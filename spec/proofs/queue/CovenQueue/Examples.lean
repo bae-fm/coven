@@ -136,13 +136,13 @@ theorem committed_reachable : Reachable encode 0 committed :=
 
 theorem prepared_reachable : Reachable encode 0 prepared := by
   exact .next committed_reachable
-    (.prepare committed 2 [request] [key] 1 1 0 firstRecord []
+    (.prepare committed 2 [request] [key] 1 1 0 0 firstRecord []
       (by decide) (by decide) (by decide) (by decide)
       ⟨request, [], rfl, rfl, rfl⟩)
 
 theorem sent_reachable : Reachable encode 0 sent := by
   exact .next prepared_reachable
-    (.send prepared ⟨1, 0, 0⟩ (some ⟨some 0, false, ⟨0, 0, 0⟩⟩) 1 1 0
+    (.send prepared ⟨1, 0, 0⟩ (some ⟨some 0, false, ⟨0, 0, 0⟩⟩) 1 1 0 0
       (by decide) (by decide) (by decide)
       (by
         intro a ha

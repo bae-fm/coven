@@ -170,6 +170,7 @@ impl Generator {
             10 => StoreChange::RaiseSchema {
                 version: self.pick(3) as u32 + 1,
                 snapshot: snapshot(self.pick(5) as u64 + 1, self.audience()),
+                caught_at: crate::effects::tests::never_late(),
             },
             11 => StoreChange::Reset {
                 snapshot: snapshot(
@@ -251,7 +252,7 @@ pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Val
             StoreChange::DeleteCircle { circle } => json!({"kind":8,"circle":circle_number(*circle)}),
             StoreChange::AddCircleMember { circle, member } => json!({"kind":9,"circle":circle_number(*circle),"member":member_number(member)}),
             StoreChange::RemoveCircleMember { circle, member, .. } => json!({"kind":10,"circle":circle_number(*circle),"member":member_number(member)}),
-            StoreChange::RaiseSchema { version, snapshot } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
+            StoreChange::RaiseSchema { version, snapshot, .. } => json!({"kind":11,"version":version,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::Reset { snapshot } => json!({"kind":13,"snapshot":{"audience":audience_number(&snapshot.audience),"number":snapshot.number}}),
             StoreChange::RotateKey { audience, key, key_hash } => json!({"kind":15,"audience":audience_number(audience),"key":key_number(*key),"key_hash":key_hash}),
             StoreChange::SetAccess { member, access } => json!({"kind":14,"member":member_number(member),"access":serde_json::to_string(access).unwrap()}),

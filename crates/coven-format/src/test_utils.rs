@@ -534,6 +534,7 @@ pub fn store_changes() -> Vec<StoreChange> {
         StoreChange::RaiseSchema {
             version: 2,
             snapshot: snapshot.clone(),
+            caught_at: crate::value::StorageTime::new(1_700_000_000, 5).expect("a valid time"),
         },
         StoreChange::Reset {
             snapshot: SnapshotId {
@@ -586,6 +587,7 @@ pub fn objects() -> Vec<Object> {
                     device: DeviceId(9),
                     number: 11,
                 },
+                caught_at: crate::value::StorageTime::new(1_700_000_100, 0).expect("a valid time"),
             },
             ..store_log()
         }),

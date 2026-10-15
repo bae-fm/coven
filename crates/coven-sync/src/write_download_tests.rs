@@ -296,6 +296,7 @@ async fn newer_store_stops_uploads_and_waits_for_newer_downloads() {
                 device: DeviceId(1),
                 number: 1,
             },
+            caught_at: crate::effects::tests::never_late(),
         })
         .await
         .unwrap();

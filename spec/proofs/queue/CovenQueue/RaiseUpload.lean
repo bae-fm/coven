@@ -145,26 +145,28 @@ theorem post_migration_behind_marker (q : Queue) (version : Nat) (identity : Ide
 
 /-- The old-schema head remains first-sendable while the store is old, even
 though the app has migrated. Keys/identity and provider success are separate. -/
-theorem old_schema_head_enabled (encode : Seal) (s : World) (app store publication f : Nat)
+theorem old_schema_head_enabled (encode : Seal) (s : World) (app store publication through f : Nat)
     (requests : List KeyRequest) (keys : List Key) (r : Record) (rest : List Pending)
     (head : s.queue.waiting = .untried r :: rest) (updated : store ≤ app)
     (old : r.version ≤ store) (chosen : chooseKeys requests = some keys)
     (header : ∃ h ps, requests = h :: ps ∧ h.audience = 0 ∧ h.currentMember = true) :
     CovenQueue.Step encode s { s with queue := s.queue.prepare f (keys.map Key.id) } :=
-  .prepare s f requests keys app store publication r rest head updated
-    (old_uploadable _ _ _ old) chosen header
+  .prepare s f requests keys app store publication through r rest head updated
+    (old_uploadable _ _ _ _ old) chosen header
 
-theorem migration_marker_enabled (store publication version : Nat) (id : Identity) :
-    Uploadable store publication ⟨id, version, .migration, []⟩ := Or.inl rfl
+theorem migration_marker_enabled (store publication through version : Nat) (id : Identity) :
+    Uploadable store publication through ⟨id, version, .migration, []⟩ := Or.inl rfl
 
-/-- An app write at the latest local migration's version sends only once a
-raise to that version is kept. -/
-theorem new_schema_requires_kept (r : Record) (kept publication : Nat)
+/-- An app write at the latest local migration's version, numbered after
+every capture, sends only once a raise to that version is kept. -/
+theorem new_schema_requires_kept (r : Record) (kept publication through : Nat)
     (appWrite : r.disposition = .ordinary) (current : r.version = publication)
-    (migrated : 0 < publication) (enabled : Uploadable kept publication r) :
+    (migrated : 0 < publication) (uncaptured : through < r.identity.id.number)
+    (enabled : Uploadable kept publication through r) :
     r.version ≤ kept := by
-  rcases enabled with marker | none | older | raised
+  rcases enabled with marker | none | older | raised | captured
   · rw [appWrite] at marker; cases marker
+  · omega
   · omega
   · omega
   · omega

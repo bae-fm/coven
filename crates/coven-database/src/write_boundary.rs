@@ -33,13 +33,13 @@ impl Boundary {
     /// Extract the boundary carried by an entry, including a currently dropped one.
     pub fn from_entry(entry: &StoreLogEntry) -> Option<Self> {
         match &entry.change {
-            StoreChange::RaiseSchema { version, snapshot } => {
-                Some(Self::SchemaChange(StoreVersion {
-                    number: *version,
-                    snapshot: snapshot.clone(),
-                    entry: entry.position,
-                }))
-            }
+            StoreChange::RaiseSchema {
+                version, snapshot, ..
+            } => Some(Self::SchemaChange(StoreVersion {
+                number: *version,
+                snapshot: snapshot.clone(),
+                entry: entry.position,
+            })),
             StoreChange::Reset { snapshot } => Some(Self::Reset {
                 entry: entry.position,
                 snapshot: snapshot.clone(),

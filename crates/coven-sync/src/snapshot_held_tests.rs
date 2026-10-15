@@ -188,3 +188,42 @@ fn a_listed_raise_snapshot_holds_what_it_omits() {
     assert!(held_selections(&[None, raise], &snapshots)
         .is_some_and(|selections| selections.iter().all(|p| p.covers(write))));
 }
+
+/// T216 (`abandoned_raise_released`): Ana's raise snapshot is listed but
+/// her device is removed before any entry names it. A raise entry counts
+/// only within a day of its `T_c` (§9), so once every entry stored by
+/// then is received and none names it, it no longer holds Ben's write.
+#[test]
+fn a_listed_raise_snapshot_stops_holding_a_day_after_its_catch_up() {
+    use crate::store_log_sync::snapshots::held::held_coverage;
+    let listing: Vec<Listed> = vec![
+        (1, 1, 60, 50, vec![(1, 1)], vec![]),
+        (2, 2, 200, 200, vec![(1, 1), (2, 1)], vec![]),
+    ];
+    let mut snapshots = verified(&listing);
+    for snapshot in &mut snapshots {
+        if snapshot.object.path.device() == Some(DeviceId(1)) {
+            snapshot.prefix.raise = std::num::NonZeroU32::new(2);
+        }
+    }
+    let write = WriteId {
+        device: DeviceId(2),
+        number: 1,
+    };
+    let log = coven_database::StoreLog::default();
+    let covered = |through: Option<u64>| {
+        held_coverage(
+            &log,
+            &Audience::Store,
+            &snapshots,
+            through.map(|seconds| StorageTime::new(seconds, 0).unwrap()),
+        )
+        .is_some_and(|selections| selections.iter().all(|p| p.covers(write)))
+    };
+    let day = StorageTime::DAY_SECONDS;
+    // Unknown, or exactly a day after its `T_c`: an entry could still name it.
+    assert!(!covered(None));
+    assert!(!covered(Some(50 + day)));
+    // Every entry stored by then received and none names it: it is out.
+    assert!(covered(Some(50 + day + 1)));
+}

@@ -212,10 +212,12 @@ fn same_meaning(
             RaiseSchema {
                 version: v,
                 snapshot: s,
+                ..
             },
             RaiseSchema {
                 version: w,
                 snapshot: t,
+                ..
             },
         ) => v == w && s == t,
         (Reset { snapshot: s }, Reset { snapshot: t }) => s == t,
@@ -268,10 +270,12 @@ fn contradiction(
             RaiseSchema {
                 version: v,
                 snapshot: s,
+                ..
             },
             RaiseSchema {
                 version: w,
                 snapshot: t,
+                ..
             },
         ) => s.audience == t.audience && v == w && s != t,
         (Reset { snapshot: s }, Reset { snapshot: t }) => s.audience == t.audience && s != t,

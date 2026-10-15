@@ -152,6 +152,7 @@ impl StoreLogSync {
         mut task: SnapshotTask,
         version: u32,
         snapshot: SnapshotId,
+        caught_at: Option<coven_format::value::StorageTime>,
     ) -> Result<Progress, SyncError> {
         let mut data = Data::Snapshots(task.clone());
         if record.last_step >= data.entry_step_number(5) {
@@ -195,12 +196,21 @@ impl StoreLogSync {
             self.database.finish_operation(record.id).await?;
             return Ok(Progress::Finished(Output::Unit));
         }
+        // The entry carries its snapshot's `T_c`: it counts only if it lands
+        // within a day of it (§9, §15).
+        let caught_at = caught_at.ok_or(coven_database::DbError::Invariant {
+            what: "an unprepared raise entry has its snapshot's catch-up time",
+        })?;
         let observed = self.send.observation()?;
         let record = record.clone();
         self.database
             .prepare_operation_entry(
                 member.member(),
-                StoreChange::RaiseSchema { version, snapshot },
+                StoreChange::RaiseSchema {
+                    version,
+                    snapshot,
+                    caught_at,
+                },
                 move |log, entry, copies| {
                     let sealed = crate::store_log_keys::seal(
                         copies,

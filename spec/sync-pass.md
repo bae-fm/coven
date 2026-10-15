@@ -596,7 +596,11 @@ Later app commits do not extend that captured cut
 A raise snapshot uses its migration's capture only when step 6's catch-up
 applied nothing past it; otherwise it captures the audience again through
 this device's newest write (§15, §17.1;
-[`RaiseHistory.unchanged_capture_prepares`](proofs/io/CovenIO/RaiseCoverage.lean)).
+[`RaiseHistory.unchanged_capture_prepares`](proofs/io/CovenIO/RaiseHistory.lean)).
+Its entry carries the snapshot's `T_c`; once an observed storage time is past
+`T_c + one day` before the entry is prepared, the attempt is abandoned like
+any other and the raise prepared afresh
+([`RaiseHistory.expired_stays_out`](proofs/io/CovenIO/RaiseHistory.lean)).
 Upload and check the stored checksum, or fetch the stored bytes once if the provider
 has no complete-object checksum. That confirmation is shared with any
 occupied-path comparison. No snapshot task is created and deleted merely
@@ -616,11 +620,12 @@ From the same write, snapshot and positions catalogs, delete only objects
 whose coverage, finality, age/reader positions and ownership satisfy §15.
 For every part audience require both newest counting coverage under every
 boundary replay could still select, including a listed raise snapshot no
-entry names yet, and historical counting coverage whose landing was
+entry names yet until the store-log catch-up has received every entry stored
+by a day after its `T_c`, and historical counting coverage whose landing was
 strictly more than one day ago; a replacement does not restart that
 historical age
 ([`Eligible`, `maturity_survives_new_snapshots`](proofs/io/CovenIO/Retention.lean),
-[`RaiseHistory.deleted_stays_covered`](proofs/io/CovenIO/RaiseCoverage.lean)).
+[`RaiseHistory.deleted_stays_covered`, `listed_raise_hold_ends`](proofs/io/CovenIO/RaiseHistory.lean)).
 For example, replacing Monday noon's covering snapshot on Tuesday morning
 still permits deletion after Tuesday noon if all other gates hold
 ([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)).

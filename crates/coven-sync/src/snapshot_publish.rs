@@ -72,8 +72,33 @@ impl StoreLogSync {
             }
             if record.last_step >= 2 {
                 let attempt = attempt.as_ref().ok_or(prepared_attempt())?;
+                // Its entry, not yet prepared, carries the stored snapshot's
+                // `T_c` and counts only if it lands within a day of it (§9,
+                // §15). Past that day the attempt is abandoned and the raise
+                // prepared afresh at a new path; an entry already sent that
+                // lands late is dropped, which restarts it the same way.
+                let caught_at = match entry {
+                    Some(_) => None,
+                    None => {
+                        let name =
+                            task.temporary
+                                .first()
+                                .ok_or(coven_database::DbError::Invariant {
+                                what:
+                                    "a stored raise snapshot keeps its sealed file until its entry",
+                            })?;
+                        let caught_at =
+                            sealed_prefix(&io::SnapshotInput::open(&self.directory, name)?)?
+                                .caught_at;
+                        if !self.may_count(caught_at) {
+                            tracing::debug!("a raise's entry window passed before its entry");
+                            return self.abandon_snapshot(record, task).await;
+                        }
+                        Some(caught_at)
+                    }
+                };
                 return self
-                    .raise_snapshot_step(record, task, version, published(attempt))
+                    .raise_snapshot_step(record, task, version, published(attempt), caught_at)
                     .await;
             }
             // A later breaking migration replaced this capture: its own
@@ -592,16 +617,7 @@ impl StoreLogSync {
         let member = self.operation_member()?;
         let local = self.database.local_store_log().await?;
         crate::write_seal::check_member(&local.log, &member, local.device)?;
-        let bytes = input.read_at(
-            0,
-            (SnapshotObjectPrefix::MAX_SIGNED_PREFIX as u64).min(input.size()) as usize,
-        )?;
-        let length = SnapshotObjectPrefix::length(&bytes)?;
-        let (prefix, _) = SnapshotObjectPrefix::decode_signed(
-            bytes
-                .get(..length + 64)
-                .ok_or(coven_format::Error::Truncated)?,
-        )?;
+        let prefix = sealed_prefix(input)?;
         crate::object_author::check_signer(
             &member,
             crate::object_author::recorded_signer(&local.log, &prefix.store_log, &member.member()),
@@ -639,6 +655,21 @@ impl StoreLogSync {
         self.database.finish_operation(record.id).await?;
         Ok(Progress::Finished(Output::Unit))
     }
+}
+
+/// The signed prefix of a prepared snapshot file, with its `T_c`.
+fn sealed_prefix(input: &io::SnapshotInput) -> Result<SnapshotObjectPrefix, SyncError> {
+    let bytes = input.read_at(
+        0,
+        (SnapshotObjectPrefix::MAX_SIGNED_PREFIX as u64).min(input.size()) as usize,
+    )?;
+    let length = SnapshotObjectPrefix::length(&bytes)?;
+    let (prefix, _) = SnapshotObjectPrefix::decode_signed(
+        bytes
+            .get(..length + 64)
+            .ok_or(coven_format::Error::Truncated)?,
+    )?;
+    Ok(prefix)
 }
 
 fn prepared_attempt() -> coven_database::DbError {

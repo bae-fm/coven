@@ -5,7 +5,7 @@
 //! from the entry set. Key commitments bind introductions to their key bytes.
 
 use crate::error::{require, Error, Rule};
-use crate::value::{name, positive, EntryId, EntryPositions};
+use crate::value::{name, positive, EntryId, EntryPositions, StorageTime};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 pub use coven_crypto::MemberPublicKeys;
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, MemberId, StoreId};
@@ -180,6 +180,9 @@ pub enum StoreChange {
         version: u32,
         /// The snapshot whose audience is raised to that schema.
         snapshot: SnapshotId,
+        /// That snapshot's signed catch-up storage time `T_c`: replay keeps
+        /// the entry only if it lands at most one day after it (§9, §15).
+        caught_at: StorageTime,
     },
     /// Reset the store's or a circle's rows to a snapshot (§19.3).
     Reset {
@@ -229,7 +232,9 @@ impl StoreChange {
                 )
             }
             Self::CreateCircle { name: n, .. } | Self::RenameCircle { name: n, .. } => name(n),
-            Self::RaiseSchema { version, snapshot } => {
+            Self::RaiseSchema {
+                version, snapshot, ..
+            } => {
                 require(*version > 0, "schema version", Rule::Required)?;
                 positive(snapshot.number)
             }
@@ -289,7 +294,7 @@ store_changes!(
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },
     10 => RemoveCircleMember { circle, member },
-    11 => RaiseSchema { version, snapshot },
+    11 => RaiseSchema { version, snapshot, caught_at },
     13 => Reset { snapshot },
     14 => SetAccess { member, access },
     15 => RotateKey { audience, key, key_hash },

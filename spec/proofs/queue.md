@@ -162,11 +162,12 @@ records. `post_migration_behind_marker` puts subsequent app writes behind it.
 The snapshot captures through that marker. It does not include later app writes.
 The marker carries no row changes; those travel in the snapshot alone.
 
-The gate `Uploadable kept publication` is Rust's: `publication` is the
-version of the latest local breaking migration (zero for none). A marker
-always sends; a record older than `publication` sends while the store is
-older, since the latest capture covers it; a record at `publication` waits
-for a kept raise to it. `old_schema_head_enabled` proves that an updated app
+The gate `Uploadable kept publication through` is Rust's: `publication` is
+the version of the latest local breaking migration (zero for none), and
+`through` the newest own write a current capture covers (zero for none). A
+marker always sends; a record older than `publication`, or numbered within a
+capture, sends while the store is older, since the latest capture covers it;
+a later record at `publication` waits for a kept raise to it. `old_schema_head_enabled` proves that an updated app
 can first-send the old head while the kept store version is still old
 (`old_uploadable`). `old_prefix_and_marker_enabled` extends that permission
 through the migration marker. The marker must send before the kept raise:
@@ -195,6 +196,38 @@ a kept raise to its version. `between_write_joins_later_prefix` and
 `between_write_raise_publishes` check Ana's case: write 1, marker 2, write 3,
 marker 4, write 5 with the store at 1; records 1 to 4 upload and the raise
 to 3 publishes, and 5 waits.
+
+**A capture taken again joins later writes (proved).** A raise snapshot is
+prepared only right after a completed catch-up (§15). When that catch-up
+applied something the capture lacks, Rust's `raise_capture::prepare` captures
+the audience again through the device's newest write, with no new marker.
+`LocalStep.recapture` moves the captured cut to that write;
+`recapture_admits_prefix` shows it changes no record and lets every queued
+own write through it pass the gate, and `later_capture_never_deadlocks`
+covers histories with recaptures too. `recaptured_write_joins_prefix` and
+`recaptured_raise_publishes` check Ana's case: write 1, marker 2, write 3,
+recapture through 3, write 4 with the store at 1; records 1 to 3 upload, the
+raise to 2 publishes, and 4 waits.
+
+**A migrated device judges received writes as its peers will (proved).**
+Before any raise to its version is kept, a migrated device judges a received
+older-version write under its own captures, as though each capture's raise
+were kept ([RaiseProvisional](queue/CovenQueue/RaiseProvisional.lean); Rust
+`WriteBoundary::judging`). `provisional_record_agrees` and
+`provisional_change_agrees` show the interpreted record and every per-change
+verdict, losses included, depend on the raise's coverage and version, not on
+the entry naming it; only the whole-write verdict carries the entry as a
+label (`provisional_verdict_agrees`). In the `Judging` history, writes are
+judged under the current capture and a capture taken again includes every
+judged write (it is taken from the current state). `judged_under_published`
+shows every judged write is covered by the current capture or was judged
+under it, so `provisional_matches_kept`: each judged write the published
+raise snapshot leaves out has exactly the per-change verdicts peers compute
+once that raise is kept. Writes it covers reach peers inside the snapshot,
+whose contents are the device's own state (its fingerprint check, §15: an
+implementation obligation, not modeled here). If another raise wins,
+`reload_matches_receiver` rebuilds the device's state from its unchanged
+records.
 
 `prefix_uploads` constructs a finite schedule of the actual queue's preparation,
 send, provider landing, reply and acknowledgement events. `no_raise_deadlock`

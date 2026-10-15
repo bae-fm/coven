@@ -11,6 +11,7 @@ import CovenIO.Writers
 import CovenIO.DroppedRegistrations
 import CovenIO.RaiseCoverage
 import CovenIO.RetentionDeadline
+import CovenIO.RaiseHistory
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -604,7 +605,8 @@ private def retirementDevices (j : Json) : Except String Json := do
 (`null` for none, or a named snapshot's `[writer, number]`), the newest
 counting snapshot it admits covers the write. A snapshot admits under a
 named boundary when it is that snapshot or its signed view read the entry
-naming it (`reads`). -/
+naming it (`reads`). A raise entry may name a snapshot that is not listed;
+only its readers are then admitted. -/
 private def held (j : Json) : Except String Json := do
   let audience ← j.getObjValAs? Nat "audience"
   let writer ← j.getObjValAs? Nat "writer"
@@ -622,7 +624,7 @@ private def held (j : Json) : Except String Json := do
   let find (path : Nat × Nat) : Except String Snapshot :=
     match landed.find? (fun s => s.writer == path.1 && s.number == path.2) with
     | some s => .ok s
-    | none => .error "a boundary names an unlisted snapshot"
+    | none => .ok ⟨audience, path.1, path.2, 0, 0, []⟩
   let reads := (← parsed.mapM fun (s, named) => named.mapM fun path => do
     pure (s, ← find path)).flatten
   let possible ← (← j.getObjValAs? (Array Json) "possible").toList.mapM fun b =>

@@ -380,6 +380,7 @@ fn creation_author_is_the_header_id_and_versions_are_checked() {
         change: StoreChange::RaiseSchema {
             version: 0,
             snapshot: test_utils::snapshot_header().id,
+            caught_at: crate::value::StorageTime::UNIX_EPOCH,
         },
         ..test_utils::store_log()
     };

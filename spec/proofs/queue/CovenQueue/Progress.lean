@@ -164,7 +164,7 @@ theorem step_preserves_attempt {encode : Seal} {s t : World} (h : Step encode s 
       cases p with
       | untried _ => simp [Queue.head, hp] at ha
       | tried _ => simpa [Queue.head, World.commitWrite, Queue.commit, hp] using ha
-  | prepare f requests keys app store publication r rest hp =>
+  | prepare f requests keys app store publication through r rest hp =>
     simp [Queue.head, hp] at ha
   | send => unfold World.send; split <;> exact ha
   | land => simp only [World.land]; split <;> exact ha

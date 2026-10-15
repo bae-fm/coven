@@ -304,7 +304,7 @@
 | 8 | Delete circle | `circle:uuid` |
 | 9 | Add circle member | `circle:uuid \| member:MemberId` |
 | 10 | Remove circle member | `circle:uuid \| member:MemberId` |
-| 11 | Raise schema | `version:u32 \| snapshot:SnapshotId` |
+| 11 | Raise schema | `version:u32 \| snapshot:SnapshotId \| caught_at:StorageTime` |
 | 13 | Reset | `snapshot:SnapshotId` |
 | 14 | Set access | `member:MemberId \| access:MemberAccess` |
 | 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
@@ -361,7 +361,10 @@
   An outside store admin cannot introduce a circle key. Concurrent rotations
   coexist (§11).
 - Raised versions are at least 1, and a raise names a snapshot of the
-  audience it raises; a reset names the audience it resets. A creation's
+  audience it raises; a reset names the audience it resets. A raise's
+  `caught_at` is its snapshot's signed `T_c` (D9): replay drops a raise
+  landing more than one day after it (§9), and a boundary whose named
+  snapshot's prefix has another `T_c` refuses that snapshot (§15). A creation's
   store id must agree with its path (D9).
 
 ### D7 Snapshots

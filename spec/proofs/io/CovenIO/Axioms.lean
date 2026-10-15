@@ -386,6 +386,13 @@ import CovenIO
 #print axioms CovenIO.RaiseCoverage.RaiseHistory.unchanged_capture_prepares
 #print axioms CovenIO.RaiseCoverage.RaiseHistory.recapture_keeps_write
 #print axioms CovenIO.RaiseCoverage.RaiseHistory.kept_late_held
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.land_valid
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.landed_selection
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.initial_valid
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.listed_raise_hold_ends
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.expired_stays_out
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.abandoned_raise_released
+#print axioms CovenIO.RaiseCoverage.RaiseHistory.abandoned_raise_expires
 #print axioms CovenIO.CommonReload.Source.selectedBound
 #print axioms CovenIO.CommonReload.Source.numbered
 #print axioms CovenIO.ListingMarginExamples.provider_history

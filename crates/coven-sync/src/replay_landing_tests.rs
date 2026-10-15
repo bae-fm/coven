@@ -210,3 +210,51 @@ fn one_nanosecond_past_thirty_days_lands_too_late() {
         );
     }
 }
+
+/// A raise entry counts only if it lands at most one day after its named
+/// snapshot's `T_c`: exactly a day is kept, a nanosecond later lands too late
+/// and replay drops it, so its snapshot never becomes a boundary (§9, §15;
+/// io `RaiseHistory.expired_stays_out`).
+#[test]
+fn a_raise_landing_a_day_after_its_catch_up_lands_too_late() {
+    use coven_format::value::StorageTime;
+    use std::time::Duration;
+    let caught_at = StorageTime::new(1_760_400_000, 123_456_789).unwrap();
+    let mut h = History::new();
+    h.push(
+        0,
+        1,
+        &[0],
+        StoreChange::RaiseSchema {
+            version: 2,
+            snapshot: snapshot(1, Audience::Store),
+            caught_at,
+        },
+    );
+    let day = Duration::from_secs(86_400);
+    for (after, late) in [(day, false), (day + Duration::from_nanos(1), true)] {
+        let publications = [
+            (h.entries[0].position, caught_at),
+            (h.entries[1].position, caught_at + after),
+        ]
+        .into();
+        assert_eq!(
+            super::landed_too_late(&h.entries[1], &publications),
+            late,
+            "{after:?}"
+        );
+        let replay = crate::replay(&h.entries, &publications);
+        assert_eq!(
+            replay.entries[&h.entries[1].position],
+            if late {
+                EntryOutcome::Dropped(DropReason::LandedTooLate)
+            } else {
+                EntryOutcome::Kept
+            }
+        );
+        assert_eq!(
+            replay.state.schema.get(&Audience::Store).map(|v| v.number),
+            (!late).then_some(2)
+        );
+    }
+}

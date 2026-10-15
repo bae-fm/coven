@@ -1,14 +1,22 @@
 import CovenQueue.RaiseProgress
 
-/-! §17.1 with successive local breaking migrations. Each migration appends
-its empty marker and captures its raise through it, replacing a capture an
-earlier, still unpublished migration left (Rust `raise_capture::capture`).
-App writes made between two such migrations are newer than the first
-marker's version, and no raise to that version will be kept; they sit in
-the later captured prefix, so the gate lets them upload before that raise.
+/-! §17.1 with successive local breaking migrations and recaptures. Each
+migration appends its empty marker and captures its raise through it,
+replacing a capture an earlier, still unpublished migration left (Rust
+`raise_capture::capture`). App writes made between two such migrations are
+newer than the first marker's version, and no raise to that version will be
+kept; they sit in the later captured prefix, so the gate lets them upload
+before that raise.
+
+A raise snapshot is prepared only right after a completed catch-up (§15).
+When that catch-up applied something the capture lacks, the device captures
+the audience again from its current state, through its newest write, with no
+new marker (Rust `raise_capture::prepare`). Its app writes up to that write
+join the captured prefix, and the gate admits them by number.
 
 `Local` holds the app's version, the version of the latest local migration
-(`publication`, zero for none) and its marker's number (`through`). -/
+(`publication`, zero for none) and the newest own write a capture covers
+(`through`, zero for none). -/
 
 namespace CovenQueue.RaiseUpload
 
@@ -29,13 +37,19 @@ def Local.migrated (l : Local) (version : Nat) (id : Identity) : Local :=
   ⟨{ l.world with queue := RaiseUpload.migrate l.world.queue version id },
     version, version, l.world.queue.reserved + 1⟩
 
+/-- A capture taken again after a catch-up, through the device's newest
+write. No marker and no number: only the captured cut moves. -/
+def Local.recaptured (l : Local) : Local := { l with through := l.world.queue.reserved }
+
 /-- App writes take the app's version. A migration to a newer version
-appends its marker and captures through it. Every other queue event (key
-choice, sends, landings, confirmations, crashes) reserves no number. -/
+appends its marker and captures through it; a recapture moves the cut to the
+newest write. Every other queue event (key choice, sends, landings,
+confirmations, crashes) reserves no number. -/
 inductive LocalStep (encode : Seal) : Local → Local → Prop
   | write (l : Local) (r : Record) : LocalStep encode l (l.appWrite r)
   | migrate (l : Local) (version : Nat) (id : Identity) : l.app < version →
       LocalStep encode l (l.migrated version id)
+  | recapture (l : Local) : 0 < l.publication → LocalStep encode l l.recaptured
   | queue (l : Local) (next : World) : CovenQueue.Step encode l.world next →
       next.queue.reserved = l.world.queue.reserved →
       LocalStep encode l { l with world := next }
@@ -48,13 +62,11 @@ inductive LocalReach (encode : Seal) (device app : Nat) : Local → Prop
 
 def records (q : Queue) : List Record := q.waiting.map Pending.record
 
-/-- Every waiting record is no newer than the app; each one through the
-latest marker is a marker or older than that marker's version. -/
+/-- Every waiting record is no newer than the app, and the captured cut is a
+reserved number. -/
 structure LocalInv (l : Local) : Prop where
   valid : l.world.queue.Valid
   versions : ∀ r ∈ records l.world.queue, r.version ≤ l.app
-  captured : ∀ r ∈ records l.world.queue, r.identity.id.number ≤ l.through →
-    r.disposition = .migration ∨ r.version < l.publication
   within : l.through ≤ l.world.queue.reserved
 
 theorem commit_records (q : Queue) (r : Record) :
@@ -96,54 +108,37 @@ theorem step_records {encode : Seal} {s t : World} (step : CovenQueue.Step encod
   | acknowledge => exact finish_records _
 
 theorem start_inv (device app : Nat) : LocalInv ⟨.empty device, app, 0, 0⟩ :=
-  ⟨.nil _, by simp [records, World.empty], by simp [records, World.empty],
-    Nat.zero_le _⟩
+  ⟨.nil _, by simp [records, World.empty], Nat.zero_le _⟩
 
 theorem local_step_inv {encode : Seal} {l l' : Local} (h : LocalInv l)
     (step : LocalStep encode l l') : LocalInv l' := by
   cases step with
   | write r =>
-    refine ⟨commit_valid _ h.valid _, ?_, ?_, ?_⟩
+    refine ⟨commit_valid _ h.valid _, ?_, ?_⟩
     · intro x member
       change x ∈ records (l.world.queue.commit _) at member
       rw [commit_records] at member
       rcases List.mem_append.mp member with old | new
       · exact h.versions x old
       · simp at new; subst new; exact Nat.le_refl _
-    · intro x member number
-      change x ∈ records (l.world.queue.commit _) at member
-      rw [commit_records] at member
-      rcases List.mem_append.mp member with old | new
-      · exact h.captured x old number
-      · simp at new; subst new
-        have := h.within
-        simp [Local.appWrite] at number; omega
     · have := h.within
       simp [Local.appWrite, Queue.commit, Queue.reserved] at this ⊢; omega
   | migrate version id newer =>
-    refine ⟨commit_valid _ h.valid _, ?_, ?_, ?_⟩
+    refine ⟨commit_valid _ h.valid _, ?_, ?_⟩
     · intro x member
       change x ∈ records (l.world.queue.commit _) at member
       rw [commit_records] at member
       rcases List.mem_append.mp member with old | new
       · exact Nat.le_trans (h.versions x old) (Nat.le_of_lt newer)
       · simp at new; subst new; exact Nat.le_refl _
-    · intro x member _
-      change x ∈ records (l.world.queue.commit _) at member
-      rw [commit_records] at member
-      rcases List.mem_append.mp member with old | new
-      · exact .inr (Nat.lt_of_le_of_lt (h.versions x old) newer)
-      · simp at new; subst new; exact .inl rfl
     · simp [Local.migrated, RaiseUpload.migrate, Queue.commit, Queue.reserved]; omega
+  | recapture _ => exact ⟨h.valid, h.versions, Nat.le_refl _⟩
   | queue next step same =>
     have kept := step_records step same
-    refine ⟨step_queue_valid step h.valid, ?_, ?_, ?_⟩
+    refine ⟨step_queue_valid step h.valid, ?_, ?_⟩
     · intro x member
       rw [kept] at member
       exact h.versions x (List.mem_of_mem_drop member)
-    · intro x member number
-      rw [kept] at member
-      exact h.captured x (List.mem_of_mem_drop member) number
     · rw [same]; exact h.within
 
 theorem reach_inv {encode : Seal} {device app : Nat} {l : Local}
@@ -167,6 +162,7 @@ theorem local_step_keeps_records {encode : Seal} {l l' : Local}
     refine ⟨0, rfl, ?_⟩
     change _ <+: records (l.world.queue.commit _)
     rw [commit_records, List.drop_zero]; exact List.prefix_append _ _
+  | recapture _ => exact ⟨0, rfl, by simp [Local.recaptured]⟩
   | queue next step same =>
     refine ⟨next.queue.settled - l.world.queue.settled, by
       have := (step_monotone step).1; show next.queue.settled = _; omega, ?_⟩
@@ -185,11 +181,12 @@ theorem numbered_take_lt {d n : Nat} {ps : List Pending} (h : Numbered d n ps) (
       · simp only [eq]; omega
       · have := ih k x tail; omega
 
-/-- In every history of writes, successive local migrations and queue
-events, the latest capture publishes: its whole own prefix, including writes
-made between earlier unpublished migrations, passes the gate with the store
-still older, and the raise follows its confirmation. Keys, identity and
-provider success are supplied, as in `no_raise_deadlock`. -/
+/-- In every history of writes, successive local migrations, recaptures and
+queue events, the latest capture publishes: its whole own prefix, including
+writes made between earlier unpublished migrations and writes a recapture
+took in, passes the gate with the store still older, and the raise follows
+its confirmation. Keys, identity and provider success are supplied, as in
+`no_raise_deadlock`. -/
 theorem later_capture_never_deadlocks (encode : Seal) (published : WriteId → Prop)
     {device app0 : Nat} {l : Local} (reach : LocalReach encode device app0 l)
     (plan : Plan) (store format : Nat) (requests : List KeyRequest) (keys : List Key)
@@ -210,16 +207,12 @@ theorem later_capture_never_deadlocks (encode : Seal) (published : WriteId → P
       have := inv.within
       simp only [front, List.length_take, Queue.reserved] at this ⊢
       omega
-    have enabled : ∀ p ∈ front, Uploadable store l.publication p.record := by
+    have enabled : ∀ p ∈ front, Uploadable store l.publication l.through p.record := by
       intro p member
       have number := numbered_take_lt inv.valid k p member
-      have mem : p.record ∈ records l.world.queue :=
-        List.mem_map_of_mem (List.mem_of_mem_take member)
-      rcases inv.captured p.record mem (by omega) with marker | older
-      · exact .inl marker
-      · exact .inr (.inr (.inl older))
+      exact .inr (.inr (.inr (.inr (by omega))))
     obtain ⟨t, run, settled, _⟩ := no_raise_deadlock encode published plan l.world l.app store
-      l.publication format requests keys front (l.world.queue.waiting.drop k) inv.valid
+      l.publication l.through format requests keys front (l.world.queue.waiting.drop k) inv.valid
       (List.take_append_drop _ _).symm updated enabled chosen header identity slots
       (by rw [cut, length]; omega) coverage
     exact ⟨t, run, by omega⟩
@@ -229,12 +222,26 @@ theorem later_capture_never_deadlocks (encode : Seal) (published : WriteId → P
       (.requestSnapshot _ rfl confirmed)) (.landSnapshot _ rfl)) (.requestEntry _ rfl))
         (.landEntry _ rfl), by omega⟩
 
-/-- An app write at the latest migration's version still waits for a kept
-raise to it: the later capture admits only what it covers. -/
+/-- A recapture changes no queued record and moves the cut to the newest
+write: every own write it took in now passes the gate before any raise. -/
+theorem recapture_admits_prefix (l : Local) (inv : LocalInv l) (store : Nat) :
+    l.recaptured.world = l.world ∧
+      ∀ r ∈ records l.world.queue, Uploadable store l.publication l.recaptured.through r := by
+  refine ⟨rfl, ?_⟩
+  intro r member
+  obtain ⟨p, mem, rfl⟩ := List.mem_map.mp member
+  have number := numbered_take_lt inv.valid l.world.queue.waiting.length p
+    (by simpa using mem)
+  exact .inr (.inr (.inr (.inr (by simp [Local.recaptured, Queue.reserved]; omega))))
+
+/-- An app write at the latest migration's version, numbered after every
+capture, still waits for a kept raise to it: the capture admits only what it
+covers. -/
 theorem after_latest_marker_waits (l : Local) (r : Record) (kept : Nat)
     (ordinary : r.disposition = .ordinary) (current : r.version = l.publication)
-    (migrated : 0 < l.publication) (enabled : Uploadable kept l.publication r) :
-    l.publication ≤ kept := current ▸ new_schema_requires_kept r kept l.publication
-      ordinary current migrated enabled
+    (migrated : 0 < l.publication) (uncaptured : l.through < r.identity.id.number)
+    (enabled : Uploadable kept l.publication l.through r) :
+    l.publication ≤ kept := current ▸ new_schema_requires_kept r kept l.publication l.through
+      ordinary current migrated uncaptured enabled
 
 end CovenQueue.RaiseUpload

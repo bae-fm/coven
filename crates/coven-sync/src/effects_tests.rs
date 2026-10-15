@@ -17,7 +17,17 @@ pub(crate) fn snapshot(number: u64, audience: Audience) -> SnapshotId {
 
 pub(crate) fn raise(version: u32, number: u64, audience: Audience) -> StoreChange {
     let snapshot = snapshot(number, audience);
-    StoreChange::RaiseSchema { version, snapshot }
+    StoreChange::RaiseSchema {
+        version,
+        snapshot,
+        caught_at: never_late(),
+    }
+}
+
+/// A catch-up time whose day no test's storage clock reaches: the raise's
+/// landing window never drops it (§9).
+pub(crate) fn never_late() -> coven_format::value::StorageTime {
+    coven_format::value::StorageTime::new(u64::MAX / 2, 0).expect("a valid time")
 }
 
 #[test]

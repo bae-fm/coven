@@ -19,3 +19,4 @@ import CovenQueue.RaiseUpload
 import CovenQueue.RaiseProgress
 import CovenQueue.RaiseCaptures
 import CovenQueue.RaiseExamples
+import CovenQueue.RaiseProvisional

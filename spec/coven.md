@@ -3053,6 +3053,11 @@ Carol's tablet:
     and count both kept and dropped entries as read.
   - Drop an entry if it lands more than 30 days after the storage time of
     any entry it had not read. Exactly 30 days does not drop it.
+  - Drop a raise entry if it lands more than one day after the `T_c` it
+    carries for its snapshot (D6); exactly one day does not drop it.
+    Retention stops holding writes for a listed raise snapshot a day after
+    its `T_c`, so no entry naming it may count later (§15;
+    [`expired_stays_out`](proofs/io/CovenIO/RaiseHistory.lean)).
   - Judge this against all stored entries, including dropped ones and
     entries from newly discovered devices, not only the author's past.
     Complete that check before replay or saving author-view checks.
@@ -4766,9 +4771,16 @@ Carol's tablet:
     nothing past it. Otherwise the device captures that audience again from
     its current state, through its newest write; its own later writes join
     the captured prefix and are confirmed before the snapshot is sent
-    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseCoverage.lean)).
+    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseHistory.lean)).
     A capture sent with a later sample would omit writes stored before it
     ([`capture_unsound`, `option_a_loses_write`](proofs/io/CovenIO/RaiseCoverage.lean)).
+  - Its raise entry carries the snapshot's `T_c` and counts only if it lands
+    at most one day after it (§9). Once a storage time the device observed
+    is past that day before the entry is prepared, the attempt is abandoned
+    and the raise prepared afresh after another catch-up, at a new path; an
+    entry already sent that lands later is dropped, and the raise is prepared
+    afresh the same way
+    ([`RaiseHistory.expired_stays_out`](proofs/io/CovenIO/RaiseHistory.lean)).
 - Before sending any snapshot, including a raise snapshot, confirm every
   own write through its captured position; remote positions must come from
   checked published log prefixes or previously published snapshots subject
@@ -4940,7 +4952,7 @@ Carol's tablet:
     for it (below)
     ([`Eligible`](proofs/io/CovenIO/Retention.lean),
     [`SnapshotHistory.deleted_stays_covered`](proofs/io/CovenIO/Reload.lean),
-    [`RaiseHistory.deleted_stays_covered`](proofs/io/CovenIO/RaiseCoverage.lean));
+    [`RaiseHistory.deleted_stays_covered`](proofs/io/CovenIO/RaiseHistory.lean));
   - every store-log entry that makes this coverage usable, or makes the
     object unnecessary, is final (§9;
     [`Eligible`](proofs/io/CovenIO/Retention.lean));
@@ -4957,13 +4969,30 @@ Carol's tablet:
     snapshot above it, which a raise entry published later could still
     name. Under each, the newest counting snapshot it admits must cover the
     write. Without a pending raise this is the current newest alone
-    ([`held_without_raises`, `reload_never_skips`](proofs/io/CovenIO/RaiseCoverage.lean)).
+    ([`held_without_raises`, `reload_never_skips`](proofs/io/CovenIO/RaiseHistory.lean)).
+  - A raise entry can name a snapshot that is not listed yet, never counts,
+    or does not mark its raise. Replay can keep it, but the reload refuses
+    that boundary and waits until its named snapshot is listed, counting
+    and marked; it never skips a deleted write under it
+    ([`reload_never_skips`](proofs/io/CovenIO/RaiseHistory.lean)).
+  - A listed raise snapshot stops being such a boundary once this device
+    has received every entry stored by one day after its `T_c` (§9's
+    complete endpoint `T′` is past that day) and none names it: no entry
+    landing later counts. Its author being removed, or simply gone, holds
+    other writers' writes no longer than that
+    ([`listed_raise_hold_ends`, `expired_stays_out`, `abandoned_raise_released`](proofs/io/CovenIO/RaiseHistory.lean)).
   - E.g. Ana's store raise snapshot is listed, but her raise entry is not
     published yet. Ben's newer snapshot covers his old-schema write 5, which
     Ana's raise snapshot omits. Ben keeps write 5: once Ana's raise is
     kept, only her snapshot and those that read her entry are usable, and a
     reload would skip write 5 as having no store part
-    ([`kept_late_raise_loses_write`, `kept_late_held`](proofs/io/CovenIO/RaiseCoverage.lean)).
+    ([`kept_late_raise_loses_write`](proofs/io/CovenIO/RaiseCoverage.lean),
+    [`kept_late_held`](proofs/io/CovenIO/RaiseHistory.lean)).
+  - E.g. Ana's device is removed before her raise entry is published. A
+    day after her raise snapshot's `T_c`, once Ben has received every entry
+    stored by then, her snapshot no longer holds his write 5, which his
+    newer snapshot covers
+    ([`abandoned_raise_released`](proofs/io/CovenIO/RaiseHistory.lean)).
   - While an audience lists a snapshot whose prefix this device has not
     verified, its current newest counting snapshot is unknown: the prefix
     is in a newer format, by an author whose device registration has not
@@ -5678,11 +5707,17 @@ Carol's tablet:
     completed catch-up, from the capture if that catch-up applied nothing
     past it and otherwise from a fresh capture of the audience through the
     device's newest write
-    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseCoverage.lean)).
+    ([`RaiseHistory.unchanged_capture_prepares`, `recapture_keeps_write`](proofs/io/CovenIO/RaiseHistory.lean)).
+    Own writes up to that newest write join the captured prefix: the upload
+    gate admits them by number before any raise is kept, and the raise
+    publishes once they are confirmed
+    ([`recapture_admits_prefix`, `later_capture_never_deadlocks`](proofs/queue/CovenQueue/RaiseCaptures.lean),
+    [`recaptured_raise_publishes`](proofs/queue/CovenQueue/RaiseExamples.lean)).
     Confirm the captured own prefix, including the marker, before sending
     the snapshot, then publish the raise
-    entry after that snapshot is stored; every covered remote position
-    also requires retained publication evidence
+    entry after that snapshot is stored, carrying its `T_c`, within a day of
+    it (§15); every covered remote position also requires retained
+    publication evidence
     ([`publication_after_confirmation`, `published_raise_covers_published`, `entry_has_snapshot`](proofs/queue/CovenQueue/RaiseUpload.lean),
     [`inherited_position_published`](proofs/io/CovenIO/SnapshotWrites.lean)).
   - No empty upload queue is required: later app writes wait behind the
@@ -5692,6 +5727,21 @@ Carol's tablet:
     new-schema write 3: confirm 1 and 2, publish the snapshot and raise,
     and send 3 once a raise is kept
     ([`raise_publishes_with_new_tail`](proofs/queue/CovenQueue/RaiseExamples.lean)).
+- Before any raise to its version is kept, a migrated device judges each
+  received older-version write under its own captures, as every device
+  will under its kept raise: an uncovered older-version part is converted
+  or excluded at the capture's version, rather than waiting for the raise. A
+  part in an audience it has no capture for waits for that raise.
+  - A write's converted record and per-change verdicts depend on the
+    raise's coverage and version, never on the entry that names it, and a
+    capture taken again covers every write already judged. So the published
+    raise snapshot carries the device's own judgment of the writes it
+    covers, and each write it leaves out was judged under that same capture,
+    as peers judge it once the raise is kept
+    ([`provisional_record_agrees`, `provisional_change_agrees`, `judged_under_published`, `provisional_matches_kept`](proofs/queue/CovenQueue/RaiseProvisional.lean)).
+  - If another raise wins instead, the device rebuilds from its unchanged
+    records through the same receive rule
+    ([`reload_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
 - Conversion is for received late old-schema writes from other devices,
   including already-attempted writes that arrive after the raise. After a
   competing raise wins, the original write's author uses that same receive

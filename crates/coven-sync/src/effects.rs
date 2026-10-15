@@ -284,9 +284,9 @@ pub(crate) fn change_in_place(
         DeleteCircle { circle: id } => circle(state, *id).is_none(),
         AddCircleMember { circle, member } => in_circle(state, *circle, member),
         RemoveCircleMember { circle, member, .. } => !in_circle(state, *circle, member),
-        RaiseSchema { version, snapshot } => {
-            coven_database::Boundary::schema_in_place(state, *version, snapshot)
-        }
+        RaiseSchema {
+            version, snapshot, ..
+        } => coven_database::Boundary::schema_in_place(state, *version, snapshot),
         Reset { snapshot } => coven_database::Boundary::reset_in_place(state, snapshot),
     }
 }

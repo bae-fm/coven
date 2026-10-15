@@ -649,6 +649,7 @@ async fn removed_identities_keys_versions_resets_and_every_drop_reason_round_tri
         StoreChange::RaiseSchema {
             version: u32::MAX,
             snapshot: snapshot.clone(),
+            caught_at: coven_format::value::StorageTime::UNIX_EPOCH,
         },
     );
     replay.state.schema.insert(
@@ -778,6 +779,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
             StoreChange::RaiseSchema {
                 version,
                 snapshot: snapshot.clone(),
+                caught_at: coven_format::value::StorageTime::UNIX_EPOCH,
             },
         );
         number += 1;
@@ -806,6 +808,7 @@ async fn audience_versions_round_trip_and_a_failed_raise_keeps_every_audience() 
         StoreChange::RaiseSchema {
             version: 13,
             snapshot: snapshot.clone(),
+            caught_at: coven_format::value::StorageTime::UNIX_EPOCH,
         },
     );
     replay.state.schema.insert(

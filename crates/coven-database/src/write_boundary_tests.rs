@@ -58,6 +58,7 @@ impl crate::Database {
                     crate::Boundary::SchemaChange(v) => StoreChange::RaiseSchema {
                         version: v.number,
                         snapshot: v.snapshot.clone(),
+                        caught_at: coven_format::value::StorageTime::UNIX_EPOCH,
                     },
                     crate::Boundary::Reset { snapshot, .. } => StoreChange::Reset {
                         snapshot: snapshot.clone(),
@@ -190,6 +191,7 @@ async fn checked_boundaries_survive_selection_changes_and_restart() {
             change: StoreChange::RaiseSchema {
                 version,
                 snapshot: snapshot.clone(),
+                caught_at: coven_format::value::StorageTime::UNIX_EPOCH,
             },
         };
         replay.entries.insert(position, crate::EntryOutcome::Kept);

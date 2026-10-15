@@ -189,3 +189,12 @@ import CovenQueue
 #print axioms CovenQueue.RaiseExamples.two_migrations_reach
 #print axioms CovenQueue.RaiseExamples.between_write_joins_later_prefix
 #print axioms CovenQueue.RaiseExamples.between_write_raise_publishes
+#print axioms CovenQueue.RaiseUpload.recapture_admits_prefix
+#print axioms CovenQueue.RaiseExamples.recaptured_reach
+#print axioms CovenQueue.RaiseExamples.recaptured_write_joins_prefix
+#print axioms CovenQueue.RaiseExamples.recaptured_raise_publishes
+#print axioms CovenQueue.Provisional.provisional_verdict_agrees
+#print axioms CovenQueue.Provisional.provisional_change_agrees
+#print axioms CovenQueue.Provisional.provisional_record_agrees
+#print axioms CovenQueue.Provisional.judged_under_published
+#print axioms CovenQueue.Provisional.provisional_matches_kept

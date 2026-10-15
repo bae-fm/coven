@@ -3,7 +3,11 @@
 use super::{snapshot_path, StoreLogSync};
 use crate::{snapshot_data::SavedBoundary, SyncError};
 use coven_database::{Boundary, BoundaryCoverage, StoreLog};
-use coven_format::{sealed_snapshot::SnapshotObjectPrefix, store_log::SnapshotId, value::EntryId};
+use coven_format::{
+    sealed_snapshot::SnapshotObjectPrefix,
+    store_log::{SnapshotId, StoreChange},
+    value::EntryId,
+};
 use coven_merge::Audience;
 
 pub(super) fn allows(log: &StoreLog, id: &SnapshotId, prefix: &SnapshotObjectPrefix) -> bool {
@@ -12,6 +16,17 @@ pub(super) fn allows(log: &StoreLog, id: &SnapshotId, prefix: &SnapshotObjectPre
         .last()
         .is_none_or(|boundary| {
             boundary.snapshot() == id || prefix.store_log.covers(boundary.entry())
+        })
+}
+
+/// The `T_c` a raise entry carries for its named snapshot.
+fn named_catch_up(log: &StoreLog, boundary: &Boundary) -> Option<coven_format::value::StorageTime> {
+    log.entries
+        .iter()
+        .find(|applied| applied.entry.position == boundary.entry())
+        .and_then(|applied| match &applied.entry.change {
+            StoreChange::RaiseSchema { caught_at, .. } => Some(*caught_at),
+            _ => None,
         })
 }
 
@@ -81,9 +96,13 @@ impl StoreLogSync {
                     .into());
             }
             // A raise names a snapshot whose signed prefix marks that raise,
-            // which retention held writes for while it was listed; a reset
-            // names an unmarked one (§15, §17.1).
-            if candidate.prefix.raise != raised_version(&boundary) {
+            // which retention held writes for while it was listed, and
+            // carries that prefix's `T_c`, which replay's landing window
+            // judged; a reset names an unmarked one (§9, §15, §17.1).
+            if candidate.prefix.raise != raised_version(&boundary)
+                || named_catch_up(log, &boundary)
+                    .is_some_and(|caught_at| caught_at != candidate.prefix.caught_at)
+            {
                 let reason = self
                     .snapshot_condition(object, crate::Refusal::WrongIdentity { cause: None })
                     .await?;

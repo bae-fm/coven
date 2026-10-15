@@ -34,12 +34,16 @@ impl PossibleBoundary {
 /// here is deleted. Those boundaries are the current one, the one the final
 /// entries alone select, every non-final raise entry above the final version,
 /// and every listed raise snapshot above it that no held entry names, which a
-/// raise entry published late could still name. None when one of them
-/// selects nothing.
-pub(super) fn held_coverage(
+/// raise entry published later could still name. A raise entry counts only if
+/// it lands within a day of its snapshot's `T_c` (§9), so once every entry
+/// stored by then is received (`entries_through`) and none names it, that
+/// snapshot no longer holds anything (io `RaiseHistory.expire`). None when
+/// one of them selects nothing.
+pub(crate) fn held_coverage(
     log: &StoreLog,
     audience: &Audience,
     verified: &[super::catalog::Verified],
+    entries_through: Option<coven_format::value::StorageTime>,
 ) -> Option<Vec<coven_format::value::WritePositions>> {
     let here = |boundary: &Boundary| boundary.snapshot().audience == *audience;
     let named = |boundary: Boundary| PossibleBoundary {
@@ -61,8 +65,11 @@ pub(super) fn held_coverage(
     ];
     for applied in &log.entries {
         let position = applied.entry.position;
-        let decided = log.is_final(position)
-            && log.replay.entries.get(&position) != Some(&coven_database::EntryOutcome::Kept);
+        // A raise that landed too late, including past its own window, is
+        // dropped for good from the start (§9).
+        let decided = applied.check.landed_too_late()
+            || (log.is_final(position)
+                && log.replay.entries.get(&position) != Some(&coven_database::EntryOutcome::Kept));
         if let Some(Boundary::SchemaChange(version)) = Boundary::from_entry(&applied.entry) {
             if version.snapshot.audience == *audience && version.number > final_version && !decided
             {
@@ -71,7 +78,8 @@ pub(super) fn held_coverage(
         }
     }
     // A listed raise snapshot no held entry names yet: an entry published
-    // later could name it, and no verified prefix can have read that entry.
+    // later could name it, and no verified prefix can have read that entry,
+    // until every entry able to name it has been received.
     for snapshot in verified {
         let id = snapshot
             .object
@@ -85,6 +93,7 @@ pub(super) fn held_coverage(
             && !log.entries.iter().any(|applied| {
                 matches!(&applied.entry.change, StoreChange::RaiseSchema { snapshot, .. } if *snapshot == id)
             })
+            && entries_through.is_none_or(|through| snapshot.prefix.caught_at.within_day(through))
         {
             possible.push(Some(PossibleBoundary {
                 snapshot: id,

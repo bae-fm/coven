@@ -185,13 +185,13 @@ private structure Raising where
 2 loses the reply of the first request that stores new bytes, as the
 provider's lost completion does; an already occupied path is confirmed by
 comparing bytes instead. Each head first needs the gate. -/
-private def uploadPass (kept publication : Nat) : Nat → Nat → World → World
+private def uploadPass (kept publication through : Nat) : Nat → Nat → World → World
   | 0, _, s => s
   | fuel + 1, fault, s =>
     match s.queue.waiting with
     | [] => s
     | p :: _ =>
-      if !decide (Uploadable kept publication p.record) then s else
+      if !decide (Uploadable kept publication through p.record) then s else
       let s := { s with queue := s.queue.prepare 1 [1] }
       match s.queue.head with
       | none => s
@@ -202,7 +202,7 @@ private def uploadPass (kept publication : Nat) : Nat → Nat → World → Worl
         let s := s.land sealAttempt a
         if fault = 2 && !occupied then s else
         if s.stored a.record.identity.id.number = some (sealAttempt a) then
-          uploadPass kept publication fuel (if fault = 2 then 2 else 0)
+          uploadPass kept publication through fuel (if fault = 2 then 2 else 0)
             { s with queue := s.queue.finish }
         else s
 
@@ -225,7 +225,8 @@ private def raiseStep (s : Raising) (event : Json) : Except String Raising := do
     pure { captured with stage := some RaiseUpload.Stage.captured, plan := some (plan, version) }
   | "upload" =>
     let fault ← event.getObjValAs? Nat "fault"
-    let world := uploadPass s.kept s.publication (s.world.queue.waiting.length + 1) fault s.world
+    let through := match s.plan with | some (plan, _) => plan.through | none => 0
+    let world := uploadPass s.kept s.publication through (s.world.queue.waiting.length + 1) fault s.world
     pure { s with world := world }
   | "raise" =>
     match s.stage, s.plan with

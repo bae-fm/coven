@@ -434,12 +434,13 @@ deleted. The boundary then excludes Ben's snapshot and the reload skips the
 write. Here the raise snapshot was listed when Ben deleted, so retention that
 held writes a listed, not yet kept raise snapshot omits would keep it.
 
-**Recapture and the retention hold — proved.** The rules that replace
-option A are in the same module's `RaiseHistory`. A raise snapshot is
-prepared like any snapshot, right after a completed catch-up whose storage
-sample is its `T_c`, so it is `SnapshotHistory.Sound`. A migration's capture
-is sent only when that catch-up applied nothing past it; otherwise the
-device captures again, and its later local writes join the captured prefix.
+**Recapture, the retention hold and its end — proved.** The rules that
+replace option A are in [`RaiseHistory`](io/CovenIO/RaiseHistory.lean). A
+raise snapshot is prepared like any snapshot, right after a completed
+catch-up whose storage sample is its `T_c`, so it is
+`SnapshotHistory.Sound`. A migration's capture is sent only when that
+catch-up applied nothing past it; otherwise the device captures again, and
+its later local writes join the captured prefix.
 `unchanged_capture_prepares` shows such a capture meets §15's preparation
 rule; storelog-data's `capture_prepared_final` shows the retirement-verdict
 gate then holds for the capture as well. Its signed prefix marks it as a raise
@@ -447,38 +448,65 @@ snapshot, so retention can see it before any entry names it.
 
 Deleting a write then needs, for each part audience, coverage under every
 boundary replay could still select (`Held`): the current one, the one final
-entries fix, and every listed counting raise snapshot that a raise could
-still name, each with the snapshots whose signed view read the entry naming
-it. The model's history (`Step`) lets snapshots land with the entries their
-views read, raise entries publish, replay move among possible boundaries,
-finality rule boundaries out, time pass and writes be deleted under the hold.
+entries fix, every raise entry not ruled out, and every listed counting raise
+snapshot that a raise could still name, each with the snapshots whose signed
+view read the entry naming it. The model's history (`Step`) lets snapshots
+land with the entries their views read, raise entries publish, replay keep an
+entry's boundary among the possible ones, finality rule boundaries out, a
+listed raise snapshot expire, time pass and writes be deleted under the hold.
 
-- `deleted_stays_covered`: in every reachable state, under whatever boundary
-  replay keeps, each part audience's newest usable counting snapshot covers
-  every deleted write. `reload_never_skips` turns this into the reload: a
-  missing deleted write is loaded from a snapshot, never skipped as having
-  no part there.
+A raise entry may name any snapshot: one not listed yet, one that never
+counts, or one whose prefix does not mark the raise (T216). Replay can keep
+it; the reload uses its boundary only once that snapshot is listed, counts
+and marks the raise (`usable`), and otherwise refuses and waits, as Rust's
+`snapshot_boundaries` does. A raise entry is stored at most a day after the
+`T_c` it carries (§9's landing rule; `publish`'s premise). So once storage
+time is a day past a listed raise snapshot's `T_c` and no entry names it,
+`expire` removes it from the possible boundaries.
+
+- `deleted_stays_covered`: in every reachable state, under whatever usable
+  boundary replay keeps, each part audience's newest usable counting snapshot
+  covers every deleted write. `reload_never_skips` turns this into the
+  reload: a missing deleted write is loaded from a snapshot or the reload
+  waits; it is never skipped as having no part there.
 - The key step, `late_landing_covers`: a counting sound snapshot that lands
-  after a deletion covers the deleted write, because its catch-up began
-  after the write's mature witness landed. This is why a raise snapshot
-  landing after the deletion, as in `option_a_loses_write`, is safe once it
-  is sound; the hold covers a raise snapshot already listed, as in
-  `kept_late_raise_loses_write`.
+  after a deletion covers the deleted write, because its catch-up began after
+  the write's mature witness landed. This is why a raise snapshot, or a
+  reader of a raise entry, landing after the deletion is safe; `Good` keeps,
+  for a boundary whose named snapshot has not landed, that its readers'
+  selection is empty or covers, so the named snapshot's later landing keeps
+  coverage (`landed_selection`).
 - `held_without_raises`: with no raise pending the hold is exactly §15's
   existing current-coverage gate.
+- `listed_raise_hold_ends`: a day after a listed raise snapshot's `T_c` with
+  no entry naming it, expiry is a step of every history and leaves every
+  other boundary in place. `expired_stays_out`: afterwards it is never a
+  possible boundary again, no published entry names it and replay never keeps
+  it, since no entry stored later counts. `abandoned_raise_released` and
+  `abandoned_raise_expires`: in the kept-late history, Ana's device is gone
+  before her entry; at Ben's deletion time her snapshot has expired and the
+  hold is the current coverage his snapshot gives.
 - `recapture_keeps_write`: in the option-A history, Ana's recaptured raise
   snapshots are sound and every audience's reload loads Ben's write 1.
   `kept_late_held`: in the kept-late history, Ana's listed raise snapshot is
   a possible store boundary that omits Ben's write, so the hold refuses the
   deletion.
 
-Outside the model: that Rust replay only keeps a raise naming a counting
-snapshot marked as that raise in its prefix, and that a raise snapshot
-whose version is not above the audience's finally kept version can no
-longer become its boundary (the `replay` and `finalize` premises); how the
-catch-up is completed and confirmed; and the liveness of recapture, which
-needs a completed catch-up without a newer remote write before the raise
-snapshot's day runs out.
+The Rust comparison `io_differential_held` (runner check `held`) computes
+Rust's selection under each possible boundary on generated listings; a
+boundary naming an unlisted snapshot admits only that entry's readers.
+
+Outside the model: that Rust replay never makes a raise at or below the
+audience's finally kept version its boundary (the `finalize` premise): a
+lower raise ordered after it is already in place (`Boundary::schema_in_place`),
+an equal one with another snapshot conflicts with it when concurrent, and a
+device prepares a raise entry only while no raise to its version or above is
+kept in its replay (`schema_sync`), so it never authors one after reading such
+a raise; that Rust's retention expiry uses a complete store-log catch-up whose
+endpoint `T′` is past the day, so every entry able to name the snapshot was
+received (§4's listing requirement); how the catch-up is completed and
+confirmed; and the liveness of a raise itself, which needs its snapshot and
+entry to land within the day after some completed catch-up.
 
 **3. Snapshot coverage proposal — revision 4.** This checks a proposal;
 [§15](../coven.md#15-snapshots) and Rust are unchanged. The publication and

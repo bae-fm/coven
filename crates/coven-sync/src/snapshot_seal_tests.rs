@@ -816,4 +816,122 @@ mod recapture {
         devices[1].sync.run_retention().await.unwrap();
         assert!(!stored(&storage, edit).await);
     }
+
+    /// Ana migrates and her raise snapshot lands; her raise entry does not.
+    async fn land_raise_snapshot(
+        devices: &mut [Device],
+        storage: &Arc<MemoryStorage>,
+    ) -> (crate::OperationId, ObjectPath, SnapshotObjectPrefix) {
+        seed(devices).await;
+        update(&mut devices[0], storage.clone(), true, true).await;
+        devices[0].catch_up().await;
+        devices[0].writes.upload_writes().await.unwrap();
+        devices[0].sync.schedule_version_changes().await.unwrap();
+        let raise = devices[0].db.operations().await.unwrap()[0].id;
+        {
+            let _pass = devices[0].caught_up_pass().await;
+            for _ in 0..2 {
+                assert!(matches!(
+                    devices[0].step(raise).await.unwrap(),
+                    crate::operations::Progress::Advanced
+                ));
+            }
+        }
+        let (path, prefix) = store_snapshots(storage, ANA).await.remove(0);
+        assert_eq!(prefix.raise.map(|v| v.get()), Some(2));
+        (raise, path, prefix)
+    }
+
+    /// A raise entry carries its snapshot's `T_c`, which its landing window
+    /// judged; one naming a snapshot with another `T_c` is refused at the
+    /// boundary, like one naming an unmarked snapshot (§15, D6).
+    #[tokio::test]
+    async fn a_raise_entry_with_another_catch_up_time_is_refused() {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        let (_, path, prefix) = land_raise_snapshot(&mut devices, &storage).await;
+        devices[0]
+            .sync
+            .make_and_upload_entry(StoreChange::RaiseSchema {
+                version: 2,
+                snapshot: path.snapshot_id().unwrap(),
+                caught_at: prefix.caught_at + std::time::Duration::from_secs(1),
+            })
+            .await
+            .unwrap();
+        update(&mut devices[1], storage.clone(), true, true).await;
+        let refused = devices[1].sync.sync_store_log().await;
+        assert!(
+            matches!(&refused, Err(SyncError::Pending(record))
+                if record.subject == crate::PendingSubject::Snapshot(path.snapshot_id().unwrap())),
+            "{refused:?}"
+        );
+    }
+
+    /// T216: a raise entry counts only if it lands within a day of its
+    /// snapshot's `T_c` (§9, §15). Ana's raise snapshot lands, but she
+    /// observes a storage time past that day before preparing its entry: she
+    /// abandons the attempt and raises afresh from a new catch-up, at a new
+    /// path whose entry carries that snapshot's own `T_c`.
+    #[tokio::test]
+    async fn a_raise_past_its_entry_window_is_prepared_afresh() {
+        use coven_foundation::clock::FixedClock;
+        use std::time::{Duration, UNIX_EPOCH};
+        let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1_000)));
+        let storage = Arc::new(
+            MemoryStorage::builder()
+                .clock(clock.clone())
+                .transfer_limits(1024 * 1024, 64 * 1024)
+                .build()
+                .unwrap(),
+        );
+        let mut devices = group(storage.clone(), 2).await;
+        let (raise, first, listed) = land_raise_snapshot(&mut devices, &storage).await;
+        // A day and a second after its sample, observed before the entry.
+        clock.set(
+            UNIX_EPOCH
+                + listed.caught_at.elapsed_since_epoch()
+                + Duration::from_secs(coven_format::value::StorageTime::DAY_SECONDS + 1),
+        );
+        devices[0]
+            .sync
+            .observe_clock(&devices[0].db.local_store_log().await.unwrap())
+            .await
+            .unwrap();
+        assert!(matches!(
+            devices[0].step(raise).await.unwrap(),
+            crate::operations::Progress::Advanced
+        ));
+        let log = devices[0].db.store_log().await.unwrap();
+        assert!(!log
+            .entries
+            .iter()
+            .any(|e| matches!(e.entry.change, StoreChange::RaiseSchema { .. })));
+        // The raise is prepared afresh, at a new path, and publishes.
+        publish_raise(&mut devices[0]).await;
+        let log = devices[0].db.store_log().await.unwrap();
+        let raised = &log.replay.state.schema[&Audience::Store];
+        assert_eq!(raised.number, 2);
+        assert_ne!(raised.snapshot, first.snapshot_id().unwrap());
+        let (_, prefix) = store_snapshots(&storage, ANA)
+            .await
+            .into_iter()
+            .find(|(path, _)| path.snapshot_id().unwrap() == raised.snapshot)
+            .unwrap();
+        let caught_at = log
+            .entries
+            .iter()
+            .find_map(|e| match &e.entry.change {
+                StoreChange::RaiseSchema { caught_at, .. } => Some(*caught_at),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(caught_at, prefix.caught_at);
+        // Ben updates and converges on the published raise.
+        update(&mut devices[1], storage.clone(), true, true).await;
+        sync_all(&mut devices).await;
+        for device in &devices {
+            assert_eq!(name(&device.db).await, "Groceries");
+        }
+    }
 }

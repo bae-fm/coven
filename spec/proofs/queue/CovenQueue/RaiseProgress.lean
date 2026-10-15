@@ -44,10 +44,10 @@ def IdentityAvailable : Prop :=
 
 /-- With available keys and a successful identity observation, the provider
 can accept the original bytes and confirm one head without any raise. -/
-theorem head_uploads (encode : Seal) (s : World) (app store publication format : Nat)
+theorem head_uploads (encode : Seal) (s : World) (app store publication through format : Nat)
     (requests : List KeyRequest) (keys : List Key) (p : Pending) (rest : List Pending)
     (valid : s.queue.Valid) (head : s.queue.waiting = p :: rest)
-    (updated : store ≤ app) (enabled : Uploadable store publication p.record)
+    (updated : store ≤ app) (enabled : Uploadable store publication through p.record)
     (chosen : chooseKeys requests = some keys)
     (header : ∃ h ps, requests = h :: ps ∧ h.audience = 0 ∧ h.currentMember = true)
     (identity : IdentityAvailable)
@@ -59,7 +59,7 @@ theorem head_uploads (encode : Seal) (s : World) (app store publication format :
   let prepared : World := { s with queue := s.queue.prepare format (keys.map Key.id) }
   have ready : Uploads encode s prepared := by
     cases p with
-    | untried r => exact .next (.prepare s format requests keys app store publication r rest head
+    | untried r => exact .next (.prepare s format requests keys app store publication through r rest head
         updated enabled chosen header) (.refl _)
     | tried a =>
         have eq : prepared = s := by simp [prepared, Queue.prepare, head]
@@ -77,7 +77,7 @@ theorem head_uploads (encode : Seal) (s : World) (app store publication format :
   let sent := prepared.send
   obtain ⟨reserved, evidence, counters, checked⟩ := identity prepared.queue preparedValid
   have sendStep : CovenQueue.Step encode prepared sent :=
-    .send prepared reserved evidence app store publication counters checked updated (by
+    .send prepared reserved evidence app store publication through counters checked updated (by
         intro a found
         have eq : a = attempt := Option.some.inj (found.symm.trans preparedHead)
         rw [eq, fixed_record]; exact enabled)
@@ -124,10 +124,10 @@ theorem head_uploads (encode : Seal) (s : World) (app store publication format :
 arbitrary new-schema tail already committed behind the captured boundary.
 This constructs a legal successful schedule, rather than assuming readiness
 of the entire queue or publication of the raise it is meant to enable. -/
-theorem prefix_uploads (encode : Seal) (s : World) (app store publication format : Nat)
+theorem prefix_uploads (encode : Seal) (s : World) (app store publication through format : Nat)
     (requests : List KeyRequest) (keys : List Key) (front tail : List Pending)
     (valid : s.queue.Valid) (waiting : s.queue.waiting = front ++ tail)
-    (updated : store ≤ app) (enabled : ∀ p ∈ front, Uploadable store publication p.record)
+    (updated : store ≤ app) (enabled : ∀ p ∈ front, Uploadable store publication through p.record)
     (chosen : chooseKeys requests = some keys)
     (header : ∃ h ps, requests = h :: ps ∧ h.audience = 0 ∧ h.currentMember = true)
     (identity : IdentityAvailable)
@@ -137,7 +137,7 @@ theorem prefix_uploads (encode : Seal) (s : World) (app store publication format
   induction front generalizing s with
   | nil => exact ⟨s, .refl _, by simp, by simpa using waiting⟩
   | cons p ps ih =>
-      obtain ⟨next, run, queueEq, compatible, validNext⟩ := head_uploads encode s app store publication format
+      obtain ⟨next, run, queueEq, compatible, validNext⟩ := head_uploads encode s app store publication through format
         requests keys p (ps ++ tail) valid waiting updated (enabled p (by simp)) chosen header identity slots
       obtain ⟨last, rest, settled, tailEq⟩ := ih next validNext (by rw [queueEq])
         (fun p hp => enabled p (by simp [hp])) compatible
@@ -163,10 +163,10 @@ theorem Uploads.lift {encode : Seal} {published : WriteId → Prop} {p : Plan}
 Keys, a valid identity observation and successful provider events are supplied;
 no prior kept raise or empty app-write tail is required. -/
 theorem no_raise_deadlock (encode : Seal) (published : WriteId → Prop) (plan : Plan)
-    (s : World) (app store publication format : Nat) (requests : List KeyRequest) (keys : List Key)
+    (s : World) (app store publication through format : Nat) (requests : List KeyRequest) (keys : List Key)
     (front tail : List Pending) (valid : s.queue.Valid)
     (waiting : s.queue.waiting = front ++ tail) (updated : store ≤ app)
-    (enabled : ∀ p ∈ front, Uploadable store publication p.record)
+    (enabled : ∀ p ∈ front, Uploadable store publication through p.record)
     (chosen : chooseKeys requests = some keys)
     (header : ∃ h ps, requests = h :: ps ∧ h.audience = 0 ∧ h.currentMember = true)
     (identity : IdentityAvailable)
@@ -176,7 +176,7 @@ theorem no_raise_deadlock (encode : Seal) (published : WriteId → Prop) (plan :
       0 < id.number ∧ id.number ≤ plan.through else published id) :
     ∃ t, Run encode published plan s ⟨t, .entryStored⟩ ∧
       t.queue.settled = plan.through ∧ t.queue.waiting = tail := by
-  obtain ⟨t, uploads, settled, waiting⟩ := prefix_uploads encode s app store publication format requests keys
+  obtain ⟨t, uploads, settled, waiting⟩ := prefix_uploads encode s app store publication through format requests keys
     front tail valid waiting updated enabled chosen header identity slots
   have confirmed : Confirmed published plan t := by
     refine ⟨by simp [settled, cut], ?_⟩
@@ -191,20 +191,21 @@ theorem no_raise_deadlock (encode : Seal) (published : WriteId → Prop) (plan :
 /-- Before publication the gate admits the captured prefix: records older
 than the migration's version and its empty marker. App writes behind the
 marker, at that version, remain blocked. -/
-theorem old_prefix_and_marker_enabled (q : Queue) (store version : Nat) (id : Identity)
+theorem old_prefix_and_marker_enabled (q : Queue) (store version through : Nat) (id : Identity)
     (old : ∀ p ∈ q.waiting, p.record.version < version) :
-    ∀ p ∈ (migrate q version id).waiting, Uploadable store version p.record := by
+    ∀ p ∈ (migrate q version id).waiting, Uploadable store version through p.record := by
   intro p member
   simp only [migrate, Queue.commit, List.mem_append, List.mem_singleton] at member
   rcases member with earlier | rfl
   · exact Or.inr (Or.inr (Or.inl (old p earlier)))
-  · exact migration_marker_enabled _ _ _ _
+  · exact migration_marker_enabled _ _ _ _ _
 
-theorem new_schema_send_requires_kept (s : World) (a : Attempt) (kept publication : Nat)
+theorem new_schema_send_requires_kept (s : World) (a : Attempt) (kept publication through : Nat)
     (head : s.queue.head = some a) (ordinary : a.record.disposition = .ordinary)
     (current : a.record.version = publication) (migrated : 0 < publication)
-    (gate : ∀ attempt, s.queue.head = some attempt → Uploadable kept publication attempt.record) :
+    (uncaptured : through < a.record.identity.id.number)
+    (gate : ∀ attempt, s.queue.head = some attempt → Uploadable kept publication through attempt.record) :
     a.record.version ≤ kept :=
-  new_schema_requires_kept _ _ _ ordinary current migrated (gate a head)
+  new_schema_requires_kept _ _ _ _ ordinary current migrated uncaptured (gate a head)
 
 end CovenQueue.RaiseUpload

@@ -27,22 +27,25 @@ def Pending.record : Pending → Record
 /-- §17.1's upload gate (Rust `device_log_sync::uploadable`). `publication`
 is the version of this device's latest local breaking migration, whose
 captured raise covers every own record through its marker; zero means none.
-A migration marker always sends: it has no row changes, its effects travel
-only in the raise snapshot, and it must publish before that snapshot, whose
-positions include it. A record older than that version belongs to the
-captured prefix and sends while the store is older. A record at that version
-waits for a kept raise to it. -/
-def Uploadable (keptVersion publication : Nat) (r : Record) : Prop :=
+`through` is the newest own write any current capture covers (zero for
+none): the marker, or a later write once a capture is taken again after a
+catch-up (§15). A migration marker always sends: it has no row changes, its
+effects travel only in the raise snapshot, and it must publish before that
+snapshot, whose positions include it. A record older than that version, or
+numbered within a capture, belongs to the captured prefix and sends while
+the store is older. A later record at that version waits for a kept raise
+to it. -/
+def Uploadable (keptVersion publication through : Nat) (r : Record) : Prop :=
   r.disposition = .migration ∨ publication = 0 ∨ r.version < publication ∨
-    publication ≤ keptVersion
+    publication ≤ keptVersion ∨ r.identity.id.number ≤ through
 
-instance (keptVersion publication : Nat) (r : Record) :
-    Decidable (Uploadable keptVersion publication r) :=
-  inferInstanceAs (Decidable (_ ∨ _ ∨ _ ∨ _))
+instance (keptVersion publication through : Nat) (r : Record) :
+    Decidable (Uploadable keptVersion publication through r) :=
+  inferInstanceAs (Decidable (_ ∨ _ ∨ _ ∨ _ ∨ _))
 
 /-- A record no newer than the kept store version always sends. -/
-theorem old_uploadable (keptVersion publication : Nat) (r : Record)
-    (old : r.version ≤ keptVersion) : Uploadable keptVersion publication r := by
+theorem old_uploadable (keptVersion publication through : Nat) (r : Record)
+    (old : r.version ≤ keptVersion) : Uploadable keptVersion publication through r := by
   unfold Uploadable
   omega
 
@@ -218,7 +221,8 @@ transaction are separate, so a crash between them requires a new read.
 Provider acceptance may occur before or after any crash, independently of
 reply receipt. The supplied store version is the version of a kept raise, not a local
 migration or an entry merely stored; the supplied publication is the version
-of the latest local breaking migration (`RaiseCaptures.Local` tracks it). A
+of the latest local breaking migration and the supplied through is its
+newest captured own write (`RaiseCaptures.Local` tracks both). A
 send requires a fresh supplied §10 identity check and rechecks that version
 gate for its original attempt. -/
 inductive Step (encode : Seal) : World → World → Prop where
@@ -228,19 +232,19 @@ inductive Step (encode : Seal) : World → World → Prop where
       AudiencesReady audiences →
       Step encode s (s.commitWrite r)
   | prepare (s f) (requests : List KeyRequest) (keys : List Key)
-      (appVersion keptVersion publication : Nat) (r : Record) (rest : List Pending) :
+      (appVersion keptVersion publication through : Nat) (r : Record) (rest : List Pending) :
       s.queue.waiting = .untried r :: rest →
-      keptVersion ≤ appVersion → Uploadable keptVersion publication r →
+      keptVersion ≤ appVersion → Uploadable keptVersion publication through r →
       chooseKeys requests = some keys →
       (∃ header parts, requests = header :: parts ∧
         header.audience = 0 ∧ header.currentMember = true) →
       Step encode s { s with queue := s.queue.prepare f (keys.map Key.id) }
   | send (s) (reserved : Counters) (e : Option Evidence)
-      (appVersion keptVersion publication : Nat) :
+      (appVersion keptVersion publication through : Nat) :
       reserved.writes = s.queue.reserved →
       checkIdentity s.queue.device reserved e = .ready →
       keptVersion ≤ appVersion →
-      (∀ a, s.queue.head = some a → Uploadable keptVersion publication a.record) →
+      (∀ a, s.queue.head = some a → Uploadable keptVersion publication through a.record) →
       Step encode s s.send
   | land (s a) : a ∈ s.sent → Step encode s (s.land encode a)
   | receive (s a) : s.queue.head = some a →

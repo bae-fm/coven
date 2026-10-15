@@ -82,9 +82,15 @@ impl StoreLogSync {
             // Coverage must hold under every boundary replay could still
             // select, including a listed raise snapshot no entry names yet
             // (§15; io `RaiseHistory.deleted_stays_covered`).
-            } else if let Some(selections) =
-                super::held::held_coverage(&local.log, audience, &catalog.verified)
-            {
+            } else if let Some(selections) = super::held::held_coverage(
+                &local.log,
+                audience,
+                &catalog.verified,
+                self.finality
+                    .lock()
+                    .expect("finality lock poisoned")
+                    .entries_received_through(),
+            ) {
                 coverage.insert(audience.clone(), selections);
             }
             // An own snapshot goes once a newer one this device can load

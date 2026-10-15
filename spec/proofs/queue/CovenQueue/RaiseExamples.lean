@@ -81,9 +81,9 @@ theorem capture_retains_old_record : afterMigration.queue.waiting.map Pending.re
   decide
 
 example : ¬ RaiseUpload.Confirmed (fun _ => False) plan afterMigration ∧
-    Uploadable 1 2 firstRecord ∧
-    Uploadable 1 2 ({ record 0 2 2 with disposition := .migration, body := [] }) ∧
-    ¬ Uploadable 1 2 (record 0 3 2) := by
+    Uploadable 1 2 2 firstRecord ∧
+    Uploadable 1 2 2 ({ record 0 2 2 with disposition := .migration, body := [] }) ∧
+    ¬ Uploadable 1 2 2 (record 0 3 2) := by
   refine ⟨?_, by decide, by decide, by decide⟩
   intro h
   have impossible : ¬ plan.through ≤ afterMigration.queue.settled := by decide
@@ -96,7 +96,7 @@ theorem raise_publishes_with_new_tail :
       t.queue.settled = 2 ∧ t.queue.waiting = [.untried (record 0 3 2)] := by
   let front : List Pending := [.untried firstRecord,
     .untried { record 0 2 2 with disposition := .migration, body := [] }]
-  exact RaiseUpload.no_raise_deadlock encode (fun _ => False) plan afterMigration 2 1 2 2
+  exact RaiseUpload.no_raise_deadlock encode (fun _ => False) plan afterMigration 2 1 2 2 2
     [request] [key] front [.untried (record 0 3 2)]
     (by change Numbered 0 1 _; exact .cons rfl (.cons rfl (.cons rfl (.nil _)))) (by decide) (by decide)
     (by intro p hp; simp [front] at hp
@@ -127,7 +127,7 @@ theorem between_write_joins_later_prefix :
     twoMigrations.through = 4 ∧ twoMigrations.publication = 3 ∧
     (RaiseUpload.records twoMigrations.world.queue).map (·.version) = [1, 2, 2, 3, 3] ∧
     (RaiseUpload.records twoMigrations.world.queue).map
-      (fun r => decide (Uploadable 1 twoMigrations.publication r)) =
+      (fun r => decide (Uploadable 1 twoMigrations.publication twoMigrations.through r)) =
       [true, true, true, true, false] := by decide
 
 /-- And the raise to 3 publishes after confirming 1 to 4, with write 5 left. -/
@@ -135,6 +135,36 @@ theorem between_write_raise_publishes :
     ∃ t, RaiseUpload.Run encode (fun _ => False) ⟨4, [⟨0, 1⟩, ⟨0, 2⟩, ⟨0, 3⟩, ⟨0, 4⟩], [], []⟩
       twoMigrations.world ⟨t, .entryStored⟩ ∧ 4 ≤ t.queue.settled :=
   RaiseUpload.later_capture_never_deadlocks encode (fun _ => False) two_migrations_reach
+    _ 1 2 [request] [key] (by decide) (by decide) ⟨request, [], rfl, rfl, rfl⟩
+    (by intro q _
+        exact ⟨⟨q.reserved, 1, 1⟩, some ⟨some q.device, false, ⟨q.settled, 0, 0⟩⟩,
+          rfl, by simp [checkIdentity, Queue.reserved, Nat.not_lt_of_ge (Nat.le_add_right q.settled q.waiting.length)]⟩)
+    (by intro p _; exact Or.inl rfl) (by decide) (by decide)
+
+/-- Ana writes 1, migrates to 2 with marker 2 and writes 3. Her catch-up
+before preparing the raise applied a remote write, so she captures the store
+again through her newest write, 3, with no new marker; then she writes 4.
+With the store still at 1, records 1 to 3 pass the gate and 4 waits. -/
+def recaptured : RaiseUpload.Local :=
+  ((((⟨.empty 0, 1, 0, 0⟩ : RaiseUpload.Local).appWrite (record 0 0 1)).migrated 2
+    (record 0 0 2).identity).appWrite (record 0 0 2)).recaptured.appWrite (record 0 0 2)
+
+theorem recaptured_reach : RaiseUpload.LocalReach encode 0 1 recaptured :=
+  .next (.next (.next (.next (.next .start (.write _ _)) (.migrate _ 2 _ (by decide)))
+    (.write _ _)) (.recapture _ (by decide))) (.write _ _)
+
+theorem recaptured_write_joins_prefix :
+    recaptured.through = 3 ∧ recaptured.publication = 2 ∧
+    (RaiseUpload.records recaptured.world.queue).map (·.version) = [1, 2, 2, 2] ∧
+    (RaiseUpload.records recaptured.world.queue).map
+      (fun r => decide (Uploadable 1 recaptured.publication recaptured.through r)) =
+      [true, true, true, false] := by decide
+
+/-- And the raise to 2 publishes after confirming 1 to 3, with write 4 left. -/
+theorem recaptured_raise_publishes :
+    ∃ t, RaiseUpload.Run encode (fun _ => False) ⟨3, [⟨0, 1⟩, ⟨0, 2⟩, ⟨0, 3⟩], [], []⟩
+      recaptured.world ⟨t, .entryStored⟩ ∧ 3 ≤ t.queue.settled :=
+  RaiseUpload.later_capture_never_deadlocks encode (fun _ => False) recaptured_reach
     _ 1 2 [request] [key] (by decide) (by decide) ⟨request, [], rfl, rfl, rfl⟩
     (by intro q _
         exact ⟨⟨q.reserved, 1, 1⟩, some ⟨some q.device, false, ⟨q.settled, 0, 0⟩⟩,
@@ -154,7 +184,7 @@ theorem competing_raise_converges (c : Conversion) (v : View) (h : PendingHistor
 That remains an old-schema attempt; absence/presence of the callback decides
 loss versus receive conversion, identically on Ana and her peers. -/
 theorem concurrent_raise_old_write :
-    Uploadable 2 0 firstRecord ∧
+    Uploadable 2 0 0 firstRecord ∧
     receive noConversion raised (checkedHistory untriedHistory) untried_valid 0 =
       ({ firstRecord with disposition := .lost 2 }, .excluded 10 2) ∧
     receive rename raised (checkedHistory untriedHistory) untried_valid 0 =
