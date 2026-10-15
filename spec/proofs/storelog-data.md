@@ -1280,7 +1280,7 @@ added member's pair or one of its keys. Every bound pair is compared with
 differing payloads
 ([`Keyed.Additions`](storelog.md#member-additions)).
 
-[`lean_differential_member_key_replacements`](../../crates/coven-sync/src/member_key_differential_tests.rs)
+[`lean_differential_member_key_replacements`](../../crates/coven-sync/src/object_author_tests.rs)
 runs the same runner on histories with replacements. After a linear prefix,
 concurrent leaves have Ben replace his own keys and Ana and Carol replace
 his, with fresh, identical or reused pairs, or Ana remove him or replace
