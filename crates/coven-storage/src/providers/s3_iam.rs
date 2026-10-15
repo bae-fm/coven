@@ -1,6 +1,7 @@
-//! Member keys through AWS-style IAM (§4): AWS IAM and Ceph RGW accounts with
-//! an inline user policy, SeaweedFS's embedded IAM with a managed policy
-//! attached to the user, because its PutUserPolicy drops conditions.
+//! Member keys through AWS-style IAM (§4): AWS IAM, Ceph RGW accounts and
+//! Versity Gateway's standalone IAM with an inline user policy, SeaweedFS's
+//! embedded IAM with a managed policy attached to the user, because its
+//! PutUserPolicy drops conditions.
 //!
 //! Every step tolerates what an earlier attempt with the same deterministic
 //! user name already created. A user holds at most two keys and coven holds
@@ -22,21 +23,33 @@ struct Flavor {
     /// PutUserPolicy, users under `/coven/` with store and member tags;
     /// otherwise CreatePolicy and AttachUserPolicy on a plain user.
     inline: bool,
-    /// AWS IAM's global endpoint, signing for us-east-1; otherwise the
-    /// location's S3 endpoint and region.
-    global: bool,
+    api: IamApi,
+}
+/// Where a service's IAM API listens and which region signs for it.
+#[derive(Clone, Copy)]
+enum IamApi {
+    /// AWS IAM's global endpoint, signing for us-east-1.
+    Global,
+    /// The location's S3 endpoint and region.
+    Location,
+    /// The admin access's IAM endpoint, signing for the location's region.
+    Separate,
 }
 const AWS: Flavor = Flavor {
     inline: true,
-    global: true,
+    api: IamApi::Global,
 };
 const SEAWEEDFS: Flavor = Flavor {
     inline: false,
-    global: false,
+    api: IamApi::Location,
 };
 const CEPH_RGW: Flavor = Flavor {
     inline: true,
-    global: false,
+    api: IamApi::Location,
+};
+const VERSITY_GW: Flavor = Flavor {
+    inline: true,
+    api: IamApi::Separate,
 };
 
 macro_rules! minter {
@@ -75,6 +88,7 @@ macro_rules! minter {
                 revoke: revoke_key,
                 key_exists: key_present,
                 propagation: $propagation,
+                separate_iam: matches!($flavor.api, IamApi::Separate),
             }
         };
     };
@@ -99,6 +113,15 @@ minter!(
     CEPH_RGW,
     Duration::from_secs(60)
 );
+// Versity Gateway's standalone IAM service (`versitygw iam`), which the
+// gateway reads over its private endpoint. A new key worked at once live;
+// sixty seconds is the retry window, not a stated propagation bound.
+minter!(
+    VERSITY_GW_IAM,
+    "Versity Gateway IAM",
+    VERSITY_GW,
+    Duration::from_secs(60)
+);
 
 struct Iam<'a> {
     context: &'a AdminRequest,
@@ -114,19 +137,32 @@ impl<'a> Iam<'a> {
         else {
             return Err(StorageFailure::InvalidConfiguration.with_source("expected S3"));
         };
-        Ok(match flavor.global {
-            true => Self {
-                context,
-                endpoint: context.endpoints.aws_iam.clone(),
-                region: "us-east-1".into(),
+        let endpoint = match flavor.api {
+            IamApi::Global => {
+                return Ok(Self {
+                    context,
+                    endpoint: context.endpoints.aws_iam.clone(),
+                    region: "us-east-1".into(),
+                })
+            }
+            IamApi::Location => endpoint.clone().ok_or_else(|| {
+                StorageFailure::InvalidConfiguration.with_source("IAM needs the S3 endpoint")
+            })?,
+            IamApi::Separate => match &context.admin {
+                AdminCredential::AccessKey {
+                    iam_endpoint: Some(iam_endpoint),
+                    ..
+                } => iam_endpoint.clone(),
+                _ => {
+                    return Err(StorageFailure::InvalidConfiguration
+                        .with_source("this service's admin access names its IAM endpoint"))
+                }
             },
-            false => Self {
-                context,
-                endpoint: endpoint.clone().ok_or_else(|| {
-                    StorageFailure::InvalidConfiguration.with_source("IAM needs the S3 endpoint")
-                })?,
-                region: region.clone(),
-            },
+        };
+        Ok(Self {
+            context,
+            endpoint,
+            region: region.clone(),
         })
     }
 

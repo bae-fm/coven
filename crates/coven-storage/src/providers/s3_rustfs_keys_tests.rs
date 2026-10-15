@@ -235,6 +235,7 @@ async fn service_accounts_share_one_parent_and_reach_only_the_store() {
             access_key_id: "root".into(),
             secret_access_key: SecretText::new("root-secret".into()),
             session_token: None,
+            iam_endpoint: None,
         },
         minting::AdminEndpoints::production(),
         Arc::new(SystemClock),

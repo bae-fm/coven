@@ -1542,8 +1542,8 @@ while let Ok(values) = lost.next().await {
   means GCS XML, using generation conditions and conditional copy to publish
   multipart uploads. Hosts ending in `.r2.cloudflarestorage.com` select R2,
   using conditional PUT and multipart completion and ignoring checksums
-  without stated scope. The self-hosted RustFS, SeaweedFS and Ceph RGW profiles
-  are selected only by name. Setup refuses SeaweedFS before any request with
+  without stated scope. The self-hosted RustFS, SeaweedFS, Ceph RGW and
+  Versity Gateway profiles are selected only by name. Setup refuses SeaweedFS before any request with
   `StorageSetupError::S3ProfileRefused { profile: SeaweedFs }`: its concurrent
   conditional multipart completions failed certification (§4). A name or custom profile contradicting a
   catalogued host, a name other than AWS or any custom profile without an
@@ -1558,8 +1558,8 @@ while let Ok(values) = lost.next().await {
   refuses a bucket holding anything outside the store's folder with
   `OwnBucketRequired { reason: OwnBucketReason::Occupied }`, wrapped in
   `StorageSetupError::Storage`. Reconnecting checks no objects outside the
-  store's folder. AWS, GCS, RustFS, SeaweedFS and Ceph RGW keys can be limited to the
-  store's prefix, so their stores share buckets and prefixes unchecked.
+  store's folder. AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway
+  keys can be limited to the store's prefix, so their stores share buckets and prefixes unchecked.
 - An endpoint matching no catalogued host and naming no profile has no AWS
   fallback: setup detects its settings and returns and records the location
   with them as a custom profile. Reconnecting with that same location and no
@@ -1882,6 +1882,8 @@ pub enum S3ProfileName {
     SeaweedFs,
     /// Ceph RADOS Gateway, self-hosted.
     CephRgw,
+    /// Versity Gateway, self-hosted.
+    VersityGw,
 }
 
 /// Dropbox's location fixes its access level at cloud-store creation (§4).
@@ -3136,7 +3138,8 @@ pub struct AccessKeyToDelete {
 pub enum S3Principal {
     /// Made by hand in the provider's console; only the console deletes it.
     Console,
-    /// AWS IAM, Ceph RGW accounts and SeaweedFS's embedded IAM.
+    /// AWS IAM, Ceph RGW accounts, SeaweedFS's embedded IAM and Versity
+    /// Gateway's standalone IAM.
     IamUser { user: String, policy: IamPolicy },
     /// GCS: the HMAC key's service account and its managed folder.
     GcsServiceAccount { project: String, email: String, managed_folder: String },
@@ -3186,7 +3189,14 @@ pub enum AdminAccessSource {
 
 /// Admin access for one operation; formatting never shows a secret.
 pub enum AdminCredential {
-    AccessKey { access_key_id: String, secret_access_key: SecretText, session_token: Option<SecretText> },
+    AccessKey {
+        access_key_id: String,
+        secret_access_key: SecretText,
+        session_token: Option<SecretText>,
+        /// Versity Gateway's standalone IAM service, which listens apart
+        /// from the S3 endpoint; None for every other service (§4).
+        iam_endpoint: Option<Url>,
+    },
     BearerToken(SecretText),
 }
 

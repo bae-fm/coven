@@ -28,6 +28,9 @@ pub(crate) struct KeyMinter {
         for<'a> fn(&'a AdminRequest, &'a str, &'a S3Principal) -> Pending<'a, bool>,
     /// How long the member-side check retries authentication and permission failures.
     pub(super) propagation: Duration,
+    /// The service runs its IAM API apart from the S3 endpoint, at an address
+    /// only its operator knows, so admin access names it (Versity Gateway).
+    pub(super) separate_iam: bool,
 }
 // Profiles compare by their service; minters are named constants.
 impl PartialEq for KeyMinter {
@@ -118,6 +121,28 @@ pub(crate) fn key_admin(
         StorageFailure::InvalidConfiguration
             .with_source("this service's keys are made in the console")
     })?;
+    let iam_endpoint = match &admin {
+        AdminCredential::AccessKey { iam_endpoint, .. } => iam_endpoint.as_ref(),
+        AdminCredential::BearerToken(_) => None,
+    };
+    match (minter.separate_iam, iam_endpoint) {
+        (true, None) => {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("this service's admin access names its IAM endpoint"))
+        }
+        (false, Some(_)) => {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("this service's IAM is not at a separate endpoint"))
+        }
+        (true, Some(url))
+            if !crate::web_url::is_web_url(url)
+                || url.query().is_some()
+                || url.fragment().is_some() =>
+        {
+            return Err(StorageFailure::InvalidConfiguration.with_source("IAM endpoint"))
+        }
+        _ => {}
+    }
     Ok(std::sync::Arc::new(ProfileKeyAdmin {
         http: crate::providers::http::client()
             .map_err(|e| crate::providers::http::transport(CloudProvider::S3, e))?,

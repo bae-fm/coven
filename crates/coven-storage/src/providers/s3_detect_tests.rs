@@ -76,6 +76,12 @@ const SEAWEEDFS: Service = Service {
     copy: Some(S3CopyCondition::IfNoneMatch),
     ..RUSTFS
 };
+/// Enforces conditional completion and the copy condition, dates multipart
+/// objects by completion and states checksum scope: the plain S3 settings.
+const VERSITY_GW: Service = Service {
+    start_timestamp: false,
+    ..AWS
+};
 /// Accepts writes to an occupied name whatever condition is sent, and dates
 /// multipart objects by initiation.
 const OVERWRITES: Service = Service {
@@ -525,6 +531,7 @@ async fn detection_reproduces_each_catalogued_entry() {
         (RUSTFS, S3ProfileName::RustFs),
         (SEAWEEDFS, S3ProfileName::SeaweedFs),
         (RUSTFS, S3ProfileName::CephRgw),
+        (VERSITY_GW, S3ProfileName::VersityGw),
     ] {
         let fixture = Fixture::new(service).await;
         let detection = fixture

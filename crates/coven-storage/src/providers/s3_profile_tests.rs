@@ -378,6 +378,7 @@ fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
         S3ProfileName::RustFs,
         S3ProfileName::SeaweedFs,
         S3ProfileName::CephRgw,
+        S3ProfileName::VersityGw,
     ] {
         let profile = CataloguedProfile::named(name);
         assert_eq!(profile.endpoint, None);
@@ -400,6 +401,7 @@ fn self_hosted_profiles_are_selected_only_by_name_at_their_own_endpoint() {
         "http://localhost:9000",
         "http://localhost:8333",
         "http://localhost:7480",
+        "http://localhost:10000",
     ] {
         assert_eq!(settings(Some(&host.parse().unwrap()), None).unwrap(), None);
     }

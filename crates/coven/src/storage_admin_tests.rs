@@ -26,6 +26,7 @@ async fn admin_access_makes_an_invites_key_and_deletes_it_on_evidence() {
             access_key_id: "admin".into(),
             secret_access_key: SecretText::new("admin-secret".into()),
             session_token: None,
+            iam_endpoint: None,
         }))
         .await
         .unwrap();
@@ -107,6 +108,7 @@ async fn an_admin_replaces_a_members_key_and_their_device_adopts_it() {
             access_key_id: "admin".into(),
             secret_access_key: SecretText::new("admin-secret".into()),
             session_token: None,
+            iam_endpoint: None,
         }))
         .await
         .unwrap();

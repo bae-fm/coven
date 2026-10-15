@@ -44,6 +44,7 @@ fn cli_output_becomes_an_in_memory_credential() {
         access_key_id,
         secret_access_key,
         session_token,
+        iam_endpoint,
     } = process_credentials(
         br#"{"Version":1,"AccessKeyId":"ASIA","SecretAccessKey":"s3cr3t","SessionToken":"t0k3n","Expiration":"2026-10-14T01:00:00Z"}"#,
     )
@@ -54,6 +55,7 @@ fn cli_output_becomes_an_in_memory_credential() {
     assert_eq!(access_key_id, "ASIA");
     assert_eq!(secret_access_key.as_str(), "s3cr3t");
     assert_eq!(session_token.unwrap().as_str(), "t0k3n");
+    assert_eq!(iam_endpoint, None);
     assert!(
         process_credentials(br#"{"Version":2,"AccessKeyId":"A","SecretAccessKey":"s"}"#).is_err()
     );
@@ -236,6 +238,7 @@ async fn identity_center_waits_for_the_person_then_returns_role_credentials() {
             access_key_id,
             secret_access_key,
             session_token,
+            iam_endpoint,
         } = result.unwrap()
         else {
             panic!("access key")
@@ -243,6 +246,7 @@ async fn identity_center_waits_for_the_person_then_returns_role_credentials() {
         assert_eq!(access_key_id, "ASIA");
         assert_eq!(secret_access_key.as_str(), "role-secret");
         assert_eq!(session_token.unwrap().as_str(), "session");
+        assert_eq!(iam_endpoint, None);
         assert_eq!(state.lock().unwrap().polls, 2);
     }
 }

@@ -46,6 +46,7 @@ pub(super) const RUSTFS_ACCOUNTS: KeyMinter = KeyMinter {
     key_exists: key_present,
     // Policies apply on the serving node; peers learn of new accounts quickly.
     propagation: Duration::from_secs(30),
+    separate_iam: false,
 };
 
 struct Admin<'a> {
@@ -84,6 +85,7 @@ impl<'a> Admin<'a> {
             access_key_id,
             secret_access_key,
             session_token,
+            ..
         } = &self.context.admin
         else {
             return Err(StorageFailure::InvalidConfiguration

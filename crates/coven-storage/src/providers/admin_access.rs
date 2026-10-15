@@ -206,6 +206,7 @@ fn process_credentials(output: &[u8]) -> Result<AdminCredential, StorageError> {
         access_key_id: parsed.access_key_id,
         secret_access_key: parsed.secret_access_key,
         session_token: parsed.session_token,
+        iam_endpoint: None,
     })
 }
 
@@ -366,6 +367,7 @@ pub(crate) async fn identity_center(
         access_key_id: text(role, "accessKeyId")?,
         secret_access_key: SecretText::new(text(role, "secretAccessKey")?),
         session_token: Some(SecretText::new(text(role, "sessionToken")?)),
+        iam_endpoint: None,
     })
 }
 

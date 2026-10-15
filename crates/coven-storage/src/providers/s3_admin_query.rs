@@ -91,6 +91,7 @@ pub(crate) async fn send(
         access_key_id,
         secret_access_key,
         session_token,
+        ..
     } = admin
     else {
         return Err(StorageFailure::InvalidConfiguration

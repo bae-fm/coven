@@ -22,6 +22,8 @@ use url::Url;
 const ADMIN_ID: &str = "admin-key";
 const ADMIN_SECRET: &str = "admin-secret";
 const REGION: &str = "rgw-zone";
+/// Where the fake serves Versity Gateway's standalone IAM API, apart from S3.
+const VERSITY_IAM: &str = "/versity-iam/";
 
 struct ProbeClock {
     sleeps: Mutex<Vec<Duration>>,
@@ -118,7 +120,7 @@ fn admin(state: &mut Remote, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Re
     let sent = headers["authorization"].to_str().unwrap();
     let region = match uri.path() {
         "/iam/" => "us-east-1",
-        "/" => REGION,
+        "/" | VERSITY_IAM => REGION,
         _ => return iam_error(404, "InvalidEndpoint"),
     };
     let signed: Vec<(&str, String)> = ["content-type", "host", "x-amz-date"]
@@ -443,6 +445,8 @@ impl Fake {
                 access_key_id: ADMIN_ID.into(),
                 secret_access_key: SecretText::new(ADMIN_SECRET.into()),
                 session_token: None,
+                iam_endpoint: (name == S3ProfileName::VersityGw)
+                    .then(|| url.join(VERSITY_IAM).unwrap()),
             },
             minting::AdminEndpoints {
                 aws_iam: url.join("/iam/").unwrap(),
@@ -543,6 +547,7 @@ async fn a_retry_replaces_keys_whose_secret_was_lost() {
         S3ProfileName::Aws,
         S3ProfileName::SeaweedFs,
         S3ProfileName::CephRgw,
+        S3ProfileName::VersityGw,
     ] {
         let fake = Fake::new().await;
         let admin = fake.admin(profile);
@@ -569,7 +574,11 @@ async fn a_retry_replaces_keys_whose_secret_was_lost() {
 
 #[tokio::test]
 async fn the_member_check_waits_for_propagation_and_refuses_a_broad_policy() {
-    for profile in [S3ProfileName::SeaweedFs, S3ProfileName::CephRgw] {
+    for profile in [
+        S3ProfileName::SeaweedFs,
+        S3ProfileName::CephRgw,
+        S3ProfileName::VersityGw,
+    ] {
         let fake = Fake::new().await;
         let admin = fake.admin(profile);
         let scope = scope();
@@ -592,91 +601,98 @@ async fn the_member_check_waits_for_propagation_and_refuses_a_broad_policy() {
     }
 }
 
+/// Ceph RGW serves IAM at the location's endpoint; Versity Gateway at the
+/// IAM endpoint its admin access names. Both sign for the location's region.
 #[tokio::test]
-async fn ceph_mints_an_inline_key_at_rgw_and_revokes_its_user_and_policy() {
-    let fake = Fake::new().await;
-    let admin = fake.admin(S3ProfileName::CephRgw);
-    let scope = scope();
-    let minted = admin.mint(&scope).await.unwrap();
-    assert_eq!(
-        minted.principal,
-        S3Principal::IamUser {
-            user: scope.name.clone(),
-            policy: IamPolicy::Inline {
-                name: "coven-member".into()
-            },
+async fn ceph_and_versity_mint_inline_keys_at_their_iam_and_revoke_them() {
+    for (profile, path) in [
+        (S3ProfileName::CephRgw, "/"),
+        (S3ProfileName::VersityGw, VERSITY_IAM),
+    ] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let scope = scope();
+        let minted = admin.mint(&scope).await.unwrap();
+        assert_eq!(
+            minted.principal,
+            S3Principal::IamUser {
+                user: scope.name.clone(),
+                policy: IamPolicy::Inline {
+                    name: "coven-member".into()
+                },
+            }
+        );
+        assert_eq!(
+            minted.credentials.secret_access_key.as_str(),
+            "member+secret/1&"
+        );
+        {
+            let state = fake.state.lock().unwrap();
+            assert_eq!(
+                state.actions,
+                [
+                    "CreateUser",
+                    "PutUserPolicy",
+                    "ListAccessKeys",
+                    "CreateAccessKey"
+                ]
+                .map(|action| (path.into(), action.into()))
+            );
+            let user = &state.users[&scope.name];
+            assert!(user.attached.is_empty() && state.policies.is_empty());
+            let (name, document) = user.inline.as_ref().unwrap();
+            assert_eq!(name, "coven-member");
+            let document: serde_json::Value = serde_json::from_str(document).unwrap();
+            assert_eq!(
+                document,
+                serde_json::json!({
+                    "Version": "2012-10-17",
+                    "Statement": [
+                        {
+                            "Effect": "Allow",
+                            "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
+                            "Resource": format!("arn:aws:s3:::bucket/base/{}/*", scope.store),
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": "s3:ListBucket",
+                            "Resource": "arn:aws:s3:::bucket",
+                            "Condition": {"StringLike": {"s3:prefix": format!("base/{}/*", scope.store)}},
+                        },
+                        {
+                            "Effect": "Allow",
+                            "Action": "s3:GetBucketVersioning",
+                            "Resource": "arn:aws:s3:::bucket",
+                        },
+                    ],
+                })
+            );
         }
-    );
-    assert_eq!(
-        minted.credentials.secret_access_key.as_str(),
-        "member+secret/1&"
-    );
-    {
-        let state = fake.state.lock().unwrap();
-        assert_eq!(
-            state.actions,
-            [
-                "CreateUser",
-                "PutUserPolicy",
-                "ListAccessKeys",
-                "CreateAccessKey"
-            ]
-            .map(|action| ("/".into(), action.into()))
-        );
-        let user = &state.users[&scope.name];
-        assert!(user.attached.is_empty() && state.policies.is_empty());
-        let (name, document) = user.inline.as_ref().unwrap();
-        assert_eq!(name, "coven-member");
-        let document: serde_json::Value = serde_json::from_str(document).unwrap();
-        assert_eq!(
-            document,
-            serde_json::json!({
-                "Version": "2012-10-17",
-                "Statement": [
-                    {
-                        "Effect": "Allow",
-                        "Action": ["s3:GetObject", "s3:PutObject", "s3:DeleteObject", "s3:AbortMultipartUpload", "s3:ListMultipartUploadParts"],
-                        "Resource": format!("arn:aws:s3:::bucket/base/{}/*", scope.store),
-                    },
-                    {
-                        "Effect": "Allow",
-                        "Action": "s3:ListBucket",
-                        "Resource": "arn:aws:s3:::bucket",
-                        "Condition": {"StringLike": {"s3:prefix": format!("base/{}/*", scope.store)}},
-                    },
-                    {
-                        "Effect": "Allow",
-                        "Action": "s3:GetBucketVersioning",
-                        "Resource": "arn:aws:s3:::bucket",
-                    },
-                ],
-            })
-        );
-    }
-    admin.probe(&scope, &minted.credentials).await.unwrap();
-    let id = &minted.credentials.access_key_id;
-    assert!(admin.key_exists(id, &minted.principal).await.unwrap());
-    assert!(!admin
-        .key_exists("another-key", &minted.principal)
-        .await
-        .unwrap());
-    fake.state.lock().unwrap().fail_action = Some("ListAccessKeys");
-    assert_eq!(
-        admin
-            .key_exists(id, &minted.principal)
+        admin.probe(&scope, &minted.credentials).await.unwrap();
+        let id = &minted.credentials.access_key_id;
+        assert!(admin.key_exists(id, &minted.principal).await.unwrap());
+        assert!(!admin
+            .key_exists("another-key", &minted.principal)
             .await
-            .unwrap_err()
-            .failure(),
-        StorageFailure::PermissionDenied
-    );
-    fake.state.lock().unwrap().fail_action = None;
-    admin.revoke(id, &minted.principal).await.unwrap();
-    assert!(!admin.key_exists(id, &minted.principal).await.unwrap());
-    admin.revoke(id, &minted.principal).await.unwrap();
-    let state = fake.state.lock().unwrap();
-    assert!(state.users.is_empty() && state.policies.is_empty() && state.objects.is_empty());
-    assert!(state.actions.iter().all(|(path, _)| path == "/"));
-    assert_eq!(state.bad_signatures, 0);
+            .unwrap());
+        fake.state.lock().unwrap().fail_action = Some("ListAccessKeys");
+        assert_eq!(
+            admin
+                .key_exists(id, &minted.principal)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::PermissionDenied
+        );
+        fake.state.lock().unwrap().fail_action = None;
+        admin.revoke(id, &minted.principal).await.unwrap();
+        assert!(!admin.key_exists(id, &minted.principal).await.unwrap());
+        admin.revoke(id, &minted.principal).await.unwrap();
+        let state = fake.state.lock().unwrap();
+        assert!(state.users.is_empty() && state.policies.is_empty() && state.objects.is_empty());
+        assert!(state.actions.iter().all(|(sent, _)| sent == path));
+        assert_eq!(state.bad_signatures, 0);
+    }
 }
 
 #[tokio::test]
@@ -685,6 +701,7 @@ async fn minted_iam_keys_can_read_bucket_versioning_without_listing_other_stores
         S3ProfileName::Aws,
         S3ProfileName::SeaweedFs,
         S3ProfileName::CephRgw,
+        S3ProfileName::VersityGw,
     ] {
         let fake = Fake::new().await;
         let admin = fake.admin(profile);
@@ -707,64 +724,68 @@ async fn minted_iam_keys_can_read_bucket_versioning_without_listing_other_stores
 }
 
 #[tokio::test]
-async fn ceph_rolls_back_partial_mints_and_reports_failed_deletion() {
-    for action in ["CreateUser", "PutUserPolicy", "CreateAccessKey"] {
+async fn inline_iam_rolls_back_partial_mints_and_reports_failed_deletion() {
+    for profile in [S3ProfileName::CephRgw, S3ProfileName::VersityGw] {
+        for action in ["CreateUser", "PutUserPolicy", "CreateAccessKey"] {
+            let fake = Fake::new().await;
+            let admin = fake.admin(profile);
+            let scope = scope();
+            fake.state.lock().unwrap().fail_action = Some(action);
+            assert_eq!(
+                admin.mint(&scope).await.unwrap_err().failure(),
+                StorageFailure::PermissionDenied
+            );
+            fake.state.lock().unwrap().fail_action = None;
+            admin.roll_back(&scope).await.unwrap();
+            admin.roll_back(&scope).await.unwrap();
+            let state = fake.state.lock().unwrap();
+            assert!(state.users.is_empty() && state.policies.is_empty());
+        }
         let fake = Fake::new().await;
-        let admin = fake.admin(S3ProfileName::CephRgw);
+        let admin = fake.admin(profile);
         let scope = scope();
-        fake.state.lock().unwrap().fail_action = Some(action);
+        fake.state.lock().unwrap().lose_key_reply = true;
         assert_eq!(
             admin.mint(&scope).await.unwrap_err().failure(),
+            StorageFailure::Network
+        );
+        fake.state.lock().unwrap().fail_action = Some("DeleteAccessKey");
+        assert_eq!(
+            admin.roll_back(&scope).await.unwrap_err().failure(),
             StorageFailure::PermissionDenied
         );
+        assert_eq!(fake.state.lock().unwrap().users[&scope.name].keys.len(), 1);
         fake.state.lock().unwrap().fail_action = None;
         admin.roll_back(&scope).await.unwrap();
         admin.roll_back(&scope).await.unwrap();
         let state = fake.state.lock().unwrap();
         assert!(state.users.is_empty() && state.policies.is_empty());
     }
-    let fake = Fake::new().await;
-    let admin = fake.admin(S3ProfileName::CephRgw);
-    let scope = scope();
-    fake.state.lock().unwrap().lose_key_reply = true;
-    assert_eq!(
-        admin.mint(&scope).await.unwrap_err().failure(),
-        StorageFailure::Network
-    );
-    fake.state.lock().unwrap().fail_action = Some("DeleteAccessKey");
-    assert_eq!(
-        admin.roll_back(&scope).await.unwrap_err().failure(),
-        StorageFailure::PermissionDenied
-    );
-    assert_eq!(fake.state.lock().unwrap().users[&scope.name].keys.len(), 1);
-    fake.state.lock().unwrap().fail_action = None;
-    admin.roll_back(&scope).await.unwrap();
-    admin.roll_back(&scope).await.unwrap();
-    let state = fake.state.lock().unwrap();
-    assert!(state.users.is_empty() && state.policies.is_empty());
 }
 
 #[tokio::test]
-async fn ceph_stops_retrying_an_unusable_key_after_sixty_seconds() {
-    let fake = Fake::new().await;
-    let admin = fake.admin(S3ProfileName::CephRgw);
-    let scope = scope();
-    let minted = admin.mint(&scope).await.unwrap();
-    fake.state.lock().unwrap().propagation = u32::MAX;
-    assert_eq!(
-        admin
-            .probe(&scope, &minted.credentials)
-            .await
-            .unwrap_err()
-            .failure(),
-        StorageFailure::Authentication
-    );
-    assert_eq!(
-        *fake.clock.sleeps.lock().unwrap(),
-        vec![Duration::from_secs(1); 60]
-    );
-    admin.roll_back(&scope).await.unwrap();
-    assert!(fake.state.lock().unwrap().users.is_empty());
+async fn ceph_and_versity_stop_retrying_an_unusable_key_after_sixty_seconds() {
+    for profile in [S3ProfileName::CephRgw, S3ProfileName::VersityGw] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let scope = scope();
+        let minted = admin.mint(&scope).await.unwrap();
+        fake.state.lock().unwrap().propagation = u32::MAX;
+        assert_eq!(
+            admin
+                .probe(&scope, &minted.credentials)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Authentication
+        );
+        assert_eq!(
+            *fake.clock.sleeps.lock().unwrap(),
+            vec![Duration::from_secs(1); 60]
+        );
+        admin.roll_back(&scope).await.unwrap();
+        assert!(fake.state.lock().unwrap().users.is_empty());
+    }
 }
 
 #[tokio::test]

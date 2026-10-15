@@ -43,6 +43,7 @@ pub(super) const R2_TOKENS: KeyMinter = KeyMinter {
     key_exists: key_present,
     // Cloudflare states no bound; new tokens usually work within seconds.
     propagation: Duration::from_secs(30),
+    separate_iam: false,
 };
 
 /// The account and jurisdiction an R2 endpoint names:

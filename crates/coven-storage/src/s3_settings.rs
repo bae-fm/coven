@@ -27,6 +27,8 @@ pub enum S3ProfileName {
     SeaweedFs,
     /// Ceph RADOS Gateway, self-hosted.
     CephRgw,
+    /// Versity Gateway, self-hosted.
+    VersityGw,
 }
 
 /// The bucket's versioning state, read through the service's XML API (§4).

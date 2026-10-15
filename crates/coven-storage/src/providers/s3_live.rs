@@ -102,12 +102,20 @@ impl LiveS3 {
         };
         crate::transfer::with_cleanup(result, cleanup)
     }
-    /// The env key as the service's admin access, for minting member keys.
+    /// The env key as the service's admin access, for minting member keys,
+    /// with `COVEN_LIVE_S3_IAM_ENDPOINT` where the service runs IAM apart
+    /// from its S3 endpoint (Versity Gateway).
     pub(super) fn admin(&self) -> crate::AdminCredential {
+        let iam_endpoint = match std::env::var("COVEN_LIVE_S3_IAM_ENDPOINT") {
+            Ok(url) => Some(url.parse().expect("valid live IAM endpoint")),
+            Err(std::env::VarError::NotPresent) => None,
+            Err(error) => panic!("invalid live IAM endpoint: {error}"),
+        };
         crate::AdminCredential::AccessKey {
             access_key_id: self.credentials.access_key_id.clone(),
             secret_access_key: self.credentials.secret_access_key.clone(),
             session_token: None,
+            iam_endpoint,
         }
     }
     pub(super) fn connect(&self, settings: Option<S3Settings>) -> StorageConnection<S3Storage> {

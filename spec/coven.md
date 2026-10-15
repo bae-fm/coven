@@ -685,11 +685,13 @@ the file's ranges under `F`.
     the same machine or a private network can. A contradicting name or custom
     profile, or a plain-`http` catalogued host, fails validation with
     `InvalidConfiguration` before any request. The self-hosted profiles are
-    **RustFS**, **SeaweedFS** and **Ceph RGW**; no hostname selects them.
+    **RustFS**, **SeaweedFS**, **Ceph RGW** and **Versity Gateway**; no
+    hostname selects them.
   - **Member key scope.** A service limits a member key either to a prefix
     inside a bucket or only to a whole bucket. AWS (IAM `s3:prefix`
-    conditions), GCS (a managed folder per store), RustFS, SeaweedFS and Ceph RGW
-    (policy `s3:prefix` conditions) limit it to the store's prefix, so their
+    conditions), GCS (a managed folder per store), RustFS, SeaweedFS, Ceph RGW
+    and Versity Gateway (policy `s3:prefix` conditions) limit it to the
+    store's prefix, so their
     stores can share a bucket and base prefix. An R2 API token is limited to
     buckets, never to a folder inside one, so every member's key reaches
     every object in its bucket: a member of one store could delete another
@@ -845,7 +847,10 @@ the file's ranges under `F`.
     PUT racing a conditional copy of one name both succeeded in 14 of 200
     trials, so the refusal stands. The same day suite 5 passed R2, RustFS
     1.0.1 with versioning disabled and enabled, and Ceph RGW 20.2.4 and GCS
-    with versioning disabled; those entries record suite 5 certificates. AWS
+    with versioning disabled; those entries record suite 5 certificates. It
+    also passed Versity Gateway 1.9.0 with versioning disabled and enabled
+    from detected settings, and on **2026-10-15** again as the named
+    `VersityGw` entry, whose certificates cover both states. AWS
     is **uncertified**: there is no live account. The table's selected
     behaviors are:
 
@@ -857,19 +862,21 @@ the file's ranges under `F`.
     | RustFS (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
     | SeaweedFS (uncertified, refused) | AWS SigV4 | `If-None-Match: *` | Copy with `If-None-Match: *` | Completion | None returned | V2 | ETag |
     | Ceph RGW (certified, unversioned) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | None returned | V2 | ETag |
+    | Versity Gateway (certified, versioned too) | AWS SigV4 | `If-None-Match: *` | Conditional completion | Completion | Scope stated | V2 | ETag |
 
-    RustFS alone supports versioned buckets: RustFS 1.0.1 passed every suite 5
-    race with versioning enabled. GCS ran only with versioning disabled, so it
+    RustFS and Versity Gateway support versioned buckets: RustFS 1.0.1 and
+    Versity Gateway 1.9.0 (POSIX backend with `--versioning-dir`) passed every
+    suite 5 race with versioning enabled. GCS ran only with versioning disabled, so it
     has no versioned-bucket evidence.
     SeaweedFS 4.48 fails the multipart races with versioning enabled or not.
     AWS remains uncertified. R2 has no versioning feature. Ceph
     RGW 20.2.4 fails the versioned races. See the
     [suite 4 evidence](s3-certification.md#concurrent-certification-suite-4),
     the [full battery](s3-certification.md#full-battery-2026-10-14) and the
-    [GCS run](s3-certification.md#gcs-and-versity-gateway-2026-10-14)
+    [GCS and Versity Gateway runs](s3-certification.md#gcs-and-versity-gateway-2026-10-14)
     for the live runs and their bucket states.
 
-    AWS and R2 request checksums; every profile but GCS consumes S3
+    AWS, R2 and Versity Gateway request checksums; every profile but GCS consumes S3
     response headers. RustFS, SeaweedFS and Ceph RGW are not asked for checksums they
     never return. GCS supplies
     its hashes without a checksum-mode request; the adapter translates Google
@@ -879,7 +886,8 @@ the file's ranges under `F`.
     env file using `COVEN_LIVE_S3_{BUCKET,REGION,ENDPOINT,ACCESS_KEY_ID,SECRET_ACCESS_KEY}`.
     Run `COVEN_LIVE_S3_ENV=<file> cargo test -p coven-storage s3_certification -- --ignored --nocapture`.
     Select a self-hosted profile with `COVEN_LIVE_S3_PROFILE=CephRgw`
-    (or `RustFs` / `SeaweedFs`); otherwise the suite detects its settings.
+    (or `RustFs` / `SeaweedFs` / `VersityGw`); otherwise the suite detects its
+    settings.
     The ignored test runs production detection from the location's settings,
     or the plain S3 settings where detection must supply them, and prints
     every observation. A detected entry that fails the setup safety
@@ -1022,6 +1030,10 @@ the file's ranges under `F`.
     publishes multipart uploads by copy with `If-None-Match: *`. None returned a checksum, even
     with checksum mode; their profiles do not request one and rely on the
     complete-byte comparison required for a missing checksum (below).
+    Versity Gateway 1.9.0, versioned or not, refused occupied names the same
+    way, sequentially and in every suite 5 race, so it uses conditional
+    completion too; unlike the others it returns checksums with their scope
+    stated, so its profile requests them.
   - `RequestTimeTooSkewed` means the device clock is off, not that access
     was denied. Retry the request once, signed with the server offset its
     response's `Date` states.
@@ -1191,8 +1203,8 @@ the file's ranges under `F`.
     cut-off assumption; nondecreasing publication times alone do not imply it.
 - Native publication gaps remain visible in the profiles and certification.
   GCS conditional-copy timestamps and R2 single-PUT and multipart timestamps
-  passed the completion checks, as did RustFS, SeaweedFS and unversioned Ceph RGW single-PUT and
-  multipart timestamps.
+  passed the completion checks, as did RustFS, SeaweedFS, unversioned Ceph
+  RGW and Versity Gateway single-PUT and multipart timestamps.
   AWS single-request PUT timestamps describe
   completion; AWS multipart `Last-Modified` instead records initiation
   ([system metadata](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html)).
@@ -1291,7 +1303,8 @@ the file's ranges under `F`.
     Center's device authorization (register a public client, show the
     verification page and code, poll at the given interval, then fetch the
     chosen account and role's credentials). On every platform, the person may
-    paste an admin access key or API token. A CLI runs only after the person
+    paste an admin access key or API token; a pasted key for Versity Gateway
+    names its IAM endpoint too (below). A CLI runs only after the person
     chooses it, with no input; its output is parsed in memory and erased, and
     a failure reports only its exit status, since CLI text can echo
     configuration. Guided steps show the bucket, the store's prefix and the
@@ -1309,14 +1322,25 @@ the file's ranges under `F`.
     (Squid or newer) take the inline form at the location's RGW endpoint and
     region, using an account-root key or a user's delegated IAM access
     ([RGW IAM](https://docs.ceph.com/en/squid/radosgw/iam/)).
-    GCS, R2 and RustFS have their own minters; a custom profile uses
-    guided console steps. On **2026-10-14** the RustFS, SeaweedFS and Ceph
-    RGW 20.2.4 minters each made a key live with an admin key, passed the
-    member-side check below, were refused writes, reads and listings outside
-    the store's prefix, revoked the key twice, read it absent and saw the
-    service refuse it ([evidence](s3-certification.md#member-keys)). Run
+    Versity Gateway takes the inline form from its standalone IAM service
+    (`versitygw iam`, which the gateway reads through
+    `--iam-standalone-endpoint`). That service listens at its own address,
+    apart from the S3 endpoint, so a pasted admin key for Versity Gateway
+    names its IAM endpoint (`AdminCredential::AccessKey`'s `iam_endpoint`),
+    signed for the location's region. Every other service's admin access
+    names none, and admin access naming one for them, or none for Versity
+    Gateway, fails with `InvalidConfiguration` before any request. The
+    gateway's own admin API (`versitygw admin create-user`) has no per-user
+    policy and is not used. GCS, R2 and RustFS have their own minters; a
+    custom profile uses guided console steps. On **2026-10-14** the RustFS,
+    SeaweedFS and Ceph RGW 20.2.4 minters, and on **2026-10-15** the Versity
+    Gateway 1.9.0 minter, each made a key live with an admin key, passed the member-side check below, were
+    refused writes, reads and listings outside the store's prefix, revoked
+    the key twice, read it absent and saw the service refuse it
+    ([evidence](s3-certification.md#member-keys)). Run
     `COVEN_LIVE_S3_ENV=<file holding the admin key> COVEN_LIVE_S3_PROFILE=<name>
-    cargo test -p coven-storage s3_member_key_lifecycle -- --ignored --nocapture`.
+    cargo test -p coven-storage s3_member_key_lifecycle -- --ignored --nocapture`,
+    adding `COVEN_LIVE_S3_IAM_ENDPOINT=<url>` for Versity Gateway.
   - On GCS each member key is the HMAC key of its own service account. The
     minter reads the bucket's project through the JSON API and refuses a
     bucket without uniform bucket-level access, which managed folders need.
@@ -1383,7 +1407,8 @@ the file's ranges under `F`.
     listing must be. Otherwise the check fails with
     `StorageFailure::KeyBeyondStore`. Authentication and
     permission failures are retried each second within the service's
-    retry window: 60 seconds for AWS IAM and Ceph RGW, and 30 for SeaweedFS,
+    retry window: 60 seconds for AWS IAM, Ceph RGW and Versity Gateway, and
+    30 for SeaweedFS,
     whose gateways read identity changes asynchronously. The 60-second window
     is a retry limit, not a verified provider propagation guarantee; a key
     still refused at the limit fails the operation.

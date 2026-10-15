@@ -70,3 +70,55 @@ fn custom_profiles_take_console_steps() {
     ))
     .is_ok());
 }
+
+#[test]
+fn only_versity_admin_access_names_a_separate_iam_endpoint() {
+    let access = |iam_endpoint: Option<&str>| AdminCredential::AccessKey {
+        access_key_id: "admin".into(),
+        secret_access_key: SecretText::new("admin-secret".into()),
+        session_token: None,
+        iam_endpoint: iam_endpoint.map(|url| Url::parse(url).unwrap()),
+    };
+    let admin = |name: Option<S3ProfileName>, credential: AdminCredential| {
+        key_admin(
+            location(
+                name.map(S3Profile::Named),
+                name.map(|_| "http://127.0.0.1:10000"),
+                "base",
+            ),
+            credential,
+            AdminEndpoints::production(),
+            std::sync::Arc::new(SystemClock),
+            std::sync::Arc::new(UuidIds),
+        )
+    };
+    let versity = Some(S3ProfileName::VersityGw);
+    assert!(admin(versity, access(Some("http://127.0.0.1:7076"))).is_ok());
+    for credential in [
+        access(None),
+        AdminCredential::BearerToken(SecretText::new("token".into())),
+        access(Some("ftp://127.0.0.1:7076")),
+        access(Some("http://127.0.0.1:7076/?Action=ListUsers")),
+    ] {
+        assert_eq!(
+            admin(versity, credential).err().unwrap().failure(),
+            StorageFailure::InvalidConfiguration
+        );
+    }
+    // Elsewhere IAM is global or at the location's endpoint.
+    for name in [
+        None,
+        Some(S3ProfileName::SeaweedFs),
+        Some(S3ProfileName::CephRgw),
+        Some(S3ProfileName::RustFs),
+    ] {
+        assert!(admin(name, access(None)).is_ok());
+        assert_eq!(
+            admin(name, access(Some("http://127.0.0.1:7076")))
+                .err()
+                .unwrap()
+                .failure(),
+            StorageFailure::InvalidConfiguration
+        );
+    }
+}

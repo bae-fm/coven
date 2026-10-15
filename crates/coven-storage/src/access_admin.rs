@@ -15,7 +15,8 @@ use std::fmt;
 #[derive(Clone)]
 pub enum AdminCredential {
     /// An admin access key: AWS IAM (or exported short-lived credentials with
-    /// their session token), a Ceph RGW account, SeaweedFS IAM, RustFS.
+    /// their session token), a Ceph RGW account, SeaweedFS IAM, RustFS,
+    /// Versity Gateway's IAM.
     AccessKey {
         /// The admin key's public id.
         access_key_id: String,
@@ -23,6 +24,12 @@ pub enum AdminCredential {
         secret_access_key: SecretText,
         /// The session token of temporary credentials.
         session_token: Option<SecretText>,
+        /// The IAM API's endpoint where the service runs IAM apart from its
+        /// S3 endpoint: Versity Gateway's standalone IAM service, which the
+        /// operator deploys at its own address. Every other service takes
+        /// none: AWS IAM is global, and the rest serve their admin API at the
+        /// location's endpoint.
+        iam_endpoint: Option<url::Url>,
     },
     /// An OAuth or API bearer token: Google Cloud, or a Cloudflare API token.
     BearerToken(SecretText),

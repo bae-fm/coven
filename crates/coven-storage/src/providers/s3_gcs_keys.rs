@@ -47,6 +47,7 @@ pub(super) const GCS_KEYS: KeyMinter = KeyMinter {
     key_exists: key_present,
     // Google documents up to 60 seconds before a new HMAC key works.
     propagation: Duration::from_secs(60),
+    separate_iam: false,
 };
 
 struct Gcs<'a> {

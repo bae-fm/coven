@@ -97,7 +97,8 @@ pub(super) struct CataloguedProfile {
 }
 
 /// Every catalogued service; hosted ones match hostnames in this order.
-pub(super) const PROFILES: &[CataloguedProfile] = &[AWS, GCS, R2, RUSTFS, SEAWEEDFS, CEPH_RGW];
+pub(super) const PROFILES: &[CataloguedProfile] =
+    &[AWS, GCS, R2, RUSTFS, SEAWEEDFS, CEPH_RGW, VERSITY_GW];
 /// The plain S3 behaviors detection starts from and keeps where nothing held.
 /// AWS's entry differs in its copy publication and start timestamp.
 pub(super) const PLAIN: S3Settings = S3Settings {
@@ -257,6 +258,29 @@ const CEPH_RGW: CataloguedProfile = CataloguedProfile {
     setup: Setup::Admitted,
 };
 
+// Versity Gateway 1.9.0 (POSIX backend) detected the plain S3 settings and
+// passed suite 5 with them, versioning disabled and enabled, on 2026-10-14;
+// on 2026-10-15 this named entry passed suite 5 in both states. See
+// spec/s3-certification.md.
+const VERSITY_GW: CataloguedProfile = CataloguedProfile {
+    name: S3ProfileName::VersityGw,
+    endpoint: None,
+    settings: PLAIN,
+    // Its standalone IAM service enforces a user's inline policy, with
+    // `s3:prefix` conditions and object resources under the store's prefix.
+    key_scope: S3KeyScope::Prefix,
+    versioned_buckets: Certification::Passed {
+        date: "2026-10-15",
+        suite: 5,
+    },
+    minter: Some(&super::iam::VERSITY_GW_IAM),
+    certification: Certification::Passed {
+        date: "2026-10-15",
+        suite: 5,
+    },
+    setup: Setup::Admitted,
+};
+
 impl CataloguedProfile {
     pub(super) fn named(name: S3ProfileName) -> Self {
         match name {
@@ -266,6 +290,7 @@ impl CataloguedProfile {
             S3ProfileName::RustFs => RUSTFS,
             S3ProfileName::SeaweedFs => SEAWEEDFS,
             S3ProfileName::CephRgw => CEPH_RGW,
+            S3ProfileName::VersityGw => VERSITY_GW,
         }
     }
     /// The catalogued profile a hosted endpoint's host selects.

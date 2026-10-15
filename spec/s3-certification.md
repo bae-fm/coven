@@ -25,7 +25,10 @@ unversioned and failed versioned, SeaweedFS failed unversioned, Garage failed
 every race, and GCS's key could not read versioning, so suite 5 did not run
 there. After the key was granted bucket metadata access, GCS passed suite 5,
 and Versity Gateway 1.9.0 passed it with versioning disabled and enabled
-([GCS and Versity Gateway](#gcs-and-versity-gateway-2026-10-14)).
+([GCS and Versity Gateway](#gcs-and-versity-gateway-2026-10-14)). On
+2026-10-15 the named `VersityGw` entry passed suite 5 in both states and its
+minter passed the member-key lifecycle
+([Versity Gateway profile](#versity-gateway-profile-2026-10-15)).
 The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
 contract and certification procedure are in [§4](coven.md#4-storage-providers-and-access).
@@ -1346,6 +1349,9 @@ answers 404; the minter now reads absence back after a refused delete.
   access the root user of an RGW account (`radosgw-admin account create`,
   then `user create --account-id=<id> --account-root`), which also created
   the bucket so the account owns it.
+- Versity Gateway 1.9.0, run on 2026-10-15 with its standalone IAM service
+  ([below](#versity-gateway-profile-2026-10-15)), admin access the gateway's
+  root key with `COVEN_LIVE_S3_IAM_ENDPOINT` naming the IAM service.
 
 Each run printed, apart from the cargo harness lines:
 
@@ -1365,7 +1371,8 @@ member_key_lifecycle PASS
 roll_back PASS cleanup PASS
 ```
 
-SeaweedFS and Ceph RGW printed the same lines with `principal=IamUser`.
+SeaweedFS, Ceph RGW and Versity Gateway printed the same lines with
+`principal=IamUser`.
 
 ## Full battery, 2026-10-14
 
@@ -2721,7 +2728,111 @@ certification suite=5 PASS
 listing_lag SUMMARY provider_case=S3_new_device_folder trials=20 min_s=0.007451917 median_s=0.042806770 max_s=0.079583500 (aggregated from per-trial lines)
 ```
 
-These results would justify a catalogued `VersityGw` profile with the
-detected settings, certified by suite 5 with versioning disabled and enabled.
-Its key scope and member-key minting are not established: no minter exists
-for it, so `s3_member_key_lifecycle` was not run.
+These results justified a catalogued `VersityGw` profile with the detected
+settings. Its key scope and member-key minting were not yet established;
+both are [below](#versity-gateway-profile-2026-10-15).
+
+## Versity Gateway profile, 2026-10-15
+
+Run on 2026-10-15 between 02:37 and 02:46 UTC from `impl-t196` on `main` at
+`3825dd2af`, with the catalogued `VersityGw` entry and its minter added. The
+image is the one above (`versity/versitygw:v1.9.0`, build `ca4c8d30f579`,
+image `sha256:d0b4ec48c463`, digest `sha256:f9768331c89d`), now run as two
+processes in one podman container (libkrun machine, 2 GiB): the standalone
+IAM service, `versitygw --port :7076 iam --dir <iam> --private-ports
+<socket>`, and the gateway, `versitygw --port :10000
+--iam-standalone-endpoint <socket> posix --versioning-dir <versions> <root>`,
+both with the same generated root key and region `us-east-1`, reached over
+plain `http`. The gateway created `coven-live` and `coven-live-versioned`,
+and enabled versioning on the second.
+
+Standalone IAM is in 1.9.0. Its API (IAM query protocol, version
+`2010-05-08`, signed for the gateway's region; a signature for another
+region is refused with `SignatureDoesNotMatch`) listens only on the IAM
+service's own port: the gateway's S3 port answers an IAM `POST` with
+`MethodNotAllowed`. `CreateUser` takes the `/coven/` path and tags,
+`PutUserPolicy` takes the member policy unchanged, and the gateway enforces
+it on S3 requests: by hand, a key of a user holding the policy for
+`base/store1/` wrote, read and listed there, read the bucket's versioning,
+and was refused `AccessDenied` ("no identity-based policy allows") for a
+write under `base/store2/`, a write at the bucket's root, listings of
+`base/store2/`, `base/` and the whole bucket, and a listing of the other
+bucket. `DeleteUser` with a policy attached is refused with
+`DeleteConflict`; absent users, keys and policies answer `NoSuchEntity`.
+A deleted key was refused with `InvalidAccessKeyId` at once and on every
+read in the following 18 seconds. The gateway's own admin API
+(`versitygw admin create-user`) has no per-user policy, so the minter does
+not use it.
+
+| Provider | Build | Bucket | Suite 5 races (2×200, 8×50, mixed 200, replace 200) | Sequential contracts | Listing lag median / max | Verdict |
+| --- | --- | --- | --- | --- | --- | --- |
+| Versity Gateway | 1.9.0 | Disabled | one winner in every trial | all PASS | 0.005 s / 0.006 s | suite 5 PASS (`VersityGw`) |
+| Versity Gateway | 1.9.0 | Enabled | one winner in every trial | all PASS | 0.009 s / 0.017 s | suite 5 PASS (`VersityGw`) |
+
+Detection observed what it observed on 2026-10-14 and reproduced the new
+entry (`catalogued entries reproduced: [VersityGw]`). The named entry now
+passes setup's safety check in the versioned bucket too, which detected
+settings never could. Versioning disabled (versioning enabled printed the
+same lines apart from `versioning=Enabled`, timings and the listing lag):
+
+```text
+bucket versioning=Disabled
+setup_safety_check PASS
+catalogued entries reproduced: [VersityGw]
+candidate S3Settings { signing: AwsSigV4, single_put: IfNoneMatch, multipart: ConditionalCompletion, multipart_timestamp: Completion, checksums: ScopeStated, listing: V2, revision: ETag, response_headers: S3, request_checksums: true }
+setup_profile_check PASS
+§4 native_behavior_detection PASS
+race SUMMARY Put writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_2 PASS cleanup=PASS
+race SUMMARY Put writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_put_8 PASS cleanup=PASS
+race SUMMARY Multipart writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_multipart_publication_2 PASS cleanup=PASS
+race SUMMARY Multipart writers=8 trials=50 overlapping=50 successes=50 violations=0
+§4 concurrent_multipart_publication_8 PASS cleanup=PASS
+race SUMMARY Mixed writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_put_and_multipart_publication PASS cleanup=PASS
+race SUMMARY Replace writers=2 trials=200 overlapping=200 successes=200 violations=0
+§4 concurrent_replace_current_revision PASS cleanup=PASS
+§4 create_once_single_put PASS cleanup=PASS
+§4 whole_object_reads PASS cleanup=PASS
+§4 ranged_reads PASS cleanup=PASS
+§4 prefix_listing PASS cleanup=PASS
+§4 exact_status PASS cleanup=PASS
+§4 deletion PASS cleanup=PASS
+§4 setup_provider_check PASS cleanup=PASS
+§4 create_once_multipart PASS cleanup=PASS
+§4 partial_uploads_hidden PASS cleanup=PASS
+§4 multipart_resume PASS cleanup=PASS
+§4 single_put_timestamp_equals_completion PASS cleanup=PASS
+§4 multipart_timestamp_equals_completion PASS cleanup=PASS
+§4 revision_changes_on_replace PASS cleanup=PASS
+listing_lag SUMMARY provider_case=S3_object trials=20 min_s=0.003700250 median_s=0.004639333 max_s=0.006211875 omitted_trials=0 timeouts=0
+§4 listing_lag PASS cleanup=PASS
+§4 immediate_device_folders PASS cleanup=PASS
+bucket versioning_after=Disabled stable=true
+certification suite=5 PASS
+```
+
+`s3_member_key_lifecycle` with `versitygw.env` (the root key),
+`COVEN_LIVE_S3_PROFILE=VersityGw` and
+`COVEN_LIVE_S3_IAM_ENDPOINT=http://localhost:7076/` printed, apart from the
+cargo harness lines:
+
+```text
+mint PASS principal=IamUser
+key_exists_after_mint=true
+member_check PASS
+write_other_store refused=PermissionDenied
+read_other_store refused=PermissionDenied
+list_other_store refused=PermissionDenied
+write_outside_base_prefix refused=PermissionDenied
+revoke PASS
+key_exists_after_revoke=false
+revoke_again PASS
+revoked_key refused=Authentication after_s=0
+member_key_lifecycle PASS
+roll_back PASS cleanup PASS
+```
+
+Afterwards the IAM service listed no users and `coven-live` held no objects.
