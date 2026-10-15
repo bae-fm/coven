@@ -187,39 +187,6 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
     })
 }
 
-/// Load one sealed snapshot's plaintext over its audience inside a discarded
-/// transaction and compare the resulting agreement state with the capture.
-pub(crate) fn verify(
-    database: &DatabaseConnection,
-    before: &DatabaseConnection,
-    schema: &WriteSchema,
-    id: SnapshotId,
-    prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
-    input: impl Read,
-    captured: Option<crate::CapturedState>,
-    signer: &SnapshotSigner<'_>,
-) -> Result<(), DbError> {
-    let visible = AppView::after(before, schema);
-    let old_store = MergeStore::from_schema(before, &schema.schema);
-    let deleted = crate::store_log_tables::deleted_circles(database)?;
-    let empty = BTreeMap::new();
-    let old =
-        DatabaseRemovalView::new(before, &old_store, schema, &visible, &empty, &deleted, None)?;
-    crate::snapshot_state::create_tables(database)?;
-    let (_, touched) = read(database, schema, &id, prefix, input, signer)?;
-    let selected = BTreeSet::from([id.audience.clone()]);
-    let current = MergeStore::from_snapshot(database, &schema.schema, &selected);
-    crate::write_apply::WriteApply::new(database, schema, &current, &visible, &visible, &deleted)
-        .replace(&old, touched)?;
-    crate::snapshot_state::drop_tables(database)?;
-    if let Some(captured) = captured {
-        if !crate::snapshot_write::captured(database, &id.audience)?.same(captured) {
-            return Err(SnapshotError::CapturedState.into());
-        }
-    }
-    Ok(())
-}
-
 pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,

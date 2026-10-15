@@ -305,10 +305,6 @@ the publisher receives its reply. `visible_rotation_has_copies` reads the
 entry independently of the publisher's journal and recovers the fixed
 audience, key id and hash, with all prerequisite copies already stored.
 
-`snapshot_stored_checked` proves that any published snapshot has the recorded
-bytes and opens to the captured state under its recorded key.
-`failed_snapshot_check_blocks_publication` rules out uploading a snapshot
-that fails that local check.
 
 **A fair publication attempt finishes exactly once.**
 `rotation_resumes_and_finishes` and `snapshot_resumes_and_finishes` prove

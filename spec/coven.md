@@ -4866,13 +4866,6 @@ Carol's tablet:
     the snapshot, so a Gifts loader cannot mistake an unpublished part
     for deleted history
     ([`pending_run`, `two_audience_raise_keeps_circle_part`](proofs/io/CovenIO/SnapshotWriteExamples.lean)).
-- Before uploading a snapshot, its writer opens the sealed temporary file
-  through the snapshot reader: decrypt, verify both signatures, and parse
-  and check every record.
-  - Its fingerprint must equal the database state the writer captured,
-    at those same positions and schema version. Writes committed since
-    that capture do not change the comparison.
-  - A failed check stops publication and reaches the caller.
 - Readers choose by the authenticated prefix; they do not certify a
   snapshot for other devices by opening its body.
 - The *latest* or *current newest* snapshot of an audience is its counting
@@ -6074,8 +6067,7 @@ Carol's tablet:
   - an entry is uploaded after everything it refers to; in particular, a
     key introduction is stored only after all its required sealed copies
     ([queue proof: `rotation_entry_after_copies`, `visible_rotation_has_copies`](proofs/queue.md#what-is-proved));
-  - a snapshot counts only when complete and passing the reader's checks
-    (§15; [queue proof: `snapshot_stored_checked`](proofs/queue.md#what-is-proved));
+  - a snapshot counts only when complete (§15);
   - a received write's changes and consumed position become visible in one
     transaction (§6;
     [queue proof: `AtomicReceive.never_half_visible`](proofs/queue.md#what-is-proved)).

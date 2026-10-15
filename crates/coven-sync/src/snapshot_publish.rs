@@ -5,7 +5,7 @@
 //! is confirmed, and abandoned for a new path once it can no longer count
 //! (§15, SP step 8).
 
-use super::{io, snapshot_path, verify, StoreLogSync};
+use super::{io, snapshot_path, StoreLogSync};
 use crate::{
     operation_data::Data,
     operations::{Output, Progress},
@@ -285,35 +285,16 @@ impl StoreLogSync {
             .reserve_snapshot_files(record, &mut task, 1)
             .await?
             .remove(0);
-        let (sealed, captured) = self
-            .seal_snapshot(
-                id.clone(),
-                raise,
-                (key_id, key),
-                caught_at,
-                member,
-                &path,
-                &name,
-            )
-            .await?;
-        // Open it as a reader would before anything is sent (§15). A failed
-        // check stops publication and reaches the caller.
-        let opened = verify::SealedPlaintext::open(
-            io::SnapshotInput::open(&self.directory, &name)?,
+        self.seal_snapshot(
+            id.clone(),
+            raise,
+            (key_id, key),
+            caught_at,
+            member,
             &path,
-            &sealed,
-            io::key(&ring, &audience, key_id)?,
-            member.keys().public_keys().signing,
-        )?;
-        self.database
-            .verify_snapshot(
-                id,
-                sealed.prefix,
-                opened,
-                captured,
-                self.evidence_keys().await?,
-            )
-            .await?;
+            &name,
+        )
+        .await?;
         set_attempt(
             &mut task,
             Some(SnapshotAttempt {

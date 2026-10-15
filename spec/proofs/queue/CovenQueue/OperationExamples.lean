@@ -8,10 +8,9 @@ def codec : Codec where
     | audience :: key :: hash :: _ => some ⟨audience, key, hash⟩
     | _ => none
   entry_roundtrip _ := rfl
-  openSnapshot key bytes := if key = 7 ∧ bytes = [70, 80] then some [10, 20] else none
 
 def rotation : Rotation := ⟨⟨0, 2, 22⟩, [22], [⟨1, 0, [200]⟩, ⟨2, 1, [201]⟩], 1, [9], 2⟩
-def snapshot : Snapshot := ⟨1, 7, [70, 80], [10, 20]⟩
+def snapshot : Snapshot := ⟨1, 7, [70, 80]⟩
 def kept : Kept := fun _ => True
 
 def staged (d : Data) : State :=
@@ -22,13 +21,13 @@ def durable (d : Data) : State := { staged d with retained := some d.localBytes 
 def prepared (d : Data) : State :=
   { initial 1 d with journal := .pending ⟨1, d, 1⟩, retained := some d.localBytes }
 
-theorem prepared_reachable (d : Data) (check : d.localChecked codec) (accepted : Kept) :
+theorem prepared_reachable (d : Data) (accepted : Kept) :
     Reachable codec accepted 1 d (prepared d) :=
   .step (.step (.step .initial (.stageLocal _ ⟨1, d, 0⟩ rfl rfl))
     (.persistLocal (staged d) ⟨1, d, 0⟩ rfl rfl rfl))
-    (.commitLocal (durable d) ⟨1, d, 0⟩ rfl rfl rfl check)
+    (.commitLocal (durable d) ⟨1, d, 0⟩ rfl rfl rfl)
 
-theorem crash_between_artifact_and_journal (d : Data) (check : d.localChecked codec) :
+theorem crash_between_artifact_and_journal (d : Data) :
     Reachable codec kept 1 d (prepared d) ∧
     (durable d).crash.journal.row = some ⟨1, d, 0⟩ ∧
     (durable d).crash.retained = some d.localBytes ∧
@@ -37,7 +36,7 @@ theorem crash_between_artifact_and_journal (d : Data) (check : d.localChecked co
     .step (.step .initial (.stageLocal _ ⟨1, d, 0⟩ rfl rfl))
       (.persistLocal _ ⟨1, d, 0⟩ rfl rfl rfl)
   refine ⟨.step (.step persisted (.crash _))
-    (.commitLocal _ ⟨1, d, 0⟩ rfl rfl rfl check), rfl, rfl, rfl⟩
+    (.commitLocal _ ⟨1, d, 0⟩ rfl rfl rfl), rfl, rfl, rfl⟩
 
 /-- These states are the actual targets of the transition relation below. -/
 def copyObject : Object := ⟨.copy 1, [200]⟩
@@ -64,7 +63,7 @@ def rotationFinished : State :=
 theorem copy_stored_reachable (accepted : Kept) :
     Reachable codec accepted 1 (.rotation rotation) copyStored := by
   have send : Reachable codec accepted 1 (.rotation rotation) copySent :=
-    .step (prepared_reachable (.rotation rotation) trivial accepted)
+    .step (prepared_reachable (.rotation rotation) accepted)
       (.send _ ⟨1, .rotation rotation, 1⟩ 0 copyObject rfl rfl (by decide))
   exact .step (.step send (.crash _)) (.land _ 0 copyObject (by decide))
 
@@ -172,7 +171,7 @@ def snapshotFinished : State := { snapshotUploaded with journal := .finished 1 (
 
 theorem snapshot_stored_reachable : Reachable codec kept 1 (.snapshot snapshot) snapshotStored := by
   have sent : Reachable codec kept 1 (.snapshot snapshot) snapshotSent :=
-    .step (prepared_reachable (.snapshot snapshot) rfl kept)
+    .step (prepared_reachable (.snapshot snapshot) kept)
       (.send _ ⟨1, .snapshot snapshot, 1⟩ 0 snapshotObject rfl rfl (by decide))
   exact .step sent (.land _ 0 snapshotObject (by decide))
 
@@ -186,19 +185,18 @@ theorem snapshot_finishes_after_crash :
       (by decide) rfl (by decide))
   exact .step (.step uploaded (.crash _)) (.finishSnapshot _ ⟨1, .snapshot snapshot, 2⟩ snapshot rfl rfl rfl)
 
-/-- A reader can load the whole checked snapshot before the publisher's final
+/-- A reader can load the whole snapshot before the publisher's final
 row deletion. Literal invisibility until the last step is false; the reader's
 own atomic application is the relevant boundary. -/
 theorem snapshot_visible_before_finish :
     Reachable codec kept 1 (.snapshot snapshot) snapshotStored ∧
     snapshotStored.stored (.snapshot 1) = some snapshot.sealed ∧
-    snapshotStored.journal.row ≠ none ∧
-    codec.openSnapshot snapshot.key snapshot.sealed = some snapshot.captured :=
+    snapshotStored.journal.row ≠ none :=
   ⟨snapshot_stored_reachable, by decide⟩
 
 example : ∃ s, Reachable codec kept 1 (.snapshot snapshot) s ∧
     s.stored (.snapshot 1) = some snapshot.sealed ∧ s.journal.row ≠ none :=
   ⟨snapshotStored, snapshot_visible_before_finish.1, snapshot_visible_before_finish.2.1,
-    snapshot_visible_before_finish.2.2.1⟩
+    snapshot_visible_before_finish.2.2⟩
 
 end CovenQueue.Operations.Examples

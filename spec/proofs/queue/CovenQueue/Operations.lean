@@ -41,8 +41,6 @@ structure Snapshot where
   number : Nat
   key : Nat
   sealed : Bytes
-  /-- The captured state, including positions and schema, never the live DB. -/
-  captured : Bytes
   deriving DecidableEq, Repr
 
 inductive Data where
@@ -51,13 +49,11 @@ inductive Data where
   deriving DecidableEq, Repr
 
 /-- The format/crypto boundary: the rotation encoder includes the audience,
-key id and hash as well as the fixed entry plaintext and sealing key.
-Snapshot opening includes parsing and both signature checks (§15). -/
+key id and hash as well as the fixed entry plaintext and sealing key. -/
 structure Codec where
   entry : Rotation → Bytes
   openEntry : Bytes → Option Introduction
   entry_roundtrip : ∀ r, openEntry (entry r) = some r.toIntroduction
-  openSnapshot : Nat → Bytes → Option Bytes
 
 /-- Storage projected onto this attempt's reserved paths. Unrelated objects
 are outside this state; the supplied reservations must not collide with them. -/
@@ -74,10 +70,6 @@ def Data.objects (codec : Codec) : Data → List Object
 def Data.localBytes : Data → Bytes
   | .rotation r => r.keyBytes
   | .snapshot s => s.sealed
-
-def Data.localChecked (codec : Codec) : Data → Prop
-  | .rotation _ => True
-  | .snapshot s => codec.openSnapshot s.key s.sealed = some s.captured
 
 /-- Copy checkpoints refine §18.1's copy step so each confirmed copy survives
 restart. Zero precedes the custody/file transaction; n+1 follows n uploads. -/
@@ -152,7 +144,7 @@ inductive Step (codec : Codec) (kept : Kept) : State → State → Prop where
       s.memory.localDraft = some r.data.localBytes →
       Step codec kept s { s with retained := some r.data.localBytes }
   | commitLocal (s : State) (r : Row) : s.journal = .pending r → r.last_step = 0 →
-      s.retained = some r.data.localBytes → r.data.localChecked codec →
+      s.retained = some r.data.localBytes →
       Step codec kept s { s with
         journal := .pending { r with last_step := 1 }
         memory := .empty }
@@ -213,7 +205,7 @@ structure Valid (codec : Codec) (s : State) : Prop where
   bound : s.journal.position codec ≤ (s.journal.data.objects codec).length + 2
   pendingBound : ∀ r, s.journal = .pending r → r.last_step ≤ (r.data.objects codec).length + 1
   localReady : 0 < s.journal.position codec →
-    s.retained = some s.journal.data.localBytes ∧ s.journal.data.localChecked codec
+    s.retained = some s.journal.data.localBytes
   confirmed : StoredThrough codec s.journal.data s.stored
     (s.journal.position codec - 1)
   requests : ∀ n o, (n, o) ∈ s.sent →
@@ -260,11 +252,11 @@ theorem step_valid {codec : Codec} {kept : Kept} {s t : State}
     refine { v with localReady := ?_ }
     intro positive
     simp [hj, Journal.position, hz] at positive
-  | commitLocal r hj hz hd checked =>
+  | commitLocal r hj hz hd =>
     have data : s.journal.data = r.data := by simp [hj, Journal.data]
     refine ⟨by simp [Journal.position, Journal.data], ?_, ?_, ?_, ?_, ?_⟩
     · intro row eq; cases eq; simp
-    · intro _; exact ⟨hd, checked⟩
+    · intro _; exact hd
     · intro i hi; simp [Journal.position] at hi
     · simpa [Journal.data, ← data] using v.requests
     · simpa [Journal.data, ← data] using v.objects
@@ -372,7 +364,7 @@ theorem rotation_entry_after_copies {codec : Codec} {kept : Kept} {id : Nat}
 
 theorem finished_publication {codec : Codec} {kept : Kept} {id : Nat} {d : Data} {s : State}
     (h : Reachable codec kept id d s) (done : s.journal.row = none) :
-    s.journal = .finished id d ∧ s.retained = some d.localBytes ∧ d.localChecked codec ∧
+    s.journal = .finished id d ∧ s.retained = some d.localBytes ∧
     ∀ o ∈ d.objects codec, s.stored o.path = some o.bytes := by
   have fixed := fixed_data h
   have v := reachable_valid h
@@ -382,9 +374,8 @@ theorem finished_publication {codec : Codec} {kept : Kept} {id : Nat} {d : Data}
     have hi : i = id := by simpa [hj, Journal.id] using fixed.2
     have hd : data = d := by simpa [hj, Journal.data] using fixed.1
     subst i; subst data
-    refine ⟨rfl, ?_, ?_, ?_⟩
-    · exact (v.localReady (by simp [hj, Journal.position])).1.trans (congrArg some (congrArg Data.localBytes fixed.1))
-    · simpa [fixed.1] using (v.localReady (by simp [hj, Journal.position])).2
+    refine ⟨rfl, ?_, ?_⟩
+    · exact (v.localReady (by simp [hj, Journal.position])).trans (congrArg some (congrArg Data.localBytes fixed.1))
     · intro o ho
       obtain ⟨n, hn, eq⟩ := List.mem_iff_getElem.mp ho
       apply v.confirmed n (by simp [hj, Journal.position]; omega) o
@@ -397,44 +388,6 @@ theorem step_monotone {codec : Codec} {kept : Kept} {s t : State} (h : Step code
 theorem deleted_row_stays_deleted {codec : Codec} {kept : Kept} {s t : State}
     (h : Step codec kept s t) (done : s.journal.row = none) : t.journal.row = none := by
   cases h <;> simp_all [State.crash, Journal.row]
-
-/-- Publication can only follow the successful local snapshot check. -/
-theorem remote_locally_checked {codec : Codec} {kept : Kept} {id : Nat} {d : Data} {s : State}
-    (h : Reachable codec kept id d s) :
-    (∀ n o, (n, o) ∈ s.sent → d.localChecked codec) ∧
-    (∀ p bytes, s.stored p = some bytes → d.localChecked codec) := by
-  induction h with
-  | initial =>
-    constructor
-    · intro n o h; simp [initial] at h
-    · intro p bytes h; simp [initial] at h
-  | @step s t reachable step ih =>
-    cases step with
-    | send r n o hj hn ho =>
-      refine ⟨?_, ih.2⟩
-      intro i x hx
-      rcases List.mem_cons.mp hx with eq | old
-      · have checked := (reachable_valid reachable).localReady (by simp [hj, Journal.position, hn])
-        simpa [(fixed_data reachable).1] using checked.2
-      · exact ih.1 i x old
-    | land n o sent =>
-      refine ⟨ih.1, ?_⟩
-      intro p bytes _
-      exact ih.1 n o sent
-    | stageLocal | persistLocal | commitLocal | receive | checkpoint | finishSnapshot |
-        finishRotation | crash | wait => exact ih
-
-theorem snapshot_stored_checked {codec : Codec} {kept : Kept} {id : Nat}
-    {snapshot : Snapshot} {s : State} (h : Reachable codec kept id (.snapshot snapshot) s)
-    {bytes : Bytes} (stored : s.stored (.snapshot snapshot.number) = some bytes) :
-    bytes = snapshot.sealed ∧ codec.openSnapshot snapshot.key bytes = some snapshot.captured := by
-  obtain ⟨n, o, ho, _, equal, _⟩ := (reachable_valid h).objects _ _ stored
-  rw [(fixed_data h).1] at ho
-  have mem := List.mem_of_getElem? ho
-  simp only [Data.objects, List.mem_singleton] at mem
-  subst o
-  have checked := (remote_locally_checked h).2 _ _ stored
-  exact ⟨equal, by simpa [equal, Data.localChecked] using checked⟩
 
 /-- A peer reads the introducing entry independently of the publisher's
 journal. This is its checked payload; replay supplies authority separately.
@@ -505,15 +458,5 @@ theorem publication_retries_identical {codec : Codec} {kept : Kept} {id : Nat} {
   rw [(fixed_data hs).1] at sa
   rw [(fixed_data ht).1] at sb
   exact Option.some.inj (sa.symm.trans sb)
-
-theorem failed_snapshot_check_blocks_publication {codec : Codec} {kept : Kept} {id : Nat}
-    {snapshot : Snapshot} {s : State} (h : Reachable codec kept id (.snapshot snapshot) s)
-    (failed : codec.openSnapshot snapshot.key snapshot.sealed ≠ some snapshot.captured) :
-    s.stored (.snapshot snapshot.number) = none := by
-  cases stored : s.stored (.snapshot snapshot.number) with
-  | none => rfl
-  | some bytes =>
-    have checked := snapshot_stored_checked h stored
-    exact False.elim (failed (checked.1 ▸ checked.2))
 
 end CovenQueue.Operations

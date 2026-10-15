@@ -587,7 +587,7 @@ growth requests one, therefore waits for the next pass's step 6. Work
 driven outside a pass, such as an app's reset, runs that catch-up first.
 If this pass cannot supply that catch-up, leave publication pending
 ([`SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
-Capture it and verify its sealed bytes locally as §15 requires; before
+Capture it; before
 sending, confirm every own write through its position, with remote positions
 supported by checked published logs or previously published snapshots under
 the same gate ([`snapshot_covers_published`, `inherited_position_published`](proofs/io/CovenIO/SnapshotWrites.lean)).

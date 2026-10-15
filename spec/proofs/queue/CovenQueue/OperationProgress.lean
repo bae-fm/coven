@@ -159,7 +159,7 @@ theorem rotation_resumes_and_finishes {codec : Codec} {kept : Kept} {id : Nat} {
   obtain ⟨t, event, unique⟩ := finishes_exactly_once run fair
   have completed := finished_publication (run.reachable (t + 1)) event.2
   have entry : (run.state (t + 1)).stored (.entry r.entryNumber) = some (codec.entry r) :=
-    completed.2.2.2 ⟨.entry r.entryNumber, codec.entry r⟩ (by simp [Data.objects, Rotation.objects])
+    completed.2.2 ⟨.entry r.entryNumber, codec.entry r⟩ (by simp [Data.objects, Rotation.objects])
   exact ⟨t, event, unique, completed.1, completed.2.1, entry,
     (rotation_entry_after_copies (run.reachable (t + 1)) entry).2⟩
 
@@ -168,11 +168,10 @@ theorem snapshot_resumes_and_finishes {codec : Codec} {kept : Kept} {id : Nat} {
     ∃ t, FinishesAt run t ∧ (∀ u, FinishesAt run u → u = t) ∧
       (run.state (t + 1)).journal = .finished id (.snapshot s) ∧
       (run.state (t + 1)).retained = some s.sealed ∧
-      (run.state (t + 1)).stored (.snapshot s.number) = some s.sealed ∧
-      codec.openSnapshot s.key s.sealed = some s.captured := by
+      (run.state (t + 1)).stored (.snapshot s.number) = some s.sealed := by
   obtain ⟨t, event, unique⟩ := finishes_exactly_once run fair
   have completed := finished_publication (run.reachable (t + 1)) event.2
   exact ⟨t, event, unique, completed.1, completed.2.1,
-    completed.2.2.2 ⟨.snapshot s.number, s.sealed⟩ (by simp [Data.objects]), completed.2.2.1⟩
+    completed.2.2 ⟨.snapshot s.number, s.sealed⟩ (by simp [Data.objects])⟩
 
 end CovenQueue.Operations

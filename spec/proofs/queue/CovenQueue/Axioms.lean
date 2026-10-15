@@ -64,10 +64,8 @@ import CovenQueue
 #print axioms CovenQueue.Operations.eventually_finishes
 #print axioms CovenQueue.Operations.rotation_resumes_and_finishes
 #print axioms CovenQueue.Operations.snapshot_resumes_and_finishes
-#print axioms CovenQueue.Operations.snapshot_stored_checked
 #print axioms CovenQueue.Operations.visible_rotation_has_copies
 #print axioms CovenQueue.Operations.finished_rotation_requires_kept
-#print axioms CovenQueue.Operations.failed_snapshot_check_blocks_publication
 #print axioms CovenQueue.Operations.Examples.crash_between_artifact_and_journal
 #print axioms CovenQueue.Operations.Examples.rotation_finishes_after_crashes
 #print axioms CovenQueue.Operations.Examples.publication_without_kept_entry

@@ -57,48 +57,6 @@ impl Database {
         }).await
     }
 
-    /// Check a sealed snapshot's plaintext before publication (§15): every
-    /// record passes the loader's checks and, with `captured`, loading it
-    /// reproduces the agreement state the snapshot was written from. Writes
-    /// committed since that capture do not take part. Nothing commits.
-    pub async fn verify_snapshot<R: std::io::Read + Send + 'static>(
-        &self,
-        id: coven_format::store_log::SnapshotId,
-        prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
-        input: R,
-        captured: Option<crate::CapturedState>,
-        authorship: std::sync::Arc<dyn crate::Authorship>,
-    ) -> Result<(), DbError> {
-        self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            inner.access.with_writer(|writer| {
-                reader.with_reader(|reader| {
-                    reader.read_transaction(|| {
-                        inner.access.write_schema.prepare(reader)?;
-                        writer.discarded_transaction(|writer| {
-                            // The writer checks its own snapshot as its signer.
-                            let author = crate::ownership::member(writer, inner.access.device)?;
-                            crate::snapshot_load::verify(
-                                writer,
-                                reader,
-                                &inner.access.write_schema,
-                                id,
-                                prefix,
-                                input,
-                                captured,
-                                &crate::snapshot_load::SnapshotSigner {
-                                    authorship: authorship.as_ref(),
-                                    author,
-                                },
-                            )
-                        })
-                    })
-                })
-            })
-        })
-        .await
-    }
-
     /// Run the snapshot loader's format, schema and merge checks in a transaction
     /// that always rolls back, returning the uploaded files the snapshot names.
     /// File retention uses this for a snapshot no reload has read; a damaged
@@ -180,7 +138,7 @@ impl Database {
         id: coven_format::store_log::SnapshotId,
         begin: B,
         emit: F,
-    ) -> Result<crate::CapturedState, crate::SnapshotWriteError<E>>
+    ) -> Result<(), crate::SnapshotWriteError<E>>
     where
         B: FnOnce(&coven_format::snapshot::SnapshotHeader) -> Result<(), E> + Send + 'static,
         F: FnMut(Vec<u8>) -> Result<(), E> + Send + 'static,

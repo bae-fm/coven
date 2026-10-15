@@ -39,8 +39,6 @@ pub(super) mod retention;
 mod return_check;
 #[path = "snapshot_seal.rs"]
 mod seal;
-#[path = "snapshot_verify.rs"]
-mod verify;
 #[path = "snapshot_write_input.rs"]
 mod write_input;
 
