@@ -909,7 +909,7 @@ the file's ranges under `F`.
     The ignored test runs production detection from the location's settings,
     or the plain S3 settings where detection must supply them, and prints
     every observation. A detected entry that fails the setup safety
-    check above prints as uncertified with each failed check. From suite
+    check above prints as uncertified with its first failed check. From suite
     version 5 a named profile's own entry is the candidate, checked against
     those observations; otherwise the detected settings are. Sequential probes
     cannot show that a race needs copy publication, so detection alone would
