@@ -119,6 +119,7 @@ impl DatabaseBuilder {
             Some(origin),
             self.migration_operation.as_deref(),
         )?;
+        crate::database::file_database::declare_budgets(&writer, &tables)?;
         crate::file_removals::finish_at_open(&writer, &self.directory)?;
         let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;

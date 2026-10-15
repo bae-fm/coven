@@ -429,6 +429,8 @@ pub enum DbError {
     FileBatchDuplicate { namespace: String, id: String },
     /// A batch names no app-provided file declaration.
     FileNamespaceNotAppProvided { namespace: String },
+    /// No synced table ever declared this file namespace (E8).
+    UnknownNamespace { namespace: String },
     /// The id source reused the physical name of a kept file.
     FileNameReused { name: FileName },
     /// No row in the namespace names a supplied file.
@@ -529,6 +531,8 @@ pub enum WriteWait {
 
 /// A schema rule checked on open and after migrating (§8, §14.1).
 pub enum SchemaError {
+    /// Tables sharing a file namespace declare different cache budgets (E8).
+    CacheBudgetDisagrees { namespace: String },
     /// A synced foreign key does not reference the complete parent primary key (§8.4).
     /// `key` names the referencing columns and referenced table and columns as SQL.
     ForeignKeyNotPrimaryKey { table: String, key: String },
@@ -1039,11 +1043,12 @@ pub struct FileDecl { /* private fields */ }
 
 impl FileDecl {
     /// Declares the file a table's rows carry: its namespace, which groups
-    /// files in the cache, each with its own budget (E8), its kind, and when
-    /// devices download it. Every attached file is queued for upload as the
-    /// attaching write commits, including while storage is disconnected.
+    /// files in the cache, its cache budget in bytes from first declaration
+    /// (E8), its kind, and when devices download it. Every attached file is
+    /// queued for upload as the attaching write commits, even disconnected.
     pub fn new(
         namespace: impl Into<String>,
+        cache_budget: u64,
         provenance: Provenance,
         fill: CacheFill,
     ) -> Self;
@@ -1080,11 +1085,11 @@ fn tables() -> Vec<SyncedTable> {
         // Descendants of notes. Each attachment carries the user's own file.
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("attachments", Provenance::UserProvided, CacheFill::CacheLazy)),
+            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided, CacheFill::CacheLazy)),
         // A thumbnail the app makes, in the note's audience.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("thumbnails", Provenance::AppProvided, CacheFill::CacheEager)),
+            .carries_files(FileDecl::new("thumbnails", 256 << 20, Provenance::AppProvided, CacheFill::CacheEager)),
         // In the store, with keys from the tag's name.
         SyncedTable::new("tags", RowIdentity::SharedKey),
         // A shared key over two columns, which includes note_id (§14.1).
@@ -2849,10 +2854,9 @@ impl CovenHandle {
     /// downloads it again.
     pub async fn evict_file(&self, file: &FileRef) -> Result<(), FileReadError>;
 
-    /// The cache budget for one namespace, in bytes; each namespace evicts
-    /// on its own. A namespace with no budget set evicts nothing.
+    /// A declared namespace's cache budget, in bytes; each evicts on its own.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
-    pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError>;
+    pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError>;
 
     /// Progress of downloading every file declared to download as soon as
     /// its row arrives that this device doesn't have yet, such as after

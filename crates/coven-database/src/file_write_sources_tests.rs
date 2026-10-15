@@ -28,6 +28,7 @@ async fn a_circle_deletion_keeps_sources_until_the_deletion_drops() {
                     .audience_column("audience")
                     .carries_files(FileDecl::new(
                         "originals",
+                        1 << 30,
                         Provenance::UserProvided,
                         CacheFill::CacheLazy,
                     )),
@@ -35,6 +36,7 @@ async fn a_circle_deletion_keeps_sources_until_the_deletion_drops() {
                     .audience_column("audience")
                     .carries_files(FileDecl::new(
                         "copies",
+                        1 << 30,
                         Provenance::AppProvided,
                         CacheFill::CacheLazy,
                     )),
@@ -125,6 +127,7 @@ async fn originals_device(ids: &SequentialIds, circle: CircleId) -> (TestStore, 
                 .audience_column("audience")
                 .carries_files(FileDecl::new(
                     "originals",
+                    1 << 30,
                     Provenance::UserProvided,
                     CacheFill::CacheLazy,
                 ))],

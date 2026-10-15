@@ -7,8 +7,13 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
     let db = store
         .schema(
             vec![SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-                FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy)
-                    .with_location_column("x"),
+                FileDecl::new(
+                    "files",
+                    1 << 30,
+                    Provenance::AppProvided,
+                    CacheFill::CacheLazy,
+                )
+                .with_location_column("x"),
             )],
             "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
         )
@@ -134,8 +139,13 @@ async fn file_loss_fixture() -> (
     let db = store
         .schema(
             vec![SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-                FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy)
-                    .with_location_column("x"),
+                FileDecl::new(
+                    "files",
+                    1 << 30,
+                    Provenance::AppProvided,
+                    CacheFill::CacheLazy,
+                )
+                .with_location_column("x"),
             )],
             "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
         )
@@ -293,8 +303,13 @@ async fn reversible_inputs_protect_removed_file_losses_until_the_input_is_releas
     let db = store
         .schema(
             vec![SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-                FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy)
-                    .with_location_column("x"),
+                FileDecl::new(
+                    "files",
+                    1 << 30,
+                    Provenance::AppProvided,
+                    CacheFill::CacheLazy,
+                )
+                .with_location_column("x"),
             )],
             "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
         )

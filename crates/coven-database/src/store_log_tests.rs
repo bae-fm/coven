@@ -381,6 +381,7 @@ async fn circle_deletion_keeps_a_queued_copy_until_its_upload_completes() {
         .audience_column("audience")
         .carries_files(FileDecl::new(
             "files",
+            1 << 30,
             Provenance::AppProvided,
             CacheFill::CacheLazy,
         ));

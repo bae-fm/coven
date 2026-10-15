@@ -5407,7 +5407,7 @@ Carol's tablet:
 ### 16.4 Cache
 
 - Each device caches uploaded files and chunks of them, within a size budget
-  the app sets.
+  the app declares with each namespace.
   - When the cache is over budget, the least recently used files and chunks
     go first.
   - Freeing space never fails a read.

@@ -856,17 +856,17 @@ macro_rules! coven_tables {
                 cancelled INTEGER PRIMARY KEY CHECK(cancelled=1)
             ) STRICT;
         ");
-        // Each namespace's budget, if set, and the cached bytes the cache
+        // Each declared namespace's budget and the cached bytes the cache
         // records hold, maintained with them so a budget check needs no sum.
+        // Cache records live only in declared namespaces (FileRef validation).
         $visit!(_coven_cache_budgets, "
             CREATE TABLE _coven_cache_budgets (
                 namespace TEXT PRIMARY KEY NOT NULL,
-                bytes BLOB CHECK(bytes IS NULL OR length(bytes)=8),
+                bytes BLOB NOT NULL CHECK(length(bytes)=8),
                 total INTEGER NOT NULL DEFAULT 0 CHECK(total>=0)
             ) STRICT, WITHOUT ROWID;
             CREATE TRIGGER _coven_cache_added AFTER INSERT ON _coven_cache BEGIN
-                INSERT INTO _coven_cache_budgets(namespace,total) VALUES(NEW.namespace,NEW.size)
-                ON CONFLICT(namespace) DO UPDATE SET total=total+NEW.size;
+                UPDATE _coven_cache_budgets SET total=total+NEW.size WHERE namespace=NEW.namespace;
             END;
             CREATE TRIGGER _coven_cache_removed AFTER DELETE ON _coven_cache BEGIN
                 UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;

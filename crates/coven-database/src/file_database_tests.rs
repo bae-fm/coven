@@ -2,7 +2,7 @@ use super::*;
 use crate::{
     file_write::tests::{attach, tables},
     tests::TestStore,
-    Provenance,
+    CacheFill, CovenError, FileDecl, Provenance, RowIdentity, SchemaError, SyncedTable,
 };
 
 #[tokio::test]
@@ -908,4 +908,80 @@ async fn a_stalled_upload_source_holds_back_no_app_write() {
         .unwrap();
     assert!(opening.await.unwrap().is_err());
     db.close().await.unwrap();
+}
+
+/// E8: every namespace gets its budget where it is declared. A later set
+/// budget survives reopening; an undeclared namespace has none.
+#[tokio::test]
+async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
+    use crate::file_write::tests::SCHEMA;
+    let declared = |budget| {
+        vec![
+            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
+                "files",
+                budget,
+                Provenance::AppProvided,
+                CacheFill::CacheLazy,
+            )),
+        ]
+    };
+    let store = TestStore::new();
+    let db = store.schema(declared(100), SCHEMA).await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    assert_eq!(owner.budget("files").await.unwrap(), 100);
+    assert!(matches!(
+        owner.budget("other").await,
+        Err(DbError::UnknownNamespace { namespace }) if namespace == "other"
+    ));
+    assert!(matches!(
+        owner.set_budget("other", 1).await,
+        Err(DbError::UnknownNamespace { .. })
+    ));
+    owner.set_budget("files", 50).await.unwrap();
+    db.close().await.unwrap();
+    let db = store.schema(declared(100), SCHEMA).await.unwrap();
+    assert_eq!(
+        FileDatabase::new(db.clone()).budget("files").await.unwrap(),
+        50
+    );
+    // The cache holds its budget: the older entry goes once the total exceeds it.
+    let removed = db.inspect_writer(|sql| {
+        for (path, read) in [("old", 1), ("new", 2)] {
+            sql.internal_execute(
+                "INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned)
+                 VALUES('files',?1,0,?1,30,?2,0)",
+                (path, read),
+            )
+            .unwrap();
+        }
+        super::cache::trim(sql, "files").unwrap()
+    });
+    assert_eq!(removed, ["old"]);
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn tables_sharing_a_namespace_declare_one_budget() {
+    let store = TestStore::new();
+    let tables = vec![
+        SyncedTable::new("a", RowIdentity::SharedKey).carries_files(FileDecl::new(
+            "files",
+            1,
+            Provenance::AppProvided,
+            CacheFill::CacheLazy,
+        )),
+        SyncedTable::new("b", RowIdentity::SharedKey).carries_files(FileDecl::new(
+            "files",
+            2,
+            Provenance::AppProvided,
+            CacheFill::CacheLazy,
+        )),
+    ];
+    let sql = "CREATE TABLE a(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT);
+               CREATE TABLE b(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT);";
+    assert!(matches!(
+        store.schema(tables, sql).await,
+        Err(CovenError::Database(DbError::Schema(SchemaError::CacheBudgetDisagrees { namespace })))
+            if namespace == "files"
+    ));
 }

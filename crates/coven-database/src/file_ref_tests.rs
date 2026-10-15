@@ -5,6 +5,7 @@ fn tables(kind: Provenance) -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "files",
+            1 << 30,
             kind,
             CacheFill::CacheLazy,
         )),
@@ -209,6 +210,7 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
     let declarations = vec![
         SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "files",
+            1 << 30,
             Provenance::AppProvided,
             CacheFill::CacheEager,
         )),
@@ -354,11 +356,16 @@ async fn custom_columns_and_inherited_audience_are_read_together_with_composite_
                 .key_columns(["note_id", "name"])
                 .audience_from("note_id")
                 .carries_files(
-                    FileDecl::new("files", Provenance::AppProvided, CacheFill::CacheLazy)
-                        .with_id_column("TOKEN")
-                        .with_size_column("BYTES")
-                        .with_hash_column("DIGEST")
-                        .with_location_column("WHERE_AT"),
+                    FileDecl::new(
+                        "files",
+                        1 << 30,
+                        Provenance::AppProvided,
+                        CacheFill::CacheLazy,
+                    )
+                    .with_id_column("TOKEN")
+                    .with_size_column("BYTES")
+                    .with_hash_column("DIGEST")
+                    .with_location_column("WHERE_AT"),
                 ),
         ]
     };

@@ -271,20 +271,51 @@ fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
         Err(error) => vec![error],
     }
 }
-pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<Option<u64>, DbError> {
-    db.query(
-        "SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1 AND bytes IS NOT NULL",
-        [namespace],
-        |r| r.get::<_, Vec<u8>>(0),
-    )?
-    .into_iter()
-    .next()
-    .map(|bytes| {
-        Ok(u64::from_be_bytes(
-            bytes.try_into().map_err(|_| DbError::DamagedDatabase)?,
-        ))
+/// Give each namespace its declared budget the first time it is declared;
+/// `set_cache_budget` changes it after (E8). Tables sharing a namespace
+/// must declare one budget.
+pub(crate) fn declare_budgets(
+    db: &DatabaseConnection,
+    tables: &[crate::SyncedTable],
+) -> Result<(), DbError> {
+    let mut declared = std::collections::BTreeMap::new();
+    for file in tables.iter().filter_map(|table| table.files.as_ref()) {
+        if *declared
+            .entry(file.namespace.as_str())
+            .or_insert(file.cache_budget)
+            != file.cache_budget
+        {
+            return Err(crate::SchemaError::CacheBudgetDisagrees {
+                namespace: file.namespace.clone(),
+            }
+            .into());
+        }
+    }
+    db.transaction(|db| {
+        for (namespace, bytes) in declared {
+            db.internal_execute(
+                "INSERT INTO _coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
+                 ON CONFLICT(namespace) DO NOTHING",
+                (namespace, bytes.to_be_bytes().as_slice()),
+            )?;
+        }
+        Ok(())
     })
-    .transpose()
+}
+pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<u64, DbError> {
+    let bytes = db
+        .query(
+            "SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1",
+            [namespace],
+            |r| r.get::<_, Vec<u8>>(0),
+        )?
+        .pop()
+        .ok_or_else(|| DbError::UnknownNamespace {
+            namespace: namespace.to_owned(),
+        })?;
+    Ok(u64::from_be_bytes(
+        bytes.try_into().map_err(|_| DbError::DamagedDatabase)?,
+    ))
 }
 /// The namespace's cached bytes, maintained with its cache records.
 pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
@@ -301,9 +332,7 @@ pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbE
 /// caller removes once the writer is free (§16.6).
 pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
     db.transaction(|db| {
-        let Some(budget) = budget(db, namespace)? else {
-            return Ok(Vec::new());
-        };
+        let budget = budget(db, namespace)?;
         let mut total = total(db, namespace)?;
         let mut removed = Vec::new();
         while u64::try_from(total).map_err(|_| DbError::DamagedDatabase)? > budget {

@@ -9,6 +9,7 @@ fn tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("attachments", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "attachments",
+            1 << 30,
             Provenance::AppProvided,
             CacheFill::CacheLazy,
         )),

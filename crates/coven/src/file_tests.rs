@@ -22,7 +22,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
             .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
             .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files", Provenance::AppProvided, CacheFill::CacheLazy,
+                "files", 1 << 30, Provenance::AppProvided, CacheFill::CacheLazy,
             ))])
             .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .open(directory.id()).await.unwrap();
@@ -101,6 +101,7 @@ fn tables() -> Vec<SyncedTable> {
             .audience_from("note_id")
             .carries_files(FileDecl::new(
                 "attachments",
+                1 << 30,
                 Provenance::UserProvided,
                 CacheFill::CacheLazy,
             )),
@@ -108,6 +109,7 @@ fn tables() -> Vec<SyncedTable> {
             .audience_from("note_id")
             .carries_files(FileDecl::new(
                 "thumbnails",
+                1 << 30,
                 Provenance::AppProvided,
                 CacheFill::CacheEager,
             )),

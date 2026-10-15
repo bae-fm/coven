@@ -75,8 +75,8 @@ impl CovenHandle {
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError> {
         self.files.set_cache_budget(namespace, max_bytes).await
     }
-    /// An unset budget evicts nothing.
-    pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
+    /// The namespace's budget, declared or since set.
+    pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError> {
         self.files.get_cache_budget(namespace).await
     }
     /// Progress of downloading every file declared to download as soon as

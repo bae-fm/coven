@@ -15,7 +15,7 @@ use std::sync::{Arc, RwLock};
 
 #[path = "file_cache.rs"]
 mod cache;
-pub(crate) use cache::{id as cache_id, pinned as cache_pinned};
+pub(crate) use cache::{declare_budgets, id as cache_id, pinned as cache_pinned};
 
 #[derive(Clone)]
 enum FileDatabaseAccess {
@@ -586,11 +586,13 @@ impl FileDatabase {
         let namespace = namespace.to_owned();
         self.run(move |db, _, _, _| {
             db.transaction(|db| {
-                db.internal_execute(
-                    "INSERT INTO _coven_cache_budgets(namespace,bytes) VALUES(?1,?2)
-                     ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes",
-                    (namespace, bytes.to_be_bytes().as_slice()),
+                let changed = db.internal_execute(
+                    "UPDATE _coven_cache_budgets SET bytes=?2 WHERE namespace=?1",
+                    (&namespace, bytes.to_be_bytes().as_slice()),
                 )?;
+                if changed == 0 {
+                    return Err(DbError::UnknownNamespace { namespace });
+                }
                 Ok(())
             })
         })
@@ -621,8 +623,8 @@ impl FileDatabase {
         self.run(|db, _, _, _| db.transaction(crate::cache_progress::cancel_eager))
             .await
     }
-    /// An absent budget leaves that namespace unlimited.
-    pub async fn budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
+    /// The namespace's budget, declared or since set.
+    pub async fn budget(&self, namespace: &str) -> Result<u64, DbError> {
         let namespace = namespace.to_owned();
         self.run(move |db, _, _, _| cache::budget(db, &namespace))
             .await

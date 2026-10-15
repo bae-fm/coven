@@ -66,8 +66,8 @@ impl Files {
         self.inner.database.trim_cache(namespace).await?;
         Ok(())
     }
-    /// Unconfigured namespaces have no eviction budget.
-    pub async fn get_cache_budget(&self, namespace: &str) -> Result<Option<u64>, DbError> {
+    /// The namespace's budget, declared or since set (E8).
+    pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError> {
         self.inner.check_open()?;
         self.inner.database.budget(namespace).await
     }

@@ -132,6 +132,7 @@ pub enum CacheFill {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileDecl {
     pub(crate) namespace: String,
+    pub(crate) cache_budget: u64,
     pub(crate) provenance: Provenance,
     pub(crate) fill: CacheFill,
     pub(crate) id: String,
@@ -142,11 +143,19 @@ pub struct FileDecl {
 }
 
 impl FileDecl {
-    /// Declare a file namespace, origin and cache policy.
-    /// Every attached file is queued for upload in the attaching write.
-    pub fn new(namespace: impl Into<String>, provenance: Provenance, fill: CacheFill) -> Self {
+    /// Declare a file namespace, its cache budget in bytes, origin and cache
+    /// policy. The budget applies when the namespace is first declared;
+    /// `set_cache_budget` changes it after. Every attached file is queued for
+    /// upload in the attaching write.
+    pub fn new(
+        namespace: impl Into<String>,
+        cache_budget: u64,
+        provenance: Provenance,
+        fill: CacheFill,
+    ) -> Self {
         Self {
             namespace: namespace.into(),
+            cache_budget,
             provenance,
             fill,
             id: "id".into(),

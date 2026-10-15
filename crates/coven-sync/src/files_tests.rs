@@ -49,10 +49,15 @@ impl Fixture {
             .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), "files", ids.as_ref())
             .unwrap();
         let declarations = vec![
-            SyncedTable::new("files", RowIdentity::SharedKey)
-                .carries_files(FileDecl::new("files", provenance, fill)),
+            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
+                "files",
+                1 << 30,
+                provenance,
+                fill,
+            )),
             SyncedTable::new("other", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "other",
+                1 << 30,
                 Provenance::AppProvided,
                 CacheFill::CacheLazy,
             )),

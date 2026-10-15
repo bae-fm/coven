@@ -8,6 +8,7 @@ const SCHEMA: &str =
 fn declaration() -> FileDecl {
     FileDecl::new(
         "attachments",
+        1 << 30,
         Provenance::AppProvided,
         CacheFill::CacheEager,
     )
@@ -34,6 +35,7 @@ async fn default_and_custom_file_columns_are_checked_on_the_synced_table() {
         (
             FileDecl::new(
                 "originals",
+                1 << 30,
                 Provenance::UserProvided,
                 CacheFill::CacheLazy,
             )

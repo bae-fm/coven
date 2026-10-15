@@ -10,6 +10,7 @@ fn eager() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "files",
+            1 << 30,
             Provenance::AppProvided,
             CacheFill::CacheEager,
         )),

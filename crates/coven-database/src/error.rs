@@ -395,6 +395,12 @@ pub enum DbError {
         /// The supplied namespace.
         namespace: String,
     },
+    /// No synced table ever declared this file namespace (E8).
+    #[error("file namespace {namespace} was never declared")]
+    UnknownNamespace {
+        /// The supplied namespace.
+        namespace: String,
+    },
     /// The id source reused the physical name of a kept file.
     #[error("file name {name:?} is already kept by this device")]
     FileNameReused {
@@ -609,6 +615,12 @@ impl From<rusqlite::Error> for DbError {
 /// A schema rule checked on open and after migrating (§8, §14.1).
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SchemaError {
+    /// Tables sharing a file namespace declare different cache budgets (E8).
+    #[error("file namespace {namespace} declares different cache budgets")]
+    CacheBudgetDisagrees {
+        /// The namespace.
+        namespace: String,
+    },
     /// A synced foreign key does not reference the complete parent primary key (§8.4).
     #[error("foreign key {table}: {key} must reference the parent's primary key")]
     ForeignKeyNotPrimaryKey {

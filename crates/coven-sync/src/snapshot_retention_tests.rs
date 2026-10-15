@@ -120,6 +120,7 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
         .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey)
             .carries_files(FileDecl::new(
                 "files",
+                1 << 30,
                 Provenance::AppProvided,
                 CacheFill::CacheLazy,
             ))])
