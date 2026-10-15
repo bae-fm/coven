@@ -715,9 +715,9 @@ Before every request, including a retry, part or session completion, check
 §10's catch-up freshness and current signing credentials. Expiry waits for the next pass without changing
 the fixed reference, key or confirmed session progress.
 
-Use one create within the provider's single-request limit; crossing a
-64-KiB encryption chunk boundary alone does not start a resumable session.
-Above the provider's limit, begin or resume the recorded session, check
+Use one create up to the provider's single-request limit or 32 MiB, whichever
+is less; a 64-KiB encryption chunk boundary alone starts no session.
+Above that, begin or resume the recorded session, check
 confirmed progress, send remaining parts and finish. The source's whole-file
 check never holds the database writer across disk reading or cryptography.
 Completion changes no app row; it supplies new retention evidence without
