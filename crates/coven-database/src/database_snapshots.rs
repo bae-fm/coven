@@ -1,7 +1,6 @@
 //! Snapshot streams and atomic reload through the database owner.
 
 use super::Database;
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::DbError;
 
 impl Database {
@@ -26,8 +25,10 @@ impl Database {
         .await
     }
 
-    /// Positions a reload must preserve for the local author's future writes,
-    /// and the queue identities whose plaintext the transaction itself replays.
+    /// Positions a reload must preserve, and the queue identities whose
+    /// plaintext the transaction itself replays. They are this device's applied
+    /// positions, which hold its own writes and every past they read; a write
+    /// made during staging reads no more (§15, io `staging_past_bounded`).
     pub async fn reload_positions(
         &self,
     ) -> Result<
@@ -39,22 +40,25 @@ impl Database {
     > {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| reader.read_transaction(|| {
-                let waiting = reader.query("SELECT device,number FROM _coven_uploads ORDER BY device,number", [], |r| Ok(coven_merge::WriteId {
-                    device: coven_foundation::id_source::DeviceId(crate::write_encoding::counter(r.get(0)?)),
-                    number: crate::write_encoding::counter(r.get(1)?),
-                }))?;
-                let mut required = std::collections::BTreeMap::<_, u64>::new();
-                reader.for_each(&format!("SELECT number,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 ORDER BY number DESC LIMIT 1"), [inner.access.device.0.to_be_bytes().as_slice()], |r| {
-                    let number = crate::write_encoding::counter(r.get(0)?);
-                    required.insert(inner.access.device, number);
-                    let past = crate::write_encoding::decoded(coven_format::merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?;
-                    for id in past.0 { required.entry(id.device).and_modify(|n| *n = (*n).max(id.number)).or_insert(id.number); }
-                    Ok::<_, DbError>(())
-                })?;
-                Ok((coven_format::value::WritePositions(required.into_iter().map(|(device,number)| coven_merge::WriteId { device, number }).collect()), waiting))
-            }))
-        }).await
+            reader.with_reader(|reader| {
+                reader.read_transaction(|| {
+                    let waiting = reader.query(
+                        "SELECT device,number FROM _coven_uploads ORDER BY device,number",
+                        [],
+                        |r| {
+                            Ok(coven_merge::WriteId {
+                                device: coven_foundation::id_source::DeviceId(
+                                    crate::write_encoding::counter(r.get(0)?),
+                                ),
+                                number: crate::write_encoding::counter(r.get(1)?),
+                            })
+                        },
+                    )?;
+                    Ok((crate::download::positions(reader)?, waiting))
+                })
+            })
+        })
+        .await
     }
 
     /// Run the snapshot loader's format, schema and merge checks in a transaction
@@ -336,7 +340,6 @@ impl Database {
                             &inner.access.write_schema,
                             reload,
                             files,
-                            inner.access.device,
                         )
                     })
                 })

@@ -1,11 +1,10 @@
 //! Audience frontiers exist only inside the atomic loading transaction.
 
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::snapshot_error::invalid;
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience, audience_text, decoded};
+use crate::write_encoding::{audience, audience_text};
 use crate::{DbError, DownloadedPart, DownloadedWrite, SnapshotError};
-use coven_format::{merge_fields, value::WritePositions};
+use coven_format::value::WritePositions;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
@@ -16,7 +15,7 @@ pub(crate) struct SnapshotCoverage {
 }
 
 impl SnapshotCoverage {
-    pub(crate) fn new(database: &DatabaseConnection, device: DeviceId) -> Result<Self, DbError> {
+    pub(crate) fn new(database: &DatabaseConnection) -> Result<Self, DbError> {
         let positions = crate::download::positions(database)?;
         let audiences = database
             .query(
@@ -28,34 +27,10 @@ impl SnapshotCoverage {
             .into_iter()
             .map(|a| (a, positions.clone()))
             .collect();
-        let mut coverage = Self {
-            audiences,
-            target: BTreeMap::new(),
-        };
-        // A device's next write implicitly reads every earlier own write, even
-        // when the upload queue is empty. Reload cannot rewind that causal past.
-        let own = database.query(
-            &format!(
-                "SELECT number,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1
-             ORDER BY number DESC LIMIT 1"
-            ),
-            [device.0.to_be_bytes().as_slice()],
-            |r| {
-                Ok((
-                    crate::write_encoding::counter(r.get(0)?),
-                    decoded(merge_fields::decode_write_positions(
-                        &r.get::<_, Vec<u8>>(1)?,
-                    ))?,
-                ))
-            },
-        )?;
-        for (number, past) in own {
-            coverage.include(WriteId { device, number });
-            for write in past.0 {
-                coverage.include(write);
-            }
-        }
-        Ok(coverage)
+        // A reload never rewinds this device's applied positions: they hold
+        // its own writes, and a write made during staging read them (§15).
+        let target = positions.0.iter().map(|w| (w.device, w.number)).collect();
+        Ok(Self { audiences, target })
     }
 
     pub(crate) fn loaded(&mut self, audience: Audience, positions: WritePositions) {

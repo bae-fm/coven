@@ -676,10 +676,10 @@ witness lands by its `B_a`, and the write goes by `R + 3P + U + D`, after
 every witness is more than a day old (`bounded_storage`). The model's
 `offlinePart` remains the case with no bound.
 
-The required lower bound is frozen at reload start, including the remote past
-of waiting writes, already uploaded own writes and their past, and the positions
-of audiences whose existing state is retained. New app writes see the old
-committed view during staging; their remote past remains within that bound.
+The required lower bound is frozen at reload start: the device's applied
+positions, which hold its own writes and their past. New app writes see the old
+committed view during staging, so their remote past remains within that bound
+(`AtomicReload.staging_past_bounded`).
 Waiting local writes apply in causal order on top of the installed remote cut.
 They do not read staged rows or silently add new remote requirements.
 

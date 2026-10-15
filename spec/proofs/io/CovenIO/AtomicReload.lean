@@ -34,6 +34,19 @@ theorem atomic_waiting_ready (audiences writers : List Nat) (old staged : View)
   intro a ha writer hw
   exact Nat.le_trans (frozenPast writer hw) (realized a ha writer hw)
 
+/-- A write authored during staging reads the committed view, so its past is
+at most this device's applied positions. A frozen requirement that includes
+them bounds every such past, which `CommonReload.committed_safe` assumes. -/
+theorem staging_past_bounded (writers : List Nat) (applied required past : Nat → Nat)
+    (keeps : ∀ w ∈ writers, applied w ≤ required w)
+    (authored : ∀ w ∈ writers, past w ≤ applied w) :
+    ∀ w ∈ writers, past w ≤ required w :=
+  fun w hw => Nat.le_trans (authored w hw) (keeps w hw)
+
+/-- Without them: applied through 2, no own write, a snapshot through 1. The
+target is 1, and a write made during staging read 2. -/
+example : ¬ WaitingReady [0] [0] (fun _ _ => max 0 1) (fun _ => 2) := by simp [WaitingReady]
+
 /-- One two-audience write and one waiting write suffice: exposing one part
 first lets a waiting write claim a past not realized by the other audience. -/
 example : ¬ WaitingReady [0, 1] [0] (fun a _ => if a = 0 then 1 else 0) (fun _ => 1) := by simp [WaitingReady]

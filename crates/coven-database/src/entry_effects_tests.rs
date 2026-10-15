@@ -64,11 +64,16 @@ async fn reset(target: &crate::Database, number: u64) -> EntryId {
     entry
 }
 
-async fn empty(target: &crate::Database) {
+/// Reset the store to an empty snapshot, reading the applied `writes` the
+/// reset ignores to their positions.
+async fn empty(target: &crate::Database, writes: &[coven_format::write::WriteRecord]) {
     let log = target.store_log().await.unwrap();
-    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(
+    let mut reload = SnapshotReload::<std::io::Empty, _>::new(
         vec![],
-        vec![],
+        writes
+            .iter()
+            .map(crate::snapshot_write::tests::stream)
+            .collect(),
         std::sync::Arc::new(crate::test_utils::TestAuthorship),
     );
     reload.snapshots = vec![SnapshotSource::Empty(Audience::Store)];
@@ -97,7 +102,7 @@ async fn dropping_a_loaded_reset_restores_rows_and_suppressed_judgments() {
         .await
         .unwrap();
     let write = records(&source).remove(0);
-    target.receive(write.into()).await.unwrap();
+    target.receive(write.clone().into()).await.unwrap();
     let own = target.sync_state(vec![]).await.unwrap().device;
     let pending = Record::dropped_entry(
         EntryId {
@@ -122,9 +127,9 @@ async fn dropping_a_loaded_reset_restores_rows_and_suppressed_judgments() {
         })
         .await
         .unwrap();
-    let mut reload = SnapshotReload::<std::io::Empty, std::io::Empty>::new(
+    let mut reload = SnapshotReload::<std::io::Empty, _>::new(
         vec![],
-        vec![],
+        vec![crate::snapshot_write::tests::stream(&write)],
         std::sync::Arc::new(crate::test_utils::TestAuthorship),
     );
     reload.snapshots = vec![SnapshotSource::Empty(Audience::Store)];
@@ -266,10 +271,10 @@ async fn later_observations_and_completed_work_survive_reset_reversals() {
     db.record_pending(old.clone()).await.unwrap();
     db.record_pending(completed.clone()).await.unwrap();
     let first = reset(&db, 1).await;
-    empty(&db).await;
+    empty(&db, &[]).await;
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     let second = reset(&db, 2).await;
-    empty(&db).await;
+    empty(&db, &[]).await;
     db.clear_pending(completed.subject().clone()).await.unwrap();
     db.record_pending(old.clone()).await.unwrap();
     assert_eq!(
@@ -299,9 +304,9 @@ async fn every_kept_reset_suppresses_earlier_observations_across_restart() {
     );
     db.replace_pending_reports(vec![old.clone()]).await.unwrap();
     let first = reset(&db, 1).await;
-    empty(&db).await;
+    empty(&db, &[]).await;
     let second = reset(&db, 2).await;
-    empty(&db).await;
+    empty(&db, &[]).await;
     drop_boundary(&db, first).await;
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.close().await.unwrap();
@@ -337,7 +342,7 @@ async fn a_kept_reset_never_hides_an_s3_key_awaiting_deletion() {
     let before = db.pending::<Record>().await.unwrap();
     assert_eq!(before.len(), 1);
     reset(&db, 1).await;
-    empty(&db).await;
+    empty(&db, &[]).await;
     assert_eq!(db.pending::<Record>().await.unwrap(), before);
     db.close().await.unwrap();
 }
@@ -352,9 +357,10 @@ async fn failed_projection_rolls_back_replay_and_readers_observe_only_its_commit
     sql(&source, "INSERT INTO notes VALUES('n','retained','')")
         .await
         .unwrap();
-    db.receive(records(&source).remove(0).into()).await.unwrap();
+    let received = records(&source).remove(0);
+    db.receive(received.clone().into()).await.unwrap();
     let entry = reset(&db, 1).await;
-    empty(&db).await;
+    empty(&db, &[received]).await;
     let log = db.store_log().await.unwrap();
     let before = crate::tests::contents(&db);
     let mut live = db.subscribe(move |sql| {
@@ -405,7 +411,7 @@ async fn peer_progress_removes_suppressed_reports_without_reviving_unchanged_rep
         .await
         .unwrap();
     let entry = reset(&db, 1).await;
-    empty(&db).await;
+    empty(&db, &[]).await;
     db.replace_pending_reports(vec![old.clone(), report(42)])
         .await
         .unwrap();
@@ -483,10 +489,8 @@ async fn final_boundaries_release_inputs_and_a_later_boundary_retains_again() {
     // With a horizon no unseen retirement can still exclude a received write,
     // so its landing retains nothing (§10).
     horizon(&target, 0).await;
-    target
-        .receive(records(&source).remove(0).into())
-        .await
-        .unwrap();
+    let early = records(&source).remove(0);
+    target.receive(early.clone().into()).await.unwrap();
     assert_eq!(
         retained(&target),
         (0, 0, 0, 0),
@@ -502,7 +506,7 @@ async fn final_boundaries_release_inputs_and_a_later_boundary_retains_again() {
     );
     target.record_pending(judged).await.unwrap();
     reset_at(&target, 1, 10).await;
-    empty(&target).await;
+    empty(&target, &[early]).await;
     assert_eq!(count(&target, "notes"), 0);
     let other_store = TestStore::with_ids(&ids);
     let other = other_store.schema(notes(), NOTES).await.unwrap();
@@ -516,14 +520,16 @@ async fn final_boundaries_release_inputs_and_a_later_boundary_retains_again() {
             .unwrap(),
         crate::ApplyOutcome::Applied
     );
+    // The early write the reset ignored and the late one both stay retained
+    // while the reset can still drop.
     let (inputs, writes, pending, links) = retained(&target);
     assert!(inputs > 0);
-    assert_eq!((writes, pending, links), (1, 1, 1));
+    assert_eq!((writes, pending, links), (2, 1, 1));
     assert!(target.pending::<Record>().await.unwrap().is_empty());
     let rows = notes_rows(&target);
     // Finality is strict: an entry stored exactly at the horizon is not final.
     horizon(&target, 10).await;
-    assert_eq!(retained(&target).1, 1);
+    assert_eq!(retained(&target).1, 2);
     horizon(&target, 11).await;
     assert_eq!(retained(&target), (0, 0, 0, 0));
     assert!(target.pending::<Record>().await.unwrap().is_empty());

@@ -610,16 +610,22 @@ async fn snapshot_evidence_keeps_sources_and_verdicts_for_later_changes() {
         &loss.replaced_by,
         Replacement::DataDependency { write, .. } if *write == again.header.position
     )));
-    // An identical snapshot's evidence loads again; a different original
-    // under the same identity is refused and nothing commits.
-    load_one(
-        fresh,
-        id(coven_merge::Audience::Store),
-        snapshot.prefix.clone(),
-        std::io::Cursor::new(snapshot.concat()),
-    )
-    .await
-    .unwrap();
+    // An identical snapshot's evidence loads again, read to Ben's later
+    // write rather than rewound behind it (§15).
+    fresh
+        .load_snapshots::<Record, _, _>(crate::SnapshotReload::new(
+            vec![(
+                id(coven_merge::Audience::Store),
+                snapshot.prefix.clone(),
+                std::io::Cursor::new(snapshot.concat()),
+                crate::snapshot_write::tests::author(),
+            )],
+            vec![crate::snapshot_write::tests::stream(&again)],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(fresh.lost_values().await.unwrap().len(), 2);
 }
 
 /// A device that loaded a row from a snapshot authors its own change to it,

@@ -304,6 +304,57 @@ async fn a_reload_opens_only_the_parts_its_starts_lack() {
     );
 }
 
+/// Ben applies Ana's writes 1 and 2 with no own write since. Ana's store
+/// snapshot stops at write 1. Ben's reload keeps his applied positions in its
+/// frozen requirement, so it reads to write 2 rather than rewinding, and an app
+/// write made while the snapshot downloads, which read write 2, commits with
+/// it on the first attempt (§15).
+#[tokio::test]
+async fn an_app_write_during_staging_commits_with_the_reload() {
+    let storage = storage();
+    let mut devices = household(storage.clone()).await;
+    let [ana, ben, _] = devices.as_mut_slice() else {
+        panic!("three members")
+    };
+    sql(&ana.db, "INSERT INTO notes VALUES('first','public','one')").await;
+    ana.writes.upload_writes().await.unwrap();
+    ana.write_snapshot(Audience::Store).await.unwrap();
+    sql(&ana.db, "INSERT INTO notes VALUES('second','public','two')").await;
+    let second = ana.writes.upload_writes().await.unwrap()[0];
+    ben.writes.download_writes().await.unwrap();
+    assert!(passed(ben, second).await);
+    let snapshot = storage
+        .list(&coven_storage::ObjectPrefix::audience_snapshots(
+            STORE_ID,
+            &Audience::Store,
+        ))
+        .await
+        .unwrap()
+        .remove(0);
+    let (stalled, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    storage
+        .hold_body_at(snapshot.path.clone(), snapshot.size - 1, stalled, held)
+        .await;
+    let db = ben.db.clone();
+    let app = async move {
+        observed.await.unwrap();
+        sql(&db, "INSERT INTO notes VALUES('third','local','three')").await;
+        resume.send(()).unwrap();
+    };
+    let (reloaded, ()) = tokio::join!(ben.sync.reload_from_snapshots(), app);
+    reloaded.unwrap();
+    assert!(passed(ben, second).await);
+    assert_eq!(
+        rows(&ben.db)
+            .await
+            .into_iter()
+            .map(|(id, _, _)| id)
+            .collect::<Vec<_>>(),
+        ["first", "second", "third"]
+    );
+}
+
 mod histories {
     use crate::replay::tests::*;
     use coven_database::{StoreLog, StoreLogState};

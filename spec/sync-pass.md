@@ -437,8 +437,7 @@ the pause (§18). Approval deletes the request after its binding is kept; declin
 §12.2. No open invite means no join-request scan.
 
 A required reload first settles attempted uploads as §18.1 requires, then
-freezes each writer's required position from waiting writes' remote past,
-already uploaded own writes and their past, and retained audiences' positions
+freezes each writer's required position at this device's applied positions
 ([`committed_safe`](proofs/io/CovenIO/CommonReload.lean)).
 Select counting usable snapshots and read each readable audience to the maximum
 of that requirement and all selected positions; retain the checked snapshot

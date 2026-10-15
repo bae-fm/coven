@@ -126,8 +126,7 @@ impl StoreLogSync {
                     };
                     starts.insert(audience.clone(), start);
                 }
-                // Unchanged audiences keep their state at the local positions,
-                // which also join the frozen requirement (`committed_safe`).
+                // Unchanged audiences keep their state at the local positions.
                 if audiences.len() < readable.len() {
                     let positions = self.database.sync_state(Vec::new()).await?.positions;
                     for audience in readable.difference(&audiences) {

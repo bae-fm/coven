@@ -4909,11 +4909,10 @@ Carol's tablet:
   - Any device snapshots the store's rows.
   - A device of one of a circle's members snapshots that circle's rows,
     separately, sealed with the circle's key ([§14.3](#143-circles)).
-- At reload start, fix a required position for each writer: include the
-  remote past of waiting local writes, already uploaded own writes and
-  their past, and the positions of audiences whose existing state is kept,
-  including an audience with no rows
-  ([`committed_safe`](proofs/io/CovenIO/CommonReload.lean)).
+- At reload start, fix a required position for each writer: this device's
+  applied positions, which hold its own writes and their past
+  ([`committed_safe`](proofs/io/CovenIO/CommonReload.lean),
+  [`staging_past_bounded`](proofs/io/CovenIO/AtomicReload.lean)).
   - Choose a counting usable snapshot for each readable audience needing
     replacement; for each writer, the common target is the maximum of the
     frozen requirement and every selected snapshot's position

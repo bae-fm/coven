@@ -31,7 +31,6 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
     schema: &WriteSchema,
     reload: crate::SnapshotReload<R, W>,
     files: &crate::file_write::FileWrite<'_>,
-    device: coven_foundation::id_source::DeviceId,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.transaction(|database| {
         let crate::SnapshotReload {
@@ -78,7 +77,7 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
             crate::pending::suppress(database, &resets)?;
             crate::pending::refresh(database)?;
         }
-        let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(database, device)?;
+        let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(database)?;
         let visible = AppView::after(before, schema);
         let old_store = MergeStore::from_schema(before, &schema.schema);
         let deleted = crate::store_log_tables::deleted_circles(database)?;

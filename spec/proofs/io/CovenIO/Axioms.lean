@@ -318,6 +318,7 @@ import CovenIO
 
 #print axioms CovenIO.AtomicReload.staging_keeps_visible
 #print axioms CovenIO.AtomicReload.atomic_waiting_ready
+#print axioms CovenIO.AtomicReload.staging_past_bounded
 #print axioms CovenIO.AtomicReload.closed_replacement_commits
 
 #print axioms CovenIO.RepairedExamples.selection_races_finish

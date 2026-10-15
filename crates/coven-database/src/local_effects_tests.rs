@@ -108,10 +108,8 @@ async fn reversed_reset_restores_cascaded_and_nulled_local_rows_after_local_edit
     sql(&source, "INSERT INTO notes VALUES('n','title','body')")
         .await
         .unwrap();
-    target
-        .receive(records(&source).remove(0).into())
-        .await
-        .unwrap();
+    let received = records(&source).remove(0);
+    target.receive(received.clone().into()).await.unwrap();
     sql(
         &target,
         "INSERT INTO pins VALUES('p1','n','one'),('p2','n','two');
@@ -122,7 +120,7 @@ async fn reversed_reset_restores_cascaded_and_nulled_local_rows_after_local_edit
     .await
     .unwrap();
     let original = local(&target);
-    let entry = reset(&target, &[], WritePositions(vec![])).await;
+    let entry = reset(&target, &[received], WritePositions(vec![])).await;
     assert_eq!(count(&target, "notes"), 0);
     let hidden = BTreeMap::from([
         ("pins", vec![]),
