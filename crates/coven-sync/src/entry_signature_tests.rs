@@ -9,8 +9,9 @@
 //! entry added. The prefix re-adds active members, repeating or changing
 //! their keys, role or access (`Keyed.Additions`), returns removed members
 //! with their old pair or a fresh one, and adds new ids borrowing another
-//! member's key (`Keyed.freshKeys`). Rust refuses a bad
-//! signature as damaged bytes and never applies it; the model drops it.
+//! member's key (`Keyed.freshKeys`). Rust refuses every signature its
+//! recorded view does not bind, an unknown author's too, and never applies
+//! it; the model drops it.
 //! Because no entry reads a leaf, both replays keep the same prefix.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -630,7 +631,6 @@ fn lean_differential_member_keys() {
     let results: Vec<Value> = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(results.len(), cases.len());
     let mut refusals = 0;
-    let mut unknown = 0;
     let mut exposed = 0;
     let mut selections = [0; 2];
     // Re-additions kept and dropped, and concurrent additions combined and not.
@@ -645,17 +645,14 @@ fn lean_differential_member_keys() {
         let replay = &received.log.replay;
         for (i, signature) in result["signatures"].as_array().unwrap().iter().enumerate() {
             let current = signature["current"].as_bool().unwrap();
-            let known = signature["known"].as_bool().unwrap();
-            // Rust refuses exactly a signer the recorded view does not bind to
-            // its known author; an author unknown there is dropped by replay.
+            // Rust refuses exactly a signer the recorded view does not bind.
             assert_eq!(
                 received.refused.contains(&i),
-                known && !current,
+                !current,
                 "entry {i} of {input}"
             );
             assert_eq!(i < case.signed, current, "entry {i} of {input}");
-            refusals += usize::from(known && !current);
-            unknown += usize::from(!known);
+            refusals += usize::from(!current);
         }
         let position = |i: usize| case.history.entries[i].position;
         let rust: BTreeSet<usize> = (0..case.history.entries.len())
@@ -753,10 +750,7 @@ fn lean_differential_member_keys() {
         }
     }
     // The generated cases exercise every verdict.
-    assert!(
-        refusals > 0 && unknown > 0 && exposed > 0,
-        "{refusals} {unknown} {exposed}"
-    );
+    assert!(refusals > 0 && exposed > 0, "{refusals} {exposed}");
     assert!(selections.iter().all(|&n| n > 0), "{selections:?}");
     assert!(additions.iter().all(|&n| n > 0), "{additions:?}");
     assert!(fresh.iter().all(|&n| n > 0), "{fresh:?}");
@@ -840,4 +834,36 @@ async fn creation_and_later_entries_use_the_same_authenticated_envelope() {
             Err(Refusal::Signature { .. })
         ));
     }
+}
+
+/// T245: a self-registration by an id no entry added carries no signature
+/// its recorded view can check, so it is refused rather than kept as a drop
+/// that would count in lateness and finality.
+#[test]
+fn an_author_without_keys_in_its_view_is_a_signature_refusal() {
+    let mut h = History::new();
+    h.push(
+        MEMBERS,
+        device(MEMBERS),
+        &[0],
+        history::device(device(MEMBERS)),
+    );
+    let entry = h.entries.last().unwrap().clone();
+    let path = crate::store_log_object::path(STORE, entry.position);
+    let key = store_key();
+    let bytes = crate::store_log_object::seal(
+        STORE,
+        &entry,
+        coven_format::FormatVersion::CURRENT,
+        &key,
+        &identity(MEMBERS),
+    )
+    .unwrap();
+    let envelope = SingleChunkObject::decode(&bytes).unwrap();
+    let opened = crate::store_log_object::open(&envelope, &path, &key).unwrap();
+    let view = crate::replay::tests::replay(&h.entries[..1]).state;
+    assert!(matches!(
+        opened.verify(&view),
+        Err(Refusal::Signature { .. })
+    ));
 }

@@ -487,10 +487,7 @@ async fn lean_differential_join_admission() {
             let numbered = pair(&keys);
             // A refused signature is the entry's own pending refusal, not
             // a replay fate (§19.1).
-            let signed = |j: &usize| {
-                let signature = &result["signatures"][*j];
-                !signature["known"].as_bool().unwrap() || signature["current"].as_bool().unwrap()
-            };
+            let signed = |j: &usize| result["signatures"][*j]["current"].as_bool().unwrap();
             let expected = if matching.iter().any(|j| kept.contains(j)) {
                 bound(m, numbered)
             } else if matching.iter().any(|j| dropped.contains(j) && signed(j)) {

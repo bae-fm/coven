@@ -82,6 +82,19 @@ def signatureCurrent (view : State) (e : Entry) : Bool :=
   | .entry (.create ..) keys => e.signer == keys.signing
   | _ => (lookup view.keys e.author).any (fun keys => e.signer == keys.signing)
 
+/-- An author with no keys in the recorded view has no current signer,
+whatever key signed: the entry is judged like any other unbound signature
+(T245). Rust refuses it before replay, so it never counts in lateness or
+finality. -/
+theorem unknown_author_not_current (view : State) (e : Entry)
+    (notCreation : ∀ access key keys, e.action ≠ .entry (.create access key) keys)
+    (absent : lookup view.keys e.author = none) :
+    signatureCurrent view e = false := by
+  unfold signatureCurrent
+  split
+  · rename_i access key keys h; exact absurd h (notCreation access key keys)
+  · simp [absent]
+
 /-- Reusing either public key cannot revoke a leaked credential. All keys
 installed by kept entries remain in this replay-derived history. -/
 def freshKeys (s : State) (keys : MemberKeys) : Bool :=

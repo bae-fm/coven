@@ -113,8 +113,7 @@ private def run (j : Json) : Except String Json := do
       ("fixed", toJson fixed)]
   -- The key each entry's recorded view selects to verify it.
   let signatures := (List.range n).map fun e =>
-    Json.mkObj [("current", toJson (CurrentReplay.Keyed.signatureCurrent (views e) (H.log e))),
-      ("known", toJson (lookup (views e).keys (H.log e).author).isSome)]
+    Json.mkObj [("current", toJson (CurrentReplay.Keyed.signatureCurrent (views e) (H.log e)))]
   let keys := sortedPairs (r.state.keys.map fun (m, k) => [m, k.signing, k.sealing])
   -- Every pair kept entries bound in this replay, retained after removal.
   let used := (r.state.usedKeys.map fun k => [k.signing, k.sealing]).eraseDups.mergeSort

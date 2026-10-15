@@ -953,7 +953,9 @@ to existing proofs and the Rust runner. Common membership effects, circle
 finishing and the permanent storage-time rejection use the existing functions.
 
 `kept_current_signature` proves that every kept entry uses the signing key
-current in its recorded view. `replacement_authority` requires that both the
+current in its recorded view; `unknown_author_not_current` proves that an
+author with no keys there has none, so Rust refuses that entry as it refuses
+any other unbound signer (T245). `replacement_authority` requires that both the
 target and author exist there and that the author is the target or an admin.
 The creation signature instead verifies against the initial keys it carries.
 Adding an already-present id with different keys is refused; it cannot bypass

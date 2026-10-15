@@ -249,11 +249,9 @@ async fn lean_differential_member_key_replacements() {
         assert_eq!(received.refused, again.refused, "arrival order of {input}");
         let replay = &received.log.replay;
         // Signatures: Rust refuses exactly a signer the recorded view does not
-        // bind to its known author.
+        // bind, an unknown author's too.
         for &i in &case.received {
-            let signature = &result["signatures"][i];
-            let refused =
-                signature["known"].as_bool().unwrap() && !signature["current"].as_bool().unwrap();
+            let refused = !result["signatures"][i]["current"].as_bool().unwrap();
             assert_eq!(
                 received.refused.contains(&i),
                 refused,

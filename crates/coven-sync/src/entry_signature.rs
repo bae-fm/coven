@@ -36,17 +36,16 @@ impl OpenedEntry {
     }
 
     /// Verify against `view`, the replay of exactly this entry's recorded past.
-    /// An author no kept entry in that view added has no current key, so no
-    /// signature can make it a member: only a self-registration reaches this
-    /// check (see [`author_matches_view`](crate::store_log_object::author_matches_view)), and replay drops it as `NotAllowed`
-    /// in that same view, as Appendix C's keyed replay does for a signer that
-    /// is not current there.
+    /// An author with no keys in that view has no current signer, so the entry
+    /// is refused like any other signature the view does not bind (§9,
+    /// `Keyed.unknown_author_not_current`): it never enters replay, lateness
+    /// or finality.
     pub(crate) fn verify(&self, view: &StoreLogState) -> Result<(), Refusal> {
         let signer = match &self.entry.change {
             StoreChange::CreateStore { admin, .. } => admin.signing,
             _ => match view.members.get(&self.entry.author) {
                 Some(author) => author.keys.signing,
-                None => return Ok(()),
+                None => return Err(Refusal::Signature { cause: None }),
             },
         };
         signer

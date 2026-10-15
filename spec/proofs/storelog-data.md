@@ -1264,9 +1264,9 @@ copies decoded by the production codec. It compares `Keyed.signatureCurrent`
 in each entry's recorded view, kept and dropped entries, every installed pair
 and active role from `Keyed.resolve`, `currentCredential` for each copy's
 member and sealing key, and `MemberKeys.selectInReplay` with Rust's first-attempt
-selection. Leaves signed with a key their author's view never bound are Rust
-signature refusals and model drops; a self-registration by an id no entry
-added is dropped by both. Its honest prefix also re-adds active members,
+selection. Leaves signed with a key their author's view never bound, and a
+self-registration by an id no entry added, are Rust signature refusals and
+model drops (T245). Its honest prefix also re-adds active members,
 repeating them or changing their keys, role or access, returns removed
 members with their old pair or a fresh one, and adds new ids borrowing an
 added member's pair or one of its keys. Every bound pair is compared with

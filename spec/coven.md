@@ -2967,7 +2967,8 @@ Carol's tablet:
   - Each device numbers its own entries, so no two entries ever get the
     same path. There is no shared sequence or cross-device slot to claim.
   - Verify the signature against that stable author's keys in the replay of
-    `had_read`, including implicit own entries. The device path is not an
+    `had_read`, including implicit own entries; an author without keys there
+    is a signature refusal (§19.1), never an entry. The device path is not an
     alternative author. Creation supplies its author's initial pair in its
     payload and its id in the header; verify both the signature and store path.
 

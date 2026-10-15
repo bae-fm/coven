@@ -348,20 +348,33 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
             .unwrap()
             .entry
             .position;
-    // Writer 3 has no membership authority, but publishes a correctly signed
-    // entry. Writer 2's delayed addition is decoded and consumed before it.
+    // Ana's device publishes a correctly signed entry that replay drops: it
+    // would remove the store's only admin. Writer 2's delayed addition is
+    // decoded and consumed before it. An entry no recorded view can verify is
+    // refused instead and never counts (T245).
+    let read = a.log().await;
     let witness = StoreLogEntry {
         position: EntryId {
-            device: DeviceId(3),
-            number: 1,
+            device: DeviceId(1),
+            number: read
+                .entries
+                .iter()
+                .filter(|applied| applied.entry.position.device == DeviceId(1))
+                .count() as u64
+                + 1,
         },
-        timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(3)).unwrap(),
-        author: member(9).member(),
-        had_read: a.log().await.positions(),
-        change: StoreChange::AddDevice {
-            device: DeviceId(3),
-            name: "outsider".into(),
-            replaces: None,
+        timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(1)).unwrap(),
+        author: member(1).member(),
+        // Its own earlier entries are implicit.
+        had_read: coven_format::value::EntryPositions(
+            read.positions()
+                .0
+                .into_iter()
+                .filter(|position| position.device != DeviceId(1))
+                .collect(),
+        ),
+        change: StoreChange::RemoveMember {
+            member: member(1).member(),
         },
     };
     let ring = a.custody.read().unwrap().unwrap();
@@ -370,7 +383,7 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
         &witness,
         coven_format::FormatVersion::CURRENT,
         ring.store_key(key(1)).unwrap(),
-        &member(9),
+        &member(1),
     )
     .unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(86400));
@@ -394,10 +407,10 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
         log.replay.entries[&late],
         EntryOutcome::Dropped(coven_database::DropReason::LandedTooLate)
     );
-    assert_eq!(
+    assert!(matches!(
         log.replay.entries[&witness.position],
-        EntryOutcome::Dropped(coven_database::DropReason::NotAllowed)
-    );
+        EntryOutcome::Dropped(_)
+    ));
     assert!(!log.replay.state.members.contains_key(&member(2).member()));
     c.restart(storage).await;
     assert_eq!(c.log().await, log);

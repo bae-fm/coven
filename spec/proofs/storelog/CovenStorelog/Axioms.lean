@@ -394,6 +394,7 @@ import CovenStorelog
 #print axioms CovenStorelog.CurrentReplay.Keyed.member_keys_converge
 #print axioms CovenStorelog.CurrentReplay.Keyed.kept_authorized
 #print axioms CovenStorelog.CurrentReplay.Keyed.kept_current_signature
+#print axioms CovenStorelog.CurrentReplay.Keyed.unknown_author_not_current
 #print axioms CovenStorelog.CurrentReplay.Keyed.replacement_authority
 #print axioms CovenStorelog.CurrentReplay.Keyed.removed_cannot_be_replaced
 #print axioms CovenStorelog.CurrentReplay.Keyed.replacement_preserves_membership
