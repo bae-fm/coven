@@ -520,7 +520,7 @@ async fn data_differential_reload_choice() {
     use crate::tests::run_lean;
     use crate::{PendingReason, PendingRecord, PendingSubject, Prerequisite, RequiredUpdate};
     use coven_format::sealed_snapshot::SnapshotObjectPrefix;
-    use coven_format::value::{EntryPositions, StorageTime, WritePositions};
+    use coven_format::value::{StorageTime, WritePositions};
     use coven_foundation::id_source::DeviceId;
     use coven_storage::ObjectPath;
     use serde_json::{json, Value};
@@ -628,7 +628,9 @@ async fn data_differential_reload_choice() {
                         })
                         .collect(),
                 ),
-                store_log: EntryPositions(Vec::new()),
+                // The signed view registers both devices to their member:
+                // a snapshot's signer is resolved there (D9).
+                store_log: log.positions(),
             };
             let mut bytes = prefix.encode().unwrap();
             let signer = if kind == 0 { &other } else { &ana.member };

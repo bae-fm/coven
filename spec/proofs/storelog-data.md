@@ -784,7 +784,9 @@ drives the real snapshot catalog and `Catalog::take_current` against
 with random signed positions, in memory storage. Some prefixes are signed
 by another member, so this version refuses them; some bodies carry this
 device's recorded refusal; some are sealed under a key the log does not
-accept; some prefixes are in a newer format. Rust's choice (the catalog's
+accept; some prefixes are in a newer format. Every prefix's signed
+store-log view registers both devices, since a snapshot's signer is found
+in that view (D9). Rust's choice (the catalog's
 required update, or what `take_current` takes or waits for) must equal
 Lean's, and for a wait the reason the real reload operation records must
 equal `Choice.reason`. Bodies are never opened, so a load is compared only
