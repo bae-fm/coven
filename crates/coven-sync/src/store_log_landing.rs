@@ -23,12 +23,18 @@ pub(crate) async fn observe_publication(
     // This device's own log gained the entry's prerequisite copies.
     reads.forget_misses(coven_database::LogKind::KeyCopy, entry.device);
     let path = crate::store_log_object::path(store, entry);
-    let mut objects: Vec<_> =
-        crate::discovery::retained(database, store, coven_database::LogKind::Entry)
-            .await?
-            .into_values()
-            .map(|read| read.metadata)
-            .collect();
+    let mut writers = database.known_log_writers().await?;
+    writers.insert(entry.device);
+    let mut objects: Vec<_> = crate::discovery::retained(
+        database,
+        store,
+        coven_database::LogKind::Entry,
+        &crate::discovery::past_applied(log, writers),
+    )
+    .await?
+    .into_values()
+    .map(|read| read.metadata)
+    .collect();
     if !objects.iter().any(|object| object.path == path) {
         let storage = storage.ok_or(SyncError::NoStorage)?;
         let published = storage.status(&path).await?.ok_or_else(|| {

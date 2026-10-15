@@ -322,7 +322,7 @@ pub(crate) async fn read_copies(
         storage,
         store,
         coven_database::LogKind::KeyCopy,
-        &writers,
+        &writers.into_iter().map(|writer| (writer, 0)).collect(),
         limit,
     )
     .await?

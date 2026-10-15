@@ -230,7 +230,13 @@ impl JoiningIdentity {
     ) -> Result<Option<coven_crypto::StoreKey>, SyncError> {
         let store = self.path.store();
         let kind = coven_database::LogKind::KeyCopy;
-        let mut input = crate::discovery::retained(database, store, kind).await?;
+        let mut input = crate::discovery::retained(
+            database,
+            store,
+            kind,
+            &[(self.inviting_writer, self.key_copy_number)].into(),
+        )
+        .await?;
         crate::discovery::scan_tail(
             database,
             &crate::pass_reads::PassReads::default(),

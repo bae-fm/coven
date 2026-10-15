@@ -35,7 +35,7 @@ use crate::{discovery, pass_reads::PassReads};
 use coven_database::LogKind;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, Storage};
-use std::{collections::BTreeSet, num::NonZeroUsize};
+use std::{collections::BTreeMap, num::NonZeroUsize};
 
 #[tokio::test]
 async fn fetch_ahead_retains_a_hit_beyond_the_first_miss_without_crossing_it() {
@@ -45,7 +45,7 @@ async fn fetch_ahead_retains_a_hit_beyond_the_first_miss_without_crossing_it() {
     for n in [1u64, 3] {
         storage.create(&path(n), &[n as u8]).await.unwrap();
     }
-    let writers = BTreeSet::from([DeviceId(1)]);
+    let writers = BTreeMap::from([(DeviceId(1), 0)]);
     let read = discovery::scan(
         &receiver.db,
         &PassReads::default(),
@@ -98,9 +98,14 @@ async fn invitation_tail_never_substitutes_for_earlier_copy_history() {
             .await
             .unwrap();
     }
-    let mut received = discovery::retained(&receiver.db, store(1), LogKind::KeyCopy)
-        .await
-        .unwrap();
+    let mut received = discovery::retained(
+        &receiver.db,
+        store(1),
+        LogKind::KeyCopy,
+        &BTreeMap::from([(DeviceId(1), 0)]),
+    )
+    .await
+    .unwrap();
     discovery::scan_tail(
         &receiver.db,
         &PassReads::default(),
@@ -120,9 +125,14 @@ async fn invitation_tail_never_substitutes_for_earlier_copy_history() {
     );
     receiver.reopen(storage.clone(), vec![], vec![]).await;
     let before = storage.request_trace().len();
-    let mut received = discovery::retained(&receiver.db, store(1), LogKind::KeyCopy)
-        .await
-        .unwrap();
+    let mut received = discovery::retained(
+        &receiver.db,
+        store(1),
+        LogKind::KeyCopy,
+        &BTreeMap::from([(DeviceId(1), 0)]),
+    )
+    .await
+    .unwrap();
     discovery::scan_tail(
         &receiver.db,
         &PassReads::default(),
@@ -147,7 +157,7 @@ async fn invitation_tail_never_substitutes_for_earlier_copy_history() {
         storage.as_ref(),
         store(1),
         LogKind::KeyCopy,
-        &BTreeSet::from([DeviceId(1)]),
+        &BTreeMap::from([(DeviceId(1), 0)]),
         NonZeroUsize::MIN,
     )
     .await
@@ -347,7 +357,7 @@ async fn io_differential_discovery() {
                     storage.as_ref(),
                     store(1),
                     LogKind::KeyCopy,
-                    &BTreeSet::from([DeviceId(1)]),
+                    &BTreeMap::from([(DeviceId(1), 0)]),
                     NonZeroUsize::MIN,
                 )
                 .await;
@@ -415,7 +425,7 @@ async fn a_failed_read_keeps_completed_fetch_ahead_bodies_and_blocks_its_cursor(
         storage.as_ref(),
         store(1),
         LogKind::KeyCopy,
-        &BTreeSet::from([DeviceId(1)]),
+        &BTreeMap::from([(DeviceId(1), 0)]),
         NonZeroUsize::new(3).unwrap()
     )
     .await
@@ -424,7 +434,11 @@ async fn a_failed_read_keeps_completed_fetch_ahead_bodies_and_blocks_its_cursor(
         receiver.db.log_downloads(LogKind::KeyCopy).await.unwrap(),
         [(DeviceId(1), 1)]
     );
-    let retained = receiver.db.log_inputs(LogKind::KeyCopy).await.unwrap();
+    let retained = receiver
+        .db
+        .log_inputs(LogKind::KeyCopy, vec![(DeviceId(1), 0)])
+        .await
+        .unwrap();
     assert_eq!(
         retained
             .iter()
@@ -455,7 +469,7 @@ async fn an_unknown_folder_survives_its_first_miss_and_a_later_listing_omission(
         storage.as_ref(),
         store(1),
         LogKind::Entry,
-        &writers,
+        &writers.iter().map(|writer| (*writer, 0)).collect(),
         NonZeroUsize::MIN,
     )
     .await
@@ -483,10 +497,46 @@ async fn an_unknown_folder_survives_its_first_miss_and_a_later_listing_omission(
         storage.as_ref(),
         store(1),
         LogKind::Entry,
-        &writers,
+        &writers.iter().map(|writer| (*writer, 0)).collect(),
         NonZeroUsize::MIN,
     )
     .await
     .unwrap();
     assert_eq!(input.len(), 2);
+}
+
+/// Applied entries live in the decoded log: a catch-up reads retained entries
+/// only past each writer's applied ones, keeping the newest applied entry,
+/// whose observation keeps the storage-time sample (SP step 1, §3.1).
+#[tokio::test]
+async fn applied_entries_are_not_read_again() {
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let mut author = device(storage.clone(), 1, member(1), store(1)).await;
+    author.create(key(1)).await;
+    for device in [10, 11, 12] {
+        author
+            .sync
+            .make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
+                device: DeviceId(device),
+                name: "phone".into(),
+                replaces: None,
+            })
+            .await
+            .unwrap();
+    }
+    author.catch_up().await;
+    let log = author.log().await;
+    let writers = author.db.known_log_writers().await.unwrap();
+    let retained = discovery::retained(
+        &author.db,
+        store(1),
+        LogKind::Entry,
+        &discovery::past_applied(&log, writers),
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        retained.keys().copied().collect::<Vec<_>>(),
+        [(DeviceId(1), 4.try_into().unwrap())]
+    );
 }

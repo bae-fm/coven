@@ -36,14 +36,19 @@ impl Database {
         .await
     }
 
-    /// Complete retained entry or key-copy input, including input not yet applied.
-    pub async fn log_inputs(&self, kind: crate::LogKind) -> Result<Vec<crate::LogInput>, DbError> {
+    /// Complete retained entry or key-copy input of each named writer,
+    /// numbered past the number named with it.
+    pub async fn log_inputs(
+        &self,
+        kind: crate::LogKind,
+        after: Vec<(coven_foundation::id_source::DeviceId, u64)>,
+    ) -> Result<Vec<crate::LogInput>, DbError> {
         self.call(move |inner| {
             inner
                 .access
                 .readers
                 .acquire_reader()
-                .with_reader(|reader| crate::log_input::inputs(reader, kind))
+                .with_reader(|reader| crate::log_input::inputs(reader, kind, &after))
         })
         .await
     }

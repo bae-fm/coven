@@ -30,8 +30,17 @@ async fn cursor_never_crosses_a_fetch_ahead_gap_and_reopen_keeps_every_body() {
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(
-        db.log_inputs(LogKind::Entry).await.unwrap(),
+        db.log_inputs(LogKind::Entry, vec![(DeviceId(7), 0), (DeviceId(42), 0)])
+            .await
+            .unwrap(),
         [input(7, 1), input(42, 1), input(42, 3)]
+    );
+    // Each writer's rows are read past its own number only.
+    assert_eq!(
+        db.log_inputs(LogKind::Entry, vec![(DeviceId(42), 1)])
+            .await
+            .unwrap(),
+        [input(42, 3)]
     );
     assert_eq!(
         db.log_downloads(LogKind::Entry).await.unwrap(),
@@ -63,7 +72,11 @@ async fn cursor_commit_failure_rolls_back_every_input_and_retry_is_idempotent() 
         .keep_log_inputs(LogKind::KeyCopy, vec![input(42, 1), input(42, 2)])
         .await
         .is_err());
-    assert!(db.log_inputs(LogKind::KeyCopy).await.unwrap().is_empty());
+    assert!(db
+        .log_inputs(LogKind::KeyCopy, vec![(DeviceId(42), 0)])
+        .await
+        .unwrap()
+        .is_empty());
     assert!(db.log_downloads(LogKind::KeyCopy).await.unwrap().is_empty());
     db.inspect_writer(|sql| sql.batch("DROP TRIGGER reject_cursor").unwrap());
     db.close().await.unwrap();
@@ -83,7 +96,9 @@ async fn cursor_commit_failure_rolls_back_every_input_and_retry_is_idempotent() 
         .await
         .is_err());
     assert_eq!(
-        db.log_inputs(LogKind::KeyCopy).await.unwrap(),
+        db.log_inputs(LogKind::KeyCopy, vec![(DeviceId(42), 0)])
+            .await
+            .unwrap(),
         [input(42, 1)]
     );
 }
@@ -96,7 +111,11 @@ async fn a_remembered_writer_has_no_received_input() {
     db.remember_log_writers(vec![DeviceId(5)]).await.unwrap();
     for kind in [LogKind::Entry, LogKind::KeyCopy] {
         assert_eq!(db.log_downloads(kind).await.unwrap(), [(DeviceId(5), 0)]);
-        assert!(db.log_inputs(kind).await.unwrap().is_empty());
+        assert!(db
+            .log_inputs(kind, vec![(DeviceId(5), 0)])
+            .await
+            .unwrap()
+            .is_empty());
     }
 }
 

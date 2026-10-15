@@ -37,20 +37,29 @@ pub struct LogInput {
     pub bytes: Vec<u8>,
 }
 
-pub(crate) fn inputs(db: &DatabaseConnection, kind: LogKind) -> Result<Vec<LogInput>, DbError> {
-    db.query(
-        "SELECT writer,number,observation,bytes FROM _coven_log_inputs WHERE kind=?1 ORDER BY writer,number",
-        [kind.name()],
-        |row| {
-            Ok(LogInput {
-                writer: DeviceId(u64::from_be_bytes(row.get(0)?)),
-                number: NonZeroU64::new(u64::from_be_bytes(row.get(1)?))
-                    .ok_or(rusqlite::Error::InvalidQuery)?,
-                observation: row.get(2)?,
-                bytes: row.get(3)?,
-            })
-        },
-    )
+/// Each writer's retained input past its number, read by key range.
+pub(crate) fn inputs(
+    db: &DatabaseConnection,
+    kind: LogKind,
+    after: &[(DeviceId, u64)],
+) -> Result<Vec<LogInput>, DbError> {
+    let mut inputs = Vec::new();
+    for (writer, number) in after {
+        inputs.extend(db.query(
+            "SELECT number,observation,bytes FROM _coven_log_inputs WHERE kind=?1 AND writer=?2 AND number>?3 ORDER BY number",
+            (kind.name(), &writer.0.to_be_bytes()[..], &number.to_be_bytes()[..]),
+            |row| {
+                Ok(LogInput {
+                    writer: *writer,
+                    number: NonZeroU64::new(u64::from_be_bytes(row.get(0)?))
+                        .ok_or(rusqlite::Error::InvalidQuery)?,
+                    observation: row.get(1)?,
+                    bytes: row.get(2)?,
+                })
+            },
+        )?);
+    }
+    Ok(inputs)
 }
 
 pub(crate) fn positions(

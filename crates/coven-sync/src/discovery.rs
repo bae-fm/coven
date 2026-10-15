@@ -50,13 +50,37 @@ pub(crate) fn path(
     }
 }
 
+/// Each writer's numbers past its newest applied entry, keeping that entry:
+/// the decoded log holds the rest, and the newest one's observation keeps
+/// the storage-time sample a restarted session starts from.
+pub(crate) fn past_applied(
+    log: &coven_database::StoreLog,
+    writers: impl IntoIterator<Item = DeviceId>,
+) -> BTreeMap<DeviceId, u64> {
+    let applied: BTreeMap<_, _> = log
+        .positions()
+        .0
+        .into_iter()
+        .map(|id| (id.device, id.number))
+        .collect();
+    writers
+        .into_iter()
+        .map(|writer| {
+            let number = applied.get(&writer).copied().unwrap_or(0);
+            (writer, number.saturating_sub(1))
+        })
+        .collect()
+}
+
+/// The retained input of each writer past the number named with it.
 pub(crate) async fn retained(
     database: &Database,
     store: StoreId,
     kind: LogKind,
+    after: &BTreeMap<DeviceId, u64>,
 ) -> Result<BTreeMap<(DeviceId, NonZeroU64), ObjectRead>, SyncError> {
     database
-        .log_inputs(kind)
+        .log_inputs(kind, after.iter().map(|(w, n)| (*w, *n)).collect())
         .await?
         .into_iter()
         .map(|input| {
@@ -74,16 +98,18 @@ pub(crate) async fn retained(
         .collect()
 }
 
+/// Read each writer's log through its next miss. Returns the retained input
+/// past the number each writer names, and every new read.
 pub(crate) async fn scan(
     database: &Database,
     reads: &crate::pass_reads::PassReads,
     storage: &dyn Storage,
     store: StoreId,
     kind: LogKind,
-    writers: &BTreeSet<DeviceId>,
+    writers: &BTreeMap<DeviceId, u64>,
     limit: std::num::NonZeroUsize,
 ) -> Result<Vec<ObjectRead>, SyncError> {
-    let mut input = retained(database, store, kind).await?;
+    let mut input = retained(database, store, kind, writers).await?;
     let positions: BTreeMap<_, _> = database.log_downloads(kind).await?.into_iter().collect();
     // A refused entry stops its writer's log: nothing at or past it is read.
     // Its number is retained, so the next read would be past it.
@@ -100,7 +126,7 @@ pub(crate) async fn scan(
     };
     // A completed drain ends discovery; its retained history is in `input`.
     let drained = database.drained_devices().await?;
-    for &writer in writers {
+    for &writer in writers.keys() {
         if refused.contains(&writer) || drained.contains(&writer) {
             continue;
         }

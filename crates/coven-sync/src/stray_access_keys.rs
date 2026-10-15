@@ -35,9 +35,15 @@ impl StoreLogSync {
         // Read before the listing: a drain, applied entries and received
         // input only grow, so a later listing judges a key by no newer facts.
         let drained = self.database.drained_devices().await?;
+        let writers = self.database.known_log_writers().await?;
         let received: Vec<_> = self
             .database
-            .log_inputs(LogKind::Entry)
+            .log_inputs(
+                LogKind::Entry,
+                crate::discovery::past_applied(&local.log, writers)
+                    .into_iter()
+                    .collect(),
+            )
             .await?
             .into_iter()
             .map(|input| (input.writer, input.number.get()))

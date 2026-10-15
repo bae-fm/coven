@@ -62,14 +62,15 @@ impl StoreLogSync {
         let mut waits = BTreeMap::new();
         let mut entries = BTreeMap::new();
         loop {
-            let unseen = writers.difference(&probed).copied().collect();
+            let unseen: Vec<_> = writers.difference(&probed).copied().collect();
+            // Applied entries live in the decoded log; only later input is read.
             for received in crate::discovery::scan(
                 &self.database,
                 &self.reads,
                 storage,
                 local.store,
                 coven_database::LogKind::Entry,
-                &unseen,
+                &crate::discovery::past_applied(&local.log, unseen.iter().copied()),
                 self.download_limit,
             )
             .await?
@@ -97,7 +98,7 @@ impl StoreLogSync {
                 storage,
                 local.store,
                 coven_database::LogKind::KeyCopy,
-                &unseen,
+                &unseen.iter().map(|writer| (*writer, 0)).collect(),
                 self.download_limit,
             )
             .await?
