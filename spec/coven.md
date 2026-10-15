@@ -4231,12 +4231,12 @@ Carol's tablet:
   - A key coven made can stay unrecorded with nothing to delete it: its
     replacement discarded, its database lost or reset (§10) before an entry
     records it, or its mint call's reply lost. Every made key's provider-side
-    name carries its store and minting device (§4). An admin's
-    `reclaim_access_keys` (E9), with admin access, lists the store's keys
-    and, in one transaction, makes pending `DeleteAccessKey` each listed key
-    that no stored entry records, kept or dropped, whose minting device is
-    retired with a final entry and drained (§6), with every entry it received
-    from that device applied. Only copies of the minting database record its keys, and a drained
+    name carries its store and minting device (§4). A pass on an admin's
+    device holding admin access lists the store's keys once another device's
+    keys can be stray, and in one transaction makes pending
+    `DeleteAccessKey` each listed key that no stored entry records, kept or
+    dropped, whose minting device is retired with a final entry and drained
+    (§6), with every entry it received from that device applied. Only copies of the minting database record its keys, and a drained
     device's entries are all here with none left to be kept, so the listing
     never takes a key that is or becomes recorded, nor a live device's key in
     flight

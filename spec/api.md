@@ -3001,9 +3001,9 @@ match stream.read_at(resume_at, 256 * 1024).await {
   retain confirmation by key id, so later entries and retries cannot restore
   the notice. Failed commits preserve pending work and report the failure.
 - A key coven made that no entry records, such as one whose minting database
-  was lost before recording it, is found by `reclaim_access_keys` once its
-  minting device is retired and drained, and then has its own
-  `DeleteAccessKey` record (§13).
+  was lost before recording it, gets its own `DeleteAccessKey` record from
+  an admin's sync while admin access is held, once its minting device is
+  retired and drained (§13).
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner;
@@ -3099,13 +3099,6 @@ impl CovenHandle {
     /// reads the provider for that exact key. Only its absence clears the
     /// record; failures return AccessKeyNotDeleted and the record stays (§13).
     pub async fn delete_access_key(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), SyncError>;
-
-    /// Lists this store's S3 keys at the provider with admin access and, in
-    /// one transaction, records a DeleteAccessKey for each key no stored entry
-    /// records whose minting device is retired with a final entry and drained
-    /// (§13). A live device's key, recorded or still being made, is never
-    /// taken. Admins only; a failed listing records nothing.
-    pub async fn reclaim_access_keys(&self, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), SyncError>;
 
     /// Resumes work pending with AdminAccessRequired, holding this admin access
     /// for that operation only (§4).

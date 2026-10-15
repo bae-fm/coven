@@ -371,7 +371,8 @@ If no usable key can be acquired or made,
 that audience's sends wait with their first reason; app writes still commit.
 
 The owner's device runs the access work recorded when entries were applied.
-A non-owner exposes the owner wait. Requests serialize and check their current
+A non-owner exposes the owner wait. An admin's device holding admin access
+lists stray keys (§13) at most once. Requests serialize and check their current
 intention as §4 requires. Pending provider access does not block independent
 data protected by usable keys; no removal call runs a second revocation path.
 

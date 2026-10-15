@@ -19,6 +19,7 @@ impl OperationRun {
         if caught_up {
             self.sync.match_keys().await?;
             self.sync.settle_queued_entry().await?;
+            self.sync.sweep_stray_access_keys().await?;
         }
         self.drive_key_phase().await?;
         // Phase 3. A required reload holds data application and first

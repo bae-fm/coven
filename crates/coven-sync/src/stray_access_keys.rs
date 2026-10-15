@@ -16,22 +16,28 @@ use crate::{effects::Authority, PendingRecord, SyncError};
 use coven_database::{LogKind, StoreLog};
 use coven_format::MemberAccess;
 use coven_foundation::id_source::DeviceId;
-use coven_storage::{AccessKeyAdmin, ListedKey};
+use coven_storage::ListedKey;
 use std::collections::BTreeSet;
 
 impl StoreLogSync {
-    /// List this store's keys with admin access and keep each stray one
-    /// pending `DeleteAccessKey`, in one transaction. Keys already pending or
-    /// confirmed deleted stay as they are. Deleting them is the ordinary
-    /// verified deletion (§13).
-    pub(super) async fn reclaim_access_keys(
-        &self,
-        admin: &dyn AccessKeyAdmin,
-    ) -> Result<(), SyncError> {
+    /// SP phase 2: on an admin's device holding admin access for an operation,
+    /// list this store's keys and keep each stray one pending
+    /// `DeleteAccessKey`, in one transaction. At most one listing per pass,
+    /// and none until another device's keys can be stray. Keys already
+    /// pending or confirmed deleted stay as they are. Deleting them is the
+    /// ordinary verified deletion (§13).
+    pub(crate) async fn sweep_stray_access_keys(&mut self) -> Result<(), SyncError> {
+        let Some(admin) = self.admin_access.values().next().cloned() else {
+            return Ok(());
+        };
         let local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
-        self.check_stopped(&local, &member)?;
-        Authority::Admin.check(&local.log.replay.state, &member.member())?;
+        if Authority::Admin
+            .check(&local.log.replay.state, &member.member())
+            .is_err()
+        {
+            return Ok(());
+        }
         // Read before the listing: a drain, applied entries and received
         // input only grow, so a later listing judges a key by no newer facts.
         let drained = self.database.drained_devices().await?;
@@ -48,8 +54,12 @@ impl StoreLogSync {
             .into_iter()
             .map(|input| (input.writer, input.number.get()))
             .collect();
+        let devices = reclaimable(&local.log, &received, &drained);
+        if devices.is_empty() || self.swept.as_ref() == Some(&devices) {
+            return Ok(());
+        }
         let listed = admin.list_keys(local.store).await?;
-        let deletions = stray(&local.log, &received, &drained, listed)
+        let deletions = stray(&local.log, &devices, listed)
             .into_iter()
             .map(|key| {
                 let access = MemberAccess::S3AccessKey {
@@ -62,19 +72,19 @@ impl StoreLogSync {
         self.database
             .record_access_key_deletions::<PendingRecord>(None, deletions)
             .await?;
+        self.swept = Some(devices);
         Ok(())
     }
 }
 
-/// The listed keys no stored entry records whose minting device is drained
-/// and has every received entry applied. An entry still waiting could record
-/// its key once applied, so that device's keys wait with it.
-pub(crate) fn stray(
+/// The devices whose keys can be stray: drained, with every received entry
+/// applied. An entry still waiting could record its device's key once
+/// applied, so that device's keys wait with it.
+pub(crate) fn reclaimable(
     log: &StoreLog,
     received: &[(DeviceId, u64)],
     drained: &BTreeSet<DeviceId>,
-    listed: Vec<ListedKey>,
-) -> Vec<ListedKey> {
+) -> BTreeSet<DeviceId> {
     let applied: BTreeSet<(DeviceId, u64)> = log
         .entries
         .iter()
@@ -85,6 +95,15 @@ pub(crate) fn stray(
         .filter(|position| !applied.contains(position))
         .map(|(device, _)| *device)
         .collect();
+    drained.difference(&waiting).copied().collect()
+}
+
+/// The listed keys of `devices` that no stored entry records.
+pub(crate) fn stray(
+    log: &StoreLog,
+    devices: &BTreeSet<DeviceId>,
+    listed: Vec<ListedKey>,
+) -> Vec<ListedKey> {
     // Kept or dropped, an entry recording a key leaves it to §13's rules.
     let recorded: BTreeSet<&str> = log
         .entries
@@ -97,9 +116,7 @@ pub(crate) fn stray(
     listed
         .into_iter()
         .filter(|key| {
-            drained.contains(&key.device)
-                && !waiting.contains(&key.device)
-                && !recorded.contains(key.access_key_id.as_str())
+            devices.contains(&key.device) && !recorded.contains(key.access_key_id.as_str())
         })
         .collect()
 }

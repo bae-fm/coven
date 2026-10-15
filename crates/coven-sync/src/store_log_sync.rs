@@ -42,6 +42,9 @@ pub struct StoreLogSync {
     /// needs it and never written anywhere (§4).
     admin_access:
         std::collections::BTreeMap<crate::OperationId, Arc<dyn coven_storage::AccessKeyAdmin>>,
+    /// The devices whose keys the last stray-key listing could take. Kept in
+    /// memory: a restart lists once more (§13).
+    swept: Option<BTreeSet<coven_foundation::id_source::DeviceId>>,
     /// Operation and joining retry waits, and the provider cooldown (§16.5).
     waits: Arc<crate::RetryWaits>,
     /// This drive's one `join-requests/` listing, serving every open
@@ -82,6 +85,7 @@ impl StoreLogSync {
             ids,
             directory,
             admin_access: Default::default(),
+            swept: None,
             join_requests: None,
             restore_code,
         }
@@ -115,6 +119,7 @@ impl StoreLogSync {
             ids,
             directory,
             admin_access: Default::default(),
+            swept: None,
             join_requests: None,
             restore_code,
         }
