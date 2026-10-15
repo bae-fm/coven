@@ -1515,7 +1515,10 @@ the file's ranges under `F`.
   - A failed mint or check rolls back what the call's names created — keys,
     policy and user — and reports the failure, with the rollback's own failure
     if that fails too. Admin access is held only by the operation that needs
-    it and released once its key is checked or its step fails; after a restart
+    it and released once its key is checked (a replacement's once it ends,
+    §13) or its step fails
+    ([`released_makes_nothing`, `check_keeps_admin`](proofs/storage/CovenStorage/AdminAccess.lean));
+    after a restart
     the step waits with `PendingReason::AdminAccessRequired` until a retry
     supplies admin access again.
 - Posted positions live at `<store>/positions/<device>` ([§6](#6-syncing-writes)).

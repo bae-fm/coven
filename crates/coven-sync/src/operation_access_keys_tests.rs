@@ -291,6 +291,45 @@ async fn discarding_a_replacement_leaves_no_key_it_holds_unrecorded() {
     assert_eq!(admin.users(), [lost.key_name]);
 }
 
+/// A failed mint or check releases admin access: the retry waits for the app
+/// to supply it again, then makes and checks a new key (§4; AdminAccess
+/// `released_makes_nothing`).
+#[tokio::test]
+async fn a_failed_mint_or_check_needs_admin_access_again() {
+    let (_storage, mut a, b) = household().await;
+    let ben = b.member.member();
+    let admin = MemoryKeyAdmin::default();
+    admin.fail_next_mint();
+    let id = begin(
+        &mut a,
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
+    )
+    .await;
+    assert!(matches!(a.step(id).await, Err(SyncError::Storage(_))));
+    assert!(matches!(
+        a.step(id).await.unwrap(),
+        Progress::Waiting(PendingReason::AdminAccessRequired)
+    ));
+    a.sync.hold_admin_access(id, Arc::new(admin.clone()));
+    assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
+    admin.fail_next_probe();
+    assert!(matches!(a.step(id).await, Err(SyncError::Storage(_))));
+    assert!(matches!(
+        a.step(id).await.unwrap(),
+        Progress::Waiting(PendingReason::AdminAccessRequired)
+    ));
+    assert!(admin.users().is_empty());
+    a.sync.hold_admin_access(id, Arc::new(admin.clone()));
+    assert!(matches!(
+        finish(&mut a, id).await.unwrap(),
+        Output::AccessKeyReplaced(_)
+    ));
+    assert_eq!(
+        &admin.calls()[..6],
+        ["mint", "roll_back", "mint", "probe", "roll_back", "mint"]
+    );
+}
+
 /// T259 (KeyListing `clone_mint_spares_recorded_key`): a backup of Ana's
 /// desktop, taken after the replacement is journaled and before its key is
 /// made, runs as a second copy and mints too. Each mint call names its

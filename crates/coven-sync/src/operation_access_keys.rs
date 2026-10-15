@@ -105,6 +105,8 @@ impl StoreLogSync {
                             .advance_operation(data.update(record, 0)?)
                             .await?;
                     }
+                    // A failed step needs admin access supplied again (§4).
+                    self.release_admin_access(record.id);
                     Err(error)
                 }
             };

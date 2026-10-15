@@ -592,6 +592,18 @@ Each mint call now names its principal afresh and deletes nothing:
 provider, and `clone_mint_spares_recorded_key` checks that history. A key a
 lost mint call made is the listing's once its device is retired.
 
+**T241: a failed step releases admin access (proved).**
+[AdminAccess](storage/CovenStorage/AdminAccess.lean) follows one replacement's
+journal row and the admin access the app supplies, held in memory (§4).
+- `released_makes_nothing`, `failed_mint_releases`, `failed_check_releases`,
+  `failure_makes_nothing_until_supplied`: after a failed mint or check no key
+  is made until the app supplies admin access again.
+- `check_keeps_admin`: a replacement keeps it past the check, to delete the
+  old key once its entry is kept (§13), and releases it when it ends.
+- `old_rule_mints_without_supply` (checked counterexample): when a failed
+  step kept admin access, the automatic retry made a key Ana never supplied
+  admin access for again.
+
 ## Undecodable own key copies
 
 T182 made a pass's scan reset the device with `SlotMismatch` when a copy

@@ -295,3 +295,10 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Listing.reset_spares_recorded_key
 #print axioms CovenStorage.KeyDelivery.Listing.reset_key_reclaimed_once_retired
 #print axioms CovenStorage.KeyDelivery.Listing.clone_mint_spares_recorded_key
+
+#print axioms CovenStorage.AdminAccess.released_makes_nothing
+#print axioms CovenStorage.AdminAccess.failed_mint_releases
+#print axioms CovenStorage.AdminAccess.failed_check_releases
+#print axioms CovenStorage.AdminAccess.failure_makes_nothing_until_supplied
+#print axioms CovenStorage.AdminAccess.check_keeps_admin
+#print axioms CovenStorage.AdminAccess.old_rule_mints_without_supply
