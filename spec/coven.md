@@ -2977,9 +2977,9 @@ Carol's tablet:
     <store>/store-log/ana-phone/1      create the store, Ana as admin       signed with Ana's key
     <store>/store-log/ana-phone/2      add Ben's id and public key pair    signed with Ana's key
                                had read: ana-phone 1
-    <store>/store-log/ben-laptop/1     add device ben-phone                 signed with Ben's key
+    <store>/store-log/ben-laptop/1     add device ben-laptop                signed with Ben's key
                                had read: ana-phone 2
-    <store>/store-log/ana-ipad/1       make Ben an admin                    signed with Ana's key
+    <store>/store-log/ana-phone/3      make Ben an admin                    signed with Ana's key
                                had read: ana-phone 2
     ```
 
