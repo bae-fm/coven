@@ -196,10 +196,10 @@ impl RowChange {
             .ok_or_else(|| DbError::MigrationPrimaryKeyMissing {
                 table: self.table.clone(),
             })?;
-        if key.len() != primary.collations.len() {
+        if key.len() != primary.columns.len() {
             return Err(DbError::MigrationKeyArity {
                 table: self.table.clone(),
-                expected: primary.collations.len(),
+                expected: primary.columns.len(),
                 actual: key.len(),
             });
         }
@@ -208,7 +208,7 @@ impl RowChange {
             Operation::Update(_) => ChangeOp::Update,
             Operation::Delete => ChangeOp::Delete,
         };
-        let key = crate::write_rows::equality_key(&key, &primary.collations)?;
+        let key = crate::write_rows::equality_key(&key)?;
         if self.op != original_op
             || key != original.row.key
             || names.tables.get(&original.row.table) != Some(&table.name)

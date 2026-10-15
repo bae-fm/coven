@@ -278,32 +278,7 @@ impl MigrationSnapshot {
             return Ok(Vec::new());
         };
         let values = crate::removal_sql::reference_values(db, table, columns, values)?;
-        let index = table
-            .indices
-            .iter()
-            .find(|i| {
-                i.columns.len() == columns.len()
-                    && i.columns
-                        .iter()
-                        .all(|c| c.as_ref().is_some_and(|c| columns.contains(c)))
-            })
-            .expect("reference targets a unique index");
-        let collations: Vec<_> = columns
-            .iter()
-            .map(|c| {
-                let position = index
-                    .columns
-                    .iter()
-                    .position(|n| n.as_ref() == Some(c))
-                    .expect("target column");
-                &index.collations[position]
-            })
-            .collect();
-        let terms: Vec<_> = slots
-            .iter()
-            .zip(&collations)
-            .map(|(c, collation)| format!("{} COLLATE {}", identifier(c), identifier(collation)))
-            .collect();
+        let terms: Vec<_> = slots.iter().map(|c| identifier(c)).collect();
         let lookup = format!(
             "{}_lookup_{}",
             snapshot.temporary,
@@ -437,21 +412,11 @@ impl SnapshotTable {
 }
 
 fn key_sql(table: &TableSchema, prefix: &str) -> String {
-    let primary = table
-        .indices
-        .iter()
-        .find(|i| i.primary)
-        .expect("synced primary index");
     format!(
         "_coven_migration_key({})",
         key_columns(table)
             .iter()
-            .zip(&primary.collations)
-            .map(|(c, collation)| format!(
-                "'{}',{prefix}{}",
-                collation.replace('\'', "''"),
-                identifier(&c.name)
-            ))
+            .map(|c| format!("{prefix}{}", identifier(&c.name)))
             .collect::<Vec<_>>()
             .join(",")
     )

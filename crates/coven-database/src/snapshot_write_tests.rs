@@ -571,7 +571,7 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     let b_store = TestStore::with_ids(&ids);
     let migrations = || {
         vec![crate::Migration::run(1, "references", move |sql| {
-            sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
+            sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
             Ok(())
         })]
     };
@@ -595,7 +595,7 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
         .await
         .unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
-    sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
+    sql(&b, "INSERT INTO children VALUES('child','parent')")
         .await
         .unwrap();
     sql(&a, "DELETE FROM parents WHERE id='parent'")
@@ -622,7 +622,7 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     }
     assert_eq!(references.len(), 2);
     for written in references {
-        assert_eq!(written.value, Value::Text("PaReNt".into()));
+        assert_eq!(written.value, Value::Text("parent".into()));
         assert_eq!(written.parents.values().next().unwrap().generation, 1);
     }
     for database in [a, b] {

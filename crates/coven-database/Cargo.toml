@@ -25,7 +25,7 @@ proc-macro2.workspace = true
 syn.workspace = true
 coven-merge = { workspace = true, features = ["test-utils"] }
 coven-format = { workspace = true, features = ["test-utils"] }
-rusqlite = { workspace = true, features = ["trace"] }
+rusqlite = { workspace = true, features = ["trace", "collation"] }
 coven-foundation = { workspace = true, features = ["test-utils"] }
 tempfile.workspace = true
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "net", "fs"] }

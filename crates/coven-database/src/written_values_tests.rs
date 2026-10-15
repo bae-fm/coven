@@ -7,7 +7,7 @@ use coven_merge::{Audience, RowId};
 
 async fn open(store: &TestStore, seconds: u64) -> Database {
     store.builder(tables(), vec![crate::Migration::run(1,"references",move |sql| {
-        sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
+        sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
         Ok(())
     })]).clock(std::sync::Arc::new(coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH+std::time::Duration::from_secs(seconds)))).open().await.unwrap()
 }
@@ -53,7 +53,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
             .await
             .unwrap();
         b.receive(records(&a).remove(0).into()).await.unwrap();
-        sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
+        sql(&b, "INSERT INTO children VALUES('child','parent')")
             .await
             .unwrap();
         if lost {
@@ -80,7 +80,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         b.receive(records(&a).remove(1).into()).await.unwrap();
         assert_eq!(
             reference(&b, lost).await,
-            if lost { Some("PaReNt".into()) } else { None }
+            if lost { Some("parent".into()) } else { None }
         );
         b.inspect_writer_schema(|db, schema| {
             let app = crate::write_rows::AppView::after(db, schema);
@@ -102,7 +102,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
             } else {
                 &state.cells()["parent"].value
             };
-            assert_eq!(written.value, Value::Text("PaReNt".into()));
+            assert_eq!(written.value, Value::Text("parent".into()));
             assert_eq!(written.parents.values().next().unwrap().generation, 1);
         });
         b.close().await.unwrap();
@@ -121,7 +121,7 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         });
         assert_eq!(
             reference(&b, lost).await,
-            Some("PaReNt".into()),
+            Some("parent".into()),
             "lost={lost}"
         );
         assert_eq!(crate::write::tests::count(&b, "_coven_written_values"), 0);
@@ -138,7 +138,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
             std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
         ))
     };
-    let initial = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,guard TEXT REFERENCES parents(id) ON DELETE CASCADE)";
+    let initial = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,guard TEXT REFERENCES parents(id) ON DELETE CASCADE)";
     let migrations = |rename| {
         let sql = initial;
         let mut migrations = vec![crate::Migration::run(1, "references", move |db| {
@@ -176,14 +176,17 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
         .open()
         .await
         .unwrap();
-    sql(&a, "INSERT INTO parents VALUES('parent'),('Inbox')")
-        .await
-        .unwrap();
+    sql(
+        &a,
+        "INSERT INTO parents VALUES('parent'),('Inbox'),('Archive')",
+    )
+    .await
+    .unwrap();
     c.receive(records(&a).remove(0).into()).await.unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
     sql(
         &a,
-        "INSERT INTO children VALUES('removed','PaReNt','parent'),('live','PaReNt','Inbox')",
+        "INSERT INTO children VALUES('removed','parent','parent'),('live','parent','Inbox')",
     )
     .await
     .unwrap();
@@ -192,9 +195,12 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
     sql(&a, "UPDATE children SET parent='Inbox' WHERE id='removed'")
         .await
         .unwrap();
-    sql(&b, "UPDATE children SET parent='PARENT' WHERE id='removed'")
-        .await
-        .unwrap();
+    sql(
+        &b,
+        "UPDATE children SET parent='Archive' WHERE id='removed'",
+    )
+    .await
+    .unwrap();
     a.receive(records(&b).remove(0).into()).await.unwrap();
     sql(&c, "DELETE FROM parents WHERE id='parent'")
         .await
@@ -214,7 +220,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
             .find(|cell| cell.column == "parent")
             .unwrap()
             .value,
-        crate::types::Value::Text("PARENT".into())
+        crate::types::Value::Text("Archive".into())
     );
     let snapshot_store = TestStore::with_ids(&ids);
     let snapshot_target = snapshot_store
@@ -286,7 +292,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
         };
         assert_eq!(
             merge.row(&live).unwrap().state.cells()["root"].value.value,
-            Value::Text("PaReNt".into())
+            Value::Text("parent".into())
         );
     });
     let snapshot_target = snapshot_store
@@ -319,7 +325,7 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     for target in [&b, &c] {
         target.receive(records(&a).remove(0).into()).await.unwrap();
     }
-    sql(&b, "INSERT INTO children VALUES('child','PaReNt')")
+    sql(&b, "INSERT INTO children VALUES('child','parent')")
         .await
         .unwrap();
     sql(&c, "INSERT INTO children VALUES('child','Inbox')")
@@ -332,20 +338,20 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
         .await
         .unwrap();
     b.receive(records(&a).remove(1).into()).await.unwrap();
-    assert_eq!(reference(&b, true).await, Some("PaReNt".into()));
+    assert_eq!(reference(&b, true).await, Some("parent".into()));
     b.close().await.unwrap();
     let b = b_store.builder(tables(), vec![
         crate::Migration::run(1,"references",move |db| {
-            db.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?; Ok(())
+            db.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?; Ok(())
         }),
         crate::Migration::sql(2,"drop reference","CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children"),
     ]).open().await.unwrap();
-    assert_eq!(reference(&b, true).await, Some("PaReNt".into()));
+    assert_eq!(reference(&b, true).await, Some("parent".into()));
     b.inspect_writer(|db| {
         let bytes: Vec<u8> = db.query_row("SELECT l.value FROM _coven_lost l JOIN _coven_columns c ON c.id=l.column_id WHERE c.column_name='parent'", [], |r| r.get(0)).unwrap();
         let lost = coven_format::merge_fields::decode_column_value(&bytes).unwrap();
         assert!(lost.parents.is_empty());
-        assert_eq!(lost.value, Value::Text("PaReNt".into()));
+        assert_eq!(lost.value, Value::Text("parent".into()));
     });
     for db in [a, b, c] {
         db.close().await.unwrap();

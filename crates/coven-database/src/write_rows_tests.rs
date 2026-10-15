@@ -14,14 +14,13 @@ fn ordered_key_component_and_byte_limits_keep_the_exact_boundary() {
     use coven_format::value::Value;
     let components = 65_536;
     let mut values = vec![Value::Integer(0); components];
-    let collations = vec!["BINARY".to_owned(); components + 1];
     assert_eq!(
-        super::equality_key(&values, &collations[..components]).unwrap(),
+        super::equality_key(&values).unwrap(),
         vec![0x12; components]
     );
     values.push(Value::Integer(0));
     assert!(matches!(
-        super::equality_key(&values, &collations),
+        super::equality_key(&values),
         Err(DbError::TooLarge {
             field: "key components",
             actual: 65_537,
@@ -32,7 +31,7 @@ fn ordered_key_component_and_byte_limits_keep_the_exact_boundary() {
     // A blob component has one tag and a two-byte terminator. Nonzero
     // payload bytes need no escaping, so this exercises the encoded limit.
     for length in [maximum - 3, maximum - 2] {
-        let result = super::equality_key(&[Value::Blob(vec![1; length])], &["BINARY".to_owned()]);
+        let result = super::equality_key(&[Value::Blob(vec![1; length])]);
         if length == maximum - 3 {
             let key = result.unwrap();
             assert_eq!(key.len(), maximum);
@@ -278,8 +277,7 @@ fn row_id_order_keeps_table_key_and_audience_precedence() {
     ]
     .map(|(table, key, audience)| {
         let key_value = Value::Integer(key);
-        let encoded =
-            super::equality_key(std::slice::from_ref(&key_value), &["BINARY".into()]).unwrap();
+        let encoded = super::equality_key(std::slice::from_ref(&key_value)).unwrap();
         super::row_id(
             &(table.into(), encoded),
             &super::AppRow {

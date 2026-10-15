@@ -157,10 +157,7 @@ pub(crate) fn unique_values(
         if values.iter().any(|v| matches!(v, Value::Null)) {
             continue;
         }
-        unique.insert(
-            claim.identity.clone(),
-            equality_key(&values, &claim.collations)?,
-        );
+        unique.insert(claim.identity.clone(), equality_key(&values)?);
     }
     Ok(unique)
 }

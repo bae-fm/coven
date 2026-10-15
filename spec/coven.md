@@ -73,6 +73,7 @@
   - [A.7 Schema changes](#a7-schema-changes)
   - [A.8 SET DEFAULT foreign keys](#a8-set-default-foreign-keys)
   - [A.9 References to non-key columns](#a9-references-to-non-key-columns)
+  - [A.10 Collations on keys](#a10-collations-on-keys)
 - [Appendix B. Proof of convergence](proofs/merge.md), in its own file
 - [Appendix C. Proof of the store log](proofs/storelog.md), in its own file
 - [Store-log effects on data](proofs/storelog-data.md), coupling Appendices B and C
@@ -2545,7 +2546,16 @@ Carol's tablet:
   - a synced table with no primary key;
   - a primary key column that allows NULL, since SQLite lets a non-integer
     key column hold NULL unless it is declared NOT NULL, and a key with a
-    NULL in it names no row.
+    NULL in it names no row;
+  - a column of a synced primary key, unique constraint or unique index, or
+    of a foreign key from or into a synced table, that declares a collation
+    other than BINARY, and a unique index term with one
+    ([Appendix A.10](#a10-collations-on-keys)).
+    - Coven compares key and unique values by their bytes
+      ([D3](format.md#d3-ordered-keys)), as the merge model compares rows
+      ([Appendix B2](proofs/merge.md#b2-terms)); under `COLLATE NOCASE` SQLite would hold "Urgent" and
+      "urgent" as one row that coven treats as two.
+    - Other columns may use any collation.
 - Either kind can span several columns.
   - E.g. `note_tags(note_id, tag_id)` is a shared key.
   - Ana and Ben, both offline, each tag note 42 "urgent", and make one row.
@@ -6471,3 +6481,13 @@ merge later.
   ([§8.4](#84-foreign-keys)). Local children keep SQLite's behavior subject
   to the existing foreign-key action restrictions: a local key into a synced
   non-key column follows its updates with cascade or set null.
+
+### A.10 Collations on keys
+
+- Problem: a key or unique column with `COLLATE NOCASE` or `RTRIM` makes
+  SQLite treat different spellings as one value, while each device's write
+  records the spelling it used. Two devices adding "Urgent" and "urgent"
+  would make two rows to coven where SQLite can hold one, and two claims of
+  one unique value that coven sees as different.
+- Status: refused on open and after migrating; key, unique and foreign-key
+  columns of synced tables compare by bytes ([§8.5](#85-keys-and-uniqueness)).

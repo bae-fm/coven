@@ -360,13 +360,13 @@ async fn checks_keep_sqlite_affinity_and_quoted_expressions() {
 }
 
 #[tokio::test]
-async fn expression_partial_and_collated_unique_claims_use_sqlite_equality() {
+async fn expression_and_partial_unique_claims_use_sqlite_equality() {
     let store = TestStore::new();
-    let db = store.schema(vec![table("notes")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,folder TEXT COLLATE NOCASE,active INTEGER,ignored INTEGER); CREATE UNIQUE INDEX claimed ON notes(lower(title) DESC,folder COLLATE RTRIM) WHERE active=1").await.unwrap();
+    let db = store.schema(vec![table("notes")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,folder TEXT,active INTEGER,ignored INTEGER); CREATE UNIQUE INDEX claimed ON notes(lower(title) DESC,folder COLLATE BINARY) WHERE active=1").await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('45','Groceries','Work',1,0)")
         .await
         .unwrap();
-    sql(&db, "INSERT INTO notes VALUES('46','Shopping','Work ',1,0); INSERT INTO notes VALUES('47',NULL,'Work',1,0)").await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('46','Shopping','Work',1,0); INSERT INTO notes VALUES('47',NULL,'Work',1,0)").await.unwrap();
     let before = crate::tests::contents(&db);
     let error = sql(&db, "UPDATE notes SET title='GROCERIES' WHERE id='46'")
         .await
@@ -390,7 +390,7 @@ async fn expression_partial_and_collated_unique_claims_use_sqlite_equality() {
     assert_eq!(
         losses(&db)[0].2,
         BTreeSet::from([Rule::Unique(coven_merge::UniqueConstraint {
-            terms: vec!["lower(title)".into(), "folder COLLATE RTRIM".into()],
+            terms: vec!["lower(title)".into(), "folder COLLATE BINARY".into()],
             partial: Some("active=1".into())
         })])
     );
@@ -400,6 +400,34 @@ async fn expression_partial_and_collated_unique_claims_use_sqlite_equality() {
         .unwrap();
     assert!(losses(&db).is_empty());
     assert_eq!(count(&db, "notes"), 3);
+    db.close().await.unwrap();
+}
+
+/// SQLite compares `+title` by title's NOCASE collation in an ordinary
+/// expression, but builds the unique index over it with BINARY; claims follow
+/// the index, so differently cased titles are two values.
+#[tokio::test]
+async fn an_expression_over_a_folded_column_claims_by_bytes_like_its_index() {
+    let store = TestStore::new();
+    let db = store.schema(vec![table("notes")], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT COLLATE NOCASE,edited INTEGER); CREATE UNIQUE INDEX titled ON notes(+title)").await.unwrap();
+    sql(
+        &db,
+        "INSERT INTO notes VALUES('45','Groceries',0),('46','Shopping',0)",
+    )
+    .await
+    .unwrap();
+    crate::tests::remote_update(
+        &db,
+        "notes",
+        "46",
+        &[("title", Value::Text("GROCERIES".into()))],
+    )
+    .await;
+    sql(&db, "UPDATE notes SET edited=1 WHERE id='45'")
+        .await
+        .unwrap();
+    assert!(losses(&db).is_empty());
+    assert_eq!(count(&db, "notes"), 2);
     db.close().await.unwrap();
 }
 

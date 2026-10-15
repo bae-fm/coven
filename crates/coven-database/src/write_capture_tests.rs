@@ -116,41 +116,56 @@ async fn each_composite_independent_key_can_hold_its_uuid_in_a_different_column(
 }
 
 #[tokio::test]
-async fn independent_key_changes_validate_the_raw_insert_before_collation() {
-    for schema in [
-        NOTES,
-        "CREATE TABLE notes(id TEXT COLLATE NOCASE NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE TABLE local_rows(id TEXT PRIMARY KEY)",
-        "CREATE TABLE notes(id TEXT COLLATE RTRIM NOT NULL PRIMARY KEY,title TEXT,body TEXT); CREATE TABLE local_rows(id TEXT PRIMARY KEY)",
-    ] {
-        let store = TestStore::new();
-        let db = store.schema(independent(), schema).await.unwrap();
-        db.write(|context| {
-            context.execute("INSERT INTO notes VALUES(?1,'original','')", [V4])?;
-            Ok(())
-        }).await.unwrap();
-        for invalid in ["not a uuid".to_owned(), V4.to_uppercase(), format!("{V4} ")] {
-            let input = invalid.clone();
-            let error = db.write(move |context| {
+async fn independent_key_changes_validate_the_inserted_key() {
+    let store = TestStore::new();
+    let db = store.schema(independent(), NOTES).await.unwrap();
+    db.write(|context| {
+        context.execute("INSERT INTO notes VALUES(?1,'original','')", [V4])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    for invalid in ["not a uuid".to_owned(), V4.to_uppercase(), format!("{V4} ")] {
+        let input = invalid.clone();
+        let error = db
+            .write(move |context| {
                 context.execute("INSERT INTO local_rows VALUES('rollback')", [])?;
                 context.execute("UPDATE notes SET id=?1,title='changed'", [input])?;
                 Ok(())
-            }).await.unwrap_err();
-            assert_key_error(error, vec![Value::Text(invalid)]);
-            assert_eq!(count(&db, "local_rows"), 0);
-            assert_eq!(records(&db).len(), 1);
-            assert_eq!(db.read(|sql| Ok(sql.query_row("SELECT id,title FROM notes", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?)).await.unwrap(), (V4.into(), "original".into()));
-        }
-        db.write(|context| {
-            context.execute("UPDATE notes SET id=?1", [V7])?;
-            Ok(())
-        }).await.unwrap();
-        let writes = records(&db);
-        let rows = &writes[1].parts[0].rows;
-        assert_eq!(rows.len(), 2);
-        assert!(rows.iter().any(|r| matches!(r.change.operation, Operation::Delete)));
-        assert!(rows.iter().any(|r| matches!(r.change.operation, Operation::Insert(_))));
-        db.close().await.unwrap();
+            })
+            .await
+            .unwrap_err();
+        assert_key_error(error, vec![Value::Text(invalid)]);
+        assert_eq!(count(&db, "local_rows"), 0);
+        assert_eq!(records(&db).len(), 1);
+        assert_eq!(
+            db.read(
+                |sql| Ok(sql.query_row("SELECT id,title FROM notes", [], |r| Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?
+                )))?)
+            )
+            .await
+            .unwrap(),
+            (V4.into(), "original".into())
+        );
     }
+    db.write(|context| {
+        context.execute("UPDATE notes SET id=?1", [V7])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let writes = records(&db);
+    let rows = &writes[1].parts[0].rows;
+    assert_eq!(rows.len(), 2);
+    assert!(rows
+        .iter()
+        .any(|r| matches!(r.change.operation, Operation::Delete)));
+    assert!(rows
+        .iter()
+        .any(|r| matches!(r.change.operation, Operation::Insert(_))));
+    db.close().await.unwrap();
 }
 
 #[tokio::test]

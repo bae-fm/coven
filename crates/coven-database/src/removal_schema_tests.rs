@@ -58,16 +58,16 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
             r#"
         CREATE TABLE notes(
             id TEXT NOT NULL PRIMARY KEY,
-            title TEXT COLLATE NOCASE CONSTRAINT title_key UNIQUE,
+            title TEXT CONSTRAINT title_key UNIQUE,
             body TEXT CONSTRAINT "body""valid" CHECK( length(body) > 0 ) CHECK(body NOT NULL),
             active INT,
             folded TEXT GENERATED ALWAYS AS (lower(title)) STORED,
             tagged TEXT AS ('CHECK, UNIQUE(' || title || ')') VIRTUAL COLLATE RTRIM,
-            CONSTRAINT other_key UNIQUE(body COLLATE RTRIM DESC, active ASC),
+            CONSTRAINT other_key UNIQUE(body COLLATE BINARY DESC, active ASC),
             CHECK( active IN (0, /* comma , */ 1) ),
             CONSTRAINT folded_ok CHECK(folded = lower(title))
         );
-        CREATE UNIQUE INDEX expr_key ON notes(lower( title ) COLLATE NOCASE DESC) WHERE active == 1;
+        CREATE UNIQUE INDEX expr_key ON notes(lower( title ) COLLATE BINARY DESC) WHERE active == 1;
         CREATE UNIQUE INDEX partial_key ON notes(title) WHERE active IS NOT NULL;
     "#,
         )
@@ -93,9 +93,9 @@ async fn parsed_constraints_keep_names_expressions_collations_and_generated_valu
             unique,
             [
                 UniqueConstraint::from(["title"]),
-                UniqueConstraint::from(["body COLLATE RTRIM", "active"]),
+                UniqueConstraint::from(["body COLLATE BINARY", "active"]),
                 UniqueConstraint {
-                    terms: vec!["lower( title ) COLLATE NOCASE".into()],
+                    terms: vec!["lower( title ) COLLATE BINARY".into()],
                     partial: Some("active == 1".into())
                 },
                 UniqueConstraint {
@@ -145,7 +145,7 @@ async fn adjacent_table_constraints_and_sqlite_expression_spellings_keep_their_s
             vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
             r#"CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,n INT,
         CHECK(n IS DISTINCT FROM NULL) CONSTRAINT "has title" CHECK(title NOT NULL)
-        UNIQUE(title COLLATE RTRIM) CHECK(n != 0))"#,
+        UNIQUE(title COLLATE BINARY) CHECK(n != 0))"#,
         )
         .await
         .unwrap();
@@ -163,7 +163,7 @@ async fn adjacent_table_constraints_and_sqlite_expression_spellings_keep_their_s
         );
         assert_eq!(
             schema.rules["notes"].unique[0].identity,
-            UniqueConstraint::from(["title COLLATE RTRIM"])
+            UniqueConstraint::from(["title COLLATE BINARY"])
         );
     });
     db.close().await.unwrap();

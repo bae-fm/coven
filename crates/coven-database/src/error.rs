@@ -660,6 +660,18 @@ pub enum SchemaError {
         /// The nullable key column.
         column: String,
     },
+    /// A synced key column compares text by a collation other than BINARY (§8.5, D3).
+    #[error(
+        "key column {table}.{column} uses collation {collation}; synced keys compare text by bytes"
+    )]
+    KeyCollation {
+        /// The table holding the key, unique constraint or foreign key.
+        table: String,
+        /// The column, or for an expression term the unique index naming it.
+        column: String,
+        /// The column's or index term's collation.
+        collation: String,
+    },
     /// SQLite chooses the primary key itself (§8.5).
     #[error("SQLite generates the primary key of {table}")]
     GeneratedPrimaryKey {

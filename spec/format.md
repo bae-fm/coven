@@ -91,7 +91,10 @@
   numbers, then text by bytes, then blobs by bytes.
 - Keys have 1 to 65,536 non-NULL components and at most 8 MiB of encoded
   bytes. These components are inside `bytes`, not a counted collection in
-  the containing frame. Text uses binary collation.
+  the containing frame. Text uses binary collation: every key, unique and
+  foreign-key column of a synced table compares by bytes
+  ([§8.5](coven.md#85-keys-and-uniqueness)), so equal keys are equal bytes,
+  as rows are in the merge model ([Appendix B2](proofs/merge.md#b2-terms)).
 - Components follow each other with no count or end; a shorter key that is
   a prefix of a longer one sorts first.
 - Numbers, integer or real, share one encoding, so `1` and `1.0` are one key:

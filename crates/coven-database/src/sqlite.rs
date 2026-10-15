@@ -118,19 +118,10 @@ impl DatabaseConnection {
                 | FunctionFlags::SQLITE_DETERMINISTIC
                 | FunctionFlags::SQLITE_DIRECTONLY,
             |ctx| {
-                if !ctx.len().is_multiple_of(2) {
-                    return Err(rusqlite::Error::InvalidParameterCount(
-                        ctx.len(),
-                        ctx.len() + 1,
-                    ));
-                }
-                let mut values = Vec::new();
-                let mut collations = Vec::new();
-                for i in (0..ctx.len()).step_by(2) {
-                    collations.push(ctx.get::<String>(i)?);
-                    values.push(crate::write_encoding::value(ctx.get_raw(i + 1))?);
-                }
-                crate::write_rows::equality_key(&values, &collations)
+                let values = (0..ctx.len())
+                    .map(|i| crate::write_encoding::value(ctx.get_raw(i)))
+                    .collect::<rusqlite::Result<Vec<_>>>()?;
+                crate::write_rows::equality_key(&values)
                     .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))
             },
         )?;
@@ -457,6 +448,15 @@ impl DatabaseConnection {
     pub(crate) fn batch(&self, sql: &str) -> Result<(), DbError> {
         let _scope = self.authorization.internal();
         self.connection.execute_batch(sql).map_err(Into::into)
+    }
+
+    /// The collation a column declares, BINARY when it names none.
+    pub(crate) fn column_collation(&self, table: &str, column: &str) -> Result<String, DbError> {
+        let _scope = self.authorization.internal();
+        let (_, collation, _, _, _) =
+            self.connection
+                .column_metadata(Some("main"), table, column)?;
+        Ok(collation.map_or_else(|| "BINARY".into(), |c| c.to_string_lossy().into_owned()))
     }
 
     pub(crate) fn columns_read(&self, sql: &str) -> Result<Vec<String>, DbError> {

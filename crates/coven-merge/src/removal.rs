@@ -106,8 +106,8 @@ impl RemovalRow {
 /// One unique value and the latest timestamp of any column in its constraint.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniqueClaim {
-    /// Canonical equality encoding of the whole value, with SQL collation and
-    /// null semantics supplied by the database. Non-conflicting nulls make no claim.
+    /// Canonical equality encoding of the whole value: text compares by bytes,
+    /// since unique index terms are BINARY (§8.5). Non-conflicting nulls make no claim.
     pub value: Vec<u8>,
     /// The latest winning setter of any of the constraint's columns (§8.5).
     pub timestamp: Timestamp,

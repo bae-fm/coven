@@ -274,7 +274,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
         };
         let migrations = || {
             vec![crate::Migration::run(1, "references", move |db| {
-                db.execute_batch(&format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY COLLATE NOCASE); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,parent TEXT REFERENCES parents(id) ON DELETE {action}); CREATE INDEX child_parent ON children(parent)"))?;
+                db.execute_batch(&format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,parent TEXT REFERENCES parents(id) ON DELETE {action}); CREATE INDEX child_parent ON children(parent)"))?;
                 Ok(())
             })]
         };
@@ -307,7 +307,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             .unwrap();
         let before = frames(&c, Audience::Store).await;
         b_store.join_circle(&b, CircleId(uuid::Uuid::from_u128(10)));
-        sql(&b,"INSERT INTO children VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','PaReNt')").await.unwrap();
+        sql(&b,"INSERT INTO children VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a','parent')").await.unwrap();
         let history = |db: &Database| {
             db.inspect_writer(|db|db.query("SELECT generation,write_id FROM _coven_rows WHERE table_name='children' ORDER BY generation",[],|r|Ok((r.get::<_,Vec<u8>>(0)?,r.get::<_,i64>(1)?))).unwrap())
         };
@@ -373,7 +373,7 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             ))
             .await
             .unwrap(),
-            "PaReNt"
+            "parent"
         );
         for db in [a, b, c] {
             db.close().await.unwrap();

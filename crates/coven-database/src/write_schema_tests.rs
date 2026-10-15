@@ -279,30 +279,6 @@ async fn column_expression_and_partial_unique_identities_keep_each_reason() {
 }
 
 #[tokio::test]
-async fn explicit_collation_terms_do_not_merge_with_bare_column_constraints() {
-    use crate::write::tests::sql;
-    use coven_format::value::Value;
-    use coven_merge::Rule;
-    for schema in [
-        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,edited INT); CREATE UNIQUE INDEX folded ON notes(title COLLATE NOCASE)",
-        "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT UNIQUE,edited INT,UNIQUE(title COLLATE NOCASE))",
-    ] {
-        let store = TestStore::new();
-        let db = store.schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], schema).await.unwrap();
-        sql(&db,"INSERT INTO notes VALUES('45','Groceries',0),('46','Shopping',0)").await.unwrap();
-        let expected = Rule::Unique(["title COLLATE NOCASE"].into());
-        crate::tests::remote_update(&db, "notes", "46", &[("title",Value::Text("GROCERIES".into()))]).await;
-        sql(&db,"UPDATE notes SET edited=1 WHERE id='45'").await.unwrap();
-        db.inspect_writer(|db| {
-            let rules = db.query_row("SELECT replaced_by FROM _coven_lost WHERE column_id IS NULL",[],|r| Ok(coven_format::merge_fields::decode_rules(&r.get::<_,Vec<u8>>(0)?).unwrap())).unwrap();
-            assert_eq!(rules,[expected].into());
-            assert_eq!(db.query_row("SELECT count(*) FROM _coven_claims",[],|r| r.get::<_,u32>(0)).unwrap(),2);
-        });
-        db.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
 async fn reading_schema_leaves_connection_evaluators_unchanged() {
     let store = TestStore::new();
     let tables = vec![SyncedTable::new("notes", RowIdentity::SharedKey)];

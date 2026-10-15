@@ -20,7 +20,6 @@ pub(crate) struct TableRules {
 
 pub(crate) struct UniqueSql {
     pub(crate) identity: coven_merge::UniqueConstraint,
-    pub(crate) collations: Vec<String>,
     pub(crate) dependencies: Vec<String>,
     pub(crate) expressions: Vec<String>,
     pub(crate) predicate: String,
@@ -29,7 +28,6 @@ pub(crate) struct UniqueSql {
 struct AutomaticUnique {
     terms: Vec<String>,
     columns: Vec<String>,
-    collations: Vec<String>,
 }
 
 impl TableRules {
@@ -56,7 +54,6 @@ impl TableRules {
         let mut checks = Vec::new();
         let mut automatic = Vec::new();
         let mut generated = std::collections::BTreeMap::new();
-        let mut column_collations = std::collections::BTreeMap::new();
         for definition in &definitions {
             let column = table
                 .columns
@@ -65,7 +62,6 @@ impl TableRules {
                 .expect("schema column");
             let mut source = sources.next().expect("column source");
             let mut sql = format!("{} {}", identifier(&column.name), identifier(&column.kind));
-            let mut collation = "BINARY".to_owned();
             let mut unique = false;
             for constraint in definition.constraints {
                 match &constraint.constraint {
@@ -76,8 +72,9 @@ impl TableRules {
                             expression.text().to_owned(),
                         ));
                     }
+                    // A CHECK compares by the column's collation.
                     ColumnConstraint::Collate { collation_name } => {
-                        collation = name(collation_name.0);
+                        let collation = name(collation_name.0);
                         sql.push_str(&format!(" COLLATE {}", identifier(&collation)));
                     }
                     ColumnConstraint::Generated { .. } => {
@@ -100,10 +97,8 @@ impl TableRules {
                 automatic.push(AutomaticUnique {
                     terms: vec![column.name.clone()],
                     columns: vec![column.name.clone()],
-                    collations: vec![collation.clone()],
                 });
             }
-            column_collations.insert(column.name.clone(), collation);
             columns.push(sql);
         }
         // SQLite also accepts table constraints without commas between them.
@@ -121,20 +116,11 @@ impl TableRules {
                 TableConstraint::Unique { columns, .. } => {
                     let body = source.node_body(&constraint.constraint);
                     let terms = terms(table, columns, &body);
-                    let (columns, collations) = columns
+                    let columns = columns
                         .iter()
-                        .map(|term| {
-                            let (column, explicit) = automatic_column(table, &term.expr);
-                            let collation =
-                                explicit.unwrap_or_else(|| column_collations[&column].clone());
-                            (column, collation)
-                        })
-                        .unzip();
-                    automatic.push(AutomaticUnique {
-                        terms,
-                        columns,
-                        collations,
-                    });
+                        .map(|term| automatic_column(table, &term.expr))
+                        .collect();
+                    automatic.push(AutomaticUnique { terms, columns });
                 }
                 _ => {}
             }
@@ -183,13 +169,15 @@ impl TableRules {
                 let expressions: Vec<_> = terms
                     .iter()
                     .zip(&index.columns)
-                    .zip(&index.collations)
-                    .map(|((term, column), collation)| {
+                    .map(|(term, column)| {
                         let expression = match column {
                             Some(column) => identifier(column),
                             None => term.clone(),
                         };
-                        format!("({expression}) COLLATE {}", identifier(collation))
+                        // Every unique index term is BINARY (§8.5), but an
+                        // expression such as `+title` compares by its column's
+                        // collation unless the comparison names the index's.
+                        format!("({expression}) COLLATE BINARY")
                     })
                     .collect();
                 let sql = format!(
@@ -201,7 +189,6 @@ impl TableRules {
                 Ok(UniqueSql {
                     identity: coven_merge::UniqueConstraint { terms, partial },
                     dependencies: db.columns_read(&format!("{sql} WHERE {predicate}"))?,
-                    collations: index.collations.clone(),
                     expressions,
                     predicate,
                 })
@@ -248,11 +235,6 @@ impl AutomaticUnique {
                 .iter()
                 .zip(&index.columns)
                 .all(|(a, b)| b.as_ref().is_some_and(|b| a.eq_ignore_ascii_case(b)))
-            && self
-                .collations
-                .iter()
-                .zip(&index.collations)
-                .all(|(a, b)| a.eq_ignore_ascii_case(b))
     }
 }
 
@@ -309,23 +291,12 @@ fn column(table: &TableSchema, expr: &Expr<'_>) -> Option<String> {
         .map(|c| c.name.clone())
 }
 
-fn automatic_column(table: &TableSchema, mut expr: &Expr<'_>) -> (String, Option<String>) {
-    let mut collation = None;
+fn automatic_column(table: &TableSchema, mut expr: &Expr<'_>) -> String {
     loop {
         match expr {
-            Expr::Collate(inner, name_text) => {
-                if collation.is_none() {
-                    collation = Some(name(name_text));
-                }
-                expr = inner;
-            }
+            Expr::Collate(inner, _) => expr = inner,
             Expr::Parenthesized(inner) if inner.len() == 1 => expr = &inner[0],
-            _ => {
-                return (
-                    column(table, expr).expect("SQLite automatic unique index column"),
-                    collation,
-                )
-            }
+            _ => return column(table, expr).expect("SQLite automatic unique index column"),
         }
     }
 }

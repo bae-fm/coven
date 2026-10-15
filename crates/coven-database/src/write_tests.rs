@@ -457,31 +457,6 @@ async fn a_null_key_is_refused_by_sqlite_before_capture() {
 }
 
 #[tokio::test]
-async fn collated_keys_keep_one_identity_across_equivalent_spellings() {
-    let store = TestStore::new();
-    let database = store
-        .schema(
-            vec![SyncedTable::new("tags", RowIdentity::SharedKey)],
-            "CREATE TABLE tags(id TEXT COLLATE NOCASE NOT NULL PRIMARY KEY, label TEXT)",
-        )
-        .await
-        .unwrap();
-    sql(&database, "INSERT INTO tags VALUES('Urgent','one')")
-        .await
-        .unwrap();
-    sql(&database, "UPDATE tags SET id='URGENT',label='two'")
-        .await
-        .unwrap();
-    let writes = records(&database);
-    let old = &writes[0].parts[0].rows[0];
-    let new = &writes[1].parts[0].rows[0];
-    assert_eq!(old.row, new.row);
-    assert_eq!(new.change.generation, 1);
-    assert!(matches!(new.change.operation, Operation::Update(_)));
-    database.close().await.unwrap();
-}
-
-#[tokio::test]
 async fn generated_columns_preserve_session_column_names_and_their_sql_values() {
     let store = TestStore::new();
     let database = store.schema(vec![SyncedTable::new("notes", RowIdentity::SharedKey)], "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, length INTEGER GENERATED ALWAYS AS (length(body)) STORED, body TEXT)").await.unwrap();
@@ -500,45 +475,6 @@ async fn generated_columns_preserve_session_column_names_and_their_sql_values() 
     assert_eq!(columns["length"].value, Value::Integer(10));
     assert_eq!(row.old["length"], Value::Integer(4));
     database.close().await.unwrap();
-}
-
-#[tokio::test]
-async fn key_normalization_matches_sqlites_builtin_collations_with_embedded_nul() {
-    for (collation, before, after) in [("nocase", "A\0x", "a\0y"), ("rtrim", "urgent  ", "urgent")]
-    {
-        let store = TestStore::new();
-        let database = store.builder(vec![SyncedTable::new("tags", RowIdentity::SharedKey)], vec![crate::Migration::run(1, "collated tags", move |context| {
-            context.execute_batch(&format!("CREATE TABLE tags(id TEXT COLLATE {collation} NOT NULL PRIMARY KEY,label TEXT)"))?;
-            Ok(())
-        })]).open().await.unwrap();
-        database
-            .write(move |context| {
-                let same: bool = context.query_row(
-                    &format!("SELECT ?1 = ?2 COLLATE {collation}"),
-                    [before, after],
-                    |r| r.get(0),
-                )?;
-                assert!(same);
-                context.execute("INSERT INTO tags VALUES(?1,'one')", [before])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        database
-            .write(move |context| {
-                context.execute("UPDATE tags SET id=?1,label='two'", [after])?;
-                Ok(())
-            })
-            .await
-            .unwrap();
-        let writes = records(&database);
-        assert_eq!(writes[1].parts[0].rows.len(), 1);
-        assert_eq!(
-            writes[0].parts[0].rows[0].row,
-            writes[1].parts[0].rows[0].row
-        );
-        database.close().await.unwrap();
-    }
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

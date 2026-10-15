@@ -554,6 +554,10 @@ pub enum SchemaError {
     LocalChildUpdate { table: String, column: String },
     /// SQLite chooses the primary key itself (§8.5).
     GeneratedPrimaryKey { table: String },
+    /// A synced key, unique or foreign-key column, or a unique index term, uses
+    /// a collation other than BINARY (§8.5, D3). `column` names the index for
+    /// an expression term.
+    KeyCollation { table: String, column: String, collation: String },
     /// An independent key has no text column to hold its UUID (§8.5).
     IndependentKeyNotUuid { table: String },
     /// Declared key columns do not match the table's primary key (E2).

@@ -188,11 +188,7 @@ impl<'a> AppView<'a> {
                 let parts: Vec<_> = columns.iter().map(|c| values[c].clone()).collect();
                 if parts.iter().all(|v| !matches!(v, Value::Null)) {
                     self.lookup
-                        .entry((
-                            table.name.clone(),
-                            columns,
-                            equality_key(&parts, &index.collations)?,
-                        ))
+                        .entry((table.name.clone(), columns, equality_key(&parts)?))
                         .or_default()
                         .push(key.clone());
                 }
@@ -280,7 +276,7 @@ impl<'a> AppView<'a> {
                 .clone()
             })
             .collect();
-        let wanted = equality_key(&ordered_values, &index.collations)?;
+        let wanted = equality_key(&ordered_values)?;
         let mut found = BTreeMap::new();
         for values in matching(&values)? {
             let key = (table.name.clone(), row_key(table, &values)?);
@@ -291,7 +287,7 @@ impl<'a> AppView<'a> {
             if let Some(old) = old {
                 let components: Vec<_> = ordered_columns.iter().map(|c| old[c].clone()).collect();
                 if !components.iter().any(|v| matches!(v, Value::Null))
-                    && equality_key(&components, &index.collations)? == wanted
+                    && equality_key(&components)? == wanted
                 {
                     found.insert(key, old);
                 }
@@ -371,26 +367,10 @@ pub(crate) fn target_columns(table: &TableSchema, key: &SchemaForeignKey) -> Vec
         .collect()
 }
 
-pub(crate) fn equality_key(values: &[Value], collations: &[String]) -> Result<Vec<u8>, DbError> {
-    let mut values = values.to_vec();
-    for (value, collation) in values.iter_mut().zip(collations) {
-        if let Value::Text(text) = value {
-            match collation.to_ascii_uppercase().as_str() {
-                "BINARY" => {}
-                "NOCASE" => {
-                    text.make_ascii_lowercase();
-                    if let Some(nul) = text.find('\0') {
-                        let ignored = text.len() - nul;
-                        text.truncate(nul);
-                        text.extend(std::iter::repeat_n('\0', ignored));
-                    }
-                }
-                "RTRIM" => text.truncate(text.trim_end_matches(' ').len()),
-                other => panic!("unsupported registered collation {other}"),
-            }
-        }
-    }
-    encoded(coven_format::key::encode_key(&values))
+/// Equal SQLite key values share these bytes: synced key columns compare text
+/// by bytes (§8.5), and the encoding gives equal numbers one form (D3).
+pub(crate) fn equality_key(values: &[Value]) -> Result<Vec<u8>, DbError> {
+    encoded(coven_format::key::encode_key(values))
 }
 
 pub(crate) fn row_id(key: &AppKey, row: &AppRow) -> RowId {
@@ -426,14 +406,11 @@ pub(crate) fn column_list(table: &TableSchema) -> String {
 }
 
 pub(crate) fn row_key(table: &TableSchema, values: &AppValues) -> Result<Vec<u8>, DbError> {
-    let key = key_columns(table);
-    let primary = table
-        .indices
+    let components: Vec<_> = key_columns(table)
         .iter()
-        .find(|index| index.primary)
-        .expect("synced key has a primary index");
-    let components: Vec<_> = key.iter().map(|c| values[&c.name].clone()).collect();
-    equality_key(&components, &primary.collations)
+        .map(|c| values[&c.name].clone())
+        .collect();
+    equality_key(&components)
 }
 
 pub(crate) fn reference_error(table: &TableSchema, values: &AppValues, column: &str) -> DbError {

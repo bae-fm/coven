@@ -53,8 +53,8 @@ pub(crate) fn capture(
         } else {
             &old
         };
-        // Check the captured insert before key collation can normalize its text,
-        // including a key change or a re-add that the merge represents as an update.
+        // Check each captured insert's key, including a key change or a re-add
+        // that the merge represents as an update.
         if operation.code() == Action::SQLITE_INSERT {
             validate_key(schema, table, values)?;
         }
@@ -64,8 +64,8 @@ pub(crate) fn capture(
                 entry.insert(CapturedRow { old, new });
             }
             std::collections::btree_map::Entry::Occupied(mut entry) => {
-                // Sessions compare raw keys. SQLite can identify two spellings
-                // as one key under a collation; that is one row incarnation.
+                // Sessions compare keys by storage class, but SQLite holds 1
+                // and 1.0 as one key (D3); that is one row incarnation.
                 let change = entry.get_mut();
                 for (target, incoming) in [(&mut change.old, old), (&mut change.new, new)] {
                     for (column, value) in incoming {
