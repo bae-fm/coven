@@ -5964,9 +5964,9 @@ Carol's tablet:
     as schema losses. Ben's write 11 after the atomic reload uses the
     winning state; reading the passed positions of 9 and 10 alone does not
     exclude it.
-- Loading a winning snapshot replaces the local values computed by a losing
-  migration; those values become no shared losses, while ordinary excluded
-  writes retain their original-value losses
+- Loading a winning snapshot replaces the local values a losing migration
+  computed, which become no shared losses; ordinary excluded writes keep
+  their original-value losses, judged alike by every receiver
   ([`competing_raise_converges`](proofs/queue/CovenQueue/RaiseExamples.lean),
   [`receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean)).
 - If two devices make the same breaking change at once, the one with the
