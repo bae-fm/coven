@@ -1,5 +1,25 @@
 use super::*;
 
+/// ListMultipartUploads: every upload whose key starts with the prefix.
+pub(super) fn list_uploads(state: &Remote, q: &BTreeMap<String, String>) -> Response<Body> {
+    let prefix = q.get("prefix").cloned().unwrap_or_default();
+    let uploads: String = state
+        .uploads
+        .iter()
+        .filter(|(_, upload)| upload.key.starts_with(&prefix))
+        .map(|(id, upload)| {
+            format!(
+                "<Upload><Key>{}</Key><UploadId>{id}</UploadId></Upload>",
+                upload.key
+            )
+        })
+        .collect();
+    response(
+        200,
+        format!("<ListMultipartUploadsResult><IsTruncated>false</IsTruncated>{uploads}</ListMultipartUploadsResult>"),
+    )
+}
+
 #[tokio::test]
 #[ignore]
 async fn lean_differential_s3_create() {
@@ -511,26 +531,113 @@ async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
 }
 
 /// A temporary that cannot be deleted fails the create even when the copy
-/// published it; the occupied retry is then compared by its bytes (§10).
+/// published it. The caller's retry of the same create stages and deletes
+/// the same temporary, and finds a plain occupied path holding its own
+/// bytes, which it accepts by comparing them (§4, §10).
 #[tokio::test]
-async fn every_object_copy_reports_a_failed_temporary_deletion() {
+async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary() {
     let (_server, state, storage) = every_object_provider().await;
     let path = ObjectPath::device_log(
         STORE_ID,
         coven_foundation::id_source::DeviceId(31),
         std::num::NonZeroU64::MIN,
     );
+    let temporary = storage
+        .provider
+        .create_temporary_key(&path, b"bytes")
+        .unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
     assert_eq!(
         storage.create(&path, b"bytes").await.unwrap_err().failure(),
         StorageFailure::PermissionDenied
     );
     assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
-    assert_eq!(temporaries(&state), 1);
+    assert!(state.lock().unwrap().objects.contains_key(&temporary));
     state.lock().unwrap().refuse_temporary_delete = false;
-    assert_eq!(
-        storage.create(&path, b"bytes").await.unwrap_err().failure(),
-        StorageFailure::AlreadyExists
+    let retry = storage.create(&path, b"bytes").await.unwrap_err();
+    assert!(!matches!(retry, StorageError::Cleanup { .. }));
+    assert_eq!(retry.failure(), StorageFailure::AlreadyExists);
+    assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
+    assert_eq!(temporaries(&state), 0);
+}
+
+/// A crash between staging and deletion leaves the create's temporary; the
+/// create is still recorded by its caller, and its retry removes it. Another
+/// create's temporary has another name (§4,
+/// `CopyPublication.Recorded.staged_recorded`).
+#[tokio::test]
+async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::device_log(
+        STORE_ID,
+        coven_foundation::id_source::DeviceId(31),
+        std::num::NonZeroU64::MIN,
     );
-    assert_eq!(temporaries(&state), 1);
+    let temporary = storage
+        .provider
+        .create_temporary_key(&path, b"bytes")
+        .unwrap();
+    assert_ne!(
+        temporary,
+        storage
+            .provider
+            .create_temporary_key(&path, b"other")
+            .unwrap()
+    );
+    // The crashed attempt staged its bytes and stopped before its copy.
+    state
+        .lock()
+        .unwrap()
+        .objects
+        .insert(temporary.clone(), b"bytes".to_vec());
+    storage.create(&path, b"bytes").await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
+    assert_eq!(temporaries(&state), 0);
+}
+
+/// A copy profile records its session before the native multipart upload
+/// exists: the first part initiates it. An initiation whose reply was lost
+/// is found under the recording's name and aborted on resume or abort, so
+/// no upload outlives a recording that does not name it (§4).
+#[tokio::test]
+async fn a_planned_session_aborts_an_initiation_whose_reply_was_lost() {
+    for abandon in [false, true] {
+        let (_server, state, storage) = every_object_provider().await;
+        let path = ObjectPath::device_log(
+            STORE_ID,
+            coven_foundation::id_source::DeviceId(31),
+            std::num::NonZeroU64::MIN,
+        );
+        let mut session = storage.begin_upload(&path, 4).await.unwrap();
+        let recorded = session.encode().unwrap();
+        assert!(
+            state.lock().unwrap().requests.is_empty(),
+            "named before any request"
+        );
+        state.lock().unwrap().lose_initiation_reply = true;
+        assert_eq!(
+            storage
+                .upload_part(&mut session, b"data")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Network
+        );
+        assert_eq!(state.lock().unwrap().uploads.len(), 1);
+        let mut resumed = UploadSession::decode(recorded.as_bytes()).unwrap();
+        if abandon {
+            storage.abort_upload(&resumed).await.unwrap();
+            assert!(state.lock().unwrap().uploads.is_empty());
+            continue;
+        }
+        storage.resume_upload(&mut resumed).await.unwrap();
+        assert_eq!(resumed.confirmed_bytes(), 0);
+        assert!(state.lock().unwrap().uploads.is_empty());
+        storage.upload_part(&mut resumed, b"data").await.unwrap();
+        storage.finish_upload(&mut resumed).await.unwrap();
+        assert!(resumed.is_complete());
+        assert_eq!(storage.read(&path).await.unwrap(), b"data");
+        assert!(state.lock().unwrap().uploads.is_empty());
+        assert_eq!(temporaries(&state), 0);
+    }
 }

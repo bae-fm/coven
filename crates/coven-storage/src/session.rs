@@ -18,8 +18,9 @@ pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 /// call `resume_upload` to discover bytes accepted before a reply was lost. The
 /// bytes of this value include an upload capability: keep them secret. Dropping
 /// a session never aborts it; explicit abort abandons its pending bytes.
-/// On GCS the recorded token names the temporary object as well as identifying
-/// publication. Abort deletes it even after native multipart completion; failed
+/// On copy profiles the recorded token names the temporary object as well as
+/// identifying publication, and the session is recorded before the native
+/// multipart upload exists: the first part initiates it. Abort deletes it even after native multipart completion; failed
 /// copy or cleanup keeps the recording incomplete so it can be retried.
 /// OneDrive records its temporary UUID through receipt, copying, verification
 /// and deletion; native transfer completion alone is not publication.
@@ -78,6 +79,12 @@ pub(crate) enum SessionState {
     },
     S3Restart {
         id: SecretText,
+        token: SecretText,
+    },
+    /// A copy profile's session whose temporary name is recorded before the
+    /// native multipart upload is initiated, so no upload exists that its
+    /// recording does not name (§4).
+    S3Planned {
         token: SecretText,
     },
     GoogleDrive {
@@ -217,6 +224,12 @@ impl UploadSession {
             }
             SessionState::S3Restart { id, token } if provider == CloudProvider::S3 => {
                 nonempty(id)?;
+                nonempty(token)?;
+                if self.confirmed != 0 {
+                    return Err(StorageFailure::InvalidPart.into());
+                }
+            }
+            SessionState::S3Planned { token } if provider == CloudProvider::S3 => {
                 nonempty(token)?;
                 if self.confirmed != 0 {
                     return Err(StorageFailure::InvalidPart.into());

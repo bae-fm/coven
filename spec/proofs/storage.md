@@ -87,10 +87,37 @@ copy.
   writers of this race in 14 of 200 suite 5 trials, which is why its profile
   publishes every object by copy.
 
+Every temporary must also go: a temporary, or a native multipart upload that
+will assemble one, that no record names stays in the reserved namespace for
+good. `CopyPublication.Recorded` models the caller's durable records next to
+the bucket. A create is recorded with its destination and fixed bytes until
+it settles; a temporary is staged under a name; a crash is a step that never
+comes. The rule (T218) stages only under a recorded name and drops a record
+only with nothing staged under it. A single-request create's temporary is
+named by the create itself, and a multipart session is recorded before its
+upload is initiated.
+
+- `staged_recorded`: under the rule, in every history, whatever crashes
+  interrupt, every staged temporary is named by a record the caller still
+  holds (`step_covered` is the step).
+- `retry_clears`: a record's retry, staging again under the same name,
+  copying and deleting, leaves nothing staged there, whatever an earlier
+  crashed attempt left.
+- `failed_deletion_retry_accepted`: a create whose copy landed but whose
+  deletion failed retries with a fresh marker under the same name; its copy
+  is refused, the destination still holds the create's own bytes, so comparing
+  bytes accepts it, and its deletion clears the name.
+- `attempt_naming_strands` is a checked example of T208's naming: a create
+  staged under a fresh attempt id crashes, its retry stages, publishes and
+  deletes under another id, and the record is dropped. The first temporary
+  stays and no record names it. A multipart upload initiated before its
+  session was recorded is the same history.
+
 Outside the model: whether a real provider's copies are atomic against each
 other, which the suite's races test live; the 5 GiB single-copy limit, which
-the adapter enforces before any request; and the provider's metadata copying
-of the marker.
+the adapter enforces before any request; the provider's metadata copying
+of the marker; collisions of the SHA-256 naming, taken as injective; and a
+caller that abandons a create without retrying it, such as a device reset.
 
 ## Restore, another live copy, and writes
 

@@ -100,7 +100,7 @@ pub(super) async fn single(
         });
     };
     let token = SecretText::new(s.ids.new_id().to_string());
-    let temporary = s.temporary_key(target, &token)?;
+    let temporary = s.create_temporary_key(target, bytes)?;
     s.client
         .put_object()
         .bucket(&s.bucket)

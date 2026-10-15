@@ -424,4 +424,160 @@ theorem put_racing_copy_two_winners :
       confirm put.1 2 dest = .reset := by
   decide
 
+/-! ## Every staged temporary is recorded
+
+A temporary, or a native multipart upload that will assemble one, is the
+publisher's to remove. Under T208 a single-request create staged under a
+fresh attempt id and a multipart session was recorded only after its upload
+was initiated, so a crash in between left one that no record named and no
+later step removes. The rule (T218): stage only under a name the caller has
+already recorded, and drop the record only once nothing is staged under it.
+A single-request create's temporary is named by the create itself (its
+destination and bytes), which the caller keeps until the create settles; a
+multipart session's name is recorded before its upload is initiated. -/
+
+namespace Recorded
+
+/-- A create the caller keeps until it settles: its destination and fixed bytes. -/
+structure Create where
+  dest : Path
+  bytes : Bytes
+  deriving DecidableEq, Repr
+
+/-- A temporary's name: a create's own, or an id drawn for one attempt or
+session. -/
+inductive Name where
+  | create (c : Create)
+  | attempt (id : Nat)
+  deriving DecidableEq, Repr
+
+/-- Published objects; staged temporaries by name, with bytes and the
+attempt's marker; the names the caller's durable records hold. -/
+structure World where
+  published : Path → Option Published
+  staging : Name → Option (Bytes × Nat)
+  recorded : List Name
+
+inductive Step where
+  /-- The caller commits a record naming `n`: a queued create, or a session. -/
+  | record (n : Name)
+  /-- Stage bytes under `n` with an attempt's marker (a PUT, or an initiated
+  and assembled multipart upload). -/
+  | stage (n : Name) (bytes : Bytes) (marker : Nat)
+  /-- One conditional copy of `n` to `dest`. -/
+  | copy (n : Name) (dest : Path) (time : Nat)
+  /-- Delete the temporary; deleting an absent one succeeds. -/
+  | delete (n : Name)
+  /-- The caller drops its record once the call settled. -/
+  | settle (n : Name)
+  deriving DecidableEq, Repr
+
+/-- `strict` is the rule: staging needs a recorded name, and a record is
+dropped only with nothing staged under it. Otherwise (T208) staging and
+dropping are unguarded. A crash is a step that never comes: every step
+leaves durable state as it stands. -/
+def step (strict : Bool) (w : World) : Step → World
+  | .record n => { w with recorded := n :: w.recorded }
+  | .stage n bytes marker =>
+      if !strict || n ∈ w.recorded then
+        { w with staging := fun m => if m = n then some (bytes, marker) else w.staging m }
+      else w
+  | .copy n dest time =>
+      match w.staging n, w.published dest with
+      | some (bytes, marker), none =>
+          { w with published := fun p =>
+              if p = dest then some ⟨⟨bytes, time⟩, marker⟩ else w.published p }
+      | _, _ => w
+  | .delete n => { w with staging := fun m => if m = n then none else w.staging m }
+  | .settle n =>
+      if !strict || w.staging n = none then { w with recorded := w.recorded.erase n } else w
+
+def run (strict : Bool) (w : World) (steps : List Step) : World := steps.foldl (step strict) w
+
+def start : World := ⟨fun _ => none, fun _ => none, []⟩
+
+/-- Every staged temporary's name is recorded. -/
+def Covered (w : World) : Prop := ∀ n, (w.staging n).isSome → n ∈ w.recorded
+
+theorem step_covered {w : World} (h : Covered w) (s : Step) : Covered (step true w s) := by
+  intro n hn
+  cases s with
+  | record m =>
+      simp only [step] at hn ⊢
+      exact List.mem_cons_of_mem _ (h n hn)
+  | stage m bytes marker =>
+      by_cases hm : m ∈ w.recorded
+      · simp only [step, hm] at hn ⊢
+        simp at hn ⊢
+        by_cases e : n = m
+        · subst e; exact hm
+        · simp only [e, ↓reduceIte] at hn; exact h n hn
+      · simp [step, hm] at hn ⊢
+        exact h n hn
+  | copy m dest time =>
+      simp only [step] at hn ⊢
+      split at hn <;> exact h n hn
+  | delete m =>
+      simp only [step] at hn ⊢
+      by_cases e : n = m
+      · subst e; simp at hn
+      · simp only [e, ↓reduceIte] at hn; exact h n hn
+  | settle m =>
+      by_cases hs : w.staging m = none
+      · simp only [step, hs] at hn ⊢
+        simp at hn ⊢
+        by_cases e : n = m
+        · subst e; rw [hs] at hn; cases hn
+        · exact (List.mem_erase_of_ne e).mpr (h n hn)
+      · simp [step, hs] at hn ⊢
+        exact h n hn
+
+/-- Under the rule, in every history and whatever crashes interrupt, every
+staged temporary is named by a record the caller still holds. -/
+theorem staged_recorded (steps : List Step) : Covered (run true start steps) := by
+  suffices ∀ w, Covered w → Covered (run true w steps) from this start (by intro n hn; simp [start] at hn)
+  intro w hw
+  induction steps generalizing w with
+  | nil => exact hw
+  | cons s ss ih => exact ih _ (step_covered hw s)
+
+/-- A record's retry removes its temporary: staging again under the same
+name, copying and deleting leave nothing staged there, whatever an earlier,
+crashed attempt left; the record can then be dropped. -/
+theorem retry_clears (w : World) (n : Name) (bytes : Bytes) (marker : Nat) (dest : Path)
+    (time : Nat) :
+    (run true w [.stage n bytes marker, .copy n dest time, .delete n]).staging n = none := by
+  simp [run, step]
+
+/-- A create whose copy landed but whose deletion failed: its retry, with a
+fresh marker under the same name, is refused the occupied destination and
+leaves it holding the create's own bytes, so comparing bytes accepts it as
+the same create; its deletion then clears the name. -/
+theorem failed_deletion_retry_accepted (c : Create) (time time' marker marker' : Nat) :
+    let n := Name.create c
+    let first := run true start [.record n, .stage n c.bytes marker, .copy n c.dest time]
+    let retry := run true first [.stage n c.bytes marker', .copy n c.dest time', .delete n]
+    (first.staging n).isSome ∧
+      (retry.published c.dest).map (·.object.bytes) = some c.bytes ∧
+      retry.published c.dest = first.published c.dest ∧
+      retry.staging n = none := by
+  simp [run, step, start]
+
+/-- Why names must be recorded first: under T208's naming a single-request
+create stages under a fresh attempt id, and a crash before its deletion
+strands it. The retry stages under another id, publishes and deletes its
+own, and the record is dropped: the first temporary stays, and no record
+names it. A multipart session initiated before it was recorded is the same
+history with the native upload for the temporary. -/
+theorem attempt_naming_strands :
+    let c : Create := ⟨.write 31 1, [7]⟩
+    let after := run false start
+      [.record (.create c), .stage (.attempt 0) c.bytes 0,
+       .stage (.attempt 1) c.bytes 1, .copy (.attempt 1) c.dest 0, .delete (.attempt 1),
+       .settle (.create c)]
+    (after.staging (.attempt 0)).isSome ∧ after.recorded = [] := by
+  decide
+
+end Recorded
+
 end CovenStorage.CopyPublication

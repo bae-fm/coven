@@ -65,6 +65,7 @@ struct Remote {
     part_pages: usize,
     metadata: BTreeMap<String, String>,
     fail_part_reply: bool,
+    lose_initiation_reply: bool,
     lose_create_reply: bool,
     refuse_delete: bool,
     deletions: usize,
@@ -129,6 +130,9 @@ fn respond(
         }
     }
     let key = uri.path().strip_prefix("/bucket/").unwrap_or("").to_owned();
+    if q.contains_key("uploads") && method == Method::GET {
+        return gcs::list_uploads(&state, &q);
+    }
     if q.contains_key("uploads") {
         let token = headers[if state.gcs {
             "x-goog-meta-coven-upload"
@@ -148,6 +152,9 @@ fn respond(
                 parts: BTreeMap::new(),
             },
         );
+        if std::mem::replace(&mut state.lose_initiation_reply, false) {
+            return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
+        }
         return response(200,format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>"));
     }
     if let Some(id) = q.get("uploadId") {

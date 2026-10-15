@@ -730,18 +730,21 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
     );
     let mut resumed = UploadSession::decode(recording.as_bytes()).unwrap();
     connected.resume_upload(&mut resumed).await.unwrap();
-    assert_eq!(resumed.confirmed_bytes(), session.part_size() as u64);
-    connected
-        .upload_part(&mut resumed, &bytes[session.part_size()..])
-        .await
-        .unwrap();
-    if connected
+    let copy = connected
         .provider
         .settings
         .copy_publication
         .multipart()
-        .is_some()
-    {
+        .is_some();
+    // A copy profile records its session before the upload exists, so a
+    // recording older than its first part aborts that upload and starts over
+    // (§4); otherwise resumption finds the accepted part.
+    let resumed_at = if copy { 0 } else { part_size };
+    assert_eq!(resumed.confirmed_bytes(), resumed_at as u64);
+    for part in bytes[resumed_at..].chunks(part_size) {
+        connected.upload_part(&mut resumed, part).await.unwrap();
+    }
+    if copy {
         // Assemble without publishing, as when the completion reply is lost.
         let SessionState::S3 { id, parts, .. } = &resumed.state else {
             panic!("S3 session");

@@ -243,7 +243,8 @@ impl S3Storage {
         Ok(())
     }
     async fn confirm_published(&self, session: &UploadSession) -> Result<(), StorageError> {
-        let SessionState::S3 { token, .. } = &session.state else {
+        let (SessionState::S3 { token, .. } | SessionState::S3Planned { token }) = &session.state
+        else {
             return Err(StorageFailure::SessionMismatch.into());
         };
         self.confirm_marker(&session.path, session.total, token)
@@ -507,33 +508,27 @@ impl ProviderOps for S3Storage {
         }
         let part_size = crate::session::s3_part_size(total)?;
         let token = SecretText::new(self.ids.new_id().to_string());
-        let key = self.upload_key(path, &token)?;
-        let response = self
-            .client
-            .create_multipart_upload()
-            .bucket(&self.bucket)
-            .key(key)
-            .metadata("coven-upload", token.as_str())
-            .customize()
-            .interceptor(publication.clone())
-            .send()
-            .await
-            .map_err(s3_error)?;
-        let id = response
-            .upload_id()
-            .filter(|id| !id.is_empty())
-            .ok_or(StorageFailure::Protocol.with_source("S3 omitted upload id"))?;
+        // A copy profile's temporary is named before any request: the caller
+        // records the session, and the first part initiates the upload (§4).
+        let state = if self.settings.copy_publication.multipart().is_some() {
+            SessionState::S3Planned { token }
+        } else {
+            let id = self
+                .initiate(publication, &path.under(&self.prefix), &token)
+                .await?;
+            SessionState::S3 {
+                id,
+                token,
+                parts: Vec::new(),
+            }
+        };
         Ok(UploadSession {
             location: self.config(),
             path: path.clone(),
             total,
             confirmed: 0,
             part_size,
-            state: SessionState::S3 {
-                id: SecretText::new(id.into()),
-                token,
-                parts: Vec::new(),
-            },
+            state,
         })
     }
     async fn resume_upload(
@@ -545,6 +540,13 @@ impl ProviderOps for S3Storage {
             return self
                 .require_restart(publication, session, StorageFailure::SessionExpired.into())
                 .await;
+        }
+        if matches!(session.state, SessionState::S3Planned { .. }) {
+            // An upload initiated under the recording's name, whose reply
+            // and later recordings were lost, is aborted; a temporary it
+            // assembled still publishes, as a completed upload's does.
+            self.abort_initiated(publication, session).await?;
+            return self.recover_completed_upload(publication, session).await;
         }
         let id = SecretText::new(self.upload_id(session)?.to_owned());
         let mut marker = None;
@@ -624,6 +626,17 @@ impl ProviderOps for S3Storage {
     ) -> Result<(), StorageError> {
         if matches!(session.state, SessionState::S3Restart { .. }) {
             return Err(StorageFailure::SessionExpired.into());
+        }
+        if let SessionState::S3Planned { token } = &session.state {
+            let token = token.clone();
+            let id = self
+                .initiate(publication, &self.session_key(session)?, &token)
+                .await?;
+            session.state = SessionState::S3 {
+                id,
+                token,
+                parts: Vec::new(),
+            };
         }
         let id = self.upload_id(session)?;
         let SessionState::S3 { parts, .. } = &session.state else {
@@ -734,6 +747,12 @@ impl ProviderOps for S3Storage {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
+        if matches!(session.state, SessionState::S3Planned { .. }) {
+            return crate::transfer::with_cleanup(
+                self.abort_initiated(publication, session).await,
+                self.delete_temporary(session).await,
+            );
+        }
         let result = match self
             .client
             .abort_multipart_upload()

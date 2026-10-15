@@ -128,10 +128,10 @@ async fn conditional_publication_conflict_restarts_with_identical_bytes() {
             .begin_upload(&path(), bytes.len() as u64)
             .await
             .unwrap();
-        let first = storage.provider.upload_id(&session).unwrap().to_owned();
         for part in bytes.chunks(session.part_size()) {
             storage.upload_part(&mut session, part).await.unwrap();
         }
+        let first = storage.provider.upload_id(&session).unwrap().to_owned();
         let error = storage.finish_upload(&mut session).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::SessionExpired);
         assert_conflict_cause(&error, gcs);
@@ -155,13 +155,13 @@ async fn conditional_publication_conflict_restarts_with_identical_bytes() {
             StorageFailure::SessionExpired
         );
         let mut next = storage.restart_upload(&recorded).await.unwrap();
-        assert_ne!(storage.provider.upload_id(&next).unwrap(), first);
         assert_eq!(next.path(), session.path());
         assert_eq!(next.total_bytes(), bytes.len() as u64);
         assert_eq!(next.confirmed_bytes(), 0);
         for part in bytes.chunks(next.part_size()) {
             storage.upload_part(&mut next, part).await.unwrap();
         }
+        assert_ne!(storage.provider.upload_id(&next).unwrap(), first);
         // The new session must still recover a lost successful publication reply.
         if gcs {
             remote.lock().unwrap().fail_copy_reply = true;

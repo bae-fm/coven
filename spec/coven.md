@@ -959,10 +959,15 @@ the file's ranges under `F`.
     completion. Coven therefore publishes by copy. Every copy-publication
     profile uploads unconditionally to
     `<prefix>/<store>/.coven-uploads/<session>`, where `<session>` is the
-    upload's coven-generated UUID, recorded alongside the native multipart id
-    before sending any parts. This reserved namespace is distinct from every
-    coven object path in D10. Retrying or resuming that recording derives the
-    same name, including after multipart completion or a lost copy reply.
+    upload's coven-generated UUID. The session is recorded with that name
+    before its native multipart upload exists: the first part initiates it,
+    and the recording then gains the native id. A recording that predates an
+    initiation whose reply was lost still names it, so resuming or aborting
+    that recording aborts every native upload at the name and settles a
+    temporary already assembled there as a completed upload's. This reserved
+    namespace is distinct from every coven object path in D10. Retrying or
+    resuming that recording derives the same name, including after multipart
+    completion or a lost copy reply.
   - Copy publication sends the assembled temporary with one server-side
     `CopyObject` to the destination, carrying the profile's destination
     condition (`x-goog-if-generation-match: 0` for GCS). The
@@ -976,16 +981,27 @@ the file's ranges under `F`.
     an operation error and deletion error are both preserved.
   - A profile publishing every object by copy (SeaweedFS) publishes a
     single-request create the same way: one unconditional PUT stages its
-    bytes at `<prefix>/<store>/.coven-uploads/<attempt>`, carrying a fresh
+    bytes at `<prefix>/<store>/.coven-uploads/<create>`, carrying a fresh
     attempt id as its marker, then one conditional copy publishes it.
+    `<create>` is the create's own name: the UUID formed from the first 16
+    bytes of SHA-256 over `coven/copy-temporary/v1`, the destination path's
+    length as a big-endian u64, the path and the bytes.
     Store-log entries are such creates, each still dated by one request's
     completion: the copy's. A refused copy, or one whose reply was lost, is
     this attempt's own exactly when the destination carries its marker;
-    otherwise the copy's answer stands. Nothing resumes a single request,
-    so its temporary is deleted whatever the copy's outcome, and a failed
-    deletion fails the call with both errors preserved. A crash between
-    staging and deletion leaves the temporary in the reserved namespace,
-    outside every listing and read.
+    otherwise the copy's answer stands. The temporary is deleted whatever
+    the copy's outcome, and a failed deletion fails the call with both
+    errors preserved.
+  - Every temporary is staged under a name its publisher has already
+    recorded, and stays recorded until it is deleted. Every attempt of one
+    create stages and deletes the same name, so the caller's record of the
+    create, which it keeps with its fixed bytes until the create settles
+    (§6, §10), records the temporary too. A retry after a crash between
+    staging and deletion, or after a failed deletion, removes it, and finds
+    its own bytes at the destination as an occupied path, which §10's byte
+    comparison accepts as the same create. Under a fresh name per attempt a
+    crash would strand a temporary no record names
+    ([`staged_recorded`, `retry_clears`, `failed_deletion_retry_accepted`, `attempt_naming_strands`](proofs/storage/CovenStorage/CopyPublication.lean)).
   - Given a copy that checks and publishes its destination atomically,
     copy publication is create-once: the copy changes published objects
     exactly as a create does, a temporary is never visible as a published

@@ -234,6 +234,11 @@ import CovenStorage
 #print axioms CovenStorage.CopyPublication.copied_at_most
 #print axioms CovenStorage.CopyPublication.every_copy_at_most_one
 #print axioms CovenStorage.CopyPublication.put_racing_copy_two_winners
+#print axioms CovenStorage.CopyPublication.Recorded.step_covered
+#print axioms CovenStorage.CopyPublication.Recorded.staged_recorded
+#print axioms CovenStorage.CopyPublication.Recorded.retry_clears
+#print axioms CovenStorage.CopyPublication.Recorded.failed_deletion_retry_accepted
+#print axioms CovenStorage.CopyPublication.Recorded.attempt_naming_strands
 
 #print axioms CovenStorage.OwnCopyDamage.step_inv
 #print axioms CovenStorage.OwnCopyDamage.run_inv
