@@ -908,6 +908,59 @@ unconditional recent-return claim fails. `snapshot_next_number_wrong` and
 `away_write_miss` retain the independent reasons that old snapshots and writes
 cannot be discovered by next number after deletion.
 
+**4a. Away reads past deleted numbers — the rule in force stalls (checked
+history); a read rule that passes them is proved; coven does not pass them
+yet.** [`AwayReadExamples`](io/CovenIO/AwayReadExamples.lean) checks the
+history the reload work suspected. Ana's write 1 has only a Gifts part and is
+deleted once a counting Gifts snapshot covers it; her write 2, with a store
+part, stays stored. A device that reads only the store and joins later lists
+its store snapshots on the away path, finds none, reloads nothing, and then
+trusts its misses. `store_only_reader_stalls` shows its GET of write 1 missing
+at every time and its position staying at 0 while write 2 is stored. Nothing
+it reads ever names write 1, so write 2 never arrives. `joinedSource` and
+`joined_ordered` show the history meets every premise below.
+
+[`AwayRead.scan`](io/CovenIO/AwayRead.lean) is the read that fixes this. A miss
+counts as nothing new only once a complete catalog of every audience, listed
+after it, has no counting snapshot through that number. A number that a
+complete catalog listed before the missing GET covers was published, so its
+absence is a deletion (`covered_deleted`). If a readable audience's current
+newest snapshot in the later catalog reaches it, the device reloads
+(`reload_spec`); otherwise the write has no part in any readable audience and
+the read passes the number (`passed_no_part`). A number only the later catalog
+covers is read again with that catalog as the earlier one.
+
+- `miss_spec`: up to a terminal miss, every number was received by an actual
+  GET or is a deleted write with no part in any readable audience.
+- `terminal_unstored` and `away_checkpoint`: every write of that writer past
+  the terminal miss was stored no earlier than the miss, so a checkpoint
+  sampled before the reads protects it under the recent-return rule.
+- `away_complete`: every write past the start, stored before the terminal
+  miss, with a part in a readable audience, was received.
+- `away_read_passes` and `away_read_receives` run the joined history: the read
+  passes write 1 and receives write 2.
+- `after_catalog_skips_live_write` checks why the earlier catalog is needed.
+  The device's GET of Ana's store write 1 misses just before it is stored, and
+  a Gifts snapshot through it lands before the next listing. Judged by that
+  listing alone, the number is passed although the write is stored with a
+  store part; `scan` reads it again and receives it.
+
+Outside the model: the terminal and completeness theorems need every write to
+have a part. A write with none, a migration marker, can be deleted with no
+snapshot covering it, and then no catalog certifies its number.
+
+Coven does not implement the passing step. Passing a number gives the device a
+position whose write's timestamp and recorded reads it never learns, and coven
+keeps that metadata for every consumed position: a received write's causal
+checks read it for each write its past ends at, and a snapshot lists it for
+every consumed write without gaps. The reload's existing pass over a deleted
+number no loaded snapshot covers has the same gap. Two readings keep the
+metadata: a snapshot format that carries such a gap, or a retention rule that
+also requires the store's current newest counting snapshot to cover every
+deleted write, since every member reads the store and its snapshots carry
+every consumed write's metadata. `store_covered_never_passes` proves that
+under the second the read never passes a number: each deleted miss reloads.
+
 **5. Finality input — proved with the one-hour listing requirement.**
 `observationTime` subtracts the one-hour margin and one positive provider unit
 from the clock object's storage time. `old_immutable_present` proves backward

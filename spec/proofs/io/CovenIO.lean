@@ -30,6 +30,8 @@ import CovenIO.RepairedExamples
 import CovenIO.CommonReload
 import CovenIO.AudienceRetention
 import CovenIO.CommonReloadExamples
+import CovenIO.AwayRead
+import CovenIO.AwayReadExamples
 import CovenIO.SnapshotWrites
 import CovenIO.SnapshotWriteExamples
 import CovenIO.RaiseCoverage
