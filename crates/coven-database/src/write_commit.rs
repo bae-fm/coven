@@ -177,37 +177,7 @@ pub(crate) fn queue(
     if record.parts.is_empty() {
         return Ok(());
     }
-    // The author's write passes the check every receiver makes (§8.8): a
-    // change receivers would refuse fails here instead, so no device keeps an
-    // effect the others reject.
-    let judgement = crate::judge::judge(database, schema, &record.header)?;
-    for part in &record.parts {
-        for row in part.records() {
-            let checked = judgement.rows.get(row.row()).ok_or(DbError::Invariant {
-                what: "every queued change is judged",
-            })?;
-            let verdict = match &checked.check {
-                Ok(()) if checked.derived => coven_format::snapshot_rows::ChangeVerdict::Derived(
-                    checked.causes(record.header.position),
-                ),
-                Ok(()) => coven_format::snapshot_rows::ChangeVerdict::Applied,
-                Err(coven_format::loss::AuthorizationFailure::NotOwner { owner }) => {
-                    return Err(DbError::NotOwner {
-                        table: row.row().table.clone(),
-                        key: crate::owner_permission::row_key(row.row())?,
-                        owner: *owner,
-                    })
-                }
-                Err(coven_format::loss::AuthorizationFailure::InvalidForeignKeyEffect) => {
-                    return Err(DbError::Invariant {
-                        what: "receivers reconstruct a local write's foreign-key actions",
-                    })
-                }
-            };
-            crate::write_sources::admit(database, &record.header, row.row(), &verdict)?;
-        }
-    }
-    Ok(())
+    crate::author_judgement::judge_own_write(database, schema, record)
 }
 
 /// Check row writes and file attachments against the same committed membership.

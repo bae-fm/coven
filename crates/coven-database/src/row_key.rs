@@ -5,6 +5,17 @@
 pub struct RowKey(pub(crate) Vec<rusqlite::types::Value>);
 
 impl RowKey {
+    /// A merge row's encoded key as SQL values.
+    pub(crate) fn decode(key: &[u8]) -> Result<Self, crate::DbError> {
+        Ok(Self(
+            coven_format::key::decode_key(key)
+                .map_err(|_| crate::DbError::DamagedDatabase)?
+                .iter()
+                .map(crate::write_encoding::sql_value)
+                .collect(),
+        ))
+    }
+
     /// The SQL values identifying the row.
     pub fn values(&self) -> &[rusqlite::types::Value] {
         &self.0

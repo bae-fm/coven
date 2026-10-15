@@ -1,14 +1,8 @@
-//! A local write's row operations as steps on merge rows, and what actually
-//! produced each one (§8.8, D5).
+//! A local write's row operations as steps on merge rows (§8.8, D5).
 //!
-//! The steps travel in the write, without saying what produced them:
-//! receivers reconstruct that themselves. The author knows it from the trigger
-//! depth SQLite reports. A statement's own rows are at depth zero. A trigger or
-//! foreign-key action runs one level below the change that fired it, and a
-//! foreign-key action runs right after that change, so an operation is a
-//! foreign-key action exactly when it is the action the schema derives from the
-//! nearest earlier operation one level up. Everything else below depth zero is
-//! a trigger's own write, a direct target like a statement's.
+//! The steps travel in the write without saying what produced them. Every
+//! device, the author included, tells foreign-key actions from direct targets
+//! with the same label-free rule over the steps ([`crate::judge`]).
 
 use crate::declaration::AudienceSource;
 use crate::schema::{SchemaForeignKey, TableSchema};
@@ -22,42 +16,7 @@ use crate::DbError;
 use coven_format::value::Value;
 use coven_format::write::Step;
 use coven_merge::{Audience, Change, ColumnValue, Operation, Parent, RowId};
-use rusqlite::hooks::Action;
 use std::collections::BTreeMap;
-
-/// What actually produced an operation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Origin {
-    /// An app statement, or coven filling a file column for it.
-    Statement,
-    /// A trigger's own write.
-    Trigger,
-    /// A foreign-key action of the operation at this row and sequence.
-    ForeignKey {
-        /// The changed parent's row and step sequence.
-        cause: (RowId, u32),
-    },
-}
-
-/// Every declared table's operations of the app phase.
-#[derive(Clone, Debug, Default)]
-pub(crate) struct CapturedOperations {
-    /// Each row's steps, in sequence order.
-    pub(crate) steps: BTreeMap<RowId, Vec<Step>>,
-    /// What produced each step, by its row and sequence.
-    pub(crate) origins: BTreeMap<(RowId, u32), Origin>,
-}
-
-/// One declared-table event with its decoded values and the steps it made.
-struct Op {
-    depth: i32,
-    table: String,
-    action: Action,
-    old: Option<AppValues>,
-    new: Option<AppValues>,
-    /// The first step this operation made, naming it as a cause.
-    step: Option<(RowId, u32)>,
-}
 
 struct Tracker<'a> {
     db: &'a DatabaseConnection,
@@ -293,14 +252,14 @@ impl Tracker<'_> {
 }
 
 /// Every operation of the app phase on a declared table, as steps of the
-/// merge rows they changed, with what produced each.
+/// merge rows they changed: each row's steps, in sequence order.
 pub(crate) fn capture(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     before: &AppView<'_>,
     after: &AppView<'_>,
     events: &[Event],
-) -> Result<CapturedOperations, DbError> {
+) -> Result<BTreeMap<RowId, Vec<Step>>, DbError> {
     let mut tracker = Tracker {
         db,
         schema,
@@ -310,20 +269,14 @@ pub(crate) fn capture(
         rows: BTreeMap::new(),
         generations: BTreeMap::new(),
     };
-    let mut operations = CapturedOperations::default();
-    // Every event keeps its depth, so a declared row's nearest frame can be
-    // an operation on a local table.
-    let mut ops: Vec<Option<Op>> = Vec::with_capacity(events.len());
-    let mut depths = Vec::with_capacity(events.len());
+    let mut operations: BTreeMap<RowId, Vec<Step>> = BTreeMap::new();
     let mut sequence: u32 = 0;
     for event in events {
-        depths.push(event.depth);
         let Some(declaration) = schema
             .declarations
             .iter()
             .find(|d| d.name.eq_ignore_ascii_case(&event.table))
         else {
-            ops.push(None);
             continue;
         };
         let table = schema.table(&declaration.name);
@@ -339,22 +292,14 @@ pub(crate) fn capture(
                 values => Ok(values),
             }
         };
-        let mut op = Op {
-            depth: event.depth,
-            table: table.name.clone(),
-            action: event.action,
-            old: evaluated(values(table, &event.old)?)?,
-            new: evaluated(values(table, &event.new)?)?,
-            step: None,
-        };
-        let old_key = op
-            .old
+        let old = evaluated(values(table, &event.old)?)?;
+        let new = evaluated(values(table, &event.new)?)?;
+        let old_key = old
             .as_ref()
             .map(|old| row_key(table, old))
             .transpose()?
             .map(|key| (table.name.clone(), key));
-        let new_key = op
-            .new
+        let new_key = new
             .as_ref()
             .map(|new| row_key(table, new))
             .transpose()?
@@ -362,8 +307,8 @@ pub(crate) fn capture(
         let mut steps = Vec::new();
         match (&old_key, &new_key) {
             (Some(old_key), Some(new_key)) if old_key == new_key => {
-                let old = op.old.as_ref().expect("an update has old values");
-                let new = op.new.as_ref().expect("an update has new values");
+                let old = old.as_ref().expect("an update has old values");
+                let new = new.as_ref().expect("an update has new values");
                 tracker.existing(old_key, old)?;
                 let changed = new
                     .iter()
@@ -394,7 +339,7 @@ pub(crate) fn capture(
                 ));
             }
             _ => {
-                if let (Some(key), Some(old)) = (&old_key, &op.old) {
+                if let (Some(key), Some(old)) = (&old_key, &old) {
                     let row = tracker.existing(key, old)?;
                     let generation = tracker.generation(&row)?;
                     tracker.advance(&row)?;
@@ -412,7 +357,7 @@ pub(crate) fn capture(
                         },
                     ));
                 }
-                if let (Some(key), Some(new)) = (&new_key, &op.new) {
+                if let (Some(key), Some(new)) = (&new_key, &new) {
                     tracker.current.insert(key.clone(), Some(new.clone()));
                     let row = tracker.row(key, new)?;
                     let all = new.keys().cloned().collect::<Vec<_>>();
@@ -441,115 +386,14 @@ pub(crate) fn capture(
                 }
             }
         }
-        op.step = steps
-            .first()
-            .map(|(row, step)| (row.clone(), step.sequence));
-        let origin = if op.depth == 0 {
-            Origin::Statement
-        } else {
-            let frame = depths[..depths.len() - 1]
-                .iter()
-                .rposition(|depth| *depth == op.depth - 1);
-            match frame.and_then(|index| ops[index].as_ref()) {
-                Some(parent) if action_of(db, schema, parent, &op)? => Origin::ForeignKey {
-                    cause: parent.step.clone().expect("a parent operation made a step"),
-                },
-                _ => Origin::Trigger,
-            }
-        };
         for (row, step) in steps {
-            operations
-                .origins
-                .insert((row.clone(), step.sequence), origin.clone());
-            operations.steps.entry(row).or_default().push(step);
+            operations.entry(row).or_default().push(step);
         }
         sequence = sequence
             .checked_add(1)
             .expect("a write has fewer operations");
-        ops.push(Some(op));
     }
     Ok(operations)
-}
-
-/// Whether `child` is exactly the schema's action on `parent`'s delete or
-/// primary-key update through one of the child's foreign keys (§8.4, §8.5): a
-/// cascade delete, or an update writing only the key's columns, to NULL or to
-/// the parent's new key, from a reference to the parent's old key. Values
-/// compare as SQLite compares them: a reference holds the parent's key in the
-/// parent's affinity, and a cascade stores the new key in the child's.
-fn action_of(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    parent: &Op,
-    child: &Op,
-) -> Result<bool, DbError> {
-    let child_table = schema.table(&child.table);
-    let parent_table = schema.table(&parent.table);
-    let (Some(parent_old), Some(child_old)) = (parent.old.as_ref(), child.old.as_ref()) else {
-        return Ok(false);
-    };
-    for key in &child_table.foreign_keys {
-        if !key.target.eq_ignore_ascii_case(&parent.table) {
-            continue;
-        }
-        let targets = target_columns(parent_table, key);
-        let columns: Vec<String> = key
-            .columns
-            .iter()
-            .map(|c| column_name(child_table, c).to_owned())
-            .collect();
-        let held: Vec<Value> = columns.iter().map(|c| child_old[c].clone()).collect();
-        if held.contains(&Value::Null) {
-            continue;
-        }
-        let old_key: Vec<Value> = targets.iter().map(|t| parent_old[t].clone()).collect();
-        if crate::removal_sql::reference_values(db, parent_table, &targets, &held)? != old_key {
-            continue;
-        }
-        let key_changed = parent
-            .new
-            .as_ref()
-            .is_some_and(|new| targets.iter().any(|t| new.get(t) != parent_old.get(t)));
-        let rule = match parent.action {
-            Action::SQLITE_DELETE => &key.on_delete,
-            Action::SQLITE_UPDATE if key_changed => &key.on_update,
-            _ => continue,
-        };
-        let only_key_written = |new: &AppValues| {
-            new.iter().all(|(name, value)| {
-                columns.contains(name)
-                    || child_table
-                        .columns
-                        .iter()
-                        .any(|c| c.name == *name && c.generated)
-                    || child_old.get(name) == Some(value)
-            })
-        };
-        let action = match (rule.to_ascii_uppercase().as_str(), child.action, &child.new) {
-            ("CASCADE", Action::SQLITE_DELETE, _) => parent.action == Action::SQLITE_DELETE,
-            ("CASCADE", Action::SQLITE_UPDATE, Some(new))
-                if parent.action == Action::SQLITE_UPDATE =>
-            {
-                let parent_new = parent.new.as_ref().expect("a key update has new values");
-                let new_key: Vec<Value> = targets.iter().map(|t| parent_new[t].clone()).collect();
-                let stored =
-                    crate::removal_sql::reference_values(db, child_table, &columns, &new_key)?;
-                only_key_written(new)
-                    && columns
-                        .iter()
-                        .zip(&stored)
-                        .all(|(c, v)| new.get(c) == Some(v))
-            }
-            ("SET NULL", Action::SQLITE_UPDATE, Some(new)) => {
-                only_key_written(new) && columns.iter().all(|c| new[c] == Value::Null)
-            }
-            _ => false,
-        };
-        if action {
-            return Ok(true);
-        }
-    }
-    Ok(false)
 }
 
 #[cfg(test)]

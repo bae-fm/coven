@@ -615,8 +615,8 @@ async fn a_reload_covering_unreceived_writes_reloads_again_when_its_boundary_dro
 /// review returns (§8, §8.8, §10).
 #[tokio::test]
 async fn a_rebuild_rejudges_actions_its_writes_caused_in_another_audience() {
+    use crate::author_judgement::tests::deliver;
     use crate::judge::tests::{key, text, verdict};
-    use crate::owner_permission::tests::deliver;
     use crate::write_landing::tests::{at, retire, DAY};
     use coven_format::snapshot_rows::ChangeVerdict;
     use coven_format::write_sources::ChangeId;

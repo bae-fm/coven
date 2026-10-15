@@ -2795,9 +2795,9 @@ Carol's tablet:
     index to "Shopping".
 - A shared trigger runs only on the device making the write, writes only
   synced tables, and its writes become part of that write.
-  - Its targets are direct writes for owner permissions (§8.8), including
-    when a foreign-key action fires the trigger. Only the foreign-key action
-    itself receives the derived-change exception.
+  - For owner permissions its targets are direct writes, even when a
+    foreign-key action fires it, unless a step equals a foreign-key action's
+    exact effect (§8.8).
   - E.g. a shared trigger sets a note's `edited_at` when its body changes:
 
     ```sql
@@ -2868,8 +2868,10 @@ Carol's tablet:
     triggers. Check every direct target even if its effects combine with a
     foreign-key action on the same row. A trigger cannot borrow permission
     from the row that fired it.
-  - At commit, a foreign direct target refuses the whole local transaction
-    with `DbError::NotOwner`, leaving its rows and upload queue unchanged.
+  - At commit, the author checks its own write as receivers do (below). A
+    change they would refuse refuses the whole local transaction with
+    `DbError::NotOwner` or `DbError::InvalidForeignKeyEffect`, leaving its
+    rows and upload queue unchanged.
   - On receipt, the unauthorized row change becomes a frozen per-change loss
     naming the owner; unrelated changes in the write still apply. Changes
     that used its data follow §8's dropped-source rule. This is separate from
@@ -2893,9 +2895,8 @@ Carol's tablet:
     leaves its values as they were, or else the row its new values key, as
     the write's earlier steps leave it. When the write never touched that
     row, or a recorded reference's parent may have ended before the write,
-    the step depends on rows of the authoring view that no step carries.
-    Receivers refuse it, and so does its author, which runs the same check
-    before the write leaves (B18 `Overlapping`).
+    the step depends on rows of the authoring view that no step carries, and
+    every device refuses it (B18 `Overlapping`).
   - Match the exact row, generation, operation and every changed column and
     value, including all components of a compound key. An action's delete
     shows the values its replaced setters wrote (D5). Several actions on

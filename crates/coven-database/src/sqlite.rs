@@ -52,9 +52,10 @@ pub(crate) struct DatabaseConnection {
     scans: std::sync::Mutex<Vec<(String, i32)>>,
     #[cfg(test)]
     merge_loads: std::sync::Mutex<BTreeMap<String, usize>>,
-    /// Each local write's captured operations, for tests of their origins.
+    /// Each queued write's record and judgement, also of a refused one, for
+    /// tests of its classification.
     #[cfg(test)]
-    captured: std::cell::RefCell<Vec<crate::execution_capture::CapturedOperations>>,
+    judged: std::cell::RefCell<Vec<(coven_format::write::WriteRecord, crate::judge::Judgement)>>,
 }
 
 struct WriterObservation {
@@ -63,10 +64,20 @@ struct WriterObservation {
 }
 
 impl DatabaseConnection {
-    /// The last local write's captured operations, for tests of their origins.
+    /// The last queued write's record and judgement, also of a refused one.
     #[cfg(test)]
-    pub(crate) fn take_captured(&self) -> Option<crate::execution_capture::CapturedOperations> {
-        self.captured.borrow_mut().pop()
+    pub(crate) fn take_judged(
+        &self,
+    ) -> Option<(coven_format::write::WriteRecord, crate::judge::Judgement)> {
+        self.judged.borrow_mut().pop()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn judged(
+        &self,
+        judged: (coven_format::write::WriteRecord, crate::judge::Judgement),
+    ) {
+        self.judged.borrow_mut().push(judged);
     }
 
     #[cfg(any(test, feature = "test-utils"))]
@@ -154,7 +165,7 @@ impl DatabaseConnection {
             #[cfg(test)]
             merge_loads: std::sync::Mutex::new(BTreeMap::new()),
             #[cfg(test)]
-            captured: std::cell::RefCell::new(Vec::new()),
+            judged: std::cell::RefCell::new(Vec::new()),
         };
         db.batch("PRAGMA foreign_keys = ON; PRAGMA recursive_triggers = ON; PRAGMA trusted_schema = OFF;")?;
         db.refresh_hidden_rowids().map_err(opening_error)?;

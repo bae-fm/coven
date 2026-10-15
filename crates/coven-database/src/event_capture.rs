@@ -1,11 +1,9 @@
 //! A local write's app phase, observed one SQLite row operation at a time.
 //!
-//! Sessions record only net changes. Owner permission and foreign-key
-//! causes need each operation, in order, with its trigger depth (§8.8): a
-//! statement's own rows are at depth zero, and both triggers and foreign-key
-//! actions run one level below the change that fired them. A connection has
-//! one pre-update hook, which a session would otherwise own, so the app phase
-//! records through this hook and no session runs until it ends.
+//! Sessions record only net changes. A write's steps need each operation, in
+//! order (§8.8, D5). A connection has one pre-update hook, which a session
+//! would otherwise own, so the app phase records through this hook and no
+//! session runs until it ends.
 
 use super::DatabaseConnection;
 use crate::sql_value::SqlValue;
@@ -20,9 +18,6 @@ pub(crate) struct Event {
     pub(crate) table: String,
     /// Insert, update or delete.
     pub(crate) action: Action,
-    /// Zero for a statement's own rows, one more for each trigger or
-    /// foreign-key action between the statement and this operation.
-    pub(crate) depth: i32,
     /// Every column before the operation, in declaration order; `None` for a
     /// virtual generated column. Empty for an insert.
     pub(crate) old: Vec<Option<SqlValue>>,
@@ -60,7 +55,6 @@ impl<'a> EventCapture<'a> {
                     PreUpdateCase::Insert(accessor) => Event {
                         table: table.to_owned(),
                         action,
-                        depth: accessor.get_query_depth(),
                         old: Vec::new(),
                         new: new(accessor),
                         rowids: (accessor.get_new_row_id(), accessor.get_new_row_id()),
@@ -68,7 +62,6 @@ impl<'a> EventCapture<'a> {
                     PreUpdateCase::Delete(accessor) => Event {
                         table: table.to_owned(),
                         action,
-                        depth: accessor.get_query_depth(),
                         old: old(accessor),
                         new: Vec::new(),
                         rowids: (accessor.get_old_row_id(), accessor.get_old_row_id()),
@@ -79,7 +72,6 @@ impl<'a> EventCapture<'a> {
                     } => Event {
                         table: table.to_owned(),
                         action,
-                        depth: old_value_accessor.get_query_depth(),
                         old: old(old_value_accessor),
                         new: new(new_value_accessor),
                         rowids: (

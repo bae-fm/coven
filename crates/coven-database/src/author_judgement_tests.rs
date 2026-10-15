@@ -187,6 +187,17 @@ async fn direct_targets_of_another_members_rows_refuse_the_whole_transaction() {
         "UPDATE reviews SET body='before' WHERE id='r'; DELETE FROM tracks WHERE id='t'",
     ] {
         refused_for(sql(&pair.ben, attempt).await.unwrap_err(), "reviews", ANA);
+        // The refusal is the verdict every receiver gives that row.
+        let (_, judgement) = pair.ben.inspect_writer(|c| c.take_judged().unwrap());
+        let review = judgement
+            .rows
+            .iter()
+            .find(|(row, checked)| row.table == "reviews" && !checked.derived)
+            .unwrap();
+        assert_eq!(
+            review.1.check,
+            Err(AuthorizationFailure::NotOwner { owner: member(ANA) })
+        );
     }
     assert_eq!(records(&pair.ben).len(), queued);
     assert_eq!(
@@ -318,13 +329,13 @@ async fn only_the_owner_dismisses_a_removed_row() {
 }
 
 /// Each of Ben's local writes against `Admission.check`: the write commits
-/// exactly when every row it changed passes, whether a statement, a trigger
-/// or an exact foreign-key action changed it (`statement_authorized`,
+/// exactly when every row it changed passes, whether a direct step or an
+/// exact foreign-key action changed it (`statement_authorized`,
 /// `derived_roots_authorized`, and the accepted cascade).
 #[tokio::test]
 #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the merge runner"]
 async fn local_admission_matches_the_model() {
-    use crate::execution_capture::tests::lean::effects;
+    use crate::execution_capture::tests::{lean::effects, Classified};
     use crate::test_utils::tests::run_lean;
     let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
     let cases = [
@@ -344,7 +355,7 @@ async fn local_admission_matches_the_model() {
         let pair = Pair::seeded().await;
         let committed = sql(&pair.ben, statement).await;
         assert_eq!(committed.is_ok(), expected, "{statement}: {committed:?}");
-        let operations = pair.ben.inspect_writer(|c| c.take_captured().unwrap());
+        let operations = Classified::last(&pair.ben);
         let (mut input, ids) = pair
             .ben
             .inspect_writer_schema(|_, schema| effects(schema, &operations, true));
@@ -707,4 +718,85 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
     assert_eq!(creation(&db), created);
     assert_eq!(count(&db, "labels"), rows);
     db.close().await.unwrap();
+}
+
+/// Ben deletes his track. Its cascade deletes Ana's play, and the shared
+/// trigger that fires deletes her review before the cascade reaches it: the
+/// cascade's exact effect, which every device classifies as the action (§8.8,
+/// B18 `TriggerFirst`). Ben's device commits the write, and Ana's admits it
+/// with the same verdicts.
+#[tokio::test]
+async fn a_trigger_making_a_cascades_exact_effect_commits_as_receivers_admit_it() {
+    const TRIGGER_FIRST: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, title TEXT);
+    CREATE TABLE plays(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE);
+    CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE);
+    CREATE TRIGGER play_gone AFTER DELETE ON plays WHEN NOT coven_applying()
+      BEGIN DELETE FROM reviews WHERE track=old.track; END;
+    CREATE TRIGGER review_gone AFTER DELETE ON reviews WHEN NOT coven_applying()
+      BEGIN DELETE FROM plays WHERE track=old.track; END;";
+    let owned = |table| SyncedTable::new(table, RowIdentity::SharedKey).owner_only();
+    let pair = Pair::with(
+        vec![
+            owned("tracks"),
+            owned("plays").shared_trigger("play_gone"),
+            owned("reviews").shared_trigger("review_gone"),
+        ],
+        TRIGGER_FIRST,
+    )
+    .await;
+    sql(&pair.ben, "INSERT INTO tracks VALUES('t','Song')")
+        .await
+        .unwrap();
+    deliver(&pair.ben, &pair.ana).await;
+    sql(
+        &pair.ana,
+        "INSERT INTO plays VALUES('p','t'); INSERT INTO reviews VALUES('r','t')",
+    )
+    .await
+    .unwrap();
+    deliver(&pair.ana, &pair.ben).await;
+    sql(&pair.ben, "DELETE FROM tracks WHERE id='t'")
+        .await
+        .unwrap();
+    let record = records(&pair.ben).pop().unwrap();
+    deliver(&pair.ben, &pair.ana).await;
+    let verdicts = |db: &Database| {
+        db.inspect_writer(|c| {
+            record
+                .parts
+                .iter()
+                .flat_map(|part| part.records())
+                .map(|r| {
+                    let verdict = crate::judge::stored(c, &record.header, r.row()).unwrap();
+                    (r.row().table.clone(), verdict)
+                })
+                .collect::<std::collections::BTreeMap<_, _>>()
+        })
+    };
+    let track = coven_format::write_sources::ChangeId {
+        write: record.header.position,
+        row: record.parts[0]
+            .rows
+            .iter()
+            .find(|change| change.row.table == "tracks")
+            .unwrap()
+            .row
+            .clone(),
+    };
+    let expected = [
+        (
+            "plays".to_owned(),
+            ChangeVerdict::Derived(vec![track.clone()]),
+        ),
+        ("reviews".to_owned(), ChangeVerdict::Derived(vec![track])),
+        ("tracks".to_owned(), ChangeVerdict::Applied),
+    ]
+    .into();
+    assert_eq!(verdicts(&pair.ben), expected);
+    assert_eq!(verdicts(&pair.ana), expected);
+    for db in [&pair.ben, &pair.ana] {
+        assert_eq!(count(db, "plays") + count(db, "reviews"), 0);
+    }
+    assert!(pair.ana.lost_values().await.unwrap().is_empty());
+    pair.close().await;
 }

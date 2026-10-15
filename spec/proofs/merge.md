@@ -1235,12 +1235,11 @@ and a shared AFTER DELETE trigger fired by that deletion deletes her second
 review before the cascade reaches it. `trigger_classified_as_action` shows
 the trigger's step is classified as the track deletion's action. Its payload
 is exactly the action's, so no rule reading only steps can tell them apart; a
-receiver accepts nothing the schema would not have done. The author's own
-SQLite still knows a trigger made it and refuses the write locally. So
-"foreign-key action" on receipt means "the schema's exact consequence", and a
-shared trigger's step stays direct whenever it differs from every
-consequence. `FollowBack`: Ben changes his track's referenced code and back,
-and Ana's review follows both times. `start_view_refuses_cascade` shows that
+receiver accepts nothing the schema would not have done. So "foreign-key
+action" means "the schema's exact consequence" on every device, the
+author's included, and a shared trigger's step stays direct whenever it
+differs from every consequence. `FollowBack`: Ben changes his track's
+referenced code and back, and Ana's review follows both times. `start_view_refuses_cascade` shows that
 references read from the view before the write began classify the second
 cascade as a direct edit, refusing an honest write; `replayed_classifies`
 accepts both with references replayed through the earlier steps. `Retarget`:
@@ -1263,21 +1262,20 @@ on the inserted row, which the view at the write's start never names.
 column as '7'; changing the code to 8 makes SQLite store the text '8' in the
 tag. `unstored_refuses_cascade` shows that comparing the parent's new key as
 the parent holds it calls that cascade a direct edit; `stored_classifies`
-compares values as the child's columns store them (`storedRule`), as both the
-receiver and the author's own capture do.
+compares values as the child's columns store them (`storedRule`), as coven
+does.
 
 **What an author checks, and which net changes must end where their steps
 do.** `ForeignKeyAuthoring.lean` states the author's check before a write
-leaves (`LocalAccept`): every step on a row its writer may not change must be
-an action twice over, made as one by SQLite and classified as one by the
-receivers' label-free rule. `rebuild_refusal_refuses` proves the author
-refuses its own write whenever that rule would call such a step direct, so no
-device keeps an effect the others refuse, and `accepted_rooted` composes the
-check with `every_step_rooted`: every step of an accepted write has a
-certificate rooted in direct steps its writer may change, so every receiver
-admits it. `TriggerFirst.author_refuses` shows the other half is needed too:
-receivers classify that trigger's step as an action, while its author knows a
-trigger made it on Ana's row and refuses.
+leaves (`LocalAccept`): the receivers' label-free rule, run on its own steps.
+`local_accept_iff` proves the author accepts exactly the writes receivers
+accept: those whose every step the rule calls direct is on a row its writer
+may change. So no device keeps an effect the others refuse
+(`rebuild_refusal_refuses`), and `accepted_rooted` composes the check with
+`every_step_rooted`: every step of an accepted write has a certificate rooted
+in direct steps its writer may change. `TriggerFirst.author_accepts`: the
+trigger's step that equals the cascade's exact effect is accepted by its
+author as by every receiver.
 
 A row's net change is the payload that merges; its steps are the execution
 classification reads. `checkSteps` is the receiver's check as coven runs it:
@@ -1413,7 +1411,7 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-database -- --ignored --exact \
   ownership::tests::creation_differential_histories \
   execution_capture::tests::lean::captured_actions_are_the_models_consequences \
-  owner_permission::tests::local_admission_matches_the_model \
+  author_judgement::tests::local_admission_matches_the_model \
   judge_view::tests::receipt_matches_the_model \
   judge_view::tests::classification_matches_the_model
 ```

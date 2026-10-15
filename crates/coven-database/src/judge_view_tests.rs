@@ -6,9 +6,9 @@
 //! roots of each derived change (`applied_derived_recorded`) and the failed
 //! sources of each dependent one (`dependencies`,
 //! `dropped_contributing_root_no_effect`).
+use crate::author_judgement::tests::{member, ANA, BEN};
 use crate::judge::tests::{receipts, verdict, CAROL};
 use crate::judge::{consistent, judge, Judgement};
-use crate::owner_permission::tests::{member, ANA, BEN};
 use crate::sqlite::DatabaseConnection;
 use crate::test_utils::tests::run_lean;
 use crate::write_rows::{column_name, key_columns, target_columns};
@@ -635,7 +635,7 @@ async fn classification_matches_the_model() {
 /// what Ana wrote, and so do the delete's old values.
 #[tokio::test]
 async fn a_cascade_delete_shows_what_its_setters_wrote() {
-    use crate::owner_permission::tests::deliver;
+    use crate::author_judgement::tests::deliver;
     use crate::tests::TestStore;
     use crate::write::tests::{records, sql};
     use crate::{RowIdentity, SyncedTable};

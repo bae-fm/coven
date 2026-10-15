@@ -309,7 +309,7 @@ proofs() {
         COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
             ownership::tests::creation_differential_histories \
             execution_capture::tests::lean::captured_actions_are_the_models_consequences \
-            owner_permission::tests::local_admission_matches_the_model \
+            author_judgement::tests::local_admission_matches_the_model \
             judge_view::tests::receipt_matches_the_model \
             judge_view::tests::classification_matches_the_model
     fi

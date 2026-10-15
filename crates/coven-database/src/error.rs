@@ -197,10 +197,10 @@ pub enum DbError {
     /// This audience still exposes its previous data while its selected boundary reloads (§15).
     #[error("audience {0:?} is reloading")]
     AudienceReloading(coven_merge::Audience),
-    /// A statement or shared trigger directly changed another member's row
-    /// of an `owner_only()` table, or coven was asked to copy or dismiss one
-    /// for it (§8.8). The transaction, including its upload record, did not
-    /// commit.
+    /// The write directly changed another member's row of an `owner_only()`
+    /// table: a statement, a shared trigger, or coven copying or dismissing
+    /// it for the app (§8.8). The transaction, including its upload record,
+    /// did not commit.
     #[error("{table} row {key:?} belongs to member {owner:?}")]
     NotOwner {
         /// The owned row's table.
@@ -209,6 +209,17 @@ pub enum DbError {
         key: crate::RowKey,
         /// The member who originally created it.
         owner: coven_foundation::id_source::MemberId,
+    },
+    /// The write's foreign-key actions on this row are not the schema's exact
+    /// consequence of its direct changes, so every receiver would refuse
+    /// them (§8.8). The transaction, including its upload record, did not
+    /// commit.
+    #[error("{table} row {key:?} is not an exact foreign-key effect")]
+    InvalidForeignKeyEffect {
+        /// The row's table.
+        table: String,
+        /// Its primary key, in declared key order.
+        key: crate::RowKey,
     },
     /// An inserted row's independent key holds no UUID (§8.5).
     #[error("independent key {key:?} of {table} does not contain a canonical lowercase UUIDv4 or UUIDv7")]

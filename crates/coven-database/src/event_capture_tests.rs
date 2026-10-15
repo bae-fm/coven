@@ -14,17 +14,17 @@ fn tables() -> Vec<SyncedTable> {
     ]
 }
 
-fn summary(events: &[Event]) -> Vec<(&str, Action, i32)> {
+fn summary(events: &[Event]) -> Vec<(&str, Action)> {
     events
         .iter()
-        .map(|event| (event.table.as_str(), event.action, event.depth))
+        .map(|event| (event.table.as_str(), event.action))
         .collect()
 }
 
-/// A statement's own rows are at depth zero; a foreign-key action runs one
-/// level below the change that fired it, and a trigger it fires one more.
+/// Every operation is recorded in order: a statement's own rows, the
+/// foreign-key actions they cause and the triggers those fire.
 #[tokio::test]
-async fn operations_keep_their_order_and_trigger_depth() {
+async fn operations_keep_their_order() {
     let store = TestStore::new();
     let db = store.schema(tables(), SCHEMA).await.unwrap();
     crate::write::tests::sql(
@@ -46,10 +46,10 @@ async fn operations_keep_their_order_and_trigger_depth() {
     assert_eq!(
         summary(&events),
         [
-            ("child", Action::SQLITE_UPDATE, 0),
-            ("parent", Action::SQLITE_DELETE, 0),
-            ("child", Action::SQLITE_DELETE, 1),
-            ("log", Action::SQLITE_INSERT, 2),
+            ("child", Action::SQLITE_UPDATE),
+            ("parent", Action::SQLITE_DELETE),
+            ("child", Action::SQLITE_DELETE),
+            ("log", Action::SQLITE_INSERT),
         ]
     );
     let text = |s: &str| {

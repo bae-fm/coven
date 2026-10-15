@@ -2,7 +2,7 @@ use super::*;
 use crate::tests::TestStore;
 use crate::write::tests::{records, sql};
 use crate::{Database, RowIdentity, SyncedTable};
-use coven_format::write::{RowExecution, WriteRecord};
+use coven_format::write::RowExecution;
 
 const SCHEMA: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, title TEXT);
 CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE CASCADE, body TEXT);
@@ -43,24 +43,48 @@ fn row(table: &str, key: &str) -> RowId {
     }
 }
 
-/// The last local write's operations, as captured, and as recorded.
-fn last(db: &Database) -> (CapturedOperations, WriteRecord) {
-    let operations = db.inspect_writer(|c| c.take_captured().unwrap());
-    (operations, records(db).pop().unwrap())
+/// A queued write's steps by row, and the cause its judgement found for each
+/// foreign-key action, by the action's row and sequence. Every other step is
+/// direct (§8.8).
+pub(crate) struct Classified {
+    pub(crate) steps: BTreeMap<RowId, Vec<Step>>,
+    pub(crate) causes: BTreeMap<(RowId, u32), (RowId, u32)>,
 }
 
-fn origin(operations: &CapturedOperations, table: &str, key: &str) -> Vec<Origin> {
-    let row = row(table, key);
-    operations.steps[&row]
-        .iter()
-        .map(|step| operations.origins[&(row.clone(), step.sequence)].clone())
-        .collect()
-}
-
-fn cause(table: &str, key: &str, sequence: u32) -> Origin {
-    Origin::ForeignKey {
-        cause: (row(table, key), sequence),
+impl Classified {
+    /// The last write the device queued or refused.
+    pub(crate) fn last(db: &Database) -> Self {
+        let (record, judgement) = db.inspect_writer(|c| c.take_judged().unwrap());
+        let steps = record
+            .parts
+            .iter()
+            .flat_map(|part| part.records())
+            .map(|r| (r.row().clone(), r.execution().steps.clone()))
+            .collect();
+        let causes = judgement
+            .rows
+            .iter()
+            .flat_map(|(row, checked)| {
+                checked.actions.iter().map(move |(sequence, chain)| {
+                    ((row.clone(), *sequence), chain.last().unwrap().clone())
+                })
+            })
+            .collect();
+        Self { steps, causes }
     }
+
+    /// Each of the row's steps' cause, or `None` for a direct step.
+    fn origin(&self, table: &str, key: &str) -> Vec<Option<(RowId, u32)>> {
+        let row = row(table, key);
+        self.steps[&row]
+            .iter()
+            .map(|step| self.causes.get(&(row.clone(), step.sequence)).cloned())
+            .collect()
+    }
+}
+
+fn cause(table: &str, key: &str, sequence: u32) -> Option<(RowId, u32)> {
+    Some((row(table, key), sequence))
 }
 
 /// Deleting a track cascades to its review and sets its note's reference
@@ -71,22 +95,22 @@ async fn foreign_key_actions_name_their_cause_and_trigger_writes_stay_direct() {
     let store = TestStore::new();
     let db = database(&store).await;
     sql(&db, "DELETE FROM tracks WHERE id='t'").await.unwrap();
-    let (operations, record) = last(&db);
+    let operations = Classified::last(&db);
     let track = &operations.steps[&row("tracks", "t")];
     assert_eq!(track.len(), 1);
     assert!(matches!(track[0].change.operation, Operation::Delete));
     let deleted = track[0].sequence;
-    assert_eq!(origin(&operations, "tracks", "t"), [Origin::Statement]);
+    assert_eq!(operations.origin("tracks", "t"), [None]);
     assert_eq!(
-        origin(&operations, "reviews", "r"),
+        operations.origin("reviews", "r"),
         [cause("tracks", "t", deleted)]
     );
     assert_eq!(
-        origin(&operations, "notes", "n"),
+        operations.origin("notes", "n"),
         [cause("tracks", "t", deleted)]
     );
-    assert_eq!(origin(&operations, "marks", "m"), [Origin::Trigger]);
-    assert_eq!(origin(&operations, "notes", "audited"), [Origin::Trigger]);
+    assert_eq!(operations.origin("marks", "m"), [None]);
+    assert_eq!(operations.origin("notes", "audited"), [None]);
     // SET NULL writes exactly the reference column, from generation one.
     let note = &operations.steps[&row("notes", "n")][0];
     let Operation::Update(columns) = &note.change.operation else {
@@ -96,23 +120,6 @@ async fn foreign_key_actions_name_their_cause_and_trigger_writes_stay_direct() {
     assert_eq!(columns.keys().collect::<Vec<_>>(), ["track"]);
     assert_eq!(columns["track"].value, Value::Null);
     assert!(columns["track"].parents.is_empty());
-    // Every step travels in the write, in sequence order, without origins.
-    let mut sequences: Vec<_> = record
-        .parts
-        .iter()
-        .flat_map(|part| &part.rows)
-        .flat_map(|change| &change.execution.steps)
-        .map(|step| step.sequence)
-        .collect();
-    sequences.sort();
-    let mut captured: Vec<_> = operations
-        .steps
-        .values()
-        .flatten()
-        .map(|step| step.sequence)
-        .collect();
-    captured.sort();
-    assert_eq!(sequences, captured);
     db.close().await.unwrap();
 }
 
@@ -129,14 +136,14 @@ async fn a_key_update_is_two_halves_at_one_position() {
     )
     .await
     .unwrap();
-    let (operations, _) = last(&db);
+    let operations = Classified::last(&db);
     let old = &operations.steps[&row("tracks", "t")][0];
     let new = &operations.steps[&row("tracks", "u")][0];
     assert_eq!(old.sequence, new.sequence);
     assert!(old.key_update && matches!(old.change.operation, Operation::Delete));
     assert!(!new.key_update && matches!(new.change.operation, Operation::Insert(_)));
     assert_eq!(
-        origin(&operations, "reviews", "r"),
+        operations.origin("reviews", "r"),
         [cause("tracks", "t", old.sequence)]
     );
     let review = &operations.steps[&row("reviews", "r")][0];
@@ -167,11 +174,9 @@ async fn revisited_and_cancelled_rows_keep_each_operation() {
     )
     .await
     .unwrap();
-    let (operations, record) = last(&db);
-    assert_eq!(
-        origin(&operations, "reviews", "r"),
-        [Origin::Statement, Origin::Statement]
-    );
+    let operations = Classified::last(&db);
+    assert_eq!(operations.origin("reviews", "r"), [None, None]);
+    let record = records(&db).pop().unwrap();
     let review = record.parts[0]
         .rows
         .iter()
@@ -198,8 +203,9 @@ async fn revisited_and_cancelled_rows_keep_each_operation() {
 
 pub(crate) mod lean {
     // Real SQLite foreign-key actions against `ForeignKey.consequence` and
-    // `evaluate` (B18): each captured action, rebuilt from its schema reference
-    // and its causes' own steps, must be the model's exact consequence.
+    // `evaluate` (B18): each action the author's judgement classifies, rebuilt
+    // from its schema reference and its causes' own steps, must be the
+    // model's exact consequence.
 
     use super::*;
     use crate::test_utils::tests::run_lean;
@@ -251,7 +257,7 @@ pub(crate) mod lean {
         }
     }
 
-    fn step_of(operations: &CapturedOperations, (row, sequence): &(RowId, u32)) -> Step {
+    fn step_of(operations: &Classified, (row, sequence): &(RowId, u32)) -> Step {
         operations.steps[row]
             .iter()
             .find(|step| step.sequence == *sequence)
@@ -274,7 +280,7 @@ pub(crate) mod lean {
     fn effect(
         ids: &mut Ids,
         schema: &WriteSchema,
-        operations: &CapturedOperations,
+        operations: &Classified,
         row: &RowId,
         step: &Step,
         order: Option<&[String]>,
@@ -321,19 +327,19 @@ pub(crate) mod lean {
         json!({"row": id, "generation": step.change.generation, "kind": kind, "cells": cells})
     }
 
-    /// The runner input for every foreign-key action of one captured write.
-    fn input(schema: &WriteSchema, operations: &CapturedOperations) -> (Json, usize) {
+    /// The runner input for every foreign-key action of one write.
+    fn input(schema: &WriteSchema, operations: &Classified) -> (Json, usize) {
         let (input, _) = effects(schema, operations, false);
         let count = input["derived"].as_array().unwrap().len();
         (input, count)
     }
 
-    /// Every foreign-key action of one captured write with its references
-    /// and the direct roots it derives from; with `every_direct`, also every
-    /// other row a statement or trigger changed.
+    /// Every foreign-key action of one write with its references and the
+    /// direct roots it derives from; with `every_direct`, also every other
+    /// row a direct step changed.
     pub(crate) fn effects(
         schema: &WriteSchema,
-        operations: &CapturedOperations,
+        operations: &Classified,
         every_direct: bool,
     ) -> (Json, Ids) {
         let mut ids = Ids::default();
@@ -341,10 +347,7 @@ pub(crate) mod lean {
         let mut direct = Vec::new();
         let mut derived = Vec::new();
         let mut roots = BTreeSet::new();
-        for ((row, sequence), origin) in &operations.origins {
-            let Origin::ForeignKey { cause } = origin else {
-                continue;
-            };
+        for ((row, sequence), cause) in &operations.causes {
             let step = step_of(operations, &(row.clone(), *sequence));
             let parent_step = step_of(operations, cause);
             let (parent, _) = cause;
@@ -375,9 +378,9 @@ pub(crate) mod lean {
             let mut at = cause.clone();
             loop {
                 path.push(at.0.clone());
-                match &operations.origins[&at] {
-                    Origin::ForeignKey { cause } => at = cause.clone(),
-                    _ => break,
+                match operations.causes.get(&at) {
+                    Some(cause) => at = cause.clone(),
+                    None => break,
                 }
             }
             if roots.insert(at.clone()) {
@@ -393,24 +396,17 @@ pub(crate) mod lean {
         }
         if every_direct {
             let mut present: BTreeSet<RowId> = roots.iter().map(|(row, _)| row.clone()).collect();
-            for ((row, sequence), origin) in &operations.origins {
-                if matches!(origin, Origin::ForeignKey { .. }) {
-                    continue;
-                }
-                let at = (row.clone(), *sequence);
-                // One effect per row: its first direct operation.
-                let first = operations.steps[row]
-                    .iter()
-                    .find(|step| {
-                        !matches!(
-                            operations.origins[&(row.clone(), step.sequence)],
-                            Origin::ForeignKey { .. }
-                        )
-                    })
-                    .map(|step| step.sequence);
-                if first == Some(*sequence) && present.insert(row.clone()) {
-                    let step = step_of(operations, &at);
-                    direct.push(effect(&mut ids, schema, operations, row, &step, None));
+            for (row, steps) in &operations.steps {
+                // One effect per row: its first direct step.
+                let first = steps.iter().find(|step| {
+                    !operations
+                        .causes
+                        .contains_key(&(row.clone(), step.sequence))
+                });
+                if let Some(step) = first {
+                    if present.insert(row.clone()) {
+                        direct.push(effect(&mut ids, schema, operations, row, step, None));
+                    }
                 }
             }
         }
@@ -465,7 +461,7 @@ pub(crate) mod lean {
         for case in cases {
             sql(&db, seed).await.unwrap();
             sql(&db, case).await.unwrap();
-            let operations = db.inspect_writer(|c| c.take_captured().unwrap());
+            let operations = Classified::last(&db);
             let (input, count) = db.inspect_writer_schema(|_, schema| input(schema, &operations));
             assert!(count > 0, "{case} causes foreign-key actions");
             let result = run_lean(&runner, &input);

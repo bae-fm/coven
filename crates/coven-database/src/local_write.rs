@@ -45,13 +45,8 @@ impl DatabaseConnection {
             let before = crate::write_rows::AppView::before(database, schema, &captured)?;
             let after = crate::write_rows::AppView::after(database, schema);
             let store = crate::merge_store::MergeStore::new(database, &before);
-            let operations =
+            let steps =
                 crate::execution_capture::capture(database, schema, &before, &after, &events)?;
-            #[cfg(test)]
-            database.captured.borrow_mut().push(operations.clone());
-            // Every direct target is its owner's before anything commits (§8.8).
-            let writer = crate::owner_permission::Writer::local(database, device)?;
-            writer.check_operations(database, schema, &operations)?;
             let changes = crate::write_record::changes(
                 database,
                 schema,
@@ -61,15 +56,8 @@ impl DatabaseConnection {
                 &before.changes(&after, captured.keys().cloned())?,
                 &deleted_circles,
             )?;
-            let record = crate::write_record::record(
-                database,
-                device,
-                now,
-                changes,
-                operations.steps,
-                &store,
-            )?;
-            writer.check_copies(database, schema, record.as_ref())?;
+            let record =
+                crate::write_record::record(database, device, now, changes, steps, &store)?;
             let affected = crate::write_apply::WriteApply::new(
                 database,
                 schema,

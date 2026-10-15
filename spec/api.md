@@ -353,9 +353,12 @@ pub enum DbError {
     /// A value or row exceeds the format (§5), or a write's plaintext or sealed
     /// bytes cannot fit in a SQLite value and its queue row (§6).
     TooLarge { field: &'static str, actual: u64, maximum: u64 },
-    /// A statement or shared trigger directly changed another member's row (§8.8).
-    /// The transaction, including its upload record, did not commit.
+    /// The write directly changed another member's row (§8.8). The
+    /// transaction, including its upload record, did not commit.
     NotOwner { table: String, key: RowKey, owner: MemberId },
+    /// The write's foreign-key actions on a row are not the schema's exact
+    /// consequence of its direct changes (§8.8). Nothing committed.
+    InvalidForeignKeyEffect { table: String, key: RowKey },
     /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
     TriggerTarget { trigger: String, table: String },
     /// A reference points at a row outside the source row's audience (§14.5).

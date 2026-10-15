@@ -140,19 +140,9 @@ pub enum RemovalRule {
     },
 }
 
-fn row_key(key: &[u8]) -> Result<RowKey, DbError> {
-    Ok(RowKey(
-        coven_format::key::decode_key(key)
-            .map_err(|_| DbError::DamagedDatabase)?
-            .iter()
-            .map(crate::write_encoding::sql_value)
-            .collect(),
-    ))
-}
-
 impl LostValue {
     pub(crate) fn from_record(record: Loss) -> Result<Self, DbError> {
-        let key = row_key(&record.row.key)?;
+        let key = RowKey::decode(&record.row.key)?;
         let cell = |column, cell: coven_merge::Cell<coven_format::value::Value>| LostCell {
             column,
             value: crate::write_encoding::sql_value(&cell.value.value),
@@ -199,7 +189,7 @@ impl LostValue {
                     .map(|source| {
                         Ok(ChangeSource {
                             write: source.write,
-                            key: row_key(&source.row.key)?,
+                            key: RowKey::decode(&source.row.key)?,
                             table: source.row.table,
                             audience: source.row.audience,
                         })

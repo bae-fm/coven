@@ -4,7 +4,7 @@
 //! tables, so its writes carry whatever Ben's member did: what a receiver
 //! accepts is decided by its own check alone.
 use super::*;
-use crate::owner_permission::tests::{deliver, member, tables, ANA, BEN, SCHEMA};
+use crate::author_judgement::tests::{deliver, member, tables, ANA, BEN, SCHEMA};
 use crate::snapshot_write::tests::stream;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};

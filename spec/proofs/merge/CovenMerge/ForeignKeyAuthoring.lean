@@ -3,17 +3,19 @@ import CovenMerge.ForeignKeyClassification
 /-! What a write's author checks before the write leaves, and which rows'
 net changes must end where their steps end (§8.8, D5).
 
-* `LocalAccept`: the author commits only when every step on a row its writer
-  may not change is an action twice over: SQLite made it as one, and the
-  receivers' label-free rule (`cause`) classifies it as one.
-  `rebuild_refusal_refuses` is the second half: the author refuses its own
-  write whenever the receivers' rule would call such a step direct, so no
-  device keeps an effect the others refuse. `accepted_rooted` composes the
-  check with `every_step_rooted`: every step of an accepted write, on any row,
-  has a certificate rooted in direct steps its writer may change, so every
-  receiver admits it. `TriggerFirst.author_refuses` shows the first half is
-  needed too: receivers classify that trigger's step as an action, while its
-  author knows a trigger made it on Ana's row.
+* `LocalAccept`: the author runs the receivers' label-free rule (`cause`) on
+  its own write and commits only when every step on a row its writer may not
+  change is classified as an action. What SQLite's action code made never
+  enters: `local_accept_iff` proves the author accepts exactly the writes
+  whose every step the rule calls direct is on a row the writer may change,
+  the condition every receiver applies. `rebuild_refusal_refuses` is one
+  half: the author refuses whatever receivers would, so no device keeps an
+  effect the others refuse. `accepted_rooted` composes the check with
+  `every_step_rooted`: every step of an accepted write, on any row, has a
+  certificate rooted in direct steps its writer may change, so every receiver
+  admits it. `TriggerFirst.author_accepts` is the other half on a checked
+  history: a trigger's step that equals the cascade's exact consequence is
+  accepted by the author as by every receiver.
 * `checkSteps` is the receiver's check as coven runs it. A row's net change is
   the payload that merges; its steps are the execution that classification
   reads. A direct row needs its writer's permission, and its net change must
@@ -30,49 +32,69 @@ namespace CovenMerge.Ownership.Classification
 
 variable {Row Ref Payload : Type} [DecidableEq Payload]
 
-/-- The author's check before its write leaves. -/
-def LocalAccept (R : Rule Row Ref Payload) (t : Trace Row Ref Payload) (made : Nat → Made)
+/-- The author's check before its write leaves: the receivers' rule, run on
+its own steps. -/
+def LocalAccept (R : Rule Row Ref Payload) (t : Trace Row Ref Payload)
     (permitted : Row → Bool) : Prop :=
-  ∀ i s, t.steps[i]? = some s → permitted (R.row s) = false →
-    (∃ j, made i = .action j) ∧ (cause R t i).isSome = true
+  ∀ i s, t.steps[i]? = some s → permitted (R.row s) = false → (cause R t i).isSome = true
+
+/-- **The author accepts exactly what receivers accept.** Its check holds
+exactly when every step the receivers' rule calls direct is on a row its
+writer may change (`every_step_rooted`'s condition). -/
+theorem local_accept_iff (R : Rule Row Ref Payload) (t : Trace Row Ref Payload)
+    (permitted : Row → Bool) :
+    LocalAccept R t permitted ↔
+      ∀ j p, cause R t j = none → t.steps[j]? = some p → permitted (R.row p) = true := by
+  constructor
+  · intro accept j p direct hp
+    cases hj : permitted (R.row p) with
+    | true => rfl
+    | false =>
+      have := accept j p hp hj
+      rw [direct] at this
+      cases this
+  · intro direct_ok i s h forbidden
+    cases hc : cause R t i with
+    | some _ => rfl
+    | none =>
+      have := direct_ok i s hc h
+      rw [forbidden] at this
+      cases this
 
 /-- **The author refuses whatever receivers would.** A step on a row its
 writer may not change, which the receivers' rule calls direct, refuses the
 whole write at its author. -/
 theorem rebuild_refusal_refuses {R : Rule Row Ref Payload} {t : Trace Row Ref Payload}
-    {made : Nat → Made} {permitted : Row → Bool} {i : Nat} {s : Payload}
+    {permitted : Row → Bool} {i : Nat} {s : Payload}
     (h : t.steps[i]? = some s) (forbidden : permitted (R.row s) = false)
-    (direct : cause R t i = none) : ¬ LocalAccept R t made permitted := by
+    (direct : cause R t i = none) : ¬ LocalAccept R t permitted := by
   intro accept
-  have := (accept i s h forbidden).2
+  have := accept i s h forbidden
   rw [direct] at this
   cases this
 
 /-- **What the author commits, every receiver admits.** -/
 theorem accepted_rooted {R : Rule Row Ref Payload} {t : Trace Row Ref Payload}
-    {made : Nat → Made} {permitted : Row → Bool} (accept : LocalAccept R t made permitted)
+    {permitted : Row → Bool} (accept : LocalAccept R t permitted)
     (i : Nat) (s : Payload) (h : t.steps[i]? = some s) :
     ∃ d, ForeignKey.evaluate (stepSchema R t) (directSteps R t) d = some (i, s) ∧
-      ∀ j ∈ ForeignKey.roots d, ∃ p, t.steps[j]? = some p ∧ permitted (R.row p) = true := by
-  refine every_step_rooted R t permitted (fun j p direct hp => ?_) i s h
-  cases hj : permitted (R.row p) with
-  | true => rfl
-  | false =>
-    have := (accept j p hp hj).2
-    rw [direct] at this
-    cases this
+      ∀ j ∈ ForeignKey.roots d, ∃ p, t.steps[j]? = some p ∧ permitted (R.row p) = true :=
+  every_step_rooted R t permitted ((local_accept_iff R t permitted).mp accept) i s h
 
-/-- In `TriggerFirst`, Ben may change only his track 0. Receivers classify
-the trigger's deletion of Ana's review 2 as the track deletion's action, but
-its author knows a trigger made it, and refuses. -/
-theorem TriggerFirst.author_refuses :
-    (cause stepRule TriggerFirst.trace 2).isSome = true ∧
-    ¬ LocalAccept stepRule TriggerFirst.trace TriggerFirst.made (fun r => decide (r = 0)) := by
-  refine ⟨by decide, fun accept => ?_⟩
-  obtain ⟨⟨j, made⟩, _⟩ := accept 2 ⟨⟨2, 1, .del, []⟩, []⟩ rfl (by decide)
-  have trigger : TriggerFirst.made 2 = .trigger := rfl
-  rw [trigger] at made
-  cases made
+/-- In `TriggerFirst`, Ben may change only his track 0. A trigger made the
+deletion of Ana's review 2, and receivers classify it as the track
+deletion's action; its author runs the same rule and accepts the write. -/
+theorem TriggerFirst.author_accepts :
+    TriggerFirst.made 2 = .trigger ∧ (cause stepRule TriggerFirst.trace 2).isSome = true ∧
+    LocalAccept stepRule TriggerFirst.trace (fun r => decide (r = 0)) := by
+  refine ⟨rfl, by decide, fun i s h forbidden => ?_⟩
+  rcases i with _ | _ | _ | i
+  · simp [TriggerFirst.trace] at h
+    subst h
+    cases forbidden
+  · decide
+  · decide
+  · simp [TriggerFirst.trace] at h
 
 end CovenMerge.Ownership.Classification
 

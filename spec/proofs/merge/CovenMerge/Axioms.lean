@@ -337,9 +337,10 @@ open CovenMerge
 #print axioms Ownership.Classification.Overlapping.Stale.live_exact
 #print axioms Ownership.Classification.Overlapping.Stale.ended_exact
 #print axioms Ownership.Classification.Overlapping.Stale.views_differ
+#print axioms Ownership.Classification.local_accept_iff
 #print axioms Ownership.Classification.rebuild_refusal_refuses
 #print axioms Ownership.Classification.accepted_rooted
-#print axioms Ownership.Classification.TriggerFirst.author_refuses
+#print axioms Ownership.Classification.TriggerFirst.author_accepts
 #print axioms Ownership.Admission.checkSteps_relaxed
 #print axioms Ownership.Admission.relaxed_cause
 #print axioms Ownership.Admission.applied_root_ends_where_steps_end

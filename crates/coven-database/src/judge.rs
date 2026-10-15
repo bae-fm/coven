@@ -1,4 +1,5 @@
-//! The receiver's permission check on each row change of one write (§8.8, D5).
+//! The permission check on each row change of one write (§8.8, D5). Every
+//! device runs it, the author on its own write before queueing it.
 //!
 //! A write's steps never say what produced them. The receiver orders the
 //! steps of every part it opened by sequence, and calls a step a foreign-key
@@ -171,6 +172,7 @@ impl Checked {
 }
 
 /// Every opened row change's check.
+#[derive(Clone)]
 pub(crate) struct Judgement {
     pub(crate) rows: BTreeMap<RowId, Checked>,
 }
