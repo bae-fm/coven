@@ -6666,9 +6666,8 @@ holds failures and rejected entries, without making either wait look completed.
   process, or a lock held by another process, still returns `AlreadyOpen`
   immediately ([E1](api.md#e1-opening)).
 - Opening leaves configured storage `Stopped`, or `Disconnected` when none is
-  set up. `start_sync` asks the injected provider connector to build a client
-  when absent, using custody credentials, then starts the loop. Tokens refresh
-  on rejection (§4). Repeated starts keep the running loop and client.
+  set up. `start_sync` starts the loop, whose first pass builds the client
+  from custody credentials (E5). Repeated starts keep the running loop.
 - `stop_sync` finishes the active pass and file transfers before releasing
   every worker's provider reference. Session keys stay with the open handle;
   closing or explicit key forgetting erases them. It retains the location

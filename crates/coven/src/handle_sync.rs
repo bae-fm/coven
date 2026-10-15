@@ -2,8 +2,9 @@
 use crate::*;
 
 impl CovenHandle {
-    /// Start syncing, building an absent client from custody credentials and
-    /// refreshing expired tokens. Already running or unconfigured stores do nothing.
+    /// Start syncing; the first pass builds an absent client from custody
+    /// credentials and backs off like any failed pass. Already running or
+    /// unconfigured stores do nothing.
     pub async fn start_sync(&self) -> Result<(), SyncError> {
         self.sync.start().await
     }

@@ -179,36 +179,35 @@ async fn stopping_releases_the_provider_and_start_rebuilds_it_once() {
 }
 
 #[tokio::test]
-async fn a_failed_start_preserves_stopped_storage_and_can_be_retried() {
+async fn a_failed_first_connection_shows_in_status_and_retries_after_backoff() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.stop_sync();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.connector.refuse.store(true, Ordering::SeqCst);
-    assert!(matches!(f.handle.start_sync().await,
-        Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Authentication));
-    assert!(matches!(
-        &*f.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Stopped
-    ));
-    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
-    f.app.fail_next_keychain_operation();
-    assert!(matches!(
-        f.handle.start_sync().await,
-        Err(SyncError::SecureStorage(_))
-    ));
-    assert!(matches!(
-        &*f.handle.subscribe_sync_status().borrow(),
-        SyncStatus::Stopped
-    ));
     f.handle.start_sync().await.unwrap();
+    status(&f.handle, |s| {
+        matches!(s, SyncStatus::Failed { error: SyncFailure::Storage(error) }
+        if error.failure() == StorageFailure::Authentication)
+    })
+    .await;
+    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
+    // The loop stays started: the pass after backoff connects.
+    f.advance(Duration::from_secs(30));
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    f.app.fail_next_keychain_operation();
+    f.handle.start_sync().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. })).await;
+    f.advance(Duration::from_secs(30));
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.close().await.unwrap();
 }
 
 #[tokio::test]
-async fn stop_queued_during_cancelled_start_releases_the_new_client() {
+async fn stop_queued_while_the_first_pass_connects_releases_the_new_client() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -219,15 +218,9 @@ async fn stop_queued_during_cancelled_start_releases_the_new_client() {
     *f.connector.held.lock().await = Some((entered, resumed));
     let mut subscription = f.handle.subscribe_sync_status();
     subscription.borrow_and_update();
-    {
-        let start = f.handle.start_sync();
-        tokio::pin!(start);
-        tokio::select! {
-            result = &mut start => panic!("start completed while provider construction was held: {result:?}"),
-            _ = entering => {}
-        }
-        f.handle.stop_sync();
-    }
+    f.handle.start_sync().await.unwrap();
+    entering.await.unwrap();
+    f.handle.stop_sync();
     resume.send(()).unwrap();
     tokio::time::timeout(Duration::from_secs(10), async {
         loop {

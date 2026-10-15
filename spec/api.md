@@ -1682,9 +1682,9 @@ while let Ok(values) = lost.next().await {
   One bad photo while the rest syncs leaves `Synced` with a pending file record.
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
-- `start_sync` builds the provider client if absent, reading credentials from
-  custody, then starts the loop. Tokens refresh on provider rejection (§4).
-  Starting an already running loop, or a store with no storage set up, does nothing.
+- `start_sync` starts the loop; its first pass builds the provider client from
+  custody credentials, failing and backing off like any pass. Tokens refresh
+  on provider rejection (§4).
 - `stop_sync` finishes the active pass and file transfers, then drops all
   workers' references to the provider client. The open handle keeps its session
   keys until close or explicit forgetting. Credentials
@@ -2457,9 +2457,8 @@ impl CovenHandle {
     /// and loop state stay. Storage's contents are untouched.
     pub async fn disconnect_storage(&self) -> Result<(), SyncError>;
 
-    /// Starts syncing, building the provider client if absent from the configured
-    /// location and custody credentials, refreshing once on rejection. Borrows
-    /// keys already unlocked for the handle's session. Does nothing if already running or no storage is set up.
+    /// Starts syncing with the keys unlocked for this session; the first pass
+    /// connects. Does nothing if already running or no storage is set up.
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
     /// Finishes the active pass and file transfers, then drops the provider

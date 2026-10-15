@@ -175,8 +175,10 @@ impl SyncLoop {
         result.await.map_err(|_| DbError::StoreClosed)?
     }
 
-    /// Start configured storage, reconstructing an absent client from custody.
-    /// Repeated starts and stores without configured storage are no-ops.
+    /// Start configured storage once its keys check. The first pass builds an
+    /// absent client from custody; a failure there is a failed pass, shown in
+    /// status and retried after backoff. Repeated starts and stores without
+    /// configured storage are no-ops.
     pub async fn start(&self) -> Result<(), SyncError> {
         let (reply, result) = oneshot::channel();
         self.commands
@@ -349,7 +351,8 @@ impl SyncRun {
         if self.configured && !self.started {
             self.operations.check_sync_keys().await?;
             if self.connection.is_none() {
-                self.connect().await?;
+                // The next connection starts its own backoff.
+                self.new_connection();
             }
             self.started = true;
             self.status.send_replace(SyncStatus::Syncing);
@@ -484,6 +487,9 @@ impl SyncRun {
                     }
                     self.status.send_replace(SyncStatus::Syncing);
                     let result = async {
+                        if self.connection.is_none() {
+                            self.connect().await?;
+                        }
                         self.operations.sync().await?;
                         // An admin's replacement of this member's key arrives
                         // sealed to them; adopt it before the old key goes (§13).

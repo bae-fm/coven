@@ -510,6 +510,15 @@ mod provider_access_tests {
             .await
             .unwrap();
         handle.start_sync().await.unwrap();
+        // The first pass connects; calls needing storage follow it.
+        let mut status = handle.subscribe_sync_status();
+        tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         handle
             .create_invite(
                 InviteTarget::NewMember {
