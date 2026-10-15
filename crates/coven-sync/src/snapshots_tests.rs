@@ -620,7 +620,7 @@ async fn selected_snapshot(device: &mut Device) -> ObjectPath {
     else {
         panic!()
     };
-    let selected = files.snapshots[0].path.clone();
+    let selected = files.snapshots[0].object.path.clone();
     device.sync.sync_store_log().await.unwrap();
     selected
 }

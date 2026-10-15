@@ -32,6 +32,16 @@ pub(super) fn signed_snapshot(
 }
 
 async fn unsigned_snapshot(device: &Device, id: coven_format::store_log::SnapshotId) -> Vec<u8> {
+    sealed_snapshot(device, id, |_| ()).await
+}
+
+/// `device`'s snapshot `id` sealed under its newest store key without either
+/// signature, after `edit` changes its plaintext.
+pub(super) async fn sealed_snapshot(
+    device: &Device,
+    id: coven_format::store_log::SnapshotId,
+    edit: impl FnOnce(&mut Vec<u8>),
+) -> Vec<u8> {
     let key_id = device.newest(Audience::Store).await;
     let path = ObjectPath::snapshot(
         store(1),
@@ -69,7 +79,8 @@ async fn unsigned_snapshot(device: &Device, id: coven_format::store_log::Snapsho
         .await
         .unwrap();
     let prefix = receive.recv().unwrap();
-    let plain: Vec<_> = receive.into_iter().flatten().collect();
+    let mut plain: Vec<_> = receive.into_iter().flatten().collect();
+    edit(&mut plain);
     let key = device
         .custody
         .read()

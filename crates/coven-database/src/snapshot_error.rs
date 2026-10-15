@@ -12,6 +12,17 @@ pub enum SnapshotError {
         #[source]
         error: Box<crate::DbError>,
     },
+    /// A selected snapshot's plaintext failed while the reload transaction was
+    /// reading it: the loader's format, schema and merge checks, or reading
+    /// the input itself.
+    #[error("reload snapshot {snapshot:?}: {error}")]
+    Body {
+        /// The supplied snapshot's identity.
+        snapshot: coven_format::store_log::SnapshotId,
+        /// The failed read or check.
+        #[source]
+        error: Box<crate::DbError>,
+    },
     /// Reading the plaintext supplied by sync failed.
     #[error("reading reload input: {0}")]
     Read(#[source] std::io::Error),

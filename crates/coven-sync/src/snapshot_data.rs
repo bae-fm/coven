@@ -2,7 +2,7 @@
 
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
-use coven_storage::{ObjectPath, UploadSession};
+use coven_storage::{StoredObject, UploadSession};
 use serde::{Deserialize, Serialize};
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -47,7 +47,9 @@ pub(crate) struct ReloadFiles {
 
 #[derive(Clone, Serialize, Deserialize)]
 pub(crate) struct SavedSnapshot {
-    pub(crate) path: ObjectPath,
+    /// The authenticated observation whose plaintext `file` holds; a body
+    /// the reload transaction rejects is refused under it (§19.1).
+    pub(crate) object: StoredObject,
     pub(crate) file: String,
     pub(crate) prefix: Vec<u8>,
 }

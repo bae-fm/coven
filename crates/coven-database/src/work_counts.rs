@@ -17,6 +17,9 @@ pub struct WorkCounts {
     pub commits: usize,
     /// Successful atomic installations of a ready entry batch and its replay.
     pub store_log_commits: usize,
+    /// Snapshot bodies the loader parsed, for loading, verification or
+    /// file-reference checks.
+    pub snapshot_reads: usize,
 }
 
 /// Injected counter; clones observe the same database, never other test databases.

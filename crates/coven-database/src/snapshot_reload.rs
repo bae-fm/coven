@@ -2,7 +2,9 @@
 
 use crate::{BoundaryCoverage, DownloadedWriteStream, OperationUpdate};
 use coven_format::{sealed_snapshot::SnapshotObjectPrefix, store_log::SnapshotId};
+use coven_foundation::id_source::{DeviceId, FileId};
 use coven_merge::Audience;
+use std::collections::BTreeSet;
 
 /// One audience's starting state. An audience without a stored snapshot starts
 /// empty and consumes its complete device-log history in the reload transaction.
@@ -18,6 +20,16 @@ pub enum SnapshotSource<R> {
     },
     /// No stored snapshot exists for this readable audience.
     Empty(Audience),
+}
+
+/// A stored snapshot a committed reload read, with the uploaded files its
+/// rows and losses name: file retention reuses them rather than reading the
+/// body again (§16.5).
+pub struct LoadedSnapshot {
+    /// The snapshot's identity.
+    pub id: SnapshotId,
+    /// Uploaded files named by its rows and losses.
+    pub files: BTreeSet<(DeviceId, FileId)>,
 }
 
 /// Checked inputs and metadata that must advance together with the loaded rows.

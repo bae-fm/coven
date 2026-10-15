@@ -506,3 +506,84 @@ async fn a_snapshot_in_a_newer_format_waits_for_an_update_while_the_logs_go_on()
     b.sync.run_retention().await.unwrap();
     assert_eq!(snapshot_record(&b, &path).await, waits);
 }
+
+/// A reload parses each selected body once, inside the transaction that
+/// loads it. A body that authenticates but fails the loader's checks there is
+/// refused, and the reload waits on that snapshot rather than loading an
+/// older one, without reading or parsing it again (§15, §19.1).
+#[tokio::test]
+async fn a_reload_parses_each_body_once_and_refuses_one_that_fails_to_load() {
+    let storage = snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    a.sync.write_snapshot(Audience::Store).await.unwrap();
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    let work = coven_database::test_utils::WorkCounter::default();
+    b.db.test_track_work(work.clone()).await.unwrap();
+    b.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(work.take().snapshot_reads, 1);
+    assert_eq!(tables(&b).await, tables(&a).await);
+
+    // A newer snapshot whose sealed plaintext lacks its last byte: its
+    // signatures and chunks check, and only the loader finds it truncated.
+    write_rows(&a, 1, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    let id = coven_format::store_log::SnapshotId {
+        audience: Audience::Store,
+        device: a.device().await,
+        number: 999,
+    };
+    let newer = ObjectPath::snapshot(
+        store(1),
+        Audience::Store,
+        id.device,
+        NonZeroU64::new(id.number).unwrap(),
+    );
+    let unsigned = super::signatures::sealed_snapshot(&a, id, |plain| {
+        plain.pop();
+    })
+    .await;
+    storage
+        .create(
+            &newer,
+            &super::signatures::signed_snapshot(&unsigned, &newer, &a.member, &a.member),
+        )
+        .await
+        .unwrap();
+    let waits_on_newer = |result: Result<(), SyncError>| {
+        assert!(
+            matches!(&result, Err(SyncError::Pending(waiting)) if waiting.reason
+                == crate::PendingReason::Waits(crate::Prerequisite::Object(newer.clone()))),
+            "{result:?}"
+        );
+    };
+    let mut c = notes_device(storage.clone(), 3).await;
+    add_device(&mut c).await;
+    let work = coven_database::test_utils::WorkCounter::default();
+    c.db.test_track_work(work.clone()).await.unwrap();
+    waits_on_newer(c.sync.reload_from_snapshots().await);
+    assert_eq!(work.take().snapshot_reads, 1);
+    assert!(matches!(
+        snapshot_record(&c, &newer).await,
+        Some(crate::PendingReason::Refused(_))
+    ));
+    assert!(tables(&c).await.is_empty());
+    let reads = storage.reads().await.len();
+    c.elapse_retry_delays();
+    waits_on_newer(c.sync.reload_from_snapshots().await);
+    assert_eq!(work.take().snapshot_reads, 0);
+    assert!(!storage.reads().await[reads..]
+        .iter()
+        .any(|(read, _, _)| read == &newer));
+    // Once it is no longer listed, the waiting reload loads the newest left,
+    // and so does the one this call requests: one parse each.
+    storage.delete(&newer).await.unwrap();
+    c.elapse_retry_delays();
+    c.sync.reload_from_snapshots().await.unwrap();
+    assert_eq!(work.take().snapshot_reads, 2);
+    c.writes.download_writes().await.unwrap();
+    assert_eq!(tables(&c).await, tables(&a).await);
+}

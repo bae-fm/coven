@@ -72,22 +72,33 @@ impl Database {
     }
 }
 
-pub(super) fn snapshot_references(
+/// Uploaded files named by the rows and losses of the audience snapshot just
+/// read into this transaction. A location the schema cannot accept is the
+/// snapshot's own failure.
+pub(crate) fn snapshot_references(
     db: &crate::sqlite::DatabaseConnection,
     audience: &coven_merge::Audience,
     schema: &crate::write_schema::WriteSchema,
 ) -> Result<BTreeSet<(DeviceId, FileId)>, DbError> {
     let mut references = BTreeSet::new();
     db.for_each(
-        "SELECT table_name,columns FROM temp._coven_snapshot_values",
-        [],
+        "SELECT table_name,columns FROM temp._coven_snapshot_values WHERE audience=?1",
+        [crate::write_encoding::audience_text(audience)],
         |row| {
             let columns = coven_format::merge_fields::decode_columns(&row.get::<_, Vec<u8>>(1)?)?;
             retain_columns(schema, &row.get::<_, String>(0)?, &columns, &mut references)
         },
-    )?;
-    crate::loss_record::visit(db, audience, |loss| {
-        crate::file_protection::loss(schema, &loss, &mut references)
+    )
+    .and_then(|()| {
+        crate::loss_record::visit(db, audience, |loss| {
+            crate::file_protection::loss(schema, &loss, &mut references)
+        })
+    })
+    .map_err(|error| match error {
+        DbError::DamagedDatabase => {
+            crate::snapshot_error::invalid("snapshot file location is invalid")
+        }
+        error => error,
     })?;
     Ok(references)
 }

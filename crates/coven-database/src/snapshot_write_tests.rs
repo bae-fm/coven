@@ -144,6 +144,8 @@ pub(crate) fn stream(
     }
 }
 
+/// Load one snapshot. A failure of its body is returned as the loader's own
+/// verdict, after checking that the reload named this snapshot.
 pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     database: &Database,
     expected: SnapshotId,
@@ -152,10 +154,18 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
 ) -> Result<(), crate::DbError> {
     database
         .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
-            vec![(expected, prefix, plaintext)],
+            vec![(expected.clone(), prefix, plaintext)],
             Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
         ))
         .await
+        .map(drop)
+        .map_err(|error| match error {
+            crate::DbError::Snapshot(crate::SnapshotError::Body { snapshot, error }) => {
+                assert_eq!(snapshot, expected);
+                *error
+            }
+            error => error,
+        })
 }
 
 #[tokio::test]

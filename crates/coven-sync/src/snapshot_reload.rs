@@ -124,7 +124,7 @@ impl StoreLogSync {
                     .into_iter();
                 for candidate in selections {
                     let file = names.next().expect("reserved snapshot files");
-                    match self.load_snapshot(candidate, file).await? {
+                    match self.download_snapshot(candidate, file).await? {
                         Ok(snapshot) => files.snapshots.push(snapshot),
                         Err(reason) => {
                             return Err(SyncError::Pending(Box::new(
@@ -289,7 +289,7 @@ impl StoreLogSync {
                 let mut snapshots = Vec::new();
                 for snapshot in &files.snapshots {
                     snapshots.push(SnapshotSource::Stored {
-                        id: snapshot.path.snapshot_id().ok_or_else(|| {
+                        id: snapshot.object.path.snapshot_id().ok_or_else(|| {
                             inconsistent("recorded snapshot path has another layout")
                         })?,
                         prefix: SnapshotObjectPrefix::decode(&snapshot.prefix)?,
@@ -367,6 +367,48 @@ impl StoreLogSync {
                             error => return Err(error),
                         }
                     }
+                    Err(coven_database::DbError::Snapshot(
+                        coven_database::SnapshotError::Body { snapshot, error },
+                    )) => {
+                        let object = files
+                            .snapshots
+                            .iter()
+                            .find(|saved| {
+                                saved.object.path.snapshot_id().as_ref() == Some(&snapshot)
+                            })
+                            .ok_or(coven_database::DbError::Invariant {
+                                what: "a reload's failed snapshot is one it supplied",
+                            })?
+                            .object
+                            .clone();
+                        // Nothing loaded. Retry selects again: the refused
+                        // body is then waited on, never reloaded.
+                        let SnapshotJob::Reload { files, .. } = &mut task.job else {
+                            unreachable!()
+                        };
+                        *files = None;
+                        self.save_snapshot_task(record, &task, 0).await?;
+                        // A schema outside the app's supported range fails the
+                        // caller, as does a snapshot made under another
+                        // retirement verdict, which cannot load here (§10). Any
+                        // other verdict on the body refuses it, and the reload
+                        // waits on that snapshot rather than passing it over for
+                        // an older one (§15, §19.1; storelog-data
+                        // `ReloadWait.choose`).
+                        let error = match *error {
+                            error @ coven_database::DbError::Snapshot(
+                                coven_database::SnapshotError::Schema { .. }
+                                | coven_database::SnapshotError::RetirementVerdict { .. },
+                            ) => return Err(error.into()),
+                            error => error,
+                        };
+                        self.refuse_snapshot(&object, error.into()).await?;
+                        let reason =
+                            crate::PendingReason::Waits(crate::Prerequisite::Object(object.path));
+                        return Err(SyncError::Pending(Box::new(
+                            self.operation_condition(record, reason).await?,
+                        )));
+                    }
                     result => result,
                 };
                 match result {
@@ -381,15 +423,13 @@ impl StoreLogSync {
                     }
                     Err(
                         error @ coven_database::DbError::Snapshot(
-                            coven_database::SnapshotError::MissingWrites { .. }
-                            | coven_database::SnapshotError::RetirementVerdict { .. },
+                            coven_database::SnapshotError::MissingWrites { .. },
                         ),
                     ) => {
                         // A write assumed to remain queued can finish uploading
-                        // during the download, and a snapshot made under another
-                        // retirement verdict cannot load here (§10). Retry must
-                        // select and fetch again, rather than repeatedly loading
-                        // the same stale inputs.
+                        // during the download. Retry must select and fetch
+                        // again, rather than repeatedly loading the same stale
+                        // inputs.
                         let SnapshotJob::Reload { files, .. } = &mut task.job else {
                             unreachable!()
                         };
@@ -397,7 +437,28 @@ impl StoreLogSync {
                         self.save_snapshot_task(record, &task, 0).await?;
                         return Err(error.into());
                     }
-                    result => result?,
+                    result => {
+                        // The parse that loaded each body also found the files
+                        // it names; file retention reuses them (§16.5).
+                        for loaded in result? {
+                            let saved = files
+                                .snapshots
+                                .iter()
+                                .find(|saved| {
+                                    saved.object.path.snapshot_id().as_ref() == Some(&loaded.id)
+                                })
+                                .ok_or(coven_database::DbError::Invariant {
+                                    what: "a reload's loaded snapshot is one it supplied",
+                                })?;
+                            crate::object_input::ObjectInput::observe(
+                                &self.database,
+                                &saved.object,
+                            )
+                            .await?
+                            .keep_files(Some(loaded.files))
+                            .await?;
+                        }
+                    }
                 }
             }
             2 => {
@@ -413,7 +474,7 @@ impl StoreLogSync {
                 let mut paths: Vec<_> = files
                     .snapshots
                     .iter()
-                    .map(|s| s.path.as_str().to_owned())
+                    .map(|s| s.object.path.as_str().to_owned())
                     .collect();
                 for write in &files.writes {
                     let header = WriteHeaderFrame::decode(&write.header)?;

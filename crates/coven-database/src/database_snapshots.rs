@@ -93,9 +93,10 @@ impl Database {
     }
 
     /// Run the snapshot loader's format, schema and merge checks in a transaction
-    /// that always rolls back. Sync uses this for loading and file-reference checks;
-    /// a damaged snapshot cannot leave rows, metadata or observations behind.
-    /// Supply its authenticated sealed prefix alongside the opened plaintext.
+    /// that always rolls back, returning the uploaded files the snapshot names.
+    /// File retention uses this for a snapshot no reload has read; a damaged
+    /// snapshot cannot leave rows, metadata or observations behind. Supply its
+    /// authenticated sealed prefix alongside the opened plaintext.
     pub async fn validate_snapshot<R: std::io::Read + Send + 'static>(
         &self,
         id: coven_format::store_log::SnapshotId,
@@ -119,18 +120,11 @@ impl Database {
                         prefix,
                         input,
                     )?;
-                    let files = super::file_retention::snapshot_references(
+                    super::file_retention::snapshot_references(
                         writer,
                         &id.audience,
                         &inner.access.write_schema,
                     )
-                    .map_err(|error| match error {
-                        DbError::DamagedDatabase => {
-                            crate::snapshot_error::invalid("snapshot file location is invalid")
-                        }
-                        error => error,
-                    })?;
-                    Ok(files)
                 })
             })
         })
@@ -238,15 +232,18 @@ impl Database {
     /// decoded write is retained at a time. Inputs may arrive in any order.
     ///
     /// Replaces the selected audiences and replays uncovered parts and waiting
-    /// uploads in one transaction. Every audience finishes at common positions;
-    /// missing history, read errors and failed checks roll the whole load back.
+    /// uploads in one transaction, parsing each snapshot body once. Every
+    /// audience finishes at common positions; missing history, read errors and
+    /// failed checks roll the whole load back, a body's failure as
+    /// `SnapshotError::Body` naming that snapshot. Returns the uploaded files
+    /// each stored snapshot names.
     /// Supply each readable audience's parts, including those needed by waiting
     /// writes and the device's own earlier writes. Other audiences retain their
     /// merge history. Upload records, numbers and sealing key ids stay unchanged.
     pub async fn load_snapshots<P: crate::PendingValue, R, W>(
         &self,
         reload: crate::SnapshotReload<R, W>,
-    ) -> Result<(), DbError>
+    ) -> Result<Vec<crate::LoadedSnapshot>, DbError>
     where
         R: std::io::Read + Send + 'static,
         W: std::io::Read + Send + 'static,
@@ -268,8 +265,7 @@ impl Database {
                             inner.access.device,
                         )
                     })
-                })?;
-                Ok(())
+                })
             })
         })
         .await

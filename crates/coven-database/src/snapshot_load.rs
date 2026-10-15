@@ -23,7 +23,7 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
     reload: crate::SnapshotReload<R, W>,
     files: &crate::file_write::FileWrite<'_>,
     device: coven_foundation::id_source::DeviceId,
-) -> Result<(), DbError> {
+) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.transaction(|database| {
         let crate::SnapshotReload {
             snapshots,
@@ -77,10 +77,29 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
             DatabaseRemovalView::new(before, &old_store, schema, &visible, &empty, &deleted, None)?;
         crate::snapshot_state::create_tables(database)?;
         let mut touched = BTreeSet::new();
+        let mut loaded = Vec::new();
         for source in snapshots {
             match source {
                 crate::SnapshotSource::Stored { id, prefix, input } => {
-                    let (header, rows) = read(database, schema, &id, prefix, input)?;
+                    // The only parse of this body: a failure names the
+                    // snapshot, whose bytes sync then refuses (§19.1).
+                    let (header, rows, files) = read(database, schema, &id, prefix, input)
+                        .and_then(|(header, rows)| {
+                            let files = crate::database::file_retention::snapshot_references(
+                                database,
+                                &id.audience,
+                                schema,
+                            )?;
+                            Ok((header, rows, files))
+                        })
+                        .map_err(|error| SnapshotError::Body {
+                            snapshot: id.clone(),
+                            error: Box::new(error),
+                        })?;
+                    loaded.push(crate::LoadedSnapshot {
+                        id: id.clone(),
+                        files,
+                    });
                     // Writes covered here but never applied individually are not
                     // retained, so earlier inputs cannot reproduce this audience.
                     if !header.writes.0.iter().all(|write| applied.covers(*write)) {
@@ -145,7 +164,7 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
         if let Some(operation) = operation {
             crate::operation::advance(database, &operation)?;
         }
-        Ok(())
+        Ok(loaded)
     })
 }
 
@@ -188,6 +207,8 @@ pub(crate) fn read(
     prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
     mut input: impl Read,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
+    #[cfg(any(test, feature = "test-utils"))]
+    database.record_work(|work| work.snapshot_reads += 1);
     let local_version = *schema.versions.end();
     let mut touched = crate::snapshot_state::begin(database, schema, &expected.audience)?;
     let metadata = SnapshotMetadata::new(database);

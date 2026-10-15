@@ -298,46 +298,34 @@ impl StoreLogSync {
         Ok(())
     }
 
-    /// Load an audience's current newest snapshot into `file`. A body that
-    /// fails its check is refused, and loading waits on that snapshot rather
-    /// than passing it over for an older one: a version that loads the body
-    /// selects it (§15, §19.1; storelog-data `ReloadWait.choose`). A schema
-    /// outside the app's supported range fails the caller with that error.
-    pub(super) async fn load_snapshot(
+    /// Download an audience's current newest snapshot and save its
+    /// authenticated plaintext into `file`; the reload transaction parses it
+    /// (§15). Bytes that fail authentication are refused, and loading waits on
+    /// that snapshot rather than passing it over for an older one: a version
+    /// that loads the body selects it (§19.1; storelog-data `ReloadWait.choose`).
+    pub(super) async fn download_snapshot(
         &self,
         candidate: Candidate,
         file: String,
     ) -> Result<Result<SavedSnapshot, PendingReason>, SyncError> {
-        let result = self.open_snapshot(&candidate, &file).await;
-        let waits = match result {
+        let error = match self.save_plaintext(&candidate, &file).await {
             Ok(()) => {
                 return Ok(Ok(SavedSnapshot {
-                    path: candidate.object.path,
-                    file,
                     prefix: candidate.prefix.encode()?,
+                    object: candidate.object,
+                    file,
                 }))
             }
-            Err(
-                error @ SyncError::Database(coven_database::DbError::Snapshot(
-                    coven_database::SnapshotError::Schema { .. },
-                )),
-            ) => Err(error),
-            Err(error) => {
-                self.refuse_snapshot(&candidate.object, error).await?;
-                Ok(Err(PendingReason::Waits(crate::Prerequisite::Object(
-                    candidate.object.path,
-                ))))
-            }
+            Err(error) => error,
         };
+        self.refuse_snapshot(&candidate.object, error).await?;
         io::remove(&self.directory, &file)?;
-        waits
+        Ok(Err(PendingReason::Waits(crate::Prerequisite::Object(
+            candidate.object.path,
+        ))))
     }
 
-    pub(super) async fn open_snapshot(
-        &self,
-        candidate: &Candidate,
-        file: &str,
-    ) -> Result<(), SyncError> {
+    async fn save_plaintext(&self, candidate: &Candidate, file: &str) -> Result<(), SyncError> {
         let mut writer = self
             .directory
             .file(
@@ -350,19 +338,6 @@ impl StoreLogSync {
         self.stream_snapshot(candidate, &retained, &mut writer)
             .await?;
         writer.finish().await?;
-        let files = self
-            .database
-            .validate_snapshot(
-                candidate
-                    .object
-                    .path
-                    .snapshot_id()
-                    .expect("checked snapshot path"),
-                candidate.prefix.clone(),
-                io::SnapshotInput::open(&self.directory, file)?,
-            )
-            .await?;
-        retained.keep_files(Some(files)).await?;
         Ok(())
     }
 
