@@ -728,6 +728,7 @@ async fn a_dropped_approval_settles_its_invite() {
         .await
         .unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
+    a.catch_up().await;
     let reply = loop {
         match step(&mut a, operation).await.unwrap() {
             Progress::Advanced => (),
