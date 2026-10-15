@@ -198,6 +198,23 @@ pub(super) fn check_prefix(prefix: &ObjectPrefix, path: &ObjectPath) -> Result<(
     }
     Ok(())
 }
+/// CloudKit dates count whole milliseconds (§4), but `NSDate` reports them
+/// as floating-point seconds, which rarely land exactly on a millisecond.
+/// Round to the nearest one so the time sits on the provider's tick. A
+/// non-finite date or one before the epoch is a protocol error.
+fn whole_milliseconds(seconds: f64) -> Result<StorageTime, StorageError> {
+    let milliseconds = (seconds * 1000.0).round();
+    if !milliseconds.is_finite() || milliseconds < 0.0 || milliseconds >= u64::MAX as f64 {
+        return Err(StorageFailure::Protocol.with_source("CloudKit date out of range"));
+    }
+    let milliseconds = milliseconds as u64;
+    StorageTime::new(
+        milliseconds / 1000,
+        u32::try_from(milliseconds % 1000).expect("below one thousand") * 1_000_000,
+    )
+    .map_err(|error| StorageFailure::Protocol.with_source(error))
+}
+
 pub(super) fn publication_metadata(
     name: &str,
     path: &str,
@@ -223,11 +240,7 @@ pub(super) fn publication_metadata(
         created
     }
     .ok_or(StorageFailure::Protocol)?;
-    // A negative interval precedes the epoch and fails the conversion.
-    let stored_at = StorageTime::since_epoch(
-        Duration::try_from_secs_f64(seconds)
-            .map_err(|error| StorageFailure::Protocol.with_source(error))?,
-    );
+    let stored_at = whole_milliseconds(seconds)?;
     Ok(StoredObject {
         path,
         size,

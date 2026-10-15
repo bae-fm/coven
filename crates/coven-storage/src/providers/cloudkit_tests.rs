@@ -131,6 +131,51 @@ fn replacements_retain_change_tags_even_with_equal_sizes_and_dates() {
     }
 }
 
+/// `NSDate` seconds rarely hold a millisecond exactly; the time lands on the
+/// millisecond tick CloudKit counts, never between ticks (§4).
+#[test]
+fn dates_land_on_whole_milliseconds() {
+    use coven_format::value::StorageTime;
+    let path = ObjectPath::clock(path().store(), DeviceId(7));
+    for (seconds, expected) in [
+        (
+            1_760_400_000.123,
+            StorageTime::new(1_760_400_000, 123_000_000),
+        ),
+        (0.1 + 0.2, StorageTime::new(0, 300_000_000)),
+        (30.0009999999, StorageTime::new(30, 1_000_000)),
+        (0.0, StorageTime::new(0, 0)),
+    ] {
+        let object = publication_metadata(
+            path.as_str(),
+            path.as_str(),
+            "64",
+            None,
+            Some(seconds),
+            Some("tag"),
+        )
+        .unwrap();
+        assert_eq!(object.stored_at, expected.unwrap(), "{seconds}");
+        assert_eq!(object.stored_at.nanos() % 1_000_000, 0);
+    }
+    for seconds in [-0.001, f64::INFINITY, f64::NEG_INFINITY, f64::NAN, 1e300] {
+        assert_eq!(
+            publication_metadata(
+                path.as_str(),
+                path.as_str(),
+                "64",
+                None,
+                Some(seconds),
+                Some("tag")
+            )
+            .unwrap_err()
+            .failure(),
+            StorageFailure::Protocol,
+            "{seconds}"
+        );
+    }
+}
+
 #[test]
 fn metadata_requires_the_date_for_the_object_kind() {
     for path in [
