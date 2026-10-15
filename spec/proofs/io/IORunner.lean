@@ -14,6 +14,7 @@ import CovenIO.DroppedRegistrations
 import CovenIO.RaiseCoverage
 import CovenIO.RetentionDeadline
 import CovenIO.RaiseHistory
+import CovenIO.FinalReset
 import CovenIO.CommonReload
 import CovenIO.AudienceRetention
 import Lean
@@ -907,6 +908,42 @@ private def deadline (j : Json) : Except String Json := do
   return Json.mkObj [("parts", toJson parts), ("B", toJson bound), ("R", toJson r),
     ("deadline", toJson (r + 3 * passGap + upload + (← j.getObjValAs? Nat "latency")))]
 
+/-- `Retired.Folder.step` folded over one removed writer's folder events: an
+upload of a file id, a restore or a revocation of its access, and a
+retention whose listing completes or fails. After each event, `null` while
+no scan is complete, else whether the scan names every file the folder
+holds (`scan_names_every_file`). -/
+private def folder (j : Json) : Except String Json := do
+  let writer ← j.getObjValAs? Nat "writer"
+  let events ← (← j.getObjValAs? (Array Json) "events").toList.mapM fun e => do
+    if let .ok file := e.getObjValAs? Nat "upload" then
+      return Retired.FolderEvent.upload file
+    if let .ok completes := e.getObjValAs? Bool "retain" then
+      return .retain completes
+    if (e.getObjValAs? Bool "restore").isOk then return .restore
+    if (e.getObjValAs? Bool "revoke").isOk then return .revoke
+    throw "unknown folder event"
+  let mut f := Retired.Folder.initial
+  let mut results := #[]
+  for event in events do
+    f := f.step writer true event
+    results := results.push (match f.scan with
+      | .pending => Json.null
+      | .complete paths => toJson (f.files.all fun file => Path.file writer file ∈ paths))
+  return Json.arr results
+
+/-- `FinalReset.select` on one audience's kept raise and reset entries in
+replay order, each `["raise", version, snapshot]` or `["reset", snapshot]`:
+the indices of the effective ones, whose last is the boundary. -/
+private def boundaries (j : Json) : Except String Json := do
+  let entries ← (← j.getObjValAs? (Array Json) "entries").toList.zipIdx.mapM fun (e, i) => do
+    let boundary : FinalReset.Boundary ← match (← e.getArr?).toList with
+      | [.str "raise", v, s] => pure (.raise (← v.getNat?) (← s.getNat?))
+      | [.str "reset", s] => pure (.reset (← s.getNat?))
+      | _ => throw "unknown boundary"
+    pure (⟨i, boundary⟩ : FinalReset.Entry)
+  return toJson ((FinalReset.select .empty entries).map (·.id))
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -923,6 +960,8 @@ private def run (j : Json) : Except String Json := do
   | "send_gate" => sendGate j
   | "drain" => drain j
   | "file_scan" => fileScan j
+  | "folder" => folder j
+  | "boundaries" => boundaries j
   | "writers" => writers j
   | "retirements" => retirementDevices j
   | "phases" => phases j

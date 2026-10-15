@@ -283,6 +283,11 @@ import CovenStorelogData
 #print axioms CovenStorelogData.RetentionSafety.waits_only_on_finality_and_posts
 #print axioms CovenStorelogData.RetentionSafety.eligible_eventually_deleted
 #print axioms CovenStorelogData.RetentionSafety.CreationExample.creation_device_counterexample
+#print axioms CovenStorelogData.RetentionSafety.read_before_delete
+#print axioms CovenStorelogData.RetentionSafety.names_become_candidates
+#print axioms CovenStorelogData.RetentionSafety.stale_unproven_counterexample
+#print axioms CovenStorelogData.RetentionSafety.unread_deletion_counterexample
+#print axioms CovenStorelogData.RetentionSafety.establish_truthful
 
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes
 #print axioms CovenStorelogData.ReplayEffects.settleN_realizes

@@ -249,3 +249,106 @@ async fn io_differential_file_scan() {
     }
     assert_eq!(results, crate::discovery::tests::io_runner(&cases));
 }
+
+/// IO `Retired.Folder.step`: Carol is removed from day 0. Her uploads land
+/// only while her account's access is not taken away; Ana's provider access
+/// confirms it taken away (`revoke`), and Ben moving to Carol's account
+/// restores it (`restore`) until he moves back. Each retention lists the
+/// folder or fails. After each event, no complete scan is `null`; otherwise
+/// whether the scan named every file Carol uploaded, which retention then
+/// deletes, her removal being final.
+#[tokio::test]
+#[ignore = "requires COVEN_IO_RUNNER, supplied by scripts/check.sh"]
+async fn io_differential_folder_restore() {
+    use serde_json::{json, Value};
+    let histories: [&[&str]; 4] = [
+        &[
+            "upload", "retain", "revoke", "retain", "restore", "upload", "revoke", "retain",
+        ],
+        &[
+            "upload", "revoke", "fail", "retain", "restore", "retain", "revoke", "retain",
+        ],
+        &["upload", "revoke", "restore", "upload", "revoke", "retain"],
+        &[
+            "upload", "revoke", "retain", "restore", "upload", "revoke", "fail", "retain",
+        ],
+    ];
+    let mut cases = Vec::new();
+    let mut results = Vec::new();
+    for history in histories {
+        let (storage, clock) = google();
+        let [mut a, mut b, c] = accounts(storage.clone()).await;
+        let carol = c.device().await;
+        let photo =
+            |n: u64| ObjectPath::file(store(1), carol, FileId(uuid::Uuid::from_u128(n.into())));
+        publish(&mut a, Command::RemoveMember(c.member.member())).await;
+        finalize(&mut a, &clock).await;
+        b.clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+        b.sync().await;
+        let mut revoked_once = false;
+        let mut uploaded = Vec::new();
+        let mut events = Vec::new();
+        let mut observed = Vec::new();
+        for event in history {
+            match *event {
+                "upload" => {
+                    let id = uploaded.len() as u64 + 1;
+                    storage.create(&photo(id), b"photo").await.unwrap();
+                    uploaded.push(id);
+                    events.push(json!({ "upload": id }));
+                }
+                "retain" => {
+                    a.sync.run_retention().await.unwrap();
+                    events.push(json!({ "retain": true }));
+                }
+                "fail" => {
+                    fail_folder_listing(&storage, carol).await;
+                    let _ = a.sync.run_retention().await;
+                    storage.set_faults(Faults::none()).await;
+                    a.elapse_retry_delays();
+                    events.push(json!({ "retain": false }));
+                }
+                "revoke" if !revoked_once => {
+                    drive_access(&mut a).await;
+                    revoked_once = true;
+                    events.push(json!({ "revoke": true }));
+                }
+                kind => {
+                    // Ben moves to Carol's account and back, reaching storage
+                    // through the account he held before each move.
+                    let (held, account) = if kind == "restore" {
+                        ("ben@example.com", "cat@example.com")
+                    } else {
+                        ("cat@example.com", "ben@example.com")
+                    };
+                    b.sync.storage = Some(Arc::new(
+                        MemoryStorage::for_recipient(&storage, held).unwrap(),
+                    ));
+                    b.sync
+                        .make_and_upload_entry(StoreChange::SetAccess {
+                            member: b.member.member(),
+                            access: coven_format::MemberAccess::ProviderAccount(account.into()),
+                        })
+                        .await
+                        .unwrap();
+                    a.sync().await;
+                    drive_access(&mut a).await;
+                    events.push(json!({ kind: true }));
+                }
+            }
+            observed.push(match a.db.file_scan(carol).await.unwrap() {
+                None => Value::Null,
+                Some(_) => {
+                    let mut all = true;
+                    for id in &uploaded {
+                        all &= storage.read(&photo(*id)).await.is_err();
+                    }
+                    json!(all)
+                }
+            });
+        }
+        cases.push(json!({ "check": "folder", "writer": carol.0, "events": events }));
+        results.push(json!(observed));
+    }
+    assert_eq!(results, crate::discovery::tests::io_runner(&cases));
+}

@@ -552,3 +552,9 @@ import CovenIO
 #print axioms CovenIO.AwayReadExamples.away_read_receives
 #print axioms CovenIO.AwayReadExamples.late_runs
 #print axioms CovenIO.AwayReadExamples.after_catalog_skips_live_write
+#print axioms CovenIO.Retired.scan_names_every_file
+#print axioms CovenIO.Retired.revoked_listing_completes
+#print axioms CovenIO.Retired.retention_forgetting_counterexample
+#print axioms CovenIO.FinalReset.before_final_reset_repeats_it
+#print axioms CovenIO.FinalReset.final_reset_never_returns
+#print axioms CovenIO.BoundaryNames.one_entry_per_snapshot

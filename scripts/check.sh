@@ -455,12 +455,14 @@ proofs() {
             store_log_sync::tests::snapshots::publication::io_differential_publication \
             store_log_sync::tests::snapshots::publication::io_differential_ordinary_snapshot_writes \
             store_log_sync::tests::snapshots::held::io_differential_held \
+            store_log_sync::tests::snapshots::held::io_differential_boundary_select \
             store_log_sync::tests::snapshots::common_point::io_differential_common_point \
             retry_waits::tests::io_differential_waiting \
             store_log_sync::tests::operations::evidence::io_differential_waiting_evidence \
             store_log_sync::tests::operations::evidence::io_differential_wait_rows \
             files::tests::upload_retry::io_differential_upload_worker \
             store_log_sync::snapshots::file_scan::tests::io_differential_file_scan \
+            store_log_sync::snapshots::file_scan::tests::io_differential_folder_restore \
             write_object::tests::io_differential_dropped_registration \
             write_object::tests::io_differential_dropped_registration_retires \
             store_log_landing::tests::io_differential_late_registration_retires

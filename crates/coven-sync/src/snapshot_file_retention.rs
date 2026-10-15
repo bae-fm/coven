@@ -204,15 +204,18 @@ impl StoreLogSync {
     }
 
     /// Check the file references of another uploader's write this device
-    /// is about to delete, unless they are already checked or proven
-    /// unreadable here; deletion then makes them candidates (§16.5).
+    /// is about to delete, unless they are already complete here; deletion
+    /// then makes them candidates (§16.5). An unproven verdict is read again
+    /// once one of its parts opens or the schema range covers it, as for
+    /// proving absence (storelog-data `names_become_candidates`,
+    /// `stale_unproven_counterexample`).
     pub(super) async fn establish_references(
         &self,
         object: &StoredObject,
         log: &StoreLog,
     ) -> Result<(), SyncError> {
         let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
-        if retained.files().await?.is_some() {
+        if matches!(retained.files().await?, Some(FileEvidence::Complete(_))) {
             return Ok(());
         }
         let readable = self.snapshot_audiences(log)?;

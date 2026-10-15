@@ -103,6 +103,65 @@ async fn a_removed_devices_member_deletes_its_covered_logs_once_the_removal_is_f
     assert!(read < deleted);
 }
 
+/// Ben found the write of Ana's removed phone unproven while one of its
+/// parts did not open for him. Once that part opens, deleting the write reads
+/// it again, so the files it names become candidates with its deletion
+/// (§16.5; storelog-data `stale_unproven_counterexample`).
+#[tokio::test]
+async fn a_stale_unproven_write_is_read_again_before_it_goes() {
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    write_rows(&a, 0, 1, 17, Audience::Store).await;
+    upload(&a, &storage).await;
+    a.write_snapshot(Audience::Store).await.unwrap();
+    b.sync.reload_from_snapshots().await.unwrap();
+    b.sync
+        .make_and_upload_entry(StoreChange::RemoveDevice {
+            device: a.device().await,
+        })
+        .await
+        .unwrap();
+    post(&b, &storage).await;
+    let object = storage
+        .list(&ObjectPrefix::device_logs(store(1)))
+        .await
+        .unwrap()
+        .remove(0);
+    crate::object_input::ObjectInput::observe(&b.db, &object)
+        .await
+        .unwrap()
+        .keep_files(coven_database::FileEvidence::Unproven(
+            coven_database::UnprovenFiles::Parts([(Audience::Store, key(1))].into()),
+        ))
+        .await
+        .unwrap();
+    storage_clock.set(at(31, 0));
+    b.clock.set(at(31, 0));
+    b.sync().await;
+    mature(&storage_clock, &[&b]).await;
+    let size = storage.read(&object.path).await.unwrap().len() as u64;
+    let before = storage.request_trace().len();
+    b.sync.run_retention().await.unwrap();
+    assert!(logs(&storage).await.is_empty());
+    // Its parts were read to their end before it went, not just its header.
+    let trace = storage.request_trace()[before..].to_vec();
+    let read = trace
+        .iter()
+        .position(|r| {
+            matches!(r, MemoryRequest::Read(p, Some(range)) if *p == object.path && range.end() == size)
+        })
+        .expect("the unproven write was read again");
+    let deleted = trace
+        .iter()
+        .position(|r| matches!(r, MemoryRequest::Delete(p) if *p == object.path))
+        .unwrap();
+    assert!(read < deleted);
+}
+
 #[tokio::test]
 /// On Google Drive the store owner cannot delete another account's file, but
 /// its delete takes the file out of the store's folder, where it stays in the

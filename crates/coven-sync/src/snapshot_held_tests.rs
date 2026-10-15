@@ -306,3 +306,80 @@ fn a_dropped_reset_that_is_not_final_holds_what_its_selection_omits() {
         95
     ));
 }
+
+/// IO `FinalReset.select`: one audience's kept raise and reset entries in
+/// replay order, every sequence of up to four drawn from raises to versions
+/// 1 and 2 and resets, each naming one of two snapshots. Rust's
+/// `StoreLog::boundaries` keeps exactly the entries the model finds
+/// effective, so the boundary it replays is the model's.
+#[test]
+#[ignore = "scripts/check.sh supplies the Lean IO runner"]
+fn io_differential_boundary_select() {
+    use coven_database::{EntryOutcome, ReplayEntry, StoreLog, StoreLogCheck};
+    use coven_format::store_log::{StoreChange, StoreLogEntry};
+    let kinds: Vec<(Option<u32>, u64)> = [None, Some(1), Some(2)]
+        .into_iter()
+        .flat_map(|version| [1, 2].map(|snapshot| (version, snapshot)))
+        .collect();
+    let mut sequences: Vec<Vec<(Option<u32>, u64)>> = vec![Vec::new()];
+    let mut frontier = sequences.clone();
+    for _ in 0..4 {
+        frontier = frontier
+            .iter()
+            .flat_map(|sequence| {
+                kinds.iter().map(move |kind| {
+                    let mut next = sequence.clone();
+                    next.push(*kind);
+                    next
+                })
+            })
+            .collect();
+        sequences.extend(frontier.iter().cloned());
+    }
+    let mut cases = Vec::new();
+    let mut actual = Vec::new();
+    for sequence in sequences {
+        let mut log = StoreLog::default();
+        for (index, (version, snapshot)) in sequence.iter().enumerate() {
+            let snapshot = SnapshotId {
+                audience: Audience::Store,
+                device: DeviceId(1),
+                number: *snapshot,
+            };
+            let change = match version {
+                Some(version) => StoreChange::RaiseSchema {
+                    version: *version,
+                    snapshot,
+                    caught_at: StorageTime::UNIX_EPOCH,
+                },
+                None => StoreChange::Reset { snapshot },
+            };
+            let position = entry(index);
+            log.entries.push(ReplayEntry {
+                entry: StoreLogEntry {
+                    position,
+                    timestamp: coven_merge::Timestamp::new(index as u64 + 1, 0, DeviceId(2))
+                        .unwrap(),
+                    author: crate::store_log_sync::tests::member(1).member(),
+                    had_read: EntryPositions(Vec::new()),
+                    change,
+                },
+                stored_at: StorageTime::UNIX_EPOCH,
+                check: StoreLogCheck::Allowed,
+            });
+            log.replay.entries.insert(position, EntryOutcome::Kept);
+        }
+        actual.push(json!(log
+            .boundaries()
+            .map(|boundary| boundary.entry().device.0 - 100)
+            .collect::<Vec<_>>()));
+        cases.push(json!({
+            "check": "boundaries",
+            "entries": sequence.iter().map(|(version, snapshot)| match version {
+                Some(version) => json!(["raise", version, snapshot]),
+                None => json!(["reset", snapshot]),
+            }).collect::<Vec<_>>(),
+        }));
+    }
+    assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
+}

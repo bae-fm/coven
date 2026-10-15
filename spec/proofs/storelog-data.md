@@ -936,6 +936,17 @@ The current spec resolves or narrows the historical witnesses as follows:
   SQL cascades or arbitrary migrations.
 - **Frozen file references:** `RetentionSafety.loss_protects_file` rules out
   the predicate error checked by `RetentionExamples.frozen_file_counterexample`.
+- **Deleted objects' references:** deleting a retained object makes the files
+  it names candidates (`ReferenceCandidates`). Another uploader's object is
+  read before it goes (`read_before_delete`), and every file a deleted object
+  names is a candidate once it goes whenever its parts open here, whether this
+  device had checked it, found it unproven, or never read it
+  (`names_become_candidates`). `unread_deletion_counterexample` is the rule
+  before T210, which deleted without reading; `stale_unproven_counterexample`
+  is the rule that reused an unproven verdict after the missing part opened,
+  which Rust's `a_stale_unproven_write_is_read_again_before_it_goes` replays.
+  An object whose parts still do not open stays unproven, and §16.5 leaves
+  the files it names in storage.
   The Rust comparison `data_differential_file_deletion` runs retention on a
   file named by each kind of retained reference in turn, by none, and behind
   an unreadable snapshot, and compares its deletions with `fileDeletable`.

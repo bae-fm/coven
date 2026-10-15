@@ -5014,6 +5014,10 @@ Carol's tablet:
     each, the newest counting snapshot it admits must cover the write.
     Without a pending raise or reset this is the current newest alone
     ([`held_without_raises`, `reload_never_skips`](proofs/io/CovenIO/RaiseHistory.lean)).
+    A final reset outside this list never becomes the boundary again
+    ([`final_reset_never_returns`](proofs/io/CovenIO/FinalReset.lean)), and
+    each snapshot is named by at most one raise or reset entry
+    ([`one_entry_per_snapshot`](proofs/io/CovenIO/BoundaryNames.lean)).
   - Under a kept reset, a reload skips a deleted write only when the reset
     ignores it: outside its snapshot and stored before its entry, so it
     never read it (§19.3;
@@ -5516,7 +5520,10 @@ Carol's tablet:
     Keep the discovered paths and scan completion so later passes and reopen
     continue the reference checks without listing again. If access is restored,
     a later cut-off needs its own scan: the transaction that records the
-    restored access forgets the completed scan. Removal alone does not
+    restored access forgets the completed scan, so a completed scan always
+    names every file the folder holds
+    ([`scan_names_every_file`, `retention_forgetting_counterexample`](proofs/io/CovenIO/Retired.lean)).
+    Removal alone does not
     authorize a scan to be treated as the last one while storage access
     remains unresolved.
   - A device removed while its member keeps provider-account access has no
@@ -5585,7 +5592,11 @@ Carol's tablet:
   - `_coven_file_candidates`: stored files awaiting a deletion decision
     (§16.5). The transaction ending a file's last local reference adds it;
     so does a retained object's checked reference list before this device
-    deletes that object, and a removed uploader's folder scan. A candidate
+    deletes that object, and a removed uploader's folder scan. Another
+    uploader's object is read before it goes, and an unproven verdict again
+    once one of its parts opens or the schema range covers it
+    ([`read_before_delete`, `names_become_candidates`, `stale_unproven_counterexample`](proofs/storelog-data/CovenStorelogData/ReferenceCandidates.lean)).
+    A candidate
     goes once storage confirms its deletion, or while local data still
     protects it, since that protection's end adds it again;
   - `_coven_file_scans`: each removed uploader whose file folder this device

@@ -578,14 +578,26 @@ The Rust comparison `io_differential_held` (runner check `held`) computes
 Rust's selection under each possible boundary on generated listings; a
 boundary naming an unlisted snapshot admits only that entry's readers.
 
-Outside the model: that a final reset entry Rust leaves out of the possible
-boundaries is never the boundary again (the `finalize` premise): dropped and
-final, replay never keeps it; kept and final, it is the final boundary or one
-a later final boundary replaces for good, since every entry not yet final
-read every final one (§9's landing rule) and replays after it. That an entry
-names its author's snapshot of its own kind, so one snapshot is never named
-by both a raise and a reset (the `publish` premise; the model keys readers by
-named snapshot, Rust by entry). That Rust replay never makes a raise at or
+Two premises are proved separately. A final reset Rust leaves out of the
+possible boundaries is never the boundary again (the `finalize` premise;
+[`FinalReset`](io/CovenIO/FinalReset.lean)): dropped and final, replay never
+keeps it. Kept and final, every kept entry ordered before it that is not final
+is concurrent with it, and since concurrent kept entries never conflict, it
+repeats that reset (`before_final_reset_repeats_it`); so the replayed state
+after the reset is the one the final entries alone give, and an entry after
+it that was effective there stays effective (`final_reset_never_returns`). The
+Rust comparison `io_differential_boundary_select` checks that
+`StoreLog::boundaries` keeps exactly the entries `FinalReset.select` finds
+effective, over every sequence of up to four raises and resets. Each snapshot
+is named by at most one entry, of the kind its prefix marks (the `publish`
+premise, and why keying readers by named snapshot, as the model does, agrees
+with Rust keying them by entry;
+[`BoundaryNames.one_entry_per_snapshot`](io/CovenIO/BoundaryNames.lean)):
+every preparation reserves a fresh number of its device's snapshot sequence,
+and a raise or reset operation publishes one entry naming its own
+preparation, assuming §2's members who are not hostile to their store.
+
+Outside the model: that Rust replay never makes a raise at or
 below the audience's finally kept version its boundary (the `finalize`
 premise): a lower raise ordered after it is already in place (`Boundary::schema_in_place`),
 an equal one with another snapshot conflicts with it when concurrent, and a
@@ -1108,8 +1120,29 @@ drop. Failed or incomplete scans do not certify completion.
 `failed_scan_not_complete` and `completed_scan_retained` model the durable
 one-time removed-device file-folder scan. The Rust comparison
 `io_differential_file_scan` folds `observeFiles` over failed and completed
-listings after a cut-off. Orphan enumeration, restoration of access and
-reference-safe deletion remain implementation obligations.
+listings after a cut-off.
+
+`Folder` adds the uploader's access to that scan. The uploader publishes into
+its folder only while its access is not confirmed taken away; a retention
+lists the folder only after that cut-off, and the device's one owner runs a
+retention whole, so no transaction recording access lands inside a listing.
+The transaction that records any of the access restored forgets the scan.
+
+- `scan_names_every_file`: however uploads, restores, revocations and
+  retentions interleave, a completed scan stands for a cut-off still in force
+  and names every file the folder holds.
+- `revoked_listing_completes`: after a revocation, one retention whose listing
+  completes records such a scan.
+- `retention_forgetting_counterexample`: forgetting the scan only when a
+  retention next sees the access restored, as before T210, keeps an empty scan
+  across a restore, an upload and a new revocation between two retentions, so
+  the uploaded photo is never listed.
+
+The Rust comparison `io_differential_folder_restore` drives Carol's removal,
+Ana's revocation of her account, Ben moving to her account and back, uploads
+and listings that complete or fail, and compares after each event whether a
+scan exists and whether it found every upload. Orphan enumeration beyond the
+folder and reference-safe deletion remain implementation obligations.
 
 ## Requests and retained observations
 
