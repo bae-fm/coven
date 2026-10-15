@@ -71,17 +71,20 @@ impl StoreLogSync {
         Ok(due || woken && persisted.is_some() && self.waits.cooldown().is_none())
     }
 
-    /// Whether the operation's recorded condition waits on a reload.
+    /// Whether the operation's recorded condition waits on a pending reload:
+    /// on the reload itself, or on a device-log write. Only step 6 sends or
+    /// receives writes, and a pending reload holds step 6 back (SP), so a
+    /// raise waiting on its own captured prefix, such as its migration
+    /// marker, waits on the reload too.
     pub(crate) async fn waits_on_reload(&self, id: OperationId) -> Result<bool, SyncError> {
         Ok(self
             .database
             .operation_pending::<PendingRecord>(id)
             .await?
-            .is_some_and(|pending| {
-                matches!(
-                    pending.reason,
-                    PendingReason::Waits(Prerequisite::Reload(_))
-                )
+            .is_some_and(|pending| match &pending.reason {
+                PendingReason::Waits(Prerequisite::Reload(_)) => true,
+                PendingReason::Waits(Prerequisite::Object(path)) => path.write_position().is_some(),
+                _ => false,
             }))
     }
 

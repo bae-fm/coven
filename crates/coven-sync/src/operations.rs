@@ -657,8 +657,9 @@ impl OperationRun {
                     .map(|(_, record)| record.id);
             }
             // A raise holding the writer slot goes before reloads, unless it
-            // waits on one: it then yields, so the two never wait on each
-            // other (IO `DriveOrder.no_cycle`).
+            // waits on one, including through a write step 6 has to send or
+            // receive: it then yields, so the two never wait on each other
+            // (IO `DriveOrder.no_cycle`).
             let mut raising_first = false;
             for (data, record) in &records {
                 if Some(record.id) == writer && data.raises_version() {

@@ -167,14 +167,27 @@ async fn attempt_after_delay(
 /// IO `DriveOrder`: a raise holding the writer slot goes before a pending
 /// reload while it waits on anything else (`raise_keeps_its_place`); once its
 /// recorded condition names the reload, it yields and the drive runs the
-/// reload (`no_cycle`).
+/// reload (`no_cycle`). A raise waiting on a write, such as its own migration
+/// marker's upload, waits on the reload too: step 6 sends and receives writes
+/// only once no reload is pending.
 #[tokio::test]
 async fn a_raise_waiting_on_a_reload_yields_to_it() {
     use crate::snapshot_data::{ReloadScope, SnapshotJob, SnapshotTask, SnapshotTrigger};
+    let marker = coven_merge::WriteId {
+        device: DeviceId(1),
+        number: 1,
+    };
     for (raise_waits, reload_runs) in [
         (positions(7), false),
         (
             PendingReason::Waits(Prerequisite::Reload(Audience::Store)),
+            true,
+        ),
+        (
+            PendingReason::Waits(Prerequisite::Object(crate::write_seal::path(
+                store(1),
+                marker,
+            ))),
             true,
         ),
     ] {
