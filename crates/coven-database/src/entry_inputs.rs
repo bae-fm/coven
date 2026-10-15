@@ -458,14 +458,20 @@ pub(crate) fn restore(
             .caused_by(causes)
             .replace(&old, touched)?;
     crate::snapshot_state::drop_tables(db)?;
-    for (audience, positions) in coverage {
-        crate::retained_writes::visit(db, &audience, |write| {
-            if !positions.covers(write.header.position) {
-                affected.extend(crate::download::apply_opened(db, schema, write, deleted)?);
-            }
-            Ok(())
-        })?;
-    }
+    // Each retained write applies once, with every rebuilt part its input
+    // has not taken in, so a foreign-key action and its cause in different
+    // audiences are judged together.
+    crate::retained_writes::visit(db, &selected, |mut write| {
+        let position = write.header.position;
+        write.parts.retain(|part| match part {
+            crate::DownloadedPart::Opened(part) => !coverage[&part.audience].covers(position),
+            crate::DownloadedPart::Skipped(_) => false,
+        });
+        if !write.parts.is_empty() {
+            affected.extend(crate::download::apply_opened(db, schema, write, deleted)?);
+        }
+        Ok(())
+    })?;
     Ok(affected)
 }
 

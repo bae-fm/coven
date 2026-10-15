@@ -97,44 +97,97 @@ pub(crate) fn frame(
     Ok(())
 }
 
-/// Visit this audience's retained parts in timestamp order, which is causal order.
+/// Every retained write of these audiences, in timestamp order, which is
+/// causal order, each once with all of its retained parts among them: a
+/// write's foreign-key actions
+/// can reach rows of several of them, and their verdicts are decided
+/// together (§8.8).
 pub(crate) fn visit(
     db: &DatabaseConnection,
-    target: &Audience,
+    targets: &std::collections::BTreeSet<Audience>,
     mut visit: impl FnMut(DownloadedWrite) -> Result<(), DbError>,
 ) -> Result<(), DbError> {
-    let text = audience_text(target);
-    let headers = db.query(
-        "SELECT timestamp,header FROM _coven_write_inputs WHERE audience=?1 ORDER BY timestamp",
-        [&text],
-        |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
-    )?;
-    for (timestamp, header) in headers {
-        let header =
-            merge_fields::decode_write_header(&header).map_err(|_| DbError::DamagedDatabase)?;
-        let mut part = WritePart {
-            audience: target.clone(),
-            rows: Vec::new(),
-            executions: Vec::new(),
-            dismissals: Vec::new(),
-        };
-        for frame in db.query(
-            "SELECT frame FROM _coven_write_input_frames WHERE audience=?1 AND timestamp=?2 ORDER BY ordinal",
-            params![text, timestamp],
-            |r| r.get::<_, Vec<u8>>(0),
+    let mut parts = Vec::new();
+    for audience in targets {
+        for (timestamp, header) in db.query(
+            "SELECT timestamp,header FROM _coven_write_inputs WHERE audience=?1 ORDER BY timestamp",
+            [audience_text(audience)],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
         )? {
-            match WriteFrame::decode(&frame).map_err(|_| DbError::DamagedDatabase)? {
-                WriteFrame::Change(row) => part.rows.push(row),
-                WriteFrame::Execution(execution) => part.executions.push(execution),
-                WriteFrame::Dismissal(dismissal) => part.dismissals.push(dismissal),
+            let header =
+                merge_fields::decode_write_header(&header).map_err(|_| DbError::DamagedDatabase)?;
+            parts.push((timestamp, header, audience));
+        }
+    }
+    parts.sort_by(|a, b| {
+        (&a.0, a.1.position.device, a.1.position.number, a.2).cmp(&(
+            &b.0,
+            b.1.position.device,
+            b.1.position.number,
+            b.2,
+        ))
+    });
+    let mut current: Option<DownloadedWrite> = None;
+    for (timestamp, header, audience) in parts {
+        let part = DownloadedPart::Opened(part(db, audience, &timestamp)?);
+        match &mut current {
+            Some(write) if write.header.position == header.position => write.parts.push(part),
+            _ => {
+                if let Some(write) = current.take() {
+                    visit(write)?;
+                }
+                current = Some(DownloadedWrite {
+                    header,
+                    parts: vec![part],
+                });
             }
         }
-        visit(DownloadedWrite {
-            header,
-            parts: vec![DownloadedPart::Opened(part)],
-        })?;
+    }
+    if let Some(write) = current {
+        visit(write)?;
     }
     Ok(())
+}
+
+/// One retained part's frames.
+fn part(
+    db: &DatabaseConnection,
+    audience: &Audience,
+    timestamp: &[u8],
+) -> Result<WritePart, DbError> {
+    let mut part = WritePart {
+        audience: audience.clone(),
+        rows: Vec::new(),
+        executions: Vec::new(),
+        dismissals: Vec::new(),
+    };
+    for frame in db.query(
+        "SELECT frame FROM _coven_write_input_frames WHERE audience=?1 AND timestamp=?2 ORDER BY ordinal",
+        params![audience_text(audience), timestamp],
+        |r| r.get::<_, Vec<u8>>(0),
+    )? {
+        match WriteFrame::decode(&frame).map_err(|_| DbError::DamagedDatabase)? {
+            WriteFrame::Change(row) => part.rows.push(row),
+            WriteFrame::Execution(execution) => part.executions.push(execution),
+            WriteFrame::Dismissal(dismissal) => part.dismissals.push(dismissal),
+        }
+    }
+    Ok(part)
+}
+
+/// The headers of an audience's retained writes, in timestamp order.
+pub(crate) fn headers(
+    db: &DatabaseConnection,
+    audience: &Audience,
+) -> Result<Vec<WriteHeader>, DbError> {
+    db.query(
+        "SELECT header FROM _coven_write_inputs WHERE audience=?1 ORDER BY timestamp",
+        [audience_text(audience)],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?
+    .into_iter()
+    .map(|header| merge_fields::decode_write_header(&header).map_err(|_| DbError::DamagedDatabase))
+    .collect()
 }
 
 /// Forget the retained parts once no replay can need them.

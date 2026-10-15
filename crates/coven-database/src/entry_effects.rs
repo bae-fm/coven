@@ -151,14 +151,7 @@ pub(crate) fn replay<P: PendingValue>(
         let selected = current.get(audience).map(Vec::as_slice).unwrap_or(&[]);
         let mut input = crate::entry_inputs::selected_input(db, audience, selected)?;
         if let Some(id) = input {
-            let (version, positions): (u32, Vec<u8>) = db.query_row(
-                "SELECT version,positions FROM _coven_data_inputs WHERE id=?1",
-                [id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            )?;
-            let positions = crate::write_encoding::decoded(
-                coven_format::merge_fields::decode_write_positions(&positions),
-            )?;
+            let (version, positions) = input_positions(db, id)?;
             input = input.filter(|_| {
                 schema.versions.contains(&version)
                     && writes.iter().all(|write| !positions.covers(*write))
@@ -170,6 +163,39 @@ pub(crate) fn replay<P: PendingValue>(
             }
             None if circles.reloadable(audience) => require_reload::<P>(db, audience, false)?,
             None => (),
+        }
+    }
+    // A rebuilt audience's writes can carry foreign-key actions into another
+    // audience's part of the same write, whose verdicts follow their causes'
+    // (§8.8). That audience is rebuilt with them, from an input that has not
+    // taken those writes in; without one it waits for a reload.
+    let mut pending: Vec<Audience> = inputs.keys().cloned().collect();
+    while let Some(audience) = pending.pop() {
+        for (other, writes) in derived_elsewhere(db, schema, &audience, inputs[&audience])? {
+            if inputs.contains_key(&other)
+                || returned.contains(&other)
+                || !crate::entry_inputs::reads(db, &other)?
+            {
+                continue;
+            }
+            let selected = current.get(&other).map(Vec::as_slice).unwrap_or(&[]);
+            let input = match crate::entry_inputs::selected_input(db, &other, selected)? {
+                Some(id) => {
+                    let (version, positions) = input_positions(db, id)?;
+                    (schema.versions.contains(&version)
+                        && writes.iter().all(|write| !positions.covers(*write)))
+                    .then_some(id)
+                }
+                None => None,
+            };
+            match input {
+                Some(input) => {
+                    inputs.insert(other.clone(), input);
+                    pending.push(other);
+                }
+                None if circles.reloadable(&other) => require_reload::<P>(db, &other, false)?,
+                None => (),
+            }
         }
     }
     // Replay removes the need for a reload that the device can no longer
@@ -202,6 +228,74 @@ pub(crate) fn replay<P: PendingValue>(
         crate::pending::refresh(db)?;
     }
     Ok(affected)
+}
+
+/// A retained input's schema version and the write positions it covers.
+fn input_positions(
+    db: &DatabaseConnection,
+    input: i64,
+) -> Result<(u32, coven_format::value::WritePositions), DbError> {
+    let (version, positions): (u32, Vec<u8>) = db.query_row(
+        "SELECT version,positions FROM _coven_data_inputs WHERE id=?1",
+        [input],
+        |r| Ok((r.get(0)?, r.get(1)?)),
+    )?;
+    Ok((
+        version,
+        crate::write_encoding::decoded(coven_format::merge_fields::decode_write_positions(
+            &positions,
+        ))?,
+    ))
+}
+
+/// The other audiences whose rows a rebuild of `audience` from `input` can
+/// change the verdicts of: those holding a foreign-key action that a row of
+/// `audience` caused, in a retained write the input has not taken in, with
+/// those writes.
+fn derived_elsewhere(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    audience: &Audience,
+    input: i64,
+) -> Result<BTreeMap<Audience, Vec<coven_merge::WriteId>>, DbError> {
+    let (_, positions) = input_positions(db, input)?;
+    let mut found: BTreeMap<Audience, Vec<coven_merge::WriteId>> = BTreeMap::new();
+    for header in crate::retained_writes::headers(db, audience)? {
+        if positions.covers(header.position) || !elsewhere(db, &header, audience)? {
+            continue;
+        }
+        let judgement = crate::judge::judge(db, schema, &header)?;
+        for (row, checked) in &judgement.rows {
+            let caused = checked
+                .actions
+                .iter()
+                .flat_map(|(_, chain)| chain)
+                .any(|(cause, _)| cause.audience == *audience);
+            if row.audience != *audience && caused {
+                let writes = found.entry(row.audience.clone()).or_default();
+                if !writes.contains(&header.position) {
+                    writes.push(header.position);
+                }
+            }
+        }
+    }
+    Ok(found)
+}
+
+/// Whether this device holds original changes of the write outside `audience`.
+fn elsewhere(
+    db: &DatabaseConnection,
+    header: &coven_format::write::WriteHeader,
+    audience: &Audience,
+) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_authored_changes WHERE write_id=?1 AND audience!=?2)",
+        params![
+            coven_format::merge_fields::encode_write_id(&header.position)?,
+            audience_text(audience)
+        ],
+        |r| r.get(0),
+    )
 }
 
 fn require_reload<P: PendingValue>(

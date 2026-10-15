@@ -3094,6 +3094,10 @@ Carol's tablet:
   - Applying a new replay replaces its derived database state atomically.
     If rebuilding fails, keep the previous committed state and report the
     failure; do not publish positions over the unfinished work.
+  - Rebuilding one audience reapplies its retained writes together with
+    their parts in every other audience holding a foreign-key action they
+    caused (§8.8), so that audience is rebuilt in the same transaction, from
+    data that has not taken those writes in, or waits for a reload.
   - Snapshot eligibility follows the received entries too. A snapshot's
     authorized key remains readable when membership replay changes (§11).
     Retention cannot erase inputs a later replay needs.

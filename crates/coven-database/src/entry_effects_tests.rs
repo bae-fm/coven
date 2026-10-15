@@ -605,3 +605,112 @@ async fn a_reload_covering_unreceived_writes_reloads_again_when_its_boundary_dro
         db.close().await.unwrap();
     }
 }
+
+/// Ben's track is in the store and Ana's review of it in their circle, so
+/// deleting the track cascades into the circle's part of Ben's write. The
+/// delete replaced a title Ben's other device set in a write that later
+/// lands outside its device's retirement window. Replay rebuilds the store
+/// without that write, so the delete used dropped data; the review's
+/// cascade, in the circle, drops with it, and the circle is rebuilt too: the
+/// review returns (§8, §8.8, §10).
+#[tokio::test]
+async fn a_rebuild_rejudges_actions_its_writes_caused_in_another_audience() {
+    use crate::judge::tests::{key, text, verdict};
+    use crate::owner_permission::tests::deliver;
+    use crate::write_landing::tests::{at, retire, DAY};
+    use coven_format::snapshot_rows::ChangeVerdict;
+    use coven_format::write_sources::ChangeId;
+    const REVIEW: &str = "00000000-0000-4000-8000-0000000000d1";
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    let declared = || {
+        vec![
+            crate::SyncedTable::new("tracks", crate::RowIdentity::SharedKey),
+            crate::SyncedTable::new("reviews", crate::RowIdentity::IndependentUuid)
+                .audience_column("audience"),
+        ]
+    };
+    let ids = SequentialIds::new();
+    let stores: Vec<_> = (0..4).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut dbs = Vec::new();
+    for store in &stores {
+        let db = store
+            .schema(
+                declared(),
+                "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, title TEXT);
+                 CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
+                   track TEXT REFERENCES tracks(id) ON DELETE CASCADE, body TEXT)",
+            )
+            .await
+            .unwrap();
+        store.join_circle(&db, circle);
+        dbs.push(db);
+    }
+    let [ben, other, ana, target] = [&dbs[0], &dbs[1], &dbs[2], &dbs[3]];
+    sql(ben, "INSERT INTO tracks VALUES('t','Song')")
+        .await
+        .unwrap();
+    deliver(ben, other).await;
+    deliver(ben, ana).await;
+    sql(other, "UPDATE tracks SET title='Renamed' WHERE id='t'")
+        .await
+        .unwrap();
+    deliver(other, ben).await;
+    let audience = circle.to_string();
+    ana.write(move |sql| {
+        sql.execute(
+            "INSERT INTO reviews VALUES(?1,?2,'t','good')",
+            [REVIEW, audience.as_str()],
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    deliver(ana, ben).await;
+    sql(ben, "DELETE FROM tracks WHERE id='t'").await.unwrap();
+    let ben_writes = records(ben);
+    let (create, delete) = (&ben_writes[0], ben_writes.last().unwrap());
+    let rename = &records(other)[0];
+    let review_write = &records(ana)[0];
+    let parts: Vec<_> = delete
+        .parts
+        .iter()
+        .map(|part| part.audience.clone())
+        .collect();
+    assert_eq!(parts, [Audience::Store, Audience::Circle(circle)]);
+    for (write, day) in [(create, 0), (rename, 31), (review_write, 0), (delete, 0)] {
+        target
+            .apply_downloaded::<Record>(
+                write.clone().into(),
+                crate::test_utils::published(at(day * DAY)),
+            )
+            .await
+            .unwrap();
+    }
+    let review = coven_merge::RowId {
+        audience: Audience::Circle(circle),
+        ..key("reviews", REVIEW)
+    };
+    assert_eq!(count(target, "reviews"), 0);
+    assert_eq!(
+        verdict(target, delete, &review),
+        ChangeVerdict::Derived(vec![ChangeId {
+            write: delete.header.position,
+            row: key("tracks", "t"),
+        }])
+    );
+    retire(target, stores[1].device(), 1, "device", 0).await;
+    assert_eq!(
+        verdict(target, delete, &review),
+        ChangeVerdict::Dependent(vec![ChangeId {
+            write: delete.header.position,
+            row: key("tracks", "t"),
+        }])
+    );
+    assert_eq!(
+        text(target, "SELECT (SELECT body FROM reviews)"),
+        Some("good".into())
+    );
+    for db in dbs {
+        db.close().await.unwrap();
+    }
+}
