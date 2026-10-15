@@ -30,7 +30,7 @@ theorem restored_before_seal_orphans_key :
     Accounted restored ∧
     after.resets = [7] ∧
     after.copies 1 = some ⟨104, none⟩ ∧
-    after.provider = [⟨101, 100⟩] ∧ after.recorded = [] ∧
+    after.provider = [⟨101, 100, 7⟩] ∧ after.recorded = [] ∧
     ¬ Accounted after := by decide
 
 /-- The same restore under T203's reset: the new database holds key 101 as
@@ -41,7 +41,7 @@ theorem restored_before_seal_keeps_key_pending :
     after.resets = [7] ∧
     after.copies 1 = some ⟨104, none⟩ ∧
     after.pending 1 = [101] ∧
-    after.provider = [⟨101, 100⟩] ∧ after.recorded = [] ∧
+    after.provider = [⟨101, 100, 7⟩] ∧ after.recorded = [] ∧
     Accounted after := by decide
 
 example : Accounted (run .random desktop (beforeSealSteps ++ [.deliver 1])) := by decide
@@ -69,10 +69,10 @@ theorem restored_before_mint_orphans_key :
       [.begin 0, .clone 0, .mint 0, .sealKey 0, .deliver 0, .drop 0, .mint 1, .sealKey 1]
     let after := discardingReset restored 1 7
     restored.storage 100 = some ⟨[101], 7⟩ ∧
-    restored.provider = [⟨103, 100⟩] ∧
+    restored.provider = [⟨103, 100, 7⟩] ∧
     restored.copies 1 = some ⟨7, some ⟨100, some 103, some [103], false⟩⟩ ∧
     Accounted restored ∧
-    after.resets = [7] ∧ after.provider = [⟨103, 100⟩] ∧ after.recorded = [] ∧
+    after.resets = [7] ∧ after.provider = [⟨103, 100, 7⟩] ∧ after.recorded = [] ∧
     ¬ Accounted after := by decide
 
 /-- Under T203's reset the made key 103 stays pending deletion. -/
@@ -80,7 +80,7 @@ theorem restored_before_mint_keeps_key_pending :
     let after := run .bound desktop
       [.begin 0, .clone 0, .mint 0, .sealKey 0, .deliver 0, .drop 0, .mint 1, .sealKey 1,
         .deliver 1]
-    after.resets = [7] ∧ after.pending 1 = [103] ∧ after.provider = [⟨103, 100⟩] ∧
+    after.resets = [7] ∧ after.pending 1 = [103] ∧ after.provider = [⟨103, 100, 7⟩] ∧
     after.recorded = [] ∧ Accounted after := by decide
 
 end CovenStorage.KeyDelivery.Examples

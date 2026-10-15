@@ -20,6 +20,8 @@ use url::Url;
 struct Remote {
     uniform: bool,
     accounts: Vec<String>,
+    /// Service account email to its description.
+    descriptions: BTreeMap<String, String>,
     folders: Vec<String>,
     /// Folder name to (etag, role bindings).
     policies: BTreeMap<String, (u32, Vec<String>)>,
@@ -64,6 +66,21 @@ fn api(
     if path == "/projects/v3/projects/123" {
         return json(serde_json::json!({"projectId": "household"}));
     }
+    if path == "/iam/v1/projects/household/serviceAccounts" && method == HttpMethod::GET {
+        // One account per page, so a listing must follow every page.
+        let index: usize = q.get("pageToken").map_or(0, |token| token.parse().unwrap());
+        let Some(email) = state.accounts.get(index) else {
+            return json(serde_json::json!({}));
+        };
+        let mut page = serde_json::json!({"accounts": [{
+            "email": email,
+            "description": state.descriptions.get(email),
+        }]});
+        if index + 1 < state.accounts.len() {
+            page["nextPageToken"] = serde_json::json!((index + 1).to_string());
+        }
+        return json(page);
+    }
     if path == "/iam/v1/projects/household/serviceAccounts" {
         let email = format!(
             "{}@household.iam.gserviceaccount.com",
@@ -73,6 +90,11 @@ fn api(
             return response(409, "{}");
         }
         state.accounts.push(email.clone());
+        if let Some(description) = body["serviceAccount"]["description"].as_str() {
+            state
+                .descriptions
+                .insert(email.clone(), description.to_owned());
+        }
         return json(serde_json::json!({"email": email}));
     }
     if let Some(email) = path.strip_prefix("/iam/v1/projects/household/serviceAccounts/") {
@@ -301,6 +323,7 @@ fn scope() -> MintScope {
     MintScope::new(
         StoreId(uuid::Uuid::from_u128(7)),
         "member-id",
+        coven_foundation::id_source::DeviceId(3),
         uuid::Uuid::from_u128(0x99),
     )
 }
@@ -359,4 +382,50 @@ async fn buckets_without_uniform_access_are_refused_and_rollback_removes_the_acc
     admin.roll_back(&scope()).await.unwrap();
     let state = state.lock().unwrap();
     assert!(state.accounts.is_empty() && state.hmac.is_empty());
+}
+
+/// A store's listing reads every page of the project's service accounts and
+/// returns the HMAC keys of those whose description names this store, with
+/// the minting device (§13).
+#[tokio::test]
+async fn a_store_listing_returns_its_accounts_keys_with_their_minting_device() {
+    let (state, _server, admin) = fake(true).await;
+    let ours = scope();
+    let elsewhere = MintScope::new(
+        StoreId(uuid::Uuid::from_u128(8 << 100)),
+        "member-id",
+        coven_foundation::id_source::DeviceId(3),
+        uuid::Uuid::from_u128(0x98 << 100),
+    );
+    let mine = admin.mint(&ours).await.unwrap();
+    admin.mint(&elsewhere).await.unwrap();
+    {
+        let mut state = state.lock().unwrap();
+        // An account coven did not make, holding a key.
+        state
+            .accounts
+            .push("someone@household.iam.gserviceaccount.com".into());
+        state.hmac.insert(
+            "GOOG1other".into(),
+            (
+                "someone@household.iam.gserviceaccount.com".into(),
+                "ACTIVE".into(),
+                "secret".into(),
+            ),
+        );
+    }
+    let listed = admin.list_keys(ours.store).await.unwrap();
+    assert_eq!(
+        listed,
+        [crate::ListedKey {
+            access_key_id: mine.credentials.access_key_id.clone(),
+            principal: mine.principal.clone(),
+            device: coven_foundation::id_source::DeviceId(3),
+        }]
+    );
+    assert_eq!(
+        state.lock().unwrap().descriptions
+            [&format!("{}@household.iam.gserviceaccount.com", ours.name)],
+        ours.label()
+    );
 }

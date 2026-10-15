@@ -220,6 +220,17 @@ impl CovenHandle {
     ) -> Result<(), SyncError> {
         self.operations.delete_access_key(operation, admin).await
     }
+    /// Lists this store's S3 keys at the provider with admin access and keeps
+    /// each key no entry records pending deletion, when the device that made
+    /// it is retired with a final entry and its logs are drained. A live
+    /// device's key, recorded or still being made, is never taken. The keys
+    /// appear in pending() for `delete_access_key` (§13).
+    pub async fn reclaim_access_keys(
+        &self,
+        admin: Arc<dyn AccessKeyAdmin>,
+    ) -> Result<(), SyncError> {
+        self.operations.reclaim_access_keys(admin).await
+    }
     /// Replaces a member's S3 key with admin access (§13): makes the key and
     /// checks it from the member's side, delivers it sealed to the member's
     /// devices, records it for them in the store log, then deletes the old

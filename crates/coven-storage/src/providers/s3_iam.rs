@@ -9,8 +9,10 @@
 use super::minting::{member_policy, AdminRequest, KeyMinter, Pending};
 use super::*;
 use crate::providers::s3_admin_query::{elements, send, QueryService};
+use crate::{access_admin::named_device, ListedKey};
 use coven_format::{IamPolicy, S3Principal};
-use std::time::Duration;
+use coven_foundation::id_source::StoreId;
+use std::{collections::BTreeMap, time::Duration};
 use url::Url;
 
 const VERSION: &str = "2010-05-08";
@@ -81,12 +83,19 @@ macro_rules! minter {
             ) -> Pending<'a, bool> {
                 Box::pin(key_exists(context, key, principal, $flavor))
             }
+            fn list_keys<'a>(
+                context: &'a AdminRequest,
+                store: StoreId,
+            ) -> Pending<'a, Vec<ListedKey>> {
+                Box::pin(list(context, store, $flavor))
+            }
             KeyMinter {
                 name: $label,
                 mint: mint_key,
                 roll_back: roll_back_key,
                 revoke: revoke_key,
                 key_exists: key_present,
+                list: list_keys,
                 propagation: $propagation,
                 separate_iam: matches!($flavor.api, IamApi::Separate),
             }
@@ -200,36 +209,61 @@ impl<'a> Iam<'a> {
         }
     }
 
-    /// The user's key ids, every page; None when the user is absent.
-    async fn keys(&self, user: &str) -> Result<Option<Vec<String>>, StorageError> {
-        let mut keys = Vec::new();
+    /// Every page of a listing; None when its first page answers `absent`.
+    async fn pages(
+        &self,
+        action: &str,
+        parameters: &[(&str, &str)],
+        absent: Option<StorageFailure>,
+    ) -> Result<Option<Vec<String>>, StorageError> {
+        let mut pages = Vec::new();
         let mut marker: Option<String> = None;
         loop {
-            let mut parameters = vec![("UserName", user)];
+            let mut sent = parameters.to_vec();
             if let Some(marker) = &marker {
-                parameters.push(("Marker", marker));
+                sent.push(("Marker", marker));
             }
-            let Some(body) = self
-                .tolerating(StorageFailure::NotFound, "ListAccessKeys", &parameters)
-                .await?
-            else {
-                return Ok(None);
+            let body = match self.call(action, &sent).await {
+                Ok(body) => body,
+                Err(error) if pages.is_empty() && absent == Some(error.failure()) => {
+                    return Ok(None)
+                }
+                Err(error) => return Err(error),
             };
-            keys.extend(elements(&body, "AccessKeyId")?);
-            if elements(&body, "IsTruncated")?.first().map(String::as_str) != Some("true") {
-                return Ok(Some(keys));
+            let truncated =
+                elements(&body, "IsTruncated")?.first().map(String::as_str) == Some("true");
+            let next = elements(&body, "Marker")?.into_iter().next();
+            pages.push(body);
+            if !truncated {
+                return Ok(Some(pages));
             }
-            let next = elements(&body, "Marker")?
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    StorageFailure::Protocol.with_source("truncated IAM listing without a marker")
-                })?;
+            let next = next.ok_or_else(|| {
+                StorageFailure::Protocol.with_source("truncated IAM listing without a marker")
+            })?;
             if marker.as_ref() == Some(&next) {
                 return Err(StorageFailure::Protocol.with_source("IAM listing repeated its marker"));
             }
             marker = Some(next);
         }
+    }
+
+    /// The user's key ids, every page; None when the user is absent.
+    async fn keys(&self, user: &str) -> Result<Option<Vec<String>>, StorageError> {
+        let Some(pages) = self
+            .pages(
+                "ListAccessKeys",
+                &[("UserName", user)],
+                Some(StorageFailure::NotFound),
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        let mut keys = Vec::new();
+        for page in pages {
+            keys.extend(elements(&page, "AccessKeyId")?);
+        }
+        Ok(Some(keys))
     }
 
     async fn delete_keys(&self, user: &str) -> Result<(), StorageError> {
@@ -244,37 +278,45 @@ impl<'a> Iam<'a> {
         Ok(())
     }
 
-    /// A managed policy's ARN by name; None when no such policy exists.
-    async fn policy_arn(&self, name: &str) -> Result<Option<String>, StorageError> {
-        let mut marker: Option<String> = None;
-        loop {
-            let mut parameters = vec![("Scope", "Local")];
-            if let Some(marker) = &marker {
-                parameters.push(("Marker", marker));
-            }
-            let body = self.call("ListPolicies", &parameters).await?;
-            let names = elements(&body, "PolicyName")?;
-            let arns = elements(&body, "Arn")?;
+    /// Every local managed policy's ARN by name.
+    async fn policies(&self) -> Result<BTreeMap<String, String>, StorageError> {
+        let mut policies = BTreeMap::new();
+        for page in self
+            .pages("ListPolicies", &[("Scope", "Local")], None)
+            .await?
+            .unwrap_or_default()
+        {
+            let names = elements(&page, "PolicyName")?;
+            let arns = elements(&page, "Arn")?;
             if names.len() != arns.len() {
                 return Err(StorageFailure::Protocol.with_source("IAM policy listing is malformed"));
             }
-            if let Some(index) = names.iter().position(|found| found == name) {
-                return Ok(Some(arns[index].clone()));
-            }
-            if elements(&body, "IsTruncated")?.first().map(String::as_str) != Some("true") {
-                return Ok(None);
-            }
-            let next = elements(&body, "Marker")?
-                .into_iter()
-                .next()
-                .ok_or_else(|| {
-                    StorageFailure::Protocol.with_source("truncated IAM listing without a marker")
-                })?;
-            if marker.as_ref() == Some(&next) {
-                return Err(StorageFailure::Protocol.with_source("IAM listing repeated its marker"));
-            }
-            marker = Some(next);
+            policies.extend(names.into_iter().zip(arns));
         }
+        Ok(policies)
+    }
+
+    /// A managed policy's ARN by name; None when no such policy exists.
+    async fn policy_arn(&self, name: &str) -> Result<Option<String>, StorageError> {
+        Ok(self.policies().await?.remove(name))
+    }
+
+    /// The names of the users a coven listing can hold: those under `/coven/`
+    /// where users carry a path, every user otherwise.
+    async fn users(&self, inline: bool) -> Result<Vec<String>, StorageError> {
+        let parameters: &[(&str, &str)] = match inline {
+            true => &[("PathPrefix", "/coven/")],
+            false => &[],
+        };
+        let mut users = Vec::new();
+        for page in self
+            .pages("ListUsers", parameters, None)
+            .await?
+            .unwrap_or_default()
+        {
+            users.extend(elements(&page, "UserName")?);
+        }
+        Ok(users)
     }
 
     /// Remove the user's keys, its policy and the user, each already absent or not.
@@ -321,7 +363,8 @@ async fn mint(
     flavor: Flavor,
 ) -> Result<S3MemberKey, StorageError> {
     let iam = Iam::new(context, flavor)?;
-    let user = scope.name.as_str();
+    // The user's name carries the store and the minting device (§13).
+    let user = scope.key_name.as_str();
     let store = scope.store.to_string();
     let mut create = vec![("UserName", user)];
     if flavor.inline {
@@ -403,11 +446,11 @@ async fn roll_back(
             name: INLINE_POLICY.into(),
         }),
         false => iam
-            .policy_arn(&scope.name)
+            .policy_arn(&scope.key_name)
             .await?
             .map(|arn| IamPolicy::Managed { arn }),
     };
-    iam.remove(&scope.name, policy.as_ref()).await
+    iam.remove(&scope.key_name, policy.as_ref()).await
 }
 
 fn user(principal: &S3Principal) -> Result<(&str, &IamPolicy), StorageError> {
@@ -450,6 +493,57 @@ async fn key_exists(
         .keys(name)
         .await?
         .is_some_and(|keys| keys.iter().any(|key| key == access_key_id)))
+}
+
+/// Every key held by a user whose name coven made for this store, with the
+/// minting device the name carries (§13).
+async fn list(
+    context: &AdminRequest,
+    store: StoreId,
+    flavor: Flavor,
+) -> Result<Vec<ListedKey>, StorageError> {
+    let iam = Iam::new(context, flavor)?;
+    let mut managed = None;
+    let mut listed = Vec::new();
+    for user in iam.users(flavor.inline).await? {
+        let Some(device) = named_device(&user, store) else {
+            continue;
+        };
+        // A user removed since the listing holds no key.
+        let keys = iam.keys(&user).await?.unwrap_or_default();
+        if keys.is_empty() {
+            continue;
+        }
+        let policy = match flavor.inline {
+            true => IamPolicy::Inline {
+                name: INLINE_POLICY.into(),
+            },
+            false => {
+                if managed.is_none() {
+                    managed = Some(iam.policies().await?);
+                }
+                let arn = managed
+                    .as_ref()
+                    .and_then(|policies| policies.get(&user))
+                    .ok_or_else(|| {
+                        StorageFailure::Protocol
+                            .with_source("an IAM user coven made holds keys without its policy")
+                    })?;
+                IamPolicy::Managed { arn: arn.clone() }
+            }
+        };
+        for access_key_id in keys {
+            listed.push(ListedKey {
+                access_key_id,
+                principal: S3Principal::IamUser {
+                    user: user.clone(),
+                    policy: policy.clone(),
+                },
+                device,
+            });
+        }
+    }
+    Ok(listed)
 }
 
 #[cfg(test)]

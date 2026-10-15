@@ -2999,6 +2999,10 @@ match stream.read_at(resume_at, 256 * 1024).await {
   a delete reply, elapsed time or replay reversal never suffices. Both paths
   retain confirmation by key id, so later entries and retries cannot restore
   the notice. Failed commits preserve pending work and report the failure.
+- A key coven made that no entry records, such as one whose minting database
+  was lost before recording it, is found by `reclaim_access_keys` once its
+  minting device is retired and drained, and then has its own
+  `DeleteAccessKey` record (§13).
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner;
@@ -3095,6 +3099,13 @@ impl CovenHandle {
     /// record; failures return AccessKeyNotDeleted and the record stays (§13).
     pub async fn delete_access_key(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), SyncError>;
 
+    /// Lists this store's S3 keys at the provider with admin access and, in
+    /// one transaction, records a DeleteAccessKey for each key no stored entry
+    /// records whose minting device is retired with a final entry and drained
+    /// (§13). A live device's key, recorded or still being made, is never
+    /// taken. Admins only; a failed listing records nothing.
+    pub async fn reclaim_access_keys(&self, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), SyncError>;
+
     /// Resumes work pending with AdminAccessRequired, holding this admin access
     /// for that operation only (§4).
     pub async fn retry_with_admin_access(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), OperationError>;
@@ -3182,6 +3193,10 @@ pub trait AccessKeyAdmin: Send + Sync {
     async fn revoke(&self, access_key_id: &str, principal: &S3Principal) -> Result<(), StorageError>;
     /// Read whether this exact key remains; a failed read is never absence.
     async fn key_exists(&self, access_key_id: &str, principal: &S3Principal) -> Result<bool, StorageError>;
+    /// Every key held under a name coven made for this store, with the
+    /// minting device that name carries (§4, §13). A failed or incomplete
+    /// listing is an error, never a shorter list.
+    async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError>;
 }
 
 /// Where admin access comes from (§4). The CLI and browser sources exist on
@@ -3226,8 +3241,19 @@ pub struct GuidedAccessKey {
     pub policy: String,
 }
 
-/// What a minted key reaches; the principal name is fixed by the journal.
-pub struct MintScope { pub store: StoreId, pub name: String, pub member: String }
+/// What a minted key reaches and who makes it; the journal fixes the names.
+/// `name` is the short principal name, `key_name` the name carrying the store,
+/// the minting device and the attempt (§4).
+pub struct MintScope {
+    pub store: StoreId,
+    pub device: DeviceId,
+    pub name: String,
+    pub key_name: String,
+    pub member: String,
+}
+
+/// A key a store's listing found, with the device whose name it carries.
+pub struct ListedKey { pub access_key_id: String, pub principal: S3Principal, pub device: DeviceId }
 
 /// A member's S3 key and who holds it.
 pub struct S3MemberKey { pub credentials: S3Credentials, pub principal: S3Principal }

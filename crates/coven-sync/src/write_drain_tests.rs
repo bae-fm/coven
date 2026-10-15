@@ -18,22 +18,22 @@ use std::time::{Duration, UNIX_EPOCH};
 const DAY: u64 = 24 * 60 * 60;
 /// Storage seconds after which the removal published at second 10 is final:
 /// `T′ = T − one hour − δ` must leave a horizon past it (§9).
-const FINAL: u64 = 30 * DAY + 3612;
-const WAIT: u64 = DAY + 300;
+pub(crate) const FINAL: u64 = 30 * DAY + 3612;
+pub(crate) const WAIT: u64 = DAY + 300;
 
 fn second(n: u64) -> SystemTime {
     UNIX_EPOCH + Duration::from_secs(n)
 }
 
-struct Removed {
+pub(crate) struct Removed {
     clock: Arc<FixedClock>,
     storage: Arc<MemoryStorage>,
-    ana: Device,
+    pub(crate) ana: Device,
 }
 
 /// Ana's group with Ben's laptop (device 2), which uploaded one write before
 /// Ana removed it at storage second 10. Ana has applied that write.
-async fn removed() -> Removed {
+pub(crate) async fn removed() -> Removed {
     let clock = Arc::new(FixedClock::new(second(1)));
     let storage = Arc::new(
         MemoryStorage::builder()
@@ -81,7 +81,7 @@ impl Removed {
     /// Membership discovery after a clock observation at storage second
     /// `time`, then write discovery, as one pass does them. The return
     /// checkpoint makes write misses trusted (§15). Returns this pass's requests.
-    async fn pass(&mut self, time: u64) -> Result<Vec<MemoryRequest>, SyncError> {
+    pub(crate) async fn pass(&mut self, time: u64) -> Result<Vec<MemoryRequest>, SyncError> {
         self.clock.set(second(time));
         let before = self.storage.request_trace().len();
         let _pass = self.ana.sync.begin_pass(&mut self.ana.writes);
@@ -98,7 +98,7 @@ impl Removed {
         Ok(self.storage.request_trace()[before..].to_vec())
     }
 
-    async fn drained(&self) -> bool {
+    pub(crate) async fn drained(&self) -> bool {
         self.ana
             .db
             .drained_devices()

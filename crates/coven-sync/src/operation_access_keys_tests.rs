@@ -482,6 +482,7 @@ async fn carrying_skips_a_made_key_in_use_and_keeps_every_owed_deletion() {
         let mut mint = crate::operation_data::MintWork::new(coven_storage::MintScope::new(
             store(1),
             &ben.to_string(),
+            coven_foundation::id_source::DeviceId(1),
             uuid::Uuid::from_u128(5),
         ));
         mint.minted = Some(key.clone());

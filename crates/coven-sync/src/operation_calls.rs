@@ -130,6 +130,10 @@ impl StoreLogSync {
                 self.delete_access_key(id, admin.as_ref()).await?;
                 return Ok(Begun::Value(Output::Unit));
             }
+            Command::ReclaimKeys(admin) => {
+                self.reclaim_access_keys(admin.as_ref()).await?;
+                return Ok(Begun::Value(Output::Unit));
+            }
             Command::DeliveredKey(held) => {
                 return Ok(Begun::Value(Output::DeliveredKey(
                     self.delivered_access_key(held.as_deref()).await?,

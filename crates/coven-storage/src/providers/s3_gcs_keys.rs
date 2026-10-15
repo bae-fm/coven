@@ -9,6 +9,7 @@
 //! stays. Absence is read from the service account's HMAC key list.
 use super::minting::{AdminRequest, KeyMinter, Pending};
 use super::*;
+use crate::{access_admin::named_device, ListedKey};
 use coven_format::S3Principal;
 use coven_foundation::id_source::StoreId;
 use reqwest::Method;
@@ -38,6 +39,9 @@ fn key_present<'a>(
 ) -> Pending<'a, bool> {
     Box::pin(key_exists(context, key, principal))
 }
+fn list_keys<'a>(context: &'a AdminRequest, store: StoreId) -> Pending<'a, Vec<ListedKey>> {
+    Box::pin(list(context, store))
+}
 
 pub(super) const GCS_KEYS: KeyMinter = KeyMinter {
     name: "GCS service accounts",
@@ -45,6 +49,7 @@ pub(super) const GCS_KEYS: KeyMinter = KeyMinter {
     roll_back: roll_back_key,
     revoke: revoke_key,
     key_exists: key_present,
+    list: list_keys,
     // Google documents up to 60 seconds before a new HMAC key works.
     propagation: Duration::from_secs(60),
     separate_iam: false,
@@ -308,7 +313,8 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
             "accountId": scope.name,
             "serviceAccount": {
                 "displayName": "coven member key",
-                "description": format!("coven store {} member {}", scope.store, scope.member),
+                // Carries the store and the minting device for a store's listing (§13).
+                "description": scope.label(),
             },
         })),
         &[409],
@@ -406,6 +412,55 @@ async fn key_exists(
         .await?
         .iter()
         .any(|key| key == access_key_id))
+}
+
+/// Every HMAC key of a service account whose description names this store,
+/// with the minting device it names (§13). Accounts are read from the bucket's
+/// project, every page.
+async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+    let gcs = Gcs::new(context, store)?;
+    let project = gcs.project().await?;
+    let mut listed = Vec::new();
+    let mut token: Option<String> = None;
+    loop {
+        let mut url = gcs.iam(&format!("projects/{project}/serviceAccounts"));
+        url.query_pairs_mut().append_pair("pageSize", "100");
+        if let Some(token) = &token {
+            url.query_pairs_mut().append_pair("pageToken", token);
+        }
+        let page = gcs
+            .call(Method::GET, url, None, &[])
+            .await?
+            .unwrap_or_default();
+        for account in page["accounts"].as_array().cloned().unwrap_or_default() {
+            let Some(device) = account["description"]
+                .as_str()
+                .and_then(|description| named_device(description, store))
+            else {
+                continue;
+            };
+            let email = crate::providers::http::string(&account, "email")?.to_owned();
+            for access_key_id in gcs.hmac_keys(&project, &email).await? {
+                listed.push(ListedKey {
+                    access_key_id,
+                    principal: S3Principal::GcsServiceAccount {
+                        project: project.clone(),
+                        email: email.clone(),
+                        managed_folder: gcs.folder.clone(),
+                    },
+                    device,
+                });
+            }
+        }
+        match page["nextPageToken"].as_str() {
+            Some("") | None => return Ok(listed),
+            Some(next) if Some(next) != token.as_deref() => token = Some(next.to_owned()),
+            Some(_) => {
+                return Err(StorageFailure::Protocol
+                    .with_source("service account listing repeated its token"))
+            }
+        }
+    }
 }
 
 #[cfg(test)]

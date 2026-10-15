@@ -132,6 +132,7 @@ async fn a_token_reaches_the_stores_own_bucket_and_its_hash_is_the_secret() {
     let scope = MintScope::new(
         StoreId(uuid::Uuid::from_u128(3)),
         "member-id",
+        coven_foundation::id_source::DeviceId(3),
         uuid::Uuid::from_u128(0x77),
     );
     state.lock().unwrap().lose_create_reply = true;
@@ -145,7 +146,7 @@ async fn a_token_reaches_the_stores_own_bucket_and_its_hash_is_the_secret() {
             "the token whose value was lost is gone"
         );
         let (name, resource, group, value) = &state.tokens[&minted.credentials.access_key_id];
-        assert_eq!(*name, scope.name);
+        assert_eq!(*name, scope.label());
         assert_eq!(resource, "com.cloudflare.edge.r2.bucket.acct_eu_household");
         assert_eq!(group, "pg-write");
         assert_eq!(
@@ -270,6 +271,7 @@ async fn a_bucket_scoped_key_must_not_list_other_buckets() {
         let scope = MintScope::new(
             StoreId(uuid::Uuid::from_u128(3)),
             "member-id",
+            coven_foundation::id_source::DeviceId(3),
             uuid::Uuid::from_u128(0x77),
         );
         let checked = admin.probe(&scope, &key).await;
@@ -283,4 +285,44 @@ async fn a_bucket_scoped_key_must_not_list_other_buckets() {
         }
         assert!(state.lock().unwrap().0.is_empty());
     }
+}
+
+/// A store's listing returns the account tokens whose name coven made for this
+/// store, with the minting device the name carries (§13).
+#[tokio::test]
+async fn a_store_listing_returns_its_tokens_with_their_minting_device() {
+    let (state, _server, admin) = fake().await;
+    let ours = MintScope::new(
+        StoreId(uuid::Uuid::from_u128(3 << 100)),
+        "member-id",
+        coven_foundation::id_source::DeviceId(0x0abc),
+        uuid::Uuid::from_u128(0x77),
+    );
+    let elsewhere = MintScope::new(
+        StoreId(uuid::Uuid::from_u128(6 << 100)),
+        "member-id",
+        coven_foundation::id_source::DeviceId(0x0abc),
+        uuid::Uuid::from_u128(0x78),
+    );
+    let mine = admin.mint(&ours).await.unwrap();
+    admin.mint(&elsewhere).await.unwrap();
+    state.lock().unwrap().tokens.insert(
+        "someone-else".into(),
+        (
+            "deploy token".into(),
+            "resource".into(),
+            "pg-write".into(),
+            "value".into(),
+        ),
+    );
+    assert_eq!(
+        admin.list_keys(ours.store).await.unwrap(),
+        [crate::ListedKey {
+            access_key_id: mine.credentials.access_key_id.clone(),
+            principal: S3Principal::R2Token {
+                account: "acct".into()
+            },
+            device: coven_foundation::id_source::DeviceId(0x0abc),
+        }]
+    );
 }

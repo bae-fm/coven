@@ -1395,11 +1395,12 @@ the file's ranges under `F`.
     member policy below, filled in.
   - Each catalogued profile's const entry names its key minter, function
     pointers that make, roll back, delete and read a member key with admin
-    access. AWS uses IAM at its global endpoint, signing for `us-east-1`: a
-    user under the path `/coven/`, tagged `coven-store` and `coven-member`
-    with the store id and the member or invite id (never an email), the
-    member policy below as the inline policy `coven-member`, and one access
-    key. SeaweedFS's embedded IAM, on the location's S3 endpoint and region
+    access, and list a store's keys. AWS uses IAM at its global endpoint,
+    signing for `us-east-1`: a user named with the key name below, under the
+    path `/coven/`, tagged `coven-store` and `coven-member` with the store id
+    and the member or invite id (never an email), the member policy below as
+    the inline policy `coven-member`, and one access key. SeaweedFS's
+    embedded IAM, on the location's S3 endpoint and region
     (the operator sets `-iam.readOnly=false`), takes the same policy through
     `CreatePolicy` and `AttachUserPolicy`: its `PutUserPolicy` drops
     conditions and refuses `s3:ListMultipartUploadParts`. Ceph RGW accounts
@@ -1428,8 +1429,9 @@ the file's ranges under `F`.
   - On GCS each member key is the HMAC key of its own service account. The
     minter reads the bucket's project through the JSON API and refuses a
     bucket without uniform bucket-level access, which managed folders need.
-    It creates the service account `<name>@<project>.iam.gserviceaccount.com`,
-    whose description names the store and member, creates the store's managed
+    It creates the service account `<name>@<project>.iam.gserviceaccount.com`
+    under the short name, whose description is the key name followed by
+    ` member <member or invite id>`, creates the store's managed
     folder `<prefix>/<store>/` if absent, and binds the account to it as
     `roles/storage.objectUser`, retrying once when the folder's policy changes
     concurrently. HMAC keys an earlier attempt left are set inactive and
@@ -1441,8 +1443,9 @@ the file's ranges under `F`.
     other HMAC keys, removes its folder binding and deletes the service
     account. The managed folder is the store's and stays. Absence is read
     from the account's HMAC key list, which a deleted account leaves empty.
-  - On R2 each member key is a Cloudflare account API token, named after the
-    attempt and limited to the store's own bucket
+  - On R2 each member key is a Cloudflare account API token, named with the
+    key name followed by ` member <member or invite id>`, and limited to the
+    store's own bucket
     (`com.cloudflare.edge.r2.bucket.<account>_<jurisdiction>_<bucket>`) with
     the `Workers R2 Storage Bucket Item Write` permission group, object reads
     and writes. The location's endpoint host names the account and its
@@ -1460,7 +1463,9 @@ the file's ranges under `F`.
     once with a random secret nobody keeps and granted `readwrite`; a service
     account's access is its parent's intersected with its own policy.
     Deleting that parent would delete every member's key, so coven never
-    deletes it. Accounts an earlier attempt named are deleted first.
+    deletes it. Each account takes the short name, and its description is the
+    key name followed by ` member <member or invite id>`. Accounts an earlier
+    attempt named are deleted first.
     Requests are signed with Signature Version 4 for `s3`. Revocation calls
     `delete-service-account`; absence is read with `info-service-account`.
     RustFS answers a delete of an absent account with HTTP 400
@@ -1477,12 +1482,28 @@ the file's ranges under `F`.
     `StringNotLike` `s3:prefix`: a request carrying no prefix, such as a bucket
     check, matches the negated condition and would be denied.
   - Making a key is one journaled operation (§18). Before the first provider
-    call the journal records a fresh attempt and the principal's name derived
-    from it, `coven-` and 24 hex digits, so every retry finds what an earlier
-    attempt made: an existing user or policy is kept, and keys whose secret no
-    attempt holds are deleted before a new one is created (an IAM user holds
-    at most two). The minted key's secret then joins the journal, as an
-    invite's key does.
+    call the journal records a fresh attempt and the principal's names derived
+    from it, so every retry finds what an earlier attempt made: an existing
+    user or policy is kept, and keys whose secret no attempt holds are deleted
+    before a new one is created (an IAM user holds at most two). The minted
+    key's secret then joins the journal, as an invite's key does. The short
+    name is `coven-` and 24 hex digits of the attempt, for GCS service
+    accounts (6 to 30 characters) and RustFS service accounts. The key name
+    carries the store and the device making the key, for §13's reclaim:
+    `coven-<store>-<device>-<attempt>`, with the first 24 hex digits of the
+    store id, the device id's 16 and the attempt's first 16, 64 characters,
+    an IAM user name's limit.
+  - A store's listing returns every key held under a key name for that store,
+    with the device the name carries: on IAM services, `ListUsers` (under
+    `/coven/` where users carry a path; SeaweedFS keeps none) and each such
+    user's `ListAccessKeys`, with the managed policy's ARN from
+    `ListPolicies` on SeaweedFS; on GCS, the bucket project's service
+    accounts, every page, and each matching account's HMAC keys; on R2, the
+    account's tokens; on RustFS, the parent's service accounts. A failed or
+    incomplete listing is an error, never a shorter list. On **2026-10-15**
+    the Versity Gateway 1.9.0 minter's live run listed the minted key under
+    its store with its device and listed nothing after revocation; the other
+    listings are checked against in-process fakes of their APIs.
   - Before delivery the key is checked from the member's side. Under it, an
     object in `<store>/.coven-check/<run>/` is created, refused a second time,
     read back and deleted, and that prefix is listed. Where keys reach a
@@ -4215,6 +4236,30 @@ Carol's tablet:
     removes the operation; with no key yet, what the attempt may have made is
     rolled back with admin access, and without it the operation waits for
     admin access with only that rollback left.
+  - A key coven made can stay unrecorded with nothing to delete it: its
+    database lost, or too damaged to read, before an entry records it. Every
+    made key's provider-side name carries its store and minting device (§4).
+    An admin's `reclaim_access_keys` (E9), with admin access, lists the
+    store's keys and, in one transaction, makes pending `DeleteAccessKey` each
+    listed key that no stored entry records, kept or dropped, whose minting
+    device is retired with a final entry and drained (§6), with every entry it
+    received from that device applied. Only copies of the minting database
+    record its keys, and a drained device's entries are all here with none
+    left to be kept, so the listing never takes a key that is or becomes
+    recorded, nor a live device's key in flight
+    ([`reclaimed_safe`, `reclaimed_never_recorded`](proofs/storage/CovenStorage/KeyListing.lean)).
+    Once the retired devices' copies have stopped, one such catch-up and its
+    deletions leave every key they made recorded
+    ([`retired_keys_settle`](proofs/storage/CovenStorage/KeyListing.lean)),
+    whether the database was reset, lost or never copied
+    ([`lost_database_key_reclaimed_once_retired`](proofs/storage/CovenStorage/KeyListing.lean)).
+    A live device's key waits: removing a lost device retires it.
+    - E.g. Ana's desktop makes and delivers a key for Ben, and Carol's
+      catch-up runs before Ana records it. Ana's desktop is live, so the key
+      stays, and Ana records it
+      ([`device_rule_spares_in_flight_key`](proofs/storage/CovenStorage/KeyListing.lean)).
+      Taking every unrecorded key would delete Ben's recorded key
+      ([`catch_up_deletes_in_flight_key`](proofs/storage/CovenStorage/KeyListing.lean)).
   - Recording an S3 replacement makes the old key from its recorded view
     pending `DeleteAccessKey` work in the same transaction as the entry and
     replay, even if the replacement entry drops. Recording the same key id

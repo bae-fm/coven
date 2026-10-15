@@ -54,6 +54,7 @@ pub(crate) enum Command {
     Discard(OperationId),
     ConfirmKey(String),
     DeleteKey(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
+    ReclaimKeys(Arc<dyn coven_storage::AccessKeyAdmin>),
     RetryWithAdmin(OperationId, Arc<dyn coven_storage::AccessKeyAdmin>),
     ReplaceAccessKey(MemberId, Arc<dyn coven_storage::AccessKeyAdmin>),
     ReplaceOwnKeys,
@@ -319,6 +320,16 @@ impl Operations {
         admin: Arc<dyn coven_storage::AccessKeyAdmin>,
     ) -> Result<(), SyncError> {
         self.unit(Command::DeleteKey(operation, admin)).await
+    }
+    /// List this store's provider keys with the storage account's admin
+    /// access and keep each key no entry records, made by a device that is
+    /// retired with a final entry and drained, pending deletion (§13). A live
+    /// device's key, recorded or in flight, is never taken.
+    pub async fn reclaim_access_keys(
+        &self,
+        admin: Arc<dyn coven_storage::AccessKeyAdmin>,
+    ) -> Result<(), SyncError> {
+        self.unit(Command::ReclaimKeys(admin)).await
     }
     /// Replace a member's S3 key with admin access (§13): make it, deliver it
     /// sealed to the member's devices, record it for them, then delete the

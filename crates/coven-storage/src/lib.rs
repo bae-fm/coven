@@ -5,7 +5,7 @@
 //! caller records upload sessions and commits credentials to key custody only
 //! after setup succeeds. Providers never read the database.
 mod access_admin;
-pub use access_admin::{AccessKeyAdmin, AdminCredential, MintScope, S3MemberKey};
+pub use access_admin::{AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey};
 mod config;
 mod provider_access;
 pub use provider_access::*;

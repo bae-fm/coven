@@ -562,6 +562,58 @@ out only the key its own database is making.
   same way. A key being made on another admin device is not distinguishable
   by the listing as decided, so the rule is not in §13.
 
+**T237: name each key by its minting device (proved).** Each provider key now
+carries the device whose operation made it (`ProviderKey.device`, set by
+`mint`). [KeyListing](storage/CovenStorage/KeyListing.lean)'s `Sys` adds the
+devices this admin knows to be retired with a final entry and drained
+(`retired`), and records which keys its catch-up made pending (`reclaimed`).
+The catch-up (`reclaim`) takes only listed keys whose device is retired and
+that no entry records. A retired copy can no longer record or deliver, since
+§10 bounds its publications to finality plus one day and five minutes and the
+drain reads its logs after that; it resets when it reads its retirement
+(`stop`), with T203's carry.
+- `reclaimed_safe` (proved): in every history of backups, clones, resets,
+  retirements, catch-ups and deletions, a key the listing made pending is in
+  no entry and held by no copy of a live device. The invariant (`Good`) rests
+  on one fact: a key a copy holds is named at the provider with that copy's
+  device (`heldProvider`). A stray key names a retired device, so no live copy
+  holds it, and only a copy holding a key records it.
+- `reclaimed_never_recorded` (proved): such a key is not recorded later in
+  the same history either.
+- `retired_keys_settle` (proved): once no copy of a retired device remains,
+  one catch-up and the deletion of what it made pending leave every live key
+  of a retired device recorded, and no later step except another retirement
+  changes that. `reclaim_covers_retired` and `delete_after_reclaim` are its
+  two steps; `settled_sstep` shows that a step other than a retirement then
+  makes no key of a retired device.
+- Checked histories: T204's history now keeps Ben's key, which Ana records
+  (`device_rule_spares_in_flight_key`); a key whose database was lost is kept
+  while its device is live and reclaimed once it is retired
+  (`lost_database_key_reclaimed_once_retired`).
+
+The rule's Rust side reads "retired with a final entry" as drained (§6): a
+drain needs the retiring entry final, the one day and five minutes, and every
+log read to a miss after them. It also waits on a device with a received
+entry not yet applied, which could still record a key. Outside the model: the
+store-log replay, what a drain reads, provider listing lag (a key missing from
+one listing is found by a later one), and keys handed out of band in an invite
+code before an entry records them.
+
+**Two other deletions take a recorded key (checked counterexamples).** Both
+need two live copies of one database, and neither is the listing's.
+- `reset_carry_deletes_recorded_key`: T203's carry. A clone of Ana's desktop
+  finds the original's delivery, resets and carries key 101 pending deletion,
+  since no entry records it yet. The original then records 101 as Ben's
+  access, as §10 allows an entry made before reading its replacement.
+  Deleting what the reset carried removes Ben's recorded key. Under T237 the
+  listing leaves 101 alone once the original records it
+  (`listing_spares_key_the_carry_takes`), so the carry's made keys are the
+  listing's job; its owed deletions are not, since their keys are recorded.
+- `same_name_mint_deletes_recorded_key`: §4's retry rule. A clone taken after
+  the attempt was journaled and before its key was made mints under the same
+  name after the original recorded 101, and deletes 101 as a key whose secret
+  it does not hold.
+
 ## Undecodable own key copies
 
 T182 made a pass's scan reset the device with `SlotMismatch` when a copy

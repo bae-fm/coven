@@ -8,7 +8,9 @@
 use super::minting::{member_policy, AdminRequest, KeyMinter, Pending};
 use super::*;
 use crate::providers::s3_admin_query::{amz_date, authorization, SignedRequest};
+use crate::{access_admin::named_device, ListedKey};
 use coven_format::S3Principal;
+use coven_foundation::id_source::StoreId;
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -37,6 +39,9 @@ fn key_present<'a>(
 ) -> Pending<'a, bool> {
     Box::pin(key_exists(context, key, principal))
 }
+fn list_keys<'a>(context: &'a AdminRequest, store: StoreId) -> Pending<'a, Vec<ListedKey>> {
+    Box::pin(list(context, store))
+}
 
 pub(super) const RUSTFS_ACCOUNTS: KeyMinter = KeyMinter {
     name: "RustFS service accounts",
@@ -44,6 +49,7 @@ pub(super) const RUSTFS_ACCOUNTS: KeyMinter = KeyMinter {
     roll_back: roll_back_key,
     revoke: revoke_key,
     key_exists: key_present,
+    list: list_keys,
     // Policies apply on the serving node; peers learn of new accounts quickly.
     propagation: Duration::from_secs(30),
     separate_iam: false,
@@ -198,8 +204,8 @@ impl<'a> Admin<'a> {
         Ok(())
     }
 
-    /// The parent's service accounts made with this scope's name.
-    async fn named(&self, name: &str) -> Result<Vec<String>, StorageError> {
+    /// The parent's service accounts, every one.
+    async fn accounts(&self) -> Result<Vec<Value>, StorageError> {
         let listed = self
             .call(
                 Method::GET,
@@ -210,10 +216,14 @@ impl<'a> Admin<'a> {
             )
             .await?
             .unwrap_or_default();
-        listed["accounts"]
-            .as_array()
-            .into_iter()
-            .flatten()
+        Ok(listed["accounts"].as_array().cloned().unwrap_or_default())
+    }
+
+    /// The parent's service accounts made with this scope's name.
+    async fn named(&self, name: &str) -> Result<Vec<String>, StorageError> {
+        self.accounts()
+            .await?
+            .iter()
             .filter(|account| account["name"] == name)
             .map(|account| crate::providers::http::string(account, "accessKey").map(str::to_owned))
             .collect()
@@ -271,7 +281,8 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
                 "policy": policy,
                 "targetUser": PARENT,
                 "name": scope.name,
-                "description": format!("coven store {} member {}", scope.store, scope.member),
+                // Carries the store and the minting device for a store's listing (§13).
+                "description": scope.label(),
             })),
             &[],
         )
@@ -325,6 +336,28 @@ async fn key_exists(
 ) -> Result<bool, StorageError> {
     service_account(principal)?;
     Admin::new(context)?.exists(access_key_id).await
+}
+
+/// Every service account of coven's parent whose description names this
+/// store, with the minting device it names (§13).
+async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+    let mut listed = Vec::new();
+    for account in Admin::new(context)?.accounts().await? {
+        let Some(device) = account["description"]
+            .as_str()
+            .and_then(|description| named_device(description, store))
+        else {
+            continue;
+        };
+        listed.push(ListedKey {
+            access_key_id: crate::providers::http::string(&account, "accessKey")?.to_owned(),
+            principal: S3Principal::RustFsServiceAccount {
+                parent: PARENT.into(),
+            },
+            device,
+        });
+    }
+    Ok(listed)
 }
 
 #[cfg(test)]

@@ -2844,6 +2844,35 @@ roll_back PASS cleanup PASS
 
 Afterwards the IAM service listed no users and `coven-live` held no objects.
 
+Later on 2026-10-15 (T237), with users named by key name
+(`coven-<store>-<device>-<attempt>`, 64 characters) and the store listing
+added, the same container and command printed, apart from the cargo harness
+lines:
+
+```text
+mint PASS principal=IamUser
+key_exists_after_mint=true
+store_listing_after_mint=true listed=1
+member_check PASS
+write_other_store refused=PermissionDenied
+read_other_store refused=PermissionDenied
+list_other_store refused=PermissionDenied
+write_outside_base_prefix refused=PermissionDenied
+revoke PASS
+key_exists_after_revoke=false
+revoke_again PASS
+store_listing_after_revoke=0
+revoked_key refused=Authentication after_s=0
+member_key_lifecycle PASS
+roll_back PASS cleanup PASS
+```
+
+By hand, the IAM service also took a user path such as
+`/coven/<store>/<member>/<device>/` and filtered `ListUsers` by
+`PathPrefix`. Afterwards it listed no users. RustFS, SeaweedFS and Ceph RGW
+were not running for this change; their listings are checked only against
+the in-process fakes.
+
 ## SeaweedFS every-object copy publication, 2026-10-15
 
 Suite 5 showed SeaweedFS 4.48 keeping one winner whenever copies raced

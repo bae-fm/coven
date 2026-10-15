@@ -12,7 +12,7 @@ use std::sync::Arc;
 #[path = "write_download.rs"]
 mod download;
 #[path = "write_drain.rs"]
-mod drain;
+pub(crate) mod drain;
 #[path = "write_discovery.rs"]
 mod scan;
 #[cfg(test)]

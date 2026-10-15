@@ -776,6 +776,8 @@ mod operation_minting;
 mod operation_pending;
 #[path = "operation_steps.rs"]
 mod operation_steps;
+#[path = "stray_access_keys.rs"]
+mod stray_access_keys;
 
 #[path = "schema_sync.rs"]
 mod schema_sync;

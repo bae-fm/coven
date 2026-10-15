@@ -6,7 +6,7 @@ use crate::{S3Credentials, StorageError};
 use async_trait::async_trait;
 use coven_crypto::SecretText;
 use coven_format::S3Principal;
-use coven_foundation::id_source::StoreId;
+use coven_foundation::id_source::{DeviceId, StoreId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
@@ -43,30 +43,99 @@ impl fmt::Debug for AdminCredential {
     }
 }
 
-/// What a minted key may reach, and the principal name its journal fixed
+/// What a minted key may reach, and the principal names its journal fixed
 /// before the first provider call (§4, §18).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MintScope {
     /// The store whose prefix the key reaches.
     pub store: StoreId,
-    /// The principal's name; a retry with the same scope finds what an earlier
-    /// attempt created.
+    /// The device making the key. Its name carries the device so a key no
+    /// entry records is reclaimed only once that device is retired (§13).
+    pub device: DeviceId,
+    /// The principal's short name, for services whose names are short (GCS
+    /// service accounts, RustFS service accounts); a retry with the same
+    /// scope finds what an earlier attempt created.
     pub name: String,
+    /// The name carrying the store, the minting device and the attempt, which
+    /// a store's key listing reads back (`named_device`): an IAM user's name,
+    /// and the first word of an R2 token's name or a GCS or RustFS
+    /// description.
+    pub key_name: String,
     /// Who the key is for, as a provider tag: a member or invite id, no email.
     pub member: String,
 }
 
+/// How many hex digits of the store id a key name carries.
+const STORE_DIGITS: usize = 24;
+
 impl MintScope {
-    /// Name the principal from a journal attempt id: `coven-` and 24 hex digits,
-    /// within every service's limit (GCS service accounts take 6 to 30
-    /// lowercase letters, digits and hyphens, starting with a letter).
-    pub fn new(store: StoreId, member: &str, attempt: uuid::Uuid) -> Self {
+    /// Name the principal from a journal attempt id. The short name is
+    /// `coven-` and 24 hex digits, within every service's limit (GCS service
+    /// accounts take 6 to 30 lowercase letters, digits and hyphens, starting
+    /// with a letter). The key name is `coven-<store>-<device>-<attempt>`: 24
+    /// hex digits of the store id, the device's 16 and 16 of the attempt's,
+    /// 64 characters, an IAM user name's limit.
+    pub fn new(store: StoreId, member: &str, device: DeviceId, attempt: uuid::Uuid) -> Self {
+        let attempt = attempt.simple().to_string();
+        let store_digits = store.0.simple().to_string();
         Self {
             store,
-            name: format!("coven-{}", &attempt.simple().to_string()[..24]),
+            device,
+            name: format!("coven-{}", &attempt[..24]),
+            key_name: format!(
+                "coven-{}-{:016x}-{}",
+                &store_digits[..STORE_DIGITS],
+                device.0,
+                &attempt[..16]
+            ),
             member: member.to_owned(),
         }
     }
+
+    /// The key name followed by the member tag: an R2 token's name, and a GCS
+    /// or RustFS service account's description.
+    pub fn label(&self) -> String {
+        format!("{} member {}", self.key_name, self.member)
+    }
+}
+
+/// The minting device a listed name or description names, when its first
+/// word is a key name coven made for this store; `None` for anything else.
+pub(crate) fn named_device(text: &str, store: StoreId) -> Option<DeviceId> {
+    let name = text.split(' ').next()?;
+    let mut parts = name.strip_prefix("coven-")?.split('-');
+    let (Some(store_part), Some(device), Some(attempt), None) =
+        (parts.next(), parts.next(), parts.next(), parts.next())
+    else {
+        return None;
+    };
+    let hex = |part: &str, digits: usize| {
+        part.len() == digits
+            && part
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    };
+    let expected = store.0.simple().to_string();
+    if !hex(store_part, STORE_DIGITS)
+        || store_part != &expected[..STORE_DIGITS]
+        || !hex(device, 16)
+        || !hex(attempt, 16)
+    {
+        return None;
+    }
+    u64::from_str_radix(device, 16).ok().map(DeviceId)
+}
+
+/// A key the provider lists for a store, with the minting device its name
+/// carries (§13).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ListedKey {
+    /// The key's public id.
+    pub access_key_id: String,
+    /// The provider identity holding it, as deleting it needs.
+    pub principal: S3Principal,
+    /// The device whose operation made it.
+    pub device: DeviceId,
 }
 
 /// A member's S3 key and who holds it. The secret is erased on drop and
@@ -117,4 +186,12 @@ pub trait AccessKeyAdmin: Send + Sync {
         access_key_id: &str,
         principal: &S3Principal,
     ) -> Result<bool, StorageError>;
+    /// Every key the provider holds under a name coven made for this store,
+    /// with the minting device that name carries. A failed or incomplete
+    /// listing is an error, never a shorter list.
+    async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError>;
 }
+
+#[cfg(test)]
+#[path = "access_admin_tests.rs"]
+mod tests;

@@ -66,7 +66,7 @@ pub use coven_storage::providers::{
     DropboxClients, GoogleDriveClient, OAuthClients, OAuthError, OAuthPresenter,
     OAuthRedirectError, ProviderResponse,
 };
-pub use coven_storage::{AccessKeyAdmin, AdminCredential, MintScope, S3MemberKey};
+pub use coven_storage::{AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey};
 pub use coven_storage::{
     ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, GoogleDriveAccess,
     OAuthAccess, ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, S3BucketVersioning,

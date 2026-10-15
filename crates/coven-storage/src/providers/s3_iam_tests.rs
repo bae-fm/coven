@@ -218,6 +218,19 @@ fn admin(state: &mut Remote, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Re
             }
             reply(&action, String::new())
         }
+        "ListUsers" => {
+            let prefix = form.get("PathPrefix").cloned().unwrap_or_default();
+            let members: String = state
+                .users
+                .iter()
+                .filter(|(_, user)| user.path.as_deref().unwrap_or("/").starts_with(&prefix))
+                .map(|(name, _)| format!("<member><UserName>{name}</UserName></member>"))
+                .collect();
+            reply(
+                &action,
+                format!("<IsTruncated>false</IsTruncated><Users>{members}</Users>"),
+            )
+        }
         "ListAccessKeys" => {
             let Some(user) = state.users.get(&user_name) else {
                 return iam_error(404, "NoSuchEntity");
@@ -463,6 +476,7 @@ fn scope() -> MintScope {
     MintScope::new(
         coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(7)),
         "member-id",
+        coven_foundation::id_source::DeviceId(3),
         uuid::Uuid::from_u128(0x1234),
     )
 }
@@ -476,7 +490,7 @@ async fn seaweedfs_attaches_a_managed_prefix_policy_and_revokes_everything() {
     let S3Principal::IamUser { user, policy } = &minted.principal else {
         panic!("IAM principal")
     };
-    assert_eq!(*user, scope.name);
+    assert_eq!(*user, scope.key_name);
     let IamPolicy::Managed { arn } = policy else {
         panic!("managed policy")
     };
@@ -514,7 +528,7 @@ async fn aws_puts_an_inline_policy_on_a_tagged_user_at_the_iam_endpoint() {
     assert_eq!(
         minted.principal,
         S3Principal::IamUser {
-            user: scope.name.clone(),
+            user: scope.key_name.clone(),
             policy: IamPolicy::Inline {
                 name: "coven-member".into()
             }
@@ -522,7 +536,7 @@ async fn aws_puts_an_inline_policy_on_a_tagged_user_at_the_iam_endpoint() {
     );
     {
         let state = fake.state.lock().unwrap();
-        let user = &state.users[&scope.name];
+        let user = &state.users[&scope.key_name];
         assert_eq!(user.path.as_deref(), Some("/coven/"));
         assert_eq!(
             user.tags,
@@ -557,12 +571,15 @@ async fn a_retry_replaces_keys_whose_secret_was_lost() {
             admin.mint(&scope).await.err().unwrap().failure(),
             StorageFailure::Network
         );
-        assert_eq!(fake.state.lock().unwrap().users[&scope.name].keys.len(), 1);
+        assert_eq!(
+            fake.state.lock().unwrap().users[&scope.key_name].keys.len(),
+            1
+        );
         // The user already exists; the lost key is deleted before a new one.
         let minted = admin.mint(&scope).await.unwrap();
         let again = admin.mint(&scope).await.unwrap();
         let state = fake.state.lock().unwrap();
-        let keys = &state.users[&scope.name].keys;
+        let keys = &state.users[&scope.key_name].keys;
         assert_eq!(keys.len(), 1);
         assert_eq!(keys[0].0, again.credentials.access_key_id);
         assert_ne!(
@@ -616,7 +633,7 @@ async fn ceph_and_versity_mint_inline_keys_at_their_iam_and_revoke_them() {
         assert_eq!(
             minted.principal,
             S3Principal::IamUser {
-                user: scope.name.clone(),
+                user: scope.key_name.clone(),
                 policy: IamPolicy::Inline {
                     name: "coven-member".into()
                 },
@@ -638,7 +655,7 @@ async fn ceph_and_versity_mint_inline_keys_at_their_iam_and_revoke_them() {
                 ]
                 .map(|action| (path.into(), action.into()))
             );
-            let user = &state.users[&scope.name];
+            let user = &state.users[&scope.key_name];
             assert!(user.attached.is_empty() && state.policies.is_empty());
             let (name, document) = user.inline.as_ref().unwrap();
             assert_eq!(name, "coven-member");
@@ -754,7 +771,10 @@ async fn inline_iam_rolls_back_partial_mints_and_reports_failed_deletion() {
             admin.roll_back(&scope).await.unwrap_err().failure(),
             StorageFailure::PermissionDenied
         );
-        assert_eq!(fake.state.lock().unwrap().users[&scope.name].keys.len(), 1);
+        assert_eq!(
+            fake.state.lock().unwrap().users[&scope.key_name].keys.len(),
+            1
+        );
         fake.state.lock().unwrap().fail_action = None;
         admin.roll_back(&scope).await.unwrap();
         admin.roll_back(&scope).await.unwrap();
@@ -804,4 +824,51 @@ async fn console_keys_and_other_principals_are_not_deleted_through_iam() {
         );
     }
     assert!(fake.state.lock().unwrap().actions.is_empty());
+}
+
+/// A store's listing returns the keys of users whose name coven made for this
+/// store, with the minting device the name carries, and a managed policy's
+/// ARN where the service attaches one (§13).
+#[tokio::test]
+async fn a_store_listing_returns_its_users_keys_with_their_minting_device() {
+    for profile in [
+        S3ProfileName::Aws,
+        S3ProfileName::SeaweedFs,
+        S3ProfileName::CephRgw,
+        S3ProfileName::VersityGw,
+    ] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let ours = scope();
+        let elsewhere = MintScope::new(
+            coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(9 << 100)),
+            "member-id",
+            coven_foundation::id_source::DeviceId(3),
+            uuid::Uuid::from_u128(0x1235),
+        );
+        let mine = admin.mint(&ours).await.unwrap();
+        admin.mint(&elsewhere).await.unwrap();
+        fake.state.lock().unwrap().users.insert(
+            "deploy".into(),
+            User {
+                path: Some("/coven/".into()),
+                keys: vec![("deploy-key".into(), "secret".into())],
+                ..User::default()
+            },
+        );
+        assert_eq!(
+            admin.list_keys(ours.store).await.unwrap(),
+            [crate::ListedKey {
+                access_key_id: mine.credentials.access_key_id.clone(),
+                principal: mine.principal.clone(),
+                device: coven_foundation::id_source::DeviceId(3),
+            }],
+            "{profile:?}"
+        );
+        fake.state.lock().unwrap().fail_action = Some("ListUsers");
+        assert_eq!(
+            admin.list_keys(ours.store).await.unwrap_err().failure(),
+            StorageFailure::PermissionDenied
+        );
+    }
 }

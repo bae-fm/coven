@@ -31,7 +31,7 @@ async fn s3_member_key_lifecycle() {
     .expect("the selected profile mints keys");
     let store = StoreId(UuidIds.new_id());
     let other = StoreId(UuidIds.new_id());
-    let scope = MintScope::new(store, "live-member", UuidIds.new_id());
+    let scope = MintScope::new(store, "live-member", DeviceId(91), UuidIds.new_id());
     let owner = live.connect(None);
     // Another store's object, which the member key must not read.
     let foreign = ObjectPath::device_log(other, DeviceId(92), NonZeroU64::MIN);
@@ -127,6 +127,19 @@ async fn lifecycle(
     if !present {
         return Err(StorageFailure::Protocol.with_source("the minted key is not listed"));
     }
+    // The store's listing names the key with its minting device (§13).
+    let listed = admin.list_keys(scope.store).await?;
+    let found = listed.iter().any(|listed| {
+        listed.access_key_id == id
+            && listed.device == scope.device
+            && listed.principal == key.principal
+    });
+    println!("store_listing_after_mint={found} listed={}", listed.len());
+    if !found || listed.len() != 1 {
+        return Err(
+            StorageFailure::Protocol.with_source("the store's listing misses the minted key")
+        );
+    }
     // Setup's member-side check: write, refuse a second create, read, list
     // and delete under the store, and a refused listing of the base prefix.
     admin.probe(scope, &key.credentials).await?;
@@ -195,6 +208,11 @@ async fn lifecycle(
     }
     admin.revoke(id, &key.principal).await?;
     println!("revoke_again PASS");
+    let listed = admin.list_keys(scope.store).await?;
+    println!("store_listing_after_revoke={}", listed.len());
+    if !listed.is_empty() {
+        return Err(StorageFailure::Protocol.with_source("the store's listing keeps a revoked key"));
+    }
     // The provider must stop honoring the key, within propagation.
     let own = ObjectPrefix::all(scope.store).under(&member.prefix);
     let mut waited = Duration::ZERO;

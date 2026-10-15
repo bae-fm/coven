@@ -5,7 +5,9 @@
 //! token; absence is read from the token itself.
 use super::minting::{AdminRequest, KeyMinter, Pending};
 use super::*;
+use crate::{access_admin::named_device, ListedKey};
 use coven_format::S3Principal;
+use coven_foundation::id_source::StoreId;
 use reqwest::Method;
 use serde_json::{json, Value};
 use std::time::Duration;
@@ -34,6 +36,9 @@ fn key_present<'a>(
 ) -> Pending<'a, bool> {
     Box::pin(key_exists(context, key, principal))
 }
+fn list_keys<'a>(context: &'a AdminRequest, store: StoreId) -> Pending<'a, Vec<ListedKey>> {
+    Box::pin(list(context, store))
+}
 
 pub(super) const R2_TOKENS: KeyMinter = KeyMinter {
     name: "Cloudflare account tokens",
@@ -41,6 +46,7 @@ pub(super) const R2_TOKENS: KeyMinter = KeyMinter {
     roll_back: roll_back_key,
     revoke: revoke_key,
     key_exists: key_present,
+    list: list_keys,
     // Cloudflare states no bound; new tokens usually work within seconds.
     propagation: Duration::from_secs(30),
     separate_iam: false,
@@ -120,8 +126,8 @@ impl Cloudflare<'_> {
         Ok(Some(value["result"].clone()))
     }
 
-    /// Every token this account holds with the given name.
-    async fn named(&self, name: &str) -> Result<Vec<String>, StorageError> {
+    /// Every token this account holds, as (id, name), every page.
+    async fn tokens(&self) -> Result<Vec<(String, String)>, StorageError> {
         let mut found = Vec::new();
         for page in 1.. {
             let mut url = self.url("tokens");
@@ -134,15 +140,27 @@ impl Cloudflare<'_> {
                 .unwrap_or_default();
             let tokens = tokens.as_array().cloned().unwrap_or_default();
             for token in &tokens {
-                if token["name"] == name {
-                    found.push(crate::providers::http::string(token, "id")?.to_owned());
-                }
+                found.push((
+                    crate::providers::http::string(token, "id")?.to_owned(),
+                    crate::providers::http::string(token, "name")?.to_owned(),
+                ));
             }
             if tokens.len() < 50 {
                 break;
             }
         }
         Ok(found)
+    }
+
+    /// Every token this account holds with the given name.
+    async fn named(&self, name: &str) -> Result<Vec<String>, StorageError> {
+        Ok(self
+            .tokens()
+            .await?
+            .into_iter()
+            .filter(|(_, held)| held == name)
+            .map(|(id, _)| id)
+            .collect())
     }
 
     async fn delete(&self, id: &str) -> Result<(), StorageError> {
@@ -180,7 +198,7 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
     };
     let cloudflare = Cloudflare { context, account };
     // An earlier attempt's token exists with a value this attempt never held.
-    for id in cloudflare.named(&scope.name).await? {
+    for id in cloudflare.named(&scope.label()).await? {
         cloudflare.delete(&id).await?;
     }
     let group = cloudflare.permission_group().await?;
@@ -193,7 +211,8 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
             Method::POST,
             cloudflare.url("tokens"),
             Some(json!({
-                "name": scope.name,
+                // Carries the store and the minting device for a store's listing (§13).
+                "name": scope.label(),
                 "policies": [{
                     "effect": "allow",
                     "resources": {resource: "*"},
@@ -222,7 +241,7 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
 async fn roll_back(context: &AdminRequest, scope: &MintScope) -> Result<(), StorageError> {
     let (account, _) = account(&context.config)?;
     let cloudflare = Cloudflare { context, account };
-    for id in cloudflare.named(&scope.name).await? {
+    for id in cloudflare.named(&scope.label()).await? {
         cloudflare.delete(&id).await?;
     }
     Ok(())
@@ -268,6 +287,27 @@ async fn key_exists(
         )
         .await?
         .is_some())
+}
+
+/// Every account token whose name coven made for this store, with the minting
+/// device it names (§13). The token id is the S3 key id.
+async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+    let (account, _) = account(&context.config)?;
+    let cloudflare = Cloudflare { context, account };
+    Ok(cloudflare
+        .tokens()
+        .await?
+        .into_iter()
+        .filter_map(|(id, name)| {
+            Some(ListedKey {
+                access_key_id: id,
+                principal: S3Principal::R2Token {
+                    account: cloudflare.account.clone(),
+                },
+                device: named_device(&name, store)?,
+            })
+        })
+        .collect())
 }
 
 #[cfg(test)]

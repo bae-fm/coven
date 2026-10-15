@@ -36,4 +36,4 @@ impl DeviceLogSync {
 
 #[cfg(test)]
 #[path = "write_drain_tests.rs"]
-mod tests;
+pub(crate) mod tests;

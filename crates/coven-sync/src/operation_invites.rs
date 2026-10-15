@@ -113,6 +113,7 @@ impl StoreLogSync {
                 InviteGrant::Minting(MintWork::new(MintScope::new(
                     local.store,
                     &format!("invite-{}", id.0),
+                    local.device,
                     self.ids.new_id(),
                 )))
             }

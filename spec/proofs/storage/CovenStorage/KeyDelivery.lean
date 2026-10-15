@@ -33,10 +33,12 @@ structure Stored where
   writer : Nat
   deriving DecidableEq, Repr
 
-/-- A live key at the provider and the attempt whose principal name made it (§4). -/
+/-- A live key at the provider, the attempt whose principal name made it (§4),
+and the minting device its provider-side name carries (T237). -/
 structure ProviderKey where
   id : Nat
   attempt : Nat
+  device : Nat
   deriving DecidableEq, Repr
 
 /-- `copies` holds database copies in slots below `slots`; `storage` maps an
@@ -79,12 +81,13 @@ def begin (w : World) (i : Nat) : World :=
   | _ => w
 
 /-- §4: keys under the attempt's name whose secret the journal does not hold
-are deleted before a new key is made; the new key's secret joins the journal. -/
+are deleted before a new key is made; the new key's secret joins the journal.
+The key's provider-side name carries the minting device (T237). -/
 def mint (w : World) (i : Nat) : World :=
   match w.copies i with
   | some ⟨d, some ⟨a, none, s, v⟩⟩ =>
     { w with copies := fun k => if k = i then some ⟨d, some ⟨a, some w.next, s, v⟩⟩ else w.copies k
-             provider := w.provider.filter (fun p => p.attempt != a) ++ [⟨w.next, a⟩]
+             provider := w.provider.filter (fun p => p.attempt != a) ++ [⟨w.next, a, d⟩]
              next := w.next + 1 }
   | _ => w
 

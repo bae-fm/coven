@@ -56,7 +56,12 @@ impl StoreLogSync {
         let data = Data::ReplaceAccessKey(ReplaceKeyWork {
             member,
             attempt,
-            mint: MintWork::new(MintScope::new(local.store, &member.to_string(), attempt)),
+            mint: MintWork::new(MintScope::new(
+                local.store,
+                &member.to_string(),
+                local.device,
+                attempt,
+            )),
             delivery: None,
             entry: None,
             abandoned: false,

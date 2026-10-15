@@ -24,6 +24,8 @@ struct Remote {
     users: BTreeMap<String, (String, Option<String>)>,
     /// Access key to (parent, name, secret, policy prefix).
     accounts: BTreeMap<String, (String, String, String, String)>,
+    /// Access key to its description.
+    descriptions: BTreeMap<String, String>,
     objects: BTreeMap<String, Vec<u8>>,
     next: u32,
     lose_create_reply: bool,
@@ -89,7 +91,13 @@ fn admin_api(
                 .accounts
                 .iter()
                 .filter(|(_, (parent, ..))| *parent == q["user"])
-                .map(|(key, (_, name, ..))| serde_json::json!({"accessKey": key, "name": name}))
+                .map(|(key, (_, name, ..))| {
+                    serde_json::json!({
+                        "accessKey": key,
+                        "name": name,
+                        "description": state.descriptions.get(key),
+                    })
+                })
                 .collect();
             response(200, serde_json::json!({"accounts": accounts}).to_string())
         }
@@ -104,6 +112,11 @@ fn admin_api(
                 .unwrap()
                 .trim_end_matches('*')
                 .to_owned();
+            if let Some(description) = body["description"].as_str() {
+                state
+                    .descriptions
+                    .insert(key.clone(), description.to_owned());
+            }
             state.accounts.insert(
                 key.clone(),
                 (
@@ -219,8 +232,7 @@ async fn serve(
     }
 }
 
-#[tokio::test]
-async fn service_accounts_share_one_parent_and_reach_only_the_store() {
+async fn fake() -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessKeyAdmin>) {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
     let admin = minting::key_admin(
@@ -242,9 +254,16 @@ async fn service_accounts_share_one_parent_and_reach_only_the_store() {
         Arc::new(UuidIds),
     )
     .unwrap();
+    (state, server, admin)
+}
+
+#[tokio::test]
+async fn service_accounts_share_one_parent_and_reach_only_the_store() {
+    let (state, _server, admin) = fake().await;
     let scope = MintScope::new(
         StoreId(uuid::Uuid::from_u128(4)),
         "member-id",
+        coven_foundation::id_source::DeviceId(3),
         uuid::Uuid::from_u128(0x55),
     );
     state.lock().unwrap().lose_create_reply = true;
@@ -291,4 +310,47 @@ async fn service_accounts_share_one_parent_and_reach_only_the_store() {
     assert!(state.accounts.is_empty());
     assert!(state.users.contains_key("coven"));
     assert_eq!(state.bad_signatures, 0);
+}
+
+/// A store's listing returns the parent's service accounts whose description
+/// names this store, with the minting device (§13).
+#[tokio::test]
+async fn a_store_listing_returns_its_service_accounts_with_their_minting_device() {
+    let (state, _server, admin) = fake().await;
+    let ours = MintScope::new(
+        StoreId(uuid::Uuid::from_u128(4 << 100)),
+        "member-id",
+        coven_foundation::id_source::DeviceId(3),
+        uuid::Uuid::from_u128(0x55),
+    );
+    let elsewhere = MintScope::new(
+        StoreId(uuid::Uuid::from_u128(5 << 100)),
+        "member-id",
+        coven_foundation::id_source::DeviceId(3),
+        uuid::Uuid::from_u128(0x56 << 100),
+    );
+    let mine = admin.mint(&ours).await.unwrap();
+    admin.mint(&elsewhere).await.unwrap();
+    // An account coven did not describe.
+    state.lock().unwrap().accounts.insert(
+        "SAother".into(),
+        (
+            "coven".into(),
+            "other".into(),
+            "secret".into(),
+            "base/".into(),
+        ),
+    );
+    assert_eq!(
+        state.lock().unwrap().descriptions[&mine.credentials.access_key_id],
+        ours.label()
+    );
+    assert_eq!(
+        admin.list_keys(ours.store).await.unwrap(),
+        [crate::ListedKey {
+            access_key_id: mine.credentials.access_key_id.clone(),
+            principal: mine.principal.clone(),
+            device: coven_foundation::id_source::DeviceId(3),
+        }]
+    );
 }

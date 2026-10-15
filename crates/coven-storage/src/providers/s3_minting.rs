@@ -3,7 +3,7 @@
 //! account's admin access. The key is checked from the member's side before
 //! the caller delivers it.
 use super::*;
-use crate::{AccessKeyAdmin, AdminCredential, MintScope, S3MemberKey};
+use crate::{AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey};
 use coven_format::S3Principal;
 use coven_foundation::id_source::StoreId;
 use std::{future::Future, pin::Pin, time::Duration};
@@ -26,6 +26,8 @@ pub(crate) struct KeyMinter {
     /// Read whether the provider still has this exact key.
     pub(super) key_exists:
         for<'a> fn(&'a AdminRequest, &'a str, &'a S3Principal) -> Pending<'a, bool>,
+    /// Every key under a name coven made for the store, with its minting device.
+    pub(super) list: for<'a> fn(&'a AdminRequest, StoreId) -> Pending<'a, Vec<ListedKey>>,
     /// How long the member-side check retries authentication and permission failures.
     pub(super) propagation: Duration,
     /// The service runs its IAM API apart from the S3 endpoint, at an address
@@ -210,6 +212,9 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
         principal: &S3Principal,
     ) -> Result<bool, StorageError> {
         (self.minter.key_exists)(&self.request(), access_key_id, principal).await
+    }
+    async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+        (self.minter.list)(&self.request(), store).await
     }
 }
 
