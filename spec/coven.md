@@ -1662,8 +1662,9 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   - The posted positions form a causally closed applied past: every cause
     of every included write is included, and no unfinished reload is passed.
   - Pending uploads can prevent advancing that past. Pending records still
-    travel: reuse the last publishable positions and omit fingerprints
-    unless they describe exactly those positions.
+    travel: reuse the last publishable write positions with the applied
+    store log, whose view names the current signing key, and omit
+    fingerprints unless they describe exactly those positions.
   - Store-log positions count consumed entries, kept or dropped. They do
     not establish finality; that uses storage times and recorded reads (§9).
   - Check its signature with the device owner's signing key current in the

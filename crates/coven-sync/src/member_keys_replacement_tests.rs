@@ -177,6 +177,47 @@ async fn self_replacement_confirms_the_queue_and_installs_the_kept_pair() {
     assert_eq!(a.log().await.replay.state.members[&carol].keys, candidate);
 }
 
+/// Carol posts her positions, replaces her own keys, then commits a write
+/// that is not yet uploaded, so her current past waits. A new pending record
+/// still travels: its post names a store-log view in which her installed
+/// pair signs, so Ana accepts it (§6, D9).
+#[tokio::test]
+async fn positions_held_across_self_replacement_stay_readable() {
+    let storage = google();
+    let [mut a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
+    c.sync().await;
+    assert!(c.writes.post_positions().await.unwrap());
+    let operation = begin(&mut c, Command::ReplaceOwnKeys).await;
+    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    write_note(&c, "held").await.unwrap();
+    c.sync().await;
+    let device = c.device().await;
+    c.db.record_pending(PendingRecord {
+        subject: PendingSubject::Write(coven_merge::WriteId {
+            device: a.device().await,
+            number: 1,
+        }),
+        reason: PendingReason::Refused(Refusal::Signature { cause: None }),
+        reported_by: device,
+    })
+    .await
+    .unwrap();
+    assert!(!c.writes.post_positions().await.unwrap());
+    a.sync().await;
+    let path = ObjectPath::positions(store(1), device);
+    let opened = crate::posted_positions::open(
+        &storage.read(&path).await.unwrap(),
+        &path,
+        a.custody.read().unwrap().as_ref(),
+        &a.log().await,
+    )
+    .unwrap();
+    let posted = opened.unwrap_or_else(|reason| panic!("{reason:?}"));
+    assert_eq!(posted.store_log, c.log().await.positions());
+    assert!(posted.fingerprints.is_empty());
+    assert_eq!(posted.pending.len(), 1);
+}
+
 /// Ben is an admin but not the store's owner. He publishes a pair Carol
 /// prepared elsewhere: no provider access changes, and her held pair is
 /// replaced. A self target, a non-admin author, a reused pair and an absent

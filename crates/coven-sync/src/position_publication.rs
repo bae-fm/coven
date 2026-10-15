@@ -87,10 +87,12 @@ impl DeviceLogSync {
         let mut positions = match current {
             Some(current) => current,
             None => {
-                // Retained fingerprints describe the retained past exactly. With
-                // no confirmation yet, no writes assert no realized work. The
-                // applied store log is still claimed: readers find this
-                // device's signing key in that signed view (D9).
+                // With no confirmation yet, no writes assert no realized work.
+                // The applied store log is always claimed: readers find this
+                // device's signing key in that signed view (D9), and after a
+                // key replacement an older view names the replaced key.
+                // Fingerprints describe exactly the past they were taken over,
+                // so a moved store log omits them.
                 let mut held = match &post.confirmed {
                     Some(bytes) => decode(bytes)?,
                     None => PostedPositions {
@@ -102,6 +104,11 @@ impl DeviceLogSync {
                         pending: Vec::new(),
                     },
                 };
+                let applied = local.log.positions();
+                if held.store_log != applied {
+                    held.store_log = applied;
+                    held.fingerprints.clear();
+                }
                 held.pending = crate::pending_logs::reports(&self.database).await?;
                 held
             }

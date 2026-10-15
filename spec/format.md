@@ -611,8 +611,9 @@
 - Positions describe a causally closed applied past, with own writes
   uploaded. Consumed store-log entries include dropped ones, including
   those that landed too late (§6, §9).
-  - Pending reports can change while positions stay at the last publishable
-    past. Omit fingerprints unless they describe exactly that past.
+  - Pending reports can change while write positions stay at the last
+    publishable past; store-log positions are the applied ones. Omit
+    fingerprints unless they describe exactly those positions.
   - Positions are not finality acknowledgements. Their provider-assigned
     replacement time, observed after a changed post, can supply the storage
     sample T for §9's subsequent store-log check. That check uses
