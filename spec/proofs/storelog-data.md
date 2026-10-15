@@ -625,7 +625,7 @@ device can load rather than the newest verified one.
   (`device_log_sync_tests.rs`) runs the history.
 
 **A snapshot's retirement-window verdicts (proved; counterexample
-checked).**
+checked; §15's finality wait proved).**
 [ReloadVerdict](storelog-data/CovenStorelogData/ReloadVerdict.lean) adds
 the check Rust's load transaction makes since T103. A snapshot carries each
 covered change it holds with its author's verdict, including `dropped` by
@@ -655,9 +655,8 @@ again (`chooseVerdict`: `choose` followed by that check; `verdictRecord`,
 - `newer_agreeing_ends_wait`: once the reload runs again, a newer snapshot
   this device can load, whose verdicts agree, ends the failure.
 
-§15 does not require that finality, and without it the check both stalls
-and lets divergent verdicts load (`unfinal_snapshot_counterexample`,
-checked). `VerdictHistory` is a store-log history in §9's storage-time
+Without that finality the check both stalls and lets divergent verdicts
+load (`unfinal_snapshot_counterexample`, checked). `VerdictHistory` is a store-log history in §9's storage-time
 replay (`Finality.resolve`). Ana and Ben are admins, Carol a member. Without
 reading one another, Ana's tablet makes Carol an admin, Ben demotes Ana, and
 Ana's phone removes Ben on day 20, safe only while Carol is an admin. Ben's
@@ -681,16 +680,54 @@ write 1.
   it keeps its effects. §10's rebuild "including contributions already in
   snapshots" does not happen.
 
+§15 now prepares a snapshot only once every covered write is ready
+(`Preparation.ready`, Rust `write_landing::unsettled`). A write is ready when
+a final kept retirement excludes it, or when the author received every entry
+stored by thirty days before it and each received retirement of its device
+stored then is final. A `Preparation` is what the author knows: the
+retirements it received, kept or dropped, its finality horizon, and the end
+of its complete store-log receipt.
+
+- `ready_agrees`: another replay judges a ready write as the author did, if
+  it agrees on every retirement stored before the author's horizon and keeps
+  no retirement stored by the author's receipt end that the author did not
+  receive. The final replay is one (§9's horizon stability, complete
+  receipt).
+- `prepared_final`: so a gated snapshot carries each write's final verdict.
+- `prepared_never_refused`: a loader that holds the entries stored before
+  the author's horizon judges every covered write as the author did, so the
+  reload's check passes and `choose`'s snapshot loads. Loading requires the
+  snapshot's store-log view first (Rust `SnapshotError::StoreLog`), which
+  contains those entries. The check stays as a corruption check.
+- `waiting_names`, `ready_of_final`: preparation waits only for a named
+  received retirement of the write's device that is not final, or for
+  receipt short of thirty days before the write. Further writes never hold
+  it.
+- `every_history_prepares`: a check completed after every entry's thirty
+  days is quiet, so the horizon passes every retirement and each write is
+  ready.
+- `gated_snapshot_waits_then_loads`, on `VerdictHistory`: whatever checks
+  Ana completed by day 51, Ben's demotion of Ana (late, stored on day 40)
+  keeps the horizon at or before Ben's removal, so his write is not ready
+  (`removal_not_final_by_preparation`, `waits_on_day_51`). On day 91 the
+  check is quiet, the horizon passes the removal, her replay drops it
+  (`removal_final_by_settled`, `settled_drops_removal`, `ready_on_day_91`),
+  and her snapshot carries the write admitted. Ben, who recorded his
+  unfixed admission, and Carol, who recorded nothing, both load it.
+
 Readings: the kept retirements at preparation and at the end come from
-`Finality.resolve`. The snapshot's carried verdicts, the device's recorded
-ones and the reload's record are inputs restating Rust, not derived from a
-database model. Changing §15 or D7 so that no snapshot carries a verdict a
-later replay reverses is a decision the spec has not made: preparing only
-once each carried write's old prefix is final (`loaded_verdict_final`
-proves that sufficient), or carrying what a loader needs to judge the
-window itself. The model also reads the queue package's `Retired.lean` only
-through its `late` input: rows and losses under a verdict are that
-package's (`window_rows_and_losses_converge`).
+`Finality.resolve`, the horizon from `Horizon.horizon`. The snapshot's
+carried verdicts, the device's recorded ones and the reload's record are
+inputs restating Rust, not derived from a database model; so are the gate's
+agreement and receipt premises, which `Horizon.horizon_stability` and a
+complete catch-up supply. Rust gates this device's own writes, which have no
+recorded publication time, on every retirement of its device being final;
+that each such write a counting snapshot covers is published within thirty
+days of the catch-up's receipt end is a hand argument from §15's one-day
+counting deadline, not modeled. A raise snapshot seals the migration's
+earlier capture and is not gated. The model reads the queue package's
+`Retired.lean` only through its `late` input: rows and losses under a
+verdict are that package's (`window_rows_and_losses_converge`).
 
 What the safe rule costs. A body refusal, or a key this device does not
 accept, never holds retention (`retention_ignores_bodies`). A refused prefix

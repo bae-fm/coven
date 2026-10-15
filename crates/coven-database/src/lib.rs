@@ -152,7 +152,7 @@ pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};
 pub use write_boundary::{Boundary, BoundaryCoverage};
 pub use write_failure::WriteFailure;
-pub use write_landing::Published;
+pub use write_landing::{Published, VerdictWait, WRITE_WINDOW};
 
 // SQL values and parameters are part of the API. Connections remain private.
 pub use rusqlite::{named_params, params, types, Params, Row, ToSql};

@@ -355,14 +355,14 @@ pub(crate) mod schema;
 mod streams;
 #[path = "write_download_tests.rs"]
 mod validation;
-mod writes {
+pub(crate) mod writes {
     use super::*;
     use coven_crypto::ObjectHasher;
     use coven_format::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
     use coven_format::write::WriteRecord;
     use coven_format::write_stream::{decode_plaintext, WriteEncoder};
 
-    pub(super) async fn queued(db: &Database) -> WriteRecord {
+    pub(crate) async fn queued(db: &Database) -> WriteRecord {
         db.read_oldest_upload(|upload| {
             let coven_database::WaitingUpload {
                 header_frame,
@@ -458,7 +458,7 @@ mod writes {
         bytes
     }
 
-    pub(super) async fn publish(storage: &MemoryStorage, record: &WriteRecord) {
+    pub(crate) async fn publish(storage: &MemoryStorage, record: &WriteRecord) {
         let path = crate::write_seal::path(STORE_ID, record.header.position);
         storage
             .create(&path, &seal(record, &path, |_, _| {}))

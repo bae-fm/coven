@@ -8,6 +8,7 @@ use crate::{
 };
 use coven_crypto::SigningKey;
 use coven_format::{store_log::StoreChange, write::WriteHeader};
+use coven_foundation::id_source::DeviceId;
 use rusqlite::params;
 
 /// The columns `_coven_store_log` keeps for an entry that can retire writes:
@@ -56,8 +57,26 @@ pub(crate) fn candidates(
     header: &WriteHeader,
     signer: &SigningKey,
 ) -> Result<Vec<(Retirement, bool, bool)>, DbError> {
+    Ok(of_device(db, header.position.device, signer)?
+        .into_iter()
+        // A device retirement counts read or not: one the write's own view
+        // kept already refused it, and one that view dropped is judged by
+        // time alone (`read_retirement_judged_by_time`). A key replacement
+        // counts only unread.
+        .filter(|(retirement, _, _, key)| !key || !header.store_log_read.covers(retirement.entry))
+        .map(|(retirement, kept, fixed, _)| (retirement, kept, fixed))
+        .collect())
+}
+
+/// Every entry that can retire a write of `device` signed with `signer`,
+/// except permanently late ones, with whether replay keeps it, whether it is
+/// final, and whether it is a key replacement, read or not.
+pub(crate) fn of_device(
+    db: &DatabaseConnection,
+    device: DeviceId,
+    signer: &SigningKey,
+) -> Result<Vec<(Retirement, bool, bool, bool)>, DbError> {
     let horizon = crate::store_log_tables::horizon(db)?;
-    let device = header.position.device;
     let rows = db.query(
         "SELECT device,number,stored_at,outcome='kept',0 FROM _coven_store_log
          WHERE retires_device=?1 AND outcome<>'late'
@@ -79,15 +98,10 @@ pub(crate) fn candidates(
         },
     )?;
     rows.into_iter()
-        // A device retirement counts read or not: one the write's own view
-        // kept already refused it, and one that view dropped is judged by
-        // time alone (`read_retirement_judged_by_time`). A key replacement
-        // counts only unread.
-        .filter(|(entry, _, _, key)| !key || !header.store_log_read.covers(*entry))
-        .map(|(entry, stored, kept, _)| {
+        .map(|(entry, stored, kept, key)| {
             let stored_at = crate::storage_time::decode(&stored)?;
             let fixed = horizon.is_some_and(|h| stored_at < h);
-            Ok((Retirement { entry, stored_at }, kept, fixed))
+            Ok((Retirement { entry, stored_at }, kept, fixed, key))
         })
         .collect()
 }

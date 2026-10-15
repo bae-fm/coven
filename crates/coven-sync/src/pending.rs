@@ -90,7 +90,8 @@ pub enum PendingSubject {
 /// A fact required before processing can continue.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Prerequisite {
-    /// Membership and key-copy discovery must finish within the sending window.
+    /// Membership and key-copy discovery must finish within the sending
+    /// window, or reach thirty days before a snapshot's covered write (§15).
     CatchUp,
     /// A storage object must arrive.
     Object(ObjectPath),
@@ -108,7 +109,9 @@ pub enum Prerequisite {
     Reload(#[serde(with = "crate::snapshot_data::audience")] Audience),
     /// A reader must post positions.
     Positions(DeviceId),
-    /// Physical cleanup must retain an entry's reversal inputs.
+    /// This entry must become final (§9): physical cleanup retains its
+    /// reversal inputs, or a snapshot would cover a write it can still retire
+    /// and waits to be prepared (§15).
     EntryFinality(#[serde(with = "encoding::entry")] EntryId),
 }
 

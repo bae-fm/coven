@@ -468,6 +468,33 @@ impl StoreLogSync {
         };
         let key = io::key(&ring, &id.audience, key_id)?;
         let caught_at = self.catch_up_time().await?;
+        // Every covered write's retirement-window verdict must be final, so
+        // a loader holds what the final replay holds (§15, storelog-data
+        // `prepared_final`). A raise seals the migration's capture, whose
+        // verdicts this check cannot see.
+        if raise.is_none() {
+            let latest = self
+                .finality
+                .lock()
+                .expect("finality lock poisoned")
+                .caught_up_window();
+            if let Some(wait) = self
+                .database
+                .snapshot_verdict_wait(
+                    id.audience.clone(),
+                    member.keys().public_keys().signing,
+                    latest,
+                )
+                .await?
+            {
+                return Ok(Progress::Waiting(crate::PendingReason::Waits(match wait {
+                    coven_database::VerdictWait::Entry(entry) => {
+                        crate::Prerequisite::EntryFinality(entry)
+                    }
+                    coven_database::VerdictWait::CatchUp => crate::Prerequisite::CatchUp,
+                })));
+            }
+        }
         let name = self
             .reserve_snapshot_files(record, &mut task, 1)
             .await?

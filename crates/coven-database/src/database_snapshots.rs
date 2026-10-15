@@ -131,6 +131,33 @@ impl Database {
         .await
     }
 
+    /// What preparing a snapshot of `audience` waits for before every covered
+    /// write's retirement-window verdict is final (§15). `signer` is this
+    /// device's member signing key; `latest` is the end of the last complete
+    /// store-log catch-up's receipt plus `WRITE_WINDOW`.
+    pub async fn snapshot_verdict_wait(
+        &self,
+        audience: coven_merge::Audience,
+        signer: coven_crypto::SigningKey,
+        latest: Option<coven_format::value::StorageTime>,
+    ) -> Result<Option<crate::VerdictWait>, DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(|reader| {
+                reader.read_transaction(|| {
+                    crate::write_landing::unsettled(
+                        reader,
+                        &audience,
+                        inner.access.device,
+                        &signer,
+                        latest,
+                    )
+                })
+            })
+        })
+        .await
+    }
+
     /// Stream an audience's plaintext snapshot frames from one committed reader
     /// transaction. `begin` receives metadata before any frame, so the consumer
     /// can write the sealed prefix and seal each subsequent frame as it arrives;

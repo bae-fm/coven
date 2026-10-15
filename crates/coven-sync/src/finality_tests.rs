@@ -321,3 +321,90 @@ fn io_differential_finality_requires_the_old_prefix_even_when_the_window_is_quie
         }])
     );
 }
+
+/// A snapshot is prepared only once every covered write's retirement-window
+/// verdict is final, judged against the latest catch-up's window (§10, §15;
+/// storelog-data `prepared_final`).
+mod snapshot_window {
+    use crate::device_log_sync::tests::{group, rows, sql, writes, STORE_ID};
+    use crate::SyncError;
+    use coven_format::store_log::StoreChange;
+    use coven_foundation::clock::{Clock, FixedClock};
+    use coven_foundation::id_source::DeviceId;
+    use coven_merge::Audience;
+    use coven_storage::test_utils::MemoryStorage;
+    use coven_storage::{ObjectPath, ObjectPrefix, Storage};
+    use std::sync::Arc;
+    use std::time::{Duration, UNIX_EPOCH};
+
+    /// Device 3 receives device 1's write one second past device 1's removal's
+    /// thirty days, while that removal is not yet final: its snapshot waits on
+    /// the removal and nothing is published. Once thirty quiet days make it final,
+    /// a requested snapshot is prepared and published.
+    #[tokio::test]
+    async fn a_snapshot_waits_for_the_removal_deciding_a_covered_write() {
+        let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
+        let storage = Arc::new(
+            MemoryStorage::builder()
+                .transfer_limits(1024 * 1024, 64 * 1024)
+                .clock(clock.clone())
+                .build()
+                .unwrap(),
+        );
+        let mut devices = group(storage.clone(), 3).await;
+        sql(
+            &devices[0].db,
+            "INSERT INTO notes VALUES('one','title','body')",
+        )
+        .await;
+        let record = writes::queued(&devices[0].db).await;
+        let removal = devices[1]
+            .sync
+            .make_and_upload_entry(StoreChange::RemoveDevice {
+                device: DeviceId(1),
+            })
+            .await
+            .unwrap();
+        let device_clock = devices[2].clock.clone();
+        let later = |days: u64| {
+            let at = clock.now() + Duration::from_secs(days * 86400 + 1);
+            clock.set(at);
+            device_clock.set(at);
+        };
+        later(30);
+        writes::publish(&storage, &record).await;
+        let third = &mut devices[2];
+        third.sync.sync_store_log().await.unwrap();
+        third.writes.download_writes().await.unwrap();
+        assert!(rows(&third.db).await.is_empty());
+        let Err(SyncError::Pending(pending)) = third.sync.write_snapshot(Audience::Store).await
+        else {
+            panic!("the snapshot waits for the removal");
+        };
+        assert_eq!(
+            pending.reason,
+            crate::PendingReason::Waits(crate::Prerequisite::EntryFinality(removal))
+        );
+        assert!(storage
+            .list(&ObjectPrefix::snapshots(STORE_ID))
+            .await
+            .unwrap()
+            .is_empty());
+        later(31);
+        let third = &mut devices[2];
+        third.sync.sync_store_log().await.unwrap();
+        let snapshot = third.sync.write_snapshot(Audience::Store).await.unwrap();
+        let path = ObjectPath::snapshot(
+            STORE_ID,
+            snapshot.audience,
+            snapshot.device,
+            snapshot.number.try_into().unwrap(),
+        );
+        assert!(storage
+            .list(&ObjectPrefix::snapshots(STORE_ID))
+            .await
+            .unwrap()
+            .iter()
+            .any(|object| object.path == path));
+    }
+}

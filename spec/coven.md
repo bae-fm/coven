@@ -3447,21 +3447,26 @@ Carol's tablet:
     disappears; another kept retirement can still exclude it. A failed
     rebuild leaves the prior state intact and reports the failure.
   - A snapshot names no storage time for the writes it covers, so a loader
-    cannot judge their windows again. Loading compares each covered
-    change's carried verdict with this device's recorded verdict for its
-    write and loads nothing on a difference
-    ([`verdict_load_agrees`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
-    A verdict reads only the kept retirements stored more than 30 days
-    before its write, so a snapshot prepared once that prefix was final for
-    every covered write carries each final verdict
-    ([`late_depends_on_old`, `loaded_verdict_final`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
-    §15 does not require that finality, and this rule is then not met. E.g.
-    Ana's replay keeps Ben's removal when she snapshots his write published
-    a second past its deadline, and a later entry drops the removal. Ben,
-    who recorded the write admitted, cannot reload while her snapshot is
-    the newest; a device that recorded nothing, including Ben once his
-    verdict is fixed, loads the write as dropped
+    cannot judge their windows again. A verdict reads only the kept
+    retirements of its device stored more than 30 days before its write
+    ([`late_depends_on_old`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)),
+    so §15 prepares a snapshot only once each covered write's verdict is
+    final. The snapshot then carries each final verdict
+    ([`ready_agrees`, `prepared_final`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
+    Without that wait a loader can take a verdict the final replay reverses.
+    E.g. Ana's replay keeps Ben's removal when she snapshots his write
+    published a second past its deadline, and a later entry drops the
+    removal. Ben, who recorded the write admitted, cannot reload while her
+    snapshot is the newest; a device that recorded nothing loads the write
+    as dropped
     ([checked history: `unfinal_snapshot_counterexample`](proofs/storelog-data.md#results-and-their-assumptions)).
+  - Loading still compares each covered change's carried verdict with this
+    device's recorded verdict for its write and loads nothing on a
+    difference ([`verdict_load_agrees`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
+    A loader first holds the snapshot's store-log view, so a snapshot
+    prepared this way never differs
+    ([`prepared_never_refused`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean));
+    a difference means a damaged snapshot or database and reaches the caller.
   - This retirement verdict is final once its deciding kept retiring entry
     is final (§9); it needs no assumption about what the write read
     ([`retirement_verdict_final`](proofs/merge/CovenMerge/Retirement.lean)). Its preceding store-log
@@ -4410,9 +4415,8 @@ Carol's tablet:
   rows and losses in the loading transaction; retain original inputs until
   the deciding replacement prefix is final and independent retention checks
   pass. A snapshot cannot rescue an old-key write by covering it.
-  A covered write's retirement-window verdict is the author's; §10 states
-  when a loader can rely on it
-  ([`loaded_verdict_final`, `unfinal_snapshot_counterexample`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
+  A covered write's retirement-window verdict is the author's, final when
+  the snapshot is prepared (below, §10).
 - Snapshots also retain the original creator identities and verified direct
   and foreign-key provenance required by §8.8. A snapshot author's signature
   cannot substitute for another member's original authorship. Recheck exact
@@ -4518,6 +4522,21 @@ Carol's tablet:
   applied and nothing pending in that catch-up; a reload invalidates the
   earlier terminal misses
   ([`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean)).
+  - Prepare it only once each covered write's retirement-window verdict is
+    final (§10): a final kept retirement excludes the write, or that
+    catch-up received every entry stored by 30 days before the write and
+    each received retirement of its device stored then is final (§9). Until
+    then preparation waits, with `Waits(EntryFinality(entry))` naming such a
+    retirement, or `Waits(CatchUp)` while receipt falls short. Only
+    retirements hold it, never further writes, and every history reaches
+    the finality it waits for
+    ([`waiting_names`, `ready_of_final`, `every_history_prepares`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
+  - E.g. Ben's write lands one second past his removal's deadline, and Ana's
+    replay keeps the removal on day 51 while it is not final. Her snapshot
+    waits; on day 91 the removal is final and dropped, and her snapshot
+    carries the write admitted. Ben, who recorded the admission, and Carol,
+    who never received the write, both load it
+    ([`gated_snapshot_waits_then_loads`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
   - Sample storage time `T_c` before those reads, and keep that sample in
     the signed prefix throughout preparation and upload, including retries.
     [`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
@@ -5848,8 +5867,9 @@ holds failures and rejected entries, without making either wait look completed.
   - an unpublished schema raise, pending own uploads or a required reload;
   - a snapshot that cannot be used, a positions object that cannot be
     trusted, or history that prevents proving a file safe to delete;
-  - physical cleanup waiting for an entry to become final, with
-    `Waits(EntryFinality(entry))` naming that entry (§9);
+  - physical cleanup or a snapshot's preparation waiting for an entry to
+    become final, with `Waits(EntryFinality(entry))` naming that entry
+    (§9, §15);
   - file sources that cannot be uploaded, paused transfers, and provider
     work waiting for the owner, a request, or an app action;
   - a dropped entry, including “landed too late” on its author's device,

@@ -254,6 +254,19 @@ import CovenStorelogData
 #print axioms CovenStorelogData.Pending.loaded_verdict_final
 #print axioms CovenStorelogData.Pending.newer_agreeing_ends_wait
 #print axioms CovenStorelogData.Pending.unfinal_snapshot_counterexample
+#print axioms CovenStorelogData.VerdictHistory.removal_not_final_by_preparation
+#print axioms CovenStorelogData.VerdictHistory.removal_final_by_settled
+#print axioms CovenStorelogData.VerdictHistory.settled_drops_removal
+#print axioms CovenStorelogData.Pending.ready_agrees
+#print axioms CovenStorelogData.Pending.prepared_final
+#print axioms CovenStorelogData.Pending.prepared_never_refused
+#print axioms CovenStorelogData.Pending.waiting_names
+#print axioms CovenStorelogData.Pending.ready_of_final
+#print axioms CovenStorelogData.Pending.not_ready
+#print axioms CovenStorelogData.Pending.every_history_prepares
+#print axioms CovenStorelogData.Pending.waits_on_day_51
+#print axioms CovenStorelogData.Pending.ready_on_day_91
+#print axioms CovenStorelogData.Pending.gated_snapshot_waits_then_loads
 #print axioms CovenStorelogData.RetentionSafety.first_finality_wait_visible
 
 #print axioms CovenStorelogData.ReplayEffects.scan_realizes

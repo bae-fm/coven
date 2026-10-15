@@ -21,7 +21,7 @@ use std::time::Duration;
 
 /// A retired write counts when published no more than thirty storage days after
 /// each kept entry retiring its device; exactly thirty days counts (§10).
-pub(crate) const WRITE_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
+pub const WRITE_WINDOW: Duration = Duration::from_secs(30 * 24 * 60 * 60);
 
 /// A kept entry retiring a write: its device's retirement, or an unread
 /// replacement of its owner's signing key, with its first publication time.
@@ -257,11 +257,78 @@ fn landings(db: &DatabaseConnection) -> Result<Vec<(WriteId, Landed, bool)>, DbE
         .collect()
 }
 
+/// What a snapshot's preparation still waits for before its covered writes'
+/// window verdicts are final (§15).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VerdictWait {
+    /// A received retirement able to decide a covered write's window, stored
+    /// more than thirty days before it, is not final yet (§9).
+    Entry(EntryId),
+    /// The last complete store-log catch-up does not reach thirty days before a
+    /// covered write, so an unreceived retirement could still decide it.
+    CatchUp,
+}
+
+/// The first wait before a snapshot of `audience` carries only final window
+/// verdicts (§15; storelog-data `Preparation.ready`, `prepared_final`). A
+/// verdict is final once a final kept retirement excludes the write, or once
+/// every entry stored by thirty days before it was received and every
+/// received retirement of its device stored then is final. `latest` is the
+/// end of the last complete catch-up's receipt plus thirty days: the latest
+/// publication time of a write whose earlier entries it all received. This device's own writes carry no
+/// recorded publication time; every one a counting snapshot covers is
+/// published by its catch-up time plus a day, so every entry able to decide it
+/// was received, and each retirement of this device must be final.
+pub(crate) fn unsettled(
+    db: &DatabaseConnection,
+    audience: &Audience,
+    own: DeviceId,
+    signer: &SigningKey,
+    latest: Option<StorageTime>,
+) -> Result<Option<VerdictWait>, DbError> {
+    let mut waits = Vec::new();
+    for (write, landed, _) in landings(db)? {
+        if !audiences(db, write)?.contains(audience) {
+            continue;
+        }
+        let candidates = crate::write_retirement::candidates(db, &landed.header, &landed.signer)?;
+        let deciding = |r: &Retirement| !within(landed.stored_at, r.stored_at);
+        if candidates
+            .iter()
+            .any(|(r, kept, fixed)| *kept && *fixed && deciding(r))
+        {
+            continue;
+        }
+        if latest.is_none_or(|latest| landed.stored_at > latest) {
+            return Ok(Some(VerdictWait::CatchUp));
+        }
+        waits.extend(
+            candidates
+                .into_iter()
+                .filter(|(r, _, fixed)| !fixed && deciding(r))
+                .map(|(r, _, _)| r),
+        );
+    }
+    waits.extend(
+        crate::write_retirement::of_device(db, own, signer)?
+            .into_iter()
+            .filter(|(_, _, fixed, _)| !fixed)
+            .map(|(r, _, _, _)| r),
+    );
+    Ok(waits
+        .into_iter()
+        .min_by_key(|r| (r.stored_at, r.entry))
+        .map(|r| VerdictWait::Entry(r.entry)))
+}
+
 /// A loaded snapshot's verdict for a covered change must agree with this
 /// device's own window verdict for its write, when it holds one: only then do
 /// the snapshot's contributions count what this device's replay counts (§10).
 /// A dropped verdict and only it means the snapshot's author judged the write
 /// outside its window; every other verdict, unjudged included, kept its effects.
+/// A snapshot prepared under §15's finality gate never differs from a loader
+/// holding its store-log view (storelog-data `prepared_never_refused`), so a
+/// difference is corruption on one side.
 pub(crate) fn agrees(
     db: &DatabaseConnection,
     authored: &coven_format::snapshot_rows::AuthoredChange,

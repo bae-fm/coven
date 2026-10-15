@@ -390,7 +390,8 @@ impl StoreLogSync {
                         self.save_snapshot_task(record, &task, 0).await?;
                         // A schema outside the app's supported range fails the
                         // caller, as does a snapshot made under another
-                        // retirement verdict, which cannot load here (§10). Any
+                        // retirement verdict: §15 prepares only final verdicts,
+                        // so it means a damaged snapshot or database (§10). Any
                         // other verdict on the body refuses it, and the reload
                         // waits on that snapshot rather than passing it over for
                         // an older one (§15, §19.1; storelog-data

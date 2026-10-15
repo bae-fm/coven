@@ -663,3 +663,194 @@ fn one_nanosecond_past_the_window_is_late() {
     ));
     assert!(within_window(retired, &kept));
 }
+
+/// What a snapshot of the store waits for before preparing: the deciding
+/// retirement until it is final, and receipt reaching thirty days before the
+/// write, whichever way replay currently judges it (§15).
+async fn verdict_wait(db: &crate::Database, through: Option<u64>) -> Option<VerdictWait> {
+    db.snapshot_verdict_wait(
+        Audience::Store,
+        keys(1).signing,
+        through.map(|t| at(t) + WRITE_WINDOW),
+    )
+    .await
+    .unwrap()
+}
+
+/// Whether the removal is kept (the write is late) or dropped (it is admitted),
+/// a snapshot covering the write waits for the removal to be final, and for a
+/// catch-up whose receipt reaches thirty days before the write. Another
+/// audience is not held; once the horizon passes the removal nothing is.
+#[tokio::test]
+async fn preparation_waits_for_a_covered_writes_deciding_retirement_to_be_final() {
+    for kept in [true, false] {
+        let p = pair().await;
+        sql(&p.source, "INSERT INTO notes VALUES('n','title','body')")
+            .await
+            .unwrap();
+        let write = records(&p.source).remove(0);
+        let removal = retire(&p.target, write.header.position.device, 1, "device", 0).await;
+        if !kept {
+            fate(&p.target, removal, false).await.unwrap();
+        }
+        p.target
+            .apply_downloaded::<Record>(
+                write.into(),
+                crate::test_utils::published(at(30 * DAY + 1)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(count(&p.target, "notes"), i64::from(!kept));
+        assert_eq!(
+            verdict_wait(&p.target, None).await,
+            Some(VerdictWait::CatchUp)
+        );
+        assert_eq!(
+            verdict_wait(&p.target, Some(0)).await,
+            Some(VerdictWait::CatchUp)
+        );
+        assert_eq!(
+            verdict_wait(&p.target, Some(1)).await,
+            Some(VerdictWait::Entry(removal))
+        );
+        let circle = Audience::Circle(coven_foundation::id_source::CircleId(
+            uuid::Uuid::from_u128(5),
+        ));
+        assert_eq!(
+            p.target
+                .snapshot_verdict_wait(circle, keys(1).signing, Some(at(1) + WRITE_WINDOW))
+                .await
+                .unwrap(),
+            None
+        );
+        p.target
+            .advance_store_log_horizon(p.target.store_log().await.unwrap(), at(1), at(1))
+            .await
+            .unwrap();
+        assert_eq!(verdict_wait(&p.target, Some(1)).await, None, "kept {kept}");
+        // A late verdict anchored by its final removal needs no receipt.
+        if kept {
+            assert_eq!(verdict_wait(&p.target, None).await, None);
+        }
+    }
+}
+
+/// Writes alone never hold a snapshot: an admitted write whose device has no
+/// retirement waits for nothing but receipt, with no horizon at all (§15).
+#[tokio::test]
+async fn a_write_without_retirements_waits_only_for_receipt() {
+    let p = pair().await;
+    sql(&p.source, "INSERT INTO notes VALUES('n','title','body')")
+        .await
+        .unwrap();
+    p.target
+        .apply_downloaded::<Record>(
+            records(&p.source).remove(0).into(),
+            crate::test_utils::published(at(DAY)),
+        )
+        .await
+        .unwrap();
+    assert_eq!(p.target.store_log().await.unwrap().horizon, None);
+    assert_eq!(verdict_wait(&p.target, Some(0)).await, None);
+    assert_eq!(
+        verdict_wait(&p.target, None).await,
+        Some(VerdictWait::CatchUp)
+    );
+}
+
+/// This device's own writes have no recorded publication time: a retirement of
+/// its own device holds its snapshots until final, even while dropped (§15).
+#[tokio::test]
+async fn an_own_devices_unfinal_retirement_holds_its_snapshots() {
+    let p = pair().await;
+    let own = p.target.sync_state(vec![]).await.unwrap().device;
+    let removal = retire(&p.target, own, 1, "device", 5).await;
+    fate(&p.target, removal, false).await.unwrap();
+    assert_eq!(
+        verdict_wait(&p.target, Some(10)).await,
+        Some(VerdictWait::Entry(removal))
+    );
+    p.target
+        .advance_store_log_horizon(p.target.store_log().await.unwrap(), at(6), at(6))
+        .await
+        .unwrap();
+    assert_eq!(verdict_wait(&p.target, Some(10)).await, None);
+}
+
+/// The history of storelog-data `gated_snapshot_waits_then_loads`: Ben's write lands
+/// one second past his removal's deadline while Ana's replay keeps the removal.
+/// Her snapshot waits; once the removal is dropped and final it carries the
+/// write admitted. Ben, who recorded the admission unfixed, and Carol, who
+/// never received the write, both load it and hold the same rows (§10, §15).
+#[tokio::test]
+async fn a_snapshot_waits_for_a_dropped_removal_then_loads_everywhere() {
+    use crate::snapshot_write::tests::{frames, id, load_one};
+    let ids = SequentialIds::new();
+    let stores: Vec<_> = (0..4).map(|_| TestStore::with_ids(&ids)).collect();
+    let mut dbs = Vec::new();
+    for store in &stores {
+        dbs.push(store.schema(notes(), NOTES).await.unwrap());
+    }
+    let [writer, ana, ben, carol] = &dbs[..] else {
+        unreachable!()
+    };
+    sql(writer, "INSERT INTO notes VALUES('n','title','body')")
+        .await
+        .unwrap();
+    let write = records(writer).remove(0);
+    let device = write.header.position.device;
+    let published = crate::test_utils::published(at(30 * DAY + 1));
+    let removal = retire(ana, device, 1, "device", 0).await;
+    ana.apply_downloaded::<Record>(write.clone().into(), published)
+        .await
+        .unwrap();
+    assert_eq!(count(ana, "notes"), 0);
+    assert_eq!(
+        verdict_wait(ana, Some(51 * DAY)).await,
+        Some(VerdictWait::Entry(removal))
+    );
+    fate(ana, removal, false).await.unwrap();
+    assert_eq!(count(ana, "notes"), 1);
+    assert_eq!(
+        verdict_wait(ana, Some(51 * DAY)).await,
+        Some(VerdictWait::Entry(removal))
+    );
+    ana.advance_store_log_horizon(ana.store_log().await.unwrap(), at(61 * DAY), at(91 * DAY))
+        .await
+        .unwrap();
+    assert_eq!(verdict_wait(ana, Some(91 * DAY)).await, None);
+    let snapshot = frames(ana, Audience::Store).await;
+
+    retire(ben, device, 1, "device", 0).await;
+    fate(ben, removal, false).await.unwrap();
+    ben.apply_downloaded::<Record>(write.clone().into(), published)
+        .await
+        .unwrap();
+    retire(carol, device, 1, "device", 0).await;
+    fate(carol, removal, false).await.unwrap();
+    for loader in [ben, carol] {
+        load_one(
+            loader,
+            id(Audience::Store),
+            snapshot.prefix.clone(),
+            std::io::Cursor::new(snapshot.concat()),
+        )
+        .await
+        .unwrap();
+        assert_eq!(count(loader, "notes"), 1);
+    }
+    let rows = |db: &crate::Database| {
+        db.inspect_writer(|sql| {
+            sql.query("SELECT id,title,body FROM notes", [], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            })
+            .unwrap()
+        })
+    };
+    assert_eq!(rows(ben), rows(carol));
+    assert_eq!(rows(ben), rows(ana));
+}

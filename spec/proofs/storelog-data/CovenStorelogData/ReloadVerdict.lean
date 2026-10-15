@@ -1,6 +1,7 @@
 import CovenStorelogData.ReloadWaitChecks
 import CovenMerge.Retirement
 import CovenStorelog.FinalityExamples
+import CovenStorelog.Horizon
 
 /-! §10, §15: a reload and the retirement-window verdicts a snapshot carries.
 
@@ -21,18 +22,17 @@ What holds:
   stored more than thirty days before it (`late_depends_on_old`). So a
   snapshot whose author's kept retirements agree there with this device's
   never disagrees (`prepared_agrees`, `agreeing_never_waits`), and one
-  prepared once that prefix was final carries every write's final verdict:
-  a device loading it holds what a device judging each write itself holds
+  prepared once that prefix was final carries every write's final verdict
   (`loaded_verdict_final`);
 - once the reload runs again, a newer snapshot this device can load and
   whose verdicts agree ends the failure (`newer_agreeing_ends_wait`).
 
-What fails (`unfinal_snapshot_counterexample`, checked): §15 lets a
-snapshot be prepared while the retirement deciding a covered write can still
-drop. `VerdictHistory` is such a store-log history in the storage-time
-replay of §9: Ben's removal is kept when Ana prepares her snapshot a day
-after his write's deadline, and dropped once a later entry lands. Ana's
-snapshot carries the write as `dropped`; the final replay admits it.
+What fails (`unfinal_snapshot_counterexample`, checked): a snapshot
+prepared while the retirement deciding a covered write can still drop.
+`VerdictHistory` is such a store-log history in the storage-time replay of
+§9: Ben's removal is kept when Ana prepares her snapshot a day after his
+write's deadline, and dropped once a later entry lands. Ana's snapshot
+carries the write as `dropped`; the final replay admits it.
 - Ben recorded his unfixed admission: every reload fails the check on Ana's
   snapshot, its record waits for an app action, and in a store with no
   further writes nothing requests another snapshot, since Ana's covers
@@ -40,8 +40,23 @@ snapshot carries the write as `dropped`; the final replay admits it.
 - Once Ben's admission is fixed Rust no longer records it, and Carol, who
   never received the write, has nothing to compare: both load Ana's
   snapshot and drop a write the final replay admits, while a device that
-  received it keeps its effects. §10's "including contributions already in
-  snapshots" is not met. -/
+  received it keeps its effects.
+
+So §15 prepares a snapshot only once every covered write is ready
+(`Preparation.ready`, Rust `write_landing::unsettled`): a final kept
+retirement excludes it, or the author received every entry stored by thirty
+days before it and each received retirement of its device stored then is
+final. Then:
+- the snapshot carries each final verdict (`ready_agrees`,
+  `prepared_final`), and the reload's check never fails for a loader that
+  holds the entries stored before the author's horizon, as loading the
+  snapshot's store-log view requires (`prepared_never_refused`);
+- preparation waits only for a named non-final retirement or for receipt
+  (`waiting_names`, `ready_of_final`), and every history reaches that
+  finality: one quiet check after every entry's window (`every_history_prepares`);
+- in `VerdictHistory`, Ana's snapshot waits on day 51 whatever checks she
+  completed, and on day 91 carries the write admitted; Ben and Carol load it
+  (`gated_snapshot_waits_then_loads`). -/
 
 namespace CovenStorelogData.VerdictHistory
 open CovenStorelog CovenStorelog.Finality
@@ -97,6 +112,48 @@ theorem removal_kept_then_dropped :
     5 ∈ (resolve history window 7 (fun _ => true)).dropped ∧
     finalSet history window 7 (atTime history settled) settled 5 = true := by
   decide
+
+/-- No check Ana can complete by day 51 makes Ben's removal final, with
+§9's horizon (`Horizon.horizon`, Rust `finality::horizon`). Ben's demotion of
+Ana, stored on day 40, did not read the removal, so it is late, and it lies in
+the recent window of every check from day 40 to day 70; an earlier quiet
+check certifies only entries stored before day 10. -/
+theorem removal_not_final_by_preparation (checks : List Nat)
+    (byThen : ∀ T ∈ checks, T ≤ prepared) :
+    Horizon.horizon history window 7 checks ≤ 20 * day := by
+  apply Nat.le_of_not_lt
+  intro lt
+  obtain ⟨T, mem, quiet, after⟩ : ∃ T ∈ checks,
+      Horizon.quiet history window 7 T = true ∧ 20 * day + window < T := by
+    simpa only [Horizon.horizon, Horizon.accumulated_iff, Nat.not_lt_zero, false_or] using lt
+  have bound := byThen T mem
+  have late : Finality.late history 7 (fun _ => true) 4 = true := by decide
+  have entry := List.all_eq_true.mp quiet 4 (by simp)
+  have stored : history.stored 4 = 40 * day := rfl
+  simp only [late, stored, Bool.not_true, Bool.or_false, Bool.not_eq_true',
+    Bool.and_eq_false_iff, decide_eq_false_iff_not] at entry
+  simp only [prepared, window, day] at bound after entry
+  omega
+
+/-- On day 91 the check is quiet: the last late entry, Carol's on day 60, has
+left its window. The horizon then passes Ben's removal, whatever came before. -/
+theorem removal_final_by_settled (checks : List Nat) :
+    20 * day < Horizon.horizon history window 7 (checks ++ [settled]) := by
+  have quiet : Horizon.quiet history window 7 settled = true := by decide
+  simp only [Horizon.horizon, Horizon.accumulated_iff, Nat.not_lt_zero, false_or]
+  exact ⟨settled, by simp, quiet, by decide⟩
+
+/-- By day 91 every entry has landed, and the replay drops Ben's removal. -/
+theorem settled_drops_removal :
+    5 ∈ (resolve history window 7 (atTime history settled)).dropped ∧
+      5 ∉ (resolve history window 7 (atTime history settled)).kept := by
+  have all : atTime history settled = fun _ => true := by
+    funext w
+    simp only [atTime, decide_eq_true_eq]
+    rcases w with _ | _ | _ | _ | _ | _ | _ | w <;> simp [history, settled, day]
+  rw [all]
+  have dropped := removal_kept_then_dropped.2.2.2.1
+  exact ⟨dropped, fun kept => (partition history window 7 _ 5).2 kept dropped⟩
 
 end CovenStorelogData.VerdictHistory
 
@@ -378,5 +435,263 @@ theorem unfinal_snapshot_counterexample :
   refine ⟨VerdictHistory.removal_kept_then_dropped.1,
     VerdictHistory.removal_kept_then_dropped.2.2.2.1, ?_⟩
   decide
+
+/-! ## Preparing only once each covered write's verdict is final (§15) -/
+
+/-- What the author's device knows when it prepares a snapshot: every
+retirement it received that is not permanently late, kept or dropped (Rust
+`write_retirement::candidates`), its finality horizon (entries stored strictly
+before it are final, §9) and the end of its complete store-log receipt: it
+received every entry stored by then. -/
+structure Preparation where
+  received : List Retirement
+  horizon : Nat
+  through : Nat
+
+/-- A retirement that can decide the write's window: one of its device, stored
+more than thirty days before it. -/
+def deciding (stored : Nat × Nat → Nat) (w : Nat × Nat) (e : Retirement) : Bool :=
+  decide (e.device = w.1) && !decide (stored w ≤ e.stored + window)
+
+/-- Rust `write_landing::unsettled`, negated: the write's verdict can no longer
+change. Either a final kept retirement excludes it, or the author received
+every entry stored by thirty days before it and each received retirement of
+its device stored then is final. `prep` is the author's kept retirements. -/
+def Preparation.ready (p : Preparation) (prep : List Retirement) (stored : Nat × Nat → Nat)
+    (w : Nat × Nat) : Bool :=
+  prep.any (fun e => deciding stored w e && decide (e.stored < p.horizon)) ||
+    (decide (stored w ≤ p.through + window) &&
+      p.received.all fun e => !deciding stored w e || decide (e.stored < p.horizon))
+
+private theorem excluded_late (K : List Retirement) (stored : Nat × Nat → Nat) (w : Nat × Nat)
+    (e : Retirement) (kept : e ∈ K) (decides : deciding stored w e = true) :
+    lateUnder K stored w = true := by
+  simp only [deciding, Bool.and_eq_true, decide_eq_true_eq, Bool.not_eq_true',
+    decide_eq_false_iff_not] at decides
+  have allows : retirementAllows writeLogs stored K w = false := by
+    cases h : retirementAllows writeLogs stored K w with
+    | false => rfl
+    | true => exact absurd ((allows_iff K stored w).mp h e kept decides.1) decides.2
+  simp [lateUnder, allows]
+
+/-- Another replay judges a ready write as the author did when it agrees on
+every retirement stored before the author's horizon and keeps no retirement
+stored by the author's receipt end that the author did not receive. The final
+replay is one: entries before the horizon are final (§9,
+`Horizon.horizon_stability`), and receipt was complete. So is the replay of
+any loader holding every entry stored before that horizon. -/
+theorem ready_agrees (p : Preparation) (prep other : List Retirement)
+    (stored : Nat × Nat → Nat) (w : Nat × Nat)
+    (sub : ∀ e ∈ prep, e ∈ p.received)
+    (stable : ∀ e : Retirement, e.stored < p.horizon → (e ∈ prep ↔ e ∈ other))
+    (complete : ∀ e ∈ other, e.stored ≤ p.through → e ∈ p.received)
+    (ready : p.ready prep stored w = true) :
+    lateUnder prep stored w = lateUnder other stored w := by
+  simp only [Preparation.ready, Bool.or_eq_true, List.any_eq_true, Bool.and_eq_true,
+    decide_eq_true_eq, List.all_eq_true] at ready
+  rcases ready with ⟨e, kept, decides, final⟩ | ⟨receipt, finals⟩
+  · rw [excluded_late prep stored w e kept decides,
+      excluded_late other stored w e ((stable e final).mp kept) decides]
+  · apply late_depends_on_old
+    intro e device old
+    have decides : deciding stored w e = true := by
+      simp only [deciding, Bool.and_eq_true, decide_eq_true_eq, Bool.not_eq_true',
+        decide_eq_false_iff_not]
+      exact ⟨device, by omega⟩
+    have final (received : e ∈ p.received) : e.stored < p.horizon := by
+      have := finals e received
+      simpa [decides] using this
+    constructor
+    · intro kept
+      exact (stable e (final (sub e kept))).mp kept
+    · intro kept
+      exact (stable e (final (complete e kept (by omega)))).mpr kept
+
+/-- A snapshot prepared only once every covered write is ready carries each
+write's final verdict. -/
+theorem prepared_final (v : Verdicts) (s : Listed) (p : Preparation)
+    (prep final : List Retirement) (stored : Nat × Nat → Nat)
+    (gate : ∀ w ∈ v.carried s, p.ready prep stored w = true)
+    (judged : ∀ w ∈ v.carried s, v.late s w = lateUnder prep stored w)
+    (sub : ∀ e ∈ prep, e ∈ p.received)
+    (stable : ∀ e : Retirement, e.stored < p.horizon → (e ∈ prep ↔ e ∈ final))
+    (complete : ∀ e ∈ final, e.stored ≤ p.through → e ∈ p.received) :
+    ∀ w ∈ v.carried s, v.late s w = lateUnder final stored w := fun w hw => by
+  rw [judged w hw]
+  exact ready_agrees p prep final stored w sub stable complete (gate w hw)
+
+/-- The reload's verdict check never fails on such a snapshot: a loader holding
+every entry stored before the author's horizon (loading first requires the
+snapshot's store-log view, Rust `SnapshotError::StoreLog`) judges every
+covered write as the author did, so `choose`'s snapshot loads. The check stays
+as a corruption check. -/
+theorem prepared_never_refused {c : Checks} {v : Verdicts} {listed : List Listed} {s : Listed}
+    (p : Preparation) (prep device : List Retirement) (stored : Nat × Nat → Nat)
+    (chosen : choose c listed = .load s)
+    (gate : ∀ w ∈ v.carried s, p.ready prep stored w = true)
+    (judged : ∀ w ∈ v.carried s, v.late s w = lateUnder prep stored w)
+    (recorded : ∀ w b, v.held w = some b → b = lateUnder device stored w)
+    (sub : ∀ e ∈ prep, e ∈ p.received)
+    (stable : ∀ e : Retirement, e.stored < p.horizon → (e ∈ prep ↔ e ∈ device))
+    (complete : ∀ e ∈ device, e.stored ≤ p.through → e ∈ p.received) :
+    chooseVerdict c v listed = .choice (.load s) := by
+  have agrees : v.disagreement s = none := by
+    apply disagreement_none.mpr
+    intro w hw b hb
+    rw [prepared_final v s p prep device stored gate judged sub stable complete w hw,
+      recorded w b hb]
+  simp [chooseVerdict, chosen, agrees]
+
+/-- Preparation waits only for finality: a write that is not ready names either
+receipt short of thirty days before it, or a received retirement of its device
+stored more than thirty days before it that is not yet final (Rust
+`Waits(CatchUp)`, `Waits(EntryFinality)`). -/
+theorem waiting_names (p : Preparation) (prep : List Retirement) (stored : Nat × Nat → Nat)
+    (w : Nat × Nat) (waiting : p.ready prep stored w = false) :
+    p.through + window < stored w ∨
+      ∃ e ∈ p.received, e.device = w.1 ∧ e.stored + window < stored w ∧ p.horizon ≤ e.stored := by
+  rcases Nat.lt_or_ge (p.through + window) (stored w) with short | receipt
+  · exact Or.inl short
+  · right
+    have all : (p.received.all fun e => !deciding stored w e || decide (e.stored < p.horizon)) =
+        false := by
+      simp only [Preparation.ready, Bool.or_eq_false_iff, Bool.and_eq_false_iff,
+        decide_eq_false_iff_not] at waiting
+      exact waiting.2.resolve_left (by omega)
+    obtain ⟨e, received, open_⟩ := List.all_eq_false.mp all
+    simp only [deciding, Bool.or_eq_true, Bool.not_eq_true', Bool.and_eq_false_iff,
+      decide_eq_false_iff_not, decide_eq_true_eq, Bool.not_eq_false, not_or, Decidable.not_not,
+      Nat.not_le, Nat.not_lt] at open_
+    exact ⟨e, received, open_.1.1, by omega, open_.2⟩
+
+/-- Readiness needs nothing beyond finality: receipt through thirty days
+before the write and a final horizon past every received retirement that can
+decide it. -/
+theorem ready_of_final (p : Preparation) (prep : List Retirement) (stored : Nat × Nat → Nat)
+    (w : Nat × Nat) (receipt : stored w ≤ p.through + window)
+    (final : ∀ e ∈ p.received, deciding stored w e = true → e.stored < p.horizon) :
+    p.ready prep stored w = true := by
+  simp only [Preparation.ready, Bool.or_eq_true, Bool.and_eq_true, decide_eq_true_eq,
+    List.all_eq_true]
+  refine Or.inr ⟨receipt, fun e received => ?_⟩
+  cases decides : deciding stored w e
+  · simp
+  · simp [final e received decides]
+
+/-- A received retirement that can decide the write and is not final, with no
+kept one that is final and excludes it, keeps the write waiting. -/
+theorem not_ready (p : Preparation) (prep : List Retirement) (stored : Nat × Nat → Nat)
+    (w : Nat × Nat) (e : Retirement) (received : e ∈ p.received)
+    (decides : deciding stored w e = true) (open_ : p.horizon ≤ e.stored)
+    (anchors : ∀ k ∈ prep, deciding stored w k = true → p.horizon ≤ k.stored) :
+    p.ready prep stored w = false := by
+  simp only [Preparation.ready, Bool.or_eq_false_iff, List.any_eq_false, Bool.and_eq_false_iff,
+    decide_eq_false_iff_not]
+  refine ⟨fun k kept => ?_, Or.inr (List.all_eq_false.mpr ⟨e, received, ?_⟩)⟩
+  · cases dk : deciding stored w k
+    · simp
+    · simp [anchors k kept dk]
+  · simp [decides]; omega
+
+/-- Every history reaches readiness: a check completed after every entry's
+thirty days is quiet, so the horizon passes every received retirement, and
+each write within thirty days of receipt is ready. -/
+theorem every_history_prepares (H : Finality.History) (n : Nat) (checks : List Nat) (T : Nat)
+    (p : Preparation) (prep : List Retirement) (stored : Nat × Nat → Nat) (w : Nat × Nat)
+    (entries : ∀ e ∈ p.received, e.entry < n ∧ e.stored = H.stored e.entry)
+    (beyond : ∀ e, e < n → H.stored e + window < T)
+    (horizon : Horizon.horizon H window n (checks ++ [T]) ≤ p.horizon)
+    (receipt : stored w ≤ p.through + window) :
+    p.ready prep stored w = true := by
+  have quiet : Horizon.quiet H window n T = true := by
+    apply List.all_eq_true.mpr
+    intro e he
+    have := beyond e (List.mem_range.mp he)
+    simp only [Bool.or_eq_true, Bool.not_eq_true', Bool.and_eq_false_iff,
+      decide_eq_false_iff_not]
+    exact Or.inl (Or.inl (by omega))
+  have final (e : Retirement) (received : e ∈ p.received) : e.stored < p.horizon := by
+    obtain ⟨lt, same⟩ := entries e received
+    have : H.stored e.entry < Horizon.horizon H window n (checks ++ [T]) := by
+      simp only [Horizon.horizon, Horizon.accumulated_iff, Nat.not_lt_zero, false_or]
+      exact ⟨T, by simp, quiet, beyond e.entry lt⟩
+    omega
+  exact ready_of_final p prep stored w receipt fun e received _ => final e received
+
+/-! ### The history of `unfinal_snapshot_counterexample`, gated -/
+
+/-- Ana's device: it received Ben's removal, read every entry stored by the
+given time, and has the horizon of the checks it completed by then. -/
+def anaAt (horizon through : Nat) : Preparation := ⟨[benRemoval], horizon, through⟩
+
+/-- The snapshot Ana prepares once Ben's write is ready, on day 91. -/
+def anaGated : Listed := ⟨(0, 2), [(1, 1)], 1⟩
+
+/-- Her replay then no longer keeps Ben's removal. -/
+def gatedBy (held : Nat × Nat → Option Bool) : Verdicts :=
+  { carried := fun s => if s = anaGated then [benWrite] else []
+    late := fun _ w => lateUnder [] benStored w
+    held }
+
+theorem gated_ben_loads :
+    chooseVerdict passes (gatedBy fun _ => landingRecord false false) [anaGated] =
+      .choice (.load anaGated) := by decide
+
+theorem gated_carol_loads :
+    chooseVerdict passes (gatedBy fun _ => none) [anaGated] = .choice (.load anaGated) := by
+  decide
+
+theorem gated_admitted : (gatedBy fun _ => none).late anaGated benWrite = false := by decide
+
+theorem ben_decides : deciding benStored benWrite benRemoval = true := by decide
+
+theorem waits_on_day_51 (early : List Nat) (byThen : ∀ T ∈ early, T ≤ VerdictHistory.prepared) :
+    (anaAt (Horizon.horizon VerdictHistory.history VerdictHistory.window 7 early)
+        VerdictHistory.prepared).ready [benRemoval] benStored benWrite = false := by
+  have bound := VerdictHistory.removal_not_final_by_preparation early byThen
+  have stored : benRemoval.stored = 20 * VerdictHistory.day := rfl
+  apply not_ready _ _ _ _ benRemoval (by simp [anaAt]) ben_decides (by simp only [anaAt]; omega)
+  intro k kept _
+  simp only [List.mem_singleton] at kept
+  subst kept
+  simp only [anaAt]
+  omega
+
+theorem ready_on_day_91 (later : List Nat) :
+    (anaAt (Horizon.horizon VerdictHistory.history VerdictHistory.window 7
+        (later ++ [VerdictHistory.settled])) VerdictHistory.settled).ready [] benStored
+        benWrite = true := by
+  have bound := VerdictHistory.removal_final_by_settled later
+  have stored : benRemoval.stored = 20 * VerdictHistory.day := rfl
+  have receipt : benStored benWrite ≤ VerdictHistory.settled + window := by decide
+  apply ready_of_final _ _ _ _ receipt
+  intro e received _
+  simp only [anaAt, List.mem_singleton] at received
+  subst received
+  simp only [anaAt]
+  omega
+
+/-- On day 51 Ben's write is not ready, whatever checks Ana completed by then,
+and the wait names Ben's removal. On day 91 it is ready, and Ana's replay drops
+the removal, as the final one does: her snapshot carries the write admitted.
+Ben, who recorded his unfixed admission, and Carol, who recorded nothing, both
+load it and hold the final verdict. -/
+theorem gated_snapshot_waits_then_loads (early : List Nat)
+    (byThen : ∀ T ∈ early, T ≤ VerdictHistory.prepared) (later : List Nat) :
+    (anaAt (Horizon.horizon VerdictHistory.history VerdictHistory.window 7 early)
+        VerdictHistory.prepared).ready [benRemoval] benStored benWrite = false ∧
+    (anaAt (Horizon.horizon VerdictHistory.history VerdictHistory.window 7
+        (later ++ [VerdictHistory.settled])) VerdictHistory.settled).ready [] benStored
+        benWrite = true ∧
+    5 ∈ (Finality.resolve VerdictHistory.history VerdictHistory.window 7
+      (Finality.atTime VerdictHistory.history VerdictHistory.settled)).dropped ∧
+    5 ∉ (Finality.resolve VerdictHistory.history VerdictHistory.window 7
+      (Finality.atTime VerdictHistory.history VerdictHistory.settled)).kept ∧
+    chooseVerdict passes (gatedBy fun _ => landingRecord false false) [anaGated] =
+      .choice (.load anaGated) ∧
+    chooseVerdict passes (gatedBy fun _ => none) [anaGated] = .choice (.load anaGated) ∧
+    (gatedBy fun _ => none).late anaGated benWrite = false :=
+  ⟨waits_on_day_51 early byThen, ready_on_day_91 later, VerdictHistory.settled_drops_removal.1,
+    VerdictHistory.settled_drops_removal.2, gated_ben_loads, gated_carol_loads, gated_admitted⟩
 
 end CovenStorelogData.Pending

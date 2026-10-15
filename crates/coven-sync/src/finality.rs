@@ -51,6 +51,14 @@ impl Observation {
         self.caught_up
     }
 
+    /// The latest publication time of a write whose every earlier entry by
+    /// thirty days that catch-up received: §4's listing guarantee made each
+    /// entry stored by `observation_time(T_c)` visible to it (§15).
+    pub(crate) fn caught_up_window(&self) -> Option<StorageTime> {
+        let (_, unit) = self.sample?;
+        observation_time(self.caught_up? + coven_database::WRITE_WINDOW, unit)
+    }
+
     /// Record a clock-object time with the monotonic reading from before its
     /// replacement. A retained sample keeps its original starting point.
     pub(crate) fn clock_observed(&mut self, stored: StorageTime, started: Duration) {
