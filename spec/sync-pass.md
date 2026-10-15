@@ -578,7 +578,7 @@ in that catch-up, using its storage sample from before the reads as the signed
 `T_c`, and require coverage of the audience's current newest counting
 snapshot at preparation (§15;
 [`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean),
-[`SnapshotRefresh.refresh_outranks`](proofs/io/CovenIO/SnapshotRefresh.lean)).
+[`SnapshotPublication.canPrepare`](proofs/io/CovenIO/Retention.lean)).
 The first theorem proves position coverage. Sampling before reads and keeping
 the sample through preparation and landing are checked by
 [`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
