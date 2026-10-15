@@ -10,6 +10,8 @@ use std::num::NonZeroU64;
 
 #[path = "snapshot_boundaries_tests.rs"]
 mod boundaries;
+#[path = "snapshot_held_tests.rs"]
+mod held;
 #[path = "snapshot_publish_tests.rs"]
 mod publication;
 #[path = "snapshot_retention_tests.rs"]

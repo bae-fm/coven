@@ -19,6 +19,8 @@ pub(super) mod catalog;
 mod file_retention;
 #[path = "snapshot_file_scan.rs"]
 mod file_scan;
+#[path = "snapshot_held.rs"]
+pub(super) mod held;
 #[path = "snapshot_io.rs"]
 mod io;
 #[path = "snapshot_prefix.rs"]

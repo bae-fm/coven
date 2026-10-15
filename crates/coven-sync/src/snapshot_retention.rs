@@ -83,7 +83,7 @@ impl StoreLogSync {
             // select, including a listed raise snapshot no entry names yet
             // (§15; io `RaiseHistory.deleted_stays_covered`).
             } else if let Some(selections) =
-                super::boundaries::held_coverage(&local.log, audience, &catalog.verified)
+                super::held::held_coverage(&local.log, audience, &catalog.verified)
             {
                 coverage.insert(audience.clone(), selections);
             }
