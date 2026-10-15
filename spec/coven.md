@@ -3685,7 +3685,7 @@ Carol's tablet:
     as dropped
     ([checked history: `unfinal_snapshot_counterexample`](proofs/storelog-data.md#results-and-their-assumptions)).
   - Loading still compares each covered change's carried verdict with this
-    device's recorded verdict for its write and loads nothing on a
+    device's verdict for its write, if it holds one, and loads nothing on a
     difference ([`verdict_load_agrees`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).
     A loader first holds the snapshot's store-log view, so a snapshot
     prepared this way never differs
