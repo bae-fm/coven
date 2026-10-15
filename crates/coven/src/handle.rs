@@ -268,14 +268,16 @@ impl CovenHandle {
     ) -> Result<(), OperationError> {
         self.operations.discard_pending_operation(operation).await
     }
-    /// Share access and create an invitation expiring after a day.
+    /// Fixes a fresh member id or an existing active replacement target, as
+    /// an admin, then shares access and creates an invitation expiring after a
+    /// day. Replacement preserves role, circle memberships and device ids.
     pub async fn create_invite(
         &self,
-        role: MemberRole,
+        target: InviteTarget,
         access: InviteAccess,
     ) -> Result<Invite, SyncError> {
         self.storage.prepare_invite().await?;
-        self.operations.create_invite(role, access).await
+        self.operations.create_invite(target, access).await
     }
     /// Checked join requests, starting with the current list.
     pub fn subscribe_join_requests(&self) -> tokio::sync::watch::Receiver<Vec<JoinRequest>> {

@@ -28,7 +28,9 @@ async fn expiring_an_invitation_completes_a_retry_of_its_obsolete_grant() {
     let invite = begin(
         &mut a,
         Command::Invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::ProviderAccount {
                 email: "owner@example.com".into(),
             },
@@ -210,7 +212,9 @@ async fn a_cancelled_unsent_grant_never_reaches_the_provider() {
     let id = begin(
         &mut a,
         Command::Invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::ProviderAccount {
                 email: "unsent@example.com".into(),
             },
@@ -477,7 +481,9 @@ async fn starting_revocation_invalidates_cached_invitation_tokens() {
     let id = begin(
         &mut a,
         Command::Invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::ProviderAccount {
                 email: ACCOUNT.into(),
             },
@@ -517,9 +523,11 @@ async fn discarding_an_invalid_s3_account_invite_leaves_no_provider_request() {
     a.create(key(1)).await;
     let files = file_owner(&a);
     let operations = operation_owner(a.sync, files);
-    assert!(matches!(operations.create_invite(MemberRole::Member,
+    assert!(
+        matches!(operations.create_invite(InviteTarget::NewMember { role: MemberRole::Member },
         InviteAccess::ProviderAccount {email:ACCOUNT.into()}).await,
-        Err(SyncError::Storage(error)) if error.failure()==StorageFailure::InvalidConfiguration));
+        Err(SyncError::Storage(error)) if error.failure()==StorageFailure::InvalidConfiguration)
+    );
     pending(&operations, &a.db).await;
     let invite =
         a.db.operations()

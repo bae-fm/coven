@@ -5,7 +5,9 @@ use coven_storage::test_utils::MemoryKeyAdmin;
 
 fn minted_invite(admin: &MemoryKeyAdmin) -> Command {
     Command::Invite(
-        MemberRole::Member,
+        InviteTarget::NewMember {
+            role: MemberRole::Member,
+        },
         InviteAccess::S3AdminAccess(Arc::new(admin.clone())),
     )
 }

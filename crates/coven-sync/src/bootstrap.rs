@@ -1,7 +1,7 @@
 //! The joining device's store-log and snapshot steps (§12).
 
 use super::*;
-use coven_database::EntryOutcome;
+use crate::join_admission::BindingSource;
 use coven_storage::StorageInvitation;
 
 /// The joining member's outcome after checking storage (§12.2).
@@ -35,31 +35,22 @@ impl StoreLogSync {
     }
 
     /// Apply the signed store log and open this member's sealed keys. Returns
-    /// false until membership is effective. A refused entry stops admission
-    /// and fails loudly with its pending record; a damaged key copy is passed
-    /// over for a later copy, as any reader does (§11, §19.1). Snapshot work
-    /// waits until the member has actually been admitted.
-    pub async fn bootstrap_member(&mut self) -> Result<bool, SyncError> {
+    /// false until the binding `admission` requires is kept (§12). A refused
+    /// entry stops admission and fails loudly with its pending record; a
+    /// damaged key copy is passed over for a later copy, as any reader does
+    /// (§11, §19.1). Snapshot work waits until the member has actually been
+    /// admitted.
+    pub async fn bootstrap_member(&mut self, admission: BindingSource) -> Result<bool, SyncError> {
         self.step().await?;
         let local = self.database.local_store_log().await?;
         let member = self.operation_member()?;
-        let keys = member.keys().public_keys();
-        // Membership is effective only with this id bound to this device's pair.
-        if crate::effects::member(&local.log.replay.state, &member.member())
-            .is_some_and(|current| current.keys == keys)
-        {
+        if crate::join_admission::admitted(
+            &local.log,
+            &member.member(),
+            &member.keys().public_keys(),
+            admission,
+        )? {
             return Ok(true);
-        }
-        for entry in &local.log.entries {
-            if matches!(&entry.entry.change, StoreChange::AddMember { member: added, keys: pair, .. }
-                if *added == member.member() && *pair == keys)
-            {
-                if let EntryOutcome::Dropped(reason) =
-                    &local.log.replay.entries[&entry.entry.position]
-                {
-                    return Err(SyncError::Rejected(reason.clone()));
-                }
-            }
         }
         if let Some(record) = crate::pending_logs::local_refusals(&self.database)
             .await?
@@ -98,7 +89,10 @@ impl StoreLogSync {
             self.store_keys
                 .persist(&coven_crypto::StoreKeyring::new(key))?;
         }
-        Ok(if self.bootstrap_member().await? {
+        let admission = BindingSource::Join {
+            approver: request.approver(),
+        };
+        Ok(if self.bootstrap_member(admission).await? {
             JoinOutcome::Admitted
         } else {
             JoinOutcome::Waiting
@@ -154,7 +148,11 @@ impl StoreLogSync {
         let member = self.operation_member()?;
         let local = self.database.local_store_log().await?;
         self.check_stopped(&local, &member)?;
-        if crate::effects::member(&local.log.replay.state, &member.member()).is_none() {
+        // Registration needs this pair's current kept binding, not merely
+        // an active member id (§10, §12.2).
+        if crate::effects::member(&local.log.replay.state, &member.member())
+            .is_none_or(|held| held.keys != member.keys().public_keys())
+        {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
         }
         // A snapshot that fails its checks is recorded; a reload whose current

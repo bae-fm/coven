@@ -15,7 +15,9 @@ async fn failed_administrative_catch_up_reserves_nothing() {
         Command::SetRole(member(2).member(), MemberRole::Admin),
         Command::Reset(Audience::Store),
         Command::Invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::S3AccessKey {
                 access_key_id: "invite".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),

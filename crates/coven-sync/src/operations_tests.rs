@@ -260,7 +260,7 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
     assert!(matches!(
         b.sync
             .begin_operation_call(Command::Invite(
-                MemberRole::Member,
+                InviteTarget::NewMember { role: MemberRole::Member },
                 InviteAccess::ProviderAccount {
                     email: "new@example.com".into()
                 }
@@ -350,6 +350,9 @@ async fn interrupted_plain_removal_keeps_its_entry_and_schedules_access_on_repla
 
 #[path = "operation_invites_tests.rs"]
 mod invites;
+
+#[path = "join_admission_tests.rs"]
+mod join_admission;
 
 #[tokio::test]
 async fn independent_removals_keep_their_original_attempts() {

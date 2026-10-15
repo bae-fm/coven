@@ -407,7 +407,10 @@ async fn prepare_and_load(
             }
         } else {
             status("Opening member keys and the store log");
-            if !sync.bootstrap_member().await? {
+            if !sync
+                .bootstrap_member(coven_sync::BindingSource::Restore)
+                .await?
+            {
                 return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed).into());
             }
         }

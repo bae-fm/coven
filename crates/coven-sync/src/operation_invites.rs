@@ -3,17 +3,14 @@
 use super::operation_minting::Minting;
 use super::StoreLogSync;
 use crate::{
-    operation_data::{Data, InviteGrant, InviteState, InviteWork, MintWork},
+    operation_data::{Data, InviteBinding, InviteGrant, InviteState, InviteWork, MintWork},
     operations::{Begun, Output, Progress},
     *,
 };
 use coven_crypto::{InviteSecret, ObjectHasher, SecretText};
 use coven_database::{LocalStoreLog, OperationRecord};
 use coven_format::{
-    codes::InviteCode,
-    sealed_single::SingleChunkObject,
-    store_log::{MemberRole, StoreChange},
-    Object,
+    codes::InviteCode, sealed_single::SingleChunkObject, store_log::StoreChange, Object,
 };
 use coven_foundation::id_source::{InviteId, MemberId};
 use coven_storage::{
@@ -35,13 +32,49 @@ impl StoreLogSync {
         &mut self,
         local: &LocalStoreLog,
         me: &MemberId,
-        role: MemberRole,
+        target: InviteTarget,
         access: InviteAccess,
     ) -> Result<Begun, SyncError> {
-        crate::effects::Authority::Admin.check(&local.log.replay.state, me)?;
+        let state = &local.log.replay.state;
+        crate::effects::Authority::Admin.check(state, me)?;
         if !self.owns_storage(&local.log, me) {
             return Err(StorageFailure::NotStoreOwner.into());
         }
+        // The admin fixes the id before the invite exists: a fresh one for a
+        // new person, or an existing active member for recovery (§12.2).
+        let (member, binding) = match target {
+            InviteTarget::NewMember { role } => {
+                (MemberId(self.ids.new_id()), InviteBinding::Add { role })
+            }
+            InviteTarget::ReplaceMemberKeys { member } => {
+                let Some(existing) = crate::effects::member(state, &member) else {
+                    return Err(SyncError::Rejected(coven_database::DropReason::TargetGone(
+                        coven_database::EntryTarget::Member(member),
+                    )));
+                };
+                // This installation replaces its own pair with
+                // replace_member_keys; approving its own replacement would
+                // stop the device that must finish the invite.
+                if member == *me {
+                    return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
+                }
+                // Rebinding changes no recorded access: an account invite
+                // shares the member's recorded account (§12.2).
+                if let InviteAccess::ProviderAccount { email } = &access {
+                    let account = coven_format::MemberAccess::ProviderAccount(
+                        email.trim().to_ascii_lowercase(),
+                    );
+                    if !existing.access.same_credential(&account) {
+                        return Err(StorageFailure::InvalidConfiguration
+                            .with_source(
+                                "a replacement invite shares the member's recorded account",
+                            )
+                            .into());
+                    }
+                }
+                (member, InviteBinding::Replace)
+            }
+        };
         match &access {
             InviteAccess::ProviderAccount { email } if email.trim().is_empty() => {
                 return Err(StorageFailure::InvalidConfiguration
@@ -87,9 +120,8 @@ impl StoreLogSync {
         let secret = InviteSecret::generate()?;
         let data = Data::Invite(InviteWork {
             id,
-            // An addition's fresh stable id, fixed before the invite exists (D13).
-            member: MemberId(self.ids.new_id()),
-            role,
+            member,
+            binding,
             access: grant,
             secret: SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?),
             expires_at: self
@@ -148,16 +180,8 @@ impl StoreLogSync {
             work.state = if approve {
                 let request = stored.ok_or(SyncError::InvitationChanged)?.clone();
                 let decoded = self.decode_request(&request)?;
-                self.validate_administration(
-                    local,
-                    me,
-                    &coven_format::store_log::StoreChange::AddMember {
-                        member: decoded.member,
-                        keys: decoded.keys,
-                        role: work.role,
-                        access: work.access.member_access()?,
-                    },
-                )?;
+                // Approval binds exactly the checked request's fresh pair.
+                self.validate_administration(local, me, &work.binding_change(&decoded)?)?;
                 InviteState::Approving {
                     request,
                     entry: None,
@@ -184,11 +208,14 @@ impl StoreLogSync {
             return Ok(None);
         };
         match work.state {
-            InviteState::Approving { entry: Some(_), .. } | InviteState::Settled => {
-                return Ok(None)
-            }
+            InviteState::Approving { entry: Some(_), .. }
+            | InviteState::Recording { entry: Some(_) }
+            | InviteState::Settled => return Ok(None),
             InviteState::Revoking => (),
-            InviteState::Grant | InviteState::Waiting { .. } | InviteState::Approving { .. } => {
+            InviteState::Grant
+            | InviteState::Waiting { .. }
+            | InviteState::Approving { .. }
+            | InviteState::Recording { .. } => {
                 work.state = InviteState::Revoking;
                 self.save_invite(Some(record), &data, 0).await?;
             }
@@ -211,6 +238,7 @@ impl StoreLogSync {
             self.save_invite(Some(record), &data, 0).await?;
             return Ok(Progress::Reply(Err(SyncError::InvitationChanged)));
         }
+        let records_access = work.records_access();
         match &mut work.state {
             InviteState::Grant if matches!(work.access, InviteGrant::Minting(_)) => {
                 let InviteGrant::Minting(mint) = &mut work.access else {
@@ -352,7 +380,18 @@ impl StoreLogSync {
             InviteState::Approving { .. } if record.last_step < 5 => {
                 self.entry_step(record, data).await
             }
-            InviteState::Approving { .. } => {
+            InviteState::Approving { .. } if records_access => {
+                // The binding is kept; its new key's record is separate work.
+                work.state = InviteState::Recording { entry: None };
+                self.database
+                    .advance_operation(data.update(record, 0)?)
+                    .await?;
+                Ok(Progress::Advanced)
+            }
+            InviteState::Recording { .. } if record.last_step < 5 => {
+                self.entry_step(record, data).await
+            }
+            InviteState::Approving { .. } | InviteState::Recording { .. } => {
                 work.state = InviteState::Settled;
                 self.database
                     .advance_operation(data.update(record, 5)?)
@@ -383,8 +422,18 @@ impl StoreLogSync {
             InviteState::Revoking => {
                 let access = work.access.member_access()?;
                 work.state = InviteState::Settled;
+                // A replacement invite takes back only its own new grant,
+                // never the access its active member already holds (§12.2).
+                let retained = matches!(work.binding, InviteBinding::Replace)
+                    && crate::effects::member(
+                        &self.database.local_store_log().await?.log.replay.state,
+                        &work.member,
+                    )
+                    .is_some_and(|member| member.access.same_credential(&access));
                 // The invite's S3 key stays pending until its deletion clears (§12.2).
-                let deletions = crate::access_keys::deletion(&access, None)
+                let deletions = (!retained)
+                    .then(|| crate::access_keys::deletion(&access, None))
+                    .flatten()
                     .into_iter()
                     .collect::<Result<Vec<_>, _>>()?;
                 self.database
@@ -527,8 +576,8 @@ impl StoreLogSync {
         .to_text()?;
         Ok(Invite {
             id: work.id,
+            member: work.member,
             code: code.to_string(),
-            role: work.role,
             expires_at: work.expires_at,
         })
     }

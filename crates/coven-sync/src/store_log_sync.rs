@@ -339,9 +339,12 @@ impl StoreLogSync {
             return Err(SyncError::Removed);
         }
         // Held credentials a kept replacement retired cannot author anything;
-        // the installation keeps its device id and queues (§10).
-        if crate::effects::member(state, &member.member())
-            .is_some_and(|held| held.keys != member.keys().public_keys())
+        // the installation keeps its device id and queues (§10). A pair no
+        // kept entry ever bound is a candidate still awaiting its binding
+        // (§12.2): it is not replaced, and it holds no sending authority.
+        let keys = member.keys().public_keys();
+        if crate::effects::member(state, &member.member()).is_some_and(|held| held.keys != keys)
+            && state.bound_keys.contains(&keys)
         {
             return Err(SyncError::MemberKeysReplaced {
                 member: member.member(),

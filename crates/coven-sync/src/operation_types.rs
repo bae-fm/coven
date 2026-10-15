@@ -74,6 +74,22 @@ pub enum OldKeyDeletion {
     },
 }
 
+/// The admin's choice, fixed before the invite is shown (§12.2, §12.3).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteTarget {
+    /// A new person: coven generates a fresh member id, added with this role.
+    NewMember {
+        /// The role the person receives on approval.
+        role: MemberRole,
+    },
+    /// An existing active member who lost every device: approval binds the
+    /// requester's new keys to this id, keeping its role, circles and devices.
+    ReplaceMemberKeys {
+        /// The member whose keys the approval replaces.
+        member: MemberId,
+    },
+}
+
 /// How the invited person reaches the store's provider.
 #[derive(Clone)]
 pub enum InviteAccess {
@@ -98,10 +114,10 @@ pub enum InviteAccess {
 pub struct Invite {
     /// The one-time request path's identity.
     pub id: InviteId,
+    /// The stable member id the invite fixed.
+    pub member: MemberId,
     /// Code the app may show as a QR code. Contains secrets.
     pub code: String,
-    /// Role the person will receive on approval.
-    pub role: MemberRole,
     /// One day after creation on the inviting device's clock.
     pub expires_at: SystemTime,
 }

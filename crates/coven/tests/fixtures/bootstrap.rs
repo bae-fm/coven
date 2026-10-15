@@ -118,7 +118,12 @@ impl Owner {
             }
         };
         self.handle
-            .create_invite(MemberRole::Member, access)
+            .create_invite(
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
+                access,
+            )
             .await
             .unwrap()
     }

@@ -61,7 +61,9 @@ pub use files::{
     Files, PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadQueue,
 };
 
+mod join_admission;
 mod joining_identity;
+pub use join_admission::BindingSource;
 mod recorded_upload;
 mod snapshot_data;
 

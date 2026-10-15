@@ -9,14 +9,22 @@ async fn membership_discovery_keeps_received_input_across_reopen() {
     author.create(key(1)).await;
     let connection = Arc::new(storage.for_device());
     let mut receiver = device(connection.clone(), 2, member(1), store(1)).await;
-    assert!(receiver.sync.bootstrap_member().await.unwrap());
+    assert!(receiver
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap());
     assert_eq!(receiver.log().await, author.log().await);
     let first = connection.request_trace();
     assert!(first.iter().all(|request| !matches!(request,
         MemoryRequest::List(prefix) if prefix.as_str().contains("/store-log/") || prefix.as_str().contains("/keys/")
     )), "history must be discovered by exact reads: {first:?}");
     receiver.reopen(connection.clone(), vec![], vec![]).await;
-    assert!(receiver.sync.bootstrap_member().await.unwrap());
+    assert!(receiver
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap());
     let later = connection.request_trace();
     assert!(later[first.len()..].iter().all(|request| !matches!(request,
         MemoryRequest::Read(path, _) if path.store_log_position().or(path.key_copy_position()).is_some_and(|(writer, number)| writer.0 == 1 && number.get() == 1)
@@ -194,7 +202,11 @@ async fn registration_learned_during_a_scan_discovers_an_unlisted_writer() {
     let mut author = device(storage.clone(), 1, member(1), store(1)).await;
     author.create(key(1)).await;
     let mut receiver = device(storage.clone(), 9, member(1), store(1)).await;
-    receiver.sync.bootstrap_member().await.unwrap();
+    receiver
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap();
     author
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
@@ -205,7 +217,11 @@ async fn registration_learned_during_a_scan_discovers_an_unlisted_writer() {
         .await
         .unwrap();
     let mut second = device(storage.clone(), 2, member(1), store(1)).await;
-    second.sync.bootstrap_member().await.unwrap();
+    second
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap();
     let entry = second
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
@@ -221,7 +237,11 @@ async fn registration_learned_during_a_scan_discovers_an_unlisted_writer() {
             ..coven_storage::test_utils::Faults::none()
         })
         .await;
-    receiver.sync.bootstrap_member().await.unwrap();
+    receiver
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap();
     assert!(receiver.log().await.replay.entries.contains_key(&entry));
 }
 

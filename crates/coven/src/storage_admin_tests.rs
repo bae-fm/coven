@@ -32,7 +32,9 @@ async fn admin_access_makes_an_invites_key_and_deletes_it_on_evidence() {
     let invite = owner
         .handle
         .create_invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::S3AdminAccess(admin.clone()),
         )
         .await

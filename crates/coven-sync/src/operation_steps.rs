@@ -3,7 +3,7 @@
 use super::StoreLogSync;
 use crate::{
     effects,
-    operation_data::{Data, Intent, InviteState},
+    operation_data::{Data, Intent, InviteBinding, InviteState},
     operations::{Output, Progress},
     *,
 };
@@ -220,6 +220,23 @@ impl StoreLogSync {
                     .advance_operation(data.update(&current, data.entry_step_number(5))?)
                     .await?;
             }
+            Some(EntryOutcome::Dropped(reason))
+                if matches!(&data, Data::Invite(work)
+                    if matches!(work.binding, InviteBinding::Replace)
+                        && matches!(work.state, InviteState::Approving { .. })) =>
+            {
+                // A losing replacement is reported, never published again to
+                // override the winner; the invite takes back only its own
+                // new grants (§12.2).
+                let reason = reason.clone();
+                let Data::Invite(work) = &mut data else {
+                    unreachable!()
+                };
+                work.state = InviteState::Revoking;
+                self.save_invite(Some(&current), &data, data.entry_step_number(5))
+                    .await?;
+                return Ok(Progress::Reply(Err(SyncError::Rejected(reason))));
+            }
             Some(EntryOutcome::Dropped(reason)) if matches!(&data, Data::ReplaceAccessKey(_)) => {
                 // A lost replacement is reported, never made again with a new
                 // key: its key is recorded, so it is pending deletion (§13).
@@ -255,27 +272,26 @@ impl StoreLogSync {
         let intent = match data {
             Data::Entry(work) => &mut work.intent,
             Data::Invite(work) => {
-                let InviteState::Approving { request, .. } = &work.state else {
-                    unreachable!()
-                };
-                let request = self.decode_request(request)?;
-                let change = StoreChange::AddMember {
-                    member: request.member,
-                    keys: request.keys,
-                    role: work.role,
-                    access: work.access.member_access()?,
-                };
-                self.validate_administration(local, me, &change)?;
-                if let Some(existing) = effects::member(state, &request.member) {
-                    if existing.keys == request.keys
-                        && existing.role == work.role
-                        && existing
-                            .access
-                            .same_credential(&work.access.member_access()?)
-                    {
-                        return Ok(None);
+                let change = match &work.state {
+                    InviteState::Approving { request, .. } => {
+                        work.binding_change(&self.decode_request(request)?)?
                     }
-                    return Err(SyncError::InvitationChanged);
+                    InviteState::Recording { .. } => StoreChange::SetAccess {
+                        member: work.member,
+                        access: work.access.member_access()?,
+                    },
+                    _ => unreachable!("only approval and recording publish entries"),
+                };
+                // A repeated addition or a recorded key is already in place;
+                // a replacement never is, and approval publishes its own (§9).
+                if effects::change_in_place(state, me, &change) {
+                    return Ok(None);
+                }
+                self.validate_administration(local, me, &change)?;
+                if let StoreChange::AddMember { member, .. } = &change {
+                    if effects::member(state, member).is_some() {
+                        return Err(SyncError::InvitationChanged);
+                    }
                 }
                 return Ok(Some(change));
             }

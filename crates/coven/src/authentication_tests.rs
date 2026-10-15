@@ -459,7 +459,7 @@ mod provider_access_tests {
             let before = fixture.storage.request_count();
             let credentials = fixture.credentials();
             assert!(
-                matches!(handle.create_invite(MemberRole::Member, member()).await, Err(SyncError::Storage(error)) if error.failure() == expected)
+                matches!(handle.create_invite(InviteTarget::NewMember { role: MemberRole::Member }, member()).await, Err(SyncError::Storage(error)) if error.failure() == expected)
             );
             assert_eq!(fixture.storage.request_count(), before);
             assert_eq!(fixture.sign_in.presentation_count(), 1);
@@ -475,7 +475,12 @@ mod provider_access_tests {
         assert_access(&fixture.credentials(), FILE);
         let code = handle.restore_code().await.unwrap();
         let invite = handle
-            .create_invite(MemberRole::Member, member())
+            .create_invite(
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
+                member(),
+            )
             .await
             .unwrap();
         assert_access(&fixture.credentials(), FULL);
@@ -507,7 +512,9 @@ mod provider_access_tests {
         handle.start_sync().await.unwrap();
         handle
             .create_invite(
-                MemberRole::Member,
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
                 InviteAccess::ProviderAccount {
                     email: "other@example.test".into(),
                 },
@@ -530,8 +537,14 @@ mod provider_access_tests {
             .presenter
             .cancel
             .store(true, Ordering::SeqCst);
-        let Err(SyncError::Storage(coven_storage::StorageError::Provider { source, .. })) =
-            handle.create_invite(MemberRole::Member, member()).await
+        let Err(SyncError::Storage(coven_storage::StorageError::Provider { source, .. })) = handle
+            .create_invite(
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
+                member(),
+            )
+            .await
         else {
             panic!("cancelled upgrade expected")
         };
@@ -547,13 +560,18 @@ mod provider_access_tests {
         *fixture.sign_in.server.scope.lock().unwrap() =
             Some("https://www.googleapis.com/auth/drive.file".into());
         assert!(
-            matches!(handle.create_invite(MemberRole::Member, member()).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AccessNotGranted { required: FULL })
+            matches!(handle.create_invite(InviteTarget::NewMember { role: MemberRole::Member }, member()).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AccessNotGranted { required: FULL })
         );
         assert_eq!(fixture.credentials().as_bytes(), credentials.as_bytes());
         assert_eq!(fixture.storage.list(&prefix).await.unwrap(), objects);
         *fixture.sign_in.server.scope.lock().unwrap() = None;
         handle
-            .create_invite(MemberRole::Member, member())
+            .create_invite(
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
+                member(),
+            )
             .await
             .unwrap();
         assert_access(&fixture.credentials(), FULL);
@@ -602,7 +620,7 @@ mod provider_access_tests {
             .await;
         let credentials = fixture.credentials();
         assert!(
-            matches!(handle.create_invite(MemberRole::Member, member()).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AccountMismatch)
+            matches!(handle.create_invite(InviteTarget::NewMember { role: MemberRole::Member }, member()).await, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::AccountMismatch)
         );
         assert_eq!(fixture.credentials().as_bytes(), credentials.as_bytes());
         handle.close().await.unwrap();

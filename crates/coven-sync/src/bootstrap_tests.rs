@@ -70,7 +70,11 @@ async fn bootstrap_rejects_a_conflicting_name_without_applying_creation() {
         .join("settings.json");
     std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
     joining.reopen(storage.clone(), vec![], vec![]).await;
-    let error = joining.sync.bootstrap_member().await.unwrap_err();
+    let error = joining
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap_err();
     assert!(
         matches!(&error, SyncError::Database(DbError::StoreSettingsMismatch { name, .. }) if name == "Store"),
         "{error:?}"

@@ -577,7 +577,9 @@ async fn another_invites_revocation_cannot_revive_a_confirmed_key() {
         let operation = begin(
             &mut a,
             Command::Invite(
-                MemberRole::Member,
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
                 InviteAccess::S3AccessKey {
                     access_key_id: "invited-key".into(),
                     secret_access_key: coven_crypto::SecretText::new("secret".into()),

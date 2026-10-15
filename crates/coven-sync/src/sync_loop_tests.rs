@@ -262,7 +262,11 @@ impl Device<StoreLogSync> {
 
     async fn first_catch_up(mut self) -> (Device<Operations>, Counts) {
         let mark = self.data.begin_count().await;
-        assert!(self.owner.bootstrap_member().await.unwrap());
+        assert!(self
+            .owner
+            .bootstrap_member(crate::BindingSource::Restore)
+            .await
+            .unwrap());
         self.add_device(self.data.device.0).await;
         let mut running = self.start();
         running.owner.sync().await.unwrap();

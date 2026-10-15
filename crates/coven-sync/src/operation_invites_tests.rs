@@ -11,7 +11,9 @@ async fn invite(d: &mut Device, account: &str) -> (OperationId, Invite) {
     let id = begin(
         d,
         Command::Invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::ProviderAccount {
                 email: account.into(),
             },
@@ -24,14 +26,19 @@ async fn invite(d: &mut Device, account: &str) -> (OperationId, Invite) {
     (id, invite)
 }
 /// The joining member: the id the invite fixed, with seed `seed`'s fresh pair.
-fn joiner(invite: &Invite, seed: u8) -> MemberIdentity {
+pub(super) fn joiner(invite: &Invite, seed: u8) -> MemberIdentity {
     MemberIdentity::new(
         InviteCode::from_text(&invite.code).unwrap().member,
         member(seed).keys().clone(),
     )
 }
 
-async fn request(storage: &dyn Storage, invite: &Invite, keys: &MemberIdentity, name: &str) {
+pub(super) async fn request(
+    storage: &dyn Storage,
+    invite: &Invite,
+    keys: &MemberIdentity,
+    name: &str,
+) {
     let code = InviteCode::from_text(&invite.code).unwrap();
     let path = ObjectPath::join_request(code.store, invite.id);
     let plain = Object::JoinRequest(WireRequest {
@@ -163,7 +170,9 @@ async fn invite_cursor_excludes_reserved_copies_until_the_invites_catch_up_publi
         let operation = begin(
             d,
             Command::Invite(
-                MemberRole::Member,
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
                 InviteAccess::S3AccessKey {
                     access_key_id: "new-key".into(),
                     secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -274,7 +283,9 @@ async fn s3_invitation_carries_its_key_and_retains_the_manual_deletion_notice() 
     let id = begin(
         &mut a,
         Command::Invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::S3AccessKey {
                 access_key_id: "new-key".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -349,7 +360,9 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
     operations.barrier().await.unwrap();
     let invite = operations
         .create_invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::ProviderAccount {
                 email: "join@example.com".into(),
             },
@@ -404,7 +417,9 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
     let operations = { operation_owner(a.sync, files) };
     let invite = operations
         .create_invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::ProviderAccount {
                 email: "join@example.com".into(),
             },
@@ -448,7 +463,9 @@ async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
     let files = file_owner(&a);
     let operations = { operation_owner(a.sync, files) };
     let mut pending = Box::pin(operations.create_invite(
-        MemberRole::Member,
+        InviteTarget::NewMember {
+            role: MemberRole::Member,
+        },
         InviteAccess::ProviderAccount {
             email: "join@example.com".into(),
         },
@@ -506,7 +523,9 @@ async fn discarding_a_waiting_invite_takes_its_access_back() {
     let id = begin(
         &mut a,
         Command::Invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::S3AccessKey {
                 access_key_id: "new-key".into(),
                 secret_access_key: coven_crypto::SecretText::new("secret".into()),
@@ -603,7 +622,9 @@ async fn a_request_awaiting_the_persons_decision_is_not_read_again() {
     let mut joins = operations.subscribe_join_requests();
     let invite = operations
         .create_invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::ProviderAccount {
                 email: "join@example.com".into(),
             },

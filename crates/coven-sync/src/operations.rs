@@ -46,7 +46,7 @@ pub(crate) enum Command {
     SetRole(MemberId, MemberRole),
     SetAccess(coven_format::MemberAccess),
     RemoveDevice(DeviceId),
-    Invite(MemberRole, InviteAccess),
+    Invite(InviteTarget, InviteAccess),
     Approve(JoinRequest),
     Decline(JoinRequest),
     Cancel(InviteId),
@@ -348,13 +348,14 @@ impl Operations {
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
         self.unit(Command::ConfirmKey(key.into())).await
     }
-    /// Create and share an invitation that expires after one day.
+    /// Fix the invite's member id, a fresh one or an active replacement
+    /// target, then share an invitation that expires after one day.
     pub async fn create_invite(
         &self,
-        role: MemberRole,
+        target: InviteTarget,
         access: InviteAccess,
     ) -> Result<Invite, SyncError> {
-        match self.call(Command::Invite(role, access)).await? {
+        match self.call(Command::Invite(target, access)).await? {
             Output::Invite(value) => Ok(value),
             _ => unreachable!("invite result"),
         }

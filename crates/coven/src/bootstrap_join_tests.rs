@@ -92,3 +92,100 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     pending.cancel().unwrap();
     owner.close().await;
 }
+
+/// Carol joins, then loses her only installation. Ana's recovery invite
+/// fixes Carol's id; Carol's new installation joins with fresh keys and
+/// keeps her id, role and old device id. The binding records no access: the
+/// invite's new S3 key is recorded for Carol by its own entry, which leaves
+/// her old key pending deletion. Carol's old installation and her old
+/// restore code report the replacement.
+#[tokio::test]
+async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let first = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let joining = first.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, carol) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let lost = result.unwrap().unwrap();
+    let old_code = lost.restore_code().await.unwrap();
+    let recovery = owner
+        .handle
+        .create_invite(
+            InviteTarget::ReplaceMemberKeys { member: carol },
+            InviteAccess::S3AccessKey {
+                access_key_id: "recovery-key".into(),
+                secret_access_key: SecretText::new("recovery-secret".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(recovery.member, carol);
+    let second = Installation::new();
+    let joining = second.run(
+        &owner,
+        Installation::join_request(&recovery),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, member) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    assert_eq!(member, carol);
+    let handle = result.unwrap().unwrap();
+    let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
+    let old = coven_sync::read_restore_code(&old_code).unwrap();
+    assert_eq!((code.member, old.member), (carol, carol));
+    assert_ne!(
+        code.member_keys.public_keys(),
+        old.member_keys.public_keys()
+    );
+    owner.sync().await;
+    let members = owner.handle.members().await.unwrap();
+    let info = members.iter().find(|m| m.id == carol).unwrap();
+    assert_eq!(info.keys, code.member_keys.public_keys());
+    assert_eq!(info.role, MemberRole::Member);
+    assert_eq!(info.devices.len(), 2);
+    assert!(info.devices.iter().all(|d| d.state == DeviceState::Active));
+    assert_eq!(
+        crate::tests::access_keys(&owner.handle).await,
+        [AccessKeyToDelete {
+            access_key_id: "invited-key".into(),
+            principal: coven_format::S3Principal::Console,
+            member: Some(carol),
+        }]
+    );
+    let stopped = lost.circles().create("Garden").await;
+    assert!(
+        matches!(&stopped, Err(SyncError::MemberKeysReplaced { member }) if *member == carol),
+        "{stopped:?}"
+    );
+    lost.close().await.unwrap();
+    // The old code cannot bind its pair back to Carol's id.
+    let stale = Installation::new();
+    let restored = restore_from_code(
+        stale.builder(&owner, owner.storage.clone()),
+        &old_code,
+        Some(S3Credentials {
+            access_key_id: "recovery-key".into(),
+            secret_access_key: SecretText::new("recovery-secret".into()),
+        }),
+        "Carol's old code",
+        |_| {},
+        &cancel,
+    )
+    .await;
+    assert!(
+        matches!(&restored, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member })) if *member == carol),
+        "{:?}",
+        restored.as_ref().err()
+    );
+    stale.absent(owner.directory.id()).await;
+    handle.close().await.unwrap();
+    owner.close().await;
+}

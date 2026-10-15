@@ -563,7 +563,9 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
     };
     let invite = handle
         .create_invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::S3AccessKey {
                 access_key_id: "member-key".into(),
                 secret_access_key: SecretText::new("secret".into()),

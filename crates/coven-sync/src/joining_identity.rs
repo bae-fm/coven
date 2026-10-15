@@ -158,6 +158,11 @@ impl JoiningIdentity {
         self.identity.clone()
     }
 
+    /// The inviting device: only its kept binding admits this request (§12.2).
+    pub fn approver(&self) -> coven_foundation::id_source::DeviceId {
+        self.inviting_writer
+    }
+
     /// Whether publication may already have happened before an interruption.
     pub fn attempted(&self) -> bool {
         self.attempted

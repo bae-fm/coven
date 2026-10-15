@@ -216,7 +216,11 @@ async fn a_new_device_registers_itself_before_publishing_other_entries() {
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     a.create(key(1)).await;
-    assert!(b.sync.bootstrap_member().await.unwrap());
+    assert!(b
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap());
     let unrelated = StoreChange::AddDevice {
         device: DeviceId(90),
         name: "another install".into(),
@@ -264,7 +268,11 @@ async fn a_replacement_device_registers_itself_in_its_first_entry() {
         })
         .await
         .unwrap();
-    assert!(b.sync.bootstrap_member().await.unwrap());
+    assert!(b
+        .sync
+        .bootstrap_member(crate::BindingSource::Restore)
+        .await
+        .unwrap());
     let registration = StoreChange::AddDevice {
         device: DeviceId(2),
         name: "replacement install".into(),
@@ -819,11 +827,11 @@ async fn bootstrap_reports_a_stuck_entry_instead_of_waiting_for_membership_forev
     storage.corrupt_byte(&path, size - 1).await.unwrap();
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     assert!(
-        matches!(b.sync.bootstrap_member().await, Err(SyncError::Pending(record)) if record.subject == crate::PendingSubject::Entry(first))
+        matches!(b.sync.bootstrap_member(crate::BindingSource::Restore).await, Err(SyncError::Pending(record)) if record.subject == crate::PendingSubject::Entry(first))
     );
     let reads = storage.reads().await;
     assert!(matches!(
-        b.sync.bootstrap_member().await,
+        b.sync.bootstrap_member(crate::BindingSource::Restore).await,
         Err(SyncError::Pending(_))
     ));
     assert_eq!(storage.reads().await, reads);

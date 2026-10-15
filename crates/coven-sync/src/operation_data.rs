@@ -4,7 +4,7 @@ use crate::snapshot_data::{SnapshotJob, SnapshotTask, SnapshotTrigger};
 use crate::{OperationKind, SyncError};
 use coven_database::{NewOperation, OperationRecord, OperationUpdate};
 use coven_format::{
-    store_log::{MemberRole, StoreLogEntry},
+    store_log::{MemberRole, StoreChange, StoreLogEntry},
     MemberAccess, Object,
 };
 use coven_foundation::id_source::{CircleId, InviteId, MemberId};
@@ -131,16 +131,56 @@ impl ReceivedRequest {
     }
 }
 
+/// What approving the invite's request binds to its member id (§12.2).
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) enum InviteBinding {
+    /// Add member: a fresh id with this role and the invite's access.
+    Add { role: MemberRole },
+    /// Replace member keys: an existing active id keeps its role, circles,
+    /// devices and recorded access; only its pair changes.
+    Replace,
+}
+
 #[derive(Serialize, Deserialize)]
 pub(crate) struct InviteWork {
     pub(crate) id: InviteId,
     /// The member id the invite fixes and the request must repeat.
     pub(crate) member: MemberId,
-    pub(crate) role: MemberRole,
+    pub(crate) binding: InviteBinding,
     pub(crate) access: InviteGrant,
     pub(crate) secret: coven_crypto::SecretText,
     pub(crate) expires_at: SystemTime,
     pub(crate) state: InviteState,
+}
+
+impl InviteWork {
+    /// The binding approval publishes for the checked request: its exact
+    /// pair, on the id the invite fixed (§12.2).
+    pub(crate) fn binding_change(
+        &self,
+        request: &coven_format::objects::JoinRequest,
+    ) -> Result<StoreChange, SyncError> {
+        Ok(match self.binding {
+            InviteBinding::Add { role } => StoreChange::AddMember {
+                member: self.member,
+                keys: request.keys,
+                role,
+                access: self.access.member_access()?,
+            },
+            InviteBinding::Replace => StoreChange::ReplaceMemberKeys {
+                member: self.member,
+                keys: request.keys,
+            },
+        })
+    }
+
+    /// A kept replacement records the invite's new S3 key for its member in
+    /// a separate access entry; an account invite shares only the member's
+    /// recorded account, so it has nothing to record (§12.2, §13).
+    pub(crate) fn records_access(&self) -> bool {
+        matches!(self.binding, InviteBinding::Replace)
+            && matches!(self.access, InviteGrant::S3Key(_))
+    }
 }
 
 #[derive(Serialize, Deserialize)]
@@ -152,6 +192,11 @@ pub(crate) enum InviteState {
     },
     Approving {
         request: Vec<u8>,
+        entry: Option<Vec<u8>>,
+    },
+    /// After a kept replacement: the invite's new S3 key is recorded for the
+    /// member by its own access entry, separate from the binding (§12.2).
+    Recording {
         entry: Option<Vec<u8>>,
     },
     Revoking,
@@ -305,7 +350,7 @@ impl Data {
             }) => entry.as_ref(),
             Self::Entry(work) => work.entry.as_ref(),
             Self::Invite(InviteWork {
-                state: InviteState::Approving { entry, .. },
+                state: InviteState::Approving { entry, .. } | InviteState::Recording { entry },
                 ..
             }) => entry.as_ref(),
             Self::ReplaceAccessKey(work) => work.entry.as_ref(),
@@ -333,7 +378,7 @@ impl Data {
             }) => *entry = value,
             Self::Entry(work) => work.entry = value,
             Self::Invite(InviteWork {
-                state: InviteState::Approving { entry, .. },
+                state: InviteState::Approving { entry, .. } | InviteState::Recording { entry },
                 ..
             }) => *entry = value,
             Self::ReplaceAccessKey(work) => work.entry = value,
@@ -363,7 +408,7 @@ impl Data {
                 Self::Entry(_)
                     | Self::ReplaceAccessKey(_)
                     | Self::Invite(InviteWork {
-                        state: InviteState::Approving { .. },
+                        state: InviteState::Approving { .. } | InviteState::Recording { .. },
                         ..
                     })
             )

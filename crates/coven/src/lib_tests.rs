@@ -217,7 +217,9 @@ impl Network {
         let owner = &self.devices[0].handle;
         let invite = owner
             .create_invite(
-                MemberRole::Member,
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
                 InviteAccess::S3AccessKey {
                     access_key_id: format!("member-{index}"),
                     secret_access_key: SecretText::new("secret".into()),

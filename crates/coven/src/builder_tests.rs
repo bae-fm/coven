@@ -166,7 +166,9 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     ));
     let invite = handle
         .create_invite(
-            MemberRole::Member,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
             InviteAccess::S3AccessKey {
                 access_key_id: "invited-key".into(),
                 secret_access_key: SecretText::new("invited-secret".into()),

@@ -327,8 +327,8 @@ impl StoreLogSync {
                 .await?;
                 return Ok(Begun::Value(Output::Unit));
             }
-            Command::Invite(role, access) => {
-                return self.begin_invite(&local, &me, role, access).await
+            Command::Invite(target, access) => {
+                return self.begin_invite(&local, &me, target, access).await
             }
             Command::ReplaceAccessKey(member, admin) => {
                 return self
