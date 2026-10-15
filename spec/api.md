@@ -1080,8 +1080,8 @@ impl FileDecl {
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding the fixed path, uploader and file key chosen by
-    /// the attaching write (§16.1, D12). `FileRef::path` reads its path;
-    /// `file_status` checks availability without changing this column.
+    /// the attaching write (§16.1, D12). `file_status` checks availability
+    /// without changing this column.
     /// Must allow NULL; app SQL cannot assign it. Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
@@ -2897,8 +2897,6 @@ impl FileRef {
     pub fn plaintext_size(&self) -> u64;
     /// The row's audience, whose encrypted writes carry the file's key (§16.1).
     pub fn audience(&self) -> Audience;
-    /// The fixed destination chosen by the attaching write, even before upload.
-    pub fn path(&self) -> ObjectPath;
     pub fn id(&self) -> FileId;
     pub fn uploader(&self) -> DeviceId;
 }
