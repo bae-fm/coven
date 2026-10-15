@@ -6492,8 +6492,7 @@ holds failures and rejected entries, without making either wait look completed.
 - A damaged database fails to open with `DbError::DamagedDatabase`.
   The app calls `CovenBuilder::reset_device` (E1).
   - Use the same new-device path as a stale copy (§10), from saved settings
-    and custody. Read no rows, counters, queues or operations from the
-    damaged database for salvage.
+    and custody; only §10's owed deletions carry over.
   - Check storage and unlock the member and store keys before moving the
     damaged files. A missing setting, unavailable key or failed connection
     leaves them in place and returns its typed error.
