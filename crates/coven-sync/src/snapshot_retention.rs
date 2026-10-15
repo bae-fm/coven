@@ -149,14 +149,13 @@ impl StoreLogSync {
         let mut failures = Vec::new();
         let mut waits = Vec::new();
         let mut due = BTreeMap::new();
-        let mut held = false;
         for object in storage
             .list(&ObjectPrefix::device_logs(self.directory.id()))
             .await?
         {
-            // A waiting write holds back the rest of log retention, and the
-            // first failed deletion ends this evaluation's deletions: they stay.
-            if held || !failures.is_empty() {
+            // The first failed deletion ends this evaluation's deletions:
+            // the rest stay.
+            if !failures.is_empty() {
                 retained.push(object);
                 continue;
             }
@@ -174,11 +173,11 @@ impl StoreLogSync {
             }
             let header = match self.open_write_header(&object).await {
                 Ok(header) => header,
-                // The write's first prerequisite is this object's record.
+                // The write stays, its first prerequisite this object's
+                // record; it holds no other write (io `Retention.Eligible`).
                 Err(error) if waiting(&object.path, &error) => {
                     if owned {
                         waits.push((object.path.clone(), self.pending_reason(&error).await?));
-                        held = true;
                     }
                     retained.push(object);
                     continue;
@@ -472,11 +471,7 @@ pub(super) fn waiting(path: &coven_storage::ObjectPath, error: &SyncError) -> bo
             ))
     );
     if waiting {
-        tracing::debug!(
-            path = path.as_str(),
-            ?error,
-            "waiting write holds back retention"
-        );
+        tracing::debug!(path = path.as_str(), ?error, "waiting write stays");
     }
     waiting
 }

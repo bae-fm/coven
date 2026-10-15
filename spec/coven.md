@@ -5152,8 +5152,8 @@ Carol's tablet:
     no parts or whole-object author signature. These fields describe the
     object being deleted; they grant no author authority and apply no
     rows. Loading a write still checks its complete signature (§6).
-- A write waiting for entries or a key copy holds retention back, with a
-  `Retention` pending record naming that first prerequisite. It does not
+- A write waiting for entries or a key copy stays, alone, with a
+  `Retention` pending record naming that first prerequisite; it does not
   fail the pass. Arrival of the prerequisite permits another attempt.
 - A log with a permanent refusal is not read at or past that object,
   including for retention and reload. Keep those objects and any files

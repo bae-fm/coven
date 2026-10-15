@@ -162,6 +162,58 @@ async fn a_stale_unproven_write_is_read_again_before_it_goes() {
     assert!(read < deleted);
 }
 
+/// Ben cannot open the header of the removed phone's write 1: its store key
+/// has not reached him. That write waits with its record, while the phone's
+/// covered write 2 goes once the removal is final: a wait holds only the
+/// waiting write (§15; io `Retention.Eligible` judges each write alone).
+#[tokio::test]
+async fn a_write_waiting_for_its_key_holds_only_itself() {
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = notes_device(storage.clone(), 2).await;
+    add_device(&mut b).await;
+    a.sync().await;
+    for row in 0..2 {
+        write_rows(&a, row, 1, 17, Audience::Store).await;
+        upload(&a, &storage).await;
+    }
+    a.write_snapshot(Audience::Store).await.unwrap();
+    let log = logs(&storage).await;
+    let bytes = storage.read(&log[0]).await.unwrap();
+    let length = coven_format::sealed_write::WriteObjectPrefix::length(&bytes).unwrap();
+    let mut prefix =
+        coven_format::sealed_write::WriteObjectPrefix::decode(&bytes[..length]).unwrap();
+    prefix.store_key = key(9);
+    let mut waiting = prefix.encode().unwrap();
+    waiting.extend_from_slice(&bytes[length..]);
+    republish(&storage, &storage_clock, &log[0], &waiting).await;
+    b.sync.reload_from_snapshots().await.unwrap();
+    b.sync
+        .make_and_upload_entry(StoreChange::RemoveDevice {
+            device: a.device().await,
+        })
+        .await
+        .unwrap();
+    post(&b, &storage).await;
+    storage_clock.set(at(31, 0));
+    b.clock.set(at(31, 0));
+    b.sync().await;
+    mature(&storage_clock, &[&b]).await;
+    b.sync.run_retention().await.unwrap();
+    assert_eq!(logs(&storage).await, log[..1]);
+    assert_eq!(
+        records(&b).await,
+        [(
+            log[0].clone(),
+            crate::PendingReason::KeyUnavailable {
+                audience: Audience::Store,
+                key: key(9),
+            }
+        )]
+    );
+}
+
 #[tokio::test]
 /// On Google Drive the store owner cannot delete another account's file, but
 /// its delete takes the file out of the store's folder, where it stays in the
