@@ -935,3 +935,34 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
     assert_eq!(storage.read(&path).await.unwrap(), first);
     assert!(a.db.local_store_log().await.unwrap().upload.is_none());
 }
+
+#[tokio::test]
+async fn changing_custody_cannot_change_a_devices_author() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    a.create(key(1)).await;
+    a.add(&member(2), MemberRole::Admin).await;
+    a.sync.member_keys =
+        Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member(2)))).unwrap());
+    let result = a
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(90),
+            name: "different author".into(),
+            replaces: None,
+        })
+        .await;
+    assert!(matches!(
+        result,
+        Err(SyncError::Rejected(coven_database::DropReason::NotAllowed))
+    ));
+    assert!(a.db.local_store_log().await.unwrap().upload.is_none());
+    assert_eq!(
+        storage
+            .list(&ObjectPrefix::store_logs(store(1)))
+            .await
+            .unwrap()
+            .len(),
+        2
+    );
+}
