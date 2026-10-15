@@ -6325,8 +6325,8 @@ holds failures and rejected entries, without making either wait look completed.
   - physical cleanup or a snapshot's preparation waiting for an entry to
     become final, with `Waits(EntryFinality(entry))` naming that entry
     (§9, §15);
-  - file sources that cannot be uploaded, paused transfers, and provider
-    work waiting for the owner, a request, or an app action;
+  - file sources that cannot be uploaded, and provider work waiting for
+    the owner, a request, or an app action;
   - a dropped entry, including “landed too late” on its author's device,
     a write that missed its device-retirement or member-key deadline (§10), or a fingerprint
     disagreement.
