@@ -251,6 +251,7 @@ impl DatabaseConnection {
         #[cfg(test)]
         let _profile = self.profile_statements();
         let publishes = author.is_some();
+        let device = author.as_ref().map(|origin| origin.0);
         let result = self.transaction(|db| {
             let crate::migration_run::MigrationRun { outcomes, marker } =
                 crate::migration_run::run(
@@ -262,12 +263,12 @@ impl DatabaseConnection {
                     author.expect("writable migration"),
                     &mut at,
                 )?;
-            if let Some(minimum) = outcomes
+            let breaking = outcomes
                 .iter()
                 .filter(|outcome| outcome.change == crate::MigrationChange::Breaking)
                 .map(|outcome| outcome.version)
-                .max()
-            {
+                .max();
+            let raises = if let Some(minimum) = breaking {
                 // The raise snapshots are captured through the marker before any
                 // later app write; with no store there is no shared version to raise.
                 let schema = crate::write_schema::WriteSchema::read(db, tables.to_vec())?;
@@ -283,6 +284,21 @@ impl DatabaseConnection {
                         [minimum],
                     )?;
                 }
+                true
+            } else {
+                // Only additions: a raise still waiting to publish moves to
+                // this version, captured again at it (§17.1).
+                let device = device.expect("writable migration");
+                let moved = crate::raise_capture::raise_to(db, tables, device, supported)?;
+                if moved {
+                    db.internal_execute(
+                        "UPDATE _coven_snapshot_schema SET publication=?1 WHERE singleton=1",
+                        [supported],
+                    )?;
+                }
+                moved
+            };
+            if raises {
                 if let Some(operation) = operation.filter(|_| publishes) {
                     let new = operation(supported)?;
                     let id = crate::operation::insert(db, &new)?;

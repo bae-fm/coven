@@ -427,3 +427,37 @@ async fn an_unchanged_capture_is_kept_and_a_recapture_takes_in_later_own_writes(
     );
     db.close().await.unwrap();
 }
+
+/// An addition-only update while a raise waits moves that raise to the
+/// update's version, captured again at its schema so the snapshot's header
+/// names the version it raises to; once no capture waits, an addition raises
+/// nothing (§17.1; queue `RaiseCaptures.capture_at_raise_version`).
+#[tokio::test]
+async fn an_addition_moves_a_waiting_raise_to_its_version() {
+    let store = TestStore::new();
+    let db = migrated(&store).await;
+    let before = db.raise_captures().await.unwrap().remove(0);
+    db.close().await.unwrap();
+    let color = Migration::sql(3, "color", "ALTER TABLE notes ADD COLUMN color TEXT");
+    let three = vec![initial(), converted_index(), color];
+    let db = store.builder(notes(), three.clone()).open().await.unwrap();
+    let moved = db.raise_captures().await.unwrap();
+    assert_eq!(moved.len(), 1);
+    assert_eq!((moved[0].version, moved[0].through), (3, before.through));
+    assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 3);
+    let (header, _) = decode(&raise_frames(&db, 1, 3).await);
+    assert_eq!(header.schema_version, 3);
+    // Its raise published, a later addition raises nothing.
+    db.discard_raise_capture(Audience::Store, 3).await.unwrap();
+    db.close().await.unwrap();
+    let mut four = three;
+    four.push(Migration::sql(
+        4,
+        "size",
+        "ALTER TABLE notes ADD COLUMN size INTEGER",
+    ));
+    let db = store.builder(notes(), four).open().await.unwrap();
+    assert!(db.raise_captures().await.unwrap().is_empty());
+    assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 3);
+    db.close().await.unwrap();
+}

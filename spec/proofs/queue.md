@@ -208,6 +208,19 @@ covers histories with recaptures too. `recaptured_write_joins_prefix` and
 recapture through 3, write 4 with the store at 1; records 1 to 3 upload, the
 raise to 2 publishes, and 4 waits.
 
+**An addition-only update moves a waiting raise (proved).** An app update
+that only adds tables or columns appends no marker. While a capture still
+waits to publish, `LocalStep.update` moves its raise to the updated version
+and captures again through the newest write; once the raise published
+(`LocalStep.publish`), an update changes only the app's version.
+`capture_at_raise_version` shows every waiting capture is at the app's
+version, so a raise snapshot's header always names the version it raises to,
+and `update_admits_prefix` that the update changes no record and admits every
+queued own write. `addition_keeping_raise_unpaired` is the checked history
+where keeping the earlier raise (Rust before T253) leaves a capture at
+schema 3 raising to 2, which every reader refuses; `addition_moves_raise`
+checks the rule on the same history.
+
 **A migrated device judges received writes as its peers will (proved).**
 Before any raise to its version is kept, a migrated device judges a received
 older-version write under its own captures, as though each capture's raise

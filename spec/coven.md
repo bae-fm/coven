@@ -5772,6 +5772,15 @@ Carol's tablet:
     does one whose breaking change loses to a concurrent one.
 - An update that runs several breaking migrations makes one migration
   write, and raises the store once, to the newest version.
+- An update that only adds, run while a raise this device captured still
+  waits to publish, moves that raise to its version: each waiting capture is
+  taken again at the new schema through the device's newest write, with no
+  new marker. A capture is always at the version its raise publishes, so the
+  snapshot's header names it
+  ([`capture_at_raise_version`, `update_admits_prefix`](proofs/queue/CovenQueue/RaiseCaptures.lean),
+  [`addition_keeping_raise_unpaired`, `addition_moves_raise`](proofs/queue/CovenQueue/RaiseExamples.lean)).
+  - E.g. Ana migrates to 2 offline, then her app updates to 3, adding
+    `color`. Her raise publishes version 3; Ben's app updates to 3 to load it.
 - A breaking migration deletes rows already hidden by removal rules through
   the ordinary generation path (§8.3).
   - Its migration write moves each such row to the next even generation.

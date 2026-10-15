@@ -266,8 +266,9 @@ async fn rows_named(db: &Database) -> (String, String) {
 
 mod differential {
     //! The queue model's raise run (`RaiseUpload`, `RaiseProgress`) against a
-    //! real device: app writes, breaking migrations, upload passes with lost
-    //! requests and replies, raise publication and crashes.
+    //! real device: app writes, breaking migrations, addition-only updates,
+    //! upload passes with lost requests and replies, raise publication and
+    //! crashes.
     use super::*;
     use serde_json::{json, Value};
 
@@ -287,9 +288,23 @@ mod differential {
         "CREATE INDEX both_columns ON notes(title,body)",
     ];
 
-    fn migrations(version: u32) -> Vec<Migration> {
+    /// Each version after the first: a breaking index, or an addition-only column.
+    const COLUMNS: [&str; 3] = [
+        "ALTER TABLE notes ADD COLUMN c2 TEXT",
+        "ALTER TABLE notes ADD COLUMN c3 TEXT",
+        "ALTER TABLE notes ADD COLUMN c4 TEXT",
+    ];
+
+    fn migrations(breaking: &[bool]) -> Vec<Migration> {
         std::iter::once(initial())
-            .chain((2..=version).map(|v| Migration::sql(v, "index", INDEXES[v as usize - 2])))
+            .chain(breaking.iter().enumerate().map(|(index, breaking)| {
+                let version = index as u32 + 2;
+                if *breaking {
+                    Migration::sql(version, "index", INDEXES[index])
+                } else {
+                    Migration::sql(version, "column", COLUMNS[index])
+                }
+            }))
             .collect()
     }
 
@@ -297,13 +312,16 @@ mod differential {
     /// migration: those writes join the later captured prefix
     /// (`RaiseCaptures.later_capture_never_deadlocks`,
     /// `a_write_between_unpublished_migrations_joins_the_later_prefix`).
+    /// An addition-only update moves a raise still waiting to its version
+    /// (`RaiseCaptures.capture_at_raise_version`).
     fn generate(rng: &mut Rng) -> Vec<Value> {
         let mut version = 1;
         (0..16)
             .map(|_| match rng.pick(10) {
                 0 if version < 4 => {
                     version += 1;
-                    json!({"event": "migrate", "version": version})
+                    let event = if rng.pick(3) == 0 { "add" } else { "migrate" };
+                    json!({"event": event, "version": version})
                 }
                 0..=2 => json!({"event": "write"}),
                 3..=5 => {
@@ -364,7 +382,7 @@ mod differential {
         let storage = storage();
         let mut device = group(storage.clone(), 1).await.pop().unwrap();
         let tables = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
-        let mut version = 1;
+        let mut breaking = Vec::new();
         let mut rows = 0;
         let mut out = Vec::new();
         for event in events {
@@ -376,7 +394,7 @@ mod differential {
                         .db
                         .write(move |sql| {
                             sql.execute(
-                                "INSERT INTO notes VALUES(?1,'title','body')",
+                                "INSERT INTO notes(id,title,body) VALUES(?1,'title','body')",
                                 [rows.to_string()],
                             )?;
                             Ok(())
@@ -384,10 +402,10 @@ mod differential {
                         .await
                         .unwrap();
                 }
-                "migrate" => {
-                    version = event["version"].as_u64().unwrap() as u32;
+                kind @ ("migrate" | "add") => {
+                    breaking.push(kind == "migrate");
                     device
-                        .reopen(storage.clone(), tables(), migrations(version))
+                        .reopen(storage.clone(), tables(), migrations(&breaking))
                         .await;
                     // Migration keeps every original record byte for byte.
                     let after = device.db.test_queued_writes().await.unwrap();
@@ -417,7 +435,7 @@ mod differential {
                 }
                 "crash" => {
                     device
-                        .reopen(storage.clone(), tables(), migrations(version))
+                        .reopen(storage.clone(), tables(), migrations(&breaking))
                         .await
                 }
                 other => panic!("unknown event {other}"),
@@ -430,7 +448,7 @@ mod differential {
     #[tokio::test]
     #[ignore = "requires COVEN_QUEUE_LEAN; scripts/check.sh supplies the queue runner"]
     async fn queue_raise_differential_histories() {
-        let (mut raised, mut between) = (0, 0);
+        let (mut raised, mut between, mut moved) = (0, 0, 0);
         for seed in 0..48 {
             let mut rng = Rng(seed * 7919 + 1);
             let events = generate(&mut rng);
@@ -445,6 +463,13 @@ mod differential {
                     && kinds[kinds[..i].iter().rposition(|k| *k == "migrate").unwrap()..i]
                         .contains(&"write")
             }));
+            // An addition-only update after a migration: a waiting raise moves.
+            moved += usize::from(
+                kinds
+                    .iter()
+                    .enumerate()
+                    .any(|(i, kind)| *kind == "add" && kinds[..i].contains(&"migrate")),
+            );
             let output = crate::tests::run_lean(
                 "COVEN_QUEUE_LEAN",
                 &json!({"mode": "raise", "app": 1, "events": events}),
@@ -466,6 +491,7 @@ mod differential {
         }
         assert!(raised > 0, "some histories publish a raise");
         assert!(between > 0, "some histories write between two migrations");
+        assert!(moved > 0, "some histories add after a migration");
     }
 
     /// IO `SnapshotWrites` on Ana's raise: her capture may contain unsent own
@@ -503,7 +529,7 @@ mod differential {
                             .db
                             .write(move |sql| {
                                 sql.execute(
-                                    "INSERT INTO notes VALUES(?1,'title','body')",
+                                    "INSERT INTO notes(id,title,body) VALUES(?1,'title','body')",
                                     [rows.to_string()],
                                 )?;
                                 Ok(())

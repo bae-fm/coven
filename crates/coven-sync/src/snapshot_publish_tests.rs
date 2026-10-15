@@ -928,3 +928,46 @@ async fn writing_resumes_after_each_recorded_step_with_identical_ciphertext() {
         assert!(a.db.operations().await.unwrap().is_empty());
     }
 }
+
+/// An addition-only update before a breaking migration's raise publishes
+/// moves the raise to the newer version: the capture taken again after Ben's
+/// edit applies is at that schema, so its header and raise agree, it
+/// publishes, and Ben reloads from it once updated (§17.1).
+#[tokio::test]
+async fn an_addition_before_the_raise_raises_to_the_newest_version() {
+    use crate::device_log_sync::tests::schema::{initial, publish_raise, seed, sync_all, update};
+    use crate::device_log_sync::tests::{group, sql, storage};
+    let storage = storage();
+    let mut devices = group(storage.clone(), 2).await;
+    seed(&mut devices).await;
+    update(&mut devices[0], storage.clone(), true, true).await;
+    let rename = Migration::sql(2, "change", "ALTER TABLE notes RENAME COLUMN title TO name")
+        .writes(|row| {
+            row.rename_column("title", "name");
+            Ok(())
+        });
+    let color = Migration::sql(3, "color", "ALTER TABLE notes ADD COLUMN color TEXT");
+    let tables = vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
+    let migrations = vec![initial(), rename, color];
+    devices[0]
+        .reopen(storage.clone(), tables.clone(), migrations.clone())
+        .await;
+    sql(&devices[0].db, "UPDATE notes SET color='blue'").await;
+    sql(&devices[1].db, "UPDATE notes SET title='Shopping'").await;
+    devices[1].writes.upload_writes().await.unwrap();
+    // The capture taken again takes in the color write, sent first (§15).
+    publish_raise(&mut devices[0]).await;
+    publish_raise(&mut devices[0]).await;
+    let log = devices[0].db.store_log().await.unwrap();
+    assert_eq!(log.replay.state.schema[&Audience::Store].number, 3);
+    assert!(devices[0].db.raise_captures().await.unwrap().is_empty());
+    devices[1].reopen(storage.clone(), tables, migrations).await;
+    sync_all(&mut devices).await;
+    let both = "SELECT name || color FROM notes";
+    for device in &devices {
+        let row = device
+            .db
+            .read(|sql| Ok(sql.query_row(both, [], |r| r.get::<_, String>(0))?));
+        assert_eq!(row.await.unwrap(), "Shoppingblue".to_owned());
+    }
+}

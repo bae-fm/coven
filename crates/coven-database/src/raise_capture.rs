@@ -124,6 +124,40 @@ fn capture_audience(
     Ok(())
 }
 
+/// An addition-only update while captures wait to publish: each waiting
+/// raise moves to `version`, its audience captured again through this
+/// device's newest write, so every capture is taken at the version its raise
+/// publishes and the snapshot's header names it (§17.1; queue
+/// `RaiseCaptures.capture_at_raise_version`). Returns whether any waited.
+pub(crate) fn raise_to(
+    db: &DatabaseConnection,
+    tables: &[crate::SyncedTable],
+    device: DeviceId,
+    version: u32,
+) -> Result<bool, DbError> {
+    let waiting = rows(db)?;
+    if waiting.is_empty() {
+        return Ok(false);
+    }
+    let schema = WriteSchema::read(db, tables.to_vec())?;
+    let newest = newest_own(db, device)?;
+    for (audience, _, _, _) in waiting {
+        capture_audience(db, &schema, audience, newest, version)?;
+    }
+    Ok(true)
+}
+
+/// This device's newest write, which a capture taken again runs through.
+fn newest_own(db: &DatabaseConnection, device: DeviceId) -> Result<WriteId, DbError> {
+    crate::download::positions(db)?
+        .0
+        .into_iter()
+        .find(|id| id.device == device)
+        .ok_or(DbError::Invariant {
+            what: "a captured device has its own migration marker",
+        })
+}
+
 /// Before an audience's raise snapshot is prepared, after a completed
 /// catch-up: keep its capture if that catch-up applied nothing past it,
 /// otherwise capture the audience again through this device's newest write
@@ -164,15 +198,13 @@ pub(crate) fn prepare(
     {
         return Ok(Some(capture));
     }
-    let own = positions
-        .0
-        .iter()
-        .find(|id| id.device == device)
-        .copied()
-        .ok_or(DbError::Invariant {
-            what: "a captured device has its own migration marker",
-        })?;
-    capture_audience(db, schema, selected.clone(), own, version)?;
+    capture_audience(
+        db,
+        schema,
+        selected.clone(),
+        newest_own(db, device)?,
+        version,
+    )?;
     Ok(captures(db, device)?
         .into_iter()
         .find(|c| c.audience == *selected))

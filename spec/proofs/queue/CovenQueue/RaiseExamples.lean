@@ -111,7 +111,7 @@ theorem raise_publishes_with_new_tail :
 with marker 4 before raise 2 ever published, and writes 5. Her second capture
 replaces the first and runs through 4. -/
 def twoMigrations : RaiseUpload.Local :=
-  (((((⟨.empty 0, 1, 0, 0⟩ : RaiseUpload.Local).appWrite (record 0 0 1)).migrated 2
+  (((((⟨.empty 0, 1, 0, 0, false⟩ : RaiseUpload.Local).appWrite (record 0 0 1)).migrated 2
     (record 0 0 2).identity).appWrite (record 0 0 2)).migrated 3
     (record 0 0 3).identity).appWrite (record 0 0 3)
 
@@ -146,7 +146,7 @@ before preparing the raise applied a remote write, so she captures the store
 again through her newest write, 3, with no new marker; then she writes 4.
 With the store still at 1, records 1 to 3 pass the gate and 4 waits. -/
 def recaptured : RaiseUpload.Local :=
-  ((((⟨.empty 0, 1, 0, 0⟩ : RaiseUpload.Local).appWrite (record 0 0 1)).migrated 2
+  ((((⟨.empty 0, 1, 0, 0, false⟩ : RaiseUpload.Local).appWrite (record 0 0 1)).migrated 2
     (record 0 0 2).identity).appWrite (record 0 0 2)).recaptured.appWrite (record 0 0 2)
 
 theorem recaptured_reach : RaiseUpload.LocalReach encode 0 1 recaptured :=
@@ -170,6 +170,32 @@ theorem recaptured_raise_publishes :
         exact ⟨⟨q.reserved, 1, 1⟩, some ⟨some q.device, false, ⟨q.settled, 0, 0⟩⟩,
           rfl, by simp [checkIdentity, Queue.reserved, Nat.not_lt_of_ge (Nat.le_add_right q.settled q.waiting.length)]⟩)
     (by intro p _; exact Or.inl rfl) (by decide) (by decide)
+
+/-- Ana writes 1, migrates to 2 (breaking) with marker 2, and her app then
+updates to 3, adding only a column, before raise 2 publishes. Keeping the
+pending raise at 2 leaves a capture whose raise (2) differs from the schema a
+capture taken again records (3): every reader refuses that snapshot (E-D4). -/
+def additionKeepingRaise : RaiseUpload.Local :=
+  { (((⟨.empty 0, 1, 0, 0, false⟩ : RaiseUpload.Local).appWrite (record 0 0 1)).migrated 2
+    (record 0 0 2).identity) with app := 3 }
+
+theorem addition_keeping_raise_unpaired :
+    additionKeepingRaise.pending = true ∧
+      additionKeepingRaise.publication ≠ additionKeepingRaise.app := by decide
+
+/-- The rule instead: the update moves the waiting raise to 3, captured
+through marker 2, so the snapshot is at the version it raises to. -/
+def additionMovesRaise : RaiseUpload.Local :=
+  (((⟨.empty 0, 1, 0, 0, false⟩ : RaiseUpload.Local).appWrite (record 0 0 1)).migrated 2
+    (record 0 0 2).identity).updated 3
+
+theorem addition_moves_raise :
+    additionMovesRaise.publication = 3 ∧ additionMovesRaise.app = 3 ∧
+      additionMovesRaise.through = 2 ∧
+      RaiseUpload.LocalReach encode 0 1 additionMovesRaise :=
+  ⟨by decide, by decide, by decide,
+    .next (.next (.next .start (.write _ _)) (.migrate _ 2 _ (by decide)))
+      (.update _ 3 (by decide))⟩
 
 /-- If a competing raise wins first, Ana keeps the same old upload bytes.
 Her reload and another receiver use the same selected boundary and callback. -/

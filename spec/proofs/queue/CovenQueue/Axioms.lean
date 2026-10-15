@@ -190,6 +190,10 @@ import CovenQueue
 #print axioms CovenQueue.RaiseExamples.recaptured_reach
 #print axioms CovenQueue.RaiseExamples.recaptured_write_joins_prefix
 #print axioms CovenQueue.RaiseExamples.recaptured_raise_publishes
+#print axioms CovenQueue.RaiseUpload.capture_at_raise_version
+#print axioms CovenQueue.RaiseUpload.update_admits_prefix
+#print axioms CovenQueue.RaiseExamples.addition_keeping_raise_unpaired
+#print axioms CovenQueue.RaiseExamples.addition_moves_raise
 #print axioms CovenQueue.Provisional.provisional_verdict_agrees
 #print axioms CovenQueue.Provisional.provisional_change_agrees
 #print axioms CovenQueue.Provisional.provisional_record_agrees

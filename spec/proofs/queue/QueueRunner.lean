@@ -168,7 +168,7 @@ Each event applies the model's own queue functions (`Queue.commit`,
 `Queue.finish`) under the `Uploadable` gate with the latest local migration's
 version, and the raise advances only when `RaiseUpload.Confirmed` holds. A
 later migration replaces the captured plan, as `RaiseUpload.Local.migrated`
-does. Bytes are the attempt's identity: sealing and
+does; an addition-only update moves a waiting one, as `Local.updated` does. Bytes are the attempt's identity: sealing and
 real encodings are outside this comparison. -/
 
 private def sealAttempt : Seal := fun a => [a.record.identity.id.number, a.format]
@@ -223,6 +223,17 @@ private def raiseStep (s : Raising) (event : Json) : Except String Raising := do
     let world : World := { s.world with queue := q }
     let captured : Raising := { s with world := world, app := version, publication := version }
     pure { captured with stage := some RaiseUpload.Stage.captured, plan := some (plan, version) }
+  | "add" =>
+    -- `Local.updated`: an addition-only update moves a waiting raise to its
+    -- version, captured again through the newest write.
+    let version ← event.getObjValAs? Nat "version"
+    match s.stage, s.plan with
+    | some .captured, some _ =>
+      let through := s.world.queue.reserved
+      let covers := (List.range through).map fun n => (⟨s.world.queue.device, n + 1⟩ : WriteId)
+      let plan : RaiseUpload.Plan := ⟨through, covers, [], []⟩
+      pure { s with app := version, publication := version, plan := some (plan, version) }
+    | _, _ => pure { s with app := version }
   | "upload" =>
     let fault ← event.getObjValAs? Nat "fault"
     let through := match s.plan with | some (plan, _) => plan.through | none => 0

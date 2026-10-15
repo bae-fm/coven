@@ -14,9 +14,18 @@ the audience again from its current state, through its newest write, with no
 new marker (Rust `raise_capture::prepare`). Its app writes up to that write
 join the captured prefix, and the gate admits them by number.
 
+An app update that only adds tables or columns runs no breaking migration
+and appends no marker. While a capture still waits to publish, its raise
+moves to the updated version and the audience is captured again through the
+newest own write: a capture is always taken at the version its raise
+publishes, so the raise snapshot's header names that version
+(`capture_at_raise_version`; `addition_keeping_raise_unpaired` is the
+history where keeping the earlier raise breaks this).
+
 `Local` holds the app's version, the version of the latest local migration
-(`publication`, zero for none) and the newest own write a capture covers
-(`through`, zero for none). -/
+(`publication`, zero for none), the newest own write a capture covers
+(`through`, zero for none) and whether a capture waits to publish
+(`pending`; Rust: rows in `_coven_raise_captures`). -/
 
 namespace CovenQueue.RaiseUpload
 
@@ -25,21 +34,33 @@ structure Local where
   app : Nat
   publication : Nat
   through : Nat
+  pending : Bool
 
 /-- An app write, at the app's version. -/
 def Local.appWrite (l : Local) (r : Record) : Local :=
   ⟨{ l.world with queue := l.world.queue.commit { r with version := l.app, disposition := .ordinary } },
-    l.app, l.publication, l.through⟩
+    l.app, l.publication, l.through, l.pending⟩
 
 /-- A breaking migration: its marker, and a capture through it that replaces
 any earlier one. -/
 def Local.migrated (l : Local) (version : Nat) (id : Identity) : Local :=
   ⟨{ l.world with queue := RaiseUpload.migrate l.world.queue version id },
-    version, version, l.world.queue.reserved + 1⟩
+    version, version, l.world.queue.reserved + 1, true⟩
 
 /-- A capture taken again after a catch-up, through the device's newest
 write. No marker and no number: only the captured cut moves. -/
 def Local.recaptured (l : Local) : Local := { l with through := l.world.queue.reserved }
+
+/-- An addition-only update to `version`: no marker. A waiting capture's
+raise moves to that version, captured again through the newest write (Rust
+`raise_capture::raise_to`). -/
+def Local.updated (l : Local) (version : Nat) : Local :=
+  if l.pending then
+    { l with app := version, publication := version, through := l.world.queue.reserved }
+  else { l with app := version }
+
+/-- The raise published: its capture is discarded. -/
+def Local.published (l : Local) : Local := { l with pending := false }
 
 /-- App writes take the app's version. A migration to a newer version
 appends its marker and captures through it; a recapture moves the cut to the
@@ -49,25 +70,29 @@ inductive LocalStep (encode : Seal) : Local → Local → Prop
   | write (l : Local) (r : Record) : LocalStep encode l (l.appWrite r)
   | migrate (l : Local) (version : Nat) (id : Identity) : l.app < version →
       LocalStep encode l (l.migrated version id)
-  | recapture (l : Local) : 0 < l.publication → LocalStep encode l l.recaptured
+  | recapture (l : Local) : l.pending = true → LocalStep encode l l.recaptured
+  | update (l : Local) (version : Nat) : l.app < version →
+      LocalStep encode l (l.updated version)
+  | publish (l : Local) : l.pending = true → LocalStep encode l l.published
   | queue (l : Local) (next : World) : CovenQueue.Step encode l.world next →
       next.queue.reserved = l.world.queue.reserved →
       LocalStep encode l { l with world := next }
 
 /-- An installation with an empty queue and no local migration yet. -/
 inductive LocalReach (encode : Seal) (device app : Nat) : Local → Prop
-  | start : LocalReach encode device app ⟨.empty device, app, 0, 0⟩
+  | start : LocalReach encode device app ⟨.empty device, app, 0, 0, false⟩
   | next {l l'} : LocalReach encode device app l → LocalStep encode l l' →
       LocalReach encode device app l'
 
 def records (q : Queue) : List Record := q.waiting.map Pending.record
 
-/-- Every waiting record is no newer than the app, and the captured cut is a
-reserved number. -/
+/-- Every waiting record is no newer than the app, the captured cut is a
+reserved number, and a waiting capture's raise is to the app's version. -/
 structure LocalInv (l : Local) : Prop where
   valid : l.world.queue.Valid
   versions : ∀ r ∈ records l.world.queue, r.version ≤ l.app
   within : l.through ≤ l.world.queue.reserved
+  paired : l.pending = true → l.publication = l.app
 
 theorem commit_records (q : Queue) (r : Record) :
     records (q.commit r) = records q ++
@@ -107,14 +132,14 @@ theorem step_records {encode : Seal} {s t : World} (step : CovenQueue.Step encod
   | land => simp only [World.land]; split <;> simp
   | acknowledge => exact finish_records _
 
-theorem start_inv (device app : Nat) : LocalInv ⟨.empty device, app, 0, 0⟩ :=
-  ⟨.nil _, by simp [records, World.empty], Nat.zero_le _⟩
+theorem start_inv (device app : Nat) : LocalInv ⟨.empty device, app, 0, 0, false⟩ :=
+  ⟨.nil _, by simp [records, World.empty], Nat.zero_le _, by simp⟩
 
 theorem local_step_inv {encode : Seal} {l l' : Local} (h : LocalInv l)
     (step : LocalStep encode l l') : LocalInv l' := by
   cases step with
   | write r =>
-    refine ⟨commit_valid _ h.valid _, ?_, ?_⟩
+    refine ⟨commit_valid _ h.valid _, ?_, ?_, h.paired⟩
     · intro x member
       change x ∈ records (l.world.queue.commit _) at member
       rw [commit_records] at member
@@ -124,7 +149,7 @@ theorem local_step_inv {encode : Seal} {l l' : Local} (h : LocalInv l)
     · have := h.within
       simp [Local.appWrite, Queue.commit, Queue.reserved] at this ⊢; omega
   | migrate version id newer =>
-    refine ⟨commit_valid _ h.valid _, ?_, ?_⟩
+    refine ⟨commit_valid _ h.valid _, ?_, ?_, fun _ => rfl⟩
     · intro x member
       change x ∈ records (l.world.queue.commit _) at member
       rw [commit_records] at member
@@ -132,10 +157,19 @@ theorem local_step_inv {encode : Seal} {l l' : Local} (h : LocalInv l)
       · exact Nat.le_trans (h.versions x old) (Nat.le_of_lt newer)
       · simp at new; subst new; exact Nat.le_refl _
     · simp [Local.migrated, RaiseUpload.migrate, Queue.commit, Queue.reserved]; omega
-  | recapture _ => exact ⟨h.valid, h.versions, Nat.le_refl _⟩
+  | recapture _ => exact ⟨h.valid, h.versions, Nat.le_refl _, h.paired⟩
+  | update version newer =>
+    have versions : ∀ r ∈ records l.world.queue, r.version ≤ version :=
+      fun r member => Nat.le_trans (h.versions r member) (Nat.le_of_lt newer)
+    unfold Local.updated
+    split
+    · exact ⟨h.valid, versions, Nat.le_refl _, fun _ => rfl⟩
+    · rename_i waiting
+      exact ⟨h.valid, versions, h.within, fun pending => absurd pending waiting⟩
+  | publish _ => exact ⟨h.valid, h.versions, h.within, by simp [Local.published]⟩
   | queue next step same =>
     have kept := step_records step same
-    refine ⟨step_queue_valid step h.valid, ?_, ?_⟩
+    refine ⟨step_queue_valid step h.valid, ?_, ?_, h.paired⟩
     · intro x member
       rw [kept] at member
       exact h.versions x (List.mem_of_mem_drop member)
@@ -163,6 +197,12 @@ theorem local_step_keeps_records {encode : Seal} {l l' : Local}
     change _ <+: records (l.world.queue.commit _)
     rw [commit_records, List.drop_zero]; exact List.prefix_append _ _
   | recapture _ => exact ⟨0, rfl, by simp [Local.recaptured]⟩
+  | update version _ =>
+    unfold Local.updated
+    split
+    · exact ⟨0, rfl, by simp⟩
+    · exact ⟨0, rfl, by simp⟩
+  | publish _ => exact ⟨0, rfl, by simp [Local.published]⟩
   | queue next step same =>
     refine ⟨next.queue.settled - l.world.queue.settled, by
       have := (step_monotone step).1; show next.queue.settled = _; omega, ?_⟩
@@ -233,6 +273,30 @@ theorem recapture_admits_prefix (l : Local) (inv : LocalInv l) (store : Nat) :
   have number := numbered_take_lt inv.valid l.world.queue.waiting.length p
     (by simpa using mem)
   exact .inr (.inr (.inr (.inr (by simp [Local.recaptured, Queue.reserved]; omega))))
+
+/-- Every capture is taken at the version its raise publishes: whenever a
+capture waits, through a migration, a capture taken again or an
+addition-only update, the raise's version is the app's schema version, so
+the snapshot's header and its raise agree (format D9). -/
+theorem capture_at_raise_version {encode : Seal} {device app : Nat} {l : Local}
+    (reach : LocalReach encode device app l) (waiting : l.pending = true) :
+    l.publication = l.app := (reach_inv reach).paired waiting
+
+/-- An addition-only update while a capture waits changes no record and
+captures through the newest write at the new version: every queued own
+write passes the gate before any raise, the older ones by their version. -/
+theorem update_admits_prefix (l : Local) (inv : LocalInv l) (waiting : l.pending = true)
+    (version store : Nat) :
+    (l.updated version).world = l.world ∧ (l.updated version).publication = version ∧
+      ∀ r ∈ records l.world.queue,
+        Uploadable store (l.updated version).publication (l.updated version).through r := by
+  simp only [Local.updated, waiting, ite_true]
+  refine ⟨trivial, trivial, ?_⟩
+  intro r member
+  obtain ⟨p, mem, rfl⟩ := List.mem_map.mp member
+  have number := numbered_take_lt inv.valid l.world.queue.waiting.length p
+    (by simpa using mem)
+  exact .inr (.inr (.inr (.inr (by simp [Queue.reserved]; omega))))
 
 /-- An app write at the latest migration's version, numbered after every
 capture, still waits for a kept raise to it: the capture admits only what it
