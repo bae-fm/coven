@@ -270,10 +270,6 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<FileRef, DbEr
             [path],
         )?;
     }
-    if db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])? != 1 {
-        return Err(DbError::Invariant {
-            what: "completing an upload removes its one queue row",
-        });
-    }
+    db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
     FileRef::decode(&reference)
 }
