@@ -94,25 +94,6 @@ fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
     )
 }
 
-/// Whether a listed key, relative to the location prefix, is a detection probe.
-/// Probes never reach published-object listings, even after a killed process.
-pub(super) fn is_probe(relative: &str, prefix: &ObjectPrefix) -> Result<bool, StorageError> {
-    let directory = format!("{}{PROBES}/", ObjectPrefix::all(prefix.store()).as_str());
-    let Some(rest) = relative.strip_prefix(&directory) else {
-        return Ok(false);
-    };
-    if !relative.starts_with(prefix.as_str()) {
-        return Err(StorageFailure::Protocol.with_source("S3 listed a probe outside prefix"));
-    }
-    let run = rest.split_once('/').map(|(run, _)| run).unwrap_or(rest);
-    let parsed = uuid::Uuid::parse_str(run)
-        .map_err(|source| StorageFailure::Protocol.with_source(source))?;
-    if parsed.to_string() != run {
-        return Err(StorageFailure::Protocol.with_source("S3 listed a malformed detection probe"));
-    }
-    Ok(true)
-}
-
 fn observation(probe: S3Probe, held: bool, detail: impl Into<String>) -> S3Observation {
     S3Observation {
         probe,

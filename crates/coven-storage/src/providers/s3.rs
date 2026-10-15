@@ -420,20 +420,10 @@ impl ProviderOps for S3Storage {
                 let relative = key
                     .strip_prefix(&root)
                     .ok_or(StorageFailure::Protocol.with_source("S3 listed another location"))?;
-                if self.settings.copy_publication.multipart().is_some()
-                    && copy_upload::is_temporary(relative, &prefix)?
-                {
-                    tracing::debug!("S3 upload temporary retained for session cleanup");
+                // Upload temporaries and detection probes are outside D10 too.
+                let Some(path) = listing.object_path(relative)? else {
                     continue;
-                }
-                if detect::is_probe(relative, &prefix)? {
-                    tracing::debug!("S3 detection probe outside published objects");
-                    continue;
-                }
-                let path = ObjectPath::parse(relative)?;
-                if !prefix.contains(&path) {
-                    return Err(StorageFailure::Protocol.with_source("S3 listed outside prefix"));
-                }
+                };
                 let size = object
                     .size()
                     .and_then(|size| u64::try_from(size).ok())

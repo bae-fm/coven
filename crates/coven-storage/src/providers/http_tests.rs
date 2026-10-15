@@ -116,6 +116,12 @@ fn typed_provider_error_mapping() {
         (
             CloudProvider::Dropbox,
             409,
+            serde_json::json!({"error_summary":"path/not_folder/..."}),
+            StorageFailure::NotFound,
+        ),
+        (
+            CloudProvider::Dropbox,
+            409,
             serde_json::json!({"error_summary":"path/no_permission/..."}),
             StorageFailure::PermissionDenied,
         ),

@@ -404,3 +404,76 @@ async fn writer_discovery_reads_only_immediate_folders_and_all_pages() {
         [DeviceId(31), DeviceId(32)]
     );
 }
+
+#[tokio::test]
+async fn listings_skip_stray_files_and_folders_beside_shared_stores() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    state.lock().unwrap().folders.insert("/vacation".into());
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = Arc::new(provider(&server.url));
+    assert!(storage
+        .list(&ObjectPrefix::all(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
+    state.lock().unwrap().missing_namespace = true;
+    assert!(matches!(storage.list(&ObjectPrefix::all(STORE_ID)).await,
+        Err(error) if error.failure() == StorageFailure::PermissionDenied));
+    state.lock().unwrap().missing_namespace = false;
+    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
+        .shared_location(coven_foundation::id_source::StoreId(
+            uuid::Uuid::from_bytes([0x20; 16]),
+        ))
+        .await;
+    // Stray files and folders, including names close to a coven path, are
+    // no objects or writers (D10); the store's own objects still list.
+    let write = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let entry = ObjectPath::store_log(STORE_ID, DeviceId(32), std::num::NonZeroU64::MIN);
+    storage.create(&write, b"write").await.unwrap();
+    storage.create(&entry, b"entry").await.unwrap();
+    {
+        let mut remote = state.lock().unwrap();
+        for folder in ["devices/031", "store-log/new folder", "photos"] {
+            remote.folders.insert(format!("/{STORE_ID}/{folder}"));
+        }
+        for stray in [
+            "notes.txt",
+            "devices/31/01",
+            "devices/031/1",
+            "photos/1",
+            "store-log/readme",
+            "store-log/32/1/extra",
+        ] {
+            let path = format!("/{STORE_ID}/{stray}");
+            remote.objects.insert(path, b"stray".to_vec());
+        }
+    }
+    let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|object| &object.path).collect::<Vec<_>>(),
+        [&write, &entry]
+    );
+    assert_eq!(
+        storage.list_writers(STORE_ID).await.unwrap(),
+        [DeviceId(32)]
+    );
+}
+
+#[tokio::test]
+async fn a_failed_page_fails_the_listing_rather_than_ending_it() {
+    let server = TestServer::new(Router::new().fallback(|uri: Uri| async move {
+        if uri.path().ends_with("/continue") {
+            response(503, "{}")
+        } else {
+            reply(json!({"entries":[],"has_more":true,"cursor":"next"}))
+        }
+    }))
+    .await;
+    let storage = provider(&server.url);
+    for result in [
+        storage.list(&ObjectPrefix::all(STORE_ID)).await.map(|_| ()),
+        storage.list_writers(STORE_ID).await.map(|_| ()),
+    ] {
+        assert_eq!(result.unwrap_err().failure(), StorageFailure::Network);
+    }
+}

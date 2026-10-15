@@ -514,7 +514,9 @@ fn dropbox_failure(value: &Value) -> Option<StorageFailure> {
         || names.contains(&"invalid_id")
     {
         Some(StorageFailure::ContainerNotFound)
-    } else if names.contains(&"not_found") {
+    } else if names.contains(&"not_found") || names.contains(&"not_folder") {
+        // `not_folder`: a file holds the name of a folder the path needs, so
+        // nothing exists beneath it.
         Some(StorageFailure::NotFound)
     } else {
         None

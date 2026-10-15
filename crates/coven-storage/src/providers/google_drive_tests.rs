@@ -335,22 +335,6 @@ async fn create_switches_to_a_session_above_the_multipart_request_limit() {
 }
 
 #[tokio::test]
-async fn listing_refuses_a_folder_at_an_object_path() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let parent = state
-        .lock()
-        .unwrap()
-        .directory(&format!("{STORE_ID}/devices/31"));
-    state.lock().unwrap().files.insert("directory".into(), (metadata(json!({"id":"directory","name":"1","mimeType":"application/vnd.google-apps.folder","parents":[parent]}), 0), Vec::new()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    assert!(matches!(
-        storage.list(&ObjectPrefix::all(STORE_ID)).await,
-        Err(error) if error.failure() == StorageFailure::InvalidPath
-    ));
-}
-
-#[tokio::test]
 async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
@@ -551,31 +535,103 @@ async fn incomplete_search_and_invalid_pages_never_describe_an_empty_store() {
 }
 
 #[tokio::test]
-async fn listing_refuses_native_documents_and_shortcuts_named_like_objects() {
-    for kind in [
-        "application/vnd.google-apps.document",
-        "application/vnd.google-apps.shortcut",
-    ] {
-        let state = Arc::new(Mutex::new(Remote::default()));
-        let parent = state
+async fn listings_and_reads_skip_stray_files_folders_and_documents() {
+    const FOLDER: &str = "application/vnd.google-apps.folder";
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let write = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    let entry = ObjectPath::store_log(STORE_ID, DeviceId(32), std::num::NonZeroU64::MIN);
+    storage.create(&write, b"write").await.unwrap();
+    storage.create(&entry, b"entry").await.unwrap();
+    {
+        let mut remote = state.lock().unwrap();
+        let store = remote.directory(&STORE_ID.to_string());
+        let device = remote.directory(&format!("{STORE_ID}/devices/31"));
+        let logs = remote.directory(&format!("{STORE_ID}/store-log"));
+        let photos = remote.directory(&format!("{STORE_ID}/Photos"));
+        for (name, parent, kind) in [
+            ("1", &device, "application/vnd.google-apps.document"),
+            ("2", &device, FOLDER),
+            ("3", &device, "application/vnd.google-apps.shortcut"),
+            ("01", &device, "application/octet-stream"),
+            ("Notes.txt", &store, "text/plain"),
+            ("devices", &store, "text/plain"),
+            ("1", &photos, "image/jpeg"),
+            ("New folder", &logs, FOLDER),
+            ("readme", &logs, "text/plain"),
+        ] {
+            remote.next += 1;
+            let id = format!("stray{}", remote.next);
+            let item = json!({"id":id,"name":name,"mimeType":kind,"parents":[parent]});
+            remote
+                .files
+                .insert(id, (metadata(item, 5), b"stray".to_vec()));
+        }
+    }
+    let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|object| &object.path).collect::<Vec<_>>(),
+        [&write, &entry]
+    );
+    assert_eq!(
+        storage.list_writers(STORE_ID).await.unwrap(),
+        [DeviceId(32)]
+    );
+    // A connection with no cached ids finds the file beside the document
+    // sharing its name, and a folder named like an object is no object.
+    let fresh = provider(&server.url);
+    assert_eq!(fresh.read(&write).await.unwrap(), b"write");
+    let folder_named_like_write =
+        ObjectPath::device_log(STORE_ID, DeviceId(31), 2.try_into().unwrap());
+    assert_eq!(fresh.status(&folder_named_like_write).await.unwrap(), None);
+    fresh.delete(&write).await.unwrap();
+    assert_eq!(
+        state
             .lock()
             .unwrap()
-            .directory(&format!("{STORE_ID}/devices/31"));
-        state.lock().unwrap().files.insert(
-            "native".into(),
-            (
-                metadata(
-                    json!({"id":"native","name":"1","mimeType":kind,"parents":[parent]}),
-                    0,
-                ),
-                Vec::new(),
-            ),
-        );
+            .files
+            .values()
+            .filter(|(item, _)| item["mimeType"] == "application/vnd.google-apps.document")
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn trashed_or_file_root_is_a_missing_container_and_another_id_a_protocol_error() {
+    for (root, failure) in [
+        (
+            json!({"id":"folder","mimeType":"application/vnd.google-apps.folder","trashed":true,"shared":false}),
+            StorageFailure::ContainerNotFound,
+        ),
+        (
+            json!({"id":"folder","mimeType":"text/plain","shared":false}),
+            StorageFailure::ContainerNotFound,
+        ),
+        (
+            json!({"id":"other","mimeType":"application/vnd.google-apps.folder","shared":false}),
+            StorageFailure::Protocol,
+        ),
+    ] {
+        let state = Arc::new(Mutex::new(Remote {
+            root: Some(root),
+            ..Remote::default()
+        }));
         let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
-        assert!(matches!(
-            provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await,
-            Err(error) if error.failure() == StorageFailure::InvalidPath
-        ));
+        let storage = provider(&server.url);
+        assert_eq!(
+            storage
+                .list(&ObjectPrefix::all(STORE_ID))
+                .await
+                .unwrap_err()
+                .failure(),
+            failure
+        );
+        assert_eq!(
+            storage.list_writers(STORE_ID).await.unwrap_err().failure(),
+            failure
+        );
     }
 }
 

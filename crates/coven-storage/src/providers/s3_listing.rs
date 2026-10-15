@@ -27,14 +27,19 @@ impl S3Storage {
                     .ok_or_else(|| {
                         StorageFailure::Protocol.with_source("S3 returned another writer folder")
                     })?;
-                let path = ObjectPath::parse(&format!("{store}/store-log/{name}/1"))?;
-                writers.insert(path.device().expect("store-log writer"));
+                writers.extend(crate::object_listing::writer_folder(store, name));
             }
+            // Objects directly under `store-log/`, its own folder marker
+            // included, are no writer folders (D10).
             for object in page.contents {
-                let name = object.key().ok_or(StorageFailure::Protocol)?;
-                if name != prefix {
-                    return Err(StorageFailure::Protocol
-                        .with_source("S3 writer listing returned a non-folder"));
+                if !object
+                    .key()
+                    .ok_or(StorageFailure::Protocol)?
+                    .starts_with(&prefix)
+                {
+                    return Err(
+                        StorageFailure::Protocol.with_source("S3 listed outside writer prefix")
+                    );
                 }
             }
             let Some(next) = page.next else { break };

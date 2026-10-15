@@ -315,11 +315,15 @@ impl GoogleDriveStorage {
             }
             error
         })?;
-        if http::string(&value, "id")? != self.folder
-            || value["mimeType"].as_str() != Some("application/vnd.google-apps.folder")
+        if http::string(&value, "id")? != self.folder {
+            return Err(StorageFailure::Protocol.with_source("Drive returned another folder"));
+        }
+        if value["mimeType"].as_str() != Some("application/vnd.google-apps.folder")
             || value["trashed"].as_bool() == Some(true)
         {
-            return Err(StorageFailure::InvalidPath.into());
+            // A trashed folder, or an id naming a file, holds no store.
+            return Err(StorageFailure::ContainerNotFound
+                .with_source("Drive's configured folder is trashed or not a folder"));
         }
         if access == OAuthAccess::GoogleDrive(GoogleDriveAccess::File) {
             // Drive omits `shared` for shared-drive items; `driveId` identifies them.

@@ -503,3 +503,75 @@ async fn disappeared_upload_folders_are_invalidated_before_retry() {
     storage.finish_upload(&mut upload).await.unwrap();
     assert_eq!(storage.read(&device_log(1)).await.unwrap(), b"data");
 }
+
+#[tokio::test]
+async fn listings_skip_stray_files_and_folders() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let entry = ObjectPath::store_log(STORE_ID, DeviceId(32), NonZeroU64::MIN);
+    storage.create(&device_log(1), b"write").await.unwrap();
+    storage.create(&entry, b"entry").await.unwrap();
+    {
+        let mut remote = state.lock().unwrap();
+        for (id, folder) in [
+            ("stray-photos", "Photos"),
+            ("stray-writer", "store-log/New folder"),
+            ("stray-object", "devices/31/2"),
+        ] {
+            remote
+                .dirs
+                .insert(id.into(), format!("{STORE_ID}/{folder}"));
+        }
+        for stray in [
+            "Notes.txt",
+            "Photos/1",
+            "devices/31/01",
+            "devices/31/2/1",
+            "store-log/readme",
+            "positions",
+        ] {
+            let path = format!("{STORE_ID}/{stray}");
+            remote.revisions.insert(path.clone(), 1);
+            remote.files.insert(path, b"stray".to_vec());
+        }
+    }
+    let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
+    assert_eq!(
+        listed.iter().map(|object| &object.path).collect::<Vec<_>>(),
+        [&device_log(1), &entry]
+    );
+    assert_eq!(
+        storage.list_writers(STORE_ID).await.unwrap(),
+        [DeviceId(32)]
+    );
+    // A file holding a folder's name leaves nothing beneath it.
+    assert!(provider(&server.url)
+        .list(&ObjectPrefix::positions(STORE_ID))
+        .await
+        .unwrap()
+        .is_empty());
+}
+
+#[tokio::test]
+async fn a_root_that_is_no_folder_is_missing_and_another_id_a_protocol_error() {
+    for (root, failure) in [
+        (
+            json!({"id":"root","file":{}}),
+            StorageFailure::ContainerNotFound,
+        ),
+        (json!({"id":"other","folder":{}}), StorageFailure::Protocol),
+    ] {
+        let server = TestServer::new(Router::new().fallback(move || {
+            let root = root.clone();
+            async move { reply(root) }
+        }))
+        .await;
+        let storage = provider(&server.url);
+        let error = storage
+            .list(&ObjectPrefix::all(STORE_ID))
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure(), failure);
+    }
+}

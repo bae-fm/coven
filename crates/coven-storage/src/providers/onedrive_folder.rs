@@ -35,17 +35,18 @@ impl OneDriveStorage {
                 Err(error) => return Err(error),
             };
             for item in http::array(&value, "value")? {
-                if !item["folder"].is_object() || item["file"].is_object() {
-                    return Err(StorageFailure::Protocol
-                        .with_source("OneDrive writer listing returned a file"));
+                // Files and other items under `store-log/` are no writer folders (D10).
+                if item_kind(item)? != Kind::Folder {
+                    continue;
                 }
                 let name = http::string(item, "name")?;
-                let path = ObjectPath::parse(&format!("{directory}/{name}/1"))?;
-                writers.insert(path.device().expect("store-log writer"));
-                folders.insert(
-                    format!("{directory}/{name}"),
-                    http::string(item, "id")?.to_owned(),
-                );
+                if let Some(writer) = crate::object_listing::writer_folder(store, name) {
+                    writers.insert(writer);
+                    folders.insert(
+                        format!("{directory}/{name}"),
+                        http::string(item, "id")?.to_owned(),
+                    );
+                }
             }
             let Some(next) = value.get("@odata.nextLink") else {
                 break;
@@ -163,8 +164,10 @@ impl OneDriveStorage {
                         }
                         Err(error) => return Err(error),
                     };
-                    if !value["folder"].is_object() || value["file"].is_object() {
-                        return Err(StorageFailure::InvalidPath.into());
+                    if item_kind(&value)? != Kind::Folder {
+                        // Another item holds the folder's name; nothing is beneath it.
+                        tracing::debug!(directory, "OneDrive listing folder is not a folder");
+                        return Ok(());
                     }
                     http::string(&value, "id")?.to_owned()
                 }
@@ -188,39 +191,31 @@ impl OneDriveStorage {
                         http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?)
                             .await?;
                     for item in http::array(&value, "value")? {
-                        let name = http::string(item, "name")?;
-                        if ["folder", "file"].iter().any(|facet| {
-                            item.get(*facet)
-                                .is_some_and(|value| !value.is_null() && !value.is_object())
-                        }) || (item["folder"].is_object() && item["file"].is_object())
-                        {
-                            return Err(
-                                StorageFailure::Protocol.with_source("invalid OneDrive item kind")
-                            );
+                        let kind = item_kind(item)?;
+                        let child = http::string(item, "name")?;
+                        if child.contains('/') {
+                            return Err(StorageFailure::Protocol
+                                .with_source("OneDrive child name holds a slash"));
                         }
-                        if names.len() == 1 && name == upload::TEMPORARIES {
-                            if !item["folder"].is_object() {
-                                return Err(StorageFailure::Protocol
-                                    .with_source("OneDrive upload namespace is not a folder"));
+                        let mut parts = names.clone();
+                        parts.push(child.to_owned());
+                        let name = parts.join("/");
+                        match kind {
+                            Kind::Folder => {
+                                if listing.object_folder(&name)? {
+                                    let id = http::string(item, "id")?.to_owned();
+                                    discovered.insert(name, id.clone());
+                                    folders.push((id, parts));
+                                }
                             }
-                            tracing::debug!(
-                                "OneDrive upload temporaries retained for session cleanup"
-                            );
-                            continue;
-                        }
-                        if item["folder"].is_object() {
-                            let mut parts = names.clone();
-                            parts.push(name.to_owned());
-                            crate::path::validate_directory(&parts.join("/"))?;
-                            let id = http::string(item, "id")?.to_owned();
-                            discovered.insert(parts.join("/"), id.clone());
-                            folders.push((id, parts));
-                        } else if item["file"].is_object() {
-                            let path = ObjectPath::from_components(&names, name)?;
-                            let object = object_metadata::onedrive(&path, item)?;
-                            listing.insert(object)?;
-                        } else {
-                            return Err(StorageFailure::InvalidPath.into());
+                            Kind::File => {
+                                if let Some(path) = listing.object_path(&name)? {
+                                    listing.insert(object_metadata::onedrive(&path, item)?)?;
+                                }
+                            }
+                            // A package such as a OneNote notebook, or another
+                            // item that is neither a file nor a folder.
+                            Kind::Other => listing.skip(),
                         }
                     }
                     match value.get("@odata.nextLink") {
@@ -244,6 +239,29 @@ impl OneDriveStorage {
         .await;
         drop(known);
         self.checked_folder_operation(result).await
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Kind {
+    Folder,
+    File,
+    Other,
+}
+
+/// An item's facet. A facet that is not an object, or both facets at once,
+/// is the provider's error.
+fn item_kind(item: &serde_json::Value) -> Result<Kind, StorageError> {
+    let facet = |name: &str| match item.get(name) {
+        None | Some(serde_json::Value::Null) => Ok(false),
+        Some(value) if value.is_object() => Ok(true),
+        Some(_) => Err(StorageFailure::Protocol.with_source("invalid OneDrive item kind")),
+    };
+    match (facet("folder")?, facet("file")?) {
+        (true, true) => Err(StorageFailure::Protocol.with_source("invalid OneDrive item kind")),
+        (true, false) => Ok(Kind::Folder),
+        (false, true) => Ok(Kind::File),
+        (false, false) => Ok(Kind::Other),
     }
 }
 

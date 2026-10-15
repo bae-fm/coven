@@ -204,6 +204,8 @@ pub(crate) mod google_drive {
         pub(crate) refuse_share: bool,
         pub(crate) lose_share_reply: bool,
         pub(crate) lose_delete_reply: bool,
+        /// Replaces the configured folder's metadata, e.g. trashed or a file.
+        pub(crate) root: Option<Value>,
     }
     impl Remote {
         pub(crate) fn directory(&mut self, path: &str) -> String {
@@ -279,6 +281,9 @@ pub(crate) mod google_drive {
             Value::Null
         };
         if parts == ["drive", "files", "folder"] && method == Method::GET {
+            if let Some(root) = &state.root {
+                return reply(root.clone());
+            }
             return reply(
                 json!({"id":"folder", "ownedByMe":!state.non_owner,"shared":state.shared,"mimeType":"application/vnd.google-apps.folder"}),
             );
@@ -500,6 +505,10 @@ pub(crate) mod google_drive {
                 .split("name = '")
                 .nth(1)
                 .map(|s| s.split('\'').next().unwrap());
+            let kind = q["q"]
+                .split("mimeType = '")
+                .nth(1)
+                .map(|s| s.split('\'').next().unwrap());
             let parents: Vec<_> = q["q"]
                 .split(" and ")
                 .next()
@@ -522,6 +531,7 @@ pub(crate) mod google_drive {
                         .iter()
                         .any(|parent| v["parents"].as_array().unwrap().contains(&json!(parent)))
                         && filter.is_none_or(|name| v["name"] == name)
+                        && kind.is_none_or(|kind| v["mimeType"] == kind)
                         && v["trashed"] != true
                 })
                 .map(|(v, _)| v.clone())

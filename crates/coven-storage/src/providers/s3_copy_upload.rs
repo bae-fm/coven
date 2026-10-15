@@ -373,22 +373,3 @@ impl S3Storage {
         self.delete_key(&self.session_key(session)?).await
     }
 }
-
-pub(super) fn is_temporary(relative: &str, prefix: &ObjectPrefix) -> Result<bool, StorageError> {
-    let directory = format!(
-        "{}{TEMPORARIES}/",
-        ObjectPrefix::all(prefix.store()).as_str()
-    );
-    let Some(id) = relative.strip_prefix(&directory) else {
-        return Ok(false);
-    };
-    if !relative.starts_with(prefix.as_str()) {
-        return Err(StorageFailure::Protocol.with_source("S3 listed temporary outside prefix"));
-    }
-    let parsed =
-        uuid::Uuid::parse_str(id).map_err(|source| StorageFailure::Protocol.with_source(source))?;
-    if parsed.to_string() != id {
-        return Err(StorageFailure::Protocol.with_source("S3 listed malformed upload temporary"));
-    }
-    Ok(true)
-}

@@ -97,8 +97,13 @@ impl OneDriveStorage {
         )
         .await
         .map_err(http::container_error)?;
-        if http::string(&value, "id")? != self.folder || !value["folder"].is_object() {
-            return Err(StorageFailure::InvalidPath.into());
+        if http::string(&value, "id")? != self.folder {
+            return Err(StorageFailure::Protocol.with_source("OneDrive returned another folder"));
+        }
+        if !value["folder"].is_object() {
+            // The configured id now names a file or package, not the folder.
+            return Err(StorageFailure::ContainerNotFound
+                .with_source("OneDrive's configured item is not a folder"));
         }
         Ok(())
     }

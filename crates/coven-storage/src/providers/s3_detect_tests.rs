@@ -723,7 +723,7 @@ async fn a_failed_probe_still_deletes_every_probe_object_and_upload() {
 }
 
 #[tokio::test]
-async fn listings_exclude_detection_probes_but_refuse_malformed_ones() {
+async fn listings_exclude_detection_probes_and_malformed_ones() {
     let fixture = Fixture::new(RUSTFS).await;
     let storage = StorageConnection::from_provider(Arc::new(
         S3Storage::new(
@@ -752,10 +752,7 @@ async fn listings_exclude_detection_probes_but_refuse_malformed_ones() {
         b"left".to_vec(),
         now(),
     );
-    assert_eq!(
-        storage.list(&all).await.unwrap_err().failure(),
-        StorageFailure::Protocol
-    );
+    assert!(storage.list(&all).await.unwrap().is_empty());
 }
 
 #[tokio::test]

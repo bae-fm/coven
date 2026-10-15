@@ -32,8 +32,10 @@ impl GoogleDriveStorage {
                     StorageFailure::Protocol.with_source("Drive writer query returned a file")
                 );
             }
-            let path = ObjectPath::parse(&format!("{directory}/{name}/1"))?;
-            writers.insert(path.device().expect("store-log writer"));
+            let Some(writer) = crate::object_listing::writer_folder(store, name) else {
+                continue;
+            };
+            writers.insert(writer);
             folders
                 .entry(format!("{directory}/{name}"))
                 .or_default()
@@ -166,7 +168,8 @@ impl GoogleDriveStorage {
                 }
             }
         }
-        for item in items {
+        // A folder, document or shortcut sharing the name is no copy (D10).
+        for item in items.into_iter().filter(|item| !native(item)) {
             object_metadata::drive(path, &item)?;
             let stored = http::timestamp(&item, "createdTime")?;
             let id = http::string(&item, "id")?.to_owned();
@@ -294,7 +297,9 @@ impl GoogleDriveStorage {
                 let path = format!("{directory}/{name}");
                 let id = http::string(&item, "id")?.to_owned();
                 if item["mimeType"] == FOLDER {
-                    coven_format::path::validate_directory(&path)?;
+                    if !listing.object_folder(&path)? {
+                        continue;
+                    }
                     let created = http::timestamp(&item, "createdTime")?;
                     if folders
                         .entry(path.clone())
@@ -303,14 +308,10 @@ impl GoogleDriveStorage {
                     {
                         pending.entry(path).or_default().push(id);
                     }
-                } else {
-                    if item["mimeType"]
-                        .as_str()
-                        .is_some_and(|kind| kind.starts_with("application/vnd.google-apps."))
-                    {
-                        return Err(StorageFailure::InvalidPath.into());
-                    }
-                    let path = ObjectPath::parse(&path)?;
+                } else if native(&item) {
+                    // Documents and shortcuts hold no coven bytes, whatever their names.
+                    listing.skip();
+                } else if let Some(path) = listing.object_path(&path)? {
                     let object = object_metadata::drive(&path, &item)?;
                     let created = http::timestamp(&item, "createdTime")?;
                     let keep = objects.entry(path).or_insert((object.clone(), created));
@@ -388,12 +389,18 @@ pub(super) fn check_child(
     Ok(())
 }
 
+/// A Drive-native item: a folder, document, shortcut or other Google type.
+fn native(item: &Value) -> bool {
+    item["mimeType"]
+        .as_str()
+        .is_some_and(|kind| kind.starts_with("application/vnd.google-apps."))
+}
+
+/// The folders among items named like a directory. Drive allows a file and a
+/// folder to share a name; only a folder can be the directory.
 fn folder_ids(items: &[Value]) -> Result<FolderIds, StorageError> {
     let mut found = FolderIds::new();
-    for item in items {
-        if item["mimeType"] != FOLDER {
-            return Err(StorageFailure::InvalidPath.into());
-        }
+    for item in items.iter().filter(|item| item["mimeType"] == FOLDER) {
         found.insert((
             http::timestamp(item, "createdTime")?,
             http::string(item, "id")?.to_owned(),

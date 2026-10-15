@@ -608,35 +608,6 @@ async fn create_uploads_an_oversized_write_in_parts() {
 }
 
 #[tokio::test]
-async fn shared_location_ignores_unrelated_folders() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    state.lock().unwrap().folders.insert("/vacation".into());
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = Arc::new(provider(&server.url));
-    assert!(storage
-        .list(&ObjectPrefix::all(STORE_ID))
-        .await
-        .unwrap()
-        .is_empty());
-    state.lock().unwrap().missing_namespace = true;
-    assert!(matches!(storage.list(&ObjectPrefix::all(STORE_ID)).await,
-        Err(error) if error.failure() == StorageFailure::PermissionDenied));
-    state.lock().unwrap().missing_namespace = false;
-    crate::test_utils::Conformance::new(storage.clone(), STORE_ID)
-        .shared_location(coven_foundation::id_source::StoreId(
-            uuid::Uuid::from_bytes([0x20; 16]),
-        ))
-        .await;
-    state
-        .lock()
-        .unwrap()
-        .folders
-        .insert(format!("/{STORE_ID}/devices/031"));
-    assert!(matches!(storage.list(&ObjectPrefix::all(STORE_ID)).await,
-        Err(error) if error.failure() == StorageFailure::InvalidPath));
-}
-
-#[tokio::test]
 async fn listing_retains_server_time_and_size_across_pages_and_retries() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;

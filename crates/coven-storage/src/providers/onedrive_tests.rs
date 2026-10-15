@@ -50,7 +50,7 @@ pub(super) struct Remote {
     pub(super) requests: Vec<(Method, String)>,
     pub(super) dirs: BTreeMap<String, String>,
     pub(super) files: BTreeMap<String, Vec<u8>>,
-    revisions: BTreeMap<String, u64>,
+    pub(super) revisions: BTreeMap<String, u64>,
     replace_during_read: bool,
     uploads: BTreeMap<String, (String, Vec<u8>)>,
     next: u64,
@@ -906,19 +906,21 @@ async fn listing_refuses_hostile_links_repeated_pages_and_folder_cycles() {
 }
 
 #[tokio::test]
-async fn listing_refuses_native_items_that_are_not_object_files() {
+async fn listing_skips_native_items_that_are_not_object_files() {
     let server = TestServer::new(Router::new().fallback(|uri: Uri| async move {
         if uri.path().ends_with("/root") || uri.path().ends_with(':') {
             reply(json!({"id":"root","folder":{}}))
         } else {
-            reply(json!({"value":[{"id":"native","name":"notebook","package":{"type":"oneNote"}}]}))
+            reply(json!({"value":[{"id":"native","name":"1","package":{"type":"oneNote"}}]}))
         }
     }))
     .await;
-    assert!(
-        matches!(provider(&server.url).list(&ObjectPrefix::all(STORE_ID)).await,
-        Err(error) if error.failure() == StorageFailure::InvalidPath)
-    );
+    let prefix = ObjectPrefix::device_log(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    assert!(provider(&server.url)
+        .list(&prefix)
+        .await
+        .unwrap()
+        .is_empty());
 }
 
 #[tokio::test]
