@@ -23,6 +23,8 @@ struct Post {
 struct Attempt {
     plaintext: Vec<u8>,
     sealed: Vec<u8>,
+    /// The signing key `sealed` carries the signature of.
+    signer: [u8; 32],
 }
 
 impl DeviceLogSync {
@@ -84,6 +86,17 @@ impl DeviceLogSync {
             .positions_post::<Post>()
             .await?
             .unwrap_or_default();
+        // A retry sends only what the current pair signs (§10). After a key
+        // replacement the replaceable post is signed again, over the applied
+        // view below.
+        let signer = *member.keys().public_keys().signing.as_bytes();
+        if post
+            .attempt
+            .as_ref()
+            .is_some_and(|attempt| attempt.signer != signer)
+        {
+            post.attempt = None;
+        }
         let mut positions = match current {
             Some(current) => current,
             None => {
@@ -163,6 +176,7 @@ impl DeviceLogSync {
             post.attempt = Some(Attempt {
                 plaintext: plaintext.clone(),
                 sealed: bytes,
+                signer,
             });
             self.database
                 .save_positions_post::<_, PendingRecord>(post.clone(), None)

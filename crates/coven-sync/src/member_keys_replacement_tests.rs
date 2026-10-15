@@ -218,6 +218,69 @@ async fn positions_held_across_self_replacement_stay_readable() {
     assert_eq!(posted.pending.len(), 1);
 }
 
+/// Carol's post fails after its attempt is signed, then she replaces her own
+/// keys. The retry does not send the old pair's signature again (§10): it
+/// signs a new attempt over the applied view with the installed pair.
+#[tokio::test]
+async fn a_positions_attempt_signed_before_self_replacement_is_signed_again() {
+    let storage = google();
+    let [mut a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
+    c.sync().await;
+    assert!(c.writes.post_positions().await.unwrap());
+    let device = c.device().await;
+    c.db.record_pending(PendingRecord {
+        subject: PendingSubject::Write(coven_merge::WriteId {
+            device: a.device().await,
+            number: 1,
+        }),
+        reason: PendingReason::Refused(Refusal::Signature { cause: None }),
+        reported_by: device,
+    })
+    .await
+    .unwrap();
+    {
+        let _pass = c.sync.begin_pass(&mut c.writes);
+        c.writes.observe_positions().await.unwrap();
+        storage
+            .set_faults(coven_storage::test_utils::Faults {
+                fail_next: 1,
+                ..coven_storage::test_utils::Faults::none()
+            })
+            .await;
+        assert!(c.writes.post_positions().await.is_err());
+    }
+    let operation = begin(&mut c, Command::ReplaceOwnKeys).await;
+    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    c.sync().await;
+    c.writes.post_positions().await.unwrap();
+    a.sync().await;
+    let path = ObjectPath::positions(store(1), device);
+    let bytes = storage.read(&path).await.unwrap();
+    let posted = crate::posted_positions::open(
+        &bytes,
+        &path,
+        a.custody.read().unwrap().as_ref(),
+        &a.log().await,
+    )
+    .unwrap()
+    .unwrap_or_else(|reason| panic!("{reason:?}"));
+    assert_eq!(posted.store_log, c.log().await.positions());
+    let installed = c.identity.read().unwrap().unwrap();
+    let mut hash = coven_crypto::ObjectHasher::new();
+    hash.update(&bytes[..bytes.len() - 64]);
+    let signature: [u8; 64] = bytes[bytes.len() - 64..].try_into().unwrap();
+    installed
+        .keys()
+        .public_keys()
+        .signing
+        .verify_object(
+            path.as_str(),
+            &hash.finish(),
+            &coven_crypto::Signature::from_bytes(signature),
+        )
+        .unwrap();
+}
+
 /// Ben is an admin but not the store's owner. He publishes a pair Carol
 /// prepared elsewhere: no provider access changes, and her held pair is
 /// replaced. A self target, a non-admin author, a reused pair and an absent
