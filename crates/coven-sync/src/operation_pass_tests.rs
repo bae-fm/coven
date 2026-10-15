@@ -131,6 +131,45 @@ async fn an_incomplete_first_phase_holds_first_attempts_and_administrative_work(
     }
 }
 
+/// A failed retention deletion still lets the pass reach step 9: positions
+/// are posted and the return checkpoint moves, and the deletion stays its
+/// own `Retention` record (§15, SP step 9).
+#[tokio::test]
+async fn a_failed_retention_deletion_still_posts_positions() {
+    use coven_storage::test_utils::Faults;
+    let storage = storage();
+    let ana = group(storage.clone(), 1).await.remove(0);
+    let orphan = ObjectPath::file(
+        STORE_ID,
+        DeviceId(1),
+        coven_foundation::id_source::FileId(uuid::Uuid::from_u128(999)),
+    );
+    storage.create(&orphan, b"orphan").await.unwrap();
+    ana.db
+        .add_file_candidates(std::collections::BTreeSet::from([(
+            orphan.device().unwrap(),
+            orphan.file_id().unwrap(),
+        )]))
+        .await
+        .unwrap();
+    storage
+        .set_faults(Faults {
+            delete_failures: [(orphan.clone(), StorageFailure::PermissionDenied)].into(),
+            ..Faults::none()
+        })
+        .await;
+    let (operations, ana) = start(ana);
+    let pass = operations.sync().await;
+    assert!(
+        matches!(&pass, Err(crate::SyncError::Storage(error))
+            if error.failure() == StorageFailure::PermissionDenied),
+        "{pass:?}"
+    );
+    assert!(storage.status(&orphan).await.unwrap().is_some());
+    assert!(ana.db.return_checkpoint().await.unwrap().is_some());
+    operations.close().await.unwrap();
+}
+
 /// After a removal exposes the store key, the pass publishes the rotation's
 /// copies and entry before the first attempt that seals with its key.
 #[tokio::test]

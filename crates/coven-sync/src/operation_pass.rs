@@ -47,10 +47,13 @@ impl OperationRun {
         if self.sync.write_snapshots().await? {
             self.drive_pass().await?;
         }
-        self.sync.run_retention().await?;
+        // A failed retention deletion is its own record and does not keep the
+        // pass from step 9 (§15); it is reported once positions are posted.
+        let retained = self.sync.run_retention().await;
         self.sync
             .finish_pass(&mut self.writes, discovery.complete, checkpoint)
-            .await
+            .await?;
+        retained
     }
 
     /// Outside a pass, run the catch-up a waiting snapshot preparation
