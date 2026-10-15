@@ -432,7 +432,7 @@ the pause (§18). Approval deletes the request after its binding is kept; declin
 
 A required reload first settles attempted uploads as §18.1 requires, then
 freezes each writer's required position at this device's applied positions
-([`committed_safe`](proofs/io/CovenIO/CommonReload.lean)).
+(the bound [`committed_safe`](proofs/io/CovenIO/CommonReload.lean) assumes).
 Select counting usable snapshots and read each readable audience to the maximum
 of that requirement and all selected positions; retain the checked snapshot
 bodies and write inputs throughout staging
