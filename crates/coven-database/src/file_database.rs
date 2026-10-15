@@ -101,48 +101,19 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(db) => db.open_local_file(file).await,
         }
     }
-    /// All visible files whose declaration requests eager downloads, except
-    /// those this device still has queued: their bytes are already local.
-    pub async fn eager_files(&self) -> Result<Vec<FileRef>, DbError> {
-        self.run(|db, schema, _, device| {
+    /// Pending eager work: changed references and temporary failures awaiting
+    /// their retry wait, from one indexed table (§16.4, SP step 7).
+    pub async fn eager_work(&self) -> Result<Vec<FileRef>, DbError> {
+        self.run(|db, _, _, _| crate::eager_work::read(db)).await
+    }
+    /// Settle eager work: downloaded, permanently refused or cancelled.
+    pub async fn settle_eager_work(&self, files: Vec<FileRef>) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(move |db, _, _, _| {
             db.transaction(|db| {
-                let mut files = Vec::new();
-                for declaration in &schema.declarations {
-                    let Some(file) = &declaration.files else {
-                        continue;
-                    };
-                    if file.fill != crate::CacheFill::CacheEager {
-                        continue;
-                    }
-                    let table = schema.table(&declaration.name);
-                    let keys = db.query(
-                        &format!(
-                            "SELECT {} FROM main.{} WHERE {} IS NOT NULL",
-                            crate::write_rows::key_columns(table)
-                                .iter()
-                                .map(|c| crate::sql::identifier(&c.name))
-                                .collect::<Vec<_>>()
-                                .join(","),
-                            crate::sql::identifier(&table.name),
-                            crate::sql::identifier(&file.location)
-                        ),
-                        [],
-                        |row| {
-                            let mut values = Vec::new();
-                            for index in 0..crate::write_rows::key_columns(table).len() {
-                                values.push(row.get(index)?)
-                            }
-                            Ok(RowKey(values))
-                        },
-                    )?;
-                    for key in keys {
-                        let file = file_ref::read(db, schema, &table.name, &key)?;
-                        if file.uploader() != device || !file_queue::queued(db, &file)? {
-                            files.push(file);
-                        }
-                    }
-                }
-                Ok(files)
+                files
+                    .iter()
+                    .try_for_each(|file| crate::eager_work::settle(db, file))
             })
         })
         .await
@@ -330,8 +301,10 @@ impl FileDatabase {
             .call(move |inner| {
                 inner.access.with_writer(|writer| {
                     let device = inner.access.device;
+                    let schema = &inner.access.write_schema;
                     let result = writer.transaction(|db| {
-                        file_queue::complete(db, id)?;
+                        let reference = file_queue::complete(db, id)?;
+                        crate::eager_work::uploaded(db, schema, &reference)?;
                         crate::pending::clear(db, &subject, device)
                     });
                     let active = inner.staging.lock().expect("staging lock poisoned");

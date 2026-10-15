@@ -235,12 +235,18 @@ pub(crate) fn chunk_hash(
 /// every `FileRef` stay unchanged, whatever happened to the row meanwhile.
 /// A released copy no other queued file shares is recorded for removal after
 /// the caller commits.
-pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> {
-    let (device, file) = db
+pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<FileRef, DbError> {
+    let (device, file, reference) = db
         .query_row(
-            "SELECT device,file FROM _coven_file_uploads WHERE id=?1",
+            "SELECT device,file,reference FROM _coven_file_uploads WHERE id=?1",
             [id],
-            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+            |r| {
+                Ok((
+                    r.get::<_, Vec<u8>>(0)?,
+                    r.get::<_, Vec<u8>>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            },
         )
         .map_err(|error| match error {
             DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::DamagedDatabase,
@@ -261,5 +267,5 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(), DbError> 
     if db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])? != 1 {
         return Err(DbError::DamagedDatabase);
     }
-    Ok(())
+    FileRef::decode(&reference)
 }

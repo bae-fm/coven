@@ -5164,6 +5164,10 @@ Carol's tablet:
     cancellation, including requests that have not received any bytes;
   - `_coven_cache_budgets`: each namespace's budget and cached byte total,
     updated with its cache records so a budget check needs no full sum;
+  - `_coven_eager_rows` and `_coven_eager_work`: each eager row's fixed file
+    as last noted, and the changed references awaiting an eager fill, kept in
+    the transaction that changes the row, so finding eager work reads no
+    unchanged row;
   - `_coven_file_removals`: unused local copies waiting to be deleted;
   - `_coven_retries`: each waiting upload's, operation's and approval
     poll's persisted deadline `T` and full wait `W` with the consecutive

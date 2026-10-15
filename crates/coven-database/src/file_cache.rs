@@ -187,7 +187,7 @@ fn remove_pending(
 }
 pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<Option<u64>, DbError> {
     db.query(
-        "SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1",
+        "SELECT bytes FROM _coven_cache_budgets WHERE namespace=?1 AND bytes IS NOT NULL",
         [namespace],
         |r| r.get::<_, Vec<u8>>(0),
     )?
@@ -200,6 +200,17 @@ pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<Option<
     })
     .transpose()
 }
+/// The namespace's cached bytes, maintained with its cache records.
+pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbError> {
+    Ok(db
+        .query(
+            "SELECT total FROM _coven_cache_budgets WHERE namespace=?1",
+            [namespace],
+            |r| r.get::<_, i64>(0),
+        )?
+        .pop()
+        .unwrap_or(0))
+}
 pub(super) fn trim(
     db: &DatabaseConnection,
     directory: &StoreDir,
@@ -209,11 +220,7 @@ pub(super) fn trim(
         let Some(budget) = budget(db, namespace)? else {
             return Ok(Vec::new());
         };
-        let mut total = db.query_row(
-            "SELECT coalesce(sum(size),0) FROM _coven_cache WHERE namespace=?1",
-            [namespace],
-            |r| r.get::<_, i64>(0),
-        )?;
+        let mut total = total(db, namespace)?;
         let mut removed = Vec::new();
         while u64::try_from(total).map_err(|_| DbError::DamagedDatabase)? > budget {
             // Chunks need their header for offline opens. Once the last chunk

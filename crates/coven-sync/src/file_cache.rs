@@ -10,14 +10,6 @@ use coven_database::{DbError, FileRef, RetrySubject, RetryWait};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
 
-/// The eager references a fill has attempted this session. A failed one is
-/// attempted again only once its persisted retry wait is due and no provider
-/// cooldown holds the connection (§16.5, SP waiting); a wake never requests
-/// an unchanged wait again.
-#[derive(Default)]
-pub(crate) struct EagerAttempts {
-    seen: Vec<FileRef>,
-}
 /// The persisted wait of an eager download of `file`.
 pub(crate) fn download_subject(file: &FileRef) -> RetrySubject {
     RetrySubject::Download {
@@ -94,7 +86,7 @@ impl Files {
 }
 impl FilesInner {
     pub(crate) async fn fill_eager(self: &Arc<Self>) {
-        let mut attempts = self.eager_attempts.lock().await;
+        let _fill = self.eager_fill.lock().await;
         if self
             .storage
             .read()
@@ -103,14 +95,17 @@ impl FilesInner {
         {
             return;
         }
-        let files = match self.database.eager_files().await {
+        let files = match self.database.eager_work().await {
             Ok(files) => files,
             Err(error) => {
                 // No file subject holds this failure; the next wake retries it.
-                tracing::error!(?error, "listing eager files failed");
+                tracing::error!(?error, "reading eager work failed");
                 return;
             }
         };
+        if files.is_empty() {
+            return;
+        }
         let waits: std::collections::BTreeMap<_, _> = match self.database.download_waits().await {
             Ok(waits) => waits.into_iter().collect(),
             Err(error) => {
@@ -119,31 +114,21 @@ impl FilesInner {
                 return;
             }
         };
-        // A new reference, or a failed one whose wait is due; neither while
-        // a provider cooldown holds the connection.
+        // A changed reference, or a failed one whose wait is due; neither
+        // while a provider cooldown holds the connection.
         let pending = files
-            .iter()
+            .into_iter()
             .filter(|file| {
                 let subject = download_subject(file);
-                let persisted = waits.get(&subject);
-                (persisted.is_some() || !attempts.seen.contains(file))
-                    && self.waits.due(subject, persisted)
+                self.waits.due(subject, waits.get(&subject))
             })
-            .cloned()
             .collect::<Vec<_>>();
-        attempts.seen.retain(|file| files.contains(file));
-        for file in &pending {
-            if !attempts.seen.contains(file) {
-                attempts.seen.push(file.clone());
-            }
-        }
         if pending.is_empty() {
             return;
         }
         // The reservations are the fill's progress and cancellation (§16.4).
         if let Err(error) = self.database.request_eager(pending.clone()).await {
             tracing::error!(?error, "reserving eager downloads failed");
-            attempts.seen.retain(|file| !pending.contains(file));
             return;
         }
         let mut cancel = self.cancel_eager.subscribe();
@@ -162,6 +147,9 @@ impl FilesInner {
                         if let Err(error) = self.waits.clear(download_subject(file)).await {
                             tracing::error!(?error, "ending a cancelled download's wait failed");
                         }
+                    }
+                    if let Err(error) = self.database.settle_eager_work(pending.clone()).await {
+                        tracing::error!(?error, "settling cancelled eager work failed");
                     }
                     return;
                 }
@@ -186,6 +174,13 @@ impl FilesInner {
                 file: file.id(),
             };
             let retry = download_subject(file);
+            // Done or permanently refused, the work is settled; a temporary
+            // failure keeps it for its retry wait.
+            if reason.as_ref().is_none_or(|reason| !retries(reason)) {
+                if let Err(error) = self.database.settle_eager_work(vec![file.clone()]).await {
+                    tracing::error!(?error, "settling eager work failed");
+                }
+            }
             match reason {
                 None => {
                     // Its wait belongs to the record and goes with it.

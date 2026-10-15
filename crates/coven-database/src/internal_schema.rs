@@ -765,10 +765,38 @@ macro_rules! coven_tables {
                 cancelled INTEGER PRIMARY KEY CHECK(cancelled=1)
             ) STRICT;
         ");
+        // Each namespace's budget, if set, and the cached bytes the cache
+        // records hold, maintained with them so a budget check needs no sum.
         $visit!(_coven_cache_budgets, "
             CREATE TABLE _coven_cache_budgets (
                 namespace TEXT PRIMARY KEY NOT NULL,
-                bytes BLOB NOT NULL CHECK(length(bytes)=8)
+                bytes BLOB CHECK(bytes IS NULL OR length(bytes)=8),
+                total INTEGER NOT NULL DEFAULT 0 CHECK(total>=0)
+            ) STRICT, WITHOUT ROWID;
+            CREATE TRIGGER _coven_cache_added AFTER INSERT ON _coven_cache BEGIN
+                INSERT INTO _coven_cache_budgets(namespace,total) VALUES(NEW.namespace,NEW.size)
+                ON CONFLICT(namespace) DO UPDATE SET total=total+NEW.size;
+            END;
+            CREATE TRIGGER _coven_cache_removed AFTER DELETE ON _coven_cache BEGIN
+                UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;
+            END;
+        ");
+        // Eager rows' fixed file identities as last noted, so only a changed
+        // reference becomes eager work, and that work until it is settled.
+        $visit!(_coven_eager_rows, "
+            CREATE TABLE _coven_eager_rows (
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                file TEXT NOT NULL,
+                PRIMARY KEY(table_name,key)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        $visit!(_coven_eager_work, "
+            CREATE TABLE _coven_eager_work (
+                namespace TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                reference BLOB NOT NULL,
+                PRIMARY KEY(namespace,file_id)
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_provider_access, "

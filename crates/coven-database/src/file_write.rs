@@ -360,6 +360,7 @@ impl<'a> FileWrite<'a> {
         let store = crate::merge_store::MergeStore::new(db, &visible).without_row_cache();
         for key in keys {
             crate::file_protection::refresh(db, self.schema, &key)?;
+            crate::eager_work::note(db, self.schema, self.device, &key)?;
             let Some(file) = &self.schema.declaration(&key.0).files else {
                 continue;
             };
@@ -451,6 +452,9 @@ impl<'a> FileWrite<'a> {
                 &reference.audience(),
             )?;
             crate::file_queue::enqueue(self.database, &reference, &attached.queued, now)?;
+            // Its bytes are local while queued; completing the upload requests
+            // them for an eager cache then.
+            crate::eager_work::settle(self.database, &reference)?;
         }
         Ok(())
     }

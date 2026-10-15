@@ -57,6 +57,7 @@ mod raise_capture;
 pub use provider_access::{ProviderAccess, ProviderAccessChange, ProviderAccessRequest};
 pub use raise_capture::RaiseCapture;
 mod cache_progress;
+mod eager_work;
 mod read;
 pub use cache_progress::{EagerCacheFillStatus, PinProgress};
 mod removal;

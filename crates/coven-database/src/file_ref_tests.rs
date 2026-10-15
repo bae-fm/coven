@@ -220,21 +220,20 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
         .lines()
         .nth(1)
         .unwrap();
+    let device = db.local_device().unwrap();
     db.inspect_writer_schema(|sql, schema| {
         sql.transaction(|sql| {
             sql.internal_execute("UPDATE files SET location=?1", [text])?;
-            crate::file_protection::refresh(
-                sql,
-                schema,
-                &(
-                    "files".into(),
-                    coven_format::key::encode_key(&[coven_format::value::Value::Text("7".into())])?,
-                ),
-            )
+            let key = (
+                "files".into(),
+                coven_format::key::encode_key(&[coven_format::value::Value::Text("7".into())])?,
+            );
+            crate::file_protection::refresh(sql, schema, &key)?;
+            crate::eager_work::note(sql, schema, device, &key)
         })
         .unwrap()
     });
-    let files = FileDatabase::new(db.clone()).eager_files().await.unwrap();
+    let files = FileDatabase::new(db.clone()).eager_work().await.unwrap();
     assert_eq!(files, vec![db.file_ref("files", "7").await.unwrap()]);
     // The row's current reference, and the queued attachment it replaced.
     assert_eq!(

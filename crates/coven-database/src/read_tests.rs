@@ -348,10 +348,10 @@ async fn a_read_only_handle_fails_after_any_of_its_connections_fails_to_roll_bac
     let ro = open().open_read_only().await.unwrap();
     ro.inspect_writer(|writer| writer.refuse_transaction_end(true));
     let files = crate::FileDatabase::read_only(ro.clone());
-    let error = files.eager_files().await.unwrap_err();
+    let error = files.trim_cache("files").await.unwrap_err();
     assert!(matches!(error, DbError::Rollback { .. }), "{error:?}");
     assert!(matches!(
-        files.eager_files().await,
+        files.trim_cache("files").await,
         Err(DbError::RollbackFailed)
     ));
     assert!(rollback_failed(ro.read(|_| Ok(())).await));

@@ -743,7 +743,8 @@ async fn io_counts_one_write_local_baseline() {
     assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
     // No fixed total is stated for non-idle writer holds or commits. These
     // are observed baselines; the saved-log decode bound is tested separately.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (68, 16));
+    // Finding eager work reads its changed references without a transaction.
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (68, 15));
 }
 
 #[tokio::test]
@@ -768,7 +769,7 @@ async fn io_counts_first_catchup_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (102, 40));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (102, 39));
     assert_eq!(
         counts.work.store_log_commits, 2,
         "catch-up batch and own registration"
@@ -840,8 +841,9 @@ async fn io_counts_file_fetch_baseline() {
     );
     // No fixed non-idle writer/commit total is stated; observed counts. The
     // eager fill reserves its request and retires it once cached (§16.4),
-    // and each fetched range publishes in one transaction.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (78, 28));
+    // each fetched range publishes in one transaction, and the eager fill
+    // settles its changed reference.
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (79, 28));
 }
 
 #[tokio::test]
@@ -907,7 +909,7 @@ async fn io_counts_reopen_baseline() {
         ),
         "{counts:#?}"
     );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (63, 10));
+    assert_eq!((counts.work.writer_holds, counts.work.commits), (63, 9));
 }
 
 #[tokio::test]

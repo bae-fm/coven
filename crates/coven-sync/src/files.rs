@@ -17,7 +17,6 @@ use coven_database::{DbError, FileDatabase};
 pub use coven_database::{EagerCacheFillStatus, PinProgress};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
-use file_cache::EagerAttempts;
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
@@ -77,7 +76,8 @@ struct FilesInner {
     limits: std::sync::RwLock<TransferLimits>,
     pins: tokio::sync::Mutex<()>,
     closed: AtomicBool,
-    eager_attempts: tokio::sync::Mutex<EagerAttempts>,
+    /// One eager fill at a time, and none while the connection changes.
+    eager_fill: tokio::sync::Mutex<()>,
     cancel_eager: watch::Sender<u64>,
 }
 struct FileWorker {
@@ -119,7 +119,7 @@ impl Files {
             limits: std::sync::RwLock::new(limits),
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
-            eager_attempts: tokio::sync::Mutex::new(EagerAttempts::default()),
+            eager_fill: tokio::sync::Mutex::new(()),
             cancel_eager,
         });
         let weak = Arc::downgrade(&inner);
@@ -231,7 +231,7 @@ impl Files {
         storage: Option<Arc<dyn Storage>>,
         ready: impl std::future::Future<Output = Result<(), SyncError>>,
     ) -> Result<(), SyncError> {
-        let _eager = self.inner.eager_attempts.lock().await;
+        let _eager = self.inner.eager_fill.lock().await;
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
