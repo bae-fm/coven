@@ -220,7 +220,7 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
     // A wake before the waiting file's retry is due neither requests it
     // nor changes the status the pass left.
     let requests = a.storage.request_count();
-    b.files.inner.fill_eager().await;
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(a.storage.request_count(), requests);
     assert_eq!(b.database.eager_cache_fill_status().await.unwrap(), status);
     // Retry once due: the waiting file arrives and completes; refused bytes
@@ -328,6 +328,26 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     b.files.sync_files().await.unwrap();
     assert!(b.files.inner.database.missing_bytes(&second).await.unwrap() > 0);
     b.close().await;
+    a.close().await;
+}
+
+/// A fill that cannot read its own work fails the pass's step rather than
+/// leaving it `Synced` with nothing recorded (§16.4, E5).
+#[tokio::test]
+async fn a_fill_that_cannot_read_its_work_fails_its_step() {
+    let clock = clock();
+    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    a.uploaded("eager", vec![72; CHUNK]).await;
+    let b = eager_reader(&a, &clock).await;
+    apply_all(&a, &b).await;
+    b.database.close().await.unwrap();
+    assert!(matches!(
+        b.files.sync_files().await,
+        Err(crate::SyncError::Database(
+            coven_database::DbError::StoreClosed
+        ))
+    ));
+    b.files.close().await;
     a.close().await;
 }
 

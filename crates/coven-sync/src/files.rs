@@ -156,7 +156,11 @@ impl Files {
                         }
                         Err(error) => tracing::error!(?error, "upload queue failed"),
                     }
-                    owner.fill_eager().await;
+                    // Outside a pass nothing reports it; the next pass's
+                    // step 7 fills again and fails with it.
+                    if let Err(error) = owner.fill_eager().await {
+                        tracing::error!(?error, "eager cache fill failed");
+                    }
                 };
                 tokio::select! { biased; _=stopping.changed()=>break, _=work=>{} }
                 retry = owner
@@ -220,8 +224,7 @@ impl Files {
     /// references and the failed downloads whose retry waits are due.
     pub(crate) async fn sync_files(&self) -> Result<(), SyncError> {
         self.inner.wake.notify_one();
-        self.inner.fill_eager().await;
-        Ok(())
+        self.inner.fill_eager().await
     }
 
     /// Finish transfers before verifying and committing a connection change.

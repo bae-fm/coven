@@ -85,7 +85,9 @@ impl Files {
     }
 }
 impl FilesInner {
-    pub(crate) async fn fill_eager(self: &Arc<Self>) {
+    /// SP step 7. One file's failure is that file's pending record; a failure
+    /// no file subject holds, such as reading the work, fails the fill.
+    pub(crate) async fn fill_eager(self: &Arc<Self>) -> Result<(), crate::SyncError> {
         let _fill = self.eager_fill.lock().await;
         if self
             .storage
@@ -93,27 +95,14 @@ impl FilesInner {
             .expect("storage lock poisoned")
             .is_none()
         {
-            return;
+            return Ok(());
         }
-        let files = match self.database.eager_work().await {
-            Ok(files) => files,
-            Err(error) => {
-                // No file subject holds this failure; the next wake retries it.
-                tracing::error!(?error, "reading eager work failed");
-                return;
-            }
-        };
+        let files = self.database.eager_work().await?;
         if files.is_empty() {
-            return;
+            return Ok(());
         }
-        let waits: std::collections::BTreeMap<_, _> = match self.database.download_waits().await {
-            Ok(waits) => waits.into_iter().collect(),
-            Err(error) => {
-                // No file subject holds this failure; the next wake retries it.
-                tracing::error!(?error, "reading eager download waits failed");
-                return;
-            }
-        };
+        let waits: std::collections::BTreeMap<_, _> =
+            self.database.download_waits().await?.into_iter().collect();
         // A changed reference, or a failed one whose wait is due; neither
         // while a provider cooldown holds the connection.
         let pending = files
@@ -124,13 +113,10 @@ impl FilesInner {
             })
             .collect::<Vec<_>>();
         if pending.is_empty() {
-            return;
+            return Ok(());
         }
         // The reservations are the fill's progress and cancellation (§16.4).
-        if let Err(error) = self.database.request_eager(pending.clone()).await {
-            tracing::error!(?error, "reserving eager downloads failed");
-            return;
-        }
+        self.database.request_eager(pending.clone()).await?;
         let mut cancel = self.cancel_eager.subscribe();
         for file in &pending {
             let work = async {
@@ -144,14 +130,10 @@ impl FilesInner {
                 _ = cancel.changed() => {
                     // Cancelled downloads are not retried; new references remain eligible.
                     for file in &pending {
-                        if let Err(error) = self.waits.clear(download_subject(file)).await {
-                            tracing::error!(?error, "ending a cancelled download's wait failed");
-                        }
+                        self.waits.clear(download_subject(file)).await?;
                     }
-                    if let Err(error) = self.database.settle_eager_work(pending.clone()).await {
-                        tracing::error!(?error, "settling cancelled eager work failed");
-                    }
-                    return;
+                    self.database.settle_eager_work(pending.clone()).await?;
+                    return Ok(());
                 }
                 result = work => result,
             };
@@ -162,9 +144,7 @@ impl FilesInner {
                 Ok(Err(refusal)) => {
                     // Authenticated chunks that are not this file publish no
                     // completed file: they leave the cache with the refusal.
-                    if let Err(error) = self.database.evict(file).await {
-                        tracing::error!(?error, "evicting a refused eager download failed");
-                    }
+                    self.database.evict(file).await?;
                     Some(PendingReason::Refused(refusal))
                 }
                 Err(error) => Some(self.read_pending(file, &error)),
@@ -177,51 +157,44 @@ impl FilesInner {
             // Done or permanently refused, the work is settled; a temporary
             // failure keeps it for its retry wait.
             if reason.as_ref().is_none_or(|reason| !retries(reason)) {
-                if let Err(error) = self.database.settle_eager_work(vec![file.clone()]).await {
-                    tracing::error!(?error, "settling eager work failed");
-                }
+                self.database.settle_eager_work(vec![file.clone()]).await?;
             }
             match reason {
                 None => {
                     // Its wait belongs to the record and goes with it.
-                    match self.database.clear_file_pending(subject).await {
-                        Ok(()) => self.waits.forget(retry),
-                        Err(error) => tracing::error!(
-                            ?error,
-                            "clearing a completed eager download's record failed"
-                        ),
-                    }
+                    self.database.clear_file_pending(subject).await?;
+                    self.waits.forget(retry);
                 }
                 Some(reason) => {
                     self.record_download_failure(subject, retry, reason, waits.get(&retry))
-                        .await
+                        .await?
                 }
             }
         }
         // The set retires together once every file in it is cached.
-        if let Err(error) = self.database.retire_eager().await {
-            tracing::error!(?error, "retiring completed eager downloads failed");
-        }
+        self.database.retire_eager().await?;
+        Ok(())
     }
 
     /// Persist the failed download's record with its next wait before it
     /// waits (§16.5): temporary conditions retry once the wait is due,
     /// others wait for the app or an update and keep no wait. A wait that
-    /// cannot be chosen or persisted holds the download until the app acts.
+    /// cannot be chosen or persisted holds the download until the app acts,
+    /// and fails the fill.
     async fn record_download_failure(
         &self,
         subject: PendingSubject,
         retry: RetrySubject,
         reason: PendingReason,
         previous: Option<&RetryWait>,
-    ) {
+    ) -> Result<(), crate::SyncError> {
         let timed = retries(&reason);
         let wait = if timed {
             match self.waits.next(previous) {
                 Ok(wait) => Some(wait),
                 Err(error) => {
-                    tracing::error!(?error, "choosing an eager download's retry wait failed");
-                    None
+                    self.waits.hold(retry);
+                    return Err(error);
                 }
             }
         } else {
@@ -239,15 +212,15 @@ impl FilesInner {
                 wait,
             )
             .await;
-        match (recorded, wait) {
-            (Ok(()), Some(wait)) => self.waits.arm(retry, &wait),
-            (Ok(()), None) if !timed => self.waits.forget(retry),
-            (Ok(()), None) => self.waits.hold(retry),
-            (Err(error), _) => {
-                tracing::error!(?error, "recording an eager download's pending state failed");
-                self.waits.hold(retry);
-            }
+        if let Err(error) = recorded {
+            self.waits.hold(retry);
+            return Err(error.into());
         }
+        match wait {
+            Some(wait) => self.waits.arm(retry, &wait),
+            None => self.waits.forget(retry),
+        }
+        Ok(())
     }
 
     /// The first unmet condition a failed read of `file` leaves (§16.3).
