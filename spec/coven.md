@@ -1184,6 +1184,16 @@ the file's ranges under `F`.
     or provider error is not absence. Cache the id for subsequent reads.
   - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
     never enumerates those photos or another store's objects.
+  - A store's folder or prefix can also hold things coven never wrote: a
+    person's files and folders, native documents, shortcuts, packages or
+    another store's folder. [D10](format.md#d10-paths) gives each object
+    one spelling and no reader looks anywhere else, so a listing skips
+    every entry that is not a D10 path, and writer discovery skips every
+    folder that is not a D10 device folder. Drive's exact lookups likewise
+    skip folders, documents and shortcuts sharing an object's name. What
+    the provider itself gets wrong still fails the listing: an entry
+    outside the requested scope, missing metadata, or a failed or
+    incomplete page.
 - Listings may lag publication. Every provider has the same listing margin
   `M = one hour`. At provider time L, a completed listing must include every
   still-existing object in its scope stored strictly before `L - M`.

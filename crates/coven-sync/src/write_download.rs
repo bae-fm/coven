@@ -5,12 +5,131 @@ use crate::stream_input::{ChannelParts, WithReferences};
 use crate::write_object::{ReadyWrite, Unready};
 use crate::{replay_cache::ReplayCache, PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::StoreKeyring;
-use coven_database::{ApplyOutcome, DbError, StoreLog};
+use coven_database::{ApplyOutcome, DbError, LogObject, LogRefusal, StoreLog, WriteWait};
+use coven_format::value::WritePositions;
 use coven_foundation::id_source::{DeviceId, MemberId};
+use coven_merge::WriteId;
 use coven_storage::StoredObject;
+use std::collections::BTreeMap;
 use tokio::sync::oneshot;
 
+/// The writes one discovery received, and what applying them established.
+pub(super) struct Received<'a> {
+    log: &'a StoreLog,
+    replays: ReplayCache<'a>,
+    /// Every write read, its input retained whole; applied ones stay listed.
+    pub(super) objects: BTreeMap<WriteId, StoredObject>,
+    pub(super) positions: WritePositions,
+    /// Refusals recorded before this discovery and those it found.
+    stuck: Vec<LogRefusal>,
+    /// The first unmet condition of each write still waiting.
+    pub(super) waits: BTreeMap<WriteId, WriteWait>,
+}
+
+impl<'a> Received<'a> {
+    pub(super) fn new(
+        positions: WritePositions,
+        refused: Vec<LogRefusal>,
+        log: &'a StoreLog,
+    ) -> Self {
+        Self {
+            log,
+            replays: ReplayCache::new(log),
+            objects: BTreeMap::new(),
+            positions,
+            stuck: refused,
+            waits: BTreeMap::new(),
+        }
+    }
+
+    /// The first refused write of `writer`'s log, if any.
+    pub(super) fn refused(&self, writer: DeviceId) -> Option<u64> {
+        self.stuck
+            .iter()
+            .filter_map(|record| match record.object {
+                LogObject::Write(id) if id.device == writer => Some(id.number),
+                _ => None,
+            })
+            .min()
+    }
+}
+
 impl DeviceLogSync {
+    /// Apply received writes in causal order until none can advance. Waits and
+    /// refusals become each write's own record; independent logs go on (§19.1).
+    pub(super) async fn apply_ready(
+        &self,
+        received: &mut Received<'_>,
+        ring: &StoreKeyring,
+        member: &MemberId,
+        reporter: DeviceId,
+    ) -> Result<(), SyncError> {
+        loop {
+            let mut progressed = false;
+            for (write, object) in &received.objects {
+                if received.positions.covers(*write) {
+                    continue;
+                }
+                let previous = WriteId {
+                    number: write.number - 1,
+                    ..*write
+                };
+                if write.number > 1 && !received.positions.covers(previous) {
+                    continue;
+                }
+                if received
+                    .stuck
+                    .iter()
+                    .any(|record| record.blocks(LogObject::Write(*write)))
+                {
+                    continue;
+                }
+                match self
+                    .receive_write(
+                        object,
+                        ring,
+                        received.log,
+                        &mut received.replays,
+                        member,
+                        reporter,
+                    )
+                    .await
+                {
+                    Ok(ApplyOutcome::Applied | ApplyOutcome::AlreadyApplied) => {
+                        let positions = &mut received.positions.0;
+                        match positions.iter_mut().find(|p| p.device == write.device) {
+                            Some(position) => *position = *write,
+                            None => {
+                                positions.push(*write);
+                                positions.sort_by_key(|p| p.device);
+                            }
+                        }
+                        received.waits.remove(write);
+                        progressed = true;
+                    }
+                    Ok(ApplyOutcome::Waiting(reason)) => {
+                        tracing::debug!(?write, ?reason, "write is waiting for its prerequisites");
+                        received.waits.insert(*write, reason);
+                    }
+                    Err(SyncError::Damaged(damage)) => received.stuck.push(LogRefusal {
+                        object: LogObject::Write(*write),
+                        failure: (&damage.failure).into(),
+                    }),
+                    Err(SyncError::KeyUnavailable(key)) => {
+                        tracing::debug!(?write, ?key, "write key is unavailable");
+                    }
+                    Err(SyncError::UpdateRequired(update)) => {
+                        tracing::debug!(?write, ?update, "write needs a newer coven");
+                    }
+                    Err(error) => return Err(error),
+                }
+            }
+            if !progressed {
+                return Ok(());
+            }
+        }
+    }
+
     /// Download, check and apply one write, routing its outcome to the write
     /// itself (§19.1): a wait or required update becomes its pending record, a
     /// failed check of its complete bytes its permanent refusal. Neither fails

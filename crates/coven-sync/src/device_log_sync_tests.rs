@@ -1,6 +1,6 @@
 use super::*;
 use coven_crypto::{MemberIdentity, StoreKey, StoreKeyring};
-use coven_database::{LogRefusal, Migration, RowIdentity, SyncedTable};
+use coven_database::{ApplyOutcome, LogRefusal, Migration, RowIdentity, SyncedTable};
 use coven_format::pending::RefusalCode;
 use coven_format::store_log::StoreChange;
 use coven_format::{objects::PostedPositions, sealed_single::SingleChunkPrefix, Object};
@@ -861,11 +861,11 @@ mod stuck {
     }
 
     #[tokio::test]
-    async fn observed_objects_whose_reads_fail_are_retried_without_refusal() {
-        // Exact status finds the write; reading its body then fails or finds it
-        // gone. Neither is a miss or a refusal, and a later pass applies it.
-        use coven_storage::StorageFailure;
-        for failure in [StorageFailure::Network, StorageFailure::NotFound] {
+    async fn failed_reads_are_retried_without_refusal() {
+        // The GET of the next write fails before or after its response
+        // starts. Neither is a miss or a refusal, and a later pass applies it.
+        use coven_storage::test_utils::BodyFailure;
+        for interrupted in [false, true] {
             let storage = storage();
             let mut devices = group(storage.clone(), 2).await;
             sql(
@@ -875,16 +875,21 @@ mod stuck {
             .await;
             devices[0].writes.upload_writes().await.unwrap();
             let path = ObjectPath::device_log(STORE_ID, DeviceId(1), 1.try_into().unwrap());
-            storage
-                .set_faults(Faults {
-                    read_failures: [(path.clone(), failure)].into(),
-                    ..Faults::none()
-                })
-                .await;
+            let mut faults = Faults::none();
+            if interrupted {
+                faults
+                    .body_failures
+                    .insert(path.clone(), BodyFailure::Interrupted(10));
+            } else {
+                faults
+                    .read_failures
+                    .insert(path.clone(), coven_storage::StorageFailure::Network);
+            }
+            storage.set_faults(faults).await;
             let result = devices[1].writes.download_writes().await;
             assert!(
                 matches!(result, Err(SyncError::Storage(_))),
-                "{failure:?}: {result:?}"
+                "{interrupted}: {result:?}"
             );
             assert!(devices[1]
                 .db

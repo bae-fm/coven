@@ -24,12 +24,18 @@ impl StoreLogSync {
                 .checked_add(1)
                 .and_then(std::num::NonZeroU64::new)
                 .ok_or(StorageFailure::Protocol.with_source("write sequence exhausted"))?;
+            // One GET: a hit is the object, whose bytes this check never needs,
+            // and a miss is a 404 (SP "Counting a pass").
             let writes = match storage
-                .status(&ObjectPath::device_log(local.store, local.device, next))
-                .await?
+                .stream_object(
+                    &ObjectPath::device_log(local.store, local.device, next),
+                    None,
+                )
+                .await
             {
-                Some(_) => next.get(),
-                None => 0,
+                Ok(_) => next.get(),
+                Err(error) if error.failure() == StorageFailure::NotFound => 0,
+                Err(error) => return Err(error.into()),
             };
             let session = match self.send.session_evidence() {
                 Some(session) => session,

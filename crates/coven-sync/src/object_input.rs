@@ -2,7 +2,7 @@
 
 use crate::SyncError;
 use coven_database::{Database, FileEvidence, RetainedInput};
-use coven_storage::{ByteRange, Storage, StorageFailure, StoredObject};
+use coven_storage::{ByteRange, ObjectPath, ObjectStream, Storage, StorageFailure, StoredObject};
 
 #[path = "input_stream.rs"]
 mod stream;
@@ -118,6 +118,48 @@ impl ObjectInput {
         }
         let bytes = newer.collect(stream).await?;
         Ok((newer, bytes))
+    }
+
+    /// Retain a whole-object GET's response under the observation it
+    /// describes: a next-number hit is the object itself (§6). Bytes this
+    /// observation already retains are used first, and the response then
+    /// supplies none of them.
+    pub(crate) async fn receive_response(
+        database: &Database,
+        storage: &dyn Storage,
+        path: &ObjectPath,
+        response: ObjectStream<'_>,
+    ) -> Result<Self, SyncError> {
+        if &response.metadata().path != path {
+            return Err(StorageFailure::Protocol
+                .with_source("stream names another path")
+                .into());
+        }
+        let input = Self::observe(database, response.metadata()).await?;
+        let mut stream = input.stream(storage).await;
+        if !input.retains_bytes().await? {
+            stream.start_with(response);
+        }
+        stream.drain().await?;
+        drop(stream);
+        Ok(input)
+    }
+
+    /// The observation already retained at `path`, if any, with whatever of
+    /// its bytes are retained.
+    pub(crate) async fn retained(
+        database: &Database,
+        path: &ObjectPath,
+    ) -> Result<Option<Self>, SyncError> {
+        let Some(observation) = database
+            .retained_observation(path.as_str().to_owned())
+            .await?
+        else {
+            return Ok(None);
+        };
+        let object: StoredObject = serde_json::from_slice(&observation)
+            .map_err(|_| coven_database::DbError::DamagedDatabase)?;
+        Self::observe(database, &object).await.map(Some)
     }
 
     /// Checked while holding this observation's receiving guard.

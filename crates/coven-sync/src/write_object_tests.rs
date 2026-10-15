@@ -167,7 +167,7 @@ async fn probed_writers(
     let mut probed: Vec<_> = storage.request_trace()[before..]
         .iter()
         .filter_map(|request| match request {
-            MemoryRequest::Status(path) => path.write_id().map(|write| write.device.0),
+            MemoryRequest::Read(path, None) => path.write_id().map(|write| write.device.0),
             _ => None,
         })
         .collect();

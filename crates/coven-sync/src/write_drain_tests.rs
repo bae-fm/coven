@@ -208,7 +208,7 @@ async fn a_failed_drain_read_leaves_the_device_polled() {
                 );
             }
             _ => {
-                faults.status_failures.insert(
+                faults.read_failures.insert(
                     ObjectPath::device_log(STORE_ID, DeviceId(2), 2.try_into().unwrap()),
                     StorageFailure::Network,
                 );
@@ -234,7 +234,7 @@ async fn a_drained_writers_retained_write_still_applies() {
     let path = ObjectPath::device_log(STORE_ID, DeviceId(2), 1.try_into().unwrap());
     let mut faults = coven_storage::test_utils::Faults::none();
     faults
-        .status_failures
+        .read_failures
         .insert(path.clone(), StorageFailure::Network);
     removed.storage.set_faults(faults).await;
     assert!(removed.pass(FINAL).await.is_err());
@@ -244,9 +244,13 @@ async fn a_drained_writers_retained_write_still_applies() {
         .await;
     assert!(rows(&removed.ana.db).await.is_empty());
     let finality = removed.ana.db.retirement_finalities().await.unwrap()[0];
-    // Write 1 was discovered and retained before a failure interrupted it.
+    // Write 1 was read and retained whole before a failure interrupted
+    // discovery, as an earlier window retains each hit.
     let object = removed.storage.status(&path).await.unwrap().unwrap();
     crate::object_input::ObjectInput::observe(&removed.ana.db, &object)
+        .await
+        .unwrap()
+        .receive(removed.storage.as_ref())
         .await
         .unwrap();
     assert!(removed
@@ -263,7 +267,7 @@ async fn a_drained_writers_retained_write_still_applies() {
     assert_eq!(rows(&removed.ana.db).await.len(), 1);
     let trace = &removed.storage.request_trace()[before..];
     assert!(trace.iter().all(|request| !matches!(request,
-        MemoryRequest::Status(p) if p.write_id().is_some_and(|w| w.device == DeviceId(2)))));
+        MemoryRequest::Read(p, _) if p.write_id().is_some_and(|w| w.device == DeviceId(2)))));
 }
 
 /// IO `Retired`: the actual drain prerequisites (the strict wait after F and a
@@ -296,7 +300,7 @@ fn io_differential_retired_drain() {
                         );
                     }
                     Some(_) => {
-                        faults.status_failures.insert(
+                        faults.read_failures.insert(
                             ObjectPath::device_log(STORE_ID, DeviceId(2), 2.try_into().unwrap()),
                             StorageFailure::Network,
                         );

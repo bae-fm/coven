@@ -126,12 +126,6 @@ impl Storage for SlowWrites {
         self.storage.replace(path, bytes).await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
-        if path
-            .write_position()
-            .is_some_and(|(writer, _)| writer == self.writer)
-        {
-            self.clock.set(self.clock.now() + self.step);
-        }
         self.storage.status(path).await
     }
     async fn stream_object(
@@ -139,6 +133,14 @@ impl Storage for SlowWrites {
         path: &ObjectPath,
         range: Option<ByteRange>,
     ) -> Result<coven_storage::ObjectStream<'_>, StorageError> {
+        // A next-number probe is a whole-object GET.
+        if range.is_none()
+            && path
+                .write_position()
+                .is_some_and(|(writer, _)| writer == self.writer)
+        {
+            self.clock.set(self.clock.now() + self.step);
+        }
         self.storage.stream_object(path, range).await
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {

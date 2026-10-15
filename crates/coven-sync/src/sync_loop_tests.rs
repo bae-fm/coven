@@ -656,26 +656,26 @@ async fn scenario_on(scenario: Scenario, storage: MemoryStorage) -> Counts {
     counts
 }
 
+// SP "Counting a pass": with a transfer limit of one, one new readable note
+// and no other due work adds to an idle pass exactly its GET, whose body is
+// the write, and one changed-positions PUT. The idle requests themselves are
+// io_counts_idle_requests_charge_every_listing_page's bound.
 #[tokio::test]
-#[ignore = "fails on main: as io_counts_idle_requests_charge_every_listing_page, and a write hit costs a status plus separate body reads"]
 async fn io_counts_one_write_requests() {
+    let idle = scenario(Scenario::Idle).await.requests_by_kind();
     let counts = scenario(Scenario::OneWrite).await;
     assert_eq!(
-        (counts.requests, counts.requests_by_kind()),
-        (
-            13,
-            RequestCounts {
-                lists: 2,
-                gets: 10,
-                replaces: 1,
-                ..Default::default()
-            }
-        )
+        counts.requests_by_kind(),
+        RequestCounts {
+            gets: idle.gets + 1,
+            replaces: idle.replaces + 1,
+            ..idle
+        },
+        "{counts:#?}"
     );
 }
 
 #[tokio::test]
-#[ignore = "fails on main: next_writes probes by status, so the hit and terminal miss are statuses and the body is read separately; stated one GET per hit and one GET terminal miss"]
 async fn io_counts_scan_and_fetch_ahead_cost() {
     // CovenIO.Trace.scan_cost/fetch_ahead_cost: k hits + one terminal miss
     // + at most limit-1 speculative requests. This fixture uses limit 1.
@@ -713,7 +713,7 @@ async fn io_counts_idle_takes_no_writer() {
 // entries a page, the one store-log writer folder (devices 2 and 3 hold no
 // entries) is one page and the three positions are two.
 #[tokio::test]
-#[ignore = "fails on main: write next numbers are probed by status, and step 8 growth and retention list snapshots/store/ and devices/ every pass (see io_counts_no_history_listing)"]
+#[ignore = "fails on main: step 8 growth and retention list snapshots/store/ and devices/ every pass (see io_counts_no_history_listing)"]
 async fn io_counts_idle_requests_charge_every_listing_page() {
     let storage = MemoryStorage::builder()
         .transfer_limits(16 * 1024 * 1024, 1024 * 1024)
@@ -926,7 +926,7 @@ async fn io_counts_reopen_download_reuse() {
 // next numbers, read from storage independently of the pass. A request
 // outside the model's idle vocabulary keeps its description.
 #[tokio::test]
-#[ignore = "requires COVEN_IO_RUNNER; fails on main for the causes io_counts_idle_requests_charge_every_listing_page names"]
+#[ignore = "requires COVEN_IO_RUNNER; fails on main for the cause io_counts_idle_requests_charge_every_listing_page names"]
 async fn io_differential_idle_trace() {
     use coven_storage::{ObjectPath, ObjectPrefix, Storage};
     type Position = fn(&ObjectPath) -> Option<(DeviceId, std::num::NonZeroU64)>;

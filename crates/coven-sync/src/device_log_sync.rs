@@ -2,7 +2,7 @@
 
 use crate::{PendingReason, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::{custody::KeySession, MemberIdentity, StoreKeyring};
-use coven_database::{ApplyOutcome, Database, DbError, LogObject, LogRefusal};
+use coven_database::{Database, DbError, LogObject};
 use coven_foundation::clock::ClockRef;
 use coven_merge::{Audience, WriteId};
 use coven_storage::Storage;
@@ -13,6 +13,8 @@ use std::sync::Arc;
 mod download;
 #[path = "write_drain.rs"]
 mod drain;
+#[path = "write_discovery.rs"]
+mod scan;
 #[cfg(test)]
 #[path = "device_log_sync_tests.rs"]
 pub(crate) mod tests;
@@ -28,79 +30,6 @@ pub struct WriteDiscovery {
     /// A miss could not be trusted, or required history is missing: snapshot
     /// discovery must come before further misses are used.
     pub needs_snapshots: bool,
-}
-
-/// Probe a writer's next numbers by exact status, fetching ahead in parallel
-/// up to `limit` after a hit and scheduling nothing past the first miss or a
-/// refused number `stop`. Returns the contiguous hits and the missed number,
-/// none when the refusal ended the log first. A failed probe fails the call
-/// after in-flight requests settle; it is never a miss.
-async fn next_writes(
-    storage: &dyn Storage,
-    store: coven_foundation::id_source::StoreId,
-    writer: coven_foundation::id_source::DeviceId,
-    after: u64,
-    stop: Option<u64>,
-    limit: std::num::NonZeroUsize,
-) -> Result<(Vec<(WriteId, coven_storage::StoredObject)>, Option<u64>), SyncError> {
-    use futures_util::{stream::FuturesUnordered, StreamExt};
-    let mut running = FuturesUnordered::new();
-    let mut next = after;
-    let mut width = 1;
-    let mut miss = None::<u64>;
-    let mut failed = None;
-    let mut found = BTreeMap::new();
-    loop {
-        while miss.is_none() && failed.is_none() && running.len() < width {
-            let number = next.checked_add(1).ok_or_else(|| {
-                coven_storage::StorageFailure::Protocol.with_source("write numbers exhausted")
-            })?;
-            if stop.is_some_and(|stop| number >= stop) {
-                break;
-            }
-            next = number;
-            let path = crate::write_seal::path(
-                store,
-                WriteId {
-                    device: writer,
-                    number,
-                },
-            );
-            running.push(async move { (number, storage.status(&path).await) });
-        }
-        let Some((number, result)) = running.next().await else {
-            break;
-        };
-        match result {
-            Ok(Some(object)) => {
-                found.insert(number, object);
-                width = limit.get();
-            }
-            Ok(None) => miss = Some(miss.map_or(number, |known| known.min(number))),
-            Err(error) => {
-                failed.get_or_insert(error);
-            }
-        }
-    }
-    if let Some(error) = failed {
-        return Err(error.into());
-    }
-    Ok((
-        found
-            .into_iter()
-            .filter(|(number, _)| miss.is_none_or(|miss| *number < miss))
-            .map(|(number, object)| {
-                (
-                    WriteId {
-                        device: writer,
-                        number,
-                    },
-                    object,
-                )
-            })
-            .collect(),
-        miss,
-    ))
 }
 
 /// Device-log transfer and position publication using the capabilities chosen
@@ -354,11 +283,10 @@ impl DeviceLogSync {
             complete: true,
             needs_snapshots: false,
         };
-        let mut objects = BTreeMap::new();
         let mut ends = BTreeMap::new();
         // A drained device is never probed again; its discovered writes come
-        // from retained observations. A retired device whose entry and copy
-        // logs reached misses after a qualifying sample this pass completes its
+        // from retained input. A retired device whose entry and copy logs
+        // reached misses after a qualifying sample this pass completes its
         // drain with a trusted write miss here (§6, SP step 6).
         let drained = self.database.drained_devices().await?;
         let drain_reads = self.reads.drains();
@@ -383,6 +311,7 @@ impl DeviceLogSync {
         // device's own next write.
         let mut writers = self.database.known_log_writers().await?;
         writers.remove(&local.device);
+        let mut logs = Vec::new();
         for writer in writers {
             // A refused write stops its log: nothing at or past it is read.
             let stop = refused
@@ -392,7 +321,7 @@ impl DeviceLogSync {
                     _ => None,
                 })
                 .min();
-            let after = state
+            let applied = state
                 .positions
                 .0
                 .iter()
@@ -401,110 +330,57 @@ impl DeviceLogSync {
             if stop.is_some() {
                 discovery.complete = false;
             }
-            if drained.contains(&writer) {
-                objects.extend(
-                    self.retained_writes(local.store, writer, after, stop)
-                        .await?,
-                );
-                continue;
-            }
-            let (found, end) = next_writes(
-                storage,
-                local.store,
+            logs.push(scan::WriteLog::new(
                 writer,
-                after,
+                applied,
                 stop,
-                self.download_limit,
-            )
-            .await?;
-            objects.extend(found);
-            let Some(miss) = end else {
-                continue;
-            };
-            ends.insert(writer, miss);
-            if !self.observation.as_ref().is_some_and(|observation| {
-                crate::recent_return::miss_is_recent(observation, self.clock.as_ref(), saved)
-            }) {
-                discovery.needs_snapshots = true;
-            } else if let (Some(drain), None) = (draining.get(&writer), stop) {
-                drains.push((*drain, miss));
-            }
+                drained.contains(&writer),
+            ));
         }
-        let mut stuck = refused;
-        let mut waits = BTreeMap::new();
-        let mut positions = state.positions;
-        let mut replays = crate::replay_cache::ReplayCache::new(&local.log);
-        loop {
-            let mut progressed = false;
-            for (write, object) in &objects {
-                if positions.covers(*write) {
-                    continue;
-                }
-                let previous = WriteId {
-                    number: write.number - 1,
-                    ..*write
+        let mut received = download::Received::new(state.positions, refused, &local.log);
+        // Each round reads one window of every open log, then applies what is
+        // ready, so a ready write's input is released before more is fetched
+        // and retained input stays within its budget while catching up.
+        while !logs.is_empty() {
+            let mut open = Vec::new();
+            for mut log in logs {
+                let window = self.read_window(storage, local.store, &mut log).await?;
+                received.objects.extend(window.found);
+                let miss = match window.end {
+                    None => {
+                        open.push(log);
+                        continue;
+                    }
+                    Some(scan::End::Stopped) => continue,
+                    Some(scan::End::Miss(miss)) => miss,
                 };
-                if write.number > 1 && !positions.covers(previous) {
-                    continue;
-                }
-                if stuck
-                    .iter()
-                    .any(|record| record.blocks(LogObject::Write(*write)))
-                {
-                    continue;
-                }
-                match self
-                    .receive_write(
-                        object,
-                        &ring,
-                        &local.log,
-                        &mut replays,
-                        &member.member(),
-                        local.device,
-                    )
-                    .await
-                {
-                    Ok(ApplyOutcome::Applied | ApplyOutcome::AlreadyApplied) => {
-                        match positions.0.iter_mut().find(|p| p.device == write.device) {
-                            Some(position) => *position = *write,
-                            None => {
-                                positions.0.push(*write);
-                                positions.0.sort_by_key(|p| p.device);
-                            }
-                        }
-                        progressed = true;
-                    }
-                    // Waits and refusals are already the write's pending record;
-                    // the pass continues with independent logs (§19.1).
-                    Ok(ApplyOutcome::Waiting(reason)) => {
-                        tracing::debug!(?write, ?reason, "write is waiting for its prerequisites");
-                        waits.insert(*write, reason);
-                    }
-                    Err(SyncError::Damaged(damage)) => stuck.push(LogRefusal {
-                        object: LogObject::Write(*write),
-                        failure: (&damage.failure).into(),
-                    }),
-                    Err(SyncError::KeyUnavailable(key)) => {
-                        tracing::debug!(?write, ?key, "write key is unavailable");
-                    }
-                    Err(SyncError::UpdateRequired(update)) => {
-                        tracing::debug!(?write, ?update, "write needs a newer coven");
-                    }
-                    Err(error) => return Err(error),
+                ends.insert(log.writer, miss);
+                if !self.observation.as_ref().is_some_and(|observation| {
+                    crate::recent_return::miss_is_recent(observation, self.clock.as_ref(), saved)
+                }) {
+                    discovery.needs_snapshots = true;
+                } else if let (Some(drain), None) = (draining.get(&log.writer), log.stop) {
+                    drains.push((*drain, miss));
                 }
             }
-            if !progressed {
-                break;
+            self.apply_ready(&mut received, &ring, &member.member(), local.device)
+                .await?;
+            // A write refused in this round stops its log there too.
+            for log in &mut open {
+                if let Some(refused) = received.refused(log.writer) {
+                    log.stop = Some(log.stop.map_or(refused, |stop| stop.min(refused)));
+                }
             }
+            logs = open;
         }
-        for write in objects.keys() {
-            if positions.covers(*write) {
+        for write in received.objects.keys() {
+            if received.positions.covers(*write) {
                 continue;
             }
             discovery.complete = false;
             // A cause past its writer's miss is required history: only a fresh
             // snapshot catalog can certify its deletion (§15).
-            if let Some(coven_database::WriteWait::Writes(needed)) = waits.get(write) {
+            if let Some(coven_database::WriteWait::Writes(needed)) = received.waits.get(write) {
                 if needed.iter().any(|cause| {
                     ends.get(&cause.device)
                         .is_some_and(|miss| cause.number >= *miss)
@@ -517,7 +393,7 @@ impl DeviceLogSync {
             discovery.complete = false;
         }
         for ((drain, sample), miss) in drains {
-            self.finish_drain(drain, sample, miss, &objects, &positions, &waits)
+            self.finish_drain(drain, sample, miss, &received.waits)
                 .await?;
         }
         self.compare_fingerprints().await?;
