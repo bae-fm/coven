@@ -1314,9 +1314,20 @@ The `effects` mode evaluates `resolvedSchema` derivations with `evaluate` and
 referenced-key updates and compound and transitive actions on SQLite,
 rebuilds each captured foreign-key action's `Reference` from the schema and
 its cause's own captured step, and requires the model's exact consequence.
-That checks the author's capture against B18's effects. The receiver's
-label-free rule is proved above; its Rust implementation is not yet compared
-with `cause`.
+That checks the author's capture against B18's effects.
+The `receive` mode decides `Admission.check` and `Admission.guard` for a
+received write from the receiver's reconstructed execution: the references
+behind each action the receiver found, each row's direct effect, each derived
+row's paths combined with `together`, its proposed net change, and the
+generation, setter and execution sources of every change with those that do
+not survive. `judge_view::tests::receipt_matches_the_model` receives direct,
+derived, transitive, coalesced, trigger and unauthorized-root writes, a forged
+action payload and an action whose cause's net change differs from its steps,
+and requires each recorded verdict to be the model's cause, with the roots of
+each derived change (`applied_derived_recorded`) and the failed sources of each
+dependent one (`dependencies`, `dropped_contributing_root_no_effect`). The
+receiver's classification itself, which supplies those references, is not yet
+compared with `Classification.cause`.
 The `admission` mode decides `Admission.check` for one local write, given
 each changed row's table and owner. `local_admission_matches_the_model` runs
 Ben's statements against Ana's rows on SQLite: an authorized cascade, a key
@@ -1333,7 +1344,8 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-database -- --ignored --exact \
   ownership::tests::creation_differential_histories \
   execution_capture::tests::lean::captured_actions_are_the_models_consequences \
-  owner_permission::tests::local_admission_matches_the_model
+  owner_permission::tests::local_admission_matches_the_model \
+  judge_view::tests::receipt_matches_the_model
 ```
 
 ### B19 Foreign keys on generated columns
