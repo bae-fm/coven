@@ -68,14 +68,13 @@ import CovenQueue
 #print axioms CovenQueue.Operations.visible_rotation_has_copies
 #print axioms CovenQueue.Operations.finished_rotation_requires_kept
 #print axioms CovenQueue.Operations.failed_snapshot_check_blocks_publication
-#print axioms CovenQueue.Operations.snapshot_crash_needs_new_verification
 #print axioms CovenQueue.Operations.Examples.crash_between_artifact_and_journal
 #print axioms CovenQueue.Operations.Examples.rotation_finishes_after_crashes
 #print axioms CovenQueue.Operations.Examples.publication_without_kept_entry
 #print axioms CovenQueue.Operations.Examples.restart_changes_key
 #print axioms CovenQueue.Operations.Examples.copies_visible_before_finish
 #print axioms CovenQueue.Operations.Examples.snapshot_visible_before_finish
-#print axioms CovenQueue.Operations.Examples.snapshot_finishes_after_lost_verification
+#print axioms CovenQueue.Operations.Examples.snapshot_finishes_after_crash
 #print axioms CovenQueue.AtomicReceive.never_half_visible
 #print axioms CovenQueue.AtomicReceive.crash_discards_transaction
 #print axioms CovenQueue.AtomicReceive.committed_cannot_begin

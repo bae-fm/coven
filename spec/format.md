@@ -792,8 +792,7 @@
     before applying any snapshot data.
   - Before upload, the writer verifies both signatures, decrypts and checks
     every record, and compares with the fingerprint of the captured database
-    state (§15). After upload it checks the complete stored bytes' checksum.
-    These checks add no receipt or field to the object.
+    state (§15). These checks add no receipt or field to the object.
   - For both signatures, replay the snapshot's signed `store_log` coverage,
     resolve the device's stable owner there, and use its current signing key
     in that view. Unverified positions are lookup hints only: they can request

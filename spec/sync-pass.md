@@ -601,10 +601,7 @@ Its entry carries the snapshot's `T_c`; once an observed storage time is past
 `T_c + one day` before the entry is prepared, the attempt is abandoned like
 any other and the raise prepared afresh
 ([`RaiseHistory.expired_stays_out`](proofs/io/CovenIO/RaiseHistory.lean)).
-Upload and check the stored checksum, or fetch the stored bytes once if the provider
-has no complete-object checksum. That confirmation is shared with any
-occupied-path comparison. No snapshot task is created and deleted merely
-to record an idle check.
+No snapshot task is created and deleted merely to record an idle check.
 Abandon an attempt that passes `T_c + one day` without confirmed counting
 publication and prepare afresh at a new path, which each preparation
 reserves (§10). It has passed once a storage time this device observed, or

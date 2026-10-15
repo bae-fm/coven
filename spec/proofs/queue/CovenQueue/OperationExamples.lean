@@ -168,7 +168,6 @@ def snapshotStored : State := { snapshotSent with stored := create snapshotSent.
 def snapshotReply : State := { snapshotStored with memory := ⟨none, some snapshotObject⟩ }
 def snapshotUploaded : State :=
   { snapshotStored with journal := .pending ⟨1, .snapshot snapshot, 2⟩ }
-def snapshotVerified : State := { snapshotUploaded with memory := ⟨none, some snapshotObject⟩ }
 def snapshotFinished : State := { snapshotUploaded with journal := .finished 1 (.snapshot snapshot) }
 
 theorem snapshot_stored_reachable : Reachable codec kept 1 (.snapshot snapshot) snapshotStored := by
@@ -177,25 +176,19 @@ theorem snapshot_stored_reachable : Reachable codec kept 1 (.snapshot snapshot) 
       (.send _ ⟨1, .snapshot snapshot, 1⟩ 0 snapshotObject rfl rfl (by decide))
   exact .step sent (.land _ 0 snapshotObject (by decide))
 
-theorem snapshot_verified_reachable : Reachable codec kept 1 (.snapshot snapshot) snapshotVerified := by
+theorem snapshot_finishes_after_crash :
+    Reachable codec kept 1 (.snapshot snapshot) snapshotFinished := by
   have reply : Reachable codec kept 1 (.snapshot snapshot) snapshotReply :=
     .step snapshot_stored_reachable
       (.receive _ ⟨1, .snapshot snapshot, 1⟩ 0 snapshotObject rfl rfl (by decide) (by decide))
   have uploaded : Reachable codec kept 1 (.snapshot snapshot) snapshotUploaded :=
     .step reply (.checkpoint _ ⟨1, .snapshot snapshot, 1⟩ 0 snapshotObject rfl rfl
       (by decide) rfl (by decide))
-  exact .step uploaded (.verifySnapshot _ ⟨1, .snapshot snapshot, 2⟩ snapshot rfl rfl rfl (by decide))
+  exact .step (.step uploaded (.crash _)) (.finishSnapshot _ ⟨1, .snapshot snapshot, 2⟩ snapshot rfl rfl rfl)
 
-theorem snapshot_finishes_after_lost_verification :
-    Reachable codec kept 1 (.snapshot snapshot) snapshotFinished := by
-  have crashed := Reachable.step snapshot_verified_reachable (.crash _)
-  have verified := Reachable.step crashed
-    (.verifySnapshot _ ⟨1, .snapshot snapshot, 2⟩ snapshot rfl rfl rfl (by decide))
-  exact .step verified (.finishSnapshot _ ⟨1, .snapshot snapshot, 2⟩ snapshot rfl rfl rfl rfl)
-
-/-- A reader can load the whole checked snapshot before the publisher's
-verification reply and final row deletion. Literal invisibility until the last
-step is false; the reader's own atomic application is the relevant boundary. -/
+/-- A reader can load the whole checked snapshot before the publisher's final
+row deletion. Literal invisibility until the last step is false; the reader's
+own atomic application is the relevant boundary. -/
 theorem snapshot_visible_before_finish :
     Reachable codec kept 1 (.snapshot snapshot) snapshotStored ∧
     snapshotStored.stored (.snapshot 1) = some snapshot.sealed ∧
@@ -207,9 +200,5 @@ example : ∃ s, Reachable codec kept 1 (.snapshot snapshot) s ∧
     s.stored (.snapshot 1) = some snapshot.sealed ∧ s.journal.row ≠ none :=
   ⟨snapshotStored, snapshot_visible_before_finish.1, snapshot_visible_before_finish.2.1,
     snapshot_visible_before_finish.2.2.1⟩
-
-example : snapshotVerified.crash.memory.reply = none ∧
-    snapshotVerified.crash.journal.row = some ⟨1, .snapshot snapshot, 2⟩ ∧
-    snapshotFinished.journal.row = none := by decide
 
 end CovenQueue.Operations.Examples

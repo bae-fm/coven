@@ -30,7 +30,7 @@ theorem Run.finished_stays {codec : Codec} {kept : Kept} {id : Nat} {d : Data}
 /-- Environmental assumptions for a single publication attempt, after the
 last crash. Local checks and transactions eventually succeed, storage accepts
 the fixed objects, comparison/checkpoint transactions eventually commit, and
-the final verification or kept-entry check eventually completes. A dropped
+the snapshot finish or kept-entry check eventually completes. A dropped
 rotation is not covered: §18 restarts it with a new entry and may block it. -/
 structure Fair {codec : Codec} {kept : Kept} {id : Nat} {d : Data}
     (run : Run codec kept id d) (after : Nat) : Prop where

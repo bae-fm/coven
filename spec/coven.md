@@ -404,8 +404,8 @@ a zero-body pass cannot hide a listing of the whole history.
   - `X` counts deletion requests, including native deletion of asset parts.
     `A` counts permission reads, pages, grants, revokes and due job polls.
     `M` includes fresh single-object status and occupied-path comparison
-    overhead. A required complete-byte comparison or snapshot verification
-    body instead contributes an object to `O`.
+    overhead. A required complete-byte comparison body instead contributes
+    an object to `O`.
   - Thus `R <= D + 3 * O + F + P + X + A + M + E`. Initialization and
     eviction are reported separately with the same terms. An arrival that
     causes a snapshot or historical-key sharing contributes to `P`, not an
@@ -1102,8 +1102,7 @@ the file's ranges under `F`.
     conditional PUT racing a conditional copy of one name both succeed too,
     while copies racing copies keep one winner. The SeaweedFS profile
     therefore publishes every object by copy with `If-None-Match: *`. None returned a checksum, even
-    with checksum mode; their profiles do not request one and rely on the
-    complete-byte comparison required for a missing checksum (below).
+    with checksum mode, so their profiles do not request one.
     Versity Gateway 1.9.0, versioned or not, refused occupied names the same
     way, sequentially and in every suite 5 race, so it uses conditional
     completion too; unlike the others it returns checksums with their scope
@@ -1255,10 +1254,9 @@ the file's ranges under `F`.
   coven's metadata; its scope is never guessed. RustFS, SeaweedFS and Ceph RGW return
   none; a checksum returned under their profile, scoped or not, contradicts
   the certified observation and fails as a protocol error rather than being
-  used. A missing checksum requires the byte
-  comparison; a composite cannot confirm a whole-object digest. Metadata and
-  downloaded bytes must describe the same revision: Drive and OneDrive
-  recheck replaceable metadata after download and fail if it changed.
+  used. Metadata and downloaded bytes must describe the same revision: Drive
+  and OneDrive recheck replaceable metadata after download and fail if it
+  changed.
 
   File status and upload confirmation use this call, not a folder listing.
   Count any name lookup and missing-container check separately. S3 HEAD's
@@ -1271,7 +1269,6 @@ the file's ranges under `F`.
   comes from the exact HEAD, never from the listing. A miss remains two requests: one HEAD and one listing.
   A revision proves freshness, not byte
   equality: occupied immutable paths still require §10's complete comparison.
-  Snapshot confirmation still checks the complete-object checksum (§15).
   - Ben replaces his positions twice within one storage clock tick with
     equal-length bytes. Ana notices the new revision and reads the new post.
 - Storage times come from the provider, on one clock for this store.
@@ -4871,18 +4868,8 @@ Carol's tablet:
     at those same positions and schema version. Writes committed since
     that capture do not change the comparison.
   - A failed check stops publication and reaches the caller.
-- After upload, compare the provider's checksum of the complete stored
-  bytes with the local checksum, using the provider's checksum algorithm.
-  - For multipart uploads, compare the checksum of the complete object,
-    not a part checksum or an identifier that is not a checksum.
-  - A provider without a complete-object checksum must return the stored
-    bytes for this check. A mismatch is an integrity failure, not success.
-- Readers still choose by the authenticated prefix; they do not certify a
+- Readers choose by the authenticated prefix; they do not certify a
   snapshot for other devices by opening its body.
-  - E.g. Ana's phone discovers its published snapshot was damaged. Ben's
-    healthy laptop writes a newer snapshot; new devices load that one.
-  - If Carol already loaded incorrect data, a person resets from Ben's
-    trusted copy (§19.3). Keeping one older snapshot is not a recovery rule.
 - The *latest* or *current newest* snapshot of an audience is its counting
   snapshot covering the most writes, counted over every log; a tie goes to
   the smaller path, comparing the writing device's id and then the snapshot
@@ -6236,8 +6223,8 @@ retry rule.
 ## 19. Recovery
 
 - Recovery is for any state coven's rules didn't produce: a write that
-  never arrives, an object that is damaged, a database a disk or a bug
-  damaged, or devices holding different data after the same writes.
+  never arrives, a database a disk or a bug damaged, or devices holding
+  different data after the same writes.
 - The last is the one nothing else would catch, since every rule would
   still run; it is what a bug in coven or the app looks like.
 

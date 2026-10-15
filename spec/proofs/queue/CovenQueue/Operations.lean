@@ -173,14 +173,8 @@ inductive Step (codec : Codec) (kept : Kept) : State → State → Prop where
       Step codec kept s { s with
         journal := .pending { r with last_step := n + 2 }
         memory := .empty }
-  | verifySnapshot (s : State) (r : Row) (snapshot : Snapshot) :
-      s.journal = .pending r → r.data = .snapshot snapshot →
-      r.last_step = 2 → s.stored (.snapshot snapshot.number) = some snapshot.sealed →
-      Step codec kept s { s with memory := { s.memory with
-        reply := some ⟨.snapshot snapshot.number, snapshot.sealed⟩ } }
   | finishSnapshot (s : State) (r : Row) (snapshot : Snapshot) :
       s.journal = .pending r → r.data = .snapshot snapshot → r.last_step = 2 →
-      s.memory.reply = some ⟨.snapshot snapshot.number, snapshot.sealed⟩ →
       Step codec kept s { s with journal := .finished r.id r.data, memory := .empty }
   | finishRotation (s : State) (r : Row) (rotation : Rotation) :
       s.journal = .pending r → r.data = .rotation rotation →
@@ -252,7 +246,7 @@ private theorem finish_through {codec : Codec} {d : Data} {store : Store}
 theorem step_valid {codec : Codec} {kept : Kept} {s t : State}
     (step : Step codec kept s t) (v : Valid codec s) : Valid codec t := by
   cases step with
-  | stageLocal | receive | verifySnapshot | crash | wait =>
+  | stageLocal | receive | crash | wait =>
     exact ⟨v.bound, v.pendingBound, v.localReady, v.confirmed, v.requests, v.objects⟩
   | send r n o hj hn ho =>
     refine { v with requests := ?_ }
@@ -307,7 +301,7 @@ theorem step_valid {codec : Codec} {kept : Kept} {s t : State}
       simpa [Journal.position, Journal.data] using extend_through before ho stored
     · simpa [Journal.data, ← data] using v.requests
     · simpa [Journal.data, ← data] using v.objects
-  | finishSnapshot r snapshot hj hd hn reply =>
+  | finishSnapshot r snapshot hj hd hn =>
     have data : s.journal.data = r.data := by simp [hj, Journal.data]
     have pos : s.journal.position codec = 2 := by simp [hj, Journal.position, hn]
     refine ⟨by simp [Journal.position, Journal.data], ?_, ?_, ?_, ?_, ?_⟩
@@ -404,8 +398,7 @@ theorem deleted_row_stays_deleted {codec : Codec} {kept : Kept} {s t : State}
     (h : Step codec kept s t) (done : s.journal.row = none) : t.journal.row = none := by
   cases h <;> simp_all [State.crash, Journal.row]
 
-/-- Publication can only follow the successful local snapshot check. This
-covers stored bytes before the publisher's final verification transaction. -/
+/-- Publication can only follow the successful local snapshot check. -/
 theorem remote_locally_checked {codec : Codec} {kept : Kept} {id : Nat} {d : Data} {s : State}
     (h : Reachable codec kept id d s) :
     (∀ n o, (n, o) ∈ s.sent → d.localChecked codec) ∧
@@ -428,8 +421,8 @@ theorem remote_locally_checked {codec : Codec} {kept : Kept} {id : Nat} {d : Dat
       refine ⟨ih.1, ?_⟩
       intro p bytes _
       exact ih.1 n o sent
-    | stageLocal | persistLocal | commitLocal | receive | checkpoint | verifySnapshot |
-        finishSnapshot | finishRotation | crash | wait => exact ih
+    | stageLocal | persistLocal | commitLocal | receive | checkpoint | finishSnapshot |
+        finishRotation | crash | wait => exact ih
 
 theorem snapshot_stored_checked {codec : Codec} {kept : Kept} {id : Nat}
     {snapshot : Snapshot} {s : State} (h : Reachable codec kept id (.snapshot snapshot) s)
@@ -492,11 +485,11 @@ theorem finished_rotation_requires_kept {codec : Codec} {kept : Kept} {id : Nat}
       simp [hj, Journal.data, hd] at data
       subst r
       exact accepted
-    | finishSnapshot row snapshot hj hd _ _ =>
+    | finishSnapshot row snapshot hj hd _ =>
       have data := (fixed_data reachable).1
       simp [hj, Journal.data, hd] at data
     | commitLocal | checkpoint => simp [Journal.row] at done
-    | stageLocal | persistLocal | send | land | receive | verifySnapshot | crash | wait => exact ih done
+    | stageLocal | persistLocal | send | land | receive | crash | wait => exact ih done
 
 theorem crash_preserves_operation (s : State) :
     s.crash.journal = s.journal ∧ s.crash.retained = s.retained ∧
@@ -522,11 +515,5 @@ theorem failed_snapshot_check_blocks_publication {codec : Codec} {kept : Kept} {
   | some bytes =>
     have checked := snapshot_stored_checked h stored
     exact False.elim (failed (checked.1 ▸ checked.2))
-
-theorem snapshot_crash_needs_new_verification {codec : Codec} {kept : Kept} {s t : State}
-    {row : Row} {snapshot : Snapshot} (journal : s.journal = .pending row)
-    (data : row.data = .snapshot snapshot) (step : Step codec kept s.crash t) :
-    t.journal.row ≠ none := by
-  cases step <;> simp_all [State.crash, Journal.row, Memory.empty]
 
 end CovenQueue.Operations

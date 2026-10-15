@@ -1,12 +1,11 @@
-//! A sealed snapshot is checked before and after publication (§15, SP step 8):
-//! first opened locally through the reader's own checks, then confirmed by the
-//! provider's checksum of the complete stored object or one full readback.
+//! A sealed snapshot is opened locally through the reader's own checks before
+//! publication (§15, SP step 8).
 
 use super::io::SnapshotInput;
 use crate::SyncError;
 use coven_crypto::{ContentHash, ContentHasher, DerivedKeys, ObjectHasher, SigningKey};
 use coven_format::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
-use coven_storage::{ObjectPath, Storage, StorageFailure};
+use coven_storage::{ObjectPath, StorageFailure};
 use std::io::{self, Read};
 
 /// What sealing produced: the signed prefix and the hash of every plaintext
@@ -140,55 +139,3 @@ impl Read for SealedPlaintext {
 fn damaged(reason: &'static str) -> SyncError {
     StorageFailure::Protocol.with_source(reason).into()
 }
-
-/// Confirm the provider stored exactly the local bytes: its checksum of the
-/// complete object when it reports one in an algorithm coven computes, else one
-/// full readback. A multipart composite is not a whole-object checksum. A
-/// mismatch is an integrity failure, never a publication (§15).
-pub(super) async fn confirm_stored(
-    storage: &dyn Storage,
-    path: &ObjectPath,
-    size: u64,
-    read: impl Fn(u64, usize) -> Result<Vec<u8>, SyncError>,
-) -> Result<coven_storage::StoredObject, SyncError> {
-    let stored = storage
-        .status(path)
-        .await?
-        .ok_or_else(|| StorageFailure::NotFound.with_source("uploaded snapshot is absent"))?;
-    if stored.size != size {
-        return Err(integrity(
-            "stored snapshot size differs from the sealed file",
-        ));
-    }
-    let confirmed = match &stored.checksum {
-        Some(checksum) => checksum.confirms(size, &read)?,
-        None => None,
-    };
-    let equal = match confirmed {
-        Some(equal) => equal,
-        None => {
-            let mut hasher = ObjectHasher::new();
-            let mut offset = 0;
-            while offset < size {
-                let length = (size - offset).min(1024 * 1024) as usize;
-                hasher.update(&read(offset, length)?);
-                offset += length as u64;
-            }
-            crate::identity::stored_digest(storage, path).await? == (size, hasher.finish())
-        }
-    };
-    if !equal {
-        return Err(integrity(
-            "stored snapshot bytes differ from the sealed file",
-        ));
-    }
-    Ok(stored)
-}
-
-fn integrity(reason: &'static str) -> SyncError {
-    StorageFailure::Protocol.with_source(reason).into()
-}
-
-#[cfg(test)]
-#[path = "snapshot_verify_tests.rs"]
-mod tests;

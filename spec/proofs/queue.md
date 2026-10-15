@@ -50,16 +50,15 @@ acknowledgement are separate steps. A lost reply requires another comparison.
 An operation has an `_coven_operations` row with an id, kind-specific data
 and `last_step`. Rotation data fixes its key, hash, sealed copies, entry
 plaintext and sealing key. Snapshot data fixes the captured database state,
-key and sealed bytes. Copy checkpoints refine the grouped copy step in §18.1;
-the snapshot upload and final verification are separate checkpoints.
+key and sealed bytes. Copy checkpoints refine the grouped copy step in §18.1.
 
 A local draft, its durable file or custody value, and the journal transaction
 are separate. The artifact must survive a crash before the transaction can
 advance `last_step`. A crash after storing it but before that transaction
 leaves the earlier checkpoint and the fixed artifact available for retry.
-Remote creates, their replies, checkpoint transactions and final verification
-are also separate. Finishing deletes the row. The model retains its id and
-data afterward only as evidence about the execution, not as another table.
+Remote creates, their replies and checkpoint transactions are also separate.
+Finishing deletes the row. The model retains its id and data afterward only
+as evidence about the execution, not as another table.
 
 Each audience has its own selected raise and reset. The received history
 supplies checked author authority and immutable-object validation results.
@@ -309,10 +308,7 @@ audience, key id and hash, with all prerequisite copies already stored.
 `snapshot_stored_checked` proves that any published snapshot has the recorded
 bytes and opens to the captured state under its recorded key.
 `failed_snapshot_check_blocks_publication` rules out uploading a snapshot
-that fails that local check. `snapshot_crash_needs_new_verification` proves
-that losing the final verification reply requires another check before the
-row can be deleted. Verification uses §15's complete-byte comparison option;
-no checksum collision assumption is needed.
+that fails that local check.
 
 **A fair publication attempt finishes exactly once.**
 `rotation_resumes_and_finishes` and `snapshot_resumes_and_finishes` prove
@@ -321,7 +317,7 @@ and all fixed published bytes. `finishes_at_most_once` needs no fairness.
 `Operations.Fair` applies only after a supplied time, which may follow the
 last crash. It requires successful local persistence/checks and journal
 transactions, storage acceptance, confirmation/checkpoint transactions, and
-final verification or kept-entry completion. These are explicit assumptions
+snapshot finish or kept-entry completion. These are explicit assumptions
 about each remaining step, not an assumption that the whole operation
 finishes. The proof advances through the finite recorded sequence.
 
@@ -470,7 +466,7 @@ it does not guarantee recovery from permanent rejection without app action.
 `copies_visible_before_finish` witnesses §18.2's stored copy before its entry.
 `snapshot_visible_before_finish` has one locally checked snapshot stored while
 its publisher still has an unfinished journal row. Another device can open
-that complete snapshot before the publisher commits its verification result.
+that complete snapshot before the publisher finishes.
 Both have reachable Lean `example` histories. Thus §18's wording about never
 seeing a half-done operation cannot mean hiding all physical objects until
 row deletion. The proved reading is that introductions follow their copies,
@@ -479,7 +475,7 @@ complete snapshots pass their reader checks, and writes apply atomically.
 `OperationExamples` also checks crashes before a local artifact's persistence,
 between that persistence and the journal update, after sending a copy but
 before storage accepts it, after copy confirmation, after entry storage,
-and after snapshot verification but before its completion transaction.
+and after snapshot upload but before its completion transaction.
 
 ## Readings and boundaries of the proof
 

@@ -587,7 +587,7 @@ impl StoreLogSync {
             task: &mut task,
             input: &input,
         };
-        let stored = match crate::recorded_upload::upload(
+        match crate::recorded_upload::upload(
             storage,
             &path,
             input.size(),
@@ -598,28 +598,21 @@ impl StoreLogSync {
         {
             crate::recorded_upload::Uploaded::Occupied(expected) => {
                 // A lost reply may have published this snapshot; another copy
-                // of this device may also have used its number (§10). Equal
-                // complete bytes are the stored confirmation too.
+                // of this device may also have used its number (§10).
                 crate::identity::settle_occupied(storage, &self.send, &path, expected).await?;
                 if let Some(session) = &recorded {
                     storage.abort_upload(session).await?;
                 }
-                storage.status(&path).await?.ok_or_else(|| {
-                    StorageFailure::NotFound.with_source("confirmed snapshot is absent")
-                })?
             }
-            // The provider's report of success is not confirmation of the
-            // stored bytes (§15).
-            crate::recorded_upload::Uploaded::Stored => {
-                verify::confirm_stored(storage, &path, input.size(), |offset, length| {
-                    input.read_at(offset, length)
-                })
-                .await?
-            }
+            crate::recorded_upload::Uploaded::Stored => {}
             crate::recorded_upload::Uploaded::Paused => {
                 unreachable!("snapshot uploads keep going")
             }
-        };
+        }
+        let stored = storage
+            .status(&path)
+            .await?
+            .ok_or_else(|| StorageFailure::NotFound.with_source("confirmed snapshot is absent"))?;
         // Its landing time is a provider time this session now knows.
         self.finality
             .lock()
