@@ -2,6 +2,8 @@
 
 mod access_keys;
 pub use access_keys::DeleteAccessKeyError;
+mod carried_access_keys;
+pub use carried_access_keys::{carry_access_keys, discarded_access_keys, CarriedAccessKey};
 mod conflicts;
 mod device_log_sync;
 mod effects;

@@ -420,6 +420,7 @@ async fn prepare_and_load(
         sync.download_later_writes(&mut writes).await?;
         // The notice commits before any handle is published (E5).
         if let Some(reset) = reset {
+            reset::carry_discarded_keys(&database, pending, &reset).await?;
             database
                 .record_device_reset(reset)
                 .await

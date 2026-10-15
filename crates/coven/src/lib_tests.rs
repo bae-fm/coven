@@ -383,6 +383,16 @@ impl Network {
             };
         }
     }
+    /// A builder for a device's directory, as the app would reopen it.
+    pub(crate) fn reopen(&self, device: &Device) -> CovenBuilder {
+        builder(
+            &device.app,
+            device.layout.clone(),
+            self.clock.clone(),
+            self.ids.clone(),
+            device.storage.clone(),
+        )
+    }
     pub(crate) async fn close(self) {
         for device in self.devices {
             device.handle.close().await.unwrap();

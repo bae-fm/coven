@@ -3367,6 +3367,17 @@ Carol's tablet:
 - A stale copy resets as a new device using storage and saved custody.
   - Stop its local writes and transfers. Discard its database and pending
     local work; do not salvage or renumber waiting writes.
+  - Keep the S3 keys the old database made or owed. Its operation journal,
+    read in place, names every key made for an unfinished replacement or
+    invite and every key pending `DeleteAccessKey`. Each becomes pending
+    `DeleteAccessKey` in the new database, after it loads the store log and
+    before it is published, except a made key that store log records as an
+    active member's current access, which is in use (§13). So the reset
+    leaves every key coven made recorded or pending deletion, whichever
+    restore point the old copy came from
+    ([`reset_keeps_accounted`, `accounted_step`, `accounted_run`](proofs/storage/CovenStorage/KeyDelivery.lean);
+    [`restored_before_seal_keeps_key_pending`, `restored_before_mint_keeps_key_pending`](proofs/storage/CovenStorage/KeyDeliveryExamples.lean)).
+    A database too damaged to read carries nothing.
   - Use the existing new-device installation path (§12.1), with a fresh id.
     Load the stored history, then allow app writes again.
   - A store that never set up storage has published nothing and has no
@@ -3466,8 +3477,12 @@ Carol's tablet:
 - An occupied immutable path succeeds only if its complete stored bytes
   equal the bytes this attempt would send. Compare before retiring its queue
   row; a mismatch on this device's path triggers the same device reset.
-  - This applies to writes, entries, snapshots, files and each writer's
-    sealed key copies. Different writers use different key-copy paths.
+  - This applies to writes, entries, snapshots, files, each writer's
+    sealed key copies and S3 key deliveries at
+    `access-keys/<member>/<attempt>`, whose fresh attempt id only copies of
+    the delivering database journal
+    ([`occupant_is_own_copy`, `reset_is_own_copy`](proofs/storage/CovenStorage/KeyDelivery.lean)).
+    Different writers use different key-copy paths.
   - A read failure keeps the attempt pending; occupation alone proves nothing.
   - Two live copies can pass the check together and send different bytes
     to one path. Content-bound nonces separate their encryption (§11.1);
@@ -4063,7 +4078,8 @@ Carol's tablet:
     the lost phone holds the same old key.
   - After a restart, a replacement that has not yet made its key or deleted
     the old one waits for admin access again (§4); none is stored.
-  - Discarding a replacement leaves no key unrecorded. Once its entry is
+  - Discarding a replacement, or a §10 reset discarding the database that
+    made its key, leaves no key unrecorded. Once its entry is
     reserved, the discard publishes it and the store log covers the key. Before
     that, a made key becomes pending `DeleteAccessKey` in the transaction that
     removes the operation; with no key yet, what the attempt may have made is

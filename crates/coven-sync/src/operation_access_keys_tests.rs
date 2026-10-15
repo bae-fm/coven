@@ -375,3 +375,141 @@ async fn an_occupied_delivery_counts_only_with_its_own_complete_bytes() {
     assert_eq!(a.operation(id).await.last_step, 1);
     assert_eq!(storage.read(&path).await.unwrap(), b"another copy");
 }
+
+/// The deletion operation a database holds for an access key id.
+async fn deletion_for(d: &Device, access_key_id: &str) -> Option<OperationId> {
+    for record in d.db.operations().await.unwrap() {
+        if let crate::operation_data::Data::DeleteAccessKey(key) =
+            crate::operation_data::Data::read(&record).unwrap()
+        {
+            if key.access_key_id == access_key_id {
+                return Some(record.id);
+            }
+        }
+    }
+    None
+}
+
+/// T203 (KeyDelivery `restored_before_seal_keeps_key_pending`): Ana's desktop
+/// made Ben's new key, and a backup of that database is what §10 resets. The
+/// replacement database, loaded from storage, holds the key the discarded
+/// journal made as pending deletion, and deleting it with admin access
+/// revokes it at the provider.
+#[tokio::test]
+async fn a_reset_keeps_a_key_its_discarded_database_made_pending_deletion() {
+    let (storage, mut a, b) = household().await;
+    let admin = MemoryKeyAdmin::default();
+    let ben = b.member.member();
+    let id = begin(
+        &mut a,
+        crate::operations::Command::ReplaceAccessKey(ben, Arc::new(admin.clone())),
+    )
+    .await;
+    while a.operation(id).await.last_step < 1 {
+        assert!(matches!(a.step(id).await.unwrap(), Progress::Advanced));
+    }
+    let made = match crate::operation_data::Data::read(&a.operation(id).await).unwrap() {
+        crate::operation_data::Data::ReplaceAccessKey(work) => {
+            work.mint
+                .minted
+                .expect("made key")
+                .credentials
+                .access_key_id
+        }
+        _ => panic!("replacement"),
+    };
+    assert_eq!(admin.users().len(), 1);
+    let discarded = a.db.operations().await.unwrap();
+    // The reset copy registers a fresh device for Ana and loads the store.
+    let mut c = device(storage.clone(), 3, member(1), store(1)).await;
+    c.sync().await;
+    c.sync
+        .load_new_device(
+            "Ana's desktop",
+            Some(coven_foundation::id_source::DeviceId(1)),
+        )
+        .await
+        .unwrap();
+    crate::carry_access_keys(&c.db, crate::discarded_access_keys(&discarded).unwrap())
+        .await
+        .unwrap();
+    let pending = access_keys(&c.db).await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].access_key_id, made);
+    assert_eq!(pending[0].member, Some(ben));
+    // Carrying again changes nothing: a key already pending is skipped.
+    crate::carry_access_keys(&c.db, crate::discarded_access_keys(&discarded).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(access_keys(&c.db).await.len(), 1);
+    let operation = deletion_for(&c, &made).await.expect("pending deletion");
+    c.sync.delete_access_key(operation, &admin).await.unwrap();
+    assert!(admin.users().is_empty());
+    assert!(access_keys(&c.db).await.is_empty());
+}
+
+/// A made key the loaded store log records as a member's current access is
+/// in use and is not deleted; a deletion the old database owed stays owed,
+/// even for that key, since replay never cancels one (§13).
+#[tokio::test]
+async fn carrying_skips_a_made_key_in_use_and_keeps_every_owed_deletion() {
+    let (_storage, a, b) = household().await;
+    let ben = b.member.member();
+    let current = match &a.log().await.replay.state.members[&ben].access {
+        MemberAccess::S3AccessKey {
+            access_key_id,
+            principal,
+        } => coven_storage::S3MemberKey {
+            credentials: coven_storage::S3Credentials {
+                access_key_id: access_key_id.clone(),
+                secret_access_key: coven_crypto::SecretText::new("secret".into()),
+            },
+            principal: principal.clone(),
+        },
+        other => panic!("S3 access: {other:?}"),
+    };
+    let record = |data: crate::operation_data::Data| {
+        let operation = data.new_operation("test").unwrap();
+        coven_database::OperationRecord {
+            id: OperationId(7),
+            kind: operation.kind,
+            last_step: 1,
+            data: operation.data,
+            started_by: operation.started_by,
+        }
+    };
+    let made = |key: &coven_storage::S3MemberKey| {
+        let mut mint = crate::operation_data::MintWork::new(coven_storage::MintScope::new(
+            store(1),
+            &ben.to_string(),
+            uuid::Uuid::from_u128(5),
+        ));
+        mint.minted = Some(key.clone());
+        crate::operation_data::Data::ReplaceAccessKey(crate::operation_data::ReplaceKeyWork {
+            member: ben,
+            attempt: uuid::Uuid::from_u128(5),
+            mint,
+            delivery: None,
+            entry: None,
+            abandoned: false,
+        })
+    };
+    let records = [
+        record(made(&current)),
+        record(crate::operation_data::Data::DeleteAccessKey(
+            crate::AccessKeyToDelete {
+                access_key_id: current.credentials.access_key_id.clone(),
+                principal: current.principal.clone(),
+                member: Some(ben),
+            },
+        )),
+    ];
+    let keys = crate::discarded_access_keys(&records[..1]).unwrap();
+    crate::carry_access_keys(&a.db, keys).await.unwrap();
+    assert!(access_keys(&a.db).await.is_empty());
+    let keys = crate::discarded_access_keys(&records).unwrap();
+    crate::carry_access_keys(&a.db, keys).await.unwrap();
+    let pending = access_keys(&a.db).await;
+    assert_eq!(pending.len(), 1);
+    assert_eq!(pending[0].access_key_id, current.credentials.access_key_id);
+}

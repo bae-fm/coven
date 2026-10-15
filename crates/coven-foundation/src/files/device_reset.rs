@@ -152,6 +152,13 @@ pub(super) fn begin(
     Ok(reset)
 }
 
+/// The database a reset moved aside, in its discarded-device archive.
+pub(super) fn discarded_database(directory: &Path, old_device: DeviceId) -> std::path::PathBuf {
+    directory
+        .join(format!("{ARCHIVE_PREFIX}{}", old_device.0))
+        .join(super::directory::DATABASE)
+}
+
 /// Remove the record once the replacement is published; its database keeps the notice.
 pub(super) fn finish(directory: &Path) -> Result<(), FileError> {
     atomic_file::remove(&directory.join(RECORD))

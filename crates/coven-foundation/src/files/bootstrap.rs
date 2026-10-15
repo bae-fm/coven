@@ -64,6 +64,12 @@ impl BootstrapStore {
         device_reset::read(&self.path)
     }
 
+    /// The discarded installation's database, which beginning this reset moved
+    /// aside unchanged (§10). Only its operation journal is read, in place.
+    pub fn discarded_database_path(&self, reset: &DeviceReset) -> std::path::PathBuf {
+        device_reset::discarded_database(&self.path, reset.old_device)
+    }
+
     /// Publish the loaded, open store by removing its durable marker, then any
     /// reset record: the replacement database already holds its notice.
     /// After a `Create(Published { .. })` error it is already visible.

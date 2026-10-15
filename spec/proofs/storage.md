@@ -461,9 +461,25 @@ to install the recorded one; the comparison is right to refuse it. The reset
 then orphans 103 under either sealer. The loss comes from the reset
 discarding a made key, not from the comparison.
 
-So §10's own-path list does not yet include deliveries. Adding them needs
-§10's reset to keep a journaled, unrecorded key recorded, for example as
-pending `DeleteAccessKey` in the replacement database, or rolled back.
+**T203: the reset keeps the key pending deletion (proved).** §10's reset now
+reads the old database's journal and keeps its made key, and every deletion
+it already owed, pending `DeleteAccessKey` in the new database (`deliver`'s
+reset branch; each database copy's pending deletions are `World.pending`,
+copied by a clone and lost with a dropped database). The pre-T203 reset is
+kept as `discardingReset` for the two counterexamples above.
+- `reset_keeps_accounted`: the reset step never leaves a live key outside a
+  kept entry, a surviving journal or a pending deletion.
+- `accounted_step`, `accounted_run`: no step but losing a database outright
+  (`drop`) does either, in any history of backups, clones and resets.
+- `restored_before_seal_keeps_key_pending` and
+  `restored_before_mint_keeps_key_pending` (checked): both restore points now
+  end with the made key pending deletion in the reset copy.
+
+So deliveries join §10's own-path list. A database lost before its key is
+recorded, rather than reset, still orphans the key; in Rust a database too
+damaged to read is that case. Rust's "made key that the loaded store log
+records as an active member's current access is in use" exception is outside
+the model; there the key is in `recorded` anyway.
 
 The model leaves out the store log, entry admission, the old key's deletion,
 the member's side, failed comparison reads, the discard call, invites (whose

@@ -213,3 +213,19 @@ impl DatabaseBuilder {
         })
     }
 }
+
+/// The operation journal of a database a device reset discarded (§10), read
+/// in place and read-only on a blocking thread, never opened as a store. A
+/// copy that fails SQLite's integrity check is `DamagedDatabase`.
+pub async fn discarded_operations(
+    path: std::path::PathBuf,
+) -> Result<Vec<crate::OperationRecord>, DbError> {
+    finish_blocking(
+        tokio::task::spawn_blocking(move || {
+            let db = DatabaseConnection::open(&path, true, SqlAuthorization::new(&[]))?;
+            db.check_integrity()?;
+            crate::operation::read(&db)
+        })
+        .await,
+    )
+}

@@ -207,6 +207,11 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Examples.bound_sealing_continues
 #print axioms CovenStorage.KeyDelivery.Examples.restored_after_seal_continues
 #print axioms CovenStorage.KeyDelivery.Examples.restored_before_mint_orphans_key
+#print axioms CovenStorage.KeyDelivery.reset_keeps_accounted
+#print axioms CovenStorage.KeyDelivery.accounted_step
+#print axioms CovenStorage.KeyDelivery.accounted_run
+#print axioms CovenStorage.KeyDelivery.Examples.restored_before_seal_keeps_key_pending
+#print axioms CovenStorage.KeyDelivery.Examples.restored_before_mint_keeps_key_pending
 
 #print axioms CovenStorage.CopyPublication.copy_is_create
 #print axioms CovenStorage.CopyPublication.copy_outcome

@@ -8,6 +8,9 @@ use crate::files::{
 };
 use crate::id_source::StoreId;
 
+/// The store database file, also its name in a discarded device archive.
+pub(super) const DATABASE: &str = "store.db";
+
 pub(crate) const APP_FILES: &str = "files";
 pub(crate) const CACHE: &str = "cache";
 
@@ -135,7 +138,7 @@ impl StoreDir {
     /// The database file's exact path for coven-database to open with SQLite.
     /// Callers never append path components to it.
     pub fn database_path(&self) -> PathBuf {
-        self.path.join("store.db")
+        self.path.join(DATABASE)
     }
 
     /// Retained remote input has its own SQLite owner: receiving bytes must not

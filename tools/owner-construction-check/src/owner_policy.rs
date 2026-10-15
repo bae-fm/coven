@@ -97,6 +97,11 @@ pub(crate) const POLICY: Policy = Policy {
             "open_read_only",
         ),
         (
+            "crates/coven-database/src/database_builder.rs",
+            "<free>",
+            "discarded_operations",
+        ),
+        (
             "crates/coven-database/src/file_database.rs",
             "CacheReservation",
             "publish",
