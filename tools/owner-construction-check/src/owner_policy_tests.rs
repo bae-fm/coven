@@ -13,6 +13,7 @@ use super::POLICY;
 use crate::capability_construction::{
     construction_only_types, find_capability_construction_violations,
 };
+use crate::database_boundary::schema_table_macros;
 use crate::policy::Policy;
 use crate::sources::load;
 use crate::syntax::{
@@ -443,30 +444,43 @@ fn every_crate_the_order_names_is_in_the_workspace() {
     }
 }
 
+/// The table macros the policy names are exactly the schema module's table
+/// lists, each declared once. A list declared outside the module, or one the
+/// policy omits, would leave its tables unguarded by the database boundary.
 #[test]
-fn the_database_schema_file_declares_its_table_macros() {
-    let Some((schema_file, table_macros)) = POLICY.database_schema else {
+fn the_database_schema_module_declares_exactly_its_table_macros() {
+    let Some((schema_root, table_macros)) = POLICY.database_schema else {
         return;
     };
     let workspace = load(&workspace_root()).expect("read the workspace");
-    let schema = workspace
+    let files = workspace
         .files
-        .iter()
-        .find(|file| file.relative_path == schema_file)
-        .unwrap_or_else(|| panic!("database schema file {schema_file} does not exist"));
-    let declared = schema
-        .syntax
-        .items
-        .iter()
-        .filter_map(|item| match item {
-            syn::Item::Macro(item) => item.ident.as_ref().map(ToString::to_string),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
+        .into_iter()
+        .filter(RustFile::is_crate_source)
+        .collect::<Vec<_>>();
+    assert!(
+        files.iter().any(|file| file.relative_path == schema_root),
+        "database schema module root {schema_root} does not exist"
+    );
+    let macros = schema_table_macros(&files, schema_root);
     for table_macro in table_macros {
-        assert!(
-            declared.contains(*table_macro),
-            "{schema_file} declares no macro_rules! {table_macro}"
+        let declared = macros
+            .iter()
+            .filter(|declared| declared.name == *table_macro)
+            .count();
+        assert_eq!(
+            declared, 1,
+            "the schema module under {schema_root} must declare macro_rules! {table_macro} once"
         );
     }
+    let unlisted = macros
+        .iter()
+        .filter(|declared| !declared.tables.is_empty())
+        .filter(|declared| !table_macros.contains(&declared.name.as_str()))
+        .map(|declared| declared.name.as_str())
+        .collect::<Vec<_>>();
+    assert!(
+        unlisted.is_empty(),
+        "schema table macros missing from the policy: {unlisted:?}"
+    );
 }

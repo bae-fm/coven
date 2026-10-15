@@ -159,6 +159,69 @@ fn coven_owned_sql_is_rejected_outside_the_database_crate() {
     );
 }
 
+/// The schema module includes its `#[path]` submodules; a table macro of the
+/// same name elsewhere in the crate declares no coven table.
+#[test]
+fn table_macros_are_read_from_every_file_of_the_schema_module() {
+    let files = vec![
+        RustFile::fixture(
+            "crates/coven-database/src/schema.rs",
+            r#"
+            macro_rules! coven_tables {
+                ($visit:ident) => {
+                    $visit!(_coven_writes, "key TEXT PRIMARY KEY");
+                };
+            }
+            #[path = "schema_audience.rs"]
+            mod audience;
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/coven-database/src/schema_audience.rs",
+            r#"
+            macro_rules! coven_audience_tables {
+                ($visit:ident) => {
+                    $visit!(_coven_row_audiences, "table_name TEXT NOT NULL");
+                };
+            }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/coven-database/src/elsewhere.rs",
+            r#"
+            macro_rules! coven_audience_tables {
+                ($visit:ident) => {
+                    $visit!(notes, "body TEXT");
+                };
+            }
+            "#,
+        ),
+        RustFile::fixture(
+            "crates/coven-sync/src/leak.rs",
+            r#"
+            fn leak(database: DatabaseTestSql<'_>) {
+                database.query("SELECT * FROM _coven_row_audiences", [], |_| Ok(())).unwrap();
+                database.execute("DELETE FROM notes", []).unwrap();
+            }
+            "#,
+        ),
+    ];
+
+    let violations = find_database_boundary_violations(&files, &POLICY)
+        .into_iter()
+        .map(|violation| (violation.path, violation.line, violation.message))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        violations,
+        vec![(
+            "crates/coven-sync/src/leak.rs".to_string(),
+            3,
+            "coven-owned SQL for table _coven_row_audiences is confined to coven-database"
+                .to_string(),
+        )],
+    );
+}
+
 #[test]
 fn raw_handles_and_coven_sql_inside_macro_calls_are_rejected() {
     let files = vec![

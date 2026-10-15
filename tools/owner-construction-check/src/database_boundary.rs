@@ -14,6 +14,7 @@ use syn::spanned::Spanned;
 use syn::visit::{self, Visit};
 
 use crate::macros::{parse_macro_body, token_paths, token_strings};
+use crate::module_sources::module_sources;
 use crate::policy::Policy;
 use crate::syntax::RustFile;
 
@@ -123,31 +124,51 @@ impl<'ast> Visit<'ast> for DatabaseBoundaryVisitor<'_> {
     }
 }
 
-/// The tables the policy's schema file declares through its table macros.
+/// The tables the policy's schema module declares through its table macros.
 fn collect_coven_table_names(files: &[RustFile], policy: &Policy) -> BTreeSet<String> {
-    let mut tables = BTreeSet::new();
-    let Some((schema_file, table_macros)) = policy.database_schema else {
-        return tables;
+    let Some((schema_root, table_macros)) = policy.database_schema else {
+        return BTreeSet::new();
     };
-    for file in files {
-        if file.relative_path != schema_file {
-            continue;
-        }
-        for item in &file.syntax.items {
-            let syn::Item::Macro(item) = item else {
-                continue;
-            };
-            if !item
-                .ident
-                .as_ref()
-                .is_some_and(|ident| table_macros.iter().any(|name| ident == name))
-            {
-                continue;
-            }
-            collect_table_macro_invocations(item.mac.tokens.clone(), &mut tables);
-        }
-    }
-    tables
+    schema_table_macros(files, schema_root)
+        .into_iter()
+        .filter(|table_macro| table_macros.contains(&table_macro.name.as_str()))
+        .flat_map(|table_macro| table_macro.tables)
+        .collect()
+}
+
+/// A top-level `macro_rules!` in the schema module and the tables its
+/// `$visit!(table, …)` calls declare (none for a macro that is not a table list).
+pub(crate) struct SchemaMacro {
+    pub(crate) name: String,
+    pub(crate) tables: BTreeSet<String>,
+}
+
+/// Every top-level `macro_rules!` in the schema module: the production file
+/// `schema_root` and every module beneath it, wherever `#[path]` puts its file.
+pub(crate) fn schema_table_macros(files: &[RustFile], schema_root: &str) -> Vec<SchemaMacro> {
+    let modules = module_sources(files);
+    let Some(schema_module) = modules.get(schema_root) else {
+        return Vec::new();
+    };
+    files
+        .iter()
+        .filter(|file| {
+            modules
+                .get(&file.relative_path)
+                .is_some_and(|module| module.starts_with(schema_module))
+        })
+        .flat_map(|file| {
+            file.syntax.items.iter().filter_map(|item| {
+                let syn::Item::Macro(item) = item else {
+                    return None;
+                };
+                let name = item.ident.as_ref()?.to_string();
+                let mut tables = BTreeSet::new();
+                collect_table_macro_invocations(item.mac.tokens.clone(), &mut tables);
+                Some(SchemaMacro { name, tables })
+            })
+        })
+        .collect()
 }
 
 fn collect_table_macro_invocations(

@@ -15,9 +15,11 @@ pub(crate) type CompositionRoot = (&'static str, &'static str, &'static str);
 /// of its files. This grants no authority to construct unrelated capabilities.
 pub(crate) type CapabilityFactory = (&'static str, &'static str, &'static str, &'static str);
 
-/// `(schema file, table macros)`: where coven's own tables are declared. Each
-/// `$visit!(table, …)` inside one of the named `macro_rules!` declares a
-/// table whose SQL only the database crate writes.
+/// `(schema module root, table macros)`: where coven's own tables are declared.
+/// The schema module is the root file and every module beneath it, wherever
+/// `#[path]` puts its file. Each `$visit!(table, …)` inside one of the named
+/// top-level `macro_rules!` in that module declares a table whose SQL only the
+/// database crate writes.
 pub(crate) type DatabaseSchema = (&'static str, &'static [&'static str]);
 
 pub(crate) struct Policy {
