@@ -6296,9 +6296,9 @@ holds failures and rejected entries, without making either wait look completed.
     a whole: each pass's positions scan decides every peer's positions
     record, and each audience's snapshot listing decides that audience's
     snapshot records. A subject the listing does not name has no object to
-    process and loses its record; a failed listing changes nothing. This
-    device's own positions record clears only when its publication is
-    confirmed
+    process and loses its record; a failed listing changes nothing. No
+    listing clears this device's own positions record; only confirming its
+    publication does
     ([`listing_decides`, `listing_safe`, `own_positions_kept`](proofs/storelog-data/CovenStorelogData/Pending.lean)).
   - Each store-log scan decides this device's entry waits as a whole. An
     entry it reads that has not applied records its first unmet condition:
