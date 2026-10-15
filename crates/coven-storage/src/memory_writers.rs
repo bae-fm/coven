@@ -8,6 +8,19 @@ impl MemoryProvider {
             .map_err(|error| StorageFailure::Protocol.with_source(error))
     }
 
+    /// Request every page after the first of a listing with `entries`
+    /// entries; each is traced and can fail like any request.
+    pub(super) async fn further_pages(
+        &self,
+        request: MemoryRequest,
+        entries: usize,
+    ) -> Result<(), StorageError> {
+        for _ in 1..entries.div_ceil(self.listing_page).max(1) {
+            self.before(request.clone()).await?;
+        }
+        Ok(())
+    }
+
     pub(super) async fn writer_folders(
         &self,
         store: StoreId,
@@ -15,7 +28,7 @@ impl MemoryProvider {
         self.before(MemoryRequest::Other("list_writers")).await?;
         let prefix = ObjectPrefix::store_logs(store);
         let now = self.storage_time()?;
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         let writers: std::collections::BTreeSet<_> = state
             .objects
             .iter()
@@ -29,6 +42,10 @@ impl MemoryProvider {
             })
             .filter_map(|(path, _)| path.store_log_position().map(|(writer, _)| writer))
             .collect();
+        drop(state);
+        self.further_pages(MemoryRequest::Other("list_writers"), writers.len())
+            .await?;
+        let mut state = self.state.lock().await;
         let held = if state
             .held_listing
             .as_ref()

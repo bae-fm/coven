@@ -8,6 +8,7 @@ pub struct MemoryStorageBuilder {
     time_resolution: Duration,
     single_limit: u64,
     part_size: usize,
+    listing_page: usize,
 }
 
 impl MemoryStorageBuilder {
@@ -18,6 +19,7 @@ impl MemoryStorageBuilder {
             time_resolution: Duration::from_nanos(1),
             single_limit: coven_format::store_log::MAX_STORE_LOG_OBJECT as u64,
             part_size: 64 * 1024,
+            listing_page: usize::MAX,
         }
     }
 
@@ -47,6 +49,12 @@ impl MemoryStorageBuilder {
         self.part_size = part_size;
         self
     }
+    /// Return listings in native pages of this many entries, each page its own
+    /// request in the trace, as a provider's continuation requests are (§3.1).
+    pub fn listing_page(mut self, entries: std::num::NonZeroUsize) -> Self {
+        self.listing_page = entries.get();
+        self
+    }
     /// Validate the choices and construct an isolated storage backend.
     pub fn build(self) -> Result<MemoryStorage, StorageError> {
         let Self {
@@ -55,6 +63,7 @@ impl MemoryStorageBuilder {
             time_resolution,
             single_limit,
             part_size,
+            listing_page,
         } = self;
         config.validate()?;
         if time_resolution.is_zero() {
@@ -68,6 +77,7 @@ impl MemoryStorageBuilder {
             online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit,
             part_size,
+            listing_page,
             requests: Arc::new(tokio::sync::watch::channel(0).0),
             request_trace: Arc::new(std::sync::Mutex::new(Vec::new())),
             active_requests: Arc::new(std::sync::atomic::AtomicUsize::new(0)),

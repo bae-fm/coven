@@ -535,10 +535,17 @@ impl Counts {
 }
 
 async fn group(case: Scenario) -> Vec<Device<Operations>> {
-    let storage = MemoryStorage::builder()
-        .transfer_limits(16 * 1024 * 1024, 1024 * 1024)
-        .build()
-        .unwrap();
+    group_on(
+        case,
+        MemoryStorage::builder()
+            .transfer_limits(16 * 1024 * 1024, 1024 * 1024)
+            .build()
+            .unwrap(),
+    )
+    .await
+}
+
+async fn group_on(case: Scenario, storage: MemoryStorage) -> Vec<Device<Operations>> {
     let mut owner = Device::new(&storage, 1, member(1)).await;
     owner.create().await;
     owner.add_device(2).await;
@@ -573,7 +580,18 @@ enum Scenario {
 }
 
 async fn scenario(scenario: Scenario) -> Counts {
-    let mut devices = group(scenario).await;
+    scenario_on(
+        scenario,
+        MemoryStorage::builder()
+            .transfer_limits(16 * 1024 * 1024, 1024 * 1024)
+            .build()
+            .unwrap(),
+    )
+    .await
+}
+
+async fn scenario_on(scenario: Scenario, storage: MemoryStorage) -> Counts {
+    let mut devices = group_on(scenario, storage).await;
     let counts = match scenario {
         Scenario::Idle => devices[0].pass().await,
         Scenario::OneWrite => {
@@ -638,39 +656,8 @@ async fn scenario(scenario: Scenario) -> Counts {
     counts
 }
 
-// CovenIO.Trace: idle_requests, idle_two_listings and idle_gets. Memory
-// listings return revisions directly, so M=0: 2 + 3*3 = 11. S3's 14-request
-// example adds three native HEADs that this provider does not perform.
 #[tokio::test]
-#[ignore = "requires bounded discovery and retention: 2 listings, 9 next-number misses, 0 replacements"]
-async fn io_counts_idle_requests() {
-    let counts = scenario(Scenario::Idle).await;
-    assert_eq!(
-        (
-            counts.requests,
-            counts.requests_by_kind(),
-            counts.reads.len()
-        ),
-        (
-            11,
-            RequestCounts {
-                lists: 2,
-                gets: 9,
-                ..Default::default()
-            },
-            0
-        )
-    );
-}
-
-#[tokio::test]
-#[ignore = "pass maintenance opens writer transactions; warm idle passes require zero writer holds and commits"]
-async fn io_counts_idle_local_work() {
-    assert_eq!(scenario(Scenario::Idle).await.work, WorkCounts::default());
-}
-
-#[tokio::test]
-#[ignore = "requires bounded discovery and retention: idle 11 + one write GET + one positions PUT"]
+#[ignore = "fails on main: as io_counts_idle_requests_charge_every_listing_page, and a write hit costs a status plus separate body reads"]
 async fn io_counts_one_write_requests() {
     let counts = scenario(Scenario::OneWrite).await;
     assert_eq!(
@@ -688,27 +675,115 @@ async fn io_counts_one_write_requests() {
 }
 
 #[tokio::test]
-#[ignore = "observed 7 range requests for write 1 and 0 terminal probes; stated 1 complete GET + 1 terminal miss, with 0 fetch-ahead allowance at limit 1"]
+#[ignore = "fails on main: next_writes probes by status, so the hit and terminal miss are statuses and the body is read separately; stated one GET per hit and one GET terminal miss"]
 async fn io_counts_scan_and_fetch_ahead_cost() {
     // CovenIO.Trace.scan_cost/fetch_ahead_cost: k hits + one terminal miss
     // + at most limit-1 speculative requests. This fixture uses limit 1.
     let counts = scenario(Scenario::OneWrite).await;
-    let actual = counts.trace.iter().filter(|request| matches!(request,
-        MemoryRequest::Read(path, _) if path.write_position().is_some_and(|(writer, _)| writer == DeviceId(2))
-    )).cloned().collect::<Vec<_>>();
+    let write = |n: u64| {
+        coven_storage::ObjectPath::device_log(store(1), DeviceId(2), n.try_into().unwrap())
+    };
+    let actual: Vec<_> = counts.trace.iter().filter(|request| matches!(request,
+        MemoryRequest::Read(path, _) | MemoryRequest::Status(path) if path.write_position().is_some_and(|(writer, _)| writer == DeviceId(2))
+    )).cloned().collect();
     assert_eq!(
         actual,
-        vec![
-            MemoryRequest::Read(
-                coven_storage::ObjectPath::device_log(store(1), DeviceId(2), 1.try_into().unwrap()),
-                None
-            ),
-            MemoryRequest::Read(
-                coven_storage::ObjectPath::device_log(store(1), DeviceId(2), 2.try_into().unwrap()),
-                None
-            ),
+        [
+            MemoryRequest::Read(write(1), None),
+            MemoryRequest::Read(write(2), None)
         ]
     );
+}
+
+// §3.1: an unchanged idle pass commits zero durable transactions.
+#[tokio::test]
+async fn io_counts_idle_commits_nothing() {
+    let work = scenario(Scenario::Idle).await.work;
+    assert_eq!((work.commits, work.store_log_commits), (0, 0));
+}
+
+// §3.1: an idle pass takes the database writer zero times.
+#[tokio::test]
+#[ignore = "fails on main: an idle pass takes the writer 46 times without committing"]
+async fn io_counts_idle_takes_no_writer() {
+    assert_eq!(scenario(Scenario::Idle).await.work, WorkCounts::default());
+}
+
+// CovenIO.Trace idle_requests and SP "Counting a pass": 2 + 3N, with every
+// native listing page a request; memory listings carry revisions (M = 0). With two
+// entries a page, the one store-log writer folder (devices 2 and 3 hold no
+// entries) is one page and the three positions are two.
+#[tokio::test]
+#[ignore = "fails on main: write next numbers are probed by status, and step 8 growth and retention list snapshots/store/ and devices/ every pass (see io_counts_no_history_listing)"]
+async fn io_counts_idle_requests_charge_every_listing_page() {
+    let storage = MemoryStorage::builder()
+        .transfer_limits(16 * 1024 * 1024, 1024 * 1024)
+        .listing_page(2.try_into().unwrap())
+        .build()
+        .unwrap();
+    let counts = scenario_on(Scenario::Idle, storage).await;
+    assert_eq!(
+        (counts.requests, counts.requests_by_kind()),
+        (
+            1 + 2 + 9,
+            RequestCounts {
+                lists: 2,
+                gets: 9,
+                other: 1,
+                ..Default::default()
+            }
+        )
+    );
+}
+
+// SP: discovery reads next numbers; no pass lists pages of log history, an
+// idle pass performs no snapshot discovery, and files are never listed on
+// an idle pass. A warm arrival, file fetch or reopen lists no history either.
+#[tokio::test]
+#[ignore = "fails on main: snapshot growth (snapshots.rs snapshot_grew) and retention (snapshot_retention.rs) list snapshots/<audience>/ and devices/ every pass instead of using recorded part lengths, cached prefixes and indexed candidates"]
+async fn io_counts_no_history_listing() {
+    for case in [
+        Scenario::Idle,
+        Scenario::OneWrite,
+        Scenario::FileFetch,
+        Scenario::Reopen,
+    ] {
+        let counts = scenario(case).await;
+        let positions = coven_storage::ObjectPrefix::positions(store(1));
+        let listed = |r: &MemoryRequest| matches!(r, MemoryRequest::List(p) if p != &positions);
+        assert!(!counts.trace.iter().any(listed), "{case:?}: {counts:#?}");
+    }
+}
+
+#[tokio::test]
+async fn io_counts_first_catchup_commits_one_replay_per_batch() {
+    let counts = scenario(Scenario::FirstCatchup).await;
+    assert_eq!(
+        counts.work.store_log_commits, 2,
+        "catch-up batch and own registration"
+    );
+}
+
+// SP "File uploads outside the pass": the upload worker's requests are
+// counted on their own, and a pass makes no file upload.
+#[tokio::test]
+async fn io_counts_upload_worker_is_accounted_apart_from_the_pass() {
+    let files = coven_storage::ObjectPrefix::files(store(1));
+    let uploading = |request: &MemoryRequest| match request {
+        MemoryRequest::Create(path) => files.contains(path),
+        MemoryRequest::Other(call) => call.ends_with("_upload") || *call == "upload_part",
+        _ => false,
+    };
+    let mut devices = group(Scenario::Idle).await;
+    let mark = devices[0].data.begin_count().await;
+    devices[0].data.attach(vec![9; 64 * 1024 + 5]).await;
+    let upload = devices[0].data.finish_count(mark).await;
+    assert_eq!(upload.trace.iter().filter(|r| uploading(r)).count(), 1);
+    let pass = devices[0].pass().await;
+    assert!(!pass.trace.iter().any(uploading), "{pass:#?}");
+    for device in devices {
+        device.close().await;
+    }
 }
 
 #[tokio::test]
@@ -741,46 +816,6 @@ async fn io_counts_custody_and_received_entries() {
         };
         assert_eq!(counts.received_entry_decodes, incoming, "{case:?}");
     }
-}
-
-#[tokio::test]
-async fn io_counts_one_write_local_baseline() {
-    let counts = scenario(Scenario::OneWrite).await;
-    assert_eq!(repeated_reads(&counts.reads, &[], false), 0);
-    // No fixed total is stated for non-idle writer holds or commits. These
-    // are observed baselines; the saved-log decode bound is tested separately.
-    // Finding eager work reads its changed references without a transaction,
-    // and step 8 creates no snapshot operation below the growth threshold.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (53, 8));
-}
-
-#[tokio::test]
-async fn io_counts_first_catchup_baseline() {
-    // Includes admission bootstrap, this device's registration and its first
-    // complete pass. No fixed aggregate request/transaction count is stated
-    // for initialization; include finality status probes in the observed counts.
-    let counts = scenario(Scenario::FirstCatchup).await;
-    assert_eq!(
-        (counts.requests, counts.requests_by_kind()),
-        (
-            64,
-            RequestCounts {
-                lists: 7,
-                gets: 40,
-                creates: 1,
-                replaces: 2,
-                statuses: 10,
-                other: 4,
-                ..Default::default()
-            }
-        ),
-        "{counts:#?}"
-    );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (87, 29));
-    assert_eq!(
-        counts.work.store_log_commits, 2,
-        "catch-up batch and own registration"
-    );
 }
 
 #[tokio::test]
@@ -821,36 +856,6 @@ async fn io_counts_warm_download_reuse() {
         ));
     }
     assert_eq!(actual, [(0, 0); 3]);
-}
-
-#[tokio::test]
-async fn io_counts_file_fetch_baseline() {
-    let counts = scenario(Scenario::FileFetch).await;
-    // No fixed whole-pass count is stated for an arrival carrying a file.
-    // This fixture publishes only the attaching write, which already names
-    // the file's fixed path (upload completion writes nothing), and checks
-    // the writers' terminal store-log slots for finality.
-    assert_eq!(
-        (counts.requests, counts.requests_by_kind()),
-        (
-            19,
-            RequestCounts {
-                lists: 5,
-                gets: 7,
-                ranges: 1,
-                replaces: 1,
-                statuses: 4,
-                other: 1,
-                ..Default::default()
-            }
-        ),
-        "{counts:#?}"
-    );
-    // No fixed non-idle writer/commit total is stated; observed counts. The
-    // eager fill reserves its request and retires it once cached (§16.4),
-    // each fetched range publishes in one transaction, and the eager fill
-    // settles its changed reference.
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (64, 21));
 }
 
 #[tokio::test]
@@ -896,29 +901,6 @@ async fn io_counts_file_chunks_survive_consumers_passes_and_reopen() {
 }
 
 #[tokio::test]
-async fn io_counts_reopen_baseline() {
-    let counts = scenario(Scenario::Reopen).await;
-    // Reopening has additional identity/initialization work; the spec states
-    // no fixed total for that first pass. Include the finality status probes.
-    assert_eq!(
-        (counts.requests, counts.requests_by_kind()),
-        (
-            20,
-            RequestCounts {
-                lists: 6,
-                gets: 7,
-                replaces: 1,
-                statuses: 5,
-                other: 1,
-                ..Default::default()
-            }
-        ),
-        "{counts:#?}"
-    );
-    assert_eq!((counts.work.writer_holds, counts.work.commits), (48, 3));
-}
-
-#[tokio::test]
 async fn io_counts_reopen_saved_log() {
     let counts = scenario(Scenario::Reopen).await;
     assert!(
@@ -938,4 +920,66 @@ async fn io_counts_reopen_download_reuse() {
         ),
         (0, 0)
     );
+}
+
+// CovenIO.Trace.idle (idle_requests, idle_two_listings, idle_gets): a warm
+// idle pass makes exactly the model's requests for the undrained writers'
+// next numbers, read from storage independently of the pass. A request
+// outside the model's idle vocabulary keeps its description.
+#[tokio::test]
+#[ignore = "requires COVEN_IO_RUNNER; fails on main for the causes io_counts_idle_requests_charge_every_listing_page names"]
+async fn io_differential_idle_trace() {
+    use coven_storage::{ObjectPath, ObjectPrefix, Storage};
+    type Position = fn(&ObjectPath) -> Option<(DeviceId, std::num::NonZeroU64)>;
+    let logs: [(&str, Position); 3] = [
+        ("entry", ObjectPath::store_log_position),
+        ("copy", ObjectPath::key_copy_position),
+        ("write", ObjectPath::write_position),
+    ];
+    let mut devices = group(Scenario::Idle).await;
+    let stored = devices[0]
+        .data
+        .storage
+        .list(&ObjectPrefix::all(store(1)))
+        .await
+        .unwrap();
+    let writers: Vec<_> = (1..=3u64)
+        .map(|device| {
+            let mut next = serde_json::json!({ "writer": device });
+            for (log, position) in logs {
+                let count = stored
+                    .iter()
+                    .filter_map(|o| position(&o.path))
+                    .filter(|(w, _)| w.0 == device)
+                    .count();
+                next[log] = (count + 1).into();
+            }
+            next
+        })
+        .collect();
+    let counts = devices[0].pass().await;
+    let name = |request: &MemoryRequest| match request {
+        MemoryRequest::Other("list_writers") => "list store-log".to_owned(),
+        MemoryRequest::List(prefix) if prefix == &ObjectPrefix::positions(store(1)) => {
+            "list positions".to_owned()
+        }
+        MemoryRequest::Read(path, None) => logs
+            .iter()
+            .find_map(|(log, position)| {
+                position(path).map(|(w, n)| format!("get {log} {} {n}", w.0))
+            })
+            .unwrap_or_else(|| format!("{request:?}")),
+        other => format!("{other:?}"),
+    };
+    let mut actual: Vec<_> = counts.trace.iter().map(name).collect();
+    let model = crate::discovery::tests::io_runner(&[
+        serde_json::json!({"check": "idle", "writers": writers}),
+    ]);
+    let mut expected: Vec<String> = serde_json::from_value(model[0].clone()).unwrap();
+    actual.sort();
+    expected.sort();
+    assert_eq!(actual, expected);
+    for device in devices {
+        device.close().await;
+    }
 }

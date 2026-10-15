@@ -156,6 +156,7 @@ pub struct MemoryProvider {
     online: Arc<std::sync::atomic::AtomicBool>,
     single_limit: u64,
     part_size: usize,
+    listing_page: usize,
     requests: Arc<tokio::sync::watch::Sender<u64>>,
     request_trace: Arc<std::sync::Mutex<Vec<MemoryRequest>>>,
     active_requests: Arc<std::sync::atomic::AtomicUsize>,
@@ -226,6 +227,7 @@ impl MemoryStorage {
             online: Arc::new(std::sync::atomic::AtomicBool::new(true)),
             single_limit: owner.provider.single_limit,
             part_size: owner.provider.part_size,
+            listing_page: owner.provider.listing_page,
             requests: owner.provider.requests.clone(),
             request_trace: owner.provider.request_trace.clone(),
             active_requests: owner.provider.active_requests.clone(),
@@ -640,7 +642,7 @@ impl ProviderOps for MemoryProvider {
         let prefix = listing.prefix();
         self.before(MemoryRequest::List(prefix.clone())).await?;
         let now = self.storage_time()?;
-        let mut state = self.state.lock().await;
+        let state = self.state.lock().await;
         if let Some(failure) = state.faults.list_failures.get(prefix) {
             return Err((*failure).into());
         }
@@ -656,7 +658,11 @@ impl ProviderOps for MemoryProvider {
                     })
             })
             .map(|(path, object)| object.metadata(path, self.time_resolution))
-            .collect();
+            .collect::<Vec<_>>();
+        drop(state);
+        self.further_pages(MemoryRequest::List(prefix.clone()), objects.len())
+            .await?;
+        let mut state = self.state.lock().await;
         let hold = if state
             .held_listing
             .as_ref()

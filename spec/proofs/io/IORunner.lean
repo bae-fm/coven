@@ -944,9 +944,32 @@ private def boundaries (j : Json) : Except String Json := do
     pure (⟨i, boundary⟩ : FinalReset.Entry)
   return toJson ((FinalReset.select .empty entries).map (·.id))
 
+/-- `Trace.idle`: a warm idle pass's requests for the undrained writers'
+next numbers, in model order; `idle_requests` proves there are 2 + 3N.
+Writers are `{writer, entry, copy, write}` records of next numbers. -/
+private def idlePass (j : Json) : Except String Json := do
+  let mut ids : List Nat := []
+  let mut next : List (Kind × Nat × Nat) := []
+  for w in (← (← j.getObjVal? "writers").getArr?).toList do
+    let id ← w.getObjValAs? Nat "writer"
+    ids := ids ++ [id]
+    next := next ++ [(.entry, id, ← w.getObjValAs? Nat "entry"),
+      (.copy, id, ← w.getObjValAs? Nat "copy"), (.write, id, ← w.getObjValAs? Nat "write")]
+  let lookup := fun (kind : Kind) (writer : Nat) =>
+    ((next.find? fun (k, w, _) => decide (k = kind) && w == writer).map (·.2.2)).getD 0
+  let name : Request → String
+    | .list .deviceEntries => "list store-log"
+    | .list .positions => "list positions"
+    | .get (.log .entry w n) => s!"get entry {w} {n}"
+    | .get (.log .copy w n) => s!"get copy {w} {n}"
+    | .get (.log .write w n) => s!"get write {w} {n}"
+    | _ => "other"
+  return toJson ((idle lookup ids).map name)
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
+  | "idle" => idlePass j
   | "counts" => counts j
   | "deletable" => deletable j
   | "refresh" => refresh j

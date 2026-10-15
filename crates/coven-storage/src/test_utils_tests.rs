@@ -775,3 +775,27 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
     );
     active.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
 }
+
+#[tokio::test]
+async fn paged_listings_charge_every_page() {
+    use coven_foundation::id_source::DeviceId;
+    let storage = MemoryStorage::builder()
+        .listing_page(2.try_into().unwrap())
+        .build()
+        .unwrap();
+    for device in 1..=5 {
+        let path = ObjectPath::store_log(STORE_ID, DeviceId(device), std::num::NonZeroU64::MIN);
+        storage.create(&path, b"entry").await.unwrap();
+    }
+    let before = storage.request_count();
+    assert_eq!(
+        storage
+            .list(&ObjectPrefix::store_logs(STORE_ID))
+            .await
+            .unwrap()
+            .len(),
+        5
+    );
+    assert_eq!(storage.list_writers(STORE_ID).await.unwrap().len(), 5);
+    assert_eq!(storage.request_count() - before, 3 + 3);
+}
