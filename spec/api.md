@@ -689,6 +689,11 @@ pub enum StoreCreationError {
 pub enum StoreDeletionError {
     /// The store is open or its lock could not be taken.
     Lock(StoreLockError),
+    /// Writes or files wait to upload; nothing was deleted.
+    Unsent(UnsentWork),
+    /// Reading the queue or publishing this device's removal failed, deleting
+    /// nothing; or closing failed after the removal.
+    Sync(SyncError),
     /// Removing a keychain entry failed.
     Key(KeyError),
     /// Removing the store directory failed.
@@ -825,14 +830,13 @@ impl Coven {
     /// Collects the choices for opening, restoring or joining a store in this layout.
     pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
-    /// Deletes a closed store from this device: every keychain entry coven
-    /// holds for it, including every saved host secret, then its directory.
-    /// Deletes all secrets in coven's saved names list before deleting the list
-    /// and its other entries. Needs no app-supplied names and does not open the database.
-    /// Refused while a writer, read-only handle, file stream or outstanding
-    /// file I/O retains its store lock; storage is untouched. Retrying finishes
-    /// a deletion that failed partway.
-    pub async fn delete_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
+    /// Deletes a closed store without opening it: every keychain entry coven
+    /// holds for it, then its directory. Unsent work is lost and peers keep
+    /// reading this device until it is removed; for a store that cannot open,
+    /// or to finish `CovenHandle::delete_store`. Refused while a writer,
+    /// read-only handle, file stream or file I/O holds its lock; storage is
+    /// untouched. Retrying finishes a deletion that failed partway.
+    pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
 }
 
 impl CovenBuilder {
@@ -932,7 +936,18 @@ impl CovenHandle {
     /// itself and several chained as `SyncError::Cleanup`; cancellation does
     /// not stop closing.
     pub async fn close(&self) -> Result<(), SyncError>;
+
+    /// Deletes this store from this device. With storage set up, it refuses
+    /// unsent work unless discarding it, then publishes this device's removal
+    /// (§13); either failure deletes nothing. Then closes and deletes as
+    /// `Coven::discard_store`, which finishes a deletion failing after that.
+    pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError>;
 }
+
+pub enum IfUnsent { Refuse, Discard }
+
+/// Committed writes and attached files not yet uploaded.
+pub struct UnsentWork { pub writes: u64, pub files: u64 }
 ```
 
 Example:

@@ -344,7 +344,7 @@ async fn deleting_a_restored_store_removes_the_code_and_separate_key() {
     assert_key(&store, &owner.s3_credentials().unwrap());
     assert!(store.synced_restore_code().unwrap().is_some());
     handle.close().await.unwrap();
-    crate::coven::delete(&directory, store).unwrap();
+    crate::coven::delete(&directory, &store).unwrap();
     install.absent(owner.directory.id()).await;
     owner.close().await;
 }

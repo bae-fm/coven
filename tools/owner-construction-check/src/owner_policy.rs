@@ -475,7 +475,7 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/coven.rs", "<free>", "blocking"),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
         ("crates/coven/src/coven.rs", "Coven", "create_store"),
-        ("crates/coven/src/coven.rs", "Coven", "delete_store"),
+        ("crates/coven/src/coven.rs", "Coven", "discard_store"),
         ("crates/coven/src/handle.rs", "CovenHandle", "close"),
         ("crates/coven/src/handle.rs", "CovenHandle", "new"),
         (
@@ -507,7 +507,7 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven/src/test_utils.rs",
             "TestCoven",
-            "delete_store",
+            "discard_store",
         ),
         (
             "crates/coven/src/test_utils.rs",

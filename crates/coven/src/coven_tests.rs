@@ -46,7 +46,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         Err(CovenError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     assert!(matches!(
-        app.delete_store(&first).await,
+        app.discard_store(&first).await,
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     let reader = builder(&app, layout.clone())
@@ -113,7 +113,7 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         Err(CovenError::Database(DbError::StoreClosed))
     ));
     assert!(matches!(
-        app.delete_store(&first).await,
+        app.discard_store(&first).await,
         Err(StoreDeletionError::Lock(StoreLockError::AlreadyOpen(_)))
     ));
     reader.close().await.unwrap();
@@ -129,8 +129,8 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     );
     a.close().await.unwrap();
     b.close().await.unwrap();
-    app.delete_store(&first).await.unwrap();
-    app.delete_store(&first).await.unwrap();
+    app.discard_store(&first).await.unwrap();
+    app.discard_store(&first).await.unwrap();
     assert_eq!(
         layout.stores().await.unwrap(),
         vec![StoreInfo {
@@ -182,11 +182,11 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     std::fs::write(directory.database_path(), b"damaged database").unwrap();
     app.fail_next_keychain_operation();
     assert!(matches!(
-        app.delete_store(&directory).await,
+        app.discard_store(&directory).await,
         Err(StoreDeletionError::Key(_))
     ));
     assert_eq!(layout.stores().await.unwrap().len(), 1);
-    app.delete_store(&directory).await.unwrap();
+    app.discard_store(&directory).await.unwrap();
     assert!(layout.stores().await.unwrap().is_empty());
     // Recreate exactly this store id to prove deletion removed all its keychain entries.
     struct SameStore(std::sync::Mutex<Option<StoreId>>, UuidIds);

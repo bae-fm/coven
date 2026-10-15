@@ -33,17 +33,20 @@ impl Coven {
         CovenBuilder::new(layout)
     }
 
-    /// Deletes a closed store from this device: every keychain entry coven
-    /// holds for it, including every saved host secret, then its directory.
-    /// Does not open the database.
+    /// Deletes a closed store from this device without opening it: every
+    /// keychain entry coven holds for it, including every saved host secret,
+    /// then its directory. Unsent writes and files are lost, and this device
+    /// stays in the store log for peers to read until it is removed; prefer
+    /// `CovenHandle::delete_store`. Use this for a store that cannot open, or
+    /// to finish a handle's deletion that failed after closing.
     /// Refused while a writer, read-only handle or file stream remains open;
     /// storage is untouched. Retrying finishes a deletion that failed partway.
-    pub async fn delete_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
+    pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = store_dir.clone();
         blocking(move || {
             delete(
                 &directory,
-                StoreKeychain::new(Keychain::registered()?, directory.id()),
+                &StoreKeychain::new(Keychain::registered()?, directory.id()),
             )
         })
         .await
@@ -78,7 +81,7 @@ pub(crate) fn create(
     }
 }
 
-pub(crate) fn delete(directory: &StoreDir, keys: StoreKeychain) -> Result<(), StoreDeletionError> {
+pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), StoreDeletionError> {
     let lock = directory.lock_for_deletion()?;
     keys.delete_store_entries()?;
     if let Some(lock) = lock {

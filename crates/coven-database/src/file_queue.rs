@@ -59,6 +59,35 @@ pub struct UploadQueueState {
     pub uploads: Vec<FileUpload>,
 }
 
+/// What this device committed and has not uploaded: writes and files (E1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnsentWork {
+    /// Committed writes waiting to upload.
+    pub writes: u64,
+    /// Attached files waiting to upload.
+    pub files: u64,
+}
+
+impl UnsentWork {
+    /// Whether anything waits to upload.
+    pub fn is_empty(&self) -> bool {
+        self.writes == 0 && self.files == 0
+    }
+}
+
+pub(crate) fn unsent(db: &DatabaseConnection) -> Result<UnsentWork, DbError> {
+    db.query_row(
+        "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)",
+        [],
+        |r| {
+            Ok(UnsentWork {
+                writes: r.get::<_, i64>(0)? as u64,
+                files: r.get::<_, i64>(1)? as u64,
+            })
+        },
+    )
+}
+
 pub(crate) fn state(db: &DatabaseConnection) -> Result<UploadQueueState, DbError> {
     Ok(UploadQueueState {
         paused: paused(db)?,

@@ -70,6 +70,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("eager progress covers the whole requested set"),
 ("cache_progress.rs", "SELECT EXISTS(SELECT 1 FROM _coven_eager_requests JOIN _coven_eager_work USING(namespace,file_id))", "_coven_eager_requests") =>
     Some("retirement stops at the first requested file still holding work"),
+("file_queue.rs", "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)", "_coven_uploads" | "_coven_file_uploads") =>
+    Some("deleting a store counts every waiting write and file, once"),
 ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>
     Some("the pause table holds at most one row"),
 ("retry.rs", "SELECT scope,operation,upload,download,failures,not_before,wait FROM _coven_retries", "_coven_retries") =>

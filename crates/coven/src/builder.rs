@@ -563,6 +563,9 @@ impl OpeningOwners {
             storage,
             codes,
             ids,
+            self.directory,
+            self.keychain,
+            self.device,
         )
     }
 }

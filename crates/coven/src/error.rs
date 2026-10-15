@@ -13,6 +13,13 @@ pub enum StoreDeletionError {
     /// The store is open or its lock could not be taken.
     #[error(transparent)]
     Lock(#[from] StoreLockError),
+    /// Writes or files wait to upload; nothing was deleted.
+    #[error("{} writes and {} files wait to upload", .0.writes, .0.files)]
+    Unsent(coven_database::UnsentWork),
+    /// Reading the queue or publishing this device's removal failed;
+    /// nothing was deleted. Closing failed after the removal was published.
+    #[error(transparent)]
+    Sync(#[from] crate::SyncError),
     /// Removing a keychain entry failed.
     #[error(transparent)]
     Key(#[from] KeyError),

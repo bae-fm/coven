@@ -12,8 +12,12 @@ mod sync_control;
 #[path = "member_keys.rs"]
 mod member_keys;
 
+#[path = "handle_delete.rs"]
+mod deletion;
+pub use deletion::IfUnsent;
+
 use crate::*;
-use coven_crypto::custody::StoreCustody;
+use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;
 use std::sync::{Arc, Mutex};
 
@@ -31,6 +35,9 @@ pub struct CovenHandle {
     codes: coven_sync::RestoreCodes,
     custody: Arc<Mutex<Option<StoreCustody>>>,
     ids: IdSourceRef,
+    directory: StoreDir,
+    keychain: Arc<StoreKeychain>,
+    device: DeviceId,
 }
 
 impl std::fmt::Debug for CovenHandle {
@@ -49,6 +56,9 @@ impl CovenHandle {
         storage: Arc<crate::storage::StorageConnections>,
         codes: coven_sync::RestoreCodes,
         ids: IdSourceRef,
+        directory: StoreDir,
+        keychain: Arc<StoreKeychain>,
+        device: DeviceId,
     ) -> Self {
         Self {
             closing: Arc::new(database.closing_guard()),
@@ -60,6 +70,9 @@ impl CovenHandle {
             codes,
             custody: Arc::new(Mutex::new(Some(custody))),
             ids,
+            directory,
+            keychain,
+            device,
         }
     }
 

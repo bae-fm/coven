@@ -22,7 +22,7 @@ pub use coven_sync::{
     PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadQueue,
 };
 pub use error::{ReadOnlyOpenError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError};
-pub use handle::CovenHandle;
+pub use handle::{CovenHandle, IfUnsent};
 pub use read_handle::CovenReadHandle;
 
 pub use coven_crypto::custody::{
@@ -41,7 +41,7 @@ pub use coven_database::{
     MigrationOutcome, Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
     ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
     RowChange, RowIdentity, RowKey, SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql,
-    UserFile, WriteBatch, WriteId,
+    UnsentWork, UserFile, WriteBatch, WriteId,
 };
 pub use coven_database::{DropReason, EntryTarget};
 pub use coven_database::{LogObject, LogRefusal};

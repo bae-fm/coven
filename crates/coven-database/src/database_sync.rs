@@ -184,6 +184,12 @@ impl Database {
         self.subscribe(|sql| sql.pending())
     }
 
+    /// Writes and files this device committed and has not uploaded, from one
+    /// committed state.
+    pub async fn unsent(&self) -> CovenResult<crate::UnsentWork> {
+        self.read(|sql| sql.unsent()).await
+    }
+
     /// The upload queue, its pause setting and each file's recorded provider
     /// session in one committed snapshot, available while disconnected (E7).
     pub async fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {

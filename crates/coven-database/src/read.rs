@@ -109,6 +109,10 @@ impl<'connection> SqlReadContext<'connection> {
         )?)
     }
 
+    pub(crate) fn unsent(&self) -> CovenResult<crate::UnsentWork> {
+        Ok(crate::file_queue::unsent(self.database)?)
+    }
+
     pub(crate) fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {
         Ok(crate::file_queue::state(self.database)?)
     }
