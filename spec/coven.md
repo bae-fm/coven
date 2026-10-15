@@ -5120,6 +5120,13 @@ Carol's tablet:
     upload retires it. Completion writes no row, so a deleted row stays
     deleted
     ([`steps_keep_upload`, `inflight_upload_settles`](proofs/storage/CovenStorage/Files.lean)).
+- This device's record of a user-provided original (`_coven_user_files`)
+  stays while its row is current or could become current again, apart from
+  the queue's own source facts. A row a circle deletion hides keeps it until
+  that deletion is final and the row is physically removed (§14.7); a
+  deleted row keeps it until the deleting write's window verdict is final
+  (§10). Then it goes, so no record outlives every row that could name it
+  ([`source_kept_while_row_returns`, `hidden_kept_until_final`, `deleted_kept_until_final`, `hidden_released_when_final`, `deleted_released_when_final`, `sources_bounded`](proofs/storelog-data/CovenStorelogData/LocalSources.lean)).
 - Every attempt, including retries and resumed provider sessions, checks
   the source's size and whole-file content hash, and a user-provided
   original's recorded modification time, before sending file bytes.

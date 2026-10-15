@@ -30,6 +30,7 @@ import CovenStorelogData.Access
 import CovenStorelogData.AccessKeys
 import CovenStorelogData.AccessKeyExamples
 import CovenStorelogData.RetentionSafety
+import CovenStorelogData.LocalSources
 import CovenStorelogData.LostValues
 import CovenStorelogData.SecurityExamples
 import CovenStorelogData.StorageFinality

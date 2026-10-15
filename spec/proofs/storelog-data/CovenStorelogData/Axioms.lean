@@ -142,6 +142,14 @@ import CovenStorelogData
 #print axioms CovenStorelogData.RetentionSafety.deleted_input_never_needed
 #print axioms CovenStorelogData.RetentionSafety.retention_preserves_possible_replay
 #print axioms CovenStorelogData.RetentionSafety.bounded_after_finality
+#print axioms CovenStorelogData.RetentionSafety.source_kept_while_row_returns
+#print axioms CovenStorelogData.RetentionSafety.hidden_kept_until_final
+#print axioms CovenStorelogData.RetentionSafety.deleted_kept_until_final
+#print axioms CovenStorelogData.RetentionSafety.hidden_released_when_final
+#print axioms CovenStorelogData.RetentionSafety.deleted_released_when_final
+#print axioms CovenStorelogData.RetentionSafety.sources_bounded
+#print axioms CovenStorelogData.RetentionSafety.implemented_keeps_hidden_forever
+#print axioms CovenStorelogData.RetentionSafety.implemented_releases_returning_row
 #print axioms CovenStorelogData.RetentionSafety.retained_count_bound
 #print axioms CovenStorelogData.RetentionSafety.loss_protects_file
 #print axioms CovenStorelogData.RetentionSafety.reversible_input_protects_file

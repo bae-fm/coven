@@ -386,7 +386,8 @@ proofs() {
             store_log_sync::tests::snapshots::boundaries::data_differential_boundaries
         COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-database --all-features -- \
             entry_inputs::tests::data_differential_entry_effects \
-            entry_inputs::tests::data_differential_entry_effects_circles
+            entry_inputs::tests::data_differential_entry_effects_circles \
+            file_write::sources::tests::data_differential_local_sources
         step "Rust / Lean circles readable again"
         COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             store_log_sync::snapshots::reload::tests::data_differential_circle_returns

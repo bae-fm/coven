@@ -5,6 +5,7 @@ import CovenStorelogData.CurrentData
 import StorelogDataEffects
 import PendingJson
 import CovenStorelogData.RetentionSafety
+import CovenStorelogData.LocalSources
 
 /-! Compare replay realization, effective snapshot boundaries and circle
 reloads with Rust. The adapter calls the model's functions on checked causal
@@ -105,6 +106,40 @@ private def fileDeletable (j : Json) : Except String Json := do
         reversible⟩)
   pure (toJson (RetentionSafety.fileDeletable file references))
 
+/-- `RetentionSafety.LocalSources`: one user-provided original's record
+through a row's life. The circle deletion is id 0 and the deleting write id 1;
+`final` makes every id so far final, and the stated rule then cleans up a
+hidden row; the implemented one never does. After each event, whether the record is still kept under the
+stated rule and under the implemented one; a released record stays released. -/
+private def sources (j : Json) : Except String Json := do
+  let events ← j.getObjValAs? (Array String) "events"
+  let mut row : RetentionSafety.RowState := .live
+  let mut kept : List Nat := []
+  let mut final : List Nat := []
+  let mut stated := true
+  let mut implemented := true
+  let mut out := #[]
+  for event in events do
+    match event with
+    | "deleteCircle" => row := .hidden 0; kept := 0 :: kept
+    | "dropDeletion" => kept := kept.erase 0
+    | "final" => final := [0, 1]
+    | "deleteRow" =>
+      if row != .live && !(row == .hidden 0 && !kept.contains 0) then
+        throw "deleting a row that is not current"
+      row := .deleted 1; kept := 1 :: kept; final := final.erase 1
+    | other => throw s!"unknown source event {other}"
+    let keptF := fun e => kept.contains e
+    let finalF := fun e => final.contains e
+    -- Only the stated rule cleans a hidden row up; Rust never does.
+    let cleaned := RetentionSafety.cleanup keptF finalF row
+    stated := stated && !RetentionSafety.mayDelete keptF finalF
+      (RetentionSafety.localSource 0 (RetentionSafety.sourceNeed cleaned))
+    implemented := implemented && !RetentionSafety.mayDelete keptF finalF
+      (RetentionSafety.localSource 0 (RetentionSafety.implementedNeed row))
+    out := out.push (Json.mkObj [("stated", toJson stated), ("implemented", toJson implemented)])
+  return toJson out
+
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd
   let output := do
@@ -112,13 +147,14 @@ def main : IO UInt32 := do
     if let .ok cases := j.getObjVal? "files" then
       return toJson (← (← cases.getArr?).mapM fileDeletable)
     match j.getObjVal? "reloads", j.getObjVal? "circles", j.getObjVal? "effects",
-        j.getObjVal? "pending", j.getObjVal? "choices" with
-    | .ok histories, _, _, _, _ => toJson <$> (← histories.getArr?).mapM reloads
-    | _, .ok circles, _, _, _ => toJson <$> (← circles.getArr?).mapM StorelogDataEffects.circles
-    | _, _, .ok effects, _, _ => toJson <$> (← effects.getArr?).mapM StorelogDataEffects.run
-    | _, _, _, .ok cases, _ => toJson <$> (← cases.getArr?).mapM PendingJson.run
-    | _, _, _, _, .ok cases => toJson <$> (← cases.getArr?).mapM PendingJson.choice
-    | .error _, .error _, .error _, .error _, .error _ =>
+        j.getObjVal? "pending", j.getObjVal? "choices", j.getObjVal? "sources" with
+    | .ok histories, _, _, _, _, _ => toJson <$> (← histories.getArr?).mapM reloads
+    | _, .ok circles, _, _, _, _ => toJson <$> (← circles.getArr?).mapM StorelogDataEffects.circles
+    | _, _, .ok effects, _, _, _ => toJson <$> (← effects.getArr?).mapM StorelogDataEffects.run
+    | _, _, _, .ok cases, _, _ => toJson <$> (← cases.getArr?).mapM PendingJson.run
+    | _, _, _, _, .ok cases, _ => toJson <$> (← cases.getArr?).mapM PendingJson.choice
+    | _, _, _, _, _, .ok cases => toJson <$> (← cases.getArr?).mapM sources
+    | .error _, .error _, .error _, .error _, .error _, .error _ =>
         let histories ← j.getObjValAs? (Array Json) "histories"
         toJson <$> histories.mapM run
   match output with
