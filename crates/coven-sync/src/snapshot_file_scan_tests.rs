@@ -58,8 +58,9 @@ fn folder_listings(storage: &MemoryStorage, device: DeviceId) -> usize {
 /// deletes what it found once her removal is final: a
 /// failed listing records nothing and the next retention lists again. The
 /// completed scan survives reopening. Ben taking Carol's account restores
-/// her access and forgets the scan; revoking it again is a new cut-off, which
-/// lists again.
+/// her access and forgets the scan in the replay that records it; revoking it
+/// again is a new cut-off, which lists again, even when no retention ran
+/// between the restore and the revocation.
 #[tokio::test]
 async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
     let (storage, clock) = google();
@@ -119,6 +120,66 @@ async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
     }
     assert_eq!(folder_listings(&storage, carol), 3);
     assert!(storage.read(&orphan(2)).await.is_err());
+
+    // A restore and a revocation between two retentions: the scan went
+    // with the restore, so the next retention lists the folder again.
+    storage.create(&orphan(3), b"photo").await.unwrap();
+    for (held, account) in [
+        ("ben@example.com", "cat@example.com"),
+        ("cat@example.com", "ben@example.com"),
+    ] {
+        b.sync.storage = Some(Arc::new(
+            MemoryStorage::for_recipient(&storage, held).unwrap(),
+        ));
+        b.sync
+            .make_and_upload_entry(StoreChange::SetAccess {
+                member: b.member.member(),
+                access: coven_format::MemberAccess::ProviderAccount(account.into()),
+            })
+            .await
+            .unwrap();
+        a.sync().await;
+        drive_access(&mut a).await;
+        if account == "cat@example.com" {
+            assert_eq!(a.db.file_scan(carol).await.unwrap(), None);
+        }
+    }
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(folder_listings(&storage, carol), 4);
+    assert!(a.db.file_scan(carol).await.unwrap().is_some());
+    assert!(storage.read(&orphan(3)).await.is_err());
+}
+
+/// §13, §16.5: Ana removes Ben's phone while Ben stays a member. His account
+/// keeps its access, so the phone's removal is no cut-off and nothing lists
+/// its folder: the phone could still have uploaded through that account.
+/// What it left is reclaimed at Ben's own cut-off: once Ben is removed and
+/// his account revoked, the next retention lists the phone's folder once.
+#[tokio::test]
+async fn a_removed_device_whose_member_keeps_access_waits_for_its_members_cut_off() {
+    let (storage, clock) = google();
+    let [mut a, b, _] = accounts(storage.clone()).await;
+    let phone = b.device().await;
+    let orphan = ObjectPath::file(store(1), phone, FileId(uuid::Uuid::from_u128(1)));
+    storage.create(&orphan, b"photo").await.unwrap();
+    a.sync
+        .make_and_upload_entry(StoreChange::RemoveDevice { device: phone })
+        .await
+        .unwrap();
+    drive_access(&mut a).await;
+    finalize(&mut a, &clock).await;
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(folder_listings(&storage, phone), 0);
+    assert!(storage.read(&orphan).await.is_ok());
+    publish(&mut a, Command::RemoveMember(b.member.member())).await;
+    drive_access(&mut a).await;
+    let later = UNIX_EPOCH + Duration::from_secs(62 * 86400);
+    clock.set(later);
+    a.clock.set(later);
+    a.sync().await;
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(folder_listings(&storage, phone), 1);
+    assert!(storage.read(&orphan).await.is_err());
 }
 
 /// IO `Retired.observeFiles`: after Carol's cut-off, each retention lists her

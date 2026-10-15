@@ -121,6 +121,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_file_candidates",
                 "_coven_file_chunks",
                 "_coven_file_removals",
+                "_coven_file_scan_access",
                 "_coven_file_scans",
                 "_coven_file_uploads",
                 "_coven_finality",
@@ -334,6 +335,7 @@ mod fixture {
      INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
      INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16) FROM fixture;
      INSERT INTO _coven_file_scans SELECT n,device,n FROM fixture;
+     INSERT INTO _coven_file_scan_access SELECT n,CASE WHEN i%2=0 THEN 'account' ELSE 'key' END,'account_' || i FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_write_pause VALUES(1,1);
      INSERT INTO _coven_eager_cancel VALUES(1);
@@ -583,6 +585,8 @@ mod source {
                 "size",
                 "device",
                 "file",
+                "account",
+                "access_key_id",
             ]
             .iter()
             .enumerate()

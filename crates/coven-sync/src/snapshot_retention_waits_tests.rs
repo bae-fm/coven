@@ -6,6 +6,7 @@ use super::retention::post;
 use super::*;
 use crate::store_log_sync::snapshots::retention::waits::{reached_age, Facts};
 use coven_format::value::{EntryId, StorageTime, WritePositions};
+use coven_storage::test_utils::MemoryRequest;
 use serde_json::{json, Value};
 
 const DAY: u64 = 86400;
@@ -80,9 +81,23 @@ async fn a_removed_devices_member_deletes_its_covered_logs_once_the_removal_is_f
     storage_clock.set(at(31, 0));
     b.clock.set(at(31, 0));
     b.sync().await;
+    let before = storage.request_trace().len();
     b.sync.run_retention().await.unwrap();
     assert!(logs(&storage).await.is_empty());
     assert!(records(&b).await.is_empty());
+    // Ben never applied the phone's write, which the snapshot covered: he
+    // read its body for the files it names before deleting it, so they
+    // became candidates with its deletion (§16.5).
+    let trace = storage.request_trace()[before..].to_vec();
+    let read = trace
+        .iter()
+        .position(|r| matches!(r, MemoryRequest::Read(p, _) if *p == log[0]))
+        .expect("the write's references were checked");
+    let deleted = trace
+        .iter()
+        .position(|r| matches!(r, MemoryRequest::Delete(p) if *p == log[0]))
+        .unwrap();
+    assert!(read < deleted);
 }
 
 #[tokio::test]

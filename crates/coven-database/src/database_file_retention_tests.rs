@@ -557,10 +557,12 @@ async fn protected_candidates_settle_only_while_still_protected() {
 }
 
 /// A removed uploader's completed scan records its paths as candidates with
-/// the kept removal. Replay dropping that removal, which restores access,
-/// forgets the scan in the replay transaction, so a later cut-off scans again;
-/// a scan finishing after the drop records nothing. Access restored while
-/// the removal stays kept forgets it too (§16.5).
+/// the kept removal and the access it followed. Replay dropping that removal,
+/// which restores access, forgets the scan in the replay transaction, so a
+/// later cut-off scans again; a scan finishing after the drop records
+/// nothing. Access restored while the removal stays kept forgets it in the
+/// transaction recording that access, and a scan finishing while its access
+/// is not confirmed taken away records nothing (§16.5).
 #[tokio::test]
 async fn a_scan_stands_only_while_its_removal_is_kept() {
     let store = TestStore::new();
@@ -568,9 +570,39 @@ async fn a_scan_stands_only_while_its_removal_is_kept() {
     let uploader = DeviceId(5);
     let removal = crate::write_landing::tests::retire(&db, uploader, 1, "member", 100).await;
     let found = FileId(uuid::Uuid::from_u128(11));
+    // As replay records the account needed again, or revoked.
+    let set_access = |db: &Database, intended: bool| {
+        db.inspect_writer(|sql| {
+            sql.internal_execute(
+                "INSERT INTO _coven_provider_access(account,intended,granted) VALUES('cat@example.com',?1,0)
+                 ON CONFLICT(account) DO UPDATE SET intended=excluded.intended",
+                [intended],
+            )
+            .unwrap();
+        })
+    };
+    let account = || BTreeSet::from(["cat@example.com".to_owned()]);
+    set_access(&db, true);
+    assert!(!db
+        .complete_file_scan(
+            uploader,
+            removal,
+            BTreeSet::new(),
+            account(),
+            BTreeSet::new()
+        )
+        .await
+        .unwrap());
+    set_access(&db, false);
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
     assert!(db
-        .complete_file_scan(uploader, removal, BTreeSet::from([found]))
+        .complete_file_scan(
+            uploader,
+            removal,
+            BTreeSet::from([found]),
+            account(),
+            BTreeSet::new()
+        )
         .await
         .unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
@@ -588,18 +620,27 @@ async fn a_scan_stands_only_while_its_removal_is_kept() {
     crate::retirement_drain::tests::drop_retirement(&db, removal, uploader).await;
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
     assert!(!db
-        .complete_file_scan(uploader, removal, BTreeSet::new())
+        .complete_file_scan(
+            uploader,
+            removal,
+            BTreeSet::new(),
+            account(),
+            BTreeSet::new()
+        )
         .await
         .unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
     let again = crate::write_landing::tests::retire(&db, uploader, 2, "member", 200).await;
     assert!(db
-        .complete_file_scan(uploader, again, BTreeSet::new())
+        .complete_file_scan(uploader, again, BTreeSet::new(), account(), BTreeSet::new())
         .await
         .unwrap());
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(again));
-    // Restored access forgets the scan; the candidates it found stay.
-    db.forget_file_scan(uploader).await.unwrap();
+    // Restored access forgets the scan in that transaction; the candidates
+    // it found stay. Revoking again restores no scan.
+    set_access(&db, true);
+    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
+    set_access(&db, false);
     assert_eq!(db.file_scan(uploader).await.unwrap(), None);
     assert_eq!(
         db.file_candidates(candidates_of(uploader))

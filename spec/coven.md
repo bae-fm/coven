@@ -5463,8 +5463,14 @@ Carol's tablet:
     attaching rows did not survive; incomplete scans fail visibly and retry.
     Keep the discovered paths and scan completion so later passes and reopen
     continue the reference checks without listing again. If access is restored,
-    a later cut-off needs its own scan. Removal alone does not authorize a scan
-    to be treated as the last one while storage access remains unresolved.
+    a later cut-off needs its own scan: the transaction that records the
+    restored access forgets the completed scan. Removal alone does not
+    authorize a scan to be treated as the last one while storage access
+    remains unresolved.
+  - A device removed while its member keeps provider-account access has no
+    cut-off and gets no scan: that account can still publish into its
+    folder. Its orphans are found at the member's own later cut-off, whose
+    scan lists the folder of every device the member held.
   - Ana removes Ben while his last photo upload is in flight. After his
     access is cut off, she lists his file folder: the photo either landed
     before cut-off and is included, or cannot land. Retained references and

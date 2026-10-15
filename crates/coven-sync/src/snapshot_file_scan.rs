@@ -33,15 +33,14 @@ impl StoreLogSync {
                 continue;
             };
             let (accounts, keys) = recorded_access(held, &state.member);
-            let scanned = self.database.file_scan(*device).await?.is_some();
-            if !self.database.access_taken_away(accounts, keys).await? {
-                if scanned {
-                    // Restored access ends the cut-off that scan followed.
-                    self.database.forget_file_scan(*device).await?;
-                }
-                continue;
-            }
-            if scanned {
+            // Restored access ended any scan's cut-off in the transaction
+            // that recorded it, deleting the scan (§16.5).
+            if self.database.file_scan(*device).await?.is_some()
+                || !self
+                    .database
+                    .access_taken_away(accounts.clone(), keys.clone())
+                    .await?
+            {
                 continue;
             }
             let mut files = BTreeSet::new();
@@ -59,7 +58,7 @@ impl StoreLogSync {
                 };
             }
             self.database
-                .complete_file_scan(*device, removal, files)
+                .complete_file_scan(*device, removal, files, accounts, keys)
                 .await?;
         }
         Ok(())

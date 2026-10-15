@@ -199,13 +199,18 @@ impl Database {
 
     /// Record a complete listing of a removed uploader's file folder, taken
     /// after `removal` cut its access off, with every path it found as a
-    /// candidate. Returns false, recording nothing, once `removal` is no longer
-    /// kept: that listing cannot stand for the last one (§16.5).
+    /// candidate and the `accounts` and `keys` whose confirmed removal it
+    /// followed. Returns false, recording nothing, once `removal` is no longer
+    /// kept or any of that access is no longer confirmed taken away: that
+    /// listing cannot stand for the last one. A later transaction recording
+    /// any of it restored deletes the scan (§16.5).
     pub async fn complete_file_scan(
         &self,
         device: DeviceId,
         removal: EntryId,
         files: BTreeSet<FileId>,
+        accounts: BTreeSet<String>,
+        keys: BTreeSet<String>,
     ) -> Result<bool, DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
@@ -215,7 +220,7 @@ impl Database {
                         params![removal.device.0.to_be_bytes(), removal.number.to_be_bytes()],
                         |r| r.get(0),
                     )?;
-                    if !kept {
+                    if !kept || !taken_away(db, &accounts, &keys)? {
                         return Ok(false);
                     }
                     for file in files {
@@ -229,25 +234,21 @@ impl Database {
                             removal.number.to_be_bytes()
                         ],
                     )?;
-                    Ok(true)
-                })
-            })
-        })
-        .await
-    }
-
-    /// Forget `device`'s completed scan: its access was restored, so the
-    /// next cut-off needs a listing of its own (§16.5). Candidates it found
-    /// stay.
-    pub async fn forget_file_scan(&self, device: DeviceId) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
                     db.internal_execute(
-                        "DELETE FROM _coven_file_scans WHERE device=?1",
+                        "DELETE FROM _coven_file_scan_access WHERE device=?1",
                         [device.0.to_be_bytes()],
                     )?;
-                    Ok(())
+                    let access = accounts
+                        .iter()
+                        .map(|account| ("account", account))
+                        .chain(keys.iter().map(|key| ("key", key)));
+                    for (kind, name) in access {
+                        db.internal_execute(
+                            "INSERT INTO _coven_file_scan_access(device,kind,name) VALUES(?1,?2,?3)",
+                            params![device.0.to_be_bytes(), kind, name],
+                        )?;
+                    }
+                    Ok(true)
                 })
             })
         })
@@ -268,34 +269,43 @@ impl Database {
         }
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|db| {
-                db.read_transaction(|| {
-                    for account in &accounts {
-                        let revoked = db.query(
-                            "SELECT 1 FROM _coven_provider_access WHERE account=?1 AND intended=0 AND granted=0 AND operation IS NULL",
-                            [account],
-                            |_| Ok(()),
-                        )?;
-                        if revoked.is_empty() {
-                            return Ok(false);
-                        }
-                    }
-                    for key in &keys {
-                        let deleted = db.query(
-                            "SELECT 1 FROM _coven_access_keys WHERE access_key_id=?1 AND operation IS NULL",
-                            [key],
-                            |_| Ok(()),
-                        )?;
-                        if deleted.is_empty() {
-                            return Ok(false);
-                        }
-                    }
-                    Ok(true)
-                })
-            })
+            reader.with_reader(|db| db.read_transaction(|| taken_away(db, &accounts, &keys)))
         })
         .await
     }
+}
+
+/// Every listed account revoked with no request outstanding and every listed
+/// S3 key deleted; nothing listed confirms nothing (§13).
+fn taken_away(
+    db: &crate::sqlite::DatabaseConnection,
+    accounts: &BTreeSet<String>,
+    keys: &BTreeSet<String>,
+) -> Result<bool, DbError> {
+    if accounts.is_empty() && keys.is_empty() {
+        return Ok(false);
+    }
+    for account in accounts {
+        let revoked = db.query(
+            "SELECT 1 FROM _coven_provider_access WHERE account=?1 AND intended=0 AND granted=0 AND operation IS NULL",
+            [account],
+            |_| Ok(()),
+        )?;
+        if revoked.is_empty() {
+            return Ok(false);
+        }
+    }
+    for key in keys {
+        let deleted = db.query(
+            "SELECT 1 FROM _coven_access_keys WHERE access_key_id=?1 AND operation IS NULL",
+            [key],
+            |_| Ok(()),
+        )?;
+        if deleted.is_empty() {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 /// A fixed file path awaiting a storage-deletion decision (§16.5).

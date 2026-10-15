@@ -796,8 +796,9 @@ macro_rules! coven_tables {
         ");
         // A removed uploader's file folder, listed once after its access was
         // confirmed taken away, and the kept removal that justified it. Replay
-        // deletes it once that removal is no longer kept: a later cut-off
-        // scans again (§16.5). The paths found are candidates.
+        // deletes it once that removal is no longer kept, and the transaction
+        // that records any of its access restored deletes it too: a later
+        // cut-off scans again (§16.5). The paths found are candidates.
         $visit!(_coven_file_scans, "
             CREATE TABLE _coven_file_scans (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
@@ -805,6 +806,24 @@ macro_rules! coven_tables {
                 entry_number BLOB NOT NULL CHECK(length(entry_number)=8),
                 FOREIGN KEY(entry_device,entry_number) REFERENCES _coven_store_log(device,number)
             ) STRICT, WITHOUT ROWID;
+        ");
+        // The provider accounts and S3 keys whose confirmed removal a scan
+        // followed (§13).
+        $visit!(_coven_file_scan_access, "
+            CREATE TABLE _coven_file_scan_access (
+                device BLOB NOT NULL REFERENCES _coven_file_scans(device) ON DELETE CASCADE,
+                kind TEXT NOT NULL CHECK(kind IN ('account','key')),
+                name TEXT NOT NULL,
+                PRIMARY KEY(device,kind,name)
+            ) STRICT, WITHOUT ROWID;
+            CREATE INDEX _coven_file_scan_access_name ON _coven_file_scan_access(kind,name);
+            CREATE TRIGGER _coven_file_scan_key_restored AFTER UPDATE ON _coven_access_keys
+            WHEN NEW.operation IS NOT NULL BEGIN
+                DELETE FROM _coven_file_scans WHERE device IN (SELECT device FROM _coven_file_scan_access WHERE kind='key' AND name=NEW.access_key_id);
+            END;
+            CREATE TRIGGER _coven_file_scan_key_forgotten AFTER DELETE ON _coven_access_keys BEGIN
+                DELETE FROM _coven_file_scans WHERE device IN (SELECT device FROM _coven_file_scan_access WHERE kind='key' AND name=OLD.access_key_id);
+            END;
         ");
         $visit!(_coven_cache, "
             CREATE TABLE _coven_cache (
@@ -881,6 +900,15 @@ macro_rules! coven_tables {
                 target INTEGER CHECK(target IN (0,1)),
                 CHECK(target IS NULL OR operation IS NOT NULL)
             ) STRICT, WITHOUT ROWID;
+            -- Access no longer confirmed taken away ends the cut-off a file
+            -- folder scan followed, in the transaction that records it (§16.5).
+            CREATE TRIGGER _coven_file_scan_account_restored AFTER UPDATE ON _coven_provider_access
+            WHEN NOT (NEW.intended=0 AND NEW.granted IS 0 AND NEW.operation IS NULL) BEGIN
+                DELETE FROM _coven_file_scans WHERE device IN (SELECT device FROM _coven_file_scan_access WHERE kind='account' AND name=NEW.account);
+            END;
+            CREATE TRIGGER _coven_file_scan_account_forgotten AFTER DELETE ON _coven_provider_access BEGIN
+                DELETE FROM _coven_file_scans WHERE device IN (SELECT device FROM _coven_file_scan_access WHERE kind='account' AND name=OLD.account);
+            END;
         ");
         $visit!(_coven_operations, "
             CREATE TABLE _coven_operations (

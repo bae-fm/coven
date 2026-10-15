@@ -268,7 +268,18 @@ impl StoreLogSync {
             threshold.age(&known, object.stored_at);
             match known.first_unmet() {
                 None => {
-                    if let Err(error) = self.delete_retained(&object).await {
+                    // Another uploader's write this device never checked
+                    // names files no candidate may cover yet: establish its
+                    // references before it goes (§16.5).
+                    let deleted = if id.device == local.device {
+                        self.delete_retained(&object).await
+                    } else {
+                        match self.establish_references(&object, &local.log).await {
+                            Ok(()) => self.delete_retained(&object).await,
+                            Err(error) => Err(error),
+                        }
+                    };
+                    if let Err(error) = deleted {
                         failures.push((object.path.clone(), error));
                         retained.push(object);
                     }
@@ -365,7 +376,9 @@ impl StoreLogSync {
     /// Delete a log write or snapshot. The files its checked references named
     /// lose that protection, so they become retention candidates first: a
     /// candidate is only a reason to check, while a deletion committed
-    /// without one would leave its files unconsidered (§16.5).
+    /// without one would leave its files unconsidered (§16.5). This device's
+    /// own writes and snapshots need no check: it captured them from its own
+    /// rows, whose releases already made their files candidates.
     async fn delete_retained(&self, object: &StoredObject) -> Result<(), SyncError> {
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
         let evidence = crate::object_input::ObjectInput::observe(&self.database, object)

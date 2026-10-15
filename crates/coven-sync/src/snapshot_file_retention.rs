@@ -208,6 +208,32 @@ impl StoreLogSync {
         Ok(Some(references))
     }
 
+    /// Check the file references of another uploader's write this device
+    /// is about to delete, unless they are already checked or proven
+    /// unreadable here; deletion then makes them candidates (§16.5).
+    pub(super) async fn establish_references(
+        &self,
+        object: &StoredObject,
+        log: &StoreLog,
+    ) -> Result<(), SyncError> {
+        let retained = crate::object_input::ObjectInput::observe(&self.database, object).await?;
+        if retained.files().await?.is_some() {
+            return Ok(());
+        }
+        let readable = self.snapshot_audiences(log)?;
+        let versions = self.database.write_schema_versions().await?;
+        let ring = self.store_keys.read()?;
+        let needed = crate::key_introductions::needed(log);
+        let opens = |audience: &Audience, key: KeyId| {
+            readable.contains(audience)
+                && crate::key_introductions::accepted(ring.as_ref(), &needed, audience, key)
+        };
+        let mut replays = ReplayCache::new(log);
+        self.retained_write_references(object, log, &mut replays, &readable, &opens, &versions)
+            .await?;
+        Ok(())
+    }
+
     async fn retained_write_references(
         &self,
         object: &StoredObject,
