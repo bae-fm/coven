@@ -1,6 +1,8 @@
 //! The rows whose commits can change what a waiting operation needs (§3.1,
 //! SP waiting; IO `WaitingEvidence`). A commit changing one of a wait's rows
-//! is evidence for that wait; no other commit is.
+//! is evidence for that wait; no other commit is. The rows are exactly what
+//! the waiting work reads, except that a write's writer position counts even
+//! when it stops short of the write (IO `PrerequisiteRows`).
 
 use crate::key_scope::KeyScope;
 use crate::observation::{CommitSubscription, TableRead};

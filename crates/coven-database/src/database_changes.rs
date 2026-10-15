@@ -62,4 +62,4 @@ impl DatabaseChanges {
 
 #[cfg(test)]
 #[path = "database_changes_tests.rs"]
-mod tests;
+pub(crate) mod tests;

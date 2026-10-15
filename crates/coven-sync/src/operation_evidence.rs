@@ -69,12 +69,14 @@ fn object_rows(path: &ObjectPath) -> Vec<PrerequisiteRows> {
     }
 }
 
-fn needs(reason: &PendingReason) -> Needs {
+/// What a wait for `reason` watches; a reload wait also names the pending
+/// reload operation, which advances or finishes (IO `PrerequisiteRows.needs`).
+fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
     let rows = |rows| Needs {
         rows,
         ..Needs::default()
     };
-    match reason {
+    let mut needs = match reason {
         PendingReason::Missing { path } => rows(object_rows(path)),
         PendingReason::Waits(prerequisite) => match prerequisite {
             Prerequisite::CatchUp => Needs::default(),
@@ -104,7 +106,9 @@ fn needs(reason: &PendingReason) -> Needs {
         },
         // Every other condition waits for time, the app or an update.
         _ => Needs::default(),
-    }
+    };
+    needs.rows.extend(reload.map(PrerequisiteRows::Operation));
+    needs
 }
 
 impl RetryWaits {
@@ -113,7 +117,9 @@ impl RetryWaits {
     }
 
     /// Opening watches every persisted operation wait from now: commits after
-    /// the store opened, by any work, are evidence for it.
+    /// the store opened, by any work, are evidence for it. One satisfied
+    /// before is unseen, and the wait is due within its persisted full wait
+    /// (IO `reopened_due`, `reopen_rate`).
     pub(crate) async fn watch_persisted(&self) -> Result<(), DbError> {
         let Some(database) = &self.database else {
             return Ok(());
@@ -174,8 +180,7 @@ impl RetryWaits {
         let Some(database) = &self.database else {
             return;
         };
-        let mut needs = needs(reason);
-        needs.rows.extend(reload.map(PrerequisiteRows::Operation));
+        let needs = needs(reason, reload);
         let mut evidence = self.evidence();
         let commits = match evidence.waits.remove(&id) {
             Some(Wait::Attempt { commits, .. }) => commits,
@@ -193,9 +198,20 @@ impl RetryWaits {
         );
     }
 
+    /// What a wait for `reason` watches: its prerequisites' rows, the key it
+    /// lacks, and whether it waits for the storage connection; `reload` is the
+    /// reload operation a reload wait names (IO `PrerequisiteRows.needs`).
+    pub(crate) fn watches(
+        reason: &PendingReason,
+        reload: Option<OperationId>,
+    ) -> (Vec<PrerequisiteRows>, Option<(Audience, KeyId)>, bool) {
+        let needs = needs(reason, reload);
+        (needs.rows, needs.key, needs.connection)
+    }
+
     /// The key the operation's wait lacks, if it lacks one.
     pub(crate) fn lacks_key(reason: &PendingReason) -> Option<(Audience, KeyId)> {
-        needs(reason).key
+        Self::watches(reason, None).1
     }
 
     pub(crate) fn clear_evidence(&self, id: OperationId) {

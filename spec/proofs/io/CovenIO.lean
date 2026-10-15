@@ -9,6 +9,8 @@ import CovenIO.Execution
 import CovenIO.Trace
 import CovenIO.Waiting
 import CovenIO.WaitingEvidence
+import CovenIO.WaitingReopen
+import CovenIO.PrerequisiteRows
 import CovenIO.DriveOrder
 import CovenIO.Wakes
 import CovenIO.Downloads

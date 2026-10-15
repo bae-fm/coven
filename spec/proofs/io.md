@@ -1289,21 +1289,66 @@ Rust attributes each commit an attempt makes to that attempt's `CommitScope`
 and its wait observes only commits outside it, so they cannot make the
 attempt's own wait due at once.
 
-In Rust a prerequisite is a set of database rows (`PrerequisiteRows`: an
-entry, key copy or write, a device's registration, a peer's positions, an
-audience's reload and the reload operation it waits for, the finality
-horizon, the boundaries, a provider account's access), the key a
-`KeyUnavailable` wait lacks, or the storage connection. Opening the store
-watches each persisted wait from then on, so commits by any work after opening
-count; a wait armed before opening sees nothing from before it.
-Rows are the granularity: a write's rows include its writer's applied
-position, so a commit advancing that writer counts even when it stops short
-of the write. A condition naming none of these (a snapshot, a request, a
-local failure) waits for time only.
 [`io_differential_waiting_evidence`](../../crates/coven-sync/src/operation_evidence_tests.rs)
 runs the real operation owner against the model: other work posts devices'
-positions, and attempts fail waiting on one device's positions after other
-work posted some while they ran.
+positions, attempts fail waiting on one device's positions after other work
+posted some while they ran, the wall clock is set back, and the store reopens,
+sometimes in the middle of an attempt.
+
+**The rows a wait names — proved.** In Rust a wait names prerequisites
+(`PrerequisiteRows`: an entry, key copy or write, a device's registration, a
+peer's positions, an audience's reload and the reload operation it waits for,
+the finality horizon, the boundaries, another operation, a provider account's
+access), the key a `KeyUnavailable` wait lacks, or the storage connection. Each
+prerequisite names whole rows of the local schema, by table and primary key.
+[`PrerequisiteRows`](io/CovenIO/PrerequisiteRows.lean) models those rows and
+what the waiting work reads through them: every row as it is, except a write's
+applied position, of which it reads only whether it reaches the write.
+
+The rows are exactly what the waiting work reads. A commit that changes what it
+reads changes one of the rows, so it wakes the wait and nothing unblocking is
+missed (`reading_frame`, `unblocking_commit_named`). Every row named can by
+itself change what it reads, so no row is watched for nothing
+(`named_row_matters`). The only evidence that changes nothing read is a
+partial advance: a write's writer position moving without reaching the write
+(`only_partial_advances`, `partial_advance_counts`). Each one is a waking
+commit that `evidence_rate` charges for, and while positions only rise there
+are fewer of them than writes still missing before the awaited one
+(`partial_advances_bounded`); a reload can set positions back, so this count
+holds between reloads. A condition that names no row, key or connection (an
+object only storage supplies, such as a snapshot or request, or a local
+failure) waits for time alone (`time_only`).
+[`io_differential_prerequisite_rows`](../../crates/coven-database/src/prerequisite_rows_tests.rs)
+compares the tables and keys `PrerequisiteRows::reads` watches with the model's
+rows, and
+[`io_differential_wait_rows`](../../crates/coven-sync/src/operation_evidence_tests.rs)
+compares what each kind of recorded condition names. That every path which
+satisfies a prerequisite commits to one of its rows is a Rust obligation:
+`a_write_wait_counts_a_partial_advance_of_its_writer`,
+`a_wait_observes_its_rows_outside_its_attempt` and
+`a_key_wait_wakes_when_its_key_arrives` check a write's partial advance, a
+peer's positions and the key a wait lacks.
+
+**Reopening — proved.** [`WaitingReopen`](io/CovenIO/WaitingReopen.lean) adds
+reopening to the session. A wait persists its wall-clock deadline `T` and its
+full wait `W`. Reopening arms `max 0 (min (T - now) W)` on the monotonic clock,
+keeps the failure count and the prerequisite, and watches that prerequisite
+from the reopen on: a commit before the reopen is never seen, so a wait woken
+before closing is not woken after (`reopen_forgets_evidence`). An attempt
+running when the store closed is lost, and its operation's previous wait comes
+back.
+
+A wait whose prerequisite was satisfied before the reopen is not stalled: under
+any wall clock the restored wait is due within its full wait, through any
+commits that follow (`reopen_within_wait`, `reopened_due`). With no forward
+wall-clock jump, starts across any number of reopens are at most §3.1's count
+plus one per reopen (`reopen_rate`, `reopen_unchanged_rate`). The extra start
+is the lost attempt starting again, since its previous wait may already be due
+(`reopen_mid_attempt_restarts`); a reopen with no attempt running adds nothing
+(`idle_reopen_keeps_count`). Within one uninterrupted run this is exactly
+`unchanged_rate`. A wall clock moved forward can make a persisted deadline look
+past and end a wait at once (`forward_jump_ends_wait`), which is why §3.1
+states the restart bound only without one.
 
 **A raise and a reload never wait on each other — proved.** A queued entry's
 publication waits while a reload is pending, so a raise whose own queued
@@ -1314,6 +1359,9 @@ that waits on a reload yields its place, and the reload runs (`no_cycle`); a
 raise waiting on anything else still goes first (`raise_keeps_its_place`).
 [`DriveOrder`](io/CovenIO/DriveOrder.lean) models only this choice, not the
 rest of the drive.
+[`a_raise_waiting_on_a_reload_yields_to_it`](../../crates/coven-sync/src/operation_evidence_tests.rs)
+runs the real drive both ways: the reload is skipped while the raise waits on
+positions, and runs once the raise's condition names it.
 
 **Wakes — proved.** `Wakes.lean` models the sync loop and its write-queue
 observation (`sync_loop.rs`, `Database::sync_changes`). `write_never_lost`:

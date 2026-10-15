@@ -438,6 +438,7 @@ proofs() {
             store_log_sync::tests::snapshots::held::io_differential_held \
             retry_waits::tests::io_differential_waiting \
             store_log_sync::tests::operations::evidence::io_differential_waiting_evidence \
+            store_log_sync::tests::operations::evidence::io_differential_wait_rows \
             files::tests::upload_retry::io_differential_upload_worker \
             store_log_sync::snapshots::file_scan::tests::io_differential_file_scan \
             write_object::tests::io_differential_dropped_registration \
@@ -447,9 +448,10 @@ proofs() {
 
     if proof_selected io || crate_selected coven-database; then
         runner=$(runner io ioRunner)
-        step "Rust / Lean write-queue wakes"
+        step "Rust / Lean write-queue wakes and prerequisite rows"
         COVEN_IO_RUNNER="$runner" exact_ignored coven-database --all-features -- \
-            database_changes::tests::io_differential_wakes
+            database_changes::tests::io_differential_wakes \
+            prerequisite_rows::tests::io_differential_prerequisite_rows
     fi
 
     if proof_selected merge || crate_selected coven-sync; then

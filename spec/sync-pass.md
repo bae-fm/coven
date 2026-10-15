@@ -828,11 +828,23 @@ the prerequisite its attempt ended on, and only a commit changing that
 prerequisite is evidence for it; a commit changing anything else never wakes
 it, so an unchanged wait keeps §3.1's rate
 ([`unrelated_commit_ignored`](proofs/io/CovenIO/WaitingEvidence.lean),
-[`unchanged_rate`](proofs/io/CovenIO/WaitingEvidence.lean)). A wait begins
+[`unchanged_rate`](proofs/io/CovenIO/WaitingEvidence.lean)). A prerequisite
+is the committed rows its waiting work reads, keyed by primary key, so a
+commit that can unblock the wait always wakes it; a write's rows include its
+writer's applied position, so an advance short of the write wakes it too
+([`unblocking_commit_named`](proofs/io/CovenIO/PrerequisiteRows.lean),
+[`named_row_matters`](proofs/io/CovenIO/PrerequisiteRows.lean),
+[`only_partial_advances`](proofs/io/CovenIO/PrerequisiteRows.lean)). A wait begins
 when the attempt that ends in it started: a change to its prerequisite by
 other work while the attempt runs makes that wait due at once, while the
 attempt's own commits never do
-([`racing_commit_wakes`](proofs/io/CovenIO/WaitingEvidence.lean)). Every recorded condition names what unblocks it: a queued entry held
+([`racing_commit_wakes`](proofs/io/CovenIO/WaitingEvidence.lean)). Reopening
+watches each persisted wait from the reopen on: a commit before it is not
+seen, and the wait is due within its persisted full wait, so a prerequisite
+satisfied before the reopen delays it at most that long
+([`reopened_due`](proofs/io/CovenIO/WaitingReopen.lean)). Without a forward
+wall-clock jump each reopen adds at most one start, the attempt it cut short
+([`reopen_rate`](proofs/io/CovenIO/WaitingReopen.lean)). Every recorded condition names what unblocks it: a queued entry held
 back by a pending reload waits on that reload, and a schema raise waiting on
 a reload yields its place before reloads, so the two never wait on each other
 ([`no_cycle`](proofs/io/CovenIO/DriveOrder.lean)).

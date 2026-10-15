@@ -6,6 +6,8 @@ import CovenIO.PassPhases
 import CovenIO.SnapshotWrites
 import CovenIO.Waiting
 import CovenIO.WaitingEvidence
+import CovenIO.WaitingReopen
+import CovenIO.PrerequisiteRows
 import CovenIO.Wakes
 import CovenIO.Writers
 import CovenIO.DroppedRegistrations
@@ -479,34 +481,145 @@ private def waiting (j : Json) : Except String Json := do
     ("due", toJson (Waiting.due timer time)),
     ("retried", toJson (Waiting.due (Waiting.appRetry timer time) time))]
 
-/-- `Waiting.step` for one operation's wait: monotonic `advance`s, `commit`s
-by other work changing one prerequisite, and automatic `attempt`s, each
-starting only when `Session.ready` and failing on its `prereq`, after other
-work committed the prerequisites in `raced` while it ran; an attempt's own
-commits are no evidence. Reports, per attempt, whether it was due and the
-persisted failure count afterward (`evidence_due_once`,
-`evidence_keeps_backoff`, `racing_commit_wakes`, `unrelated_commit_ignored`). -/
+/-- `Waiting.live` for one operation's wait: monotonic `advance`s (the wall
+clock moves with them), `back`s that set the wall clock back, `commit`s by
+other work changing one prerequisite, automatic `attempt`s, each starting only
+when `Session.ready` and failing on its `prereq` after other work committed the
+prerequisites in `raced` while it ran, `reopen`s, and `cut`s: an attempt
+started when due, with `raced` commits, then the store reopened before it
+ended. An attempt's own commits are no evidence. The runner tracks the wall
+clock and the wait's persisted wall deadline `T`, and gives each reopen the
+`jump` that makes the model's restart arm `max 0 (min (T - wall) W)`. Reports,
+per attempt or cut, whether it was due and the persisted failure count
+afterward (`evidence_due_once`, `evidence_keeps_backoff`,
+`racing_commit_wakes`, `unrelated_commit_ignored`, `reopen_within_wait`,
+`reopen_mid_attempt_restarts`). -/
 private def evidence (j : Json) : Except String Json := do
   let actions ← j.getObjValAs? (Array Json) "actions"
   let mut s : Waiting.Session := ⟨0, 0, none, none⟩
+  let mut wall : Int := 0
+  let mut persisted : Int := 0
   let mut out := #[]
   for action in actions do
     let op ← action.getObjValAs? String "op"
-    let mut events : List Waiting.Event := []
-    match op with
-    | "advance" => events := [.tick (← action.getObjValAs? Nat "seconds")]
-    | "commit" => events := [.commit (← action.getObjValAs? Nat "prereq")]
-    | "attempt" =>
+    let jump : Int := match s.armed with
+      | some a => (a.deadline : Int) - s.now - (persisted - wall)
+      | none => 0
+    let started : List Waiting.Life ← if s.ready && (op == "attempt" || op == "cut") then do
         let raced ← action.getObjValAs? (List Nat) "raced"
+        pure (.event .start :: raced.map fun q => .event (.commit q))
+      else pure []
+    let mut events : List Waiting.Life := []
+    match op with
+    | "advance" =>
+        let seconds ← action.getObjValAs? Nat "seconds"
+        events := [.event (.tick seconds)]
+        wall := wall + seconds
+    | "back" => wall := wall - (← action.getObjValAs? Nat "seconds")
+    | "commit" => events := [.event (.commit (← action.getObjValAs? Nat "prereq"))]
+    | "attempt" =>
         let prereq ← action.getObjValAs? Nat "prereq"
-        if s.ready then events := [.start] ++ raced.map .commit ++ [.finish prereq]
+        if !started.isEmpty then events := started ++ [.event (.finish prereq)]
+    | "reopen" => events := [.reopen jump]
+    | "cut" => events := started ++ [.reopen jump]
     | other => throw s!"unknown evidence action {other}"
-    let some next := Waiting.run s events | throw "invalid wait transition"
-    if op == "attempt" then
+    let some next := Waiting.live s events | throw "invalid wait transition"
+    if op == "attempt" && !started.isEmpty then
+      persisted := wall + ((next.armed.map Waiting.Armed.wait).getD 0)
+    if op == "attempt" || op == "cut" then
       out := out.push (Json.mkObj [("due", toJson s.ready),
         ("failures", toJson ((next.armed.map (·.failures)).getD 0))])
     s := next
   return toJson out
+
+open PrerequisiteRows in
+private def prereqOf (j : Json) : Except String Prereq := do
+  match ← j.getObjValAs? String "kind" with
+  | "entry" => pure (.entry (← j.getObjValAs? Nat "device") (← j.getObjValAs? Nat "number"))
+  | "key_copy" => pure (.keyCopy (← j.getObjValAs? Nat "writer") (← j.getObjValAs? Nat "number"))
+  | "write" => pure (.write (← j.getObjValAs? Nat "device") (← j.getObjValAs? Nat "number"))
+  | "device" => pure (.device (← j.getObjValAs? Nat "device"))
+  | "peer_positions" => pure (.peerPositions (← j.getObjValAs? Nat "device"))
+  | "reload" => pure (.reload (← j.getObjValAs? String "audience"))
+  | "finality" => pure .finality
+  | "boundaries" => pure .boundaries
+  | "provider_access" => pure (.providerAccess (← j.getObjValAs? String "account"))
+  | "operation" => pure (.operation (← j.getObjValAs? Nat "id"))
+  | other => throw s!"unknown prerequisite {other}"
+
+open PrerequisiteRows in
+private def prereqJson : Prereq → Json
+  | .entry d n => Json.mkObj [("kind", "entry"), ("device", toJson d), ("number", toJson n)]
+  | .keyCopy w n => Json.mkObj [("kind", "key_copy"), ("writer", toJson w), ("number", toJson n)]
+  | .write d n => Json.mkObj [("kind", "write"), ("device", toJson d), ("number", toJson n)]
+  | .device d => Json.mkObj [("kind", "device"), ("device", toJson d)]
+  | .peerPositions d => Json.mkObj [("kind", "peer_positions"), ("device", toJson d)]
+  | .reload a => Json.mkObj [("kind", "reload"), ("audience", toJson a)]
+  | .finality => Json.mkObj [("kind", "finality")]
+  | .boundaries => Json.mkObj [("kind", "boundaries")]
+  | .providerAccess a => Json.mkObj [("kind", "provider_access"), ("account", toJson a)]
+  | .operation id => Json.mkObj [("kind", "operation"), ("id", toJson id)]
+
+open PrerequisiteRows in
+private def patternJson : Pattern → Json
+  | .boundaries => Json.mkObj [("table", "_coven_boundaries"), ("key", Json.mkObj [])]
+  | .row r =>
+    let (table, key) : String × List (String × Json) := match r with
+      | .storeLog d n => ("_coven_store_log", [("device", toJson d), ("number", toJson n)])
+      | .input kind w n => ("_coven_log_inputs",
+          [("kind", match kind with | .entry => "entry" | .key => "key"),
+           ("writer", toJson w), ("number", toJson n)])
+      | .entryUpload d n => ("_coven_store_log_uploads", [("device", toJson d), ("number", toJson n)])
+      | .keyUpload w n => ("_coven_key_uploads", [("writer", toJson w), ("number", toJson n)])
+      | .position d => ("_coven_positions", [("device", toJson d)])
+      | .upload d n => ("_coven_uploads", [("device", toJson d), ("number", toJson n)])
+      | .landing d n => ("_coven_write_landings", [("device", toJson d), ("number", toJson n)])
+      | .registration d => ("_coven_devices", [("device", toJson d)])
+      | .peerPositions d => ("_coven_peer_positions", [("device", toJson d)])
+      | .reload a => ("_coven_data_reloads", [("audience", toJson a)])
+      | .finality => ("_coven_finality", [])
+      | .boundary k => ("_coven_boundaries", [("key", toJson k)])
+      | .access a => ("_coven_provider_access", [("account", toJson a)])
+      | .operation id => ("_coven_operations", [("id", toJson id)])
+    Json.mkObj [("table", toJson table), ("key", Json.mkObj key)]
+
+/-- `PrerequisiteRows.Prereq.rows`: the rows, by table and primary key, a wait
+on one prerequisite watches (`reading_frame`, `named_row_matters`,
+`only_partial_advances`). -/
+private def prerequisiteRows (j : Json) : Except String Json := do
+  let prereq ← prereqOf (← j.getObjVal? "prereq")
+  return toJson (prereq.rows.map patternJson)
+
+open PrerequisiteRows in
+private def objectOf (j : Json) : Except String PrerequisiteRows.Object := do
+  match ← j.getObjValAs? String "kind" with
+  | "entry" => pure (.entry (← j.getObjValAs? Nat "device") (← j.getObjValAs? Nat "number"))
+  | "key_copy" => pure (.keyCopy (← j.getObjValAs? Nat "writer") (← j.getObjValAs? Nat "number"))
+  | "write" => pure (.write (← j.getObjValAs? Nat "device") (← j.getObjValAs? Nat "number"))
+  | "stored" => pure .stored
+  | other => throw s!"unknown object {other}"
+
+/-- `PrerequisiteRows.needs`: what a wait for one recorded condition watches,
+given the pending reload operation a reload wait names. -/
+private def waitRows (j : Json) : Except String Json := do
+  let reason ← j.getObjVal? "reason"
+  let parsed : PrerequisiteRows.Reason ← match ← reason.getObjValAs? String "kind" with
+    | "object" => pure (.object (← objectOf (← reason.getObjVal? "object")))
+    | "catch_up" => pure .catchUp
+    | "registration" => pure (.registration (← reason.getObjValAs? Nat "device"))
+    | "schema_publication" => pure .schemaPublication
+    | "reload" => pure (.reload (← reason.getObjValAs? String "audience"))
+    | "positions" => pure (.positions (← reason.getObjValAs? Nat "device"))
+    | "entry_finality" => pure .entryFinality
+    | "key_unavailable" => pure .keyUnavailable
+    | "provider_access" => pure (.providerAccess (← reason.getObjValAs? String "account"))
+    | "storage" => pure .storage
+    | "other" => pure .other
+    | other => throw s!"unknown reason {other}"
+  let reload ← j.getObjValAs? (Option Nat) "reload"
+  let needs := PrerequisiteRows.needs parsed reload
+  return Json.mkObj [("prereqs", toJson (needs.prereqs.map prereqJson)),
+    ("key", toJson needs.key), ("connection", toJson needs.connection)]
 
 /-- `Wakes.step` over the write queue's commits: app writes insert, attempts
 update, confirmations remove the oldest row. A `take` is a pass start: it
@@ -659,6 +772,8 @@ private def run (j : Json) : Except String Json := do
   | "publication" => publication j
   | "waiting" => waiting j
   | "evidence" => evidence j
+  | "prerequisite_rows" => prerequisiteRows j
+  | "wait_rows" => waitRows j
   | "wakes" => wakes j
   | "held" => held j
   | check => throw s!"unknown IO check {check}"

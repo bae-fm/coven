@@ -458,7 +458,9 @@ a zero-body pass cannot hide a listing of the whole history.
   [`unchanged_capped`](proofs/io/CovenIO/WaitingEvidence.lean)).
   Multiply by each wait's declared request allowance, counting pages and
   retries within it. Neither pass completion nor a one-second worker tick
-  resets a delay. Reopen uses the persisted T and W in §16.5. Pages are
+  resets a delay. Reopen uses the persisted T and W in §16.5, and adds at
+  most one start per wait, the attempt it cut short
+  ([`reopen_unchanged_rate`](proofs/io/CovenIO/WaitingReopen.lean)). Pages are
   charged to discovery; the restart rate bound assumes no forward clock
   jump that makes a still-live wall-clock deadline appear expired.
 

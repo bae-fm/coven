@@ -4,7 +4,8 @@ use crate::write::tests::{notes, NOTES};
 use serde_json::{json, Value};
 use std::collections::VecDeque;
 
-fn io_runner(cases: &[Value]) -> Vec<Value> {
+/// Evaluate cases with the Lean IO runner that scripts/check.sh supplies.
+pub(crate) fn io_runner(cases: &[Value]) -> Vec<Value> {
     use std::{
         io::Write,
         process::{Command, Stdio},
