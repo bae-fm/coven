@@ -3638,7 +3638,7 @@ Carol's tablet:
   30 days after the entry's storage time. Exactly 30 days is allowed.
   Reading a retirement that the write's own replay dropped excludes nothing
   by itself
-  ([`writeAllowed_iff`, `read_retirement_judged_by_time`, `read_unretired_write_counts`](proofs/io/CovenIO/Retired.lean)).
+  ([`writeAllowed_iff`, `read_retirement_judged_by_time`](proofs/io/CovenIO/Retired.lean), [`read_unretired_write_counts`](proofs/io/CovenIO/Examples.lean)).
   A device that no kept entry registers is retired the same way by each
   entry registering it that replay does not keep, dropped or landed too
   late, at that entry's storage time: its writes,
