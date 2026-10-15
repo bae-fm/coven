@@ -89,11 +89,6 @@ theorem combined_race_commits (order : SnapshotOrder) :
   · apply Loads.commit
     cases order <;> decide
 
-theorem other_audience_finishes (order : SnapshotOrder) :
-    scan (fun _ => snapshotStore crossAudienceState) (fun _ => catalogState crossAudienceState) order
-      0 none [] [⟨0, 1, 0, [1]⟩, ⟨0, 2, month, [0]⟩] 0 = .complete [⟨0, 2, month, [0]⟩] := by
-  cases order <;> decide
-
 theorem cached_catalog_cannot_commit (order : SnapshotOrder) :
     scan (fun _ => snapshotStore missedState) (fun _ => catalogState loadedState) order
       0 (some loadedSnapshot) [] [anaWrite, laterWrite] 0 = .uncertified laterWrite := by
@@ -202,7 +197,6 @@ theorem quiet_deadline (order : SnapshotOrder) :
       have eq : a = 0 := by simpa [otherWrite] using ha
       subst a
       exact ⟨leftSnapshot, by decide, by decide, by decide, by decide⟩)
-    ⟨0, by decide⟩
     (by
       intro a ha
       have eq : a = 0 := by simpa [otherWrite] using ha

@@ -67,35 +67,16 @@ theorem every_pass_retains_uncovered (order : SnapshotOrder) (n : Nat) :
       rw [ih.2.1]
       cases order <;> decide
 
-/-- Separate audiences can have a deleted prefix hole before a later write
-for the audience being loaded. No snapshot for that audience sees the hole. -/
+/-- A deleted prefix hole in another audience used to stop a store reader:
+Ana's Gifts-only write 1 went under Gifts' coverage alone, and no store
+snapshot ever named it. Its deletion now waits for the store's coverage. -/
 def crossAudienceEvents : List (Nat × Action) :=
   [(0, .write 0 [1]), (0, .beginCatchup 1 0 1), (0, .read 0 0),
-    (0, .read 0 0), (0, .prepare 0), (0, .land 1 0 1),
-    (month, .delete 0 1 [] true), (month, .write 0 [0])]
+    (0, .read 0 0), (0, .prepare 0), (0, .land 1 0 1)]
 
-def crossAudienceState : State :=
-  ⟨month, [0], [⟨0, 2, month, [0]⟩, ⟨0, 1, 0, [1]⟩], [⟨0, 1, 0, [1]⟩],
-    [⟨1, 0, 1, 0, 0, [(0, 1)]⟩], [], []⟩
-
-theorem other_audience_hole (order : SnapshotOrder) :
-    execute order (initial [0]) crossAudienceEvents = some crossAudienceState ∧
-    (readLoadingLog (fun _ => snapshotStore crossAudienceState) (fun _ => crossAudienceState.landed)
-      (fun _ => none) (fun _ => false) 0 2 0 0).stop = .snapshots ∧
-    current order crossAudienceState 0 = none ∧ live crossAudienceState 0 2 = some ⟨0, 2, month, [0]⟩ := by
+theorem other_audience_hole_refused (order : SnapshotOrder) :
+    (execute order (initial [0]) crossAudienceEvents).isSome ∧
+    execute order (initial [0]) (crossAudienceEvents ++ [(month, .delete 0 1 [] true)]) = none := by
   cases order <;> decide
-
-/-- Even a fresh catalog for every audience cannot supply a store snapshot
-that has never been published. Retrying this catch-up repeats the same miss. -/
-theorem other_audience_reload_stuck (order : SnapshotOrder) :
-    execute order crossAudienceState [(month, .beginCatchup 0 0 1), (month, .read 0 0)] = none := by
-  cases order <;> decide
-
-/-- Once the deleted number is certified irrelevant to the store audience,
-advancing past it lets the actual reader receive the later store write. -/
-theorem other_audience_skip_reaches_tail :
-    let result := readLoadingLog (fun _ => snapshotStore crossAudienceState)
-      (fun _ => crossAudienceState.landed) (fun _ => none) (fun _ => false) 0 2 0 1
-    result.stop = .miss ∧ result.position = 2 := by decide
 
 end CovenIO.ReloadExamples

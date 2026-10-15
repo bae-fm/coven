@@ -73,11 +73,13 @@ theorem pinned_snapshot_survives {W Col : Type} [DecidableEq W]
   exact ⟨present, by simp [pinned]⟩
 
 /-- Device-log retention: coverage counts consumed positions, including
-skipped/excluded writes. Removal changes who must have posted, not coverage.
-`allPosted` and `aged` are the two §15 alternatives, not entry finality. -/
+excluded writes, in the store and every part audience: the store's snapshots
+carry every write's metadata, so no reader passes a deleted number. Removal
+changes who must have posted, not coverage. `allPosted` and `aged` are the
+two §15 alternatives, not entry finality. -/
 def mayDeleteWrite {W Col : Type} [DecidableEq W] (w : W) (audiences : List Audience)
     (coverage : List (StoredSnapshot W Col)) (allPosted aged : Bool) : Bool :=
-  audiences.all (fun a => coverage.any (fun s => s.id.audience == a &&
+  (Audience.store :: audiences).all (fun a => coverage.any (fun s => s.id.audience == a &&
     w ∈ s.contents.included)) && (allPosted || aged)
 
 /-- database_file_retention.rs reads synced/merge rows, not frozen losses.

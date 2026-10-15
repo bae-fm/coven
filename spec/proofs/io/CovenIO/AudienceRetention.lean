@@ -27,7 +27,7 @@ structure WitnessService (order : SnapshotOrder) (catalog : List Snapshot) (w : 
 empty initial catalog. Later selection races do not erase this witness. -/
 theorem first_witness (order : SnapshotOrder) (catalog : List Snapshot)
     (published : Write → Prop) (w : Write) (pub : published w) (a gated online passGap upload : Nat)
-    (ha : a ∈ w.audiences) (sound : ∀ s ∈ catalog, SnapshotHistory.Sound published s)
+    (ha : a ∈ w.holders) (sound : ∀ s ∈ catalog, SnapshotHistory.Sound published s)
     (service : WitnessService order catalog w a (ready w gated online) passGap upload) :
     ∃ snap ∈ catalog, snap.counts = true ∧ snap.covers w a ∧
       snap.storedAt ≤ ready w gated online + 2 * passGap + upload := by
@@ -56,7 +56,7 @@ def Prepared (order : SnapshotOrder) (catalog : List Snapshot) (time : Nat) (w :
 No loader state or retention pin occurs in its premises. -/
 theorem audience_deadline (order : SnapshotOrder) (writers : List Nat) (catalog : List Snapshot)
     (published : Write → Prop) (w : Write) (pub : published w) (writer : w.writer ∈ writers)
-    (a gated online passGap upload time : Nat) (ha : a ∈ w.audiences)
+    (a gated online passGap upload time : Nat) (ha : a ∈ w.holders)
     (sound : ∀ s ∈ catalog, SnapshotHistory.Sound published s)
     (normalized : ∀ s ∈ catalog, Normalized writers s)
     (first : WitnessService order catalog w a (ready w gated online) passGap upload)
@@ -77,7 +77,7 @@ theorem audience_deadline (order : SnapshotOrder) (writers : List Nat) (catalog 
 /-- Each part has its own reader-availability time. Their maximum bounds the
 indivisible write object, whose eligibility still checks every part. -/
 def witnessBound (w : Write) (gated : Nat) (online : Nat → Nat) (passGap upload : Nat) : Nat :=
-  CommonReload.maximum w.audiences (fun a => ready w gated (online a) + 2 * passGap + upload)
+  CommonReload.maximum w.holders (fun a => ready w gated (online a) + 2 * passGap + upload)
 
 /-- First witnesses feed the existing witnessed-write theorem. Its deadline
 R+3P+U+D is unchanged; R includes first publication and strict witness age.
@@ -88,9 +88,8 @@ theorem bounded_storage (order : SnapshotOrder) (s : State)
     (gated passGap upload latency : Nat) (online : Nat → Nat)
     (sound : ∀ snap ∈ s.landed, SnapshotHistory.Sound published snap)
     (normalized : ∀ snap ∈ s.landed, Normalized s.writers snap)
-    (nonempty : ∃ a, a ∈ w.audiences)
-    (first : ∀ a ∈ w.audiences, WitnessService order s.landed w a (ready w gated (online a)) passGap upload)
-    (repair : ∀ a ∈ w.audiences, Service order s.writers s.landed w a
+    (first : ∀ a ∈ w.holders, WitnessService order s.landed w a (ready w gated (online a)) passGap upload)
+    (repair : ∀ a ∈ w.holders, Service order s.writers s.landed w a
       (max gated (witnessBound w gated online passGap upload + day + 1)) passGap upload)
     (gate : (∀ reader ∈ s.writers, w.number ≤ postedPosition posted reader w.writer) ∨
       w.storedAt + month ≤ s.time)
@@ -102,12 +101,12 @@ theorem bounded_storage (order : SnapshotOrder) (s : State)
       3 * passGap + upload + latency ∧ removed time w := by
   apply bounded_witnessed_storage order s posted final w published pub isFinal present writer
     (witnessBound w gated online passGap upload) gated passGap upload latency sound normalized
-    ?_ nonempty repair gate scheduled removed completion
+    ?_ repair gate scheduled removed completion
   intro a ha
   obtain ⟨snap, member, counted, cov, bound⟩ := first_witness order s.landed published w pub a gated
     (online a) passGap upload ha sound (first a ha)
   exact ⟨snap, member, counted, cov, Nat.le_trans bound
-    (CommonReload.maximum_member w.audiences
+    (CommonReload.maximum_member w.holders
       (fun a => ready w gated (online a) + 2 * passGap + upload) a ha)⟩
 
 end CovenIO.AudienceRetention

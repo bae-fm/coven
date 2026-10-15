@@ -47,8 +47,11 @@ inductive Result where
   deriving DecidableEq, Repr
 
 /-- A round stops at the frozen target. The selection's fresh catalog already
-certifies its deleted holes: covered ones are in the snapshot, uncovered ones
-have no part in this audience. Later misses refresh that evidence after GET. -/
+certifies its deleted holes: covered ones are in the snapshot, and this
+audience holds no other. Later misses refresh that evidence after GET: a
+deleted write the audience's current newest reaches replaces the selection,
+and one it does not reach has no part there and is not the store's, whose
+selection then holds its number (`unreached_not_held`). -/
 def scan (world : World) (history : Nat → SnapshotHistory.State) (order : SnapshotOrder)
     (audience : Nat) (loaded : Option Snapshot) (knownDeleted : List Write) : List Write → Nat → Result
   | [], _ => .complete []
@@ -133,10 +136,10 @@ def round (source : Source order target) (audience start : Nat) : Result :=
     (source.history start).deleted target start
 
 def Realized (audience : Nat) (loaded : Option Snapshot) (received : List Write) (w : Write) : Prop :=
-  audience ∈ w.audiences → w.number ≤ position loaded w.writer ∨ w ∈ received
+  audience ∈ w.holders → w.number ≤ position loaded w.writer ∨ w ∈ received
 
 theorem deleted_selected (source : Source order target) (audience time : Nat) (w : Write)
-    (deleted : w ∈ (source.history time).deleted) (relevant : audience ∈ w.audiences) :
+    (deleted : w ∈ (source.history time).deleted) (relevant : audience ∈ w.holders) :
     w.number ≤ position (selected source audience time) w.writer := by
   have covered := SnapshotHistory.deleted_stays_covered (source.runs time) w deleted audience relevant
   cases h : selected source audience time with
@@ -148,16 +151,16 @@ theorem deleted_selected (source : Source order target) (audience time : Nat) (w
         simpa [h] using covered
       simpa [position, h] using hc.2
 
-theorem skipped_has_no_part (source : Source order target) (audience time : Nat) (w : Write)
+theorem unreached_not_held (source : Source order target) (audience time : Nat) (w : Write)
     (deleted : w ∈ (source.history time).deleted)
     (uncovered : ¬ w.number ≤ position (selected source audience time) w.writer) :
-    audience ∉ w.audiences := fun relevant => uncovered (deleted_selected source audience time w deleted relevant)
+    audience ∉ w.holders := fun relevant => uncovered (deleted_selected source audience time w deleted relevant)
 
-/-- A start the scan may skip a known deleted number for: every known
-deletion with a part in this audience is already within its positions. -/
+/-- A start whose known deletions need no read: every known deletion this
+audience holds is already within its positions. -/
 def KnownCovered (target : List Write) (audience : Nat) (loaded : Option Snapshot)
     (knownDeleted : List Write) : Prop :=
-  ∀ w ∈ target, deletedNumber knownDeleted w = true → audience ∈ w.audiences →
+  ∀ w ∈ target, deletedNumber knownDeleted w = true → audience ∈ w.holders →
     w.number ≤ position loaded w.writer
 
 /-- `scan_spec` for any start whose known deletions it already covers: a
@@ -226,7 +229,7 @@ theorem scan_spec_with (source : Source order target) (audience start time : Nat
             by_cases covered : w.number ≤ position (catalogCurrent order (source.history (time + 1)).landed audience) w.writer
             · simp only [ite_eq_left covered]
               exact ⟨by omega, by simp, deleted, notKnown⟩
-            · have irrelevant := skipped_has_no_part source audience (time + 1) w deleted
+            · have irrelevant := unreached_not_held source audience (time + 1) w deleted
                 (by simpa only [selected] using covered)
               simp only [ite_eq_right covered]
               have result := ih (time + 1) (by omega) (by omega) tailSubset
@@ -250,7 +253,7 @@ theorem selected_known (source : Source order target) (audience start : Nat) :
   exact deleted_selected source audience start w ((deleted_number source start w hw).mp known) relevant
 
 /-- The result carries actual log receipts or snapshot coverage. Every retry
-spends a previously undeleted target number; cross-audience skips are safe. -/
+spends a previously undeleted target number. -/
 theorem scan_spec (source : Source order target) (audience start time : Nat)
     (afterStart : start ≤ time) (available : source.availableFrom ≤ time) (todo : List Write) (subset : todo ⊆ target) :
     match scan source.world source.history order audience (selected source audience start)
@@ -345,7 +348,7 @@ Number zero is not a published log object. -/
 theorem committed_contains (source : Source order target) (audience start : Nat)
     (available : source.availableFrom ≤ start) :
     ∃ retries selectedAt received, Loads source audience start retries selectedAt received ∧
-      retries ≤ target.length ∧ ∀ w ∈ target, 0 < w.number → audience ∈ w.audiences →
+      retries ≤ target.length ∧ ∀ w ∈ target, 0 < w.number → audience ∈ w.holders →
         (∃ snap, selected source audience selectedAt = some snap ∧ snap.covers w audience) ∨
         (w ∈ received ∧ ∃ t o, selectedAt ≤ t ∧ source.world t (.log .write w.writer w.number) = some o) := by
   obtain ⟨retries, selectedAt, received, run, bound, complete, receipts⟩ := terminates source audience start available
@@ -370,7 +373,7 @@ theorem prefix_committed (source : Source order target) (audience start : Nat)
       w.number ≤ limit w.writer → w ∈ target) :
     ∃ retries selectedAt received, Loads source audience start retries selectedAt received ∧
       retries ≤ target.length ∧ ∀ w, source.published w → w.writer ∈ writers →
-        0 < w.number → w.number ≤ limit w.writer → audience ∈ w.audiences →
+        0 < w.number → w.number ≤ limit w.writer → audience ∈ w.holders →
         (∃ snap, selected source audience selectedAt = some snap ∧ snap.covers w audience) ∨
         (w ∈ received ∧ ∃ t o, selectedAt ≤ t ∧ source.world t (.log .write w.writer w.number) = some o) := by
   obtain ⟨retries, selectedAt, received, run, bound, complete⟩ := committed_contains source audience start available

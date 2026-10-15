@@ -118,7 +118,7 @@ def excluded (s : State) (r : Snapshot) : Bool :=
 
 /-- The hold: coverage under every possible boundary of every part audience. -/
 def Held (order : SnapshotOrder) (s : State) (w : Write) : Prop :=
-  ∀ a ∈ w.audiences, ∀ b ∈ s.possible a, CoversIn (selected order s.landed s.reads a b) w a
+  ∀ a ∈ w.holders, ∀ b ∈ s.possible a, CoversIn (selected order s.landed s.reads a b) w a
 
 instance (order : SnapshotOrder) (s : State) (w : Write) : Decidable (Held order s w) := by
   unfold Held; infer_instance
@@ -219,7 +219,7 @@ structure Valid (published : Write → Prop) (order : SnapshotOrder) (s : State)
   expiredOut : ∀ x ∈ s.expired, some x ∉ s.possible x.audience
   expiredUnnamed : ∀ x ∈ s.expired, (x ∈ s.entries → isReset s x = true) ∧ x.caughtAt + day < s.time
   deleted : ∀ w ∈ s.deleted, published w ∧ MatureCoverage s.landed s.time w ∧
-    ∀ a ∈ w.audiences, ∀ b ∈ s.possible a, Good order s w a b
+    ∀ a ∈ w.holders, ∀ b ∈ s.possible a, Good order s w a b
   resetsNamed : ∀ p ∈ s.resets, p.1 ∈ s.entries
   possibleSource : ∀ a r, some r ∈ s.possible a → r ∈ s.entries ∨ r ∈ s.marked
 
@@ -228,7 +228,7 @@ write: its catch-up began after the write's mature witness landed. -/
 theorem late_landing_covers {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (valid : Valid published order s) (w : Write) (deleted : w ∈ s.deleted)
     (snap : Snapshot) (now : snap.storedAt = s.time) (sound : Sound published snap)
-    (counts : snap.counts = true) (relevant : snap.audience ∈ w.audiences) :
+    (counts : snap.counts = true) (relevant : snap.audience ∈ w.holders) :
     snap.covers w snap.audience := by
   obtain ⟨pub, mature, _⟩ := valid.deleted w deleted
   obtain ⟨witness, member, _, covers, age⟩ := mature snap.audience relevant
@@ -437,7 +437,7 @@ theorem land_valid {published : Write → Prop} {order : SnapshotOrder} {s : Sta
 /-- A deleted write was stored before now: its mature witness covers it. -/
 theorem deleted_before {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (valid : Valid published order s) (w : Write) (deleted : w ∈ s.deleted) (a : Nat)
-    (relevant : a ∈ w.audiences) : w.storedAt < s.time := by
+    (relevant : a ∈ w.holders) : w.storedAt < s.time := by
   obtain ⟨pub, mature, _⟩ := valid.deleted w deleted
   obtain ⟨witness, member, _, covers, age⟩ := mature a relevant
   have causal := (valid.sound witness member).causal w pub (covers.1 ▸ relevant)
@@ -817,7 +817,7 @@ reset when its snapshot covers the write or the write was stored after its
 entry, as every write that read the entry was. -/
 theorem deleted_stays_covered {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (run : Run published order s) (w : Write) (deleted : w ∈ s.deleted) (a : Nat)
-    (relevant : a ∈ w.audiences) (counts : Applies s w a (s.kept a))
+    (relevant : a ∈ w.holders) (counts : Applies s w a (s.kept a))
     (use : usable s (s.kept a) = true) :
     CoversIn (selected order s.landed s.reads a (s.kept a)) w a := by
   have valid := run_valid run
@@ -844,7 +844,7 @@ having no part there. Under a kept reset it skips only a write that the
 reset ignores (§19.3): one outside its snapshot that never read its entry. -/
 theorem reload_never_skips {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (run : Run published order s) (w : Write) (deleted : w ∈ s.deleted) (a : Nat)
-    (relevant : a ∈ w.audiences) (counts : Applies s w a (s.kept a)) :
+    (relevant : a ∈ w.holders) (counts : Applies s w a (s.kept a)) :
     reload order s a w ≠ .skip := by
   unfold reload
   split

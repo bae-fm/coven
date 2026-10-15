@@ -47,8 +47,9 @@ structure Input where
   id : Nat
   kind : Kind
   needed : Need
-  /-- Snapshot coverage, ownership, age/posted positions and authenticated
-  absence of references must all succeed. No device clock appears here. -/
+  /-- Snapshot coverage by the store and every part audience, ownership,
+  age/posted positions and authenticated absence of references must all
+  succeed. No device clock appears here. -/
   checks : List CovenStorelogData.Pending.Condition
   deriving DecidableEq, Repr
 

@@ -9,7 +9,7 @@ def historical (ss : List Snapshot) (w : Write) (a : Nat) : Bool :=
 /-- The coverage deficit itself also detects an audience's first snapshot. -/
 def refreshDue (order : SnapshotOrder) (s : State) (posted : List (Nat × Nat × Nat))
     (final readable : Bool) (w : Write) (a : Nat) : Bool :=
-  final && readable && decide (a ∈ w.audiences) &&
+  final && readable && decide (a ∈ w.holders) &&
     decide ((∀ reader ∈ s.writers, w.number ≤ postedPosition posted reader w.writer) ∨
       w.storedAt + month ≤ s.time) &&
     !(match catalogCurrent order s.landed a with | none => false | some snap => decide (snap.covers w a))
@@ -40,7 +40,7 @@ structure Service (order : SnapshotOrder) (writers : List Nat) (catalog : List S
 current selection cover the write; coverage is a conclusion of the service. -/
 theorem service_covers (order : SnapshotOrder) (writers : List Nat) (catalog : List Snapshot)
     (published : Write → Prop) (w : Write) (pub : published w) (writer : w.writer ∈ writers)
-    (a bound ready passGap upload : Nat) (ha : a ∈ w.audiences)
+    (a bound ready passGap upload : Nat) (ha : a ∈ w.holders)
     (sound : ∀ snap ∈ catalog, SnapshotHistory.Sound published snap)
     (normalized : ∀ snap ∈ catalog, Normalized writers snap)
     (stored : w.storedAt ≤ bound) (mature : bound + day < ready)
@@ -85,10 +85,9 @@ theorem bounded_witnessed_storage (order : SnapshotOrder) (s : State)
     (bound gated passGap upload latency : Nat)
     (sound : ∀ snap ∈ s.landed, SnapshotHistory.Sound published snap)
     (normalized : ∀ snap ∈ s.landed, Normalized s.writers snap)
-    (witnesses : ∀ a ∈ w.audiences, ∃ snap ∈ s.landed,
+    (witnesses : ∀ a ∈ w.holders, ∃ snap ∈ s.landed,
       snap.counts = true ∧ snap.covers w a ∧ snap.storedAt ≤ bound)
-    (nonempty : ∃ a, a ∈ w.audiences)
-    (service : ∀ a ∈ w.audiences, Service order s.writers s.landed w a
+    (service : ∀ a ∈ w.holders, Service order s.writers s.landed w a
       (max gated (bound + day + 1)) passGap upload)
     (gate : (∀ reader ∈ s.writers, w.number ≤ postedPosition posted reader w.writer) ∨
       w.storedAt + month ≤ s.time)
@@ -99,8 +98,8 @@ theorem bounded_witnessed_storage (order : SnapshotOrder) (s : State)
     ∃ time, time ≤ max gated (bound + day + 1) + 3 * passGap + upload + latency ∧ removed time w := by
   let ready := max gated (bound + day + 1)
   have mature : bound + day < ready := by dsimp [ready]; omega
-  obtain ⟨a, ha⟩ := nonempty
-  obtain ⟨witness, member, _, covers, age⟩ := witnesses a ha
+  have ha := store_holds w
+  obtain ⟨witness, member, _, covers, age⟩ := witnesses store ha
   have stored : w.storedAt ≤ bound := Nat.le_trans
     ((sound witness member).causal w pub (covers.1 ▸ ha) (by simpa [covers.1] using covers)) age
   have current : Covered (catalogCurrent order s.landed) w := by

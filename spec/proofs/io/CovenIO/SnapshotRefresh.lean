@@ -91,7 +91,7 @@ theorem current_exists (order : SnapshotOrder) (ss : List Snapshot) (a : Nat) (s
 counting snapshot of a part audience contains the write, in every order. -/
 theorem fresh_covers (published : Write → Prop) (w : Write) (pub : published w)
     (snap : Snapshot) (sound : SnapshotHistory.Sound published snap)
-    (audience : snap.audience ∈ w.audiences) (counts : snap.counts = true)
+    (audience : snap.audience ∈ w.holders) (counts : snap.counts = true)
     (bound ready : Nat) (old : w.storedAt ≤ bound) (mature : bound + day < ready)
     (later : ready ≤ snap.storedAt) : snap.covers w snap.audience := by
   have admitted : snap.storedAt ≤ snap.caughtAt + day := by simpa [Snapshot.counts] using counts
@@ -101,7 +101,7 @@ theorem fresh_covers (published : Write → Prop) (w : Write) (pub : published w
 For count order this uses real additional coverage, not time as a tie-break. -/
 theorem refresh_outranks (order : SnapshotOrder) (writers : List Nat) (published : Write → Prop)
     (w : Write) (pub : published w) (writer : w.writer ∈ writers)
-    (old fresh : Snapshot) (ha : old.audience ∈ w.audiences)
+    (old fresh : Snapshot) (ha : old.audience ∈ w.holders)
     (sound : SnapshotHistory.Sound published old) (counts : old.counts = true)
     (oldForm : Normalized writers old) (freshForm : Normalized writers fresh)
     (dominates : Dominates fresh old) (missing : ¬ old.covers w old.audience)
@@ -150,25 +150,16 @@ theorem covered_selection_preserved (order : SnapshotOrder) (old added : List Sn
     (w : Write) (covered : ∃ s, catalogCurrent order old a = some s ∧ s.covers w a)
     (newCoverage : ∀ s ∈ added, s.audience = a → s.counts = true → s.covers w a) :
     ∃ s, catalogCurrent order (added ++ old) a = some s ∧ s.covers w a := by
-  let single : Write := { w with audiences := [a] }
-  have current : Covered (catalogCurrent order old) single := by
-    intro b hb
-    have eq : b = a := by simpa [single] using hb
-    subst b
-    obtain ⟨s, hs, cov⟩ := covered
-    simpa [hs, single, Snapshot.covers] using cov
-  have preserved : Covered (catalogCurrent order (added ++ old)) single := by
-    induction added with
-    | nil => exact current
-    | cons head tail ih =>
-        apply add_preserves_coverage order (tail ++ old) head single
-          (ih (by intro s hs; exact newCoverage s (by simp [hs])))
-        intro counted ha
-        have eq : head.audience = a := by simpa [single] using ha
-        simpa [single, Snapshot.covers, eq] using newCoverage head (by simp) eq counted
-  have result := preserved a (by simp [single])
-  cases hs : catalogCurrent order (added ++ old) a with
-  | none => simp [hs] at result
-  | some s => exact ⟨s, rfl, by simpa [hs, single, Snapshot.covers] using result⟩
+  induction added with
+  | nil =>
+      obtain ⟨s, hs, cov⟩ := covered
+      exact ⟨s, hs, cov⟩
+  | cons head tail ih =>
+      obtain ⟨s, hs, cov⟩ := ih (fun s hs => newCoverage s (by simp [hs]))
+      have kept := add_preserves_audience order (tail ++ old) head w a (by simpa [hs] using cov)
+        (fun counted same => newCoverage head (by simp) same counted)
+      cases hc : catalogCurrent order (head :: (tail ++ old)) a with
+      | none => simp [hc] at kept
+      | some chosen => exact ⟨chosen, by simpa using hc, by simpa [hc] using kept⟩
 
 end CovenIO.SnapshotRefresh

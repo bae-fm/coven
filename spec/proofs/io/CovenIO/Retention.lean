@@ -22,6 +22,23 @@ structure Snapshot where
   positions : List (Nat × Nat)
   deriving DecidableEq, Repr
 
+/-- The store audience. Every member reads it, and its snapshots carry every
+consumed write's metadata, parts or not (§15). -/
+abbrev store : Nat := 0
+
+/-- The audiences whose snapshots must cover a write before it is deleted:
+its part audiences and the store, so every reader of the store finds every
+deleted number covered and never passes one (§15). -/
+def Write.holders (w : Write) : List Nat := store :: w.audiences
+
+@[simp] theorem mem_holders (w : Write) (a : Nat) : a ∈ w.holders ↔ a = store ∨ a ∈ w.audiences :=
+  List.mem_cons
+
+theorem part_holds (w : Write) (a : Nat) (part : a ∈ w.audiences) : a ∈ w.holders :=
+  List.mem_cons_of_mem _ part
+
+theorem store_holds (w : Write) : store ∈ w.holders := List.mem_cons_self
+
 def Snapshot.position (s : Snapshot) (writer : Nat) : Nat :=
   ((s.positions.filter (fun p => p.1 == writer)).map Prod.snd).foldl max 0
 
@@ -66,7 +83,7 @@ def Dominates (new old : Snapshot) : Prop :=
 abbrev Current := Nat → Option Snapshot
 
 def Covered (current : Current) (w : Write) : Prop :=
-  ∀ a ∈ w.audiences, match current a with
+  ∀ a ∈ w.holders, match current a with
     | none => False
     | some snap => snap.covers w a
 
@@ -100,7 +117,7 @@ def Deletable (current : Current) (active : List Nat)
 /-- “Once a snapshot ... landed” uses historical counting publications.
 Removing or superseding that snapshot does not restart its age. -/
 def MatureCoverage (landed : List Snapshot) (time : Nat) (w : Write) : Prop :=
-  ∀ a ∈ w.audiences, ∃ snap ∈ landed,
+  ∀ a ∈ w.holders, ∃ snap ∈ landed,
     snap.counts = true ∧ snap.covers w a ∧ snap.storedAt + day < time
 
 def Eligible (order : SnapshotOrder) (landed : List Snapshot) (active : List Nat)
@@ -158,7 +175,7 @@ theorem maturity_survives_new_snapshots (old added : List Snapshot) (time : Nat)
 reset the historical witness's deadline. Finality and positions remain required. -/
 theorem eligible_after_day (order : SnapshotOrder) (landed : List Snapshot)
     (active : List Nat) (posted : Nat → Nat → Nat) (time bound : Nat) (w : Write)
-    (witnesses : ∀ a ∈ w.audiences, ∃ snap ∈ landed,
+    (witnesses : ∀ a ∈ w.holders, ∃ snap ∈ landed,
       snap.counts = true ∧ snap.covers w a ∧ snap.storedAt ≤ bound)
     (current : Covered (catalogCurrent order landed) w)
     (passed : ∀ reader ∈ active, w.number ≤ posted reader w.writer)

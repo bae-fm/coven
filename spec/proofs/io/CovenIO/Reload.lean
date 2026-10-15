@@ -83,7 +83,7 @@ theorem current_member (order : SnapshotOrder) (ss : List Snapshot) (a : Nat) (s
   simpa using List.mem_filter.mp member
 
 theorem current_detects_deleted (order : SnapshotOrder) (ss : List Snapshot) (w : Write)
-    (covered : Covered (catalogCurrent order ss) w) (a : Nat) (ha : a ∈ w.audiences)
+    (covered : Covered (catalogCurrent order ss) w) (a : Nat) (ha : a ∈ w.holders)
     (position : Nat) (needed : position < w.number) : coveredMiss ss w.writer position = true := by
   have hc := covered a ha
   cases selected : catalogCurrent order ss a with
@@ -94,24 +94,32 @@ theorem current_detects_deleted (order : SnapshotOrder) (ss : List Snapshot) (w 
       have bound := hc.2
       exact List.any_eq_true.mpr ⟨snap, facts.1, by simp [facts.2.2, show position < snap.position w.writer by omega]⟩
 
-theorem add_preserves_coverage (order : SnapshotOrder) (ss : List Snapshot) (snap : Snapshot)
-    (w : Write) (old : Covered (catalogCurrent order ss) w)
-    (new : snap.counts = true → snap.audience ∈ w.audiences → snap.covers w snap.audience) :
-    Covered (catalogCurrent order (snap :: ss)) w := by
-  intro a ha
-  have previous := old a ha
+/-- One audience's current newest keeps covering a write when a snapshot
+lands that covers it whenever it counts there. -/
+theorem add_preserves_audience (order : SnapshotOrder) (ss : List Snapshot) (snap : Snapshot)
+    (w : Write) (a : Nat)
+    (previous : match catalogCurrent order ss a with | none => False | some s => s.covers w a)
+    (next : snap.counts = true → snap.audience = a → snap.covers w a) :
+    match catalogCurrent order (snap :: ss) a with | none => False | some s => s.covers w a := by
   by_cases counted : (snap.audience == a && snap.counts) = true
   · have facts : snap.audience = a ∧ snap.counts = true := by simpa using counted
-    have next := new facts.2 (facts.1 ▸ ha)
-    rw [facts.1] at next
+    have covers := next facts.2 facts.1
     simp only [catalogCurrent, List.filter_cons, counted, ↓reduceIte, newest]
     cases h : newest order (ss.filter (fun s => s.audience == a && s.counts)) with
     | none => simp [catalogCurrent, h] at previous
     | some other =>
         cases hn : newer order snap other with
-        | true => simpa [hn] using next
+        | true => simpa [hn] using covers
         | false => simpa [hn, catalogCurrent, h] using previous
   · simpa [catalogCurrent, List.filter_cons, counted] using previous
+
+theorem add_preserves_coverage (order : SnapshotOrder) (ss : List Snapshot) (snap : Snapshot)
+    (w : Write) (old : Covered (catalogCurrent order ss) w)
+    (new : snap.counts = true → snap.audience ∈ w.holders → snap.covers w snap.audience) :
+    Covered (catalogCurrent order (snap :: ss)) w := by
+  intro a ha
+  exact add_preserves_audience order ss snap w a (old a ha)
+    (fun counted same => same ▸ new counted (same ▸ ha))
 
 namespace SnapshotHistory
 
@@ -119,9 +127,9 @@ namespace SnapshotHistory
 second is derived per writer by `completed_catchup_covers_old`: a completed
 scan cannot stop at a deleted prefix hole. Strict time handles equal ticks. -/
 structure Sound (published : Write → Prop) (s : Snapshot) : Prop where
-  causal : ∀ w, published w → s.audience ∈ w.audiences →
+  causal : ∀ w, published w → s.audience ∈ w.holders →
     s.covers w s.audience → w.storedAt ≤ s.storedAt
-  caught : ∀ w, published w → s.audience ∈ w.audiences →
+  caught : ∀ w, published w → s.audience ∈ w.holders →
     w.storedAt < s.caughtAt → s.covers w s.audience
 
 structure State where
@@ -197,7 +205,7 @@ theorem deleted_stays_covered {published : Write → Prop} {order : SnapshotOrde
 
 theorem deleted_miss_detected {published : Write → Prop} {order : SnapshotOrder} {s : State}
     (run : Run published order s) (w : Write) (deleted : w ∈ s.deleted)
-    (a : Nat) (ha : a ∈ w.audiences) (position : Nat) (needed : position < w.number) :
+    (a : Nat) (ha : a ∈ w.holders) (position : Nat) (needed : position < w.number) :
     coveredMiss s.landed w.writer position = true :=
   current_detects_deleted order s.landed w (deleted_stays_covered run w deleted) a ha position needed
 
@@ -207,7 +215,7 @@ theorem deleted_outside_uncovered_audience {published : Write → Prop}
     {order : SnapshotOrder} {s : State} (run : Run published order s)
     (w : Write) (deleted : w ∈ s.deleted) (a : Nat)
     (uncovered : ∀ snap, catalogCurrent order s.landed a = some snap →
-      snap.position w.writer < w.number) : a ∉ w.audiences := by
+      snap.position w.writer < w.number) : a ∉ w.holders := by
   intro relevant
   have covered := deleted_stays_covered run w deleted a relevant
   cases selected : catalogCurrent order s.landed a with
@@ -225,7 +233,7 @@ theorem eventual_snapshot_delivery (published : Write → Prop) (loaded : Nat �
     (sound : ∀ n, Sound published (loaded n))
     (counts : ∀ n, (loaded n).counts = true)
     (progress : ∀ bound, ∃ n, bound < (loaded n).storedAt)
-    (w : Write) (pub : published w) (audience : ∀ n, (loaded n).audience ∈ w.audiences) :
+    (w : Write) (pub : published w) (audience : ∀ n, (loaded n).audience ∈ w.holders) :
     ∃ n, (loaded n).covers w (loaded n).audience := by
   obtain ⟨n, later⟩ := progress (w.storedAt + day)
   have admitted : (loaded n).storedAt ≤ (loaded n).caughtAt + day := by
@@ -352,7 +360,7 @@ publication does not restart a historical covering witness's age. -/
 theorem scheduled_deletion_bound (order : SnapshotOrder) (s : State)
     (posted : List (Nat × Nat × Nat)) (w : Write) (witnessBound ready passGap latency : Nat)
     (published : w ∈ s.writes)
-    (witnesses : ∀ a ∈ w.audiences, ∃ snap ∈ s.landed,
+    (witnesses : ∀ a ∈ w.holders, ∃ snap ∈ s.landed,
       snap.counts = true ∧ snap.covers w a ∧ snap.storedAt ≤ witnessBound)
     (current : Covered (catalogCurrent order s.landed) w)
     (gate : (∀ reader ∈ s.writers, w.number ≤ postedPosition posted reader w.writer) ∨

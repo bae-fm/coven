@@ -241,7 +241,7 @@ theorem witness_bound_shift (w : Write) (gated passGap upload : Nat) (online : N
       AudienceRetention.witnessBound w gated online passGap upload + listingMargin := by
   apply CommonReload.maximum_le
   intro a ha
-  have bound := CommonReload.maximum_member w.audiences
+  have bound := CommonReload.maximum_member w.holders
     (fun a => AudienceRetention.ready w gated (online a) + 2 * passGap + upload) a ha
   have ready := audience_ready_shift w gated (online a)
   change AudienceRetention.ready w (gated + listingMargin) (online a) + 2 * passGap + upload ≤ _

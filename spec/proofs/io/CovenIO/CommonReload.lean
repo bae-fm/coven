@@ -438,7 +438,7 @@ theorem committed_prefix (source : Source order writers) (audiences : List Nat) 
     (complete : Complete source audiences s cut receipts)
     (a : Nat) (ha : a ∈ audiences) (w : Write) (pub : source.published w)
     (writer : w.writer ∈ writers) (positive : 0 < w.number) (within : w.number ≤ cut w.writer)
-    (relevant : a ∈ w.audiences) :
+    (relevant : a ∈ w.holders) :
     w.number ≤ position (selected source s a) w.writer ∨
       ∃ received t o, (a, received) ∈ receipts ∧ w ∈ received ∧
         source.world t (.log .write w.writer w.number) = some o := by
@@ -456,7 +456,7 @@ theorem committed_number (source : Source order writers) (audiences : List Nat) 
     (valid : Valid source audiences required s) (writer : Nat) (hw : writer ∈ writers)
     (number : Nat) (positive : 0 < number) (within : number ≤ target source audiences required last writer) :
     ∃ w, source.published w ∧ w.writer = writer ∧ w.number = number ∧
-      ∀ a ∈ audiences, a ∈ w.audiences →
+      ∀ a ∈ audiences, a ∈ w.holders →
         number ≤ position (selected source last a) writer ∨
         ∃ received t o, (a, received) ∈ receipts ∧ w ∈ received ∧
           source.world t (.log .write writer number) = some o := by
@@ -468,6 +468,23 @@ theorem committed_number (source : Source order writers) (audiences : List Nat) 
   have result := committed_prefix source audiences last _ receipts complete a ha w pub
     (writerEq ▸ hw) (numberEq ▸ positive) (by simpa [writerEq, numberEq] using within) relevant
   simpa [writerEq, numberEq] using result
+
+/-- No number is passed: with the store among the audiences, every positive
+number at the committed cut is within the store's start, which carries its
+write's metadata, or was received by an actual GET. -/
+theorem committed_store_holds (source : Source order writers) (audiences : List Nat)
+    (required : Nat → Nat) (s last : State) (retries : Nat) (receipts : List (Nat × List Write))
+    (run : Loads source audiences required s retries last receipts)
+    (valid : Valid source audiences required s) (reads : store ∈ audiences)
+    (writer : Nat) (hw : writer ∈ writers)
+    (number : Nat) (positive : 0 < number) (within : number ≤ target source audiences required last writer) :
+    ∃ w, source.published w ∧ w.writer = writer ∧ w.number = number ∧
+      (number ≤ position (selected source last store) writer ∨
+        ∃ received t o, (store, received) ∈ receipts ∧ w ∈ received ∧
+          source.world t (.log .write writer number) = some o) := by
+  obtain ⟨w, pub, writerEq, numberEq, held⟩ :=
+    committed_number source audiences required s last retries receipts run valid writer hw number positive within
+  exact ⟨w, pub, writerEq, numberEq, held store reads (store_holds w)⟩
 
 /-- A bundle already at the desired cut requires no log GETs. If it is
 behind the waiting past, the ordinary common-cut scan still applies. -/

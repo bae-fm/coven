@@ -281,7 +281,6 @@ theorem first_snapshot_deadline (order : SnapshotOrder) :
   have maxEq : max month (month + 2 + day + 1) = month + day + 3 := by decide
   have result := bounded_storage order firstCovered [] (fun _ => true) anaWrite (fun w => w = anaWrite)
     rfl rfl (by decide) (by decide) month 1 0 0 (fun _ => month) sound normalized
-    ⟨0, by decide⟩
     (by
       intro a ha
       have eq : a = 0 := by simpa [anaWrite] using ha

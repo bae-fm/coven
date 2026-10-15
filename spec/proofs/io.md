@@ -497,7 +497,7 @@ rule; storelog-data's `capture_prepared_final` shows the retirement-verdict
 gate then holds for the capture as well. Its signed prefix marks it as a raise
 snapshot, so retention can see it before any entry names it.
 
-Deleting a write then needs, for each part audience, coverage under every
+Deleting a write then needs, for the store and each part audience, coverage under every
 boundary replay could still select (`Held`): the current one, the one final
 entries fix, every raise or reset entry not ruled out, and every listed
 counting raise snapshot that a raise could still name, each with the
@@ -532,7 +532,7 @@ time is a day past a listed raise snapshot's `T_c` and no entry names it,
 `expire` removes it from the possible boundaries.
 
 - `deleted_stays_covered`: in every reachable state, under whatever usable
-  boundary replay keeps, each part audience's newest usable counting snapshot
+  boundary replay keeps, the store's and each part audience's newest usable counting snapshot
   covers every deleted write that counts under it (always under a raise or no
   boundary, `applies_unless_reset`). `reload_never_skips` turns this into the
   reload: a missing deleted write is loaded from a snapshot or the reload
@@ -688,10 +688,16 @@ They do not read staged rows or silently add new remote requirements.
 target as the maximum of the frozen requirement and every selected audience's
 snapshot position. It runs the existing `FixedReload.scan` through that finite
 prefix for every audience. Covered parts need no GET. Actual log receipts fill
-the remaining parts. A certified deleted number either causes that audience
-to select its current counting snapshot, or is skipped when its current
-snapshot cannot reach the number and therefore the write has no part there.
+the remaining parts. A certified deleted number causes that audience to select
+its current counting snapshot when that snapshot reaches the number; otherwise
+the write has no part there and is not the store's (`unreached_not_held`).
 Deletion evidence in the selection's catalog needs no repeated GET.
+`committed_store_holds` proves no number is passed: every positive number at
+the committed cut is within the store's start, which carries its write's
+metadata, or was received by an actual GET. The no-part step itself stays:
+snapshot metadata names no part audiences, and in
+`AwayReadExamples.no_part_needs_no_snapshot` no Gifts snapshot ever reaches
+Ana's deleted store-only write, so a reload waiting for one would wait forever.
 
 Keep selected snapshots fixed until a deleted hole forces their replacement.
 A replacement changes only that audience, then recomputes the common target
@@ -729,17 +735,18 @@ reads, and the runner repeats `CommonReload.scan`, one `FixedReload.scan` per
 audience, replacing the retried audience from the catalog after its round.
 Both sides report the replaced audience of each round, the final selections,
 the common target and each audience's log receipts, and they agree. Rust
-learns a deletion only from an absent read and a catalog covering the number,
-while the model's selection catalog already knows every earlier deletion. The
-histories therefore keep an audience that lacks a deleted write, and has no
-part in it, from ever covering it later, so that knowledge decides nothing
-the reads do not.
+learns a deletion only from an absent read and a catalog of the readable
+audiences covering the number, while the model's selection catalog already
+knows every earlier deletion. The histories delete a write only while the store
+and its part audiences cover it, and keep an audience that lacks a deleted
+write, and has no part in it, from ever covering it later, so that knowledge
+decides nothing the reads do not.
 
 **Kept state — proved.** An audience whose existing state the reload keeps
 starts at this device's positions (`CommonReload.State.kept`). It knows no
 deletion, so it reads every write it lacks up to the target. A deleted one its
 current newest snapshot reaches replaces it by that snapshot, like any
-selection; otherwise the write has no part there and is skipped.
+selection; otherwise the write has no part there.
 `FixedReload.scan_spec_with` proves the scan for any start that already
 covers the deletions it knows: a selection with its catalog's deletions
 (`selected_known`), or a kept state with none (`known_covered`). The common-point
@@ -803,8 +810,9 @@ needs neither a co-reading publisher nor indefinite retention pins.
 
 **Retention trigger — R3' includes first witnesses.** Retention runs every
 pass. For every final write that passes the positions-or-thirty-day gate,
-request a fresh snapshot under a) in that or the next pass for each readable
-part audience whose current newest counting snapshot does not cover it.
+request a fresh snapshot under a) in that or the next pass for the store and
+each readable part audience whose current newest counting snapshot does not
+cover it.
 Historical coverage is not a precondition. `refreshDue` implements this rule.
 `witnessedRefreshDue` preserves the historical-only trigger for the checked
 `no_first_witness` failure: one old final write, no snapshots, and an online
@@ -863,8 +871,8 @@ service. The `W+1` accounts for strict-before catch-up evidence at integer stora
 times. A known first witness can give an earlier bound. The fresh witness's
 one-day age cannot be omitted.
 
-For physical deletion of the complete write, use `B = max_a B_a` over **all its
-part audiences**, then the same `R + 3P + U + D` formula. `bounded_storage`
+For physical deletion of the complete write, use `B = max_a B_a` over **the
+store and all its part audiences**, then the same `R + 3P + U + D` formula. `bounded_storage`
 connects the first-witness services to the existing retention and DELETE theorem.
 `first_snapshot_deadline` instantiates the entire theorem on an initially
 unsnapshotted write. Finality is checked per write; `nonfinal_write_kept` and
@@ -938,58 +946,44 @@ unconditional recent-return claim fails. `snapshot_next_number_wrong` and
 `away_write_miss` retain the independent reasons that old snapshots and writes
 cannot be discovered by next number after deletion.
 
-**4a. Away reads past deleted numbers — the rule in force stalls (checked
-history); a read rule that passes them is proved; coven does not pass them
-yet.** [`AwayReadExamples`](io/CovenIO/AwayReadExamples.lean) checks the
-history the reload work suspected. Ana's write 1 has only a Gifts part and is
-deleted once a counting Gifts snapshot covers it; her write 2, with a store
-part, stays stored. A device that reads only the store and joins later lists
-its store snapshots on the away path, finds none, reloads nothing, and then
-trusts its misses. `store_only_reader_stalls` shows its GET of write 1 missing
-at every time and its position staying at 0 while write 2 is stored. Nothing
-it reads ever names write 1, so write 2 never arrives. `joinedSource` and
-`joined_ordered` show the history meets every premise below.
+**4a. Away reads past deleted numbers — proved; retention keeps the store
+covering every deleted write.** Retention deletes a write only once the store's
+current newest counting snapshot covers it as well as each part audience's,
+with a mature witness (`Write.holders`: the store and the part audiences, in
+`Covered`, `MatureCoverage` and `Sound`). Every member reads the store, and its
+snapshots carry every consumed write's metadata.
+[`AwayReadExamples`](io/CovenIO/AwayReadExamples.lean) checks the history that
+needed this. Ana's write 1 has only a Gifts part and her write 2 only a store
+part; Dave reads only the store and joins later. Deleted under Gifts' coverage
+alone, write 1 left no store snapshot naming it, and Dave's GET of it missed
+forever while write 2 stayed stored; `gifts_only_deletion_refused` shows that
+deletion is no longer `Eligible`, and `ReloadExamples.other_audience_hole_refused`
+that the old history's deletion step is refused.
 
-[`AwayRead.scan`](io/CovenIO/AwayRead.lean) is the read that fixes this. A miss
-counts as nothing new only once a complete catalog of every audience, listed
-after it, has no counting snapshot through that number. A number that a
-complete catalog listed before the missing GET covers was published, so its
-absence is a deletion (`covered_deleted`). If a readable audience's current
-newest snapshot in the later catalog reaches it, the device reloads
-(`reload_spec`); otherwise the write has no part in any readable audience and
-the read passes the number (`passed_no_part`). A number only the later catalog
-covers is read again with that catalog as the earlier one.
+[`AwayRead.scan`](io/CovenIO/AwayRead.lean) is the away read under the rule. On
+a miss it lists the store's snapshots: if the current newest reaches the
+number, it loads that snapshot (`reload_spec`); otherwise the miss is terminal.
+It never passes a number.
 
-- `miss_spec`: up to a terminal miss, every number was received by an actual
-  GET or is a deleted write with no part in any readable audience.
-- `terminal_unstored` and `away_checkpoint`: every write of that writer past
-  the terminal miss was stored no earlier than the miss, so a checkpoint
-  sampled before the reads protects it under the recent-return rule.
-- `away_complete`: every write past the start, stored before the terminal
-  miss, with a part in a readable audience, was received.
-- `away_read_passes` and `away_read_receives` run the joined history: the read
-  passes write 1 and receives write 2.
-- `after_catalog_skips_live_write` checks why the earlier catalog is needed.
-  The device's GET of Ana's store write 1 misses just before it is stored, and
-  a Gifts snapshot through it lands before the next listing. Judged by that
-  listing alone, the number is passed although the write is stored with a
-  store part; `scan` reads it again and receives it.
+- `store_reaches_deleted`: the store's current newest reaches every deleted
+  write, from `SnapshotHistory.deleted_stays_covered`.
+- `miss_spec`: up to a terminal miss, every number was received by an actual GET.
+- `terminal_unstored`: the terminal number was not stored at its GET; had it
+  been, it would be deleted and the store's snapshot would reach it. This
+  holds for a write with no part, a migration marker, too.
+- `store_covered_never_passes`: no number up to the terminal miss is passed,
+  and every write past it was stored no earlier than the miss, so a checkpoint
+  sampled before the reads protects it. `away_complete` follows.
+- `away_read_reloads` and `away_read_receives` run Dave's history: his miss of
+  write 1 loads the store's snapshot, and he then receives write 2.
 
-Outside the model: the terminal and completeness theorems need every write to
-have a part. A write with none, a migration marker, can be deleted with no
-snapshot covering it, and then no catalog certifies its number.
-
-Coven does not implement the passing step. Passing a number gives the device a
-position whose write's timestamp and recorded reads it never learns, and coven
-keeps that metadata for every consumed position: a received write's causal
-checks read it for each write its past ends at, and a snapshot lists it for
-every consumed write without gaps. The reload's existing pass over a deleted
-number no loaded snapshot covers has the same gap. Two readings keep the
-metadata: a snapshot format that carries such a gap, or a retention rule that
-also requires the store's current newest counting snapshot to cover every
-deleted write, since every member reads the store and its snapshots carry
-every consumed write's metadata. `store_covered_never_passes` proves that
-under the second the read never passes a number: each deleted miss reloads.
+Rust's away path lists each readable audience's snapshots once on return and
+loads the newest that advances (§15), rather than listing the store after each
+miss; `a_store_reader_joining_after_a_circle_only_write_is_deleted_receives_later_writes`
+in [`snapshot_return_tests.rs`](../../crates/coven-sync/src/snapshot_return_tests.rs)
+runs Dave's history through real retention and that path. The reload passes no
+number either: every deleted write it lacks is held by the store's selection or
+kept state, whose metadata advances the position (`committed_store_holds`).
 
 **5. Finality input — proved with the one-hour listing requirement.**
 `observationTime` subtracts the one-hour margin and one positive provider unit
@@ -1684,11 +1678,11 @@ T_c sampled before catch-up reads, strict one-day deletion age, inclusive
 one-day upload admission, and historical covering evidence. Path ties choose
 the smaller path. Reload freezes its required lower bound and fills to the
 maximum selected snapshot positions, retaining selections until a deleted hole forces replacement.
-Fresh catalogs certify holes; irrelevant deleted numbers can be skipped. The
+Fresh catalogs certify holes; the store holds every deleted number. The
 common cut is installed atomically and preserves every waiting remote past.
 Current retention coverage and first witnesses are derived from reader services;
 reader availability and bounds on passes, complete counting publication and
-deletion remain explicit. Whole-object deadlines require every part audience.
+deletion remain explicit. Whole-object deadlines require the store and every part audience.
 A write miss is recent only at its own observation, with a strict 29-day limit and an explicit
 provider/elapsed-time bound. Finality uses T minus one hour minus a positive provider unit, with
 underflow certifying no old entries. Retirement timing begins at finality and

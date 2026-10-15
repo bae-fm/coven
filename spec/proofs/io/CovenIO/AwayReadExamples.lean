@@ -1,29 +1,37 @@
 import CovenIO.AwayRead
-import CovenIO.ReloadExamples
 
 namespace CovenIO.AwayReadExamples
-open AwayRead SnapshotPublication
+open AwayRead
 
-/-! Two checked histories. A store-only device that joins after Ana's
-Gifts-only write 1 is deleted stops at that miss forever under the rule that
-trusts misses after discovering only its readable audiences, although her
-store write 2 is stored; the away read passes write 1 and receives write 2.
-A catalog listed only after the miss cannot certify the deletion: it can
-cover a write stored after the miss, and passing that number loses it. -/
+/-! Ana's Gifts-only write 1 is deleted and her store write 2 stays stored;
+Dave reads only the store and joins later. Retention refuses write 1's
+deletion until a store snapshot covers it too, so Dave's miss of write 1
+loads that snapshot, and he then receives write 2. -/
 
 /-- Ana's Gifts-only write 1 and her store write 2 (audience 0 is the store,
 audience 1 Gifts). -/
 def giftsWrite : Write := ⟨0, 1, 0, [1]⟩
 def storeWrite : Write := ⟨0, 2, month, [0]⟩
-/-- A counting Gifts snapshot through Ana's write 1. -/
+/-- Counting Gifts and store snapshots through Ana's write 1. -/
 def giftsSnapshot : Snapshot := ⟨1, 0, 1, 0, 0, [(0, 1)]⟩
+def storeSnapshot : Snapshot := ⟨0, 0, 2, 0, 0, [(0, 1)]⟩
 
-/-- The catalog after write 1's deletion, as `ReloadExamples.crossAudienceState`
-reaches it; before any listing nothing is known. -/
+/-- Gifts' coverage alone no longer lets write 1 go: the store's current
+newest must cover it as well. This is the deletion that left a store-only
+reader with no snapshot naming write 1, stopped at its miss forever. -/
+theorem gifts_only_deletion_refused (order : SnapshotOrder) :
+    ¬ Eligible order [giftsSnapshot] [] (fun _ _ => 0) month True giftsWrite := by
+  cases order <;> decide
+
+/-- The catalog after write 1's deletion; before any listing nothing is known. -/
 def joined (t : Nat) : SnapshotHistory.State :=
-  if t = 0 then ⟨0, [], []⟩ else ⟨month, [giftsSnapshot], [giftsWrite]⟩
+  if t = 0 then ⟨0, [], []⟩ else ⟨month, [storeSnapshot, giftsSnapshot], [giftsWrite]⟩
 
-def joinedWorld : World := fun _ => snapshotStore ReloadExamples.crossAudienceState
+/-- Ana's log as Dave reads it: write 1 deleted, write 2 stored. -/
+def joinedWorld : World := fun _ path =>
+  match path with
+  | .log .write 0 2 => some ⟨⟨[2], month⟩, 0⟩
+  | _ => none
 
 def joinedPublished (w : Write) : Prop := w = giftsWrite ∨ w = storeWrite
 
@@ -32,16 +40,21 @@ theorem joined_runs (order : SnapshotOrder) (t : Nat) :
   by_cases ht : t = 0
   · simp only [joined, ht, ↓reduceIte]; exact .initial
   · simp only [joined, ht, ↓reduceIte]
-    have sound : SnapshotHistory.Sound joinedPublished giftsSnapshot := by
+    have sound : ∀ snap ∈ [giftsSnapshot, storeSnapshot], SnapshotHistory.Sound joinedPublished snap := by
+      intro snap member
       constructor
       all_goals
         intro w pub ha
-        rcases pub with rfl | rfl
-        all_goals simp_all [giftsWrite, storeWrite, giftsSnapshot, Snapshot.covers, Snapshot.position]
-    have landed : SnapshotHistory.Run joinedPublished order ⟨0, [giftsSnapshot], []⟩ :=
-      .step .initial (.land _ giftsSnapshot rfl sound)
-    have aged : SnapshotHistory.Run joinedPublished order ⟨month, [giftsSnapshot], []⟩ :=
-      .step landed (.tick _ month (by decide))
+        simp only [List.mem_cons, List.not_mem_nil, or_false] at member
+        rcases member with rfl | rfl <;> rcases pub with rfl | rfl <;>
+          simp_all [giftsWrite, storeWrite, giftsSnapshot, storeSnapshot, Snapshot.covers,
+            Snapshot.position]
+    have gifts : SnapshotHistory.Run joinedPublished order ⟨0, [giftsSnapshot], []⟩ :=
+      .step .initial (.land _ giftsSnapshot rfl (sound _ (by simp)))
+    have both : SnapshotHistory.Run joinedPublished order ⟨0, [storeSnapshot, giftsSnapshot], []⟩ :=
+      .step gifts (.land _ storeSnapshot rfl (sound _ (by simp)))
+    have aged : SnapshotHistory.Run joinedPublished order ⟨month, [storeSnapshot, giftsSnapshot], []⟩ :=
+      .step both (.tick _ month (by decide))
     exact .step aged (.delete _ giftsWrite (Or.inl rfl) [] (fun _ _ => 0) True
       (by cases order <;> decide))
 
@@ -50,25 +63,12 @@ def joinedSource (order : SnapshotOrder) : Source order 0 where
   world := joinedWorld
   history := joined
   published := joinedPublished
-  unique := by
-    intro u v pu pv _ number
-    rcases pu with rfl | rfl <;> rcases pv with rfl | rfl <;> simp_all [giftsWrite, storeWrite]
   runs := joined_runs order
-  listedStored := by
-    intro t s member _ n positive within
-    by_cases ht : t = 0
-    · simp [joined, ht] at member
-    · simp only [joined, ht, ↓reduceIte, List.mem_singleton] at member
-      subst member
-      have one : n = 1 := by simp [giftsSnapshot, Snapshot.position] at within; omega
-      exact ⟨giftsWrite, Or.inl rfl, rfl, one.symm, by simp [giftsWrite]; omega⟩
   absent := by
     intro t w pub _ _ missing
     rcases pub with rfl | rfl
     · simp [joined]
-    · have hit : snapshotStore ReloadExamples.crossAudienceState
-          (.log .write 0 storeWrite.number) ≠ none := by decide
-      exact False.elim (hit missing)
+    · simp [joinedWorld, storeWrite] at missing
 
 theorem joined_ordered (order : SnapshotOrder) : Ordered (joinedSource order) := by
   constructor
@@ -82,102 +82,68 @@ theorem joined_ordered (order : SnapshotOrder) : Ordered (joinedSource order) :=
     rcases pu with rfl | rfl <;> rcases pv with rfl | rfl <;>
       simp_all [giftsWrite, storeWrite, month, day]
 
-/-- The rule in force: the device lists only the store's snapshots, finds
-none to load, and then trusts every miss. GET 1 misses at every time,
-while write 2, with a store part, stays stored; the device stays at 0. -/
-theorem store_only_reader_stalls (order : SnapshotOrder) (fuel time : Nat) :
-    catalogCurrent order (joined 1).landed 0 = none ∧
-    needsSnapshots (some month) month 0 = false ∧
-    (readRecentLog joinedWorld (fun _ => none) (fun _ => false) 0 (fuel + 1) time 0
-      (some month) month (fun _ => 0)).stop = .miss ∧
-    (readRecentLog joinedWorld (fun _ => none) (fun _ => false) 0 (fuel + 1) time 0
-      (some month) month (fun _ => 0)).position = 0 ∧
-    joinedWorld time (.log .write 0 2) ≠ none ∧ 0 ∈ storeWrite.audiences := by
-  have missing : joinedWorld time (.log .write 0 1) = none := by
-    simp only [joinedWorld]; decide
-  have stored : joinedWorld time (.log .write 0 2) ≠ none := by
-    simp only [joinedWorld]; decide
-  have recent : needsSnapshots (some month) month 0 = false := by decide
-  refine ⟨by cases order <;> decide, recent, ?_, ?_, stored, by decide⟩ <;>
-    simp [readRecentLog, readLog, missing, recent]
-
-/-- The away read passes deleted write 1, which has no store part, and
-receives write 2; its terminal miss at 3 is certified by a later catalog. -/
-theorem away_read_passes (order : SnapshotOrder) :
-    scan joinedWorld joined order [0] 0 3 (month + 1) 0 (joined 1).landed =
-      .miss (month + 3) 2 [2] [1] := by
-  cases order <;> decide
+/-- Dave's GET of write 1 misses; the store's current newest snapshot
+reaches it, so he loads that snapshot. From its position he receives write 2,
+and his miss of write 3 is terminal. -/
+theorem away_read_reloads (order : SnapshotOrder) :
+    scan joinedWorld joined order 0 3 (month + 1) 0 = .reload (month + 2) 1 ∧
+    scan joinedWorld joined order 0 3 (month + 2) 1 = .miss (month + 3) 2 [2] := by
+  constructor <;> cases order <;> decide
 
 /-- The general theorem applies: write 2 is received. -/
 theorem away_read_receives (order : SnapshotOrder) :
     storeWrite.number ∈ [2] ∧
-      ∃ t o, month + 1 ≤ t ∧ joinedWorld t (.log .write 0 storeWrite.number) = some o :=
-  away_complete (joinedSource order) (joined_ordered order) [0] 3 (month + 1) 0 (joined 1).landed
-    (month + 3) 2 [2] [1] ⟨1, by decide, rfl⟩ (away_read_passes order)
-    (by intro w pub _; rcases pub with rfl | rfl <;> simp [giftsWrite, storeWrite])
-    storeWrite (Or.inr rfl) rfl (by decide) (by simp [storeWrite, month, day])
-    ⟨0, by simp, by simp [storeWrite]⟩
+      ∃ t o, month + 2 ≤ t ∧ joinedWorld t (.log .write 0 storeWrite.number) = some o :=
+  away_complete (joinedSource order) (joined_ordered order) 3 (month + 2) 1
+    (month + 3) 2 [2] (away_read_reloads order).2 storeWrite (Or.inr rfl) rfl (by decide)
+    (by simp [storeWrite, month, day])
 
-/-- Ana's store write 1 is stored right after the device's GET of it misses,
-and a Gifts snapshot through it lands before the next listing. -/
-def lateWrite : Write := ⟨0, 1, 1, [0]⟩
-def lateSnapshot : Snapshot := ⟨1, 1, 1, 1, 1, [(0, 1)]⟩
+/-! The reload's step that a deleted write an audience's current newest
+does not reach has no part there stays. Snapshot metadata names no part
+audiences, so nothing else tells Gifts that Ana's store-only write 1 had
+none. In this history no Gifts snapshot ever reaches it, so a reload waiting
+for one would wait forever. The number is not passed: the store's selection
+holds it (`CommonReload.committed_store_holds`). -/
 
-def late (t : Nat) : SnapshotHistory.State :=
-  if t ≤ 1 then ⟨0, [], []⟩ else ⟨t, [lateSnapshot], []⟩
+def storeOnly : Write := ⟨0, 1, 0, [0]⟩
+def bothParts : Write := ⟨0, 2, month, [0, 1]⟩
+def storeThrough : Snapshot := ⟨0, 0, 1, 0, 0, [(0, 1)]⟩
 
-def lateWorld : World := fun t path =>
-  if t ≤ 1 then none else match path with
-    | .log .write 0 1 => some ⟨⟨[1], 1⟩, 0⟩
-    | _ => none
+def storeDeleted (t : Nat) : SnapshotHistory.State :=
+  if t = 0 then ⟨0, [], []⟩ else ⟨month, [storeThrough], [storeOnly]⟩
 
-def latePublished (w : Write) : Prop := w = lateWrite
+def bothWorld : World := fun _ path =>
+  match path with
+  | .log .write 0 2 => some ⟨⟨[2], month⟩, 0⟩
+  | _ => none
 
-theorem late_runs (order : SnapshotOrder) (t : Nat) :
-    SnapshotHistory.Run latePublished order (late t) := by
-  by_cases ht : t ≤ 1
-  · simp only [late, ht, ↓reduceIte]; exact .initial
-  · simp only [late, ht, ↓reduceIte]
-    have sound : SnapshotHistory.Sound latePublished lateSnapshot := by
+theorem store_deleted_runs (order : SnapshotOrder) (t : Nat) :
+    SnapshotHistory.Run (fun w => w = storeOnly ∨ w = bothParts) order (storeDeleted t) := by
+  by_cases ht : t = 0
+  · simp only [storeDeleted, ht, ↓reduceIte]; exact .initial
+  · simp only [storeDeleted, ht, ↓reduceIte]
+    have sound : SnapshotHistory.Sound (fun w => w = storeOnly ∨ w = bothParts) storeThrough := by
       constructor
       all_goals
         intro w pub ha
-        subst pub
-        simp [lateWrite, lateSnapshot] at ha
-    have ticked : SnapshotHistory.Run latePublished order ⟨1, [], []⟩ :=
-      .step .initial (.tick _ 1 (by decide))
-    have landed : SnapshotHistory.Run latePublished order ⟨1, [lateSnapshot], []⟩ :=
-      .step ticked (.land _ lateSnapshot rfl sound)
-    exact .step landed (.tick _ t (by show 1 ≤ t; omega))
+        rcases pub with rfl | rfl <;>
+          simp_all [storeOnly, bothParts, storeThrough, Snapshot.covers, Snapshot.position]
+    have landed : SnapshotHistory.Run (fun w => w = storeOnly ∨ w = bothParts) order ⟨0, [storeThrough], []⟩ :=
+      .step .initial (.land _ storeThrough rfl sound)
+    have aged : SnapshotHistory.Run (fun w => w = storeOnly ∨ w = bothParts) order
+        ⟨month, [storeThrough], []⟩ := .step landed (.tick _ month (by decide))
+    exact .step aged (.delete _ storeOnly (Or.inl rfl) [] (fun _ _ => 0) True
+      (by cases order <;> decide))
 
-def lateSource (order : SnapshotOrder) : Source order 0 where
-  world := lateWorld
-  history := late
-  published := latePublished
-  unique := by intro u v pu pv _ _; rw [pu, pv]
-  runs := late_runs order
-  listedStored := by
-    intro t s member _ n positive within
-    by_cases ht : t ≤ 1
-    · simp [late, ht] at member
-    · simp only [late, ht, ↓reduceIte, List.mem_singleton] at member
-      subst member
-      have one : n = 1 := by simp [lateSnapshot, Snapshot.position] at within; omega
-      exact ⟨lateWrite, rfl, rfl, one.symm, by simp [lateWrite]; omega⟩
-  absent := by
-    intro t w pub _ stored missing
-    subst pub
-    have later : ¬ t ≤ 1 := by simp [lateWrite] at stored; omega
-    simp [lateWorld, later, lateWrite] at missing
-
-/-- The device's GET of write 1 at time 1 misses before it is stored; the
-catalog listed after shows Gifts coverage through it and no store snapshot.
-Judged by that catalog alone, the number is passed, though write 1 is stored
-with a store part from then on. The away read reads it again and receives it. -/
-theorem after_catalog_skips_live_write (order : SnapshotOrder) :
-    scanAfterOnly lateWorld late order [0] 0 2 1 0 = .miss 2 1 [] [1] ∧
-    lateWorld 2 (.log .write 0 1) ≠ none ∧ 0 ∈ lateWrite.audiences ∧
-    scan lateWorld late order [0] 0 3 1 0 (late 1).landed = .miss 3 1 [1] [] := by
-  refine ⟨by cases order <;> decide, by decide, by decide, by cases order <;> decide⟩
+/-- At every time after the deletion Gifts' current newest stops short of
+write 1, and Gifts' reload still completes with write 2's part. -/
+theorem no_part_needs_no_snapshot (order : SnapshotOrder) (t : Nat) :
+    FixedReload.position (catalogCurrent order (storeDeleted (t + 1)).landed 1) 0 < storeOnly.number ∧
+    FixedReload.scan bothWorld storeDeleted order 1 none [] [storeOnly, bothParts] (t + 1) =
+      .complete [bothParts] := by
+  constructor
+  · cases order <;> simp [storeDeleted, catalogCurrent, newest, storeThrough, FixedReload.position, storeOnly]
+  · cases order <;> simp [FixedReload.scan, storeDeleted, bothWorld, catalogCurrent, newest, storeThrough,
+      FixedReload.position, FixedReload.deletedNumber, storeOnly, bothParts, Snapshot.position, Snapshot.counts]
 
 end CovenIO.AwayReadExamples
