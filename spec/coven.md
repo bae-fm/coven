@@ -6308,7 +6308,7 @@ holds failures and rejected entries, without making either wait look completed.
     has no record of its own. A wait the scan no longer finds ends;
     refusals and drops stay
     ([`entry_scan_decides`, `entry_scan_safe`, `entry_scan_removes_only_ended`, `entry_scan_keeps_verdicts`](proofs/storelog-data/CovenStorelogData/Pending.lean),
-    [`first_missing_first_unmet`, `scan_names_only`, `behind_stop_never_named`](proofs/storelog-data/CovenStorelogData/PendingScans.lean)).
+    [`first_missing_first_unmet`, `scan_names_only`, `behind_stop_never_named`, `refused_entry_never_named`](proofs/storelog-data/CovenStorelogData/PendingScans.lean)).
   - No wall-clock time or attempt counter controls these records. They
     describe current work, not a history of attempts.
 - Record every wait and failure, including:
