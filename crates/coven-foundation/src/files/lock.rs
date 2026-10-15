@@ -60,6 +60,33 @@ pub struct StoreReadLock {
     _file: LockedFile,
 }
 
+/// A held lock on the cache's range writes: shared by a write in progress,
+/// exclusive while opening finds abandoned ones. Dropping it unlocks.
+#[derive(Debug)]
+pub struct CacheWriteLock {
+    _file: LockedFile,
+}
+
+/// The cache-write lock file, in the store directory beside the cache folder,
+/// which holds only cache entries.
+const CACHE_WRITES: &str = ".coven-cache-writes.lock";
+
+/// Wait for the cache-write lock, shared or exclusive. Unlike the store
+/// locks it waits: a range write is short, and opening needs them finished.
+pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock, FileError> {
+    let path = store.join(CACHE_WRITES);
+    let file = open_lock(&path)?;
+    let locked = if shared {
+        file.lock_shared()
+    } else {
+        file.lock()
+    };
+    locked.map_err(|source| FileError::at("lock cache writes", &path, source))?;
+    Ok(CacheWriteLock {
+        _file: LockedFile { file },
+    })
+}
+
 /// Exclusive access to both the writer and readers, authorizing deletion.
 #[derive(Debug)]
 pub struct StoreDeletionLock {

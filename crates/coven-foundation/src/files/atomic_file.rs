@@ -104,6 +104,49 @@ impl AtomicFile {
     /// The caller records its name first and removes partial bytes after failure.
     /// Supply this file's store read lock; every outstanding write retains it.
     pub fn create_writer(&self, lock: StoreReadLock) -> Result<FileWriter, FileError> {
+        let path = self.resolved()?;
+        let file = create_new(&path)
+            .map_err(|source| FileError::at("create owned file", &path, source))?;
+        Ok(FileWriter {
+            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, _lock: lock })),
+            path,
+        })
+    }
+
+    /// Write and sync complete bytes at this name, then sync its directory,
+    /// with no temporary sibling. The caller records the name as its own
+    /// first, so bytes a crash interrupts stay recorded for removal. Anything
+    /// but a regular file there is refused before a byte is written.
+    pub fn write_recorded(&self, bytes: &[u8]) -> Result<(), FileError> {
+        let path = self.resolved()?;
+        let mut file = owned_options()
+            .create(true)
+            .truncate(true)
+            .open(&path)
+            .map_err(|source| FileError::at("create owned file", &path, source))?;
+        let regular = file
+            .metadata()
+            .map_err(|source| FileError::at("inspect owned file", &path, source))?
+            .is_file();
+        if !regular {
+            return Err(FileError::at(
+                "create owned file",
+                &path,
+                io::Error::new(io::ErrorKind::InvalidInput, "a regular file is required"),
+            ));
+        }
+        file.write_all(bytes)
+            .and_then(|()| file.sync_all())
+            .map_err(|source| FileError::at("write owned file", &path, source))?;
+        #[cfg(unix)]
+        sync_directory(parent(&path))
+            .map_err(|source| FileError::at("sync owned file directory", &path, source))?;
+        Ok(())
+    }
+
+    /// The path under its canonical parent, which also supplies Windows'
+    /// extended-length prefix.
+    fn resolved(&self) -> Result<PathBuf, FileError> {
         let directory = fs::canonicalize(parent(&self.path))
             .map_err(|source| FileError::at("resolve parent directory", &self.path, source))?;
         let name = self.path.file_name().ok_or_else(|| {
@@ -113,13 +156,7 @@ impl AtomicFile {
                 io::Error::new(io::ErrorKind::InvalidInput, "file name required"),
             )
         })?;
-        let path = directory.join(name);
-        let file = create_new(&path)
-            .map_err(|source| FileError::at("create owned file", &path, source))?;
-        Ok(FileWriter {
-            file: Arc::new(tokio::sync::Mutex::new(LockedWriter { file, _lock: lock })),
-            path,
-        })
+        Ok(directory.join(name))
     }
 
     /// Remove the owned file; an absent file is success. On Unix, sync the
@@ -335,8 +372,13 @@ fn temporary(path: &Path, prefix: &str) -> Result<tempfile::NamedTempFile, FileE
 }
 
 fn create_new(path: &Path) -> io::Result<fs::File> {
+    owned_options().create_new(true).open(path)
+}
+
+/// Write access to a file coven owns, durable on every platform.
+fn owned_options() -> fs::OpenOptions {
     let mut options = fs::OpenOptions::new();
-    options.write(true).create_new(true);
+    options.write(true);
     #[cfg(windows)]
     {
         use std::os::windows::fs::OpenOptionsExt;
@@ -352,7 +394,7 @@ fn create_new(path: &Path) -> io::Result<fs::File> {
             .attributes(FILE_ATTRIBUTE_NORMAL)
             .custom_flags(FILE_FLAG_WRITE_THROUGH);
     }
-    options.open(path)
+    options
 }
 
 fn cleanup(temp: tempfile::NamedTempFile, operation: FileError) -> FileError {

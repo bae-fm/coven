@@ -95,6 +95,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_boundaries",
                 "_coven_cache",
                 "_coven_cache_budgets",
+                "_coven_cache_writes",
                 "_coven_catch_up",
                 "_coven_cells",
                 "_coven_circle_deletions",
@@ -335,6 +336,7 @@ mod fixture {
      INSERT INTO _coven_write_upload_sessions SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
+     INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
      INSERT INTO _coven_access_keys SELECT 'access_' || i,CASE WHEN i%2=0 THEN i END FROM fixture;
      INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at)
        SELECT i,key,device,substr(key,17,16),zeroblob(13) FROM fixture;

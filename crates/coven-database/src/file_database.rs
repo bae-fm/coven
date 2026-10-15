@@ -1,6 +1,6 @@
 //! File metadata operations through the owning database, never through app SQL.
 
-use super::{finish_blocking, Database, DatabaseInner, DatabaseReadHandle};
+use super::{finish_blocking, Database, DatabaseAccess, DatabaseInner, DatabaseReadHandle};
 use crate::DatabaseChanges;
 use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, FileRef,
@@ -428,7 +428,9 @@ impl FileDatabase {
     }
     /// Keep one verified range of `chunks` consecutive encrypted chunks from
     /// `first`, or the header (`first` = -1), durably before publishing its
-    /// cache metadata in one transaction.
+    /// cache metadata in one transaction. The bytes are written with no
+    /// writer held (§3.1), on a blocking worker that finishes even if the
+    /// caller stops waiting.
     pub async fn cache_range(
         &self,
         file: &FileRef,
@@ -438,26 +440,20 @@ impl FileDatabase {
         bytes: Vec<u8>,
     ) -> Result<(), DbError> {
         let file = file.clone();
-        let (result, chosen) = self
-            .run(move |db, _, directory, _| {
-                let result = cache::put(db, directory, &file, first, chunks, &name, &bytes);
-                // A failed publication leaves its name recorded.
-                let chosen = result
-                    .is_err()
-                    .then(|| crate::file_removals::choose_cache(db, &[name.as_str().to_owned()]));
-                Ok::<_, DbError>((result, chosen))
-            })
-            .await?;
-        if let Some(chosen) = chosen {
-            let failures = self.remove_released(chosen).await?;
-            if !failures.is_empty() {
-                return Err(DbError::FileCleanup {
-                    write: result.map_err(Box::new),
-                    failures,
-                });
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => {
+                database
+                    .call(move |inner| {
+                        cache::put(&inner.access, &file, first, chunks, &name, &bytes)
+                    })
+                    .await
+            }
+            FileDatabaseAccess::Reader(database) => {
+                database
+                    .call(move |access| cache::put(access, &file, first, chunks, &name, &bytes))
+                    .await
             }
         }
-        result
     }
     /// Remove the bytes of cache entries the writer just chose, once it is
     /// free (§3.1, §16.6). Returns the failures, whose records stay for the

@@ -725,6 +725,11 @@ macro_rules! coven_tables {
                 PRIMARY KEY(path,area)
             ) STRICT, WITHOUT ROWID;
         ");
+        // Cache ranges whose bytes are being written with no writer held;
+        // opening makes the abandoned ones removals (§16.6).
+        $visit!(_coven_cache_writes, "
+            CREATE TABLE _coven_cache_writes (path TEXT NOT NULL PRIMARY KEY) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_device_files, "
             CREATE TABLE _coven_device_files (
                 device BLOB NOT NULL,

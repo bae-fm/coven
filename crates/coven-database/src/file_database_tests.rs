@@ -457,9 +457,9 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
 }
 
 /// One verified range is one cache file and one row; each chunk in it reads
-/// back at its own offset. A range overlapping a published one leaves its
-/// bytes unnamed, and a crash after naming them leaves bytes that opening
-/// removes (§16.6).
+/// back at its own offset. A range overlapping a published one is not
+/// written, and a crash while writing one leaves bytes that opening removes
+/// (§16.6).
 #[tokio::test]
 async fn cache_ranges_publish_whole_and_never_overlap() {
     use crate::file_write::tests::{local_count, SCHEMA};
@@ -501,7 +501,7 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     // A crash after the range's name was recorded and its bytes written.
     db.inspect_writer(|sql| {
         sql.internal_execute(
-            "INSERT INTO _coven_file_removals(area,path) VALUES('cache','interrupted')",
+            "INSERT INTO _coven_cache_writes(path) VALUES('interrupted')",
             [],
         )
         .unwrap();
@@ -511,6 +511,7 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
     let db = open().await.unwrap();
     assert!(!cache.join("interrupted").exists());
     assert!(cache.join("range").exists());
+    assert_eq!(local_count(&db, "_coven_cache_writes"), 0);
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
@@ -617,5 +618,196 @@ async fn a_stalled_pin_read_holds_back_no_app_write() {
         .unwrap();
     assert!(publication.await.unwrap().is_err());
     assert_eq!(local_count(&db, "_coven_cache"), 0);
+    db.close().await.unwrap();
+}
+
+fn cache_path(store: &TestStore, name: &FileName) -> std::path::PathBuf {
+    store
+        .database_path()
+        .parent()
+        .unwrap()
+        .join("cache")
+        .join(name.as_str())
+}
+
+#[cfg(unix)]
+fn fifo(path: &std::path::Path) {
+    assert!(std::process::Command::new("mkfifo")
+        .arg(path)
+        .status()
+        .unwrap()
+        .success());
+}
+
+/// Let a write blocked opening the FIFO at `path` go on, reading whatever
+/// it writes.
+#[cfg(unix)]
+async fn release_fifo_writer(path: std::path::PathBuf) {
+    tokio::task::spawn_blocking(move || {
+        use std::io::Read;
+        let mut fifo = std::fs::File::open(path).unwrap();
+        fifo.read_to_end(&mut Vec::new()).unwrap();
+    })
+    .await
+    .unwrap();
+}
+
+/// §3.1, §16.6: a cache range's bytes are written with no writer held. A
+/// FIFO at its recorded name stands in for a stalled disk: the range write
+/// blocks opening it while an app write commits. Released, it is no regular
+/// file, so the range publishes nothing and its name and bytes go.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_cache_range_write_holds_back_no_app_write() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    use std::time::Duration;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, vec![5; 3], true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let name = FileName::new("range").unwrap();
+    let path = cache_path(&store, &name);
+    fifo(&path);
+    let writing = tokio::spawn({
+        let name = name.clone();
+        async move { owner.cache_range(&file, 0, 1, name, vec![1; 19]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!writing.is_finished(), "the range write is stalled");
+    let written = tokio::time::timeout(
+        Duration::from_secs(5),
+        db.write(|sql| {
+            sql.execute("UPDATE files SET title='while caching'", [])?;
+            Ok(())
+        }),
+    )
+    .await;
+    assert_eq!(local_count(&db, "_coven_cache_writes"), 1);
+    // Release the write before judging, so a held writer fails the test
+    // instead of hanging it.
+    release_fifo_writer(path.clone()).await;
+    written
+        .expect("an app write waited for a stalled cache range write")
+        .unwrap();
+    assert!(writing.await.unwrap().is_err());
+    assert_eq!(local_count(&db, "_coven_cache"), 0);
+    assert_eq!(local_count(&db, "_coven_cache_writes"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert!(!path.exists());
+    db.close().await.unwrap();
+}
+
+/// §16.6: a read-only handle, as from another process, writes a recorded
+/// range while the writer commits and removes the files its writes release.
+/// That removal leaves the range being written alone: only its own writer,
+/// or an open that finds it abandoned, removes it.
+#[cfg(unix)]
+#[tokio::test]
+async fn another_handles_removals_leave_a_range_being_written() {
+    use crate::file_write::tests::{complete_uploads, local_count, owned_paths, SCHEMA};
+    use crate::Migration;
+    use std::time::Duration;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, vec![5; 3], true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
+    let read_only = store
+        .builder(
+            tables(Provenance::AppProvided),
+            vec![Migration::sql(1, "schema", SCHEMA)],
+        )
+        .open_read_only()
+        .await
+        .unwrap();
+    let reader = FileDatabase::read_only(read_only.clone());
+    let name = FileName::new("range").unwrap();
+    let path = cache_path(&store, &name);
+    fifo(&path);
+    let writing = tokio::spawn({
+        let name = name.clone();
+        async move { reader.cache_range(&file, 0, 1, name, vec![1; 19]).await }
+    });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!writing.is_finished(), "the range write is stalled");
+    // Completing the upload releases the queue's copy, which the writer
+    // removes with every other recorded removal.
+    let completed = tokio::time::timeout(Duration::from_secs(5), complete_uploads(&db)).await;
+    let left = path.exists();
+    release_fifo_writer(path.clone()).await;
+    completed.expect("completion waited for a stalled cache range write");
+    assert!(owned_paths(&store).is_empty());
+    assert!(
+        left,
+        "the writer removed a range another handle was writing"
+    );
+    assert!(writing.await.unwrap().is_err());
+    assert_eq!(local_count(&db, "_coven_cache_writes"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert!(!path.exists());
+    read_only.close().await.unwrap();
+    db.close().await.unwrap();
+}
+
+/// §16.6: opening the writer while a read-only handle writes a recorded
+/// range waits for that write to finish. A range still recorded as being
+/// written once no handle writes it was abandoned by a crash: it becomes a
+/// removal, and its bytes go.
+#[cfg(unix)]
+#[tokio::test]
+async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    use crate::Migration;
+    use std::time::Duration;
+    let store = TestStore::new();
+    let open = || store.schema(tables(Provenance::AppProvided), SCHEMA);
+    let db = open().await.unwrap();
+    attach(&db, vec![5; 3], true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
+    let abandoned = cache_path(&store, &FileName::new("abandoned").unwrap());
+    db.inspect_writer(|sql| {
+        sql.internal_execute(
+            "INSERT INTO _coven_cache_writes(path) VALUES('abandoned')",
+            [],
+        )
+        .unwrap();
+    });
+    std::fs::write(&abandoned, b"partial").unwrap();
+    let read_only = store
+        .builder(
+            tables(Provenance::AppProvided),
+            vec![Migration::sql(1, "schema", SCHEMA)],
+        )
+        .open_read_only()
+        .await
+        .unwrap();
+    let reader = FileDatabase::read_only(read_only.clone());
+    let name = FileName::new("live").unwrap();
+    let live = cache_path(&store, &name);
+    fifo(&live);
+    let writing =
+        tokio::spawn(async move { reader.cache_range(&file, 0, 1, name, vec![1; 19]).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!writing.is_finished(), "the range write is stalled");
+    db.close().await.unwrap();
+    let mut reopen = Box::pin(open());
+    let waited = tokio::time::timeout(Duration::from_millis(300), &mut reopen)
+        .await
+        .is_err();
+    release_fifo_writer(live.clone()).await;
+    assert!(waited, "opening took a range another handle was writing");
+    let db = reopen.await.unwrap();
+    assert!(writing.await.unwrap().is_err());
+    assert!(!abandoned.exists());
+    assert!(!live.exists());
+    assert_eq!(local_count(&db, "_coven_cache_writes"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    read_only.close().await.unwrap();
     db.close().await.unwrap();
 }

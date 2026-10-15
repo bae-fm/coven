@@ -5574,6 +5574,7 @@ Carol's tablet:
     the transaction that changes the row, so finding eager work reads no
     unchanged row;
   - `_coven_file_removals`: unused local copies waiting to be deleted;
+  - `_coven_cache_writes`: cache ranges whose bytes are being written;
   - `_coven_file_candidates`: stored files awaiting a deletion decision
     (§16.5). The transaction ending a file's last local reference adds it;
     so does a retained object's checked reference list before this device
@@ -5601,6 +5602,14 @@ Carol's tablet:
 - Nor bytes that no table names:
   - before writing new bytes, coven records their name in
     `_coven_file_removals`, and the write that attaches them takes it out;
+  - a cache range's bytes are written with no writer held (§3.1), by
+    any handle, including a read-only one in another process. Its name is
+    recorded in `_coven_cache_writes` instead, which only its own write
+    removes: the transaction publishing its row takes the name out, and a
+    failed write makes it a removal. Every range write holds a shared lock
+    on the cache's writes, and opening the writer holds it exclusively, so
+    a name opening still finds recorded has no live write: it becomes a
+    removal;
   - the write that lets bytes go records them there in its transaction;
   - after a write commits or fails, and when the database opens, coven
     deletes the unused bytes `_coven_file_removals` names, then their records.

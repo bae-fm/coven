@@ -5,6 +5,8 @@
 //! so a stalled disk holds back no app write; then its record goes, under the
 //! writer (§3.1, §16.6). A crash between them leaves the record, and the next
 //! open removes the bytes the same way, from that list rather than a scan.
+//! A cache range being written is recorded in `_coven_cache_writes` instead,
+//! which no removal here reads until opening finds it abandoned.
 
 use std::collections::BTreeSet;
 
@@ -146,11 +148,13 @@ pub(crate) fn forget(db: &DatabaseConnection, removed: &[Released]) -> Result<()
 }
 
 /// Opening finishes every removal a crash or failure left recorded, before
-/// any app write can run, by the same steps.
+/// any app write can run, by the same steps. First, cache ranges still
+/// recorded as being written whose writer is gone become removals.
 pub(crate) fn finish_at_open(
     writer: &DatabaseConnection,
     directory: &StoreDir,
 ) -> Result<(), DbError> {
+    abandon_cache_writes(writer, directory)?;
     let (released, mut failures) = choose(writer, &BTreeSet::new())?;
     let (removed, removal_failures) = remove_bytes(directory, released);
     failures.extend(removal_failures);
@@ -167,6 +171,30 @@ pub(crate) fn finish_at_open(
             failures,
         })
     }
+}
+
+/// A read-only handle in another process may be writing a recorded cache
+/// range while this writer opens. Every range write holds the cache-write
+/// lock shared, so once it is held exclusively, the ranges still recorded
+/// as being written have no live writer: they become removals. No other
+/// database lock is held while waiting, so a waited-for range can commit.
+fn abandon_cache_writes(writer: &DatabaseConnection, directory: &StoreDir) -> Result<(), DbError> {
+    if !writer.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)",
+        [],
+        |r| r.get::<_, bool>(0),
+    )? {
+        return Ok(());
+    }
+    let _excluded = directory.exclude_cache_writes()?;
+    writer.transaction(|db| {
+        db.internal_execute(
+            "INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache_writes",
+            [],
+        )?;
+        db.internal_execute("DELETE FROM _coven_cache_writes", [])?;
+        Ok(())
+    })
 }
 
 #[cfg(test)]

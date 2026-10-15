@@ -1,5 +1,6 @@
 //! Cache publication and eviction obey the same bytes-before-row rule as attachments.
 
+use super::DatabaseAccess;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
 use coven_crypto::FILE_CHUNK_TAG_LEN;
 
@@ -98,12 +99,13 @@ pub(super) fn read(
     })
 }
 /// Publish one verified range of `chunks` consecutive chunks from `first`,
-/// or the header (`first` = -1), as one file and one row: its name is
-/// recorded for removal before any byte is written, and the row replaces
-/// that record in the transaction that publishes it (§16.6).
-pub(super) fn put(
-    db: &DatabaseConnection,
-    directory: &StoreDir,
+/// or the header (`first` = -1), as one file and one row (§16.6). Its name
+/// is recorded as being written before any byte is written, the bytes are
+/// written with no writer held (§3.1), and the row replaces that record in
+/// the transaction that publishes it. The shared cache-write lock, held
+/// throughout, keeps opening from taking the record as abandoned.
+pub(super) fn put<L>(
+    access: &DatabaseAccess<L>,
     file: &FileRef,
     first: i64,
     chunks: i64,
@@ -115,65 +117,145 @@ pub(super) fn put(
             what: "a cached range covers whole chunks, or only the header",
         });
     }
-    let id = id(file)?;
-    db.transaction(|db| {
-        if db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)",
-            [name.as_str()],
-            |r| r.get::<_, bool>(0),
-        )? {
-            return Err(DbError::FileNameReused { name: name.clone() });
+    let _writing = access.directory.lock_cache_write()?;
+    let recorded = access.with_writer(|db| {
+        db.transaction(|db| {
+            if db.query_row(
+                "SELECT EXISTS(
+                     SELECT 1 FROM _coven_cache WHERE path=?1 UNION ALL
+                     SELECT 1 FROM _coven_cache_writes WHERE path=?1 UNION ALL
+                     SELECT 1 FROM _coven_file_removals WHERE path=?1 AND area='cache')",
+                [name.as_str()],
+                |r| r.get::<_, bool>(0),
+            )? {
+                return Err(DbError::FileNameReused { name: name.clone() });
+            }
+            // Stored entries never overlap: a range already covered in part
+            // is not written at all.
+            if overlaps(db, file, first, chunks)? {
+                return Ok(false);
+            }
+            db.internal_execute(
+                "INSERT INTO _coven_cache_writes(path) VALUES(?1)",
+                [name.as_str()],
+            )?;
+            Ok(true)
+        })
+    })?;
+    if !recorded {
+        return Ok(());
+    }
+    let published = access
+        .directory
+        .file(FileArea::Cache, name)
+        .write_recorded(bytes)
+        .map_err(DbError::from)
+        .and_then(|()| {
+            access.with_writer(|db| {
+                db.transaction(|db| publish_range(db, file, first, chunks, name, bytes))
+            })
+        });
+    let result = match published {
+        Ok(true) => return Ok(()),
+        // Another handle published part of this range meanwhile; these
+        // bytes are left unused.
+        Ok(false) => Ok(()),
+        Err(error) => Err(error),
+    };
+    let failures = release(access, name);
+    if failures.is_empty() {
+        result
+    } else {
+        Err(DbError::FileCleanup {
+            write: result.map_err(Box::new),
+            failures,
+        })
+    }
+}
+/// Whether any chunk of the range already has a stored entry.
+fn overlaps(
+    db: &DatabaseConnection,
+    file: &FileRef,
+    first: i64,
+    chunks: i64,
+) -> Result<bool, DbError> {
+    for index in first..first + chunks {
+        if covering(db, file, index)?.is_some() {
+            return Ok(true);
         }
+    }
+    Ok(false)
+}
+/// Publish a written range's row in place of its record. If another handle
+/// published part of the range meanwhile, its name becomes a recorded
+/// removal instead and the result is false.
+fn publish_range(
+    db: &DatabaseConnection,
+    file: &FileRef,
+    first: i64,
+    chunks: i64,
+    name: &FileName,
+    bytes: &[u8],
+) -> Result<bool, DbError> {
+    if db.internal_execute(
+        "DELETE FROM _coven_cache_writes WHERE path=?1",
+        [name.as_str()],
+    )? != 1
+    {
+        return Err(DbError::Invariant {
+            what: "a cache range being published is recorded as being written",
+        });
+    }
+    if overlaps(db, file, first, chunks)? {
         db.internal_execute(
             "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
             [name.as_str()],
         )?;
-        Ok(())
-    })?;
-    // The immediate transaction excludes another process's eviction and startup
-    // cleanup. If cleanup won the interval, no bytes have been written yet.
-    let result = db.transaction(|db| {
-        if !db.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_file_removals WHERE area='cache' AND path=?1)",
-            [name.as_str()],
-            |r| r.get::<_, bool>(0),
-        )? {
-            return Err(DbError::Invariant {
-                what: "a cache file being published is not awaiting removal",
-            });
-        }
-        // Another reader may have published part of this range meanwhile;
-        // stored entries never overlap, so these bytes are then left unused.
-        let overlapping = (first..first + chunks)
-            .map(|index| covering(db, file, index).map(|entry| entry.is_some()))
-            .collect::<Result<Vec<_>, _>>()?
-            .into_iter()
-            .any(|covered| covered);
-        if !overlapping {
-            directory.file(FileArea::Cache, name).replace(bytes)?;
-            db.internal_execute(
-                "INSERT INTO _coven_cache(namespace,file_id,chunk,chunks,path,size,last_read,pinned)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
-                rusqlite::params![
-                    file.namespace(),
-                    id,
-                    first,
-                    chunks,
-                    name.as_str(),
-                    bytes.len() as i64,
-                    tick(db)?
-                ],
-            )?;
-        }
-        db.internal_execute(
-            "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
-            [name.as_str()],
-        )?;
-        Ok(())
+        return Ok(false);
+    }
+    db.internal_execute(
+        "INSERT INTO _coven_cache(namespace,file_id,chunk,chunks,path,size,last_read,pinned)
+         VALUES(?1,?2,?3,?4,?5,?6,?7,0)",
+        rusqlite::params![
+            file.namespace(),
+            id(file)?,
+            first,
+            chunks,
+            name.as_str(),
+            bytes.len() as i64,
+            tick(db)?
+        ],
+    )?;
+    Ok(true)
+}
+/// Remove an unpublished range's bytes: its record becomes a recorded
+/// removal, unless publication already made it one, and the bytes go once
+/// the writer is free. Returns the failures; a record they leave is
+/// removed by the next open.
+fn release<L>(access: &DatabaseAccess<L>, name: &FileName) -> Vec<DbError> {
+    let chosen = access.with_writer(|db| {
+        db.transaction(|db| {
+            if db.internal_execute(
+                "DELETE FROM _coven_cache_writes WHERE path=?1",
+                [name.as_str()],
+            )? == 1
+            {
+                db.internal_execute(
+                    "INSERT INTO _coven_file_removals(area,path) VALUES('cache',?1)",
+                    [name.as_str()],
+                )?;
+            }
+            Ok(())
+        })?;
+        Ok::<_, DbError>(crate::file_removals::choose_cache(
+            db,
+            &[name.as_str().to_owned()],
+        ))
     });
-    // A failed publication leaves its name recorded; the caller removes any
-    // bytes it wrote once the writer is free.
-    result
+    match chosen {
+        Ok(chosen) => access.remove_released(chosen),
+        Err(error) => vec![error],
+    }
 }
 pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<Option<u64>, DbError> {
     db.query(

@@ -72,6 +72,10 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("reopening arms every persisted retry wait"),
 ("file_removals.rs", "SELECT path,area FROM _coven_file_removals ORDER BY area,path", "_coven_file_removals") =>
     Some("file removal visits every queued filesystem deletion"),
+("file_removals.rs", "SELECT EXISTS(SELECT 1 FROM _coven_cache_writes)", "_coven_cache_writes") =>
+    Some("opening stops at the first cache range recorded as being written"),
+("file_removals.rs", "INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache_writes", "_coven_cache_writes") =>
+    Some("opening makes every abandoned cache range write a removal"),
 ("key_upload.rs", "SELECT writer,number,bytes,before_device,before_number FROM _coven_key_uploads ORDER BY writer,number", "_coven_key_uploads") =>
     Some("the key-copy queue reader returns every reserved copy"),
 ("operation.rs", "SELECT id,kind,last_step,data,started_by FROM _coven_operations ORDER BY id", "_coven_operations") =>

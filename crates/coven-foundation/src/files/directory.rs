@@ -3,8 +3,8 @@
 use std::path::PathBuf;
 
 use crate::files::{
-    lock, settings, AtomicFile, SettingsError, StoreDeletionLock, StoreLock, StoreLockError,
-    StoreReadLock, StoreSettings,
+    lock, settings, AtomicFile, CacheWriteLock, FileError, SettingsError, StoreDeletionLock,
+    StoreLock, StoreLockError, StoreReadLock, StoreSettings,
 };
 use crate::id_source::StoreId;
 
@@ -206,6 +206,20 @@ impl StoreDir {
         let guard = lock::acquire_reader(&self.path, self.id)?;
         self.check_published()?;
         Ok(guard)
+    }
+
+    /// Hold while a cache range recorded as being written gets its bytes
+    /// with no database writer held. Shared by such writes in every process;
+    /// `exclude_cache_writes` waits for all of them (§16.6).
+    pub fn lock_cache_write(&self) -> Result<CacheWriteLock, FileError> {
+        lock::cache_writes(&self.path, true)
+    }
+
+    /// Wait until no cache range is being written in any process and keep new
+    /// writes waiting, so a range still recorded as being written has no
+    /// live writer (§16.6).
+    pub fn exclude_cache_writes(&self) -> Result<CacheWriteLock, FileError> {
+        lock::cache_writes(&self.path, false)
     }
 
     /// Lock an existing store or a directory left by an interrupted deletion.
