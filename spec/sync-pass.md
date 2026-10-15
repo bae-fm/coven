@@ -448,8 +448,7 @@ there, and the store's selection holds its number
 ([`scan_spec`, `unreached_not_held`](proofs/io/CovenIO/FixedReload.lean)).
 Selections otherwise stay fixed; deletion evidence in their catalogs needs no
 repeated GET, and a failed request or incomplete catalog is not such evidence
-([`scan_spec`](proofs/io/CovenIO/FixedReload.lean),
-[`retry_stale`](proofs/io/CovenIO/CommonReload.lean)).
+(the successful-source premises of [`scan_spec`](proofs/io/CovenIO/FixedReload.lean)).
 The app keeps reading the old committed state while ordinary new writes join
 the waiting queue; install all readable audiences at the common target and
 apply eligible waiting writes on top in one transaction
