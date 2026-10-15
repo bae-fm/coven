@@ -1,5 +1,4 @@
 //! Session changes, audience moves, and one causal write record.
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded, timestamp};
@@ -429,18 +428,9 @@ fn unordered(
         "SELECT device,number FROM _coven_positions WHERE device>=x'0000000000000000' ORDER BY device", [],
         |r| Ok((DeviceId(counter(r.get(0)?)),counter(r.get(1)?))),
     )?.into_iter().collect();
-    let own_position = positions.remove(&device).unwrap_or(0);
-    let last: Option<Vec<u8>> = database.query_row(
-        &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
-        [device.0.to_be_bytes().as_slice()],
-        |r| r.get(0),
-    )?;
-    let last = last.map_or(0, counter);
-    assert_eq!(
-        own_position, last,
-        "local write history and its applied position disagree"
-    );
-    let number = last
+    let number = positions
+        .remove(&device)
+        .unwrap_or(0)
         .checked_add(1)
         .expect("write numbers exhausted before timestamps");
     let header = WriteHeader {
