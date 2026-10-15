@@ -35,10 +35,16 @@ impl S3Storage {
             .send()
             .await
             .map_err(s3_error);
-        if let Err(error) = created {
-            // Nothing was written, unless a lost reply hid the write.
-            let cleanup = self.delete_probe(&key).await;
-            return crate::transfer::with_cleanup(Err(error), cleanup);
+        match created {
+            // An earlier attempt of this run wrote it before a later step was
+            // refused; the read below compares the run's bytes.
+            Err(error) if error.failure() == StorageFailure::AlreadyExists => {}
+            Err(error) => {
+                // Nothing was written, unless a lost reply hid the write.
+                let cleanup = self.delete_probe(&key).await;
+                return crate::transfer::with_cleanup(Err(error), cleanup);
+            }
+            Ok(_) => {}
         }
         let result = self.check_probe(&namespace, &key, &bytes).await;
         let cleanup = self.delete_probe(&key).await;

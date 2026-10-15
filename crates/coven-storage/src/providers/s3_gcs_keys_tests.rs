@@ -9,7 +9,7 @@ use axum::{
     http::{HeaderMap, Method as HttpMethod, Response, Uri},
     Router,
 };
-use coven_foundation::{clock::SystemClock, id_source::UuidIds};
+use coven_foundation::{clock::Clock, id_source::UuidIds};
 use std::{
     collections::BTreeMap,
     sync::{Arc, Mutex},
@@ -31,7 +31,32 @@ struct Remote {
     next: u32,
     /// The next HMAC creation answers with a server error after creating.
     lose_key_reply: bool,
+    /// Bindings refused as naming an account Google does not yet see.
+    unseen_binds: u32,
+    /// HMAC creations refused as naming an account Google does not yet see.
+    unseen_key_creates: u32,
+    /// The pauses the minter's clock took; none of them waits.
+    pauses: Vec<Duration>,
     bearer_seen: bool,
+}
+
+/// A clock whose pauses return at once, recorded in the remote's state.
+struct Pauses(Arc<Mutex<Remote>>);
+
+impl Clock for Pauses {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::SystemTime::now()
+    }
+    fn elapsed(&self) -> Duration {
+        self.0.lock().unwrap().pauses.iter().sum()
+    }
+    fn sleep(
+        &self,
+        duration: Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.0.lock().unwrap().pauses.push(duration);
+        Box::pin(std::future::ready(()))
+    }
 }
 
 fn json(value: serde_json::Value) -> Response<Body> {
@@ -54,6 +79,10 @@ fn api(
     body: &Bytes,
 ) -> Response<Body> {
     state.bearer_seen |= headers["authorization"] == "Bearer admin-token";
+    // Google refuses a POST without a length.
+    if method == HttpMethod::POST && !headers.contains_key("content-length") {
+        return response(411, "{}");
+    }
     let path = uri.path();
     let q = query(uri);
     let body: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
@@ -99,6 +128,13 @@ fn api(
     }
     if let Some(email) = path.strip_prefix("/iam/v1/projects/household/serviceAccounts/") {
         let email = decode(email);
+        if method == HttpMethod::GET {
+            return if state.accounts.contains(&email) {
+                json(serde_json::json!({"email": email}))
+            } else {
+                response(404, "{}")
+            };
+        }
         let before = state.accounts.len();
         state.accounts.retain(|account| *account != email);
         return if state.accounts.len() == before {
@@ -137,6 +173,16 @@ fn api(
         if body["etag"] != serde_json::json!(etag.to_string()) {
             return response(412, "{}");
         }
+        if state.unseen_binds > 0 {
+            state.unseen_binds -= 1;
+            let message =
+                "Service account coven-1@household.iam.gserviceaccount.com does not exist.";
+            return response(
+                400,
+                serde_json::json!({"error": {"code": 400, "message": message, "errors": [{"message": message, "reason": "invalid"}]}}).to_string(),
+            );
+        }
+        let (etag, members) = state.policies.get_mut(&folder).unwrap();
         *etag += 1;
         *members = body["bindings"]
             .as_array()
@@ -150,6 +196,10 @@ fn api(
     }
     if path == "/storage/v1/projects/household/hmacKeys" {
         let email = q["serviceAccountEmail"].clone();
+        // Google answers for an account it does not know with 404.
+        if method == HttpMethod::GET && !state.accounts.contains(&email) {
+            return response(404, "{}");
+        }
         if method == HttpMethod::GET {
             let items: Vec<_> = state
                 .hmac
@@ -160,6 +210,10 @@ fn api(
             return json(serde_json::json!({"items": items}));
         }
         if !state.accounts.contains(&email) {
+            return response(404, "{}");
+        }
+        if state.unseen_key_creates > 0 {
+            state.unseen_key_creates -= 1;
             return response(404, "{}");
         }
         state.next += 1;
@@ -177,6 +231,15 @@ fn api(
         let Some(key) = state.hmac.get_mut(id) else {
             return response(404, "{}");
         };
+        // A deleted key stays readable and refuses changes, as Google's does.
+        if method == HttpMethod::GET {
+            return json(
+                serde_json::json!({"accessId": id, "state": key.1, "serviceAccountEmail": key.0}),
+            );
+        }
+        if key.1 == "DELETED" {
+            return response(400, "{}");
+        }
         if method == HttpMethod::PUT {
             key.1 = body["state"].as_str().unwrap().to_owned();
             return json(serde_json::json!({}));
@@ -184,7 +247,7 @@ fn api(
         if key.1 != "INACTIVE" {
             return response(400, "{}");
         }
-        state.hmac.remove(id);
+        key.1 = "DELETED".into();
         return json(serde_json::json!({}));
     }
     response(404, "{}")
@@ -315,7 +378,7 @@ async fn fake(uniform: bool) -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessK
         },
         AdminCredential::BearerToken(SecretText::new("admin-token".into())),
         endpoints,
-        Arc::new(SystemClock),
+        Arc::new(Pauses(state.clone())),
         Arc::new(UuidIds),
     )
     .unwrap();
@@ -361,8 +424,13 @@ async fn a_service_account_hmac_key_reaches_only_its_managed_folder() {
         .key_exists(&again.credentials.access_key_id, &again.principal)
         .await
         .unwrap());
+    // Revoking again finds the key deleted and the account gone.
+    admin
+        .revoke(&again.credentials.access_key_id, &again.principal)
+        .await
+        .unwrap();
     let state = state.lock().unwrap();
-    assert!(state.accounts.is_empty() && state.hmac.is_empty());
+    assert!(state.accounts.is_empty() && state.hmac.values().all(|(_, key, _)| key == "DELETED"));
     assert_eq!(
         state.folders,
         std::slice::from_ref(&folder),
@@ -384,7 +452,7 @@ async fn buckets_without_uniform_access_are_refused_and_rollback_removes_the_acc
     admin.mint(&scope()).await.unwrap();
     admin.roll_back(&scope()).await.unwrap();
     let state = state.lock().unwrap();
-    assert!(state.accounts.is_empty() && state.hmac.is_empty());
+    assert!(state.accounts.is_empty() && state.hmac.values().all(|(_, key, _)| key == "DELETED"));
 }
 
 /// A store's listing reads every page of the project's service accounts and
@@ -431,4 +499,28 @@ async fn a_store_listing_returns_its_accounts_keys_with_their_minting_device() {
             [&format!("{}@household.iam.gserviceaccount.com", ours.name)],
         ours.label()
     );
+}
+
+/// Google may refuse a binding or an HMAC key for a service account it made
+/// moments ago; minting is repeated each second for up to 60 seconds, then
+/// fails, and the repeats make one account and one key.
+#[tokio::test]
+async fn minting_waits_for_google_to_see_a_new_account() {
+    let (state, _server, admin) = fake(true).await;
+    state.lock().unwrap().unseen_binds = 3;
+    state.lock().unwrap().unseen_key_creates = 2;
+    admin.mint(&scope()).await.unwrap();
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(state.pauses, [Duration::from_secs(1); 5]);
+        assert_eq!((state.accounts.len(), state.hmac.len()), (1, 1));
+    }
+    admin.roll_back(&scope()).await.unwrap();
+    let (state, _server, admin) = fake(true).await;
+    state.lock().unwrap().unseen_binds = 61;
+    assert_eq!(
+        admin.mint(&scope()).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
+    assert_eq!(state.lock().unwrap().pauses.len(), 60);
 }

@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-//! A member key minted live with the service's admin key (§4): setup's
+//! A member key minted live with the service's admin access (§4): setup's
 //! member-side check passes, the key is refused outside its store's prefix,
 //! and after revocation the provider no longer lists or honors it. Only fixed
 //! labels, principal kinds and failure kinds enter output, never a key.
@@ -23,7 +23,7 @@ async fn s3_member_key_lifecycle() {
     let live = live::LiveS3::load();
     let admin = key_admin(
         live.config.clone(),
-        live.admin(),
+        live.admin().await,
         AdminEndpoints::production(),
         Arc::new(SystemClock),
         Arc::new(UuidIds),
@@ -50,7 +50,12 @@ async fn s3_member_key_lifecycle() {
         .send()
         .await
         .map(drop)
-        .map_err(s3_error);
+        .map_err(s3_error)
+        // GCS answers the deletion of an absent object with 404.
+        .or_else(|error| match error.failure() {
+            StorageFailure::NotFound => Ok(()),
+            _ => Err(error),
+        });
     let cleanup = crate::transfer::with_cleanup(
         live_cleanup::cleanup(&owner.provider, other).await,
         live_cleanup::cleanup(&owner.provider, store).await,
@@ -90,6 +95,7 @@ fn kind(principal: &S3Principal) -> &'static str {
     match principal {
         S3Principal::IamUser { .. } => "IamUser",
         S3Principal::RustFsServiceAccount { .. } => "RustFsServiceAccount",
+        S3Principal::GcsServiceAccount { .. } => "GcsServiceAccount",
         _ => "other",
     }
 }
@@ -122,8 +128,20 @@ async fn lifecycle(
     let key = admin.mint(scope).await?;
     println!("mint PASS principal={}", kind(&key.principal));
     let id = key.credentials.access_key_id.as_str();
-    let present = admin.key_exists(id, &key.principal).await?;
-    println!("key_exists_after_mint={present}");
+    // GCS may read a key it just made as absent for a while.
+    let mut waited = Duration::ZERO;
+    let present = loop {
+        let present = admin.key_exists(id, &key.principal).await?;
+        if present || waited >= PROPAGATION {
+            break present;
+        }
+        SystemClock.sleep(Duration::from_secs(1)).await;
+        waited += Duration::from_secs(1);
+    };
+    println!(
+        "key_exists_after_mint={present} after_s={}",
+        waited.as_secs()
+    );
     if !present {
         return Err(StorageFailure::Protocol.with_source("the minted key is not listed"));
     }

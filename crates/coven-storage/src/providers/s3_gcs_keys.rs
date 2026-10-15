@@ -6,7 +6,7 @@
 //!
 //! Revocation sets the HMAC key inactive and deletes it, removes the folder
 //! binding and deletes the service account. The folder is the store's and
-//! stays. Absence is read from the service account's HMAC key list.
+//! stays. Absence is read from the key itself.
 use super::minting::{AdminRequest, KeyMinter, Pending};
 use super::*;
 use crate::{access_admin::named_device, ListedKey};
@@ -85,14 +85,18 @@ impl<'a> Gcs<'a> {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("Google Cloud admin access is an OAuth access token"));
         };
+        let post = method == Method::POST;
         let mut request = self
             .context
             .http
             .request(method, url)
             .bearer_auth(token.as_str());
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
+        request = match body {
+            Some(body) => request.json(&body),
+            // Google refuses a POST without a length with HTTP 411.
+            None if post => request.header(reqwest::header::CONTENT_LENGTH, "0"),
+            None => request,
+        };
         let response = request
             .send()
             .await
@@ -100,6 +104,22 @@ impl<'a> Gcs<'a> {
         let status = response.status().as_u16();
         if tolerated.contains(&status) {
             return Ok(None);
+        }
+        if status == 400 {
+            let headers = response.headers().clone();
+            let body = response
+                .bytes()
+                .await
+                .map_err(|error| crate::providers::http::transport(CloudProvider::S3, error))?
+                .to_vec();
+            let unseen = unseen_account(&body);
+            let error = crate::providers::http::ProviderResponse::new(status, headers, body)
+                .into_error(CloudProvider::S3);
+            return Err(if unseen {
+                StorageFailure::NotFound.with_source(error)
+            } else {
+                error
+            });
         }
         let response = crate::providers::http::checked(CloudProvider::S3, response).await?;
         let bytes = response
@@ -272,34 +292,59 @@ impl<'a> Gcs<'a> {
         }
     }
 
-    /// An HMAC key must be inactive before it can be deleted.
+    /// An HMAC key must be inactive before it can be deleted. A deleted key
+    /// still reads as `DELETED` and refuses both with HTTP 400.
     async fn delete_hmac(&self, project: &str, access_id: &str) -> Result<(), StorageError> {
         let url = self.hmac_url(project, Some(access_id));
-        self.call(
-            Method::PUT,
-            url.clone(),
-            Some(json!({"state": "INACTIVE"})),
-            &[404],
-        )
-        .await?;
+        let Some(key) = self.call(Method::GET, url.clone(), None, &[404]).await? else {
+            return Ok(());
+        };
+        if key["state"] == "DELETED" {
+            return Ok(());
+        }
+        if key["state"] != "INACTIVE" {
+            self.call(
+                Method::PUT,
+                url.clone(),
+                Some(json!({"state": "INACTIVE"})),
+                &[404],
+            )
+            .await?;
+        }
         self.call(Method::DELETE, url, None, &[404]).await?;
         Ok(())
     }
 
+    /// Delete the account's keys, binding and the account. IAM decides
+    /// whether the account still exists: Cloud Storage answers 404 for an
+    /// account it has not yet seen as well as for a deleted one.
     async fn remove(&self, project: &str, email: &str) -> Result<(), StorageError> {
-        for key in self.hmac_keys(project, email).await? {
-            self.delete_hmac(project, &key).await?;
+        let account = self.iam(&format!("projects/{project}/serviceAccounts/{email}"));
+        if self
+            .call(Method::GET, account.clone(), None, &[404])
+            .await?
+            .is_some()
+        {
+            for key in self.hmac_keys(project, email).await? {
+                self.delete_hmac(project, &key).await?;
+            }
         }
         self.bind(email, false).await?;
-        self.call(
-            Method::DELETE,
-            self.iam(&format!("projects/{project}/serviceAccounts/{email}")),
-            None,
-            &[404],
-        )
-        .await?;
+        self.call(Method::DELETE, account, None, &[404]).await?;
         Ok(())
     }
+}
+
+/// Google answers a binding for a service account it does not yet see with
+/// HTTP 400 "Service account <email> does not exist.": the account is not
+/// found, and the minting call is repeated (`ProfileKeyAdmin::mint`).
+fn unseen_account(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body)
+        .ok()
+        .and_then(|body| body["error"]["message"].as_str().map(str::to_owned))
+        .is_some_and(|message| {
+            message.starts_with("Service account ") && message.ends_with(" does not exist.")
+        })
 }
 
 async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, StorageError> {
@@ -331,6 +376,7 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
     let mut url = gcs.hmac_url(&project, None);
     url.query_pairs_mut()
         .append_pair("serviceAccountEmail", &email);
+    // A 404 here is the account Google does not yet see; nothing was made.
     let created = gcs
         .call(Method::POST, url, None, &[])
         .await?
@@ -403,11 +449,16 @@ async fn key_exists(
         bucket: bucket.clone(),
         folder: String::new(),
     };
-    Ok(gcs
-        .hmac_keys(project, email)
-        .await?
-        .iter()
-        .any(|key| key == access_key_id))
+    // The key itself: a deleted one reads `DELETED`, or is gone.
+    let key = gcs
+        .call(
+            Method::GET,
+            gcs.hmac_url(project, Some(access_key_id)),
+            None,
+            &[404],
+        )
+        .await?;
+    Ok(key.is_some_and(|key| key["state"] != "DELETED" && key["serviceAccountEmail"] == email))
 }
 
 /// Every HMAC key of a service account whose description names this store,

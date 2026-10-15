@@ -72,6 +72,9 @@ struct Remote {
     lose_key_reply: bool,
     /// New keys are refused this many times before they work.
     propagation: u32,
+    /// Object reads and deletions refused this many times while writes
+    /// already work: a key that reached some servers first.
+    partial: u32,
     /// Every key may list the whole bucket.
     broad: bool,
     /// Signed admin requests whose recomputed signature differed.
@@ -392,6 +395,10 @@ fn s3(
             .collect();
         return response(200, format!("<ListBucketResult><Name>bucket</Name><IsTruncated>false</IsTruncated>{contents}</ListBucketResult>"));
     }
+    if method != Method::PUT && state.partial > 0 {
+        state.partial -= 1;
+        return s3_reply_error(403, "AccessDenied");
+    }
     match method {
         Method::PUT => {
             if headers.contains_key("if-none-match") && state.objects.contains_key(&object) {
@@ -627,6 +634,20 @@ async fn the_member_check_waits_for_propagation_and_refuses_a_broad_policy() {
         let state = fake.state.lock().unwrap();
         assert!(state.users.is_empty() && state.policies.is_empty() && state.objects.is_empty());
     }
+}
+
+/// A key that wrote the check's object, then was refused its read and the
+/// object's deletion, finds that object on the next attempt and goes on.
+#[tokio::test]
+async fn the_member_check_resumes_over_its_own_object_after_partial_propagation() {
+    let fake = Fake::new().await;
+    let admin = fake.admin(S3ProfileName::CephRgw);
+    let scope = scope();
+    let minted = admin.mint(&scope).await.unwrap();
+    fake.state.lock().unwrap().partial = 2;
+    admin.probe(&scope, &minted.credentials).await.unwrap();
+    assert_eq!(*fake.clock.sleeps.lock().unwrap(), [Duration::from_secs(1)]);
+    assert!(fake.state.lock().unwrap().objects.is_empty());
 }
 
 /// Ceph RGW serves IAM at the location's endpoint; Versity Gateway at the

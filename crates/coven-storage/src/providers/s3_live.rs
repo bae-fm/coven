@@ -113,10 +113,23 @@ impl LiveS3 {
         };
         crate::transfer::with_cleanup(result, cleanup)
     }
-    /// The env key as the service's admin access, for minting member keys,
-    /// with `COVEN_LIVE_S3_IAM_ENDPOINT` where the service runs IAM apart
-    /// from its S3 endpoint (Versity Gateway).
-    pub(super) fn admin(&self) -> crate::AdminCredential {
+    /// The service's admin access, for minting member keys: on GCS the
+    /// signed-in `gcloud` account's access token, elsewhere the env key, with
+    /// `COVEN_LIVE_S3_IAM_ENDPOINT` where the service runs IAM apart from its
+    /// S3 endpoint (Versity Gateway).
+    pub(super) async fn admin(&self) -> crate::AdminCredential {
+        let StorageConfig::S3 { profile, .. } = &self.config else {
+            unreachable!("live S3 configuration")
+        };
+        if *profile == Some(S3Profile::Named(S3ProfileName::Gcs)) {
+            return crate::providers::obtain_admin_access(
+                crate::providers::AdminAccessSource::GcloudCli { account: None },
+                None,
+                Arc::new(SystemClock),
+            )
+            .await
+            .expect("gcloud access token");
+        }
         let iam_endpoint = match std::env::var("COVEN_LIVE_S3_IAM_ENDPOINT") {
             Ok(url) => Some(url.parse().expect("valid live IAM endpoint")),
             Err(std::env::VarError::NotPresent) => None,

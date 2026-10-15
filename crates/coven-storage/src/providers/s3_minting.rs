@@ -28,7 +28,8 @@ pub(crate) struct KeyMinter {
         for<'a> fn(&'a AdminRequest, &'a str, &'a S3Principal) -> Pending<'a, bool>,
     /// Every key under a name coven made for the store, with its minting device.
     pub(super) list: for<'a> fn(&'a AdminRequest, StoreId) -> Pending<'a, Vec<ListedKey>>,
-    /// How long the member-side check retries authentication and permission failures.
+    /// How long the member-side check retries authentication and permission
+    /// failures, and admin calls a NotFound for a principal not yet seen.
     pub(super) propagation: Duration,
     /// The service runs its IAM API apart from the S3 endpoint, at an address
     /// only its operator knows, so admin access names it (Versity Gateway).
@@ -87,6 +88,20 @@ pub(crate) struct ProfileKeyAdmin {
 }
 
 impl ProfileKeyAdmin {
+    /// A service may not yet see a principal a call just made, and answers
+    /// NotFound for it (GCS for minutes-old service accounts). The call is
+    /// repeated after a second within the service's window; any other
+    /// failure, or one past the window, is returned.
+    async fn unseen(&self, waited: &mut Duration, error: StorageError) -> Result<(), StorageError> {
+        if error.failure() != StorageFailure::NotFound || *waited >= self.minter.propagation {
+            return Err(error);
+        }
+        let pause = Duration::from_secs(1);
+        self.clock.sleep(pause).await;
+        *waited += pause;
+        Ok(())
+    }
+
     fn request(&self) -> AdminRequest {
         AdminRequest {
             http: self.http.clone(),
@@ -160,8 +175,16 @@ pub(crate) fn key_admin(
 
 #[async_trait]
 impl AccessKeyAdmin for ProfileKeyAdmin {
+    /// Each minter makes its key last, and its earlier steps accept what an
+    /// earlier attempt under the same names made, so repeating is safe.
     async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError> {
-        (self.minter.mint)(&self.request(), scope).await
+        let mut waited = Duration::ZERO;
+        loop {
+            match (self.minter.mint)(&self.request(), scope).await {
+                Err(error) => self.unseen(&mut waited, error).await?,
+                minted => return minted,
+            }
+        }
     }
     async fn probe(&self, scope: &MintScope, key: &S3Credentials) -> Result<(), StorageError> {
         let storage = S3Storage::new(
@@ -197,14 +220,26 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
         }
     }
     async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError> {
-        (self.minter.roll_back)(&self.request(), scope).await
+        let mut waited = Duration::ZERO;
+        loop {
+            match (self.minter.roll_back)(&self.request(), scope).await {
+                Err(error) => self.unseen(&mut waited, error).await?,
+                done => return done,
+            }
+        }
     }
     async fn revoke(
         &self,
         access_key_id: &str,
         principal: &S3Principal,
     ) -> Result<(), StorageError> {
-        (self.minter.revoke)(&self.request(), access_key_id, principal).await
+        let mut waited = Duration::ZERO;
+        loop {
+            match (self.minter.revoke)(&self.request(), access_key_id, principal).await {
+                Err(error) => self.unseen(&mut waited, error).await?,
+                done => return done,
+            }
+        }
     }
     async fn key_exists(
         &self,
@@ -214,7 +249,13 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
         (self.minter.key_exists)(&self.request(), access_key_id, principal).await
     }
     async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
-        (self.minter.list)(&self.request(), store).await
+        let mut waited = Duration::ZERO;
+        loop {
+            match (self.minter.list)(&self.request(), store).await {
+                Err(error) => self.unseen(&mut waited, error).await?,
+                listed => return listed,
+            }
+        }
     }
 }
 

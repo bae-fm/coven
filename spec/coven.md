@@ -1434,12 +1434,11 @@ the file's ranges under `F`.
     `roles/storage.objectUser`, retrying once when the folder's policy changes
     concurrently. Then `hmacKeys?serviceAccountEmail=` creates the key, whose
     access id is the member key id. The admin access is an OAuth access token
-    with the `cloud-platform` scope. A new HMAC key can take up to 60 seconds
-    to work, so the member-side check retries for 60 seconds.
-  - Revoking a GCS key sets it inactive and deletes it, deletes the account's
-    other HMAC keys, removes its folder binding and deletes the service
-    account. The managed folder is the store's and stays. Absence is read
-    from the account's HMAC key list, which a deleted account leaves empty.
+    with the `cloud-platform` scope. Google can take 60 seconds to see a new
+    account or key; the retry window is 60 seconds.
+  - Revoking a GCS key deletes it and, while IAM has the account, its other
+    HMAC keys, then the folder binding and the account; the store's managed
+    folder stays. Absence is read from the key: `DELETED` or gone.
   - On R2 each member key is a Cloudflare account API token, named with the
     key name followed by ` member <member or invite id>`, and limited to the
     store's own bucket
@@ -1505,10 +1504,12 @@ the file's ranges under `F`.
     prefix, a listing of the location's base prefix, outside every store,
     must be refused; where they reach a whole bucket, the account's bucket
     listing must be. Otherwise the check fails with
-    `StorageFailure::KeyBeyondStore`. Authentication and
-    permission failures are retried each second within the service's
-    retry window: 60 seconds for AWS IAM, Ceph RGW and Versity Gateway, and
-    30 for SeaweedFS,
+    `StorageFailure::KeyBeyondStore`. Authentication and permission
+    failures, after which a retry finds its run's object already created,
+    and admin calls answered NotFound for a principal the service does not
+    yet see (a mint repeats under its names) are retried each second within
+    the service's retry window: 60
+    seconds for AWS IAM, Ceph RGW and Versity Gateway, and 30 for SeaweedFS,
     whose gateways read identity changes asynchronously. The 60-second window
     is a retry limit, not a verified provider propagation guarantee; a key
     still refused at the limit fails the operation.
