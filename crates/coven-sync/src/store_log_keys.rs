@@ -1,6 +1,7 @@
 //! Key introductions and sharing with their current audiences.
 
 use crate::key_introductions::{accepted, needed, newest};
+use crate::member_credentials::Credentials;
 use crate::SyncError;
 use coven_crypto::{
     seal_circle_key, seal_store_key, CircleKey, MemberIdentity, SealingKey, StoreKey, StoreKeyring,
@@ -19,29 +20,6 @@ pub(crate) fn introduced(change: &StoreChange) -> Option<(Audience, KeyId)> {
     crate::key_introductions::introduction(change).map(|(audience, key, _)| (audience, key))
 }
 
-pub(crate) fn recipients<'a>(
-    log: &'a StoreLog,
-    audience: &'a Audience,
-) -> impl Iterator<Item = (&'a MemberId, &'a SealingKey)> {
-    log.replay
-        .state
-        .members
-        .iter()
-        .filter_map(move |(id, member)| {
-            let included = !member.removed
-                && match audience {
-                    Audience::Store => true,
-                    Audience::Circle(circle) => {
-                        log.replay.state.circles.get(circle).is_some_and(|state| {
-                            !log.replay.state.circle_deletions.contains_key(circle)
-                                && state.members.contains(id)
-                        })
-                    }
-                };
-            included.then_some((id, &member.keys.sealing))
-        })
-}
-
 pub(crate) fn holds(ring: Option<&StoreKeyring>, audience: &Audience, key: KeyId) -> bool {
     ring.is_some_and(|ring| match audience {
         Audience::Store => ring.store_key_ids().any(|id| id == key),
@@ -57,8 +35,12 @@ pub(crate) fn check_shared_keys(
 ) -> Result<(), SyncError> {
     let needed = needed(log);
     for (audience, key) in needed.keys() {
+        // A binding requires every store key; it shares the circle keys its
+        // author holds, and a current circle member shares the rest (§12.2).
         let sharing = match change {
-            StoreChange::AddMember { .. } => *audience == Audience::Store,
+            StoreChange::AddMember { .. } | StoreChange::ReplaceMemberKeys { .. } => {
+                *audience == Audience::Store
+            }
             StoreChange::AddCircleMember { circle, .. } => *audience == Audience::Circle(*circle),
             _ => false,
         };
@@ -67,6 +49,16 @@ pub(crate) fn check_shared_keys(
         }
     }
     Ok(())
+}
+
+/// Whether a replacement of `member`'s keys first shares this audience's
+/// keys with its candidate: the store's, and those of every circle the member
+/// reads (§11, §12.2).
+fn prerequisite(log: &StoreLog, member: &MemberId, audience: &Audience) -> bool {
+    match audience {
+        Audience::Store => true,
+        Audience::Circle(circle) => log.replay.state.reads_circle(*circle, member),
+    }
 }
 
 pub(crate) fn store_copy(
@@ -127,7 +119,6 @@ pub(crate) fn seal(
             return Err(SyncError::KeyAlreadyUsed(key));
         }
     }
-    let state = &log.replay.state;
     let encryption = if let StoreChange::CreateStore { key, admin, .. } = &entry.change {
         if entry.author != member.member() || *admin != member.keys().public_keys() {
             return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed));
@@ -149,16 +140,26 @@ pub(crate) fn seal(
     };
     let ring = ring.expect("entry holds its encryption key");
     let shared = needed(log);
+    let credentials = Credentials::new(log);
+    // Ordinary sharing reaches a member only at their current non-retired
+    // sealing key; an unroutable member blocks the entry rather than silently
+    // missing their copy (`KeyPhases.MemberKeys.rotationCopies`).
+    let route = |member: &MemberId| {
+        credentials
+            .route(member)
+            .ok_or(SyncError::Rejected(coven_database::DropReason::NotAllowed))
+    };
     let mut needs = Vec::new();
-    let mut need = |audience: Audience, key: KeyId, member: &MemberId, recipient: &SealingKey| {
-        needs.push(KeyCopyPrefix {
+    let need =
+        |audience: Audience, key: KeyId, member: &MemberId, recipient: SealingKey| KeyCopyPrefix {
             audience,
             key,
             member: *member,
-            sealing: *recipient,
-        });
-    };
+            sealing: recipient,
+        };
     match &entry.change {
+        // A binding's prerequisites go to its validated candidate, before the
+        // binding is current (§11, §12.2).
         StoreChange::AddMember {
             member: added,
             keys: recipient,
@@ -166,7 +167,19 @@ pub(crate) fn seal(
         } => {
             for id in ring.store_key_ids() {
                 if accepted(Some(ring), &shared, &Audience::Store, id) {
-                    need(Audience::Store, id, added, &recipient.sealing);
+                    needs.push(need(Audience::Store, id, added, recipient.sealing));
+                }
+            }
+        }
+        StoreChange::ReplaceMemberKeys {
+            member: target,
+            keys: candidate,
+        } => {
+            for (audience, id) in shared.keys() {
+                if prerequisite(log, target, audience)
+                    && accepted(Some(ring), &shared, audience, *id)
+                {
+                    needs.push(need(audience.clone(), *id, target, candidate.sealing));
                 }
             }
         }
@@ -177,7 +190,7 @@ pub(crate) fn seal(
             ..
         } => {
             ring.store_key(*key)?.check_hash(key_hash)?;
-            need(Audience::Store, *key, &entry.author, &admin.sealing);
+            needs.push(need(Audience::Store, *key, &entry.author, admin.sealing));
         }
         StoreChange::CreateCircle {
             circle,
@@ -186,12 +199,12 @@ pub(crate) fn seal(
             ..
         } => {
             ring.circle_key(*circle, *key)?.check_hash(key_hash)?;
-            need(
+            needs.push(need(
                 Audience::Circle(*circle),
                 *key,
                 &entry.author,
-                &member.keys().public_keys().sealing,
-            );
+                route(&entry.author)?,
+            ));
         }
         StoreChange::RotateKey {
             audience,
@@ -202,9 +215,7 @@ pub(crate) fn seal(
                 Audience::Store => ring.store_key(*key)?.check_hash(key_hash)?,
                 Audience::Circle(circle) => ring.circle_key(*circle, *key)?.check_hash(key_hash)?,
             }
-            for (id, recipient) in recipients(log, audience) {
-                need(audience.clone(), *key, id, recipient);
-            }
+            needs.extend(credentials.rotation_copies(audience, *key)?);
         }
         StoreChange::AddCircleMember {
             circle,
@@ -213,12 +224,7 @@ pub(crate) fn seal(
             let audience = Audience::Circle(*circle);
             for id in ring.circle_key_ids(*circle) {
                 if accepted(Some(ring), &shared, &audience, id) {
-                    need(
-                        audience.clone(),
-                        id,
-                        recipient,
-                        &state.members[recipient].keys.sealing,
-                    );
+                    needs.push(need(audience.clone(), id, recipient, route(recipient)?));
                 }
             }
         }
@@ -363,9 +369,7 @@ pub(crate) async fn read_store_key(
     {
         if copy.prefix.audience != Audience::Store
             || copy.prefix.key != key
-            || !copy
-                .prefix
-                .addressed_to(&member.member(), &member.keys().public_keys().sealing)
+            || !copy.prefix.held_by(member)
         {
             continue;
         }

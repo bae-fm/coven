@@ -294,6 +294,13 @@ impl MemberIdentity {
         &self.keys
     }
 
+    /// The held private pair whose sealing key is `sealing`. A copy names the
+    /// exact credential it is sealed to, and opens only with that one, never
+    /// with whichever pair is latest (§11).
+    pub fn credential(&self, sealing: &SealingKey) -> Option<&MemberKeys> {
+        (self.keys.public_keys().sealing == *sealing).then_some(&self.keys)
+    }
+
     /// Encode the id and private pair for identity custody. This custody
     /// encoding is not a restore code (D13).
     pub fn to_secret_bytes(&self) -> SecretBytes {

@@ -72,7 +72,7 @@ pub(crate) fn first_attempt(
     };
     match crate::key_introductions::select(
         &introductions,
-        state,
+        &crate::member_credentials::Credentials::new(log),
         member,
         copies.as_deref(),
         crate::key_introductions::held_hash(Some(ring)),

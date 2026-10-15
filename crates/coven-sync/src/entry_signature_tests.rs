@@ -536,7 +536,7 @@ fn receive(case: &Case, stored: &[u64]) -> Received {
         .map(|audience| {
             crate::key_introductions::select(
                 &introductions,
-                &log.replay.state,
+                &crate::member_credentials::Credentials::new(&log),
                 &history::member(case.me),
                 Some(&prefixes),
                 |audience, key| held.get(&(audience.clone(), key)).copied(),

@@ -94,4 +94,4 @@ pub(crate) fn recorded_signer(
 
 #[cfg(test)]
 #[path = "object_author_tests.rs"]
-mod tests;
+pub(crate) mod tests;

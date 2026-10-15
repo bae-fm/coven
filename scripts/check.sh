@@ -360,9 +360,10 @@ proofs() {
         step "Rust / Lean stable member ids, entry signers and copy credentials"
         COVEN_MEMBER_KEY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             entry_signature::tests::lean_differential_member_keys
-        step "Rust / Lean member-key replacements and old-key write windows"
+        step "Rust / Lean member-key replacements, old-key write windows and copy credentials"
         COVEN_MEMBER_KEY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            object_author::tests::lean_differential_member_key_replacements
+            object_author::tests::lean_differential_member_key_replacements \
+            store_log_sync::tests::member_credentials::lean_differential_member_key_credentials
     fi
 
     if proof_selected storelog-data || crate_selected coven-sync; then

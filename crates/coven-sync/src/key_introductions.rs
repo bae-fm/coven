@@ -1,6 +1,7 @@
 //! Key provenance: authorized received introductions and their agreed
 //! commitments (§11, Appendix C12).
 
+use crate::member_credentials::Credentials;
 use coven_crypto::{SealingKey, StoreKeyring};
 use coven_database::{StoreLog, StoreLogState};
 use coven_format::{sealed_key::KeyCopyPrefix, store_log::StoreChange, value::EntryId};
@@ -159,41 +160,34 @@ pub(crate) fn belongs(state: &StoreLogState, audience: &Audience, member: &Membe
         }
 }
 
-/// Appendix C12 `exposed`: a listed copy of the key addressed to someone outside
-/// its audience, or to a sealing credential that is not its member's current
-/// one (§11). Such a box cannot be opened to check it, so a forged one counts
-/// too; at worst it costs a rotation.
+/// Appendix C12 `exposed` with `MemberKeys.exposed`: a listed copy of the key
+/// that [`Credentials::exposes`].
 pub(crate) fn exposed(
-    state: &StoreLogState,
+    credentials: &Credentials<'_>,
     copies: &[KeyCopyPrefix],
     audience: &Audience,
     key: KeyId,
 ) -> bool {
-    copies.iter().any(|copy| {
-        &copy.audience == audience
-            && copy.key == key
-            && (!belongs(state, audience, &copy.member)
-                || state
-                    .members
-                    .get(&copy.member)
-                    .is_none_or(|member| member.keys.sealing != copy.sealing))
-    })
+    copies
+        .iter()
+        .any(|copy| &copy.audience == audience && copy.key == key && credentials.exposes(copy))
 }
 
-/// Appendix C12 `select`: for a first attempt by `me`, the newest held key whose
-/// hash matches its agreed commitment and that no listed copy exposes, by its
-/// introduction's timestamp. An exposed key is never a fallback. `held` gives
-/// the hash of material in custody for an audience and key id.
+/// Appendix C12 `select` with `MemberKeys.select`: for a first attempt by
+/// `me`, the newest held key whose hash matches its agreed commitment and
+/// that no listed copy exposes, by its introduction's timestamp. An exposed
+/// key is never a fallback. `held` gives the hash of material in custody for
+/// an audience and key id.
 pub(crate) fn select(
     introductions: &[Introduction],
-    state: &StoreLogState,
+    credentials: &Credentials<'_>,
     me: &MemberId,
     copies: Option<&[KeyCopyPrefix]>,
     held: impl Fn(&Audience, KeyId) -> Option<[u8; 32]>,
     audience: &Audience,
 ) -> Result<KeyId, Wait> {
     let copies = copies.ok_or(Wait::Listing)?;
-    if !belongs(state, audience, me) {
+    if !belongs(credentials.state, audience, me) {
         return Err(Wait::Membership);
     }
     introductions
@@ -203,7 +197,7 @@ pub(crate) fn select(
             &i.audience == audience
                 && held(audience, i.key)
                     .is_some_and(|hash| hash_for(introductions, audience, i.key) == Some(hash))
-                && !exposed(state, copies, audience, i.key)
+                && !exposed(credentials, copies, audience, i.key)
         })
         .map(|i| i.key)
         .ok_or(Wait::Key)
@@ -224,4 +218,4 @@ pub(crate) fn held_hash(
 
 #[cfg(test)]
 #[path = "key_introductions_tests.rs"]
-mod tests;
+pub(crate) mod tests;

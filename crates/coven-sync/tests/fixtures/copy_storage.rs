@@ -8,7 +8,7 @@ use coven_storage::{
 use std::sync::Mutex;
 use tokio::sync::Barrier;
 
-pub(super) enum CopyAttempt {
+pub(crate) enum CopyAttempt {
     InterruptOnce,
     LoseReplyOnce,
     FailComparison,
@@ -19,7 +19,7 @@ pub(super) enum CopyAttempt {
     CorruptFor(coven_foundation::id_source::MemberId),
 }
 
-pub(super) struct CopyStorage {
+pub(crate) struct CopyStorage {
     storage: Arc<MemoryStorage>,
     paths: Vec<ObjectPath>,
     action: CopyAttempt,
@@ -27,7 +27,7 @@ pub(super) struct CopyStorage {
 }
 
 impl CopyStorage {
-    pub(super) fn new(
+    pub(crate) fn new(
         storage: Arc<MemoryStorage>,
         paths: Vec<ObjectPath>,
         action: CopyAttempt,
@@ -41,7 +41,7 @@ impl CopyStorage {
     }
 
     /// Every create attempted at a chosen path, in order.
-    pub(super) fn attempts(&self) -> Vec<(ObjectPath, Vec<u8>)> {
+    pub(crate) fn attempts(&self) -> Vec<(ObjectPath, Vec<u8>)> {
         self.attempts.lock().unwrap().clone()
     }
 }

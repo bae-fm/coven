@@ -1,5 +1,5 @@
 import StorelogJson
-import CovenStorelogData.MemberKeySelection
+import CovenStorelogData.MemberKeyPhases
 import CovenStorelog.OldKeyObjects
 
 /-! Compare decoded store-log entries and key-copy routing with the keyed
@@ -8,7 +8,10 @@ signed it and, for creation, addition and replacement, its public pair;
 key-copy recipients carry their member and exact sealing key. Optional
 `received` names the received entry set (all entries by default), and
 optional `writes` are old-key write objects judged by `OldKeyObjects`, with
-`horizon` the stored finality horizon their window verdicts are final by. -/
+`horizon` the stored finality horizon their window verdicts are final by.
+Optional `shares` are `[member, introduction]` historical-sharing requests
+judged by `MemberKeys.shareInReplay` against the given copies; the runner
+evaluates its body, `share` on the one replay it resolves. -/
 open Lean CovenStorelog CovenStorelogData
 
 private def readKeys (j : Json) : Except String CurrentReplay.Keyed.MemberKeys := do
@@ -132,10 +135,36 @@ private def run (j : Json) : Except String Json := do
   let pass : KeySelection.MemberKeys.Pass := ⟨custody, copies⟩
   let who ← StorelogJson.nat j "self"
   let audiences ← j.getObjValAs? (List Nat) "audiences"
+  let audienceOf (a : Nat) : Audience := match a with | 0 => .store | c + 1 => .circle c
   let selected := audiences.map fun a =>
-    let audience : Audience := match a with | 0 => .store | c + 1 => .circle c
-    toJson ((KeySelection.MemberKeys.selectInReplay H W n received pass who audience).map
+    toJson ((KeySelection.MemberKeys.selectInReplay H W n received pass who (audienceOf a)).map
       (·.entry))
+  let retired := KeySelection.MemberKeys.retired H W n r
+  let recipient (copy : KeySelection.Key × KeySelection.MemberKeys.Recipient) : List Nat :=
+    [copy.2.member, copy.2.sealing]
+  -- `MemberKeys.route` for every member with a binding.
+  let routes := sortedPairs (r.state.keys.filterMap fun (m, _) =>
+    (KeySelection.MemberKeys.route r.state retired m).map fun to => [m, to.sealing])
+  -- Whether each copy alone exposes its key: an excluded recipient
+  -- (`KeySelection.exposed`) or a retired or noncurrent credential
+  -- (`MemberKeys.exposed`).
+  let exposes := copies.map fun (key, to) =>
+    KeySelection.exposed (audienceMembers r.state.membership) ⟨custody, [(key, to.member)]⟩ key ||
+      KeySelection.MemberKeys.exposed r.state retired ⟨custody, [(key, to)]⟩ key
+  -- `KeyPhases.MemberKeys.rotationCopies` for a fresh key of each audience.
+  let rotations := audiences.map fun a =>
+    let key : KeySelection.Key := ⟨n, audienceOf a, ⟨0, Vector.replicate 32 0⟩⟩
+    toJson ((KeyPhases.MemberKeys.rotationCopies r.state retired key).map
+      fun copies => sortedPairs (copies.map recipient))
+  let rawShares ← match field? j "shares" with
+    | some list => fromJson? (α := List (List Nat)) list
+    | none => pure []
+  let shared ← rawShares.mapM fun request => do
+    let [member, entry] := request | throw "share needs member and introduction"
+    let key ← introduction entry
+    -- `shareInReplay` is `share` on this replay's state and retired keys.
+    pure (toJson ((KeySelection.MemberKeys.share r.state retired pass member key).map
+      fun after => (after.drop copies.length).map recipient))
   pure (Json.mkObj [
     ("signatures", toJson signatures), ("keys", toJson keys), ("used", toJson used),
     ("members", toJson members),
@@ -144,6 +173,9 @@ private def run (j : Json) : Except String Json := do
     ("current", toJson (copies.map fun (_, recipient) =>
       KeySelection.MemberKeys.currentCredential r.state recipient)),
     ("selected", toJson selected),
+    ("retired", toJson (retired.eraseDups.mergeSort (· ≤ ·))),
+    ("routes", toJson routes), ("exposes", toJson exposes),
+    ("rotations", toJson rotations), ("shared", toJson shared),
     ("authorized", toJson authorized), ("conflicts", toJson conflicts),
     ("writes", toJson judged)])
 

@@ -277,7 +277,7 @@ fn key_audience_contains(
     member: &MemberId,
 ) -> bool {
     use coven_format::store_log::StoreChange;
-    if crate::store_log_keys::recipients(log, audience).any(|(id, _)| id == member) {
+    if crate::key_introductions::belongs(&log.replay.state, audience, member) {
         return true;
     }
     // Membership after the introduction names its initial key recipients.

@@ -28,6 +28,7 @@ mod tests;
 
 mod error;
 mod key_introductions;
+mod member_credentials;
 mod object_author;
 mod object_input;
 mod posted_positions;

@@ -2,7 +2,7 @@
 
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::Error;
-use coven_crypto::{CircleKey, CryptoError, MemberIdentity, SealingKey, StoreKey};
+use coven_crypto::{CircleKey, CryptoError, MemberIdentity, MemberKeys, SealingKey, StoreKey};
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 
@@ -38,6 +38,12 @@ impl KeyCopyPrefix {
     /// sealing key it is sealed to. Matching needs no box opening (§12.2).
     pub fn addressed_to(&self, member: &MemberId, sealing: &SealingKey) -> bool {
         self.member == *member && self.sealing == *sealing
+    }
+
+    /// Whether `member` holds the private credential this copy names: its
+    /// stable id and exact sealing key (§11).
+    pub fn held_by(&self, member: &MemberIdentity) -> bool {
+        self.member == member.member() && member.credential(&self.sealing).is_some()
     }
 
     /// Frame the box produced by crypto with this prefix. Its original random
@@ -111,12 +117,12 @@ impl<'a> SealedKey<'a> {
         member: &MemberIdentity,
         path: &str,
     ) -> Result<StoreKey, CryptoError> {
-        self.check_recipient(member)?;
+        let credential = self.credential(member)?;
         if self.prefix.audience != Audience::Store {
             return Err(CryptoError::KeyIdentity);
         }
         let (prefix, sealed) = self.bytes.split_at(self.prefix.length());
-        let key = member.keys().open_store_key(path, prefix, sealed)?;
+        let key = credential.open_store_key(path, prefix, sealed)?;
         if key.id() != self.prefix.key {
             return Err(CryptoError::KeyIdentity);
         }
@@ -132,26 +138,27 @@ impl<'a> SealedKey<'a> {
         member: &MemberIdentity,
         path: &str,
     ) -> Result<CircleKey, CryptoError> {
-        self.check_recipient(member)?;
+        let credential = self.credential(member)?;
         let Audience::Circle(circle) = self.prefix.audience else {
             return Err(CryptoError::KeyIdentity);
         };
         let (prefix, sealed) = self.bytes.split_at(self.prefix.length());
-        let key = member.keys().open_circle_key(path, prefix, sealed)?;
+        let key = credential.open_circle_key(path, prefix, sealed)?;
         if key.circle() != circle || key.id() != self.prefix.key {
             return Err(CryptoError::KeyIdentity);
         }
         Ok(key)
     }
 
-    fn check_recipient(&self, member: &MemberIdentity) -> Result<(), CryptoError> {
-        if !self
-            .prefix
-            .addressed_to(&member.member(), &member.keys().public_keys().sealing)
-        {
+    /// The member's held private credential this copy names; a copy to the
+    /// member's other credential, or to another member, is not theirs to open.
+    fn credential<'m>(&self, member: &'m MemberIdentity) -> Result<&'m MemberKeys, CryptoError> {
+        if self.prefix.member != member.member() {
             return Err(CryptoError::Authentication);
         }
-        Ok(())
+        member
+            .credential(&self.prefix.sealing)
+            .ok_or(CryptoError::Authentication)
     }
 }
 

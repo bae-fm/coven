@@ -964,6 +964,9 @@ mod objects;
 #[path = "store_log_keys_tests.rs"]
 pub(crate) mod key_distribution;
 
+#[path = "member_credentials_tests.rs"]
+mod member_credentials;
+
 #[path = "operations_tests.rs"]
 pub(crate) mod operations;
 

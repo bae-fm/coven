@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 
+use coven_crypto::{MemberPublicKeys, SealingKey, SigningKey};
 use coven_format::store_log::StoreLogEntry;
 use coven_foundation::id_source::{CircleId, MemberId};
 
@@ -49,6 +50,11 @@ pub enum StoreLogCheck {
     KeysAlreadyUsed,
     /// An authorized device removal, with the owner its author observed.
     DeviceOwner(MemberId),
+    /// An authorized member-key replacement, with the pair its author's view
+    /// bound to the target. A kept replacement retires that pair's sealing
+    /// key: copies to it expose their audience keys (§11,
+    /// `MemberKeys.retired`).
+    KeyReplacement(MemberPublicKeys),
     /// An authorized store or circle member removal. Each circle contained the
     /// removed member in the author's view; the value records whether it deletes
     /// that circle. The map may be empty.
@@ -61,7 +67,10 @@ impl StoreLogCheck {
         match self {
             Self::LandedTooLate { authorized } => *authorized,
             Self::NotAllowed | Self::KeysAlreadyUsed => false,
-            Self::Allowed | Self::DeviceOwner(_) | Self::MemberRemoval(_) => true,
+            Self::Allowed
+            | Self::DeviceOwner(_)
+            | Self::KeyReplacement(_)
+            | Self::MemberRemoval(_) => true,
         }
     }
 
@@ -91,6 +100,12 @@ impl StoreLogCheck {
                 bytes.extend(owner.0.as_bytes());
                 bytes
             }
+            Self::KeyReplacement(previous) => {
+                let mut bytes = vec![6];
+                bytes.extend(previous.signing.as_bytes());
+                bytes.extend(previous.sealing.as_bytes());
+                bytes
+            }
             Self::MemberRemoval(circles) => {
                 let mut bytes = vec![3];
                 for (circle, removal) in circles {
@@ -116,6 +131,15 @@ impl StoreLogCheck {
             [2, owner @ ..] if owner.len() == 16 => Ok(Self::DeviceOwner(MemberId(
                 uuid::Uuid::from_bytes(owner.try_into().expect("checked owner length")),
             ))),
+            [6, pair @ ..] if pair.len() == 64 => {
+                let (signing, sealing) = pair.split_at(32);
+                let signing =
+                    SigningKey::from_bytes(signing.try_into().expect("checked pair length"))
+                        .map_err(|_| DbError::DamagedDatabase)?;
+                let sealing =
+                    SealingKey::from_bytes(sealing.try_into().expect("checked pair length"));
+                Ok(Self::KeyReplacement(MemberPublicKeys { signing, sealing }))
+            }
             [3, circles @ ..] if circles.len().is_multiple_of(17) => {
                 let mut result = BTreeMap::new();
                 for bytes in circles.chunks_exact(17) {

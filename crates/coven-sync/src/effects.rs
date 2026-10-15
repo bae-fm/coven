@@ -214,6 +214,13 @@ fn check_change(view: &StoreLogState, author: &MemberId, change: &StoreChange) -
                 .collect();
             StoreLogCheck::MemberRemoval(circles)
         }
+        // The pair this view binds is the credential a kept replacement
+        // retires (§11, `MemberKeys.retired`).
+        ReplaceMemberKeys { member: target, .. } => StoreLogCheck::KeyReplacement(
+            member(view, target)
+                .expect("authorized replacement target")
+                .keys,
+        ),
         _ => StoreLogCheck::Allowed,
     }
 }

@@ -7,7 +7,7 @@ use coven_database::EntryOutcome;
 use coven_format::store_log::MemberRole;
 
 /// A fresh complete observation, as a new pass would make.
-async fn observed(device: &Device) -> Vec<keys::ObservedCopy> {
+pub(crate) async fn observed(device: &Device) -> Vec<keys::ObservedCopy> {
     let reading = keys::read_copies(
         &device.db,
         &crate::pass_reads::PassReads::default(),
@@ -322,7 +322,7 @@ async fn exposed_store() -> Device {
     ana
 }
 
-async fn finish_rotation(device: &mut Device) {
+pub(crate) async fn finish_rotation(device: &mut Device) {
     for row in device.db.operations().await.unwrap() {
         if row.kind != "rotate-key" {
             continue;

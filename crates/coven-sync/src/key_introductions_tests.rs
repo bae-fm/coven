@@ -10,7 +10,7 @@ use coven_format::store_log::MemberRole;
 use std::time::Duration;
 
 /// The applied log of a history whose entries landed on the given days.
-fn landed_log(h: &History, days: &[u64]) -> StoreLog {
+pub(crate) fn landed_log(h: &History, days: &[u64]) -> StoreLog {
     let publications: BTreeMap<_, _> = h
         .entries
         .iter()
@@ -612,14 +612,14 @@ fn selection_takes_the_newest_held_unexposed_key() {
     let newer = coven_crypto::StoreKey::generate(history::key(10)).unwrap();
     let log = rotations(&older, &newer);
     let introductions = introductions(&log);
-    let state = &log.replay.state;
+    let credentials = crate::member_credentials::Credentials::new(&log);
     let mut ring = coven_crypto::StoreKeyring::new(older.clone());
     ring.insert_store_key(newer.clone()).unwrap();
     let ana = history::member(0);
     let select = |copies: Option<&[KeyCopyPrefix]>, ring: &coven_crypto::StoreKeyring, me| {
         select(
             &introductions,
-            state,
+            &credentials,
             me,
             copies,
             held_hash(Some(ring)),
@@ -813,7 +813,7 @@ fn lean_differential_first_attempts() {
                     .map(|audience| {
                         match select(
                             &introductions,
-                            &log.replay.state,
+                            &crate::member_credentials::Credentials::new(log),
                             &history::member(*me),
                             listing.as_deref(),
                             held,

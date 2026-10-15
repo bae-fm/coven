@@ -74,7 +74,7 @@ impl StoreLogSync {
             // Only a current audience member waits for a copy; a copy addressed
             // to this member that fails its checks is reported either way.
             if matches!(reason, PendingReason::Refused(_))
-                || keys::recipients(log, &audience).any(|(id, _)| *id == me)
+                || crate::key_introductions::belongs(&log.replay.state, &audience, &me)
             {
                 let subject = PendingSubject::KeyCopy {
                     audience,
@@ -217,9 +217,7 @@ impl StoreLogSync {
         {
             if copy.prefix.audience != Audience::Store
                 || copy.prefix.key != key
-                || !copy
-                    .prefix
-                    .addressed_to(&member.member(), &member.keys().public_keys().sealing)
+                || !copy.prefix.held_by(member)
             {
                 continue;
             }
@@ -375,9 +373,7 @@ impl StoreLogSync {
         for copy in copies {
             if copy.prefix.audience != *audience
                 || copy.prefix.key != key
-                || !copy
-                    .prefix
-                    .addressed_to(&member.member(), &member.keys().public_keys().sealing)
+                || !copy.prefix.held_by(member)
             {
                 continue;
             }
@@ -467,11 +463,12 @@ fn check(
     member: &MemberIdentity,
     opened: Opened,
 ) -> Result<(), Refusal> {
+    // The box opened with the held private credential its prefix names.
     if accepts_copy(
         introductions,
         prefix,
         &member.member(),
-        &member.keys().public_keys().sealing,
+        &prefix.sealing,
         &opened,
     ) {
         Ok(())

@@ -674,24 +674,21 @@ impl StoreLogSync {
             return Ok(());
         }
         let storage = self.storage.as_deref().ok_or(SyncError::NoStorage)?;
-        let copies = self.send.observation()?;
+        let copies: Vec<_> = self
+            .send
+            .observation()?
+            .into_iter()
+            .map(|copy| copy.prefix)
+            .collect();
+        let credentials = crate::member_credentials::Credentials::new(log);
         for (audience, key) in needs.keys().cloned() {
             if !crate::key_introductions::accepted(ring.as_ref(), &needs, &audience, key) {
                 tracing::debug!(?audience, ?key, "historical key has not arrived");
                 continue;
             }
             let ring = ring.as_ref().expect("held key has a keyring");
-            for (member, recipient) in keys::recipients(log, &audience) {
-                if copies.iter().any(|copy| {
-                    copy.prefix.audience == audience
-                        && copy.prefix.key == key
-                        && copy.prefix.member == *member
-                }) {
-                    tracing::debug!(?audience, ?key, ?member, "key copy already observed");
-                    continue;
-                }
-                let recipient = *recipient;
-                let member = *member;
+            for copy in credentials.shares(&copies, &audience, key) {
+                let (member, recipient) = (copy.member, copy.sealing);
                 match audience {
                     Audience::Store => {
                         let key = ring.store_key(key)?.clone();

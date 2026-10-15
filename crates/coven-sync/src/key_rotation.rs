@@ -101,7 +101,7 @@ impl StoreLogSync {
         let ring = self.store_keys.read()?;
         match select(
             &introductions(&local.log),
-            &local.log.replay.state,
+            &crate::member_credentials::Credentials::new(&local.log),
             me,
             Some(&copies),
             crate::key_introductions::held_hash(ring.as_ref()),
@@ -171,4 +171,4 @@ impl StoreLogSync {
 
 #[cfg(test)]
 #[path = "key_rotation_tests.rs"]
-mod tests;
+pub(crate) mod tests;

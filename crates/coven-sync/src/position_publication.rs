@@ -285,6 +285,7 @@ impl DeviceLogSync {
         };
         let replay = &local.log.replay.state;
         let introductions = crate::key_introductions::introductions(&local.log);
+        let credentials = crate::member_credentials::Credentials::new(&local.log);
         let me = member.member();
         let audiences = std::iter::once(Audience::Store).chain(
             replay
@@ -297,7 +298,7 @@ impl DeviceLogSync {
             .filter_map(|audience| {
                 let key = crate::key_introductions::select(
                     &introductions,
-                    replay,
+                    &credentials,
                     &me,
                     Some(copies.as_slice()),
                     crate::key_introductions::held_hash(Some(&ring)),

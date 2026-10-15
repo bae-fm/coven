@@ -203,7 +203,7 @@ async fn introductions_refuse_material_that_does_not_match_the_committed_hash() 
 #[path = "../tests/fixtures/copy_storage.rs"]
 mod copy_storage;
 pub(crate) use copy_storage::failing_creation;
-use copy_storage::{CopyAttempt, CopyStorage};
+pub(crate) use copy_storage::{CopyAttempt, CopyStorage};
 
 async fn household(storage: &Arc<MemoryStorage>) -> [Device; 4] {
     let mut ana = device(storage.clone(), 1, member(1), store(1)).await;
@@ -305,7 +305,7 @@ async fn concurrent_addition(
     ([ana, ben, dan, erin], holder_path)
 }
 
-async fn next_copy(storage: &dyn Storage, writer: DeviceId) -> ObjectPath {
+pub(crate) async fn next_copy(storage: &dyn Storage, writer: DeviceId) -> ObjectPath {
     let last = storage
         .list(&ObjectPrefix::keys(store(1)))
         .await
