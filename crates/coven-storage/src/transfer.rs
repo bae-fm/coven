@@ -1,6 +1,21 @@
 use crate::{ObjectPath, Storage, StorageError, StorageFailure};
 use std::future::Future;
 
+/// Most bytes a caller collects in memory for one request body, matching
+/// [`crate::BUFFERED_READ_LIMIT`] for response bodies. A single request
+/// carries its whole body, so an object assembled from a bounded source — a
+/// file read and checked chunk by chunk, a write sealed piece by piece — goes
+/// in one request only up to this, and past it through a recorded session one
+/// part at a time: a large object never has to fit in memory (§16.1).
+pub const BUFFERED_REQUEST_LIMIT: u64 = 32 * 1024 * 1024;
+
+/// The largest assembled object sent in one request: the provider's
+/// single-request limit, within [`BUFFERED_REQUEST_LIMIT`]. The 64-KiB
+/// encryption chunk plays no part; a larger object needs a session (SP).
+pub fn buffered_request_limit(storage: &(impl Storage + ?Sized)) -> u64 {
+    storage.single_request_limit().min(BUFFERED_REQUEST_LIMIT)
+}
+
 /// Route complete bytes through the provider's single-request call or its
 /// recorded-session operations. Callers needing crash continuation use the
 /// session operations directly and persist each returned recording.

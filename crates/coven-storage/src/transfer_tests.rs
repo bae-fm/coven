@@ -39,3 +39,19 @@ async fn create_routes_the_boundary_without_starting_the_unused_request() {
     );
     assert_eq!(storage.read(&path).await.unwrap(), [7; 17]);
 }
+
+#[test]
+fn an_assembled_body_uses_the_providers_limit_within_the_buffered_bound() {
+    for (provider, expected) in [
+        (BUFFERED_REQUEST_LIMIT - 1, BUFFERED_REQUEST_LIMIT - 1),
+        (BUFFERED_REQUEST_LIMIT, BUFFERED_REQUEST_LIMIT),
+        (BUFFERED_REQUEST_LIMIT + 1, BUFFERED_REQUEST_LIMIT),
+        (5 * 1024 * 1024 * 1024, BUFFERED_REQUEST_LIMIT),
+    ] {
+        let storage = MemoryStorage::builder()
+            .transfer_limits(provider, 4)
+            .build()
+            .unwrap();
+        assert_eq!(buffered_request_limit(&storage), expected);
+    }
+}

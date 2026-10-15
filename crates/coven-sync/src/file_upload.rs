@@ -217,8 +217,11 @@ impl FilesInner {
             path: &path,
             total,
         };
-        // A single request is bounded even for providers accepting GiB bodies.
-        if item.session.is_none() && total <= storage.single_request_limit().min(1024 * 1024) {
+        // One request within the provider's limit holds the whole encrypted
+        // file; past the buffered bound a session holds one part at a time.
+        if item.session.is_none()
+            && total <= coven_storage::buffered_request_limit(storage.as_ref())
+        {
             let bytes = transfer.read_encrypted(0, total as usize).await?;
             match storage.create(&path, &bytes).await {
                 Ok(()) => {}

@@ -197,6 +197,17 @@ async fn a_write_exceeds_the_transfer_budget_on_upload_and_download() {
 
 // Inject the provider's failed-call state change; the real upload consumers
 // must record it before returning either failure to their initiator.
+/// A provider whose single-request limit is one encryption chunk, so these
+/// 100-KB writes go up through recorded sessions.
+fn session_storage() -> Arc<MemoryStorage> {
+    Arc::new(
+        MemoryStorage::builder()
+            .transfer_limits(64 * 1024, 64 * 1024)
+            .build()
+            .unwrap(),
+    )
+}
+
 fn conflict(session: &mut UploadSession) -> StorageError {
     let mut recording = serde_json::to_value(&*session).unwrap();
     recording["confirmed"] = serde_json::json!(0);
@@ -217,7 +228,7 @@ fn assert_restart_recorded(session: &UploadSession) {
 
 #[tokio::test]
 async fn write_publication_records_invalidated_session_before_returning_abort_failure() {
-    let storage = storage();
+    let storage = session_storage();
     let mut devices = group(storage.clone(), 1).await;
     devices[0].writes = DeviceLogSync::new(
         Arc::new(BudgetStorage {
@@ -324,7 +335,7 @@ async fn recorded_publication_saves_invalidated_session_on_finish_and_resume_fai
 #[tokio::test]
 async fn occupied_publication_with_failed_cleanup_keeps_the_write_pending() {
     for call in [UploadCall::Begin, UploadCall::Resume, UploadCall::Finish] {
-        let storage = storage();
+        let storage = session_storage();
         let mut devices = group(storage.clone(), 2).await;
         devices[0]
             .db
@@ -383,7 +394,7 @@ async fn occupied_publication_with_failed_cleanup_keeps_the_write_pending() {
 #[tokio::test]
 async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
     for expire in [false, true] {
-        let storage = storage();
+        let storage = session_storage();
         let mut devices = group(storage.clone(), 2).await;
         devices[0]
             .db
@@ -448,7 +459,7 @@ async fn lost_part_replies_and_expired_sessions_preserve_order_and_bytes() {
 #[tokio::test]
 async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() {
     for resume in [false, true] {
-        let storage = storage();
+        let storage = session_storage();
         let mut devices = group(storage.clone(), 2).await;
         devices[0]
             .db
@@ -490,7 +501,7 @@ async fn classified_occupied_paths_count_as_stored_with_and_without_a_session() 
 #[tokio::test]
 async fn a_different_occupant_resets_on_every_arm_and_a_failed_read_stays_pending() {
     for arm in ["single", "begin", "resume", "restart"] {
-        let storage = storage();
+        let storage = session_storage();
         let mut devices = group(storage.clone(), 2).await;
         let body = if arm == "single" { 1 } else { 100_000 };
         devices[0]
@@ -582,5 +593,58 @@ async fn a_completed_catch_up_expires_at_five_minutes_before_an_outside_write_se
             sender.db.test_queued_writes().await.unwrap().len(),
             usize::from(!allowed)
         );
+    }
+}
+
+/// Send one 200-KB write to a provider taking `limit` bytes in one request;
+/// return its stored length and the publication requests it made.
+async fn send_write(limit: u64) -> (u64, Vec<coven_storage::test_utils::MemoryRequest>) {
+    use coven_storage::test_utils::MemoryRequest;
+    let storage = Arc::new(
+        MemoryStorage::builder()
+            .transfer_limits(limit, 64 * 1024)
+            .build()
+            .unwrap(),
+    );
+    let mut devices = group(storage.clone(), 1).await;
+    let body = "x".repeat(200_000);
+    devices[0]
+        .db
+        .write(move |sql| {
+            sql.execute("INSERT INTO notes VALUES('one','title',?1)", [body])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let before = storage.request_trace().len();
+    devices[0].writes.upload_writes().await.unwrap();
+    let sent = storage.request_trace()[before..]
+        .iter()
+        .filter(|request| matches!(request, MemoryRequest::Create(_) | MemoryRequest::Other(_)))
+        .cloned()
+        .collect();
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(1), std::num::NonZeroU64::MIN);
+    (storage.read(&path).await.unwrap().len() as u64, sent)
+}
+
+/// One create carries a write up to the provider's limit, however many
+/// 64-KiB encryption chunks it spans; one byte past it the write goes up in
+/// a recorded session (SP).
+#[tokio::test]
+async fn a_write_goes_in_one_request_up_to_the_providers_limit() {
+    use coven_storage::test_utils::MemoryRequest;
+    let path = ObjectPath::device_log(STORE_ID, DeviceId(1), std::num::NonZeroU64::MIN);
+    let (total, _) = send_write(1024 * 1024).await;
+    assert!(total > 3 * 64 * 1024);
+    for (limit, single) in [(total + 1, true), (total, true), (total - 1, false)] {
+        let (stored, sent) = send_write(limit).await;
+        assert_eq!(stored, total);
+        if single {
+            assert_eq!(sent, [MemoryRequest::Create(path.clone())], "{limit}");
+        } else {
+            assert_eq!(sent.first(), Some(&MemoryRequest::Other("begin_upload")));
+            assert_eq!(sent.last(), Some(&MemoryRequest::Other("finish_upload")));
+            assert!(!sent.contains(&MemoryRequest::Create(path.clone())));
+        }
     }
 }

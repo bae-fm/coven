@@ -3,7 +3,6 @@
 use super::DeviceLogSync;
 use crate::SyncError;
 use coven_database::{DbError, UploadReadError};
-use coven_format::chunks::CHUNK_SIZE;
 use coven_merge::WriteId;
 use coven_storage::{StorageError, StorageFailure, UploadSession};
 use tokio::sync::mpsc;
@@ -76,7 +75,7 @@ impl DeviceLogSync {
                 }
                 Some(session)
             }
-            None if total <= CHUNK_SIZE as u64 && total <= storage.single_request_limit() => None,
+            None if total <= coven_storage::buffered_request_limit(storage) => None,
             None => match storage.begin_upload(&path, total).await {
                 Ok(session) => Some(session),
                 Err(error)

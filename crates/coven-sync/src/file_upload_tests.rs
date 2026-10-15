@@ -907,3 +907,92 @@ mod differential {
         assert_eq!(results, expected);
     }
 }
+
+/// One create carries a file up to the provider's limit, across several
+/// encryption chunks; one byte past it, or past the buffered bound on a
+/// provider accepting more, the file goes up in a recorded session (SP).
+#[tokio::test]
+async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
+    use coven_storage::{test_utils::MemoryRequest, BUFFERED_REQUEST_LIMIT};
+    let encrypted = |plain: usize| {
+        coven_format::file::FileHeader::new(plain as u64)
+            .encrypted_size()
+            .unwrap()
+    };
+    let small = CHUNK * 3 + 18;
+    // Plaintext whose encryption is exactly the buffered bound.
+    let bound = (BUFFERED_REQUEST_LIMIT - 11) as usize / (CHUNK + 16) * CHUNK
+        + ((BUFFERED_REQUEST_LIMIT - 11) as usize % (CHUNK + 16) - 16);
+    assert_eq!(encrypted(bound), BUFFERED_REQUEST_LIMIT);
+    for (plain, limit, single) in [
+        (small, encrypted(small) + 1, true),
+        (small, encrypted(small), true),
+        (small, encrypted(small) - 1, false),
+        (bound, 2 * BUFFERED_REQUEST_LIMIT, true),
+        (bound + 1, 2 * BUFFERED_REQUEST_LIMIT, false),
+    ] {
+        let clock: coven_foundation::clock::ClockRef = std::sync::Arc::new(
+            coven_foundation::clock::FixedClock::new(std::time::SystemTime::UNIX_EPOCH),
+        );
+        let f =
+            Fixture::with_single_limit(Provenance::AppProvided, CacheFill::CacheLazy, clock, limit)
+                .await;
+        let bytes: Vec<u8> = (0..plain).map(|i| (i % 251) as u8).collect();
+        let file = f.attach("files", "song", bytes.clone()).await;
+        let before = f.storage.request_trace().len();
+        f.drain().await;
+        let sent: Vec<_> = f.storage.request_trace()[before..]
+            .iter()
+            .filter(|request| matches!(request, MemoryRequest::Create(_) | MemoryRequest::Other(_)))
+            .cloned()
+            .collect();
+        let path = f.path(&file);
+        if single {
+            assert_eq!(
+                sent,
+                [MemoryRequest::Create(path.clone())],
+                "{plain} {limit}"
+            );
+        } else {
+            assert_eq!(sent.first(), Some(&MemoryRequest::Other("begin_upload")));
+            assert_eq!(sent.last(), Some(&MemoryRequest::Other("finish_upload")));
+            assert!(!sent.contains(&MemoryRequest::Create(path.clone())));
+        }
+        assert!(!f.queued(&file).await);
+        assert_eq!(
+            f.storage.status(&path).await.unwrap().unwrap().size,
+            encrypted(plain)
+        );
+        assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
+        f.close().await;
+    }
+}
+
+/// A one-request retry checks its source again: a changed original sends nothing.
+#[tokio::test]
+async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
+    use coven_storage::test_utils::MemoryRequest;
+    let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    let file = f.original("take", &vec![7; CHUNK - 100]).await;
+    f.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            ..Faults::none()
+        })
+        .await;
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.retry_uploads_now().await.unwrap();
+    assert!(f.queued(&file).await);
+    std::fs::write(f.root.path().join("take"), vec![8; CHUNK - 100]).unwrap();
+    let before = f.storage.request_trace().len();
+    f.files.retry_uploads_now().await.unwrap();
+    assert!(!f.storage.request_trace()[before..]
+        .iter()
+        .any(|request| matches!(request, MemoryRequest::Create(_))));
+    assert!(matches!(
+        f.upload_reason(&file).await,
+        Some(crate::PendingReason::FileUnavailable(_))
+    ));
+    assert!(f.queued(&file).await);
+    f.close().await;
+}

@@ -914,7 +914,8 @@ async fn retries_keep_each_parts_keys_across_store_and_circle_rotations() {
         panic!("three members")
     };
     ana.db.write(|sql| {
-        sql.execute("INSERT INTO notes VALUES('one','public',?1)", ["body".repeat(50_000)])?;
+        // Past the 1-MiB single-request limit, so the lost part reply fails it.
+        sql.execute("INSERT INTO notes VALUES('one','public',?1)", ["body".repeat(300_000)])?;
         sql.execute("INSERT INTO pins VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-0000-0000-00000000000a',?1)", ["private".repeat(20_000)])?;
         Ok(())
     }).await.unwrap();

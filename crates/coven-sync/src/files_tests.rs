@@ -33,6 +33,15 @@ impl Fixture {
         Self::with_clock(provenance, fill, clock).await
     }
     async fn with_clock(provenance: Provenance, fill: CacheFill, clock: ClockRef) -> Self {
+        Self::with_single_limit(provenance, fill, clock, CHUNK as u64).await
+    }
+    /// A provider taking one request up to `single_limit` encrypted bytes.
+    async fn with_single_limit(
+        provenance: Provenance,
+        fill: CacheFill,
+        clock: ClockRef,
+        single_limit: u64,
+    ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
         let layout = StoreLayout::new(root.path().to_owned());
@@ -56,7 +65,7 @@ impl Fixture {
             MemoryStorage::builder()
                 .provider(coven_storage::CloudProvider::Dropbox)
                 .clock(clock.clone())
-                .transfer_limits(CHUNK as u64, CHUNK)
+                .transfer_limits(single_limit, CHUNK)
                 .build()
                 .unwrap(),
         );
