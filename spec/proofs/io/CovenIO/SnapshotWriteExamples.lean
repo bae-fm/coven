@@ -89,7 +89,8 @@ theorem pending_run : SnapshotWrites.Run pending := by
     change writer ≠ 0 at other
     simp [state, oneWriter, audienceOne, Snapshot.position, Ne.symm other, other]))
 
-example : SnapshotWrites.Captured pending audienceOne ∧
+/-- Captured, but not confirmed, so not publishable. -/
+theorem pending_unpublished : SnapshotWrites.Captured pending audienceOne ∧
     ¬ audienceOne.position audienceOne.writer ≤ (pending.logs audienceOne.writer).confirmed ∧
     ¬ SnapshotWrites.Published pending audienceOne := by
   refine ⟨⟨by decide, ?_⟩, by decide, ?_⟩

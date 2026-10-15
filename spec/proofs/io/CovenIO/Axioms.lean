@@ -393,6 +393,7 @@ import CovenIO
 #print axioms CovenIO.SnapshotWriteExamples.first_run
 #print axioms CovenIO.SnapshotWriteExamples.later_run
 #print axioms CovenIO.SnapshotWriteExamples.pending_run
+#print axioms CovenIO.SnapshotWriteExamples.pending_unpublished
 #print axioms CovenIO.SnapshotWriteExamples.two_audience_raise_keeps_circle_part
 #print axioms CovenIO.RaiseCoverage.no_boundary_current
 #print axioms CovenIO.RaiseCoverage.boundary_skips

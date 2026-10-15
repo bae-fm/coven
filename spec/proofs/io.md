@@ -353,10 +353,10 @@ certificate. The existing common-cut safety and termination proofs use these
 derived bounds. Authentication, faithful snapshot contents, decoding and
 retention's absent-object certificate remain explicit source obligations.
 
-`SnapshotWriteExamples.pending_run` checks Ana's two-part write 1, captured in
-the store snapshot while its log path is absent. The request gate refuses it.
-Without that gate the same prefix passes `coveredMiss` while the other audience
-has no snapshot: this is the checked failure of publishing unuploaded coverage.
+`SnapshotWriteExamples.pending_run` reaches Ana's two-part write 1, captured in
+the store snapshot while its log path is absent; `pending_unpublished`: the gate
+refuses it. Without that gate the same prefix passes `coveredMiss` while the other
+audience has no snapshot: the checked failure of publishing unuploaded coverage.
 `two_audience_raise_keeps_circle_part` publishes write 1 first; a loader gets
 its circle part from the actual log. The 2/1 replacement history in
 `replacement_fills_other_audience` also has checked publication/confirmation

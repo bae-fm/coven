@@ -4878,7 +4878,7 @@ Carol's tablet:
     log path is absent: she must upload and confirm write 1 before sending
     the snapshot, so a Gifts loader cannot mistake an unpublished part
     for deleted history
-    ([`pending_run`, `two_audience_raise_keeps_circle_part`](proofs/io/CovenIO/SnapshotWriteExamples.lean)).
+    ([`pending_unpublished`, `two_audience_raise_keeps_circle_part`](proofs/io/CovenIO/SnapshotWriteExamples.lean)).
 - Readers choose by the authenticated prefix; they do not certify a
   snapshot for other devices by opening its body.
 - The *latest* or *current newest* snapshot of an audience is its counting
