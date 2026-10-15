@@ -32,7 +32,7 @@ xmlparser.workspace = true
 objc2.workspace = true
 block2.workspace = true
 objc2-foundation = { workspace = true, features = ["std", "NSArray", "NSDictionary", "NSEnumerator", "NSError", "NSObject", "NSOperation", "NSPredicate", "NSString", "NSURL", "NSDate", "NSValue"] }
-objc2-cloud-kit = { workspace = true, features = ["std", "block2", "CKAcceptSharesOperation", "CKAsset", "CKContainer", "CKDatabase", "CKDatabaseOperation", "CKError", "CKFetchRecordsOperation", "CKFetchShareMetadataOperation", "CKFetchShareParticipantsOperation", "CKModifyRecordsOperation", "CKModifyRecordZonesOperation", "CKOperation", "CKQuery", "CKQueryOperation", "CKRecord", "CKRecordID", "CKRecordZone", "CKRecordZoneID", "CKReference", "CKShare", "CKShareMetadata", "CKShareParticipant", "CKUserIdentity", "CKUserIdentityLookupInfo"] }
+objc2-cloud-kit = { workspace = true, features = ["std", "block2", "CKAcceptSharesOperation", "CKAsset", "CKContainer", "CKDatabase", "CKDatabaseOperation", "CKError", "CKFetchRecordsOperation", "CKFetchRecordZonesOperation", "CKFetchShareMetadataOperation", "CKFetchShareParticipantsOperation", "CKModifyRecordsOperation", "CKModifyRecordZonesOperation", "CKOperation", "CKQuery", "CKQueryOperation", "CKRecord", "CKRecordID", "CKRecordZone", "CKRecordZoneID", "CKReference", "CKShare", "CKShareMetadata", "CKShareParticipant", "CKUserIdentity", "CKUserIdentityLookupInfo"] }
 
 [dev-dependencies]
 coven-format = { workspace = true, features = ["test-utils"] }

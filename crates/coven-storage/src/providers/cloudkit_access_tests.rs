@@ -1,5 +1,5 @@
 use super::*;
-use crate::providers::cloudkit::zone;
+use crate::providers::cloudkit::tests::live_zone;
 use coven_foundation::id_source::{DeviceId, IdSourceRef, StoreId, UuidIds};
 use std::io::BufRead;
 
@@ -19,8 +19,11 @@ async fn cloudkit_live_sharing() {
             use std::io::Write;
             use std::os::unix::fs::OpenOptionsExt;
             let store = StoreId(ids.new_id());
-            let config = zone::prepare("iCloud.fm.bae.desktop", store).await.unwrap();
-            let native = Arc::new(CloudKitStorage::new(config, ids).await.unwrap());
+            let native = Arc::new(
+                live_zone::prepare(store, "cloudkit_live_sharing", ids)
+                    .await
+                    .unwrap(),
+            );
             let storage = StorageConnection::from_provider(native.clone());
             let object = ObjectPath::positions(store, DeviceId(7));
             storage.replace(&object, b"owner").await.unwrap();
@@ -45,7 +48,7 @@ async fn cloudkit_live_sharing() {
             assert_eq!(storage.read(&object).await.unwrap(), b"recipient");
             eprintln!("Tell the recipient to enter revoked. Enter verified after that host verifies access refusal.");
             assert_eq!(lines.next().unwrap().unwrap(), "verified");
-            zone::delete(&native).wait().await.unwrap();
+            live_zone::delete(&native).await.unwrap();
             std::fs::remove_file(handoff).unwrap();
         }
         "recipient" => {

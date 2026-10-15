@@ -2382,7 +2382,12 @@ device log, and the test prints its zone names so a failed run's zones can be
 removed. The rerun passed in 4,057 s, including the one-hour listing margin
 wait, and deleted both test zones. The failed run's zone in
 `iCloud.fm.bae.desktop` (Development) was left behind unnamed and still needs
-removal through CloudKit Console. The two-account
+removal through CloudKit Console. Live tests now mark their zones, and
+the marker-only cleanup then found `_defaultZone` and two unmarked zones,
+`coven-1d0b0aa4-d7b3-49d1-ad86-0fbdd781d625` and
+`coven-30d4c11b-b55c-48aa-bb27-d377656f35ad`, and kept all three: a
+real bae store's zone and an older run's look the same without a marker.
+The two-account
 `cloudkit_live_sharing` test needs a second Mac and iCloud account and was
 not run.
 

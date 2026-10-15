@@ -70,30 +70,3 @@ fn save(container: &CKContainer, name: &str) -> CloudKitRequest<()> {
     });
     CloudKitRequest { operation, result }
 }
-
-#[cfg(test)]
-pub(super) fn delete(storage: &super::CloudKitStorage) -> CloudKitRequest<()> {
-    let (complete, result) = completion();
-    let operation = objc2::rc::autoreleasepool(|_| unsafe {
-        let operation =
-            CKModifyRecordZonesOperation::initWithRecordZonesToSave_recordZoneIDsToDelete(
-                CKModifyRecordZonesOperation::alloc(),
-                None,
-                Some(&NSArray::from_retained_slice(&[storage.zone_id()])),
-            );
-        let callback = RcBlock::new(
-            move |_saved: *mut NSArray<CKRecordZone>,
-                  _deleted: *mut NSArray<CKRecordZoneID>,
-                  failure: *mut NSError| {
-                complete(match error(failure) {
-                    Some(error) => Err(error),
-                    None => Ok(()),
-                });
-            },
-        );
-        operation.setModifyRecordZonesCompletionBlock(Some(&callback));
-        storage.database.addOperation(&operation);
-        operation.into_super().into_super().into_super()
-    });
-    CloudKitRequest { operation, result }
-}

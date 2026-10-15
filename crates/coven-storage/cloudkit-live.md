@@ -7,8 +7,20 @@ ranges, recorded multipart continuation, paginated directory queries, writer
 discovery and deletion. It keeps incomplete uploads pending while checking
 listings, puts unrelated objects in the same zone and a second zone, waits one
 hour before checking completeness, and deletes both test zones after success.
-It is never part of an ordinary cargo test run. A failed assertion leaves the zone
-available for inspection; remove that test zone explicitly after investigating.
+It is never part of an ordinary cargo test run.
+
+The container is the bae app's own, and real stores use the same
+`coven-<store>` zone names, so every live test saves a `CovenLiveTestZone`
+marker record named `coven-live-test-zone` into each zone it creates before
+anything else, naming the test in its `test` field. No store writes that record
+type or name, and a test zone can only be deleted after its marker is read
+back. A failed assertion leaves the zone available for inspection. After
+investigating, run the ignored
+`providers::cloudkit::tests::live_zone::tests::cloudkit_live_remove_leftover_test_zones`
+test from the same host. It deletes only `coven-<store>` zones holding the
+marker, never touches any other zone, and prints each zone it found, deleted
+and kept. Zones from runs before the marker existed carry none and are kept;
+remove those through CloudKit Console.
 
 Use macOS 12 or later, signed in to an iCloud account. The host is an `.app` bundle
 with `CFBundleIdentifier` **`fm.bae.desktop`**, `CFBundlePackageType` **`APPL`**,
@@ -90,6 +102,7 @@ The adapter cannot create indexes through the record framework API.
 | `CovenObject` | `path: String`, `size: String`, `data: Asset`, `upload: String`, `directory1: String` (queryable), `directory2: String` (queryable), `directory3: String` (queryable), `directory4: String` (queryable), `number: String` (queryable) |
 | `CovenUpload` | `path: String`, `total: String`, `confirmed: String`, `state: String`, `owner: Reference` |
 | `CovenAsset` | `data: Asset`, `owner: Reference` |
+| `CovenLiveTestZone` | `test: String` (live tests only) |
 
 `directory1` through `directory4` contain each existing ancestor directory,
 without a trailing slash. For `<store>/snapshots/store/7/2` these are `<store>`,

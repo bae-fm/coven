@@ -16,6 +16,9 @@ use std::{
     time::Duration,
 };
 
+#[path = "cloudkit_live_zone.rs"]
+pub(super) mod live_zone;
+
 fn path() -> ObjectPath {
     ObjectPath::device_log(
         StoreId(uuid::Uuid::from_u128(1)),
@@ -272,16 +275,13 @@ fn native_failures_are_classified_without_discarding_their_cause() {
 async fn cloudkit_live() {
     let ids: IdSourceRef = Arc::new(UuidIds);
     let store = StoreId(ids.new_id());
-    // A failed run keeps its zones for inspection; name them for removal.
-    println!("cloudkit_live zone=coven-{store}");
-    let config = super::zone::prepare("iCloud.fm.bae.desktop", store)
-        .await
-        .unwrap();
+    // A failed run keeps its marked zones for inspection and later cleanup.
     let native = Arc::new(
-        CloudKitStorage::new(config.clone(), ids.clone())
+        live_zone::prepare(store, "cloudkit_live", ids.clone())
             .await
             .unwrap(),
     );
+    let config = native.config();
     let storage = StorageConnection::from_provider(native.clone());
     let first = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
     let positions = ObjectPath::positions(store, DeviceId(7));
@@ -475,7 +475,7 @@ async fn cloudkit_live() {
         );
     }
     discovery.delete_zone().await;
-    super::zone::delete(&native).wait().await.unwrap();
+    live_zone::delete(&native).await.unwrap();
 }
 
 /// Run only from the entitled macOS app described in cloudkit-live.md. The
@@ -485,11 +485,11 @@ async fn cloudkit_live() {
 async fn cloudkit_live_response_evidence() {
     let ids: IdSourceRef = Arc::new(UuidIds);
     let store = StoreId(ids.new_id());
-    println!("cloudkit_live_response_evidence zone=coven-{store}");
-    let config = super::zone::prepare("iCloud.fm.bae.desktop", store)
-        .await
-        .unwrap();
-    let native = Arc::new(CloudKitStorage::new(config, ids.clone()).await.unwrap());
+    let native = Arc::new(
+        live_zone::prepare(store, "cloudkit_live_response_evidence", ids.clone())
+            .await
+            .unwrap(),
+    );
     let storage = StorageConnection::from_provider(native.clone());
     let path = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
     let absent = storage.read(&path).await.unwrap_err();
@@ -500,7 +500,7 @@ async fn cloudkit_live_response_evidence() {
     let occupied = storage.create(&path, b"changed").await.unwrap_err();
     assert_eq!(occupied.failure(), StorageFailure::AlreadyExists);
     assert!(occupied.answered());
-    super::zone::delete(&native).wait().await.unwrap();
+    live_zone::delete(&native).await.unwrap();
     let deleted = storage.read(&path).await.unwrap_err();
     assert_eq!(deleted.failure(), StorageFailure::ContainerNotFound);
     assert!(deleted.answered());
@@ -718,11 +718,7 @@ impl Discovery {
             storage.create(&path, b"other store history").await.unwrap();
         }
         let other_store = StoreId(native.ids.new_id());
-        println!("cloudkit_live other_zone=coven-{other_store}");
-        let config = zone::prepare(&native.container_id, other_store)
-            .await
-            .unwrap();
-        let other_zone = CloudKitStorage::new(config, native.ids.clone())
+        let other_zone = live_zone::prepare(other_store, "cloudkit_live", native.ids.clone())
             .await
             .unwrap();
         // Same store id and an extra writer in another zone must stay invisible.
@@ -828,7 +824,7 @@ impl Discovery {
     }
 
     pub(super) async fn delete_zone(&self) {
-        zone::delete(&self.other_zone).wait().await.unwrap();
+        live_zone::delete(&self.other_zone).await.unwrap();
     }
 }
 
