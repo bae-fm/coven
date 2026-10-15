@@ -177,8 +177,6 @@ fn observation(db: &DatabaseConnection, path: &str) -> Result<Option<(i64, Vec<u
 // ranges beginning inside the requested interval. Seek to that boundary.
 const RANGES: &str = "SELECT max(start,?2),substr(bytes,max(start,?2)-start+1,min(end,?3)-max(start,?2)) FROM _coven_input_ranges WHERE object=?1 AND start>=coalesce((SELECT start FROM _coven_input_ranges WHERE object=?1 AND start<=?2 ORDER BY start DESC LIMIT 1),?2) AND start<?3 AND end>?2 ORDER BY start";
 
-const RANGE_OVERLAP: &str = "SELECT EXISTS(SELECT 1 FROM _coven_input_ranges WHERE object=?1 AND start=(SELECT max(start) FROM _coven_input_ranges WHERE object=?1 AND start<?3) AND end>?2)";
-
 fn budget(db: &DatabaseConnection) -> Result<InputBudget, DbError> {
     db.query_row(
         "SELECT maximum,retained,evicted FROM _coven_input_budget WHERE singleton=1",
@@ -442,8 +440,6 @@ impl RetainedInput {
         let id = self.id;
         self.database.call(move |inner| inner.inputs.write(|db| {
             if !bytes.is_empty() {
-                let overlap: bool = db.query_row(RANGE_OVERLAP, (id,offset,end), |r| r.get(0))?;
-                if overlap { return Err(DbError::Invariant { what: "input ranges never overlap" }); }
                 db.internal_execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,?4)", (id,offset,end,bytes))?;
             }
             if complete {

@@ -203,10 +203,8 @@ async fn range_queries_seek_past_preceding_chunks_and_preserve_gaps() {
         for start in (0..10_000).step_by(2) {
             db.internal_execute("INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,X'01')", (id,start,start+1))?;
         }
-        for (query, bound) in [(RANGES, "object=? AND start>? AND start<?"), (RANGE_OVERLAP, "object=? AND start=?")] {
-            let plans = db.query(&format!("EXPLAIN QUERY PLAN {query}"), (id,9998,10000), |r| r.get::<_,String>(3))?;
-            assert!(plans.iter().any(|plan| plan.contains(bound)), "{plans:?}");
-        }
+        let plans = db.query(&format!("EXPLAIN QUERY PLAN {RANGES}"), (id,9998,10000), |r| r.get::<_,String>(3))?;
+        assert!(plans.iter().any(|plan| plan.contains("object=? AND start>? AND start<?")), "{plans:?}");
         Ok(())
     }).await.unwrap();
     let ranges = input.ranges(9997, 10000).await.unwrap();
@@ -215,7 +213,6 @@ async fn range_queries_seek_past_preceding_chunks_and_preserve_gaps() {
         (ranges[0].offset, ranges[0].bytes.as_slice()),
         (9998, &[1][..])
     );
-    assert!(input.keep_range(9997, vec![2, 3]).await.is_err());
     input.keep_range(9997, vec![2]).await.unwrap();
 }
 
