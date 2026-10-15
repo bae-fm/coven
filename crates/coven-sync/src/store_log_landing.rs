@@ -8,20 +8,18 @@ use coven_storage::Storage;
 use std::collections::BTreeMap;
 
 /// Observe every landing witness after publishing a local entry, including on
-/// a retry whose first publication preceded this call.
+/// a retry whose first publication preceded this call. Entries landing before
+/// this publication decide its lateness; the catch-up that permitted it
+/// retained them, so discovery does not restart (SP step 4).
 pub(crate) async fn observe_publication(
     database: &coven_database::Database,
     reads: &crate::pass_reads::PassReads,
-    limit: std::num::NonZeroUsize,
     store: coven_foundation::id_source::StoreId,
     storage: Option<&dyn Storage>,
     log: &StoreLog,
     entry: EntryId,
 ) -> Result<BTreeMap<EntryId, StorageTime>, SyncError> {
-    // Entries landing before this publication decide its lateness. Other
-    // writers' key-copy observations from this catch-up still stand; this
-    // device's own log gained the entry's prerequisite copies.
-    reads.reset_discovery_of(coven_database::LogKind::Entry);
+    // This device's own log gained the entry's prerequisite copies.
     reads.forget_misses(coven_database::LogKind::KeyCopy, entry.device);
     let storage = storage.ok_or(SyncError::NoStorage)?;
     let path = crate::store_log_object::path(store, entry);
@@ -29,21 +27,11 @@ pub(crate) async fn observe_publication(
         coven_storage::StorageFailure::NotFound
             .with_source("published store-log entry is absent from exact status")
     })?;
-    let mut writers = crate::discovery::writers(database, reads, storage, store).await?;
-    writers.insert(entry.device);
-    let mut objects = crate::discovery::scan(
-        database,
-        reads,
-        storage,
-        store,
-        coven_database::LogKind::Entry,
-        &writers,
-        limit,
-    )
-    .await?
-    .into_iter()
-    .map(|read| read.metadata)
-    .collect();
+    let mut objects = crate::discovery::retained(database, store, coven_database::LogKind::Entry)
+        .await?
+        .into_values()
+        .map(|read| read.metadata)
+        .collect();
     add_observation(&mut objects, published)?;
     publication_times(log, &objects)
 }

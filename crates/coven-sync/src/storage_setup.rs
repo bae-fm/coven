@@ -237,9 +237,9 @@ impl StoreLogSync {
             None => StoreKeyring::new(key),
         };
         let mut creation = Some(entry);
-        if local.log.replay.state.store.is_some() && local.upload.is_none() {
-            // A new access attempt reads every stored witness through the
-            // candidate connection. Reserved attempts retain their recorded past.
+        if local.log.replay.state.store.is_some() {
+            // An access attempt reads every stored witness through the
+            // candidate connection; they decide its lateness.
             ring = self.catch_up_setup(storage.clone(), ring).await?;
             local = self.database.local_store_log().await?;
         }
@@ -315,7 +315,6 @@ impl StoreLogSync {
             let publications = crate::store_log_landing::observe_publication(
                 &self.database,
                 &self.reads,
-                self.download_limit,
                 store_id,
                 Some(storage.as_ref()),
                 &local.log,

@@ -191,7 +191,6 @@ impl StoreLogSync {
                     let publications = crate::store_log_landing::observe_publication(
                         &self.database,
                         &self.reads,
-                        self.download_limit,
                         self.directory.id(),
                         self.storage.as_deref(),
                         &local.log,

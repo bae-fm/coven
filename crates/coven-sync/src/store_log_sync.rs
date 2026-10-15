@@ -223,7 +223,6 @@ impl StoreLogSync {
         change: StoreChange,
     ) -> Result<EntryId, SyncError> {
         let _scope = self.reads.enter();
-        self.reads.reset_discovery();
         if let Some(id) = self.pending_reload().await? {
             return Err(SyncError::ReloadPending(id));
         }
@@ -421,7 +420,6 @@ impl StoreLogSync {
             let publications = crate::store_log_landing::observe_publication(
                 &self.database,
                 &self.reads,
-                self.download_limit,
                 self.directory.id(),
                 self.storage.as_deref(),
                 &local.log,

@@ -684,6 +684,9 @@ async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
         };
         ana.sync.make_and_upload_entry(witness).await.unwrap();
         clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
+        // Ben's catch-up is as old as the storage time since: he reads the
+        // witness before his retry lands.
+        ben.clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
         ben.step(id).await.unwrap();
         ben.step(id).await.unwrap();
         assert_eq!(

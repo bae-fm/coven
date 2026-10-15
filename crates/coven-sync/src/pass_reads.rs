@@ -59,14 +59,6 @@ impl PassReads {
         reads.misses.clear();
     }
 
-    /// Probe one kind of log again, including writers registered since the
-    /// listing, while keeping the other kind's misses from this observation.
-    pub(crate) fn reset_discovery_of(&self, kind: coven_database::LogKind) {
-        let mut reads = self.0.lock().expect("pass reads lock poisoned");
-        reads.writers = None;
-        reads.misses.retain(|(missed, _, _)| *missed != kind);
-    }
-
     /// This device's own publications extend only its own log.
     pub(crate) fn forget_misses(&self, kind: coven_database::LogKind, writer: DeviceId) {
         let mut reads = self.0.lock().expect("pass reads lock poisoned");

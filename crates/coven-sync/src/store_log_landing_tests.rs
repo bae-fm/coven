@@ -11,7 +11,7 @@ use coven_format::{
 use coven_foundation::{clock::FixedClock, id_source::DeviceId};
 use coven_merge::Audience;
 use coven_storage::{
-    test_utils::{Faults, MemoryStorage},
+    test_utils::{Faults, MemoryRequest, MemoryStorage},
     Storage,
 };
 use std::{
@@ -57,7 +57,6 @@ async fn own_publication_is_observed_even_when_the_listing_lags() {
         super::observe_publication(
             &a.db,
             &crate::pass_reads::PassReads::default(),
-            std::num::NonZeroUsize::MIN,
             store(1),
             Some(storage.as_ref()),
             &log,
@@ -66,6 +65,41 @@ async fn own_publication_is_observed_even_when_the_listing_lags() {
         .await
         .is_err(),
         "retained history cannot substitute for exact status"
+    );
+}
+
+/// Own publication updates the catalog without restarting discovery: after
+/// its catch-up, Ben's entry costs its create and one exact status, with no
+/// writer listing and no read of another writer's next entry (SP step 4).
+#[tokio::test]
+async fn own_publication_does_not_restart_entry_discovery() {
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut b = device(storage.clone(), 2, member(1), store(1)).await;
+    a.create(key(1)).await;
+    b.sync().await;
+    b.sync.load_new_device("second", None).await.unwrap();
+    b.catch_up().await;
+    let before = storage.request_trace().len();
+    let created = b
+        .sync
+        .make_and_upload_entry(StoreChange::AddDevice {
+            device: DeviceId(9),
+            name: "new device".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    let requests = &storage.request_trace()[before..];
+    let entry = object::path(store(1), created);
+    assert!(
+        requests.iter().all(|request| match request {
+            MemoryRequest::List(_) => false,
+            MemoryRequest::Read(path, _) => path.store_log_position().is_none(),
+            MemoryRequest::Status(path) => *path == entry,
+            _ => true,
+        }),
+        "{requests:?}"
     );
 }
 
@@ -308,6 +342,24 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
         .load_new_device("delayed writer", None)
         .await
         .unwrap();
+    // Device 2's addition of member 2 is fixed now, before the witness.
+    b.interrupt_entry(2).await;
+    let addition = StoreChange::AddMember {
+        member: member(2).member(),
+        keys: public(&member(2)),
+        role: MemberRole::Member,
+        access: coven_format::MemberAccess::ProviderAccount("member2@example.org".into()),
+    };
+    assert!(b.sync.make_and_upload_entry(addition).await.is_err());
+    b.restore_storage();
+    let late =
+        b.db.local_store_log()
+            .await
+            .unwrap()
+            .upload
+            .unwrap()
+            .entry
+            .position;
     // Writer 3 has no membership authority, but publishes a correctly signed
     // entry. Writer 2's delayed addition is decoded and consumed before it.
     let witness = StoreLogEntry {
@@ -338,21 +390,15 @@ async fn a_dropped_witness_arriving_after_the_late_entry_cannot_grant_authority(
         .create(&object::path(store(1), witness.position), &bytes)
         .await
         .unwrap();
+    // The retry lands at day 32, after a catch-up that reads the witness;
+    // the addition never read it, so it landed too late (§9).
     clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
-    assert!(matches!(
-        b.sync
-            .make_and_upload_entry(StoreChange::AddMember {
-                member: member(2).member(),
-                keys: public(&member(2)),
-                role: MemberRole::Member,
-                access: coven_format::MemberAccess::ProviderAccount("member2@example.org".into()),
-            })
-            .await,
-        Err(SyncError::Rejected(
-            coven_database::DropReason::LandedTooLate
-        ))
-    ));
-    let late = b.log().await.entries.last().unwrap().entry.position;
+    b.clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
+    b.sync().await;
+    assert_eq!(
+        b.log().await.replay.entries[&late],
+        EntryOutcome::Dropped(coven_database::DropReason::LandedTooLate)
+    );
     let mut c = device(storage.clone(), 4, member(1), store(1)).await;
     c.sync().await;
     let log = c.log().await;
@@ -840,7 +886,6 @@ async fn a_republished_entry_observation_is_a_provider_protocol_failure() {
         super::observe_publication(
             &a.db,
             &crate::pass_reads::PassReads::default(),
-            std::num::NonZeroUsize::MIN,
             store(1),
             Some(storage.as_ref()),
             &a.log().await,
