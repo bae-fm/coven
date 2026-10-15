@@ -38,3 +38,6 @@ import CovenMerge.LocalUpdateAction
 import CovenMerge.OwnerAdmission
 import CovenMerge.OwnerForeignKeyExamples
 import CovenMerge.OwnerTransientForeignKey
+import CovenMerge.ForeignKeyClassification
+import CovenMerge.OwnerMoves
+import CovenMerge.OwnerSnapshotAuthors

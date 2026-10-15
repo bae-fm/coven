@@ -304,6 +304,34 @@ open CovenMerge
 #print axioms Ownership.TransientForeignKey.changed_trace_refused
 #print axioms Ownership.TransientForeignKey.applied
 #print axioms Ownership.TransientForeignKey.dropped_root_reverses
+-- receivers classify steps without labels (§8.8, D5)
+#print axioms Ownership.Classification.action_iff
+#print axioms Ownership.Classification.action_classified
+#print axioms Ownership.Classification.direct_was_direct
+#print axioms Ownership.Classification.edge_exact
+#print axioms Ownership.Classification.certificate
+#print axioms Ownership.Classification.every_step_rooted
+#print axioms Ownership.Classification.forbidden_row_needs_action
+#print axioms Ownership.Classification.follows_cause
+#print axioms Ownership.Classification.TriggerFirst.faithful
+#print axioms Ownership.Classification.TriggerFirst.trigger_classified_as_action
+#print axioms Ownership.Classification.FollowBack.faithful
+#print axioms Ownership.Classification.FollowBack.replayed_classifies
+#print axioms Ownership.Classification.FollowBack.start_view_refuses_cascade
+#print axioms Ownership.Classification.Retarget.faithful
+#print axioms Ownership.Classification.Retarget.values_accept_retarget
+#print axioms Ownership.Classification.Retarget.parents_refuse_retarget
+-- moving owned rows and what they carry (§8.8, §14.2)
+#print axioms Ownership.Moves.refused_iff
+#print axioms Ownership.Moves.carried_foreign_refuses
+#print axioms Ownership.Moves.copy_refused
+#print axioms Ownership.Moves.admitted_permitted
+#print axioms Ownership.Moves.Album.foreign_track_refuses
+-- authorship a snapshot carries (§15, D7)
+#print axioms Ownership.SnapshotAuthors.own_writes_signers
+#print axioms Ownership.SnapshotAuthors.owner_true
+#print axioms Ownership.SnapshotAuthors.Replaced.valid
+#print axioms Ownership.SnapshotAuthors.Replaced.own_write_after_replacement
 -- foreign keys on generated columns (§8.4)
 #print axioms GeneratedReference.grouped_cells_share_winner
 #print axioms GeneratedReference.accepted_reference_written

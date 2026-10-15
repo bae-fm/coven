@@ -2855,6 +2855,13 @@ Carol's tablet:
     write's direct changes and verified authoring inputs. They do not trust
     a claimed direct/derived label, target, generation, scalar patch or cause
     list. Shared-trigger effects remain direct targets.
+  - A step is a foreign-key action exactly when it equals, with the parent
+    each written reference names, the schema's consequence of an earlier
+    step of the write through a reference its row holds at that moment: the
+    authoring view replayed through the write's earlier steps. Every other
+    step is direct. A trigger's step that equals such a consequence, made
+    before SQLite's action reaches the row, is that action's exact effect and
+    counts as it ([B18](proofs/merge.md#b18-owner-tables-and-row-authenticity)).
   - Match the exact row, generation, operation and every changed column and
     value, including all components of a compound key. Several actions on
     one row must match their complete combined effect in original execution

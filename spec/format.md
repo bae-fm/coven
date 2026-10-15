@@ -286,7 +286,10 @@
     this audience in the same write start at the generation the move began.
   - No step says whether a statement, a trigger or a foreign-key action
     made it. A receiver reconstructs that from the original schema and the
-    steps themselves, never from a sender's label or cause list (§8.8).
+    steps themselves, never from a sender's label or cause list (§8.8):
+    comparing whole steps, with their columns' parents, against consequences
+    of earlier steps through the references replayed up to each step
+    ([`action_iff`, `follows_cause`](proofs/merge/CovenMerge/ForeignKeyClassification.lean)).
   - `Execution`'s sources are the generation source and replaced setters the
     steps used beyond those the net change already names, in the same role
     order. A change coven made without SQL has no steps: an audience move,

@@ -1204,6 +1204,86 @@ original setter when that cause drops. The same SQL statement sequence was
 also executed against SQLite in memory; the Lean example uses the resulting
 execution inputs, not a proved SQL interpreter.
 
+**Telling actions from direct targets without labels.** A write lists its
+SQL operations as steps and never says what made one (D5).
+`ForeignKeyClassification.lean` models one write's steps in execution order
+together with the references each row holds just before each step: the
+authoring view, replayed through the write's earlier steps. `action_iff`
+states the receiver's rule: a step is a foreign-key action exactly when it
+equals the schema's consequence of an earlier step through a reference its
+row holds at that moment. `cause` names the nearest such step. The rule reads
+only the steps, the replayed references and the schema.
+
+`Faithful` states what SQLite does at the extraction boundary: each action it
+runs is the consequence of its cause through the reference the child holds
+when the action reaches it. Under it, `action_classified` proves every real
+action is classified as one, so an honest author's cascade is never refused
+as a direct edit, and `direct_was_direct` proves that a step classified as
+direct was made by a statement or a trigger. `certificate` builds, for every
+step, a finite derivation in B18's model that `evaluate` maps exactly to that
+step, rooted only in steps classified as direct; `edge_exact` ties each edge
+to a real schema consequence. `every_step_rooted` composes this with the
+direct permission: when every step classified as direct is on a row its
+writer may change, every step of the write, also one on another member's row,
+is an exact chain of consequences from such steps.
+`forbidden_row_needs_action` is the converse view: a step on a row the writer
+may not change is admitted only as an action.
+
+Three checked histories bound the rule; each was also run on SQLite.
+`TriggerFirst`: Ben deletes his track; the cascade deletes Ana's first review,
+and a shared AFTER DELETE trigger fired by that deletion deletes her second
+review before the cascade reaches it. `trigger_classified_as_action` shows
+the trigger's step is classified as the track deletion's action. Its payload
+is exactly the action's, so no rule reading only steps can tell them apart; a
+receiver accepts nothing the schema would not have done. The author's own
+SQLite still knows a trigger made it and refuses the write locally. So
+"foreign-key action" on receipt means "the schema's exact consequence", and a
+shared trigger's step stays direct whenever it differs from every
+consequence. `FollowBack`: Ben changes his track's referenced code and back,
+and Ana's review follows both times. `start_view_refuses_cascade` shows that
+references read from the view before the write began classify the second
+cascade as a direct edit, refusing an honest write; `replayed_classifies`
+accepts both with references replayed through the earlier steps. `Retarget`:
+after the follow-back Ben inserts another track holding the first code and
+then sets Ana's review to that code himself. `values_accept_retarget` shows
+that comparing values alone classifies his edit as the first cascade, one the
+review had already taken, though it points her review at another track.
+`parents_refuse_retarget` compares each step's named parents too (D5
+`ColumnValue.parents`) and keeps the edit direct. `follows_cause` proves the
+general fact: with named parents compared, a classified action names in
+every reference it writes exactly the row and incarnation whose step caused
+it, so an action cannot point a row at another parent. Like `consequence`,
+these histories update a referenced key in place. Coven references only
+primary keys and turns a key change into a delete and an insert (§8.5), so the
+action names the inserted row, and a reference to the old key names an
+incarnation that ended; that refuses `Retarget`'s edit even before parents are
+compared. `FollowBack` holds either way: the second cascade's cause is a step
+on the inserted row, which the view at the write's start never names.
+
+**Moving owned rows.** `OwnerMoves.lean` treats every row a move carries as
+a copy: a direct change of the mover's write, made without SQL, keeping its
+original creation. `refused_iff` proves a move is permitted exactly when its
+writer may change every present row the declared audience parent carries,
+the root included; `carried_foreign_refuses` refuses Ben's move of his own
+album while it carries Ana's track (`Album.foreign_track_refuses`).
+`copy_refused` proves such a copy fails `Admission.check` whatever origin a
+sender proposes, and its loss names the original owner; `admitted_permitted`
+proves admitted copies mean a permitted move.
+
+**Authorship a snapshot carries.** `OwnerSnapshotAuthors.lean` models what a
+loader knows about a snapshot's author: its device, the key its signature
+verified with and, once registered, the device's member. A device belongs to
+one member for good and every key binding is kept (§9, §10). D7 section 7
+needs evidence for a write unless it is from the snapshot's own device or,
+with the signer's member known, from that member's device.
+`own_writes_signers` proves such a write's author is the snapshot's signer and
+its signing key binds that same member, also when it differs from the
+snapshot's key after a replacement (`Replaced.own_write_after_replacement`).
+`owner_true` proves the owner a loader computes for an accepted creation is
+the write's true author, and unless that owner is the signer, the write's
+signed body contains this row's creation (`owned_row_true_author`). A snapshot
+can attribute rows without evidence only to its own signer.
+
 **Retained guarantees and scope.** `Ownership.value_accounted` extends B14
 to every original setter: it has an ordinary accounting outcome or its original
 value in a rejected-change loss. `originalCell`, `setter_has_cell_leaf` and
@@ -1219,7 +1299,10 @@ Audience-move destination readability remains separately proved by
 membership. It confers no permission to forge a child's values. Owner identity
 travels with copies. Transporting snapshots, discovering unreadable evidence,
 SQL capture, local commit rollback, schema conversion, and atomic installation
-remain implementation obligations.
+remain implementation obligations. So do the replayed references and the
+parents each step names: `Trace.refs` and `Step.parents` are inputs, and the
+receiver must check that a step's named parent holds the written key at that
+moment, as B18 already requires resolved row identities.
 
 **Rust differentials.** `MergeRunner`'s `creation` mode reports each row's
 `genWrite r 1`, the creation `selected_creation` characterizes.
@@ -1231,8 +1314,9 @@ The `effects` mode evaluates `resolvedSchema` derivations with `evaluate` and
 referenced-key updates and compound and transitive actions on SQLite,
 rebuilds each captured foreign-key action's `Reference` from the schema and
 its cause's own captured step, and requires the model's exact consequence.
-That checks the author's capture against B18's effects; the receiver's
-reconstruction of those causes without labels is not yet compared.
+That checks the author's capture against B18's effects. The receiver's
+label-free rule is proved above; its Rust implementation is not yet compared
+with `cause`.
 The `admission` mode decides `Admission.check` for one local write, given
 each changed row's table and owner. `local_admission_matches_the_model` runs
 Ben's statements against Ana's rows on SQLite: an authorized cascade, a key

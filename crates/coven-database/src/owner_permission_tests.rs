@@ -444,3 +444,267 @@ async fn moving_another_members_row_is_a_direct_change_of_it() {
     assert_eq!(copy.creator.unwrap().row.audience, Audience::Store);
     pair.close().await;
 }
+
+/// Ben's album carries Ana's track through its audience foreign key. Moving
+/// the album copies the track too, a direct change of her row, so Ben cannot
+/// move it while her track is in it; his own album and track move together,
+/// each copy naming its original creation (§8.8, §14.2; Lean
+/// `Moves.carried_foreign_refuses`).
+#[tokio::test]
+async fn moving_a_row_that_carries_another_members_row_is_refused() {
+    const BENS: &str = "00000000-0000-4000-8000-0000000000b1";
+    const OTHER: &str = "00000000-0000-4000-8000-0000000000b2";
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    let pair = Pair::with(
+        vec![
+            SyncedTable::new("albums", RowIdentity::IndependentUuid)
+                .owner_only()
+                .audience_column("audience"),
+            SyncedTable::new("tracks", RowIdentity::IndependentUuid)
+                .owner_only()
+                .audience_from("album"),
+        ],
+        "CREATE TABLE albums(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL);
+         CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, album TEXT NOT NULL REFERENCES albums(id) ON DELETE CASCADE)",
+    )
+    .await;
+    pair.circle(circle);
+    sql(
+        &pair.ben,
+        "INSERT INTO albums VALUES('00000000-0000-4000-8000-0000000000b1','store'),('00000000-0000-4000-8000-0000000000b2','store');
+         INSERT INTO tracks VALUES('00000000-0000-4000-8000-0000000000c2','00000000-0000-4000-8000-0000000000b2')",
+    )
+    .await
+    .unwrap();
+    deliver(&pair.ben, &pair.ana).await;
+    sql(
+        &pair.ana,
+        "INSERT INTO tracks VALUES('00000000-0000-4000-8000-0000000000a1','00000000-0000-4000-8000-0000000000b1')",
+    )
+    .await
+    .unwrap();
+    deliver(&pair.ana, &pair.ben).await;
+    let queued = records(&pair.ben).len();
+    let audience = circle.to_string();
+    let error = pair
+        .ben
+        .write(move |sql| {
+            sql.execute(
+                "UPDATE albums SET audience=?1 WHERE id=?2",
+                [audience.as_str(), BENS],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap_err();
+    refused_for(error, "tracks", ANA);
+    assert_eq!(records(&pair.ben).len(), queued);
+    assert_eq!(
+        value(
+            &pair.ben,
+            "SELECT audience FROM albums WHERE id='00000000-0000-4000-8000-0000000000b1'"
+        ),
+        Some("store".into())
+    );
+    let audience = circle.to_string();
+    pair.ben
+        .write(move |sql| {
+            sql.execute(
+                "UPDATE albums SET audience=?1 WHERE id=?2",
+                [audience.as_str(), OTHER],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    let copies: Vec<_> = records(&pair.ben)
+        .pop()
+        .unwrap()
+        .parts
+        .into_iter()
+        .flat_map(|part| part.rows)
+        .filter_map(|change| change.creator.map(|creator| (change.row, creator)))
+        .collect();
+    assert_eq!(
+        copies
+            .iter()
+            .map(|(row, _)| row.table.as_str())
+            .collect::<Vec<_>>(),
+        ["albums", "tracks"]
+    );
+    for (row, creator) in copies {
+        assert_eq!(row.audience, Audience::Circle(circle));
+        assert_eq!(creator.row.audience, Audience::Store);
+        assert_eq!(creator.row.key, row.key);
+    }
+    pair.close().await;
+}
+
+/// Ben's tracks are in the store; Ana's reviews of them are in their circle.
+/// Deleting one track and changing the other's key reach her reviews
+/// through CASCADE and SET NULL: authorized actions, carried in the
+/// circle's part of Ben's write, which Ana's device applies (§8.8, §14).
+#[tokio::test]
+async fn foreign_key_actions_reach_rows_in_another_audience() {
+    const DELETED: &str = "00000000-0000-4000-8000-0000000000d1";
+    const NULLED: &str = "00000000-0000-4000-8000-0000000000d2";
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    let pair = Pair::with(
+        vec![
+            SyncedTable::new("tracks", RowIdentity::SharedKey).owner_only(),
+            SyncedTable::new("reviews", RowIdentity::IndependentUuid)
+                .owner_only()
+                .audience_column("audience"),
+        ],
+        "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY);
+         CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, audience TEXT NOT NULL,
+           track TEXT REFERENCES tracks(id) ON DELETE CASCADE ON UPDATE SET NULL)",
+    )
+    .await;
+    pair.circle(circle);
+    sql(&pair.ben, "INSERT INTO tracks VALUES('t'),('u')")
+        .await
+        .unwrap();
+    deliver(&pair.ben, &pair.ana).await;
+    let audience = circle.to_string();
+    pair.ana
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO reviews VALUES(?1,?3,'t'),(?2,?3,'u')",
+                [DELETED, NULLED, audience.as_str()],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    deliver(&pair.ana, &pair.ben).await;
+    // A direct edit of her review is still refused across audiences.
+    refused_for(
+        sql(&pair.ben, "UPDATE reviews SET track=NULL")
+            .await
+            .unwrap_err(),
+        "reviews",
+        ANA,
+    );
+    sql(
+        &pair.ben,
+        "DELETE FROM tracks WHERE id='t'; UPDATE tracks SET id='v' WHERE id='u'",
+    )
+    .await
+    .unwrap();
+    let record = records(&pair.ben).pop().unwrap();
+    let tables = |audience: Audience| -> Vec<String> {
+        record
+            .parts
+            .iter()
+            .filter(|part| part.audience == audience)
+            .flat_map(|part| &part.rows)
+            .map(|change| change.row.table.clone())
+            .collect()
+    };
+    assert_eq!(tables(Audience::Store), ["tracks", "tracks", "tracks"]);
+    assert_eq!(tables(Audience::Circle(circle)), ["reviews", "reviews"]);
+    deliver(&pair.ben, &pair.ana).await;
+    for db in [&pair.ben, &pair.ana] {
+        assert_eq!(count(db, "reviews"), 1);
+        assert_eq!(
+            value(
+                db,
+                "SELECT track FROM reviews WHERE id='00000000-0000-4000-8000-0000000000d2'"
+            ),
+            None
+        );
+        assert_eq!(
+            value(db, "SELECT audience FROM reviews"),
+            Some(circle.to_string())
+        );
+    }
+    assert!(pair.ana.lost_values().await.unwrap().is_empty());
+    pair.close().await;
+}
+
+/// Labels contest one slot, and one member's label is removed; only its
+/// owner may delete it by dismissing that loss. A migration that drops a
+/// column then freezes the removed row's values. The other member may dismiss
+/// the frozen loss: that changes no row and leaves the row's creation as it
+/// was (§8.8, §17.1, E4).
+#[tokio::test]
+async fn dismissing_a_frozen_loss_rewrites_no_row() {
+    const LABELS: &str =
+        "CREATE TABLE labels(id TEXT NOT NULL PRIMARY KEY, slot TEXT NOT NULL UNIQUE, note TEXT)";
+    let tables = || vec![SyncedTable::new("labels", RowIdentity::SharedKey).owner_only()];
+    let ids = SequentialIds::new();
+    let stores = [TestStore::with_ids(&ids), TestStore::with_ids(&ids)];
+    let ana = stores[0].schema(tables(), LABELS).await.unwrap();
+    let ben = stores[1].schema(tables(), LABELS).await.unwrap();
+    for db in [&ana, &ben] {
+        TestStore::register(db, stores[0].device(), ANA);
+        TestStore::register(db, stores[1].device(), BEN);
+    }
+    sql(&ana, "INSERT INTO labels VALUES('ana','same','hers')")
+        .await
+        .unwrap();
+    sql(&ben, "INSERT INTO labels VALUES('ben','same','his')")
+        .await
+        .unwrap();
+    deliver(&ana, &ben).await;
+    deliver(&ben, &ana).await;
+    let removed = ben.lost_values().await.unwrap();
+    assert_eq!(removed.len(), 1, "{removed:?}");
+    let crate::lost::LossTarget::Removed { row, .. } = removed[0].target.clone() else {
+        panic!("{removed:?}")
+    };
+    let (owner, other) = if removed[0].key.0[0] == rusqlite::types::Value::Text("ana".into()) {
+        (ANA, 1)
+    } else {
+        (BEN, 0)
+    };
+    let (db, owners) = if other == 1 { (ben, ana) } else { (ana, ben) };
+    owners.close().await.unwrap();
+    refused_for(
+        crate::tests::database_error(db.dismiss_lost_values(&removed).await.unwrap_err()),
+        "labels",
+        owner,
+    );
+    let creation =
+        |db: &Database| db.inspect_writer(|c| crate::ownership::creation(c, &row).unwrap());
+    let created = creation(&db);
+    assert!(created.is_some());
+    db.close().await.unwrap();
+    let db = stores[other]
+        .builder(
+            tables(),
+            vec![
+                crate::Migration::sql(1, "schema", LABELS),
+                crate::Migration::sql(2, "drop note", "ALTER TABLE labels DROP COLUMN note"),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    let frozen = db.lost_values().await.unwrap();
+    assert_eq!(frozen.len(), 1, "{frozen:#?}");
+    assert!(matches!(
+        frozen[0].target,
+        crate::lost::LossTarget::Cells(_)
+    ));
+    assert_eq!(creation(&db), created);
+    let rows = count(&db, "labels");
+    let queued = records(&db).len();
+    db.dismiss_lost_values(&frozen).await.unwrap();
+    let all = records(&db);
+    assert_eq!(all.len(), queued + 1);
+    let dismissal = all.last().unwrap();
+    assert!(dismissal
+        .parts
+        .iter()
+        .all(|part| part.rows.is_empty() && part.executions.is_empty()));
+    assert!(dismissal
+        .parts
+        .iter()
+        .any(|part| !part.dismissals.is_empty()));
+    assert!(db.lost_values().await.unwrap().is_empty());
+    assert_eq!(creation(&db), created);
+    assert_eq!(count(&db, "labels"), rows);
+    db.close().await.unwrap();
+}

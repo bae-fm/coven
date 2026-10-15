@@ -57,6 +57,8 @@ pub(crate) struct Network {
     root: tempfile::TempDir,
     pub(crate) clock: Arc<FixedClock>,
     ids: IdSourceRef,
+    /// The synced tables and migrations every device opens with.
+    schema: (Vec<SyncedTable>, Vec<Migration>),
     pub(crate) devices: Vec<Device>,
     _sign_in: Option<crate::authentication::SignIn>,
 }
@@ -159,8 +161,8 @@ impl Network {
             ids.clone(),
             storage.clone(),
         )
-        .synced_tables(tables)
-        .migrations(migrations);
+        .synced_tables(tables.clone())
+        .migrations(migrations.clone());
         let (builder, sign_in) = if matches!(
             provider,
             CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
@@ -202,6 +204,7 @@ impl Network {
             root,
             clock,
             ids,
+            schema: (tables, migrations),
             devices: vec![Device {
                 app,
                 layout: initial_layout,
@@ -214,12 +217,20 @@ impl Network {
         network
     }
     async fn join(&mut self, index: usize) {
+        self.join_as(
+            index,
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
+        )
+        .await;
+    }
+    /// Join device `index` through an invite for `target`, approved by device 0.
+    pub(crate) async fn join_as(&mut self, index: usize, target: InviteTarget) {
         let owner = &self.devices[0].handle;
         let invite = owner
             .create_invite(
-                InviteTarget::NewMember {
-                    role: MemberRole::Member,
-                },
+                target,
                 InviteAccess::S3AccessKey {
                     access_key_id: format!("member-{index}"),
                     secret_access_key: SecretText::new("secret".into()),
@@ -239,7 +250,9 @@ impl Network {
                 self.clock.clone(),
                 self.ids.clone(),
                 storage.clone(),
-            ),
+            )
+            .synced_tables(self.schema.0.clone())
+            .migrations(self.schema.1.clone()),
             &invite.code,
             &name,
             |_| {},
@@ -392,6 +405,8 @@ impl Network {
             self.ids.clone(),
             device.storage.clone(),
         )
+        .synced_tables(self.schema.0.clone())
+        .migrations(self.schema.1.clone())
     }
     pub(crate) async fn close(self) {
         for device in self.devices {

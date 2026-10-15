@@ -160,3 +160,126 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     restored.close().await.unwrap();
     owner.close().await;
 }
+
+/// An owned row's owner is a member id, which a key replacement keeps (§8.8, §9).
+mod owner_identity {
+    use crate::tests::Network;
+    use crate::*;
+
+    const NOTES: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL)";
+
+    async fn owned_notes() -> Network {
+        Network::with_schema(
+            CloudProvider::S3,
+            vec![SyncedTable::new("notes", RowIdentity::SharedKey).owner_only()],
+            vec![Migration::sql(1, "notes", NOTES)],
+        )
+        .await
+    }
+
+    async fn own_id(handle: &CovenHandle) -> MemberId {
+        handle
+            .members()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.is_self)
+            .unwrap()
+            .id
+    }
+
+    async fn title(handle: &CovenHandle) -> String {
+        handle
+            .read(|sql| {
+                Ok(sql.query_row("SELECT title FROM notes WHERE id='carol'", [], |r| r.get(0))?)
+            })
+            .await
+            .unwrap()
+    }
+
+    async fn rename(handle: &CovenHandle, title: &'static str) -> CovenResult<()> {
+        handle
+            .write(move |sql| {
+                sql.execute("UPDATE notes SET title=?1 WHERE id='carol'", [title])?;
+                Ok(())
+            })
+            .await
+    }
+
+    /// The refusal of a direct edit names the row's owner.
+    fn refused_naming(result: CovenResult<()>, owner: MemberId) {
+        match result {
+            Err(CovenError::Database(DbError::NotOwner {
+                table,
+                owner: named,
+                ..
+            })) => {
+                assert_eq!((table.as_str(), named), ("notes", owner));
+            }
+            other => panic!("expected NotOwner, got {other:?}"),
+        }
+    }
+
+    /// Carol creates a note, then loses her only installation. Ana's recovery
+    /// invite binds fresh keys to Carol's id on a new device. The note stays
+    /// Carol's: her new device edits it, Ana's edits are refused naming the same
+    /// member before and after, and Ana's device applies Carol's edit.
+    #[tokio::test]
+    async fn owned_rows_keep_their_member_across_key_replacement() {
+        let mut network = owned_notes().await;
+        network
+            .join_as(
+                1,
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                },
+            )
+            .await;
+        let carol = own_id(&network.devices[1].handle).await;
+        network.devices[1]
+            .handle
+            .write(|sql| {
+                sql.execute("INSERT INTO notes VALUES('carol','first')", [])?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        network.sync(1).await;
+        network.sync(0).await;
+        let ana = &network.devices[0].handle;
+        assert_eq!(title(ana).await, "first");
+        refused_naming(rename(ana, "ana's").await, carol);
+        let before = ana
+            .members()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == carol)
+            .unwrap()
+            .keys;
+        network
+            .join_as(2, InviteTarget::ReplaceMemberKeys { member: carol })
+            .await;
+        let replaced = &network.devices[2].handle;
+        assert_eq!(own_id(replaced).await, carol);
+        network.sync(0).await;
+        let ana = &network.devices[0].handle;
+        let after = ana
+            .members()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.id == carol)
+            .unwrap()
+            .keys;
+        assert_ne!(after, before);
+        assert_eq!(title(replaced).await, "first");
+        rename(replaced, "still hers").await.unwrap();
+        network.sync(2).await;
+        network.sync(0).await;
+        let ana = &network.devices[0].handle;
+        assert_eq!(title(ana).await, "still hers");
+        refused_naming(rename(ana, "ana's").await, carol);
+        network.close().await;
+    }
+}
