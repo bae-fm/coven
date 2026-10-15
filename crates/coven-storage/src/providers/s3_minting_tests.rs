@@ -48,6 +48,13 @@ fn the_member_policy_reaches_only_the_store_prefix_and_denies_nothing() {
             .as_array()
             .unwrap()
             .contains(&serde_json::json!("s3:ListMultipartUploadParts")));
+        // Bucket-level reads AWS cannot limit to a prefix, unconditioned.
+        assert_eq!(statements[2]["Resource"], "arn:aws:s3:::bucket");
+        assert!(statements[2].get("Condition").is_none());
+        assert_eq!(
+            statements[2]["Action"],
+            serde_json::json!(["s3:GetBucketVersioning", "s3:ListBucketMultipartUploads"])
+        );
     }
 }
 

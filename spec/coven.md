@@ -1470,10 +1470,9 @@ the file's ranges under `F`.
     `s3:DeleteObject`, `s3:AbortMultipartUpload` and
     `s3:ListMultipartUploadParts` on `arn:aws:s3:::<bucket>/<prefix>/<store>/*`,
     and `s3:ListBucket` on the bucket under the condition `StringLike`
-    `s3:prefix` `<prefix>/<store>/*`. A separate, unconditioned statement
-    allows `s3:GetBucketVersioning` on the bucket, so the member's setup can
-    read the owner's versioning setting without granting bucket-wide listing
-    or writes outside its store. It never adds a `Deny` on
+    `s3:prefix` `<prefix>/<store>/*`. An unconditioned statement allows
+    `s3:GetBucketVersioning` and `s3:ListBucketMultipartUploads`, which AWS
+    cannot limit to a prefix; neither reads an object. It never adds a `Deny` on
     `StringNotLike` `s3:prefix`: a request carrying no prefix, such as a bucket
     check, matches the negated condition and would be denied.
   - Making a key is one journaled operation (§18). Each mint call names its
@@ -1501,7 +1500,8 @@ the file's ranges under `F`.
     listings are checked against in-process fakes of their APIs.
   - Before delivery the key is checked from the member's side. Under it, an
     object in `<store>/.coven-check/<run>/` is created, refused a second time,
-    read back and deleted, and that prefix is listed. Where keys reach a
+    read back and deleted, and that prefix is listed, with its multipart
+    uploads on a copy profile. Where keys reach a
     prefix, a listing of the location's base prefix, outside every store,
     must be refused; where they reach a whole bucket, the account's bucket
     listing must be. Otherwise the check fails with

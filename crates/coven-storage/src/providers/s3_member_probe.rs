@@ -1,5 +1,6 @@
 //! A minted member key checked from the member's side before delivery (§4):
-//! it writes, reads, lists and deletes under the store's reserved
+//! it writes, reads, lists objects (and, on a copy profile, multipart
+//! uploads) and deletes under the store's reserved
 //! `<store>/.coven-check/<run>/` prefix, and a listing outside the store's
 //! prefix must be refused, which catches a policy reaching too far.
 use super::*;
@@ -90,6 +91,17 @@ impl S3Storage {
         // Listing lags publication; this proves the key may list its prefix.
         self.list_page(self.settings.listing, namespace, None, None, None)
             .await?;
+        // A copy profile lists a session's uploads to abort one whose
+        // initiation reply was lost (§4).
+        if self.settings.copy_publication.multipart().is_some() {
+            self.client
+                .list_multipart_uploads()
+                .bucket(&self.bucket)
+                .prefix(namespace)
+                .send()
+                .await
+                .map_err(s3_error)?;
+        }
         Ok(())
     }
 

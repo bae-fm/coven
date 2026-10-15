@@ -334,19 +334,33 @@ fn s3(
         return s3_reply_error(403, "InvalidAccessKeyId");
     };
     let q = query(uri);
-    if q.contains_key("versioning") {
-        let permitted = policy["Statement"]
+    // Bucket-level actions without a prefix condition, as AWS evaluates
+    // `GetBucketVersioning` and `ListBucketMultipartUploads`.
+    let bucket_allows = |action: &str| {
+        policy["Statement"]
             .as_array()
             .unwrap()
             .iter()
             .any(|statement| {
                 statement["Effect"] == "Allow"
-                    && statement["Action"] == "s3:GetBucketVersioning"
+                    && (statement["Action"] == action
+                        || statement["Action"]
+                            .as_array()
+                            .is_some_and(|actions| actions.contains(&action.into())))
                     && statement["Resource"] == "arn:aws:s3:::bucket"
                     && statement.get("Condition").is_none()
-            });
-        return if permitted {
+            })
+    };
+    if q.contains_key("versioning") {
+        return if bucket_allows("s3:GetBucketVersioning") {
             response(200, "<VersioningConfiguration/>")
+        } else {
+            s3_reply_error(403, "AccessDenied")
+        };
+    }
+    if q.contains_key("uploads") && method == Method::GET {
+        return if bucket_allows("s3:ListBucketMultipartUploads") {
+            response(200, "<ListMultipartUploadsResult><IsTruncated>false</IsTruncated></ListMultipartUploadsResult>")
         } else {
             s3_reply_error(403, "AccessDenied")
         };
@@ -670,7 +684,7 @@ async fn ceph_and_versity_mint_inline_keys_at_their_iam_and_revoke_them() {
                         },
                         {
                             "Effect": "Allow",
-                            "Action": "s3:GetBucketVersioning",
+                            "Action": ["s3:GetBucketVersioning", "s3:ListBucketMultipartUploads"],
                             "Resource": "arn:aws:s3:::bucket",
                         },
                     ],
@@ -729,6 +743,41 @@ async fn minted_iam_keys_can_read_bucket_versioning_without_listing_other_stores
             S3BucketVersioning::Disabled
         );
         storage.outside_store_refused(scope.store).await.unwrap();
+    }
+}
+
+/// A copy profile's session is recorded before its first part initiates the
+/// native upload, so aborting it lists the uploads at its temporary (§4).
+#[tokio::test]
+async fn minted_copy_profile_keys_abort_a_session_whose_initiation_reply_was_lost() {
+    for profile in [S3ProfileName::Aws, S3ProfileName::SeaweedFs] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let scope = scope();
+        let minted = admin.mint(&scope).await.unwrap();
+        let storage = S3Storage::new(
+            fake.config(profile),
+            minted.credentials,
+            fake.clock.clone(),
+            Arc::new(UuidIds),
+            std::sync::Arc::new(crate::NoCooldown),
+        )
+        .unwrap();
+        let path = ObjectPath::device_log(
+            scope.store,
+            coven_foundation::id_source::DeviceId(4),
+            std::num::NonZeroU64::MIN,
+        );
+        let publication = crate::PublicationRequest::new(
+            Arc::new(crate::test_utils::UnrestrictedPublications),
+            path.clone(),
+        );
+        let session = storage
+            .begin_upload(&publication, &path, 6 * 1024 * 1024)
+            .await
+            .unwrap();
+        assert!(matches!(session.state, SessionState::S3Planned { .. }));
+        storage.abort_upload(&publication, &session).await.unwrap();
     }
 }
 

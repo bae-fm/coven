@@ -219,8 +219,10 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
 }
 
 /// The policy a prefix-scoped member key needs, also shown for console steps
-/// (§4): object access under the store's prefix, listing only there, and a
-/// bucket-versioning read so setup can check the owner's setting.
+/// (§4): object access under the store's prefix, listing only there, a
+/// bucket-versioning read so setup can check the owner's setting, and the
+/// multipart-upload listing a copy profile needs to abort an initiation whose
+/// reply was lost. AWS takes no prefix condition on that listing.
 /// Never a `Deny` on `s3:prefix`: a request without one, such as a bucket
 /// check, would match the negated condition and be denied.
 pub(crate) fn member_policy(
@@ -250,7 +252,7 @@ pub(crate) fn member_policy(
             },
             {
                 "Effect": "Allow",
-                "Action": "s3:GetBucketVersioning",
+                "Action": ["s3:GetBucketVersioning", "s3:ListBucketMultipartUploads"],
                 "Resource": format!("arn:aws:s3:::{bucket}"),
             },
         ],

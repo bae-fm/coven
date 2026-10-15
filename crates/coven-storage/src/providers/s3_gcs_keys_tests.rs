@@ -241,6 +241,9 @@ fn xml(
     if !folders.iter().any(|folder| reach.starts_with(folder)) {
         return xml_error(403, "AccessDenied");
     }
+    if object.is_empty() && q.contains_key("uploads") {
+        return response(200, "<ListMultipartUploadsResult><IsTruncated>false</IsTruncated></ListMultipartUploadsResult>");
+    }
     if object.is_empty() {
         return response(200, "<ListBucketResult><Name>bucket</Name><IsTruncated>false</IsTruncated></ListBucketResult>");
     }
