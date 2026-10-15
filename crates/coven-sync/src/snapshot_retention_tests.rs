@@ -193,7 +193,19 @@ async fn a_file_named_only_by_a_retained_log_write_stays_until_that_log_goes() {
     }
     a.write_snapshot(Audience::Store).await.unwrap();
     mature(&storage_clock, &[&a]).await;
+    let before = storage.request_trace().len();
     a.sync.run_retention().await.unwrap();
+    // The file check's listing of every snapshot serves each audience too:
+    // the store's folder is listed once, by log retention (SP step 8).
+    let audience = ObjectPrefix::audience_snapshots(store(1), &Audience::Store);
+    assert_eq!(
+        storage.request_trace()[before..]
+            .iter()
+            .filter(|request| **request
+                == coven_storage::test_utils::MemoryRequest::List(audience.clone()))
+            .count(),
+        1
+    );
     assert!(storage
         .list(&ObjectPrefix::device_logs(store(1)))
         .await

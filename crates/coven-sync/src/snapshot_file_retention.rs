@@ -89,7 +89,7 @@ impl StoreLogSync {
         let readable = self.snapshot_audiences(log)?;
         let versions = self.database.write_schema_versions().await?;
         let mut references = BTreeSet::new();
-        let mut listed: BTreeMap<Audience, BTreeSet<ObjectPath>> = BTreeMap::new();
+        let mut listed: BTreeMap<Audience, Vec<StoredObject>> = BTreeMap::new();
         for object in storage
             .list(&ObjectPrefix::snapshots(self.directory.id()))
             .await?
@@ -107,19 +107,18 @@ impl StoreLogSync {
                 );
                 return Ok(None);
             }
-            listed.entry(id.audience).or_default().insert(object.path);
+            listed.entry(id.audience).or_default().push(object);
         }
-        for (audience, paths) in listed {
+        for (audience, objects) in listed {
             // A snapshot that waits, was refused or cannot be read is not a
-            // candidate; any of them prevents proving absence.
-            let candidates: Vec<_> = self
-                .snapshot_candidates(&audience, log)
+            // candidate; any of them prevents proving absence. The listing
+            // above is the audience's listing: it is not listed again.
+            let count = objects.len();
+            let candidates = self
+                .listed_catalog(&audience, log, objects)
                 .await?
-                .candidates
-                .into_iter()
-                .filter(|candidate| paths.contains(&candidate.object.path))
-                .collect();
-            if candidates.len() != paths.len() {
+                .candidates;
+            if candidates.len() != count {
                 tracing::debug!(
                     ?audience,
                     "excluded retained snapshots prevent proving file absence"

@@ -118,7 +118,7 @@ impl StoreLogSync {
     }
 
     /// Check each listed snapshot of an audience and decide its record.
-    async fn listed_catalog(
+    pub(super) async fn listed_catalog(
         &self,
         audience: &Audience,
         log: &StoreLog,
