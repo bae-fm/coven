@@ -417,9 +417,10 @@ a zero-body pass cannot hide a listing of the whole history.
   miss per polled device for each of three logs: store-log entries, writes
   and key copies. `N` counts §6's known writers not yet drained: active,
   removed and replaced devices, and devices named only by registrations
-  replay dropped
+  replay dropped, until one of those registrations drains them (§6)
   ([`known_requests`](proofs/io/CovenIO/Writers.lean),
-  [`dropped_registration_polled`](proofs/io/CovenIO/WritersExamples.lean)).
+  [`dropped_registration_polled`](proofs/io/CovenIO/WritersExamples.lean),
+  [`dropped_drain_stops_polling`](proofs/io/CovenIO/DroppedRegistrations.lean)).
   With each listing fitting one page, `D = 2 + 3 * N` on every provider. Folder ids are already known in this
   warm count. All extra pages, initialization lookups and retries are charged.
   Drive's unknown-name miss is one exact parent/name query; a hit needs
@@ -1614,7 +1615,14 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   creation's prerequisite copies are also reachable through its writer.
 - Poll removed and replaced devices like active ones until a kept entry
   retiring them has been final for more than one day and five minutes (§9,
-  §10). Only that drain stops polling a known writer. Finality itself requires a provider sample more than 30 storage days
+  §10). A device that no kept entry registers, known only from registrations
+  replay dropped, is retired by each of those dropped registrations instead
+  (§10): it drains once one of them has been final, and still dropped, for
+  that long. Without this, Carol's device after her own addition drops, or
+  Ben's phone registered while Ana removes Ben, would be polled forever
+  ([`registered_or_retired`, `dropped_registration_retires`, `dropped_drain_stops_polling`](proofs/io/CovenIO/DroppedRegistrations.lean),
+  [`carol_device_needs_dropped_registration`, `phone_needs_dropped_registration`](proofs/io/CovenIO/DroppedRegistrationExamples.lean)).
+  Only that drain stops polling a known writer. Finality itself requires a provider sample more than 30 storage days
   plus one hour plus δ after that entry, and can take longer while late
   entries arrive.
 
@@ -1635,7 +1643,8 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   and §19.1's refusal rules. It is never a completed drain.
 
   `_coven_drained_devices` is local, keyed by device id, and records the
-  kept retiring entry that justified each completed drain. Set it only in
+  retiring entry, kept or a dropped registration, that justified each
+  completed drain. Set it only in
   the successful transaction retaining all three completed observations,
   checking that the entry is still kept and the wait above has elapsed.
   It survives reopening, but is neither posted nor included in snapshots.
@@ -1644,9 +1653,11 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
   Cached writes waiting for keys or application remain pending and are
   processed from retained inputs; draining does not claim they are applied.
 
-  Replay derives retirement from kept entries. In the same replay transaction,
-  remove any drain record and timing evidence whose retiring entry is no
-  longer kept; if the device is active again, poll it again. A non-final
+  Replay derives retirement from kept entries and dropped registrations. In
+  the same replay transaction, remove any drain record and timing evidence
+  whose retiring entry is no longer kept, or, for a dropped registration,
+  is kept again or whose device a kept entry now registers; if the device is
+  active again, poll it again. A non-final
   removal can drop before any drain is allowed; a correctly established
   final entry cannot drop (§9).
   Remembered retirement alone never suppresses discovery.
@@ -3428,6 +3439,16 @@ Carol's tablet:
   Reading a retirement that the write's own replay dropped excludes nothing
   by itself
   ([`writeAllowed_iff`, `read_retirement_judged_by_time`, `read_unretired_write_counts`](proofs/io/CovenIO/Retired.lean)).
+  A device that no kept entry registers is retired the same way by each
+  dropped entry that registered it, at that entry's storage time: its writes,
+  which count by their own recorded view (§7.1), count only if published no
+  more than 30 days after it. Every reader holding the same entries reaches
+  the same verdict, and once that registration's drop is final no later
+  write of the device counts, so its drain is exact
+  ([`late_after_dropped_registration`, `dropped_verdict_agrees`, `drained_device_writes_late`](proofs/io/CovenIO/DroppedRegistrations.lean),
+  [`phone_write_window`](proofs/io/CovenIO/DroppedRegistrationExamples.lean)).
+  A registration that landed too late retires nothing: its device registers
+  again with a new entry.
   Ordinary authority, causality, schema and reset checks still apply.
   - Use first complete publication times, never authored timestamps or
     device clocks. Retries change neither bytes nor storage time (§4).

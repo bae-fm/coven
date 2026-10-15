@@ -206,6 +206,7 @@ macro_rules! coven_tables {
                 retires_member BLOB CHECK(length(retires_member)=16),
                 keys_member BLOB CHECK(length(keys_member)=16),
                 keys_signing BLOB CHECK(length(keys_signing)=32),
+                registers_device BLOB CHECK(length(registers_device)=8),
                 CHECK(retires_device IS NULL OR retires_member IS NULL),
                 CHECK((keys_member IS NULL)=(keys_signing IS NULL)),
                 CHECK(keys_member IS NULL OR (retires_device IS NULL AND retires_member IS NULL)),
@@ -222,6 +223,7 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_store_log_timestamp ON _coven_store_log(timestamp);
             CREATE INDEX _coven_store_log_retires_device ON _coven_store_log(retires_device) WHERE retires_device IS NOT NULL;
             CREATE INDEX _coven_store_log_retires_member ON _coven_store_log(retires_member) WHERE retires_member IS NOT NULL;
+            CREATE INDEX _coven_store_log_registers_device ON _coven_store_log(registers_device) WHERE registers_device IS NOT NULL;
             CREATE INDEX _coven_store_log_keys_member ON _coven_store_log(keys_member) WHERE keys_member IS NOT NULL;
         ");
         // A received write's first complete publication time, the signing key

@@ -523,4 +523,4 @@ pub(crate) fn damaged(path: &ObjectPath, failure: Refusal) -> SyncError {
 
 #[cfg(test)]
 #[path = "write_object_tests.rs"]
-mod tests;
+pub(crate) mod tests;

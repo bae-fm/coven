@@ -8,6 +8,7 @@ import CovenIO.Waiting
 import CovenIO.WaitingEvidence
 import CovenIO.Wakes
 import CovenIO.Writers
+import CovenIO.DroppedRegistrations
 import Lean
 
 /-! The IO differential runner. Each case names the executable transition it
@@ -457,6 +458,28 @@ private def fileScan (j : Json) : Except String Json := do
           | _ => none))
   return Json.arr results
 
+/-- `Writers.retirements` over Rust's replay verdicts: the devices that kept
+retirements and dropped registrations of unregistered devices retire. Entry
+`i` is the `i`th received entry; its storage time is irrelevant here. -/
+private def retirementDevices (j : Json) : Except String Json := do
+  let entries ← j.getObjValAs? (Array Json) "entries"
+  let kept ← j.getObjValAs? (List Nat) "kept"
+  let dropped ← j.getObjValAs? (List Nat) "dropped"
+  let blank : CovenStorelog.Entry := ⟨0, 0, [], .rotateKey .store 0⟩
+  let log ← entries.mapM fun e => do
+    let author ← e.getObjValAs? Nat "author"
+    let device ← e.getObjValAs? Nat "writer"
+    let action ← match ← e.getObjValAs? String "action" with
+      | "create" => pure (CovenStorelog.Action.create "")
+      | "addDevice" => do pure (.addDevice author (← e.getObjValAs? Nat "device"))
+      | "removeDevice" => do pure (.removeDevice 0 (← e.getObjValAs? Nat "device"))
+      | "removeMember" => do pure (.removeMember (← e.getObjValAs? Nat "member") [])
+      | _ => pure (.rotateKey .store 0)
+    pure ({ blank with author, device, action } : CovenStorelog.Entry)
+  let result : CovenStorelog.Result := ⟨CovenStorelog.State.empty, kept, dropped⟩
+  let retired := (Writers.retirements (fun w => log.getD w blank) result id).flatMap (·.devices)
+  return toJson retired.eraseDups.mergeSort
+
 private def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "check" with
   | "discovery" => discovery j
@@ -472,6 +495,7 @@ private def run (j : Json) : Except String Json := do
   | "drain" => drain j
   | "file_scan" => fileScan j
   | "writers" => writers j
+  | "retirements" => retirementDevices j
   | "phases" => phases j
   | "snapshot_writes" => snapshotWrites j
   | "waiting" => waiting j

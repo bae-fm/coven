@@ -13,23 +13,30 @@ use rusqlite::params;
 
 /// The columns `_coven_store_log` keeps for an entry that can retire writes:
 /// the device a removal or device replacement retires, the member a removal
-/// retires, and a member-key replacement's target and new signing key (§10).
+/// retires, a member-key replacement's target and new signing key (§10), and
+/// the device a registration names, which retires that device if replay
+/// drops the registration and keeps none (§6, §10).
 #[derive(Default)]
 pub(crate) struct Retires {
     pub(crate) device: Option<Vec<u8>>,
     pub(crate) member: Option<Vec<u8>>,
     pub(crate) keys_member: Option<Vec<u8>>,
     pub(crate) keys_signing: Option<Vec<u8>>,
+    pub(crate) registers: Option<Vec<u8>>,
 }
 
 pub(crate) fn retires(entry: &coven_format::store_log::StoreLogEntry) -> Retires {
+    let bytes = |device: &coven_foundation::id_source::DeviceId| device.0.to_be_bytes().to_vec();
     match &entry.change {
-        StoreChange::RemoveDevice { device }
-        | StoreChange::AddDevice {
-            replaces: Some(device),
-            ..
+        StoreChange::AddDevice {
+            device, replaces, ..
         } => Retires {
-            device: Some(device.0.to_be_bytes().to_vec()),
+            device: replaces.as_ref().map(bytes),
+            registers: Some(bytes(device)),
+            ..Retires::default()
+        },
+        StoreChange::RemoveDevice { device } => Retires {
+            device: Some(bytes(device)),
             ..Retires::default()
         },
         StoreChange::RemoveMember { member } => Retires {
@@ -46,8 +53,10 @@ pub(crate) fn retires(entry: &coven_format::store_log::StoreLogEntry) -> Retires
 }
 
 /// Every entry retiring this write, except permanently late ones, with
-/// whether replay keeps it and whether it is final (stored strictly before the
-/// horizon, §9). A key replacement retires it only when the write's own
+/// whether it is in force and whether it is final (stored strictly before the
+/// horizon, §9). A retirement is in force while replay keeps it; a dropped
+/// registration of the write's device is one while no kept entry registers
+/// that device (`Writers.droppedRetirements`). A key replacement retires it only when the write's own
 /// `store_log_read` did not cover it and it installs a signing key other than
 /// `signer`, the key current for the owner in that recorded view: a read
 /// replacement cannot retire a later key current there, and the winner's
@@ -86,7 +95,11 @@ pub(crate) fn of_device(
          UNION ALL
          SELECT device,number,stored_at,outcome='kept',1 FROM _coven_store_log
          WHERE keys_member=(SELECT member FROM _coven_devices WHERE device=?1) AND outcome<>'late'
-           AND keys_signing<>?2",
+           AND keys_signing<>?2
+         UNION ALL
+         SELECT device,number,stored_at,
+           NOT EXISTS(SELECT 1 FROM _coven_devices WHERE device=?1),0 FROM _coven_store_log
+         WHERE registers_device=?1 AND outcome NOT IN ('kept','late')",
         params![device.0.to_be_bytes().as_slice(), signer.as_bytes().as_slice()],
         |r| {
             Ok((

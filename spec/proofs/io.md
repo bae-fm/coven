@@ -231,13 +231,63 @@ the phone in each.
 writer not yet drained, and none naming a drained writer.
 `dropped_registration_polled` counts that history's pass: Ana's device, Ben's
 laptop and the phone give 11 requests. Draining is the only way a known
-writer leaves the polled set. A device named only by dropped registrations
-drains only through a kept retirement of that device; which kept entries
-retire it is outside this model.
+writer leaves the polled set.
 [`IORunner.lean`](io/IORunner.lean)'s `writers` case computes `known` less
 drained writers and the reader;
 [a Rust test](../../crates/coven-sync/src/write_object_tests.rs) compares the
 write logs each reader actually probes, in both arrival orders.
+
+**A dropped registration retires its device — decided and proved, with the
+old rule's histories checked.** Under kept retirements alone, a device named
+only by dropped registrations never drained. Kept retirements are a device
+removal, and a member removal joined through the devices that member's kept
+registrations name, so neither names such a device.
+[`DroppedRegistrationExamples`](io/CovenIO/DroppedRegistrationExamples.lean)
+checks two histories. In the first (§9's table, row 5), Carol's addition
+drops in replay and her device's registration drops with it; no kept entry
+retires that device
+(`carol_device_needs_dropped_registration`). In the second, Ben's phone
+registers while Ana removes Ben; the removal retires only the devices Ben's
+kept registrations name, and the phone is not one
+(`phone_needs_dropped_registration`). Both devices
+stay known, so every reader polled them forever and counted them in `N`.
+Their writes, which count by their own recorded view (§7.1), had no landing
+deadline either.
+
+The rule chosen: a device that no kept entry registers is retired by each
+dropped entry that registered it, at that entry's storage time.
+[`DroppedRegistrations`](io/CovenIO/DroppedRegistrations.lean) proves what it
+gives. `dropped_registration_retires` puts such a registration among the
+retirements, and `kept_registration_not_retired` keeps a device that some
+kept entry registers out of it. `late_after_dropped_registration` makes a
+write of that device published more than 30 days after the registration late
+on every reader, and `dropped_verdict_agrees` makes the verdict a function of
+the replay result (the same received entries give the same result, in any
+arrival order). `drained_device_writes_late` makes the drain exact for
+writes: once the registration's drop is final, which needs a sample more than
+30 days after it, no write of the device published at or after that sample
+counts. `registered_or_retired` closes the gap: every device a received
+registration names is either registered by a kept entry or retired, so it
+leaves the polled set once its drain completes (`dropped_drain_stops_polling`
+keeps the request bound). `phone_write_window` checks the 30-day boundary on
+the phone.
+
+A registration that landed too late (§9) is not a retirement here: its device
+registers again with a new entry, and draining it on the late entry would
+stop discovery of that re-registration. Entries and key copies of a device
+retired this way need the same publication witness `Retired.drain_complete`
+takes for kept retirements: a catch-up after the drop is final finds the
+device unregistered, and its member cannot hold a kept binding with the same
+keys again (§9's fresh keys), so it sends nothing. That last step is a reading
+of the identity gate, not a theorem here. A later kept registration of the same
+id would lift the retirement, and with it any late verdict it caused; nothing
+in Rust registers an id again after its registration's drop is final, but the
+model does not exclude it.
+[`IORunner.lean`](io/IORunner.lean)'s `retirements` case computes the retired
+devices from Rust's replay verdicts, and
+[`io_differential_dropped_registration_retires`](../../crates/coven-sync/src/write_object_tests.rs)
+compares them with the devices each reader records finality for, on the
+phone history, in both arrival orders.
 
 **Snapshot positions name published writes — proved.**
 [`SnapshotWrites`](io/CovenIO/SnapshotWrites.lean) composes the existing
@@ -737,7 +787,8 @@ reference-safe deletion remain implementation obligations.
 `idle_gets` and `idle_requests` give exactly two listings and 3N next-number
 GETs. N counts the known writers not yet drained, including this one:
 active, removed and replaced devices, and devices named only by dropped
-registrations (`Writers.known_requests`). Drained ids add no log probes; their permanent folders and
+registrations until a dropped registration drains them
+(`Writers.known_requests`, `Writers.dropped_drain_stops_polling`). Drained ids add no log probes; their permanent folders and
 positions still occupy listing pages. The trace depends on no history or
 file count. Three devices give 11 requests (`idle_three_devices`).
 Each listing is one complete logical page here; extra provider pages and

@@ -438,3 +438,13 @@ import CovenIO
 #print axioms CovenIO.PassPhases.entries_only_reuses_previous
 #print axioms CovenIO.PassPhases.invite_after_reserved
 #print axioms CovenIO.PassPhases.unsettled_cursor_precedes_reserved
+#print axioms CovenIO.Writers.dropped_registration_retires
+#print axioms CovenIO.Writers.kept_registration_not_retired
+#print axioms CovenIO.Writers.late_after_dropped_registration
+#print axioms CovenIO.Writers.dropped_verdict_agrees
+#print axioms CovenIO.Writers.drained_device_writes_late
+#print axioms CovenIO.Writers.registered_or_retired
+#print axioms CovenIO.Writers.dropped_drain_stops_polling
+#print axioms CovenIO.Writers.carol_device_needs_dropped_registration
+#print axioms CovenIO.Writers.phone_needs_dropped_registration
+#print axioms CovenIO.Writers.phone_write_window

@@ -33,3 +33,5 @@ import CovenIO.ListingFinality
 import CovenIO.PassPhases
 import CovenIO.Writers
 import CovenIO.WritersExamples
+import CovenIO.DroppedRegistrations
+import CovenIO.DroppedRegistrationExamples

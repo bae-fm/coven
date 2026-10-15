@@ -19,7 +19,7 @@ fn applied() -> [(String, String, String); 1] {
 }
 
 /// `ana` adds Ben; his phone registers and uploads one write.
-async fn phone_writes(storage: &Arc<MemoryStorage>, ana: &mut Device) -> MemberIdentity {
+pub(crate) async fn phone_writes(storage: &Arc<MemoryStorage>, ana: &mut Device) -> MemberIdentity {
     let ben = crate::store_log_sync::tests::member(4);
     ana.sync
         .make_and_upload_entry(StoreChange::AddMember {
@@ -51,7 +51,7 @@ async fn phone_writes(storage: &Arc<MemoryStorage>, ana: &mut Device) -> MemberI
 
 /// `ana` removes Ben without having read his phone's addition. The removal is
 /// concurrent with that addition and drops it (§9).
-async fn remove(ana: &mut Device, ben: &MemberIdentity) {
+pub(crate) async fn remove(ana: &mut Device, ben: &MemberIdentity) {
     ana.sync
         .make_and_upload_entry(StoreChange::RemoveMember {
             member: ben.member(),
@@ -205,4 +205,105 @@ fn io_differential_dropped_registration() {
             .unzip()
     });
     assert_eq!(results, crate::discovery::tests::io_runner(&cases));
+}
+
+/// IO `Writers.retirements`: once every entry is final, the devices each
+/// reader records retirement finality for are the model's retired devices,
+/// given that reader's replay verdicts. Ben's phone, whose registration
+/// dropped and which no kept entry registers, is among them on both readers:
+/// the one that received the phone's entries before the removal, and the
+/// remover.
+#[test]
+#[ignore = "requires COVEN_IO_RUNNER"]
+fn io_differential_dropped_registration_retires() {
+    let runtime = tokio::runtime::Runtime::new().unwrap();
+    let (cases, results): (Vec<_>, Vec<_>) = runtime.block_on(async {
+        let storage = storage();
+        let mut devices = group(storage.clone(), 2).await;
+        let ben = phone_writes(&storage, &mut devices[0]).await;
+        let mut observed = Vec::new();
+        devices[1].sync.sync_store_log().await.unwrap();
+        remove(&mut devices[0], &ben).await;
+        for reader in &mut devices {
+            reader.sync.sync_store_log().await.unwrap();
+            addition_dropped(reader).await;
+            observed.push(retired_devices(reader).await);
+        }
+        observed.into_iter().unzip()
+    });
+    assert!(results
+        .iter()
+        .all(|devices| devices == &serde_json::json!([3])));
+    assert_eq!(results, crate::discovery::tests::io_runner(&cases));
+}
+
+/// Advance `reader`'s horizon past every entry it holds, then report the
+/// devices it records retirement finality for, with the IO case projecting
+/// its entries and its replay's kept and dropped verdicts.
+async fn retired_devices(reader: &Device) -> (serde_json::Value, serde_json::Value) {
+    use coven_format::value::StorageTime;
+    let log: StoreLog = reader.db.local_store_log().await.unwrap().log;
+    let mut members = Vec::new();
+    let mut index = |member: coven_foundation::id_source::MemberId| {
+        members
+            .iter()
+            .position(|known| *known == member)
+            .unwrap_or_else(|| {
+                members.push(member);
+                members.len() - 1
+            })
+    };
+    let (mut entries, mut kept, mut dropped) = (Vec::new(), Vec::new(), Vec::new());
+    for (number, applied) in log.entries.iter().enumerate() {
+        let entry = &applied.entry;
+        let author = index(entry.author);
+        let writer = entry.position.device.0;
+        let projected = match &entry.change {
+            StoreChange::CreateStore { .. } => {
+                serde_json::json!({"action": "create", "author": author, "writer": writer})
+            }
+            StoreChange::AddDevice {
+                device, replaces, ..
+            } => {
+                assert!(replaces.is_none(), "replacement is outside this case");
+                serde_json::json!({"action": "addDevice", "author": author, "writer": writer,
+                    "device": device.0})
+            }
+            StoreChange::RemoveDevice { device } => {
+                serde_json::json!({"action": "removeDevice", "author": author, "writer": writer,
+                    "device": device.0})
+            }
+            StoreChange::RemoveMember { member } => {
+                serde_json::json!({"action": "removeMember", "author": author, "writer": writer,
+                    "member": index(*member)})
+            }
+            _ => serde_json::json!({"action": "other", "author": author, "writer": writer}),
+        };
+        entries.push(projected);
+        match log.replay.entries[&entry.position] {
+            EntryOutcome::Kept => kept.push(number),
+            EntryOutcome::Dropped(coven_database::DropReason::LandedTooLate) => {}
+            EntryOutcome::Dropped(_) => dropped.push(number),
+        }
+    }
+    let after = StorageTime::new(4_000_000_000, 0).unwrap();
+    reader
+        .db
+        .advance_store_log_horizon(reader.db.store_log().await.unwrap(), after, after)
+        .await
+        .unwrap();
+    let mut retired: Vec<_> = reader
+        .db
+        .retirement_finalities()
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|finality| finality.device.0)
+        .collect();
+    retired.sort_unstable();
+    (
+        serde_json::json!({"check": "retirements", "entries": entries, "kept": kept,
+            "dropped": dropped}),
+        serde_json::json!(retired),
+    )
 }

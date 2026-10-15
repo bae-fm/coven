@@ -15,8 +15,9 @@ pub(crate) fn at(seconds: u64) -> StorageTime {
     StorageTime::since_epoch(Duration::from_secs(seconds))
 }
 
-/// A kept retiring entry about `writer`, a device of member 2, as replay
-/// supplies it: removal of the device or its member, or its replacement.
+/// A retiring entry about `writer`, a device of member 2, as replay supplies
+/// it: a kept removal of the device or its member, or its replacement; or the
+/// device's own registration, dropped, with no kept entry registering it.
 pub(crate) async fn retire(
     target: &crate::Database,
     writer: DeviceId,
@@ -72,6 +73,14 @@ pub(crate) async fn retire(
                 replaces: Some(writer),
             }
         }
+        "registration" => {
+            replay.state.devices.remove(&writer);
+            StoreChange::AddDevice {
+                device: writer,
+                name: "writer".into(),
+                replaces: None,
+            }
+        }
         _ => unreachable!(),
     };
     let time = log.entries.iter().map(|e| e.entry.timestamp).max();
@@ -87,7 +96,14 @@ pub(crate) async fn retire(
         had_read: EntryPositions(Vec::new()),
         change,
     };
-    replay.entries.insert(id, EntryOutcome::Kept);
+    replay.entries.insert(
+        id,
+        if kind == "registration" {
+            EntryOutcome::Dropped(crate::DropReason::NotAllowed)
+        } else {
+            EntryOutcome::Kept
+        },
+    );
     let mut checked = checked(entry);
     checked.stored_at = at(seconds);
     target
@@ -125,12 +141,14 @@ pub(crate) fn dropped_reports(db: &crate::Database) -> Vec<Record> {
         .collect()
 }
 
-/// Device removal, member removal and replacement each give the write thirty
-/// storage days: exactly thirty counts, one second more is consumed without
-/// effects or losses and reported as landed too late (§10, D5).
+/// Device removal, member removal, replacement and a dropped registration of
+/// a device no kept entry registers each give the write thirty storage days:
+/// exactly thirty counts, one second more is consumed without effects or
+/// losses and reported as landed too late (§10, D5,
+/// `Writers.late_after_dropped_registration`).
 #[tokio::test]
 async fn every_retirement_admits_exactly_thirty_days_and_consumes_later_writes() {
-    for kind in ["device", "member", "replacement"] {
+    for kind in ["device", "member", "replacement", "registration"] {
         for (offset, late) in [(0, false), (1, true)] {
             let p = pair().await;
             sql(&p.source, "INSERT INTO notes VALUES('n','title','body')")

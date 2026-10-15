@@ -51,13 +51,14 @@ pub(crate) async fn drop_retirement(db: &crate::Database, entry: EntryId, device
         .unwrap();
 }
 
-/// F is the sample before the observation whose horizon first made a kept
+/// F is the sample before the observation whose horizon first made a
 /// retirement final, never its publication time, and a later observation
 /// never refreshes it (§6). Device removal, member removal and replacement
-/// each retire their device.
+/// each retire their device, and so does a dropped registration of a device
+/// no kept entry registers (`Writers.registered_or_retired`).
 #[tokio::test]
 async fn the_first_final_observation_records_its_sample_as_f() {
-    for kind in ["device", "member", "replacement"] {
+    for kind in ["device", "member", "replacement", "registration"] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         let writer = DeviceId(5);
@@ -139,6 +140,52 @@ async fn dropping_the_retirement_forgets_its_drain_in_the_replay_transaction() {
     let finality = db.retirement_finalities().await.unwrap()[0];
     assert!(db.mark_drained(finality, at(42 * DAY)).await.unwrap());
     drop_retirement(&db, entry, writer).await;
+    assert!(db.drained_devices().await.unwrap().is_empty());
+    assert!(db.retirement_finalities().await.unwrap().is_empty());
+    assert!(!db.mark_drained(finality, at(43 * DAY)).await.unwrap());
+}
+
+/// Replay keeps the device's registration after all: the device is
+/// registered, so its registration no longer retires it, and the drain mark
+/// and its timing evidence go in that replay transaction; it is polled again.
+#[tokio::test]
+async fn keeping_a_dropped_registration_forgets_its_drain() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let writer = DeviceId(5);
+    let entry = retire(&db, writer, 1, "registration", 100).await;
+    advance(&db, 101, at(40 * DAY)).await;
+    let finality = db.retirement_finalities().await.unwrap()[0];
+    assert_eq!((finality.device, finality.entry), (writer, entry));
+    assert!(db.mark_drained(finality, at(42 * DAY)).await.unwrap());
+    let log = db.store_log().await.unwrap();
+    let mut replay = log.replay;
+    replay.entries.insert(entry, EntryOutcome::Kept);
+    replay.state.devices.insert(
+        writer,
+        crate::StoreDevice {
+            member: crate::store_log::tests::member(2),
+            name: "writer".into(),
+            state: DeviceState::Active,
+        },
+    );
+    let other = StoreLogEntry {
+        position: EntryId {
+            device: DeviceId(98),
+            number: 1,
+        },
+        timestamp: coven_merge::Timestamp::new(1, 0, DeviceId(98)).unwrap(),
+        author: crate::store_log::tests::member(1),
+        had_read: EntryPositions(Vec::new()),
+        change: StoreChange::RenameCircle {
+            circle: coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1)),
+            name: "renamed".into(),
+        },
+    };
+    replay.entries.insert(other.position, EntryOutcome::Kept);
+    db.apply_store_log::<Record>(checked(other), replay, Vec::new())
+        .await
+        .unwrap();
     assert!(db.drained_devices().await.unwrap().is_empty());
     assert!(db.retirement_finalities().await.unwrap().is_empty());
     assert!(!db.mark_drained(finality, at(43 * DAY)).await.unwrap());

@@ -426,7 +426,8 @@ proofs() {
             retry_waits::tests::io_differential_waiting \
             files::tests::upload_retry::io_differential_upload_worker \
             store_log_sync::snapshots::file_scan::tests::io_differential_file_scan \
-            write_object::tests::io_differential_dropped_registration
+            write_object::tests::io_differential_dropped_registration \
+            write_object::tests::io_differential_dropped_registration_retires
     fi
 
     if proof_selected io || crate_selected coven-database; then

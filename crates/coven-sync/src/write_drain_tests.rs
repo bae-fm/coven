@@ -157,6 +157,35 @@ async fn a_removed_device_is_drained_once_after_its_finality_wait() {
     assert!(removed.drained().await);
 }
 
+/// Ben's phone registers itself while Ana removes Ben: replay drops the
+/// phone's registration and no kept entry retires it, since the removal
+/// retires only the devices Ben's kept registrations name. The dropped
+/// registration retires it, so Ana drains the phone after the same wait and
+/// stops probing it (§6, `Writers.registered_or_retired`); before, it was
+/// polled forever.
+#[tokio::test]
+async fn a_device_whose_registration_dropped_is_drained() {
+    let mut removed = removed().await;
+    let phone = DeviceId(3);
+    let ben = crate::write_object::tests::phone_writes(&removed.storage, &mut removed.ana).await;
+    crate::write_object::tests::remove(&mut removed.ana, &ben).await;
+    let trace = removed.pass(FINAL).await.unwrap();
+    assert!(probes(&trace, phone) >= 3);
+    let finality = removed.ana.db.retirement_finalities().await.unwrap();
+    assert!(finality.iter().any(|f| f.device == phone));
+    let trace = removed.pass(FINAL + WAIT + 1).await.unwrap();
+    assert!(probes(&trace, phone) >= 3);
+    assert!(removed
+        .ana
+        .db
+        .drained_devices()
+        .await
+        .unwrap()
+        .contains(&phone));
+    let trace = removed.pass(FINAL + WAIT + 2).await.unwrap();
+    assert_eq!(probes(&trace, phone), 0);
+}
+
 /// A failed read in any of the three logs leaves the drain pending; the next
 /// due pass finishes it from fresh misses.
 #[tokio::test]

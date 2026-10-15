@@ -390,12 +390,13 @@ pub(crate) fn apply<P: crate::PendingValue>(
             let id = incoming.entry.position;
             let retires = crate::write_retirement::retires(&incoming.entry);
             database.internal_execute(
-                "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome,timestamp,retires_device,retires_member,keys_member,keys_signing)
-                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11) ON CONFLICT(device,number) DO NOTHING",
+                "INSERT INTO _coven_store_log(device,number,record,author_view,stored_at,outcome,timestamp,retires_device,retires_member,keys_member,keys_signing,registers_device)
+                 VALUES(?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12) ON CONFLICT(device,number) DO NOTHING",
                 rusqlite::params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice(),
                  bytes, author_view, stored_at,
                  if incoming.check.landed_too_late() { "late" } else { "kept" }, timestamp,
-                 retires.device, retires.member, retires.keys_member, retires.keys_signing],
+                 retires.device, retires.member, retires.keys_member, retires.keys_signing,
+                 retires.registers],
             )?;
             if let Some(boundary) = crate::Boundary::from_entry(&incoming.entry) {
                 boundary.record(database)?;
