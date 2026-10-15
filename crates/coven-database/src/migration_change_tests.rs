@@ -667,3 +667,29 @@ mod data_sources {
         ben.close().await.unwrap();
     }
 }
+
+/// A step's classification comes from its statements, never this device's
+/// rows: a receiver that ran a data step on an empty table, as a fresh
+/// device does, converts a late old-schema write exactly as one with rows
+/// does (§17.1).
+#[tokio::test]
+async fn a_data_step_run_on_an_empty_table_still_converts_late_writes() {
+    use crate::write::tests::{notes, NOTES};
+    let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let counted = calls.clone();
+    let slug = "ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=lower(title)";
+    let migration = Migration::sql(2, "slug", slug).writes(move |_| {
+        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    });
+    let insert = "INSERT INTO notes(id,title,body) VALUES('n','Title','b')";
+    let case = Case::new(notes, NOTES, &[insert], migration).await;
+    assert_eq!(
+        case.receiver.applied_migrations().unwrap()[1].change,
+        MigrationChange::Breaking
+    );
+    case.receive().await.unwrap();
+    assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert!(case.receiver.lost_values().await.unwrap().is_empty());
+    case.close().await;
+}

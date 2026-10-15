@@ -18,6 +18,10 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(crate) struct MigrationCapture {
     pub(crate) synced: BTreeSet<String>,
     pub(crate) snapshot: Option<MigrationSnapshot>,
+    /// Tables the current step's statements write rows of, as SQLite
+    /// authorizes each statement when it is prepared: whether any row
+    /// matches never decides a step's class (§17.1).
+    targets: BTreeSet<String>,
 }
 
 pub(crate) struct MigrationSnapshot {
@@ -45,7 +49,13 @@ impl MigrationCapture {
         Ok(Self {
             synced,
             snapshot: None,
+            targets: BTreeSet::new(),
         })
+    }
+
+    /// The tables the step's statements so far named, starting the next step.
+    pub(crate) fn take_targets(&mut self) -> BTreeSet<String> {
+        std::mem::take(&mut self.targets)
     }
 
     pub(crate) fn before(
@@ -54,9 +64,6 @@ impl MigrationCapture {
         before: &Schema,
         sql: &str,
     ) -> rusqlite::Result<()> {
-        if self.snapshot.is_some() {
-            return Ok(());
-        }
         let bump = Bump::new();
         let command = Parser::new(&bump, sql.as_bytes())
             .next()
@@ -121,12 +128,29 @@ impl MigrationCapture {
                     .iter()
                     .any(|t| self.synced.contains(t))
             }
-            _ => db
-                .migration_targets(sql)?
-                .iter()
-                .any(|t| self.synced.contains(t)),
+            other => {
+                let targets = db.migration_targets(sql)?;
+                let breaking = targets.iter().any(|t| self.synced.contains(t));
+                // A statement that writes rows names its tables, and those
+                // its triggers write, whether or not a row matches.
+                if matches!(
+                    other,
+                    Some(Cmd::Stmt(
+                        Stmt::Insert { .. }
+                            | Stmt::Update { .. }
+                            | Stmt::Delete { .. }
+                            | Stmt::CreateTable {
+                                body: CreateTableBody::AsSelect(_),
+                                ..
+                            }
+                    ))
+                ) {
+                    self.targets.extend(targets);
+                }
+                breaking
+            }
         };
-        if breaking {
+        if breaking && self.snapshot.is_none() {
             self.snapshot = Some(
                 MigrationSnapshot::capture(db, before, &self.synced)
                     .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?,

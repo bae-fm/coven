@@ -221,6 +221,21 @@ where keeping the earlier raise (Rust before T253) leaves a capture at
 schema 3 raising to 2, which every reader refuses; `addition_moves_raise`
 checks the rule on the same history.
 
+**Conversions come from the migrations, not a device's rows (proved).**
+[ConversionChain](queue/CovenQueue/ConversionChain.lean) derives a late
+write's plan from the app's migration list and the kept raise: the
+converters of the breaking steps after the write's version through the
+raise's, in version order, lost if one lacks a converter or none lies
+between, as Rust's `migration_receive::available` decides. A step is
+breaking by its statements: one writing rows of a synced table counts
+whether or not a row matches. `statement_plans_agree` shows devices with
+different rows derive the same plan under any classifier that ignores those
+rows; `row_classification_diverges` is the checked history where classifying
+by rows changed (Rust before T252) makes a device with notes convert a late
+edit while one that ran the migration on an empty table does not.
+`one_step_is_conversion` ties a single breaking step to the per-raise
+`Conversion` the receive proofs take.
+
 **A migrated device judges received writes as its peers will (proved).**
 Before any raise to its version is kept, a migrated device judges a received
 older-version write under its own captures, as though each capture's raise

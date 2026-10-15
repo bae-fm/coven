@@ -560,19 +560,19 @@ impl DatabaseConnection {
             .query_row("PRAGMA main.schema_version", [], |r| r.get(0))
     }
 
-    pub(crate) fn migration_changes<T>(
+    /// Run one migration step inside the open migration transaction. Which
+    /// tables its statements write is decided as they are prepared (§17.1).
+    pub(crate) fn migrating<T>(
         &self,
         run: impl FnOnce() -> Result<T, DbError>,
-    ) -> Result<(T, BTreeSet<String>), DbError> {
+    ) -> Result<T, DbError> {
         assert!(
             self.observation.is_none(),
             "migrations precede commit observation"
         );
-        let capture = stream_capture::StreamCapture::begin(self)?;
         let result = run()?;
         self.require_transaction()?;
-        let changed = capture.tables();
-        Ok((result, changed))
+        Ok(result)
     }
 
     pub(crate) fn app_query_row<T, P: Params>(

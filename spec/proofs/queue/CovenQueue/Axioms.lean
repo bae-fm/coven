@@ -199,3 +199,8 @@ import CovenQueue
 #print axioms CovenQueue.Provisional.provisional_record_agrees
 #print axioms CovenQueue.Provisional.judged_under_published
 #print axioms CovenQueue.Provisional.provisional_matches_kept
+#print axioms CovenQueue.Chain.byStatements_independent
+#print axioms CovenQueue.Chain.statement_plans_agree
+#print axioms CovenQueue.Chain.one_step_is_conversion
+#print axioms CovenQueue.Chain.row_classification_diverges
+#print axioms CovenQueue.Chain.statement_classification_converts

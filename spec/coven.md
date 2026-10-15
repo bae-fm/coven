@@ -5703,6 +5703,10 @@ Carol's tablet:
   - A migration that inserts, updates or deletes rows of synced tables is a
     breaking change, even if it only adds tables or columns: each device
     would otherwise compute those changes from its own rows.
+  - Its statements decide this, whether or not a row matches on this
+    device: a migration's class, and the conversions kept for it, never
+    depend on a device's data
+    ([`statement_plans_agree`, `row_classification_diverges`](proofs/queue/CovenQueue/ConversionChain.lean)).
 - For each breaking change, the app supplies a *migration* in two parts:
   - one changes the database, e.g. `ALTER TABLE notes RENAME COLUMN title
     TO name`;
@@ -5904,6 +5908,9 @@ Carol's tablet:
     use the winning raise's supplied conversions in version and causal
     order, independently of whether their upload was tried
     ([`receive_matches_evaluation`, `receive_agreement`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Those are the converters of the breaking migrations after the write's
+    version through the raise's, in version order
+    ([`one_step_is_conversion`](proofs/queue/CovenQueue/ConversionChain.lean)).
   - Member-key window exclusions supply base verdicts to the same §8 data
     rule (§10); conversion cannot rescue them.
   - First determine candidate schema admission without changing values,

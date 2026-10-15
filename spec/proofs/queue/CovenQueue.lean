@@ -4,6 +4,7 @@ import CovenQueue.Keys
 import CovenQueue.Upload
 import CovenQueue.Verdicts
 import CovenQueue.Conversion
+import CovenQueue.ConversionChain
 import CovenQueue.RowMerge
 import CovenQueue.Retired
 import CovenQueue.Checked

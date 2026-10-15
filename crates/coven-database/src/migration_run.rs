@@ -53,7 +53,8 @@ pub(crate) fn run<'a>(
     for migration in migrations.iter().filter(|m| m.version > current) {
         *at = migration;
         let context = MigrationContext::new(database, &before, &capture);
-        let ((), changed) = database.migration_changes(|| migration.apply(&context))?;
+        database.migrating(|| migration.apply(&context))?;
+        let changed = capture.borrow_mut().take_targets();
         let after = Schema::read(database)?;
         let effects = context.finish(&before, &after);
         crate::source_names::record(
