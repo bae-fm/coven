@@ -172,6 +172,19 @@ impl StorageError {
         }
     }
 
+    /// Whether the provider answered this request with a refusal, so it
+    /// stored nothing. A timeout, or a lost, malformed or server-failure
+    /// reply, leaves the outcome unknown. The clients resend a request only
+    /// after a refusal (a rejected token, a skewed clock), so no earlier
+    /// attempt of it stored anything either.
+    pub fn refused(&self) -> bool {
+        self.answered()
+            && !matches!(
+                self.failure(),
+                StorageFailure::Network | StorageFailure::Protocol
+            )
+    }
+
     /// The wait a provider response asked every consumer to observe, from
     /// its `Retry-After`, Dropbox's `retry_after` or CloudKit's
     /// `CKErrorRetryAfterKey`.

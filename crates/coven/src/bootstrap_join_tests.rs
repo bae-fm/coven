@@ -189,3 +189,51 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+/// The provider refuses the first join request outright, so it stored
+/// nothing: the retry sends it again and is approved, instead of reading the
+/// absent request as a declined invite (§12.2).
+#[tokio::test]
+async fn a_refused_join_request_is_sent_again() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let path = coven_storage::ObjectPath::join_request(owner.directory.id(), invite.id);
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults {
+            create_failures: [(path, (StorageFailure::PermissionDenied, 403))].into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let refused = install
+        .run(
+            &owner,
+            Installation::join_request(&invite),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(BootstrapError::Sync(SyncError::Storage(error)))
+            if error.failure() == StorageFailure::PermissionDenied),
+        "{:?}",
+        refused.as_ref().err()
+    );
+    owner
+        .storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |_| {},
+    );
+    let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
+    owner.close().await;
+}

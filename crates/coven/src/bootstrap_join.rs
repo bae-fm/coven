@@ -93,7 +93,13 @@ impl Joining<'_> {
         if !self.identity.attempted() {
             status("Sending the join request");
             self.identity.record_attempt(&self.file, self.code)?;
-            sync.submit_join(&self.identity).await?;
+            if let Err(error) = sync.submit_join(&self.identity).await {
+                // Only a request that may be stored makes its absence final.
+                if matches!(&error, SyncError::Storage(error) if error.refused()) {
+                    self.identity.record_refusal(&self.file, self.code)?;
+                }
+                return Err(error.into());
+            }
         }
         status("Waiting for approval");
         // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay

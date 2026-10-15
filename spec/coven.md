@@ -4134,7 +4134,8 @@ Carol's tablet:
   device name reuses them and the device id. These are not final key custody.
   - It records the publication attempt before issuing it. If the attempt's
     reply is lost and neither a request nor sealed keys exist on retry, it
-    treats the invite as settled. Recreating that request could revive an
+    treats the invite as settled. A request the provider refused was not
+    stored; the retry sends it again. Recreating that request could revive an
     invite the admin already declined. An admin can issue another invite.
   - Provider permission failures reach the app even when revocation followed
     decline or expiry; an unreadable request is not an absent request.

@@ -548,6 +548,14 @@ impl ProviderOps for MemoryProvider {
         publication.check()?;
         self.before(MemoryRequest::Create(path.clone())).await?;
         let mut state = self.state.lock().await;
+        if let Some((failure, status)) = state.faults.create_failures.get(path) {
+            return Err(crate::providers::ProviderResponse::injected(
+                self.config.provider(),
+                *failure,
+                *status,
+                None,
+            ));
+        }
         let held = if state
             .held_creation
             .as_ref()

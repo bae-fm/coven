@@ -16,6 +16,9 @@ pub struct Faults {
     pub status_failures: BTreeMap<ObjectPath, StorageFailure>,
     /// Fail exact deletions at these paths; the object stays.
     pub delete_failures: BTreeMap<ObjectPath, StorageFailure>,
+    /// Refuse creates at these paths with a provider response of this
+    /// HTTP status; nothing is stored.
+    pub create_failures: BTreeMap<ObjectPath, (StorageFailure, u16)>,
     /// Fail listings of exactly these prefixes.
     pub list_failures: BTreeMap<ObjectPrefix, StorageFailure>,
     /// Maximum bytes returned by each body read; nonzero.
@@ -59,6 +62,7 @@ impl Faults {
             read_failures: BTreeMap::new(),
             status_failures: BTreeMap::new(),
             delete_failures: BTreeMap::new(),
+            create_failures: BTreeMap::new(),
             list_failures: BTreeMap::new(),
             read_chunk_size: 64 * 1024,
             body_failures: BTreeMap::new(),

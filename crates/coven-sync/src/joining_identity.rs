@@ -179,6 +179,17 @@ impl JoiningIdentity {
         self.save(file, code)
     }
 
+    /// The provider refused the request, so it was never published: a
+    /// retry sends it again (§12.2).
+    pub fn record_refusal(
+        &mut self,
+        file: &AtomicFile,
+        code: &InviteCode,
+    ) -> Result<(), SyncError> {
+        self.attempted = false;
+        self.save(file, code)
+    }
+
     fn save(&self, file: &AtomicFile, code: &InviteCode) -> Result<(), SyncError> {
         let keys = self.identity.keys().to_secret_bytes();
         let mut plain = Zeroizing::new(Vec::with_capacity(
