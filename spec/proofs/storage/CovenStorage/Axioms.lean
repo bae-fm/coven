@@ -239,6 +239,20 @@ import CovenStorage
 #print axioms CovenStorage.CopyPublication.Recorded.retry_clears
 #print axioms CovenStorage.CopyPublication.Recorded.failed_deletion_retry_accepted
 #print axioms CovenStorage.CopyPublication.Recorded.attempt_naming_strands
+#print axioms CovenStorage.CopyPublication.Recorded.confirmDest_not_failed
+#print axioms CovenStorage.CopyPublication.Recorded.attemptCopy_not_failed
+#print axioms CovenStorage.CopyPublication.Recorded.shared_never_fails
+#print axioms CovenStorage.CopyPublication.Recorded.attemptCopy_fst
+#print axioms CovenStorage.CopyPublication.Recorded.confirmDest_retry
+#print axioms CovenStorage.CopyPublication.Recorded.attemptCopy_retry_empty
+#print axioms CovenStorage.CopyPublication.Recorded.same_stage
+#print axioms CovenStorage.CopyPublication.Recorded.same_delete
+#print axioms CovenStorage.CopyPublication.Recorded.same_copy
+#print axioms CovenStorage.CopyPublication.Recorded.confirmDest_same
+#print axioms CovenStorage.CopyPublication.Recorded.shared_occupied_identical
+#print axioms CovenStorage.CopyPublication.Recorded.retry_publishes
+#print axioms CovenStorage.CopyPublication.Recorded.shared_temporary_missing
+#print axioms CovenStorage.CopyPublication.Recorded.shared_temporary_both_stored
 
 #print axioms CovenStorage.OwnCopyDamage.step_inv
 #print axioms CovenStorage.OwnCopyDamage.run_inv

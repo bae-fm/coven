@@ -72,6 +72,7 @@ struct Remote {
     fail_completion_reply: bool,
     broken_check: Option<StorageCheck>,
     forced_error: Option<(&'static str, u16)>,
+    held_copy: Option<gcs::HeldCopy>,
 }
 async fn endpoint(
     State(state): State<Arc<Mutex<Remote>>>,
@@ -80,6 +81,7 @@ async fn endpoint(
     headers: HeaderMap,
     body: Bytes,
 ) -> Response<Body> {
+    gcs::hold_copy(&state, &headers).await;
     respond(&state, method, uri, headers, body)
 }
 fn respond(
@@ -237,11 +239,13 @@ fn respond(
         if state.refuse_copy {
             return response(403, "<Error><Code>AccessDenied</Code></Error>");
         }
+        let source = source.to_str().unwrap().strip_prefix("/bucket/").unwrap();
+        let Some(bytes) = state.objects.get(source).cloned() else {
+            return response(404, "<Error><Code>NoSuchKey</Code></Error>");
+        };
         if state.objects.contains_key(&key) {
             return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
         }
-        let source = source.to_str().unwrap().strip_prefix("/bucket/").unwrap();
-        let bytes = state.objects[source].clone();
         let token = state.metadata[source].clone();
         state.objects.insert(key.clone(), bytes);
         state.metadata.insert(key, token);

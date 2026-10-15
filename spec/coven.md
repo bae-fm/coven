@@ -1001,11 +1001,25 @@ the file's ranges under `F`.
     bytes of SHA-256 over `coven/copy-temporary/v1`, the destination path's
     length as a big-endian u64, the path and the bytes.
     Store-log entries are such creates, each still dated by one request's
-    completion: the copy's. A refused copy, or one whose reply was lost, is
-    this attempt's own exactly when the destination carries its marker;
-    otherwise the copy's answer stands. The temporary is deleted whatever
-    the copy's outcome, and a failed deletion fails the call with both
-    errors preserved.
+    completion: the copy's. A refused copy, or one whose reply was lost,
+    settles as stored when the destination carries its marker; otherwise
+    the copy's answer stands. The temporary is deleted whatever the copy's
+    outcome, and a failed deletion fails the call with both errors
+    preserved.
+  - Concurrent attempts of one create, such as two creators of one path
+    with identical bytes, share its temporary. One can delete it between
+    another's staging and copy, so that copy finds no source. Its answer
+    says nothing about the destination, which settles it instead: its
+    marker is stored, another object is an occupied path whose bytes §10
+    compares (the create's own when only its attempts publish there), and
+    an empty destination is a retryable `Conflict` the caller retries under
+    its kept record. No attempt ends in a hard error or loses the create
+    ([`shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing`](proofs/storage/CovenStorage/CopyPublication.lean)).
+    The marker names the attempt that staged the bytes the copy carried,
+    not the copy: an attempt staging over another's before that one copies
+    sees its own marker at the destination, so both answer stored, which
+    equal bytes settle to anyway
+    ([`shared_temporary_both_stored`](proofs/storage/CovenStorage/CopyPublication.lean)).
   - Every temporary is staged under a name its publisher has already
     recorded, and stays recorded until it is deleted. Every attempt of one
     create stages and deletes the same name, so the caller's record of the

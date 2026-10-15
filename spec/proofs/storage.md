@@ -117,6 +117,29 @@ upload is initiated.
   stays and no record names it. A multipart upload initiated before its
   session was recorded is the same history.
 
+One name per create means concurrent attempts of one create, such as two
+creators of one path with identical bytes, share a temporary. One attempt can
+delete it between another's staging and copy, and that copy then finds no
+source. The model runs any number of attempts, each staging, copying and
+deleting, in any arrival order (`runActs`), and settles a copy that finds no
+source by reading the destination, as a refused copy is (T232).
+
+- `shared_never_fails`: no attempt's answer is a hard error.
+- `shared_occupied_identical`: from a destination that is empty or holds the
+  create's bytes, every occupied answer shows the create's own bytes, so
+  comparing bytes accepts it.
+- `attemptCopy_retry_empty` and `retry_publishes`: an attempt is told to
+  retry only while the destination is empty, and a retry that finds it empty
+  publishes.
+- `shared_temporary_missing` is the checked history: attempt 2 stages,
+  attempt 1 stages over it, copies and deletes, and attempt 2's copy finds no
+  source. Returning the provider's not-found answer is a hard error; settling
+  by the destination gives an occupied path holding the same bytes.
+- `shared_temporary_both_stored` checks that the marker names the attempt
+  whose staged bytes a copy carried, not the copy: when the later stager's
+  bytes are what the first copy publishes, both attempts answer stored, the
+  same settlement equal bytes reach.
+
 Outside the model: whether a real provider's copies are atomic against each
 other, which the suite's races test live; the 5 GiB single-copy limit, which
 the adapter enforces before any request; the provider's metadata copying

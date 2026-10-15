@@ -641,3 +641,75 @@ async fn a_planned_session_aborts_an_initiation_whose_reply_was_lost() {
         assert_eq!(temporaries(&state), 0);
     }
 }
+
+/// A copy request the fake holds before serving it: it reports its arrival
+/// and waits for release, so a test interleaves other requests with it.
+pub(super) struct HeldCopy {
+    arrived: tokio::sync::oneshot::Sender<()>,
+    release: tokio::sync::oneshot::Receiver<()>,
+}
+
+pub(super) async fn hold_copy(state: &Mutex<Remote>, headers: &HeaderMap) {
+    if !headers.contains_key("x-amz-copy-source") {
+        return;
+    }
+    let Some(held) = state.lock().unwrap().held_copy.take() else {
+        return;
+    };
+    held.arrived.send(()).unwrap();
+    held.release.await.unwrap();
+}
+
+/// Two creators of one path with identical bytes are attempts of one create
+/// and share its temporary. The first stages and its copy is held; the
+/// second stages over it, copies and deletes it, so the first copy finds no
+/// source. It settles by the destination: an occupied path holding the same
+/// bytes, which the caller's comparison accepts, or, when the second copy
+/// published nothing, a retryable conflict whose retry publishes (§4,
+/// `CopyPublication.Recorded.shared_never_fails`,
+/// `shared_occupied_identical`, `retry_publishes`).
+#[tokio::test]
+async fn every_object_copy_settles_a_copy_whose_shared_temporary_is_gone() {
+    for second_publishes in [true, false] {
+        let (_server, state, storage) = every_object_provider().await;
+        let path = ObjectPath::device_log(
+            STORE_ID,
+            coven_foundation::id_source::DeviceId(31),
+            std::num::NonZeroU64::MIN,
+        );
+        let (arrived, arrival) = tokio::sync::oneshot::channel();
+        let (release, released) = tokio::sync::oneshot::channel();
+        state.lock().unwrap().held_copy = Some(HeldCopy {
+            arrived,
+            release: released,
+        });
+        let (first, second) = tokio::join!(storage.create(&path, b"bytes"), async {
+            arrival.await.unwrap();
+            state.lock().unwrap().refuse_copy = !second_publishes;
+            let second = storage.create(&path, b"bytes").await;
+            state.lock().unwrap().refuse_copy = false;
+            release.send(()).unwrap();
+            second
+        });
+        assert_eq!(temporaries(&state), 0);
+        if second_publishes {
+            second.unwrap();
+            let first = first.unwrap_err();
+            assert!(!matches!(first, StorageError::Cleanup { .. }));
+            assert_eq!(first.failure(), StorageFailure::AlreadyExists);
+            assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
+            continue;
+        }
+        assert_eq!(
+            second.unwrap_err().failure(),
+            StorageFailure::PermissionDenied
+        );
+        let first = first.unwrap_err();
+        assert_eq!(first.failure(), StorageFailure::Conflict);
+        assert!(first.retryable());
+        assert!(storage.status(&path).await.unwrap().is_none());
+        storage.create(&path, b"bytes").await.unwrap();
+        assert_eq!(storage.read(&path).await.unwrap(), b"bytes");
+        assert_eq!(temporaries(&state), 0);
+    }
+}

@@ -301,12 +301,16 @@ impl S3Storage {
     /// A single-request create on a profile publishing every object by copy
     /// (§4): stage the bytes at the create's temporary carrying this
     /// attempt's fresh marker, then copy it with the destination condition.
-    /// A refused copy, or one whose reply was lost, is this attempt's
-    /// publication exactly when the destination carries its marker; otherwise
-    /// the copy's own answer stands. The temporary is deleted whatever the
-    /// outcome, and a failed deletion is reported with it; the caller's retry
-    /// of the same create stages and deletes the same temporary, and finds
-    /// its own bytes at the destination as an occupied path.
+    /// A refused copy, or one whose reply was lost, settles as stored when
+    /// the destination carries its marker (this attempt's staged bytes, which
+    /// another attempt's copy may have carried); otherwise the copy's own
+    /// answer stands. A copy whose temporary another attempt
+    /// of the same create already deleted is settled by the destination too:
+    /// another object is an occupied path, an empty one a retryable conflict.
+    /// The temporary is deleted whatever the outcome, and a failed deletion
+    /// is reported with it; the caller's retry of the same create stages and
+    /// deletes the same temporary, and finds its own bytes at the destination
+    /// as an occupied path.
     pub(super) async fn create_by_copy(
         &self,
         publication: &PublicationRequest,
@@ -340,6 +344,19 @@ impl S3Storage {
                     match self.confirm_marker(path, bytes.len() as u64, &token).await {
                         Ok(()) => Ok(()),
                         Err(_) => Err(error),
+                    }
+                }
+                // No source: another attempt of this create, staging under
+                // the same name, deleted it between this attempt's staging
+                // and copy. The destination settles this one; an empty one
+                // is retryable, the create still recorded by its caller.
+                Err(error) if error.failure() == StorageFailure::NotFound => {
+                    match self.confirm_marker(path, bytes.len() as u64, &token).await {
+                        Ok(()) => Ok(()),
+                        Err(empty) if empty.failure() == StorageFailure::SessionExpired => {
+                            Err(StorageFailure::Conflict.with_source(error))
+                        }
+                        Err(confirmation) => Err(confirmation),
                     }
                 }
                 Err(error) => Err(error),

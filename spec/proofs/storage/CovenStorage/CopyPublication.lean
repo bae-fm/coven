@@ -578,6 +578,217 @@ theorem attempt_naming_strands :
     (after.staging (.attempt 0)).isSome ∧ after.recorded = [] := by
   decide
 
+/-! ### Attempts of one create share its temporary (T232)
+
+Two creators of one path with identical bytes are attempts of one create:
+they stage, copy and delete one name. One can delete the temporary between
+the other's staging and its copy, which then finds no source. That answer
+says nothing about the destination, so the adapter settles it by reading the
+destination, as it settles a refused copy or a lost reply: this attempt's
+marker is stored, another object is an occupied path whose bytes the caller
+compares (§10), and an empty destination is a retryable failure that keeps
+the record. -/
+
+/-- What one attempt's create returns to its caller. -/
+inductive CreateAnswer where
+  /-- The destination carries this attempt's marker. -/
+  | stored
+  /-- Another publication occupies the destination; the caller compares
+  these bytes with its own (§10). -/
+  | occupied (bytes : Bytes)
+  /-- Nothing is published; the caller keeps its record and retries. -/
+  | retry
+  /-- A hard error that neither settles nor retries the create. -/
+  | failed
+  deriving DecidableEq, Repr
+
+/-- Reading the destination after a copy whose answer does not settle it. -/
+def confirmDest (w : World) (dest : Path) (marker : Nat) : CreateAnswer :=
+  match w.published dest with
+  | some p => if p.session = marker then .stored else .occupied p.object.bytes
+  | none => .retry
+
+/-- One attempt's conditional copy and its answer. `settles` is T232's rule:
+a copy whose temporary is gone is settled by reading the destination; without
+it, the provider's not-found answer is returned as a hard error. -/
+def attemptCopy (settles : Bool) (w : World) (n : Name) (dest : Path) (time marker : Nat) :
+    World × CreateAnswer :=
+  let after := step true w (.copy n dest time)
+  match w.staging n, w.published dest with
+  | some _, none => (after, .stored)
+  | some _, some _ => (after, confirmDest after dest marker)
+  | none, _ => (after, if settles then confirmDest after dest marker else .failed)
+
+/-- One attempt's request to create `c`, in its arrival order at the provider. -/
+inductive Act where
+  | stage (marker : Nat)
+  | copy (time marker : Nat)
+  | delete
+  deriving DecidableEq, Repr
+
+/-- Attempts of create `c`, interleaved in any arrival order; each copy's answer. -/
+def runActs (settles : Bool) (c : Create) : World → List Act → World × List CreateAnswer
+  | w, [] => (w, [])
+  | w, .stage m :: acts => runActs settles c (step true w (.stage (.create c) c.bytes m)) acts
+  | w, .copy t m :: acts =>
+      let (next, answer) := attemptCopy settles w (.create c) c.dest t m
+      let (last, answers) := runActs settles c next acts
+      (last, answer :: answers)
+  | w, .delete :: acts => runActs settles c (step true w (.delete (.create c))) acts
+
+theorem confirmDest_not_failed (w : World) (dest : Path) (marker : Nat) :
+    confirmDest w dest marker ≠ .failed := by
+  unfold confirmDest
+  split
+  · split <;> simp
+  · simp
+
+theorem attemptCopy_not_failed (w : World) (n : Name) (dest : Path) (time marker : Nat) :
+    (attemptCopy true w n dest time marker).2 ≠ .failed := by
+  unfold attemptCopy
+  split
+  · simp
+  · exact confirmDest_not_failed _ _ _
+  · exact confirmDest_not_failed _ _ _
+
+/-- Under the rule no attempt of a create ends in a hard error, in any
+interleaving of any number of attempts. -/
+theorem shared_never_fails (c : Create) (w : World) (acts : List Act) :
+    .failed ∉ (runActs true c w acts).2 := by
+  induction acts generalizing w with
+  | nil => simp [runActs]
+  | cons a acts ih =>
+      cases a with
+      | stage m => exact ih _
+      | delete => exact ih _
+      | copy t m =>
+          simp only [runActs, List.mem_cons, not_or]
+          exact ⟨fun h => attemptCopy_not_failed w _ _ t m h.symm, ih _⟩
+
+theorem attemptCopy_fst (settles : Bool) (w : World) (n : Name) (dest : Path)
+    (time marker : Nat) :
+    (attemptCopy settles w n dest time marker).1 = step true w (.copy n dest time) := by
+  unfold attemptCopy
+  split <;> rfl
+
+theorem confirmDest_retry (w : World) (dest : Path) (marker : Nat)
+    (h : confirmDest w dest marker = .retry) : w.published dest = none := by
+  unfold confirmDest at h
+  split at h
+  · split at h <;> cases h
+  · assumption
+
+/-- A retry is answered only while the destination is empty: nothing is
+published, so the create is not lost by retrying it. -/
+theorem attemptCopy_retry_empty (settles : Bool) (w : World) (n : Name) (dest : Path)
+    (time marker : Nat) (retry : (attemptCopy settles w n dest time marker).2 = .retry) :
+    (attemptCopy settles w n dest time marker).1.published dest = none := by
+  rw [attemptCopy_fst]
+  apply confirmDest_retry (marker := marker)
+  revert retry
+  unfold attemptCopy
+  split
+  · simp
+  · intro h; exact h
+  · cases settles <;> simp
+
+/-- The destination holds only the create's bytes, and its name stages only them. -/
+def Same (c : Create) (w : World) : Prop :=
+  (∀ p, w.published c.dest = some p → p.object.bytes = c.bytes) ∧
+    (∀ b m, w.staging (.create c) = some (b, m) → b = c.bytes)
+
+theorem same_stage (c : Create) (w : World) (m : Nat) (h : Same c w) :
+    Same c (step true w (.stage (.create c) c.bytes m)) := by
+  refine ⟨fun p hp => h.1 p (by simp only [step] at hp; split at hp <;> exact hp), ?_⟩
+  intro b m' hs
+  simp only [step] at hs
+  split at hs
+  · simp at hs; exact hs.1.symm
+  · exact h.2 b m' hs
+
+theorem same_delete (c : Create) (w : World) (h : Same c w) :
+    Same c (step true w (.delete (.create c))) :=
+  ⟨h.1, fun b m hs => by simp [step] at hs⟩
+
+theorem same_copy (c : Create) (w : World) (t : Nat) (h : Same c w) :
+    Same c (step true w (.copy (.create c) c.dest t)) := by
+  constructor
+  · intro p hp
+    simp only [step] at hp
+    split at hp
+    · next bytes marker hs _ =>
+        simp at hp
+        rw [← hp]
+        exact h.2 bytes marker hs
+    · exact h.1 p hp
+  · intro b m hs
+    simp only [step] at hs
+    split at hs <;> exact h.2 b m hs
+
+theorem confirmDest_same (c : Create) (w : World) (marker : Nat) (b : Bytes) (h : Same c w)
+    (occ : confirmDest w c.dest marker = .occupied b) : b = c.bytes := by
+  unfold confirmDest at occ
+  split at occ
+  · next p hp =>
+      split at occ
+      · cases occ
+      · cases occ; exact h.1 p hp
+  · cases occ
+
+/-- From a destination that is empty or already holds the create's bytes,
+every attempt's occupied answer shows the create's own bytes, so the
+caller's byte comparison accepts it as the same create (§10). -/
+theorem shared_occupied_identical (c : Create) (w : World) (acts : List Act) (h : Same c w)
+    (b : Bytes) (occ : .occupied b ∈ (runActs true c w acts).2) : b = c.bytes := by
+  induction acts generalizing w with
+  | nil => simp [runActs] at occ
+  | cons a acts ih =>
+      cases a with
+      | stage m => exact ih _ (same_stage c w m h) occ
+      | delete => exact ih _ (same_delete c w h) occ
+      | copy t m =>
+          simp only [runActs, List.mem_cons] at occ
+          have next := same_copy c w t h
+          rcases occ with eq | rest
+          · revert eq
+            unfold attemptCopy
+            split
+            · simp
+            · exact fun eq => confirmDest_same c _ m b next eq.symm
+            · simp only [ite_true]
+              exact fun eq => confirmDest_same c _ m b next eq.symm
+          · exact ih _ next (by rwa [attemptCopy_fst] at rest)
+
+/-- A retry that finds the destination empty publishes: the retryable answer
+loses nothing. -/
+theorem retry_publishes (c : Create) (w : World) (m t : Nat) (recorded : .create c ∈ w.recorded)
+    (empty : w.published c.dest = none) :
+    (runActs true c w [.stage m, .copy t m]).2 = [.stored] := by
+  simp [runActs, attemptCopy, step, recorded, empty]
+
+/-- The interleaving T232 found: attempt 2 stages, attempt 1 stages over it,
+copies and deletes the shared temporary, and attempt 2's copy finds no source.
+Without the rule it is a hard error though the destination holds the create's
+bytes; with it, an occupied path holding those bytes. -/
+theorem shared_temporary_missing :
+    let c : Create := ⟨.write 31 1, [7]⟩
+    let w : World := { start with recorded := [.create c] }
+    let acts := [Act.stage 2, .stage 1, .copy 0 1, .delete, .copy 0 2]
+    (runActs false c w acts).2 = [.stored, .failed] ∧
+      (runActs true c w acts).2 = [.stored, .occupied [7]] := by
+  decide
+
+/-- The marker names the staging, not the copy: when attempt 2 stages over
+attempt 1's bytes before attempt 1 copies, attempt 1's copy publishes attempt
+2's marker, and attempt 2's copy, finding no source, reads its own marker.
+Both answer stored, which is what equal bytes settle to anyway (§10). -/
+theorem shared_temporary_both_stored :
+    let c : Create := ⟨.write 31 1, [7]⟩
+    let w : World := { start with recorded := [.create c] }
+    (runActs true c w [.stage 1, .stage 2, .copy 0 1, .delete, .copy 0 2]).2 =
+      [.stored, .stored] := by
+  decide
+
 end Recorded
 
 end CovenStorage.CopyPublication
