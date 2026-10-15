@@ -84,29 +84,61 @@ pub(crate) async fn upload(
     bytes: &[u8],
 ) -> Result<(), SyncError> {
     upload_keys(store, storage, database, send).await?;
-    create_own(
+    create_entry(
+        store,
         storage.ok_or(SyncError::NoStorage)?,
+        database,
         send,
-        &path(store, upload.entry.position),
+        upload.entry.position,
         bytes,
     )
     .await
 }
 
-/// Create one of this device's immutable objects. An occupied path counts as
-/// stored only with equal complete bytes; others reset this copy (§10).
+/// Create this device's entry. A create reply that carries the publication
+/// joins the retained input, as a read would, so neither its landing check
+/// nor discovery reads it again (SP steps 4 and 5).
+pub(crate) async fn create_entry(
+    store: StoreId,
+    storage: &dyn Storage,
+    database: &Database,
+    send: &crate::SendGate,
+    entry: EntryId,
+    bytes: &[u8],
+) -> Result<(), SyncError> {
+    if let Some(created) = create_own(storage, send, &path(store, entry), bytes).await? {
+        database
+            .keep_log_inputs(
+                coven_database::LogKind::Entry,
+                vec![coven_database::LogInput {
+                    writer: entry.device,
+                    number: std::num::NonZeroU64::new(entry.number)
+                        .ok_or(coven_storage::StorageFailure::InvalidPath)?,
+                    observation: serde_json::to_vec(&created)?,
+                    bytes: bytes.to_vec(),
+                }],
+            )
+            .await?;
+    }
+    Ok(())
+}
+
+/// Create one of this device's immutable objects, returning the reply's
+/// metadata when the provider sent it. An occupied path counts as stored
+/// only with equal complete bytes; others reset this copy (§10).
 pub(crate) async fn create_own(
     storage: &dyn Storage,
     send: &crate::SendGate,
     path: &ObjectPath,
     bytes: &[u8],
-) -> Result<(), SyncError> {
+) -> Result<Option<coven_storage::StoredObject>, SyncError> {
     match storage.create(path, bytes).await {
-        Ok(()) => Ok(()),
+        Ok(created) => Ok(created),
         Err(error @ coven_storage::StorageError::Cleanup { .. }) => Err(error.into()),
         Err(error) if error.failure() == coven_storage::StorageFailure::AlreadyExists => {
             crate::identity::settle_occupied(storage, send, path, crate::identity::digest(bytes))
                 .await
+                .map(|()| None)
         }
         Err(error) => Err(error.into()),
     }

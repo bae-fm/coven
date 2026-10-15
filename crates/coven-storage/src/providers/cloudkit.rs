@@ -111,7 +111,7 @@ impl CloudKitStorage {
         path: &ObjectPath,
         bytes: &[u8],
         policy: CKRecordSavePolicy,
-    ) -> Result<(), StorageError> {
+    ) -> Result<StoredObject, StorageError> {
         let mut record = self.object(path, bytes.len() as u64);
         let asset = record.set_asset(&self.files, bytes)?;
         publication.check()?;
@@ -124,8 +124,10 @@ impl CloudKitStorage {
             vec![asset],
         )
         .wait()
-        .await?;
-        Ok(())
+        .await?
+        .first()
+        .ok_or(StorageFailure::Protocol.with_source("CloudKit omitted its saved record"))?
+        .metadata()
     }
     async fn require_owner(&self) -> Result<(), StorageError> {
         if native::current_account(&self.container).wait().await? != self.owner {
@@ -155,7 +157,7 @@ impl ProviderOps for CloudKitStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<StoredObject>, StorageError> {
         self.save_bytes(
             publication,
             path,
@@ -163,6 +165,7 @@ impl ProviderOps for CloudKitStorage {
             CKRecordSavePolicy::IfServerRecordUnchanged,
         )
         .await
+        .map(Some)
     }
     async fn replace(
         &self,
@@ -172,6 +175,7 @@ impl ProviderOps for CloudKitStorage {
     ) -> Result<(), StorageError> {
         self.save_bytes(publication, path, bytes, CKRecordSavePolicy::AllKeys)
             .await
+            .map(drop)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self

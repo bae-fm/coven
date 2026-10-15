@@ -119,7 +119,11 @@ impl Storage for SlowWrites {
     fn single_request_limit(&self) -> u64 {
         self.storage.single_request_limit()
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn create(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<Option<StoredObject>, StorageError> {
         self.storage.create(path, bytes).await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {

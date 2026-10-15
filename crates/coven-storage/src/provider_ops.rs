@@ -28,12 +28,13 @@ pub trait ProviderOps: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
     /// Create in one request, including native duplicate cleanup on retries.
+    /// Returns the created object's metadata when the reply carries it.
     async fn create(
         &self,
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError>;
+    ) -> Result<Option<StoredObject>, StorageError>;
     /// Replace a checked positions or clock path in one request.
     async fn replace(
         &self,

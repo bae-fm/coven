@@ -224,7 +224,7 @@ impl FilesInner {
         {
             let bytes = transfer.read_encrypted(0, total as usize).await?;
             match storage.create(&path, &bytes).await {
-                Ok(()) => {}
+                Ok(_) => {}
                 Err(error)
                     if error.failure() == coven_storage::StorageFailure::AlreadyExists
                         && !matches!(error, coven_storage::StorageError::Cleanup { .. }) =>

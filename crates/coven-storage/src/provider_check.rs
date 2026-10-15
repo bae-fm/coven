@@ -23,10 +23,12 @@ pub async fn check_provider(
         .as_ref()
         .is_err_and(|error| error.failure() == StorageFailure::AlreadyExists)
     {
-        return created.map_err(|source| StorageSetupError::ProviderCheck {
-            check: StorageCheck::Create,
-            source,
-        });
+        return created
+            .map(drop)
+            .map_err(|source| StorageSetupError::ProviderCheck {
+                check: StorageCheck::Create,
+                source,
+            });
     }
     let mut check = StorageCheck::Create;
     let result = async {
@@ -37,7 +39,7 @@ pub async fn check_provider(
                 if error.failure() == StorageFailure::AlreadyExists
                     && !matches!(error, StorageError::Cleanup { .. }) => {}
             Err(error) => return Err(error),
-            Ok(()) => {
+            Ok(_) => {
                 return Err(
                     StorageFailure::Protocol.with_source("provider accepted a second create")
                 )

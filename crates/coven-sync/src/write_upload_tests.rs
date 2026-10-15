@@ -57,7 +57,11 @@ impl Storage for BudgetStorage {
     fn single_request_limit(&self) -> u64 {
         self.provider.single_request_limit()
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn create(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<Option<StoredObject>, StorageError> {
         self.check(bytes.len());
         self.provider.create(path, bytes).await
     }

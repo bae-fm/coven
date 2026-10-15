@@ -544,7 +544,7 @@ impl ProviderOps for MemoryProvider {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<StoredObject>, StorageError> {
         publication.check()?;
         self.before(MemoryRequest::Create(path.clone())).await?;
         let mut state = self.state.lock().await;
@@ -577,19 +577,18 @@ impl ProviderOps for MemoryProvider {
             return Err(StorageFailure::AlreadyExists.into());
         }
         let revision = state.next_id()?;
-        state.objects.insert(
-            path.clone(),
-            Object {
-                revision,
-                upload_id: None,
-                bytes: bytes.into(),
-                stored_at: self.storage_time()?,
-            },
-        );
+        let object = Object {
+            revision,
+            upload_id: None,
+            bytes: bytes.into(),
+            stored_at: self.storage_time()?,
+        };
+        let created = object.metadata(path, self.time_resolution);
+        state.objects.insert(path.clone(), object);
         if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
             return Err(StorageFailure::Network.into());
         }
-        Ok(())
+        Ok(Some(created))
     }
 
     async fn replace(

@@ -401,14 +401,14 @@ impl coven_storage::Storage for StepStorage {
         &self,
         path: &coven_storage::ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), coven_storage::StorageError> {
+    ) -> Result<Option<coven_storage::StoredObject>, coven_storage::StorageError> {
         let time = self.tick();
         let result = self.storage.create(path, bytes).await;
         let after = self.after_create.load(std::sync::atomic::Ordering::SeqCst);
         self.clock
             .set(self.clock.now() + Duration::from_secs(after));
         let result = match result {
-            Ok(())
+            Ok(_)
                 if self
                     .lose_create_reply
                     .swap(false, std::sync::atomic::Ordering::SeqCst) =>

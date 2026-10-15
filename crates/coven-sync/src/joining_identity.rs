@@ -207,7 +207,7 @@ impl JoiningIdentity {
         let path = &self.path;
         let _bootstrap = send.bootstrap([path.clone()].into(), false);
         match storage.create(path, &self.request).await {
-            Ok(()) => Ok(()),
+            Ok(_) => Ok(()),
             Err(error) if error.failure() == StorageFailure::AlreadyExists => {
                 if storage.read(path).await? != self.request {
                     return Err(SyncError::InvitationChanged);

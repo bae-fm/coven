@@ -79,7 +79,11 @@ impl Storage for ClaimsFirst {
     fn single_request_limit(&self) -> u64 {
         self.storage.single_request_limit()
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn create(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<Option<StoredObject>, StorageError> {
         if *path == ObjectPath::created(path.store()) {
             let result = self.storage.create(path, bytes).await;
             self.claims.send_modify(|claims| *claims += 1);

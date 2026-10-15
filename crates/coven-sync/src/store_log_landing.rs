@@ -10,7 +10,8 @@ use std::collections::BTreeMap;
 /// Observe every landing witness after publishing a local entry, including on
 /// a retry whose first publication preceded this call. Entries landing before
 /// this publication decide its lateness; the catch-up that permitted it
-/// retained them, so discovery does not restart (SP step 4).
+/// retained them, so discovery does not restart (SP step 4). The entry's own
+/// create reply is retained with them; without one, exact status supplies it.
 pub(crate) async fn observe_publication(
     database: &coven_database::Database,
     reads: &crate::pass_reads::PassReads,
@@ -21,18 +22,21 @@ pub(crate) async fn observe_publication(
 ) -> Result<BTreeMap<EntryId, StorageTime>, SyncError> {
     // This device's own log gained the entry's prerequisite copies.
     reads.forget_misses(coven_database::LogKind::KeyCopy, entry.device);
-    let storage = storage.ok_or(SyncError::NoStorage)?;
     let path = crate::store_log_object::path(store, entry);
-    let published = storage.status(&path).await?.ok_or_else(|| {
-        coven_storage::StorageFailure::NotFound
-            .with_source("published store-log entry is absent from exact status")
-    })?;
-    let mut objects = crate::discovery::retained(database, store, coven_database::LogKind::Entry)
-        .await?
-        .into_values()
-        .map(|read| read.metadata)
-        .collect();
-    add_observation(&mut objects, published)?;
+    let mut objects: Vec<_> =
+        crate::discovery::retained(database, store, coven_database::LogKind::Entry)
+            .await?
+            .into_values()
+            .map(|read| read.metadata)
+            .collect();
+    if !objects.iter().any(|object| object.path == path) {
+        let storage = storage.ok_or(SyncError::NoStorage)?;
+        let published = storage.status(&path).await?.ok_or_else(|| {
+            coven_storage::StorageFailure::NotFound
+                .with_source("published store-log entry is absent from exact status")
+        })?;
+        objects.push(published);
+    }
     publication_times(log, &objects)
 }
 

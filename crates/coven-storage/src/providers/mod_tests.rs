@@ -916,7 +916,7 @@ pub(crate) async fn compare_create_model(storage: &dyn crate::Storage, copy: boo
         );
         let bytes: Vec<u8> = serde_json::from_value(attempt["bytes"].clone()).unwrap();
         match storage.create(&path, &bytes).await {
-            Ok(()) => assert_eq!(expected["occupied"], false),
+            Ok(_) => assert_eq!(expected["occupied"], false),
             Err(error) => {
                 assert_eq!(error.failure(), StorageFailure::AlreadyExists);
                 assert_eq!(expected["occupied"], true);

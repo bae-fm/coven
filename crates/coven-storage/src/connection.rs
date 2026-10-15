@@ -169,20 +169,23 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.cooling()?;
         self.observed(self.provider.account().await).await
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn create(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<Option<StoredObject>, StorageError> {
         self.cooling()?;
         let _guard = self.provider.lock_create().await;
         let publication = self.publication(path)?;
-        self.observed(
-            crate::transfer::upload_bytes(
-                self,
-                path,
-                bytes,
-                self.provider.create(&publication, path, bytes),
-            )
-            .await,
-        )
-        .await
+        let created = crate::transfer::upload_bytes(self, path, bytes, async {
+            let object = self.provider.create(&publication, path, bytes).await?;
+            if let Some(object) = &object {
+                object.check(path)?;
+            }
+            Ok(object)
+        })
+        .await;
+        self.observed(created).await
     }
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         self.cooling()?;

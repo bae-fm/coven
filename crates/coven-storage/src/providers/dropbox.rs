@@ -149,10 +149,11 @@ impl DropboxStorage {
         path: &ObjectPath,
         bytes: &[u8],
         mode: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Value, StorageError> {
         let response = self.content("files/upload",json!({"path":path.absolute(),"mode":mode,"autorename":false,"strict_conflict":true,"mute":true}),bytes.to_vec(),None, Some(publication)).await?;
         let value = http::json(PROVIDER, response).await?;
-        check_file(&value, path, bytes.len() as u64)
+        check_file(&value, path, bytes.len() as u64)?;
+        Ok(value)
     }
     fn id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         match &session.state {
@@ -319,8 +320,9 @@ impl ProviderOps for DropboxStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError> {
-        self.write(publication, path, bytes, "add").await
+    ) -> Result<Option<StoredObject>, StorageError> {
+        let item = self.write(publication, path, bytes, "add").await?;
+        super::object_metadata::dropbox(path, &item).map(Some)
     }
     async fn replace(
         &self,
@@ -328,7 +330,9 @@ impl ProviderOps for DropboxStorage {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.write(publication, path, bytes, "overwrite").await
+        self.write(publication, path, bytes, "overwrite")
+            .await
+            .map(drop)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self

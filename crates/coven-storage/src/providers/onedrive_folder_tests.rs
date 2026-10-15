@@ -308,7 +308,7 @@ async fn disappeared_parent_fails_write_and_retry_recreates_it() {
         let result = if replace {
             storage.replace(&path, b"after").await
         } else {
-            storage.create(&path, b"after").await
+            storage.create(&path, b"after").await.map(drop)
         };
         assert_eq!(result.unwrap_err().failure(), StorageFailure::NotFound);
         if replace {

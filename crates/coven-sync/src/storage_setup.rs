@@ -407,7 +407,7 @@ async fn claim_creation(
     let own = CreationMarker { store, device }.encode()?;
     let _claim = send.bootstrap([path.clone()].into(), false);
     match storage.create(&path, &own).await {
-        Ok(()) => Ok(()),
+        Ok(_) => Ok(()),
         Err(error @ coven_storage::StorageError::Cleanup { .. }) => Err(error.into()),
         Err(error) if error.failure() == coven_storage::StorageFailure::AlreadyExists => {
             if storage.read(&path).await? == own {

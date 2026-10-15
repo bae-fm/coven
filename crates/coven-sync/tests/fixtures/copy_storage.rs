@@ -54,7 +54,11 @@ impl Storage for CopyStorage {
     fn single_request_limit(&self) -> u64 {
         self.storage.single_request_limit()
     }
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
+    async fn create(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<Option<StoredObject>, StorageError> {
         if self.paths.contains(path) || matches!(self.action, CopyAttempt::CorruptFor(_)) {
             let first = {
                 let mut attempts = self.attempts.lock().unwrap();

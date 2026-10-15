@@ -743,7 +743,9 @@ mod differential {
                     match event["remote"].as_str().unwrap() {
                         "stored" => {}
                         "error" => f.storage.set_online(false),
-                        "other" => f.storage.create(&f.path(&target), b"other").await.unwrap(),
+                        "other" => {
+                            f.storage.create(&f.path(&target), b"other").await.unwrap();
+                        }
                         remote => panic!("no Rust provider state for {remote}"),
                     }
                     let writes = f.database.test_queued_writes().await.unwrap().len();

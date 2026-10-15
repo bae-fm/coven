@@ -253,13 +253,13 @@ impl ProviderOps for OneDriveStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<StoredObject>, StorageError> {
         self.parents(publication, path).await?;
         let url = format!(
             "{}?@microsoft.graph.conflictBehavior=fail",
             self.by_path(path, "/content")?
         );
-        let result = http::checked(
+        let result = http::json(
             PROVIDER,
             self.session
                 .publish(
@@ -277,8 +277,9 @@ impl ProviderOps for OneDriveStorage {
                 .await?,
         )
         .await;
-        self.checked_folder_operation(result).await?;
-        Ok(())
+        // The reply is the created item.
+        let item = self.checked_folder_operation(result).await?;
+        object_metadata::onedrive(path, &item).map(Some)
     }
 
     async fn replace(

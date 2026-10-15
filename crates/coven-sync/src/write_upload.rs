@@ -164,7 +164,8 @@ impl DeviceLogSync {
                     return Err(StorageFailure::InvalidPart.into());
                 }
                 return crate::store_log_object::create_own(storage, &self.send, &path, &bytes)
-                    .await;
+                    .await
+                    .map(drop);
             }
             Ok::<_, SyncError>(())
         };

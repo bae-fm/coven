@@ -150,7 +150,13 @@ pub trait Storage: Send + Sync {
     /// paths other than store-log entries, whose bodies must fit one request.
     /// A failed transfer aborts the session;
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
-    async fn create(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
+    /// Returns the object's metadata when the provider's one-request reply
+    /// carries it; otherwise exact status supplies it (SP step 5).
+    async fn create(
+        &self,
+        path: &ObjectPath,
+        bytes: &[u8],
+    ) -> Result<Option<StoredObject>, StorageError>;
     /// Replace a device's posted positions or clock object; immutable paths are refused.
     /// Always one request; an oversized body returns [`StorageFailure::SingleRequestTooLarge`].
     async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;

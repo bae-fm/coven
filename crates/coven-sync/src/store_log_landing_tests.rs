@@ -49,28 +49,12 @@ async fn own_publication_is_observed_even_when_the_listing_lags() {
             .unwrap()
             .stored_at
     );
-    storage
-        .delete(&object::path(store(1), created))
-        .await
-        .unwrap();
-    assert!(
-        super::observe_publication(
-            &a.db,
-            &crate::pass_reads::PassReads::default(),
-            store(1),
-            Some(storage.as_ref()),
-            &log,
-            created
-        )
-        .await
-        .is_err(),
-        "retained history cannot substitute for exact status"
-    );
 }
 
 /// Own publication updates the catalog without restarting discovery: after
-/// its catch-up, Ben's entry costs its create and one exact status, with no
-/// writer listing and no read of another writer's next entry (SP step 4).
+/// its catch-up, Ben's entry costs its create, whose reply supplies its
+/// publication, with no writer listing, no read of another writer's next
+/// entry and no exact status (SP steps 4 and 5).
 #[tokio::test]
 async fn own_publication_does_not_restart_entry_discovery() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
@@ -91,16 +75,20 @@ async fn own_publication_does_not_restart_entry_discovery() {
         .await
         .unwrap();
     let requests = &storage.request_trace()[before..];
-    let entry = object::path(store(1), created);
     assert!(
         requests.iter().all(|request| match request {
-            MemoryRequest::List(_) => false,
+            MemoryRequest::List(_) | MemoryRequest::Status(_) => false,
             MemoryRequest::Read(path, _) => path.store_log_position().is_none(),
-            MemoryRequest::Status(path) => *path == entry,
             _ => true,
         }),
         "{requests:?}"
     );
+    assert!(requests.contains(&MemoryRequest::Create(object::path(store(1), created))));
+    // The next catch-up does not read its own entry back.
+    let before = storage.request_trace().len();
+    b.catch_up().await;
+    assert!(!storage.request_trace()[before..]
+        .contains(&MemoryRequest::Read(object::path(store(1), created), None)));
 }
 
 /// Device 2 registers itself, but its first attempt is interrupted; device 3
@@ -860,39 +848,6 @@ async fn retained_publication_time_survives_absence_and_refuses_a_changed_listin
         super::publication_times(&log, &listed).unwrap_err(),
         SyncError::Storage(error) if error.failure() == coven_storage::StorageFailure::Protocol
             && error.to_string().contains(object::path(store(1), created).as_str())
-    ));
-}
-
-#[tokio::test]
-async fn a_republished_entry_observation_is_a_provider_protocol_failure() {
-    let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(10)));
-    let storage = Arc::new(
-        MemoryStorage::builder()
-            .clock(clock.clone())
-            .build()
-            .unwrap(),
-    );
-    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-    let created = a.create(key(1)).await;
-    let path = object::path(store(1), created);
-    let bytes = storage.read(&path).await.unwrap();
-    // The provider now reports the same immutable entry as published later.
-    clock.set(UNIX_EPOCH + Duration::from_secs(11));
-    storage.delete(&path).await.unwrap();
-    storage.create(&path, &bytes).await.unwrap();
-    // Re-observing the publication compares exact status with the entry
-    // retained from its first read.
-    assert!(matches!(
-        super::observe_publication(
-            &a.db,
-            &crate::pass_reads::PassReads::default(),
-            store(1),
-            Some(storage.as_ref()),
-            &a.log().await,
-            created,
-        )
-        .await,
-        Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::Protocol
     ));
 }
 

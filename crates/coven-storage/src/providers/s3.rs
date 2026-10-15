@@ -339,14 +339,16 @@ impl ProviderOps for S3Storage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<StoredObject>, StorageError> {
+        // A PUT or copy reply carries no publication time.
         match self.settings.copy_publication.single_request() {
             Some(condition) => {
                 self.create_by_copy(publication, path, bytes, condition)
-                    .await
+                    .await?
             }
-            None => self.put(publication, path, bytes, true).await,
+            None => self.put(publication, path, bytes, true).await?,
         }
+        Ok(None)
     }
     async fn replace(
         &self,

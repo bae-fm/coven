@@ -174,10 +174,12 @@ impl StoreLogSync {
                         self.store_keys.read()?.as_ref(),
                         &member,
                     )?;
-                    crate::store_log_object::create_own(
+                    crate::store_log_object::create_entry(
+                        self.directory.id(),
                         self.storage.as_deref().ok_or(SyncError::NoStorage)?,
+                        &self.database,
                         &self.send,
-                        &crate::store_log_object::path(self.directory.id(), entry.position),
+                        entry.position,
                         &bytes,
                     )
                     .await?;

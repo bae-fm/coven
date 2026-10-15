@@ -9,7 +9,7 @@ pub struct Conformance {
     store: StoreId,
 }
 /// The provider refused an occupied immutable path and left it unchanged.
-fn occupied(result: Result<(), StorageError>) -> bool {
+fn occupied<T>(result: Result<T, StorageError>) -> bool {
     result.is_err_and(|error| {
         error.failure() == StorageFailure::AlreadyExists
             && !matches!(error, StorageError::Cleanup { .. })
@@ -54,13 +54,18 @@ impl Conformance {
         if self.storage.status(&path).await?.is_some() {
             return Err(StorageFailure::Protocol.with_source("absent exact status"));
         }
-        self.storage.create(&path, data).await?;
+        let created = self.storage.create(&path, data).await?;
         self.storage.create(&other, b"other").await?;
         let first = self
             .storage
             .status(&path)
             .await?
             .ok_or(StorageFailure::NotFound)?;
+        if created.is_some_and(|created| created != first) {
+            return Err(
+                StorageFailure::Protocol.with_source("create reply differs from exact status")
+            );
+        }
         let read = self.storage.read_object(&path, None).await?;
         if read.metadata != first {
             return Err(
@@ -256,7 +261,7 @@ impl Conformance {
         let mut winners = Vec::new();
         for (index, result) in [first, second, third].into_iter().enumerate() {
             match result {
-                Ok(()) => winners.push(index),
+                Ok(_) => winners.push(index),
                 Err(error)
                     if error.failure() == StorageFailure::AlreadyExists
                         && !matches!(error, StorageError::Cleanup { .. }) => {}

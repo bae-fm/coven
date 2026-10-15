@@ -468,9 +468,8 @@ Every create uses fixed attempted bytes and the collision rule of §10;
 sealed keys use distinct writer paths under §11. For a lost reply or occupied
 path, reuse cached stored bytes when they establish the comparison, or
 make the one needed comparison read. Metadata cannot replace that byte comparison. Record returned metadata;
-where a provider omits it, use the single-object status call, counted here.
-Own-entry publication is confirmed by exact status, including after a lost
-reply. A folder listing miss cannot establish that this publication is absent.
+where a provider omits it or the reply is lost, use the single-object status
+call, counted here. A folder listing miss cannot establish that this publication is absent.
 Never invent a publication time from the device clock.
 
 ## Phase 3: sync data

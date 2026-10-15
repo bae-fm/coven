@@ -23,8 +23,8 @@ pub(crate) async fn upload_bytes(
     storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,
     bytes: &[u8],
-    single_request: impl Future<Output = Result<(), StorageError>> + Send,
-) -> Result<(), StorageError> {
+    single_request: impl Future<Output = Result<Option<crate::StoredObject>, StorageError>> + Send,
+) -> Result<Option<crate::StoredObject>, StorageError> {
     if path.store_log_position().is_some() {
         // Finality relies on completion-time metadata from one-request entry
         // publication. Never substitute a multipart initiation timestamp.
@@ -59,7 +59,7 @@ pub(crate) async fn upload_bytes(
     }
     .await;
     match upload {
-        Ok(()) => Ok(()),
+        Ok(()) => Ok(None),
         Err(operation) => {
             with_cleanup(Err(operation), storage.abort_upload_checked(&session).await)
         }

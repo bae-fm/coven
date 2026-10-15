@@ -85,7 +85,7 @@ impl GoogleDriveStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Value, StorageError> {
         let parent = self.create_parent(publication, path).await?;
         let metadata = json!({"name": path.file_name(), "parents": [parent], "properties": {"covenDevice": self.device.0.to_string()}});
         let (content_type, body) = multipart_content(&metadata, bytes)?;
@@ -237,12 +237,12 @@ impl GoogleDriveStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         file_id: &str,
-    ) -> Result<(), StorageError> {
+    ) -> Result<Value, StorageError> {
         match self
             .remove_own_duplicates(publication, path, Some(file_id))
             .await
         {
-            Ok(Some(found)) if found["id"].as_str() == Some(file_id) => Ok(()),
+            Ok(Some(found)) if found["id"].as_str() == Some(file_id) => Ok(found),
             Ok(Some(_)) => Err(StorageFailure::AlreadyExists.into()),
             Err(error) => Err(error),
             Ok(None) => {
@@ -462,7 +462,7 @@ impl ProviderOps for GoogleDriveStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-    ) -> Result<(), StorageError> {
+    ) -> Result<Option<StoredObject>, StorageError> {
         if self
             .remove_own_duplicates(publication, path, None)
             .await?
@@ -470,7 +470,10 @@ impl ProviderOps for GoogleDriveStorage {
         {
             return Err(StorageFailure::AlreadyExists.into());
         }
-        self.create_request(publication, path, bytes).await
+        // The selected copy's metadata, from the duplicate check that follows
+        // the upload.
+        let item = self.create_request(publication, path, bytes).await?;
+        object_metadata::drive(path, &item).map(Some)
     }
 
     async fn replace(
@@ -485,7 +488,10 @@ impl ProviderOps for GoogleDriveStorage {
             None => self.remove_own_duplicates(publication, path, None).await?,
         };
         let Some(item) = item else {
-            return self.create_request(publication, path, bytes).await;
+            return self
+                .create_request(publication, path, bytes)
+                .await
+                .map(drop);
         };
         let url = http::endpoint(
             &self.upload_api,

@@ -141,7 +141,7 @@ pub(super) async fn endpoint(
             assert_eq!(arg["strict_conflict"], true);
             *state.revisions.entry(path.clone()).or_insert(0) += 1;
             state.objects.insert(path.clone(), body.to_vec());
-            reply(json!({"path_lower":path,"size":body.len(),"id":"id:file"}))
+            reply(file_metadata(&path, &body, &state))
         }
         "/2/files/download" => {
             if headers.contains_key("range") {
