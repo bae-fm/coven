@@ -11,7 +11,7 @@ use crate::{
 use coven_crypto::ContentHash;
 use coven_format::value::Value;
 use coven_foundation::{
-    files::{FileName, StoreDir},
+    files::FileName,
     id_source::{DeviceId, IdSource},
 };
 use std::{
@@ -43,11 +43,9 @@ struct AttachedFile {
 
 pub(crate) struct FileWrite<'a> {
     database: &'a DatabaseConnection,
-    directory: &'a StoreDir,
     schema: &'a WriteSchema,
     device: DeviceId,
     ids: &'a dyn IdSource,
-    staging: &'a std::sync::Mutex<BTreeSet<FileName>>,
     staged: Vec<StagedFile>,
     originals: RefCell<Vec<PreparedUserFile>>,
     attached: RefCell<BTreeMap<AppKey, AttachedFile>>,
@@ -58,20 +56,16 @@ pub(crate) struct FileWrite<'a> {
 impl<'a> FileWrite<'a> {
     pub(crate) fn new(
         database: &'a DatabaseConnection,
-        directory: &'a StoreDir,
         schema: &'a WriteSchema,
         device: DeviceId,
         ids: &'a dyn IdSource,
-        staging: &'a std::sync::Mutex<BTreeSet<FileName>>,
         staged: Vec<StagedFile>,
     ) -> Self {
         Self {
             database,
-            directory,
             schema,
             device,
             ids,
-            staging,
             staged,
             originals: RefCell::new(Vec::new()),
             attached: RefCell::new(BTreeMap::new()),
@@ -426,28 +420,5 @@ impl<'a> FileWrite<'a> {
             }
         }
         Ok(())
-    }
-
-    pub(crate) fn finish<R, E: crate::WriteFailure>(&self, result: Result<R, E>) -> Result<R, E> {
-        crate::file_removals::FileRemovals::new(
-            self.database,
-            self.directory,
-            &self.staging.lock().expect("file staging lock poisoned"),
-        )
-        .finish(result)
-    }
-
-    pub(crate) fn rollback(&self) -> Result<(), Vec<DbError>> {
-        let failures = crate::file_removals::FileRemovals::new(
-            self.database,
-            self.directory,
-            &self.staging.lock().expect("file staging lock poisoned"),
-        )
-        .remove_unused();
-        if failures.is_empty() {
-            Ok(())
-        } else {
-            Err(failures)
-        }
     }
 }

@@ -301,7 +301,7 @@ impl FileDatabase {
         };
         database
             .call(move |inner| {
-                inner.access.with_writer(|writer| {
+                let (result, chosen) = inner.access.with_writer(|writer| {
                     let device = inner.access.device;
                     let schema = &inner.access.write_schema;
                     let result = writer.transaction(|db| {
@@ -309,14 +309,9 @@ impl FileDatabase {
                         crate::eager_work::uploaded(db, schema, &reference)?;
                         crate::pending::clear(db, &subject, device)
                     });
-                    let active = inner.staging.lock().expect("staging lock poisoned");
-                    crate::file_removals::FileRemovals::new(
-                        writer,
-                        &inner.access.directory,
-                        &active,
-                    )
-                    .finish(result)
-                })
+                    Ok::<_, DbError>((result, super::released(writer, &inner.staging)))
+                })?;
+                inner.finish_removals(result, chosen)
             })
             .await
     }
@@ -443,25 +438,80 @@ impl FileDatabase {
         bytes: Vec<u8>,
     ) -> Result<(), DbError> {
         let file = file.clone();
-        self.run(move |db, _, directory, _| {
-            cache::put(db, directory, &file, first, chunks, &name, &bytes)
-        })
-        .await
+        let (result, chosen) = self
+            .run(move |db, _, directory, _| {
+                let result = cache::put(db, directory, &file, first, chunks, &name, &bytes);
+                // A failed publication leaves its name recorded.
+                let chosen = result
+                    .is_err()
+                    .then(|| crate::file_removals::choose_cache(db, &[name.as_str().to_owned()]));
+                Ok::<_, DbError>((result, chosen))
+            })
+            .await?;
+        if let Some(chosen) = chosen {
+            let failures = self.remove_released(chosen).await?;
+            if !failures.is_empty() {
+                return Err(DbError::FileCleanup {
+                    write: result.map_err(Box::new),
+                    failures,
+                });
+            }
+        }
+        result
+    }
+    /// Remove the bytes of cache entries the writer just chose, once it is
+    /// free (§3.1, §16.6). Returns the failures, whose records stay for the
+    /// next attempt.
+    async fn remove_released(
+        &self,
+        chosen: crate::file_removals::Chosen,
+    ) -> Result<Vec<DbError>, DbError> {
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => {
+                database
+                    .call(move |inner| Ok::<_, DbError>(inner.access.remove_released(chosen)))
+                    .await
+            }
+            FileDatabaseAccess::Reader(database) => {
+                database
+                    .call(move |inner| Ok::<_, DbError>(inner.remove_released(chosen)))
+                    .await
+            }
+        }
+    }
+    async fn removed(&self, chosen: crate::file_removals::Chosen) -> Result<(), DbError> {
+        let failures = self.remove_released(chosen).await?;
+        if failures.is_empty() {
+            Ok(())
+        } else {
+            Err(DbError::FileCleanup {
+                write: Ok(()),
+                failures,
+            })
+        }
     }
     /// Evict unpinned chunks in least-recently-read order, independently per namespace.
     pub async fn trim_cache(&self, namespace: &str) -> Result<(), DbError> {
         let namespace = namespace.to_owned();
-        self.run(move |db, _, directory, _| cache::trim(db, directory, &namespace))
-            .await
+        let chosen = self
+            .run(move |db, _, _, _| {
+                let paths = cache::trim(db, &namespace)?;
+                Ok::<_, DbError>(crate::file_removals::choose_cache(db, &paths))
+            })
+            .await?;
+        self.removed(chosen).await
     }
     /// Remove only cached bytes, pinned or not, without any storage operation.
     pub async fn evict(&self, file: &FileRef) -> Result<(), DbError> {
         let file = file.clone();
-        self.run(move |db, schema, directory, _| {
-            db.transaction(|db| file_ref::validate(db, schema, &file))?;
-            cache::evict(db, directory, &file)
-        })
-        .await
+        let chosen = self
+            .run(move |db, schema, _, _| {
+                db.transaction(|db| file_ref::validate(db, schema, &file))?;
+                let paths = cache::evict(db, &file)?;
+                Ok::<_, DbError>(crate::file_removals::choose_cache(db, &paths))
+            })
+            .await?;
+        self.removed(chosen).await
     }
     /// Pin a complete, previously checked cache file atomically if one exists.
     /// The presence check and state change share a transaction with eviction.
@@ -562,21 +612,23 @@ impl CacheReservation {
                     // Disk reads finish before the writer is taken: a stalled
                     // read must not hold back app writes (§3.1).
                     let size = cache::whole_size(&inner.access.directory, &file, &pending.name)?;
-                    inner.access.with_writer(|writer| {
-                        writer.transaction(|db| {
-                            file_ref::validate(db, &inner.access.write_schema, &file)?;
-                            cache::publish(db, &file, &pending.name, size)
-                        })?;
-                        let mut active = inner.staging.lock().expect("staging lock poisoned");
-                        active.remove(&pending.name);
-                        pending.lease.take();
-                        crate::file_removals::FileRemovals::new(
-                            writer,
-                            &inner.access.directory,
-                            &active,
-                        )
-                        .finish(Ok::<_, DbError>(()))
-                    })?;
+                    inner
+                        .access
+                        .with_writer(|writer| {
+                            writer.transaction(|db| {
+                                file_ref::validate(db, &inner.access.write_schema, &file)?;
+                                cache::publish(db, &file, &pending.name, size)
+                            })?;
+                            inner
+                                .staging
+                                .lock()
+                                .expect("staging lock poisoned")
+                                .remove(&pending.name);
+                            pending.lease.take();
+                            Ok::<_, DbError>(super::released(writer, &inner.staging))
+                        })
+                        // The entries it replaced go once the writer is free.
+                        .and_then(|chosen| inner.finish_removals(Ok::<_, DbError>(()), chosen))?;
                 }
                 Ok(())
             }))

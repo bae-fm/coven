@@ -41,24 +41,23 @@ impl FileStaging {
                 build(&mut batch)?;
                 Ok::<_, E>(batch)
             }));
-            inner.access.with_writer(|writer| {
-                let built = match built {
-                    Ok(built) => built,
-                    Err(panic) => {
-                        let active = inner.staging.lock().expect("file staging lock poisoned");
-                        let failures = crate::file_removals::FileRemovals::new(
-                            writer,
-                            &inner.access.directory,
-                            &active,
-                        )
-                        .remove_unused();
-                        drop(active);
-                        if !failures.is_empty() {
-                            panic!("file cleanup after batch panic failed: {failures:?}");
-                        }
-                        std::panic::resume_unwind(panic)
+            let built = match built {
+                Ok(built) => built,
+                Err(panic) => {
+                    let chosen = inner.access.with_writer(|writer| {
+                        Ok::<_, DbError>(super::released(writer, &inner.staging))
+                    });
+                    let failures = match chosen {
+                        Ok(chosen) => inner.remove_chosen(chosen),
+                        Err(error) => vec![error],
+                    };
+                    if !failures.is_empty() {
+                        panic!("file cleanup after batch panic failed: {failures:?}");
                     }
-                };
+                    std::panic::resume_unwind(panic)
+                }
+            };
+            let prepared = inner.access.with_writer(|writer| {
                 let prepared = built.and_then(|batch| {
                     if batch.files.is_empty() {
                         return Ok(VecDeque::new());
@@ -100,25 +99,23 @@ impl FileStaging {
                         })
                         .map_err(E::from)
                 });
-                let sources = match prepared {
-                    Ok(sources) => sources,
-                    Err(error) => {
-                        let active = inner.staging.lock().expect("file staging lock poisoned");
-                        return crate::file_removals::FileRemovals::new(
-                            writer,
-                            &inner.access.directory,
-                            &active,
-                        )
-                        .finish(Err(error));
+                match prepared {
+                    Ok(sources) => {
+                        inner
+                            .staging
+                            .lock()
+                            .expect("file staging lock poisoned")
+                            .extend(sources.iter().map(|s| s.name.clone()));
+                        Ok::<_, E>(Ok(sources))
                     }
-                };
-                inner
-                    .staging
-                    .lock()
-                    .expect("file staging lock poisoned")
-                    .extend(sources.iter().map(|s| s.name.clone()));
-                Ok::<_, E>(sources)
-            })?
+                    Err(error) => Ok(Err((error, super::released(writer, &inner.staging)))),
+                }
+            })?;
+            // A refused batch's recorded names go once the writer is free.
+            match prepared {
+                Ok(sources) => sources,
+                Err((error, chosen)) => return inner.finish_removals(Err(error), chosen),
+            }
         };
         Ok(Self {
             database,

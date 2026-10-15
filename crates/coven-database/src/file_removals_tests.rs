@@ -411,3 +411,57 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();
 }
+
+/// §3.1, §16.6: upload completion releases the queue's copy, whose bytes go
+/// only after the writer is free. While that removal stalls on the disk an
+/// app write commits; once it finishes, the record goes too.
+#[tokio::test]
+async fn a_stalled_file_removal_holds_back_no_app_write() {
+    use std::sync::{mpsc, Mutex};
+    use std::time::Duration;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, b"original".to_vec(), true).await.unwrap();
+    let (entered, stalled) = mpsc::channel();
+    let (release, released) = mpsc::channel::<()>();
+    let gate = Mutex::new(Some((entered, released)));
+    db.test_gate_file_removal(move || {
+        // Only the first removal, the completion's, stalls.
+        let first = gate.lock().unwrap().take();
+        if let Some((entered, released)) = first {
+            entered.send(()).unwrap();
+            released.recv_timeout(Duration::from_secs(10)).unwrap();
+        }
+    })
+    .await;
+    let completing = tokio::spawn({
+        let db = db.clone();
+        async move { complete(&db).await }
+    });
+    tokio::task::spawn_blocking(move || stalled.recv_timeout(Duration::from_secs(5)).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(local_count(&db, "_coven_device_files"), 0);
+    assert_eq!(local_count(&db, "_coven_file_removals"), 1);
+    let written = tokio::time::timeout(
+        Duration::from_secs(5),
+        db.write(|sql| {
+            sql.execute("UPDATE files SET size=size", [])?;
+            Ok(())
+        }),
+    )
+    .await;
+    // Release the removal before judging, so a held writer fails the test
+    // instead of hanging it.
+    release.send(()).unwrap();
+    written
+        .expect("an app write waited for a stalled file removal")
+        .unwrap();
+    completing.await.unwrap().unwrap();
+    assert_eq!(local_count(&db, "_coven_file_removals"), 0);
+    assert!(owned_paths(&store).is_empty());
+    db.close().await.unwrap();
+}

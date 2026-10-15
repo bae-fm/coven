@@ -265,14 +265,12 @@ const CRASH_WRITE: &str = "INSERT INTO notes VALUES('note','committed','store');
 // Deleting the row releases no bytes: its file's queued upload keeps its copy
 // (§16.5). Crashes while removing released bytes are covered where upload
 // completion releases them, in coven-database's file removal tests.
-const CRASH_POINTS: [WriteCheckpoint; 6] = [
+// The write releases no bytes, so no cleanup transaction follows it: file
+// removal runs after the writer is free and only for committed records.
+const CRASH_POINTS: [WriteCheckpoint; 3] = [
     WriteCheckpoint::Committed,
     WriteCheckpoint::Observed,
     WriteCheckpoint::StagingReleased,
-    // Cleanup commits separately from the app write; exercise both occurrences.
-    WriteCheckpoint::Committed,
-    WriteCheckpoint::Observed,
-    WriteCheckpoint::Finished,
 ];
 
 #[test]

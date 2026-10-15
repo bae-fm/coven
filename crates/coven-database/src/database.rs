@@ -70,6 +70,10 @@ struct DatabaseInner {
     clock: ClockRef,
     ids: IdSourceRef,
     staging: Mutex<BTreeSet<coven_foundation::files::FileName>>,
+    /// Runs where released files' bytes are about to go, after the writer is
+    /// free, so a test can stall that disk work.
+    #[cfg(test)]
+    removal_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 // The lock outlives every connection, including when the last handle is dropped.
@@ -110,6 +114,31 @@ impl<L> DatabaseAccess<L> {
             }
             run(writer)
         })
+    }
+
+    /// Remove released files' bytes now that the writer is free, then forget
+    /// their records under it (§3.1, §16.6). `chosen` is what the writer
+    /// that recorded them chose, with the failures found choosing it.
+    fn remove_released(&self, chosen: crate::file_removals::Chosen) -> Vec<DbError> {
+        let (released, mut failures) = match chosen {
+            Ok(chosen) => chosen,
+            Err(error) => return vec![error],
+        };
+        let (removed, removal_failures) =
+            crate::file_removals::remove_bytes(&self.directory, released);
+        failures.extend(removal_failures);
+        if !removed.is_empty() {
+            let forgotten = self.with_writer(|writer| {
+                writer.transaction(|db| crate::file_removals::forget(db, &removed))?;
+                #[cfg(any(test, feature = "test-utils"))]
+                writer.checkpoint(crate::test_utils::WriteCheckpoint::Finished);
+                Ok::<_, DbError>(())
+            });
+            if let Err(error) = forgotten {
+                failures.push(error);
+            }
+        }
+        failures
     }
 
     fn open_local_file(
@@ -214,37 +243,102 @@ impl DatabaseInner {
         }
     }
 
+    /// Run a write under the writer, then remove the files it released once
+    /// the writer is free (§16.6).
     fn with_files<R, E: crate::WriteFailure>(
         &self,
         staged: Vec<crate::file_write::StagedFile>,
         run: impl FnOnce(&DatabaseConnection, &crate::file_write::FileWrite<'_>) -> Result<R, E>,
     ) -> Result<R, E> {
-        self.access.with_writer(|writer| {
+        let (outcome, chosen) = self.access.with_writer(|writer| {
             let files = crate::file_write::FileWrite::new(
                 writer,
-                &self.access.directory,
                 &self.access.write_schema,
                 self.access.device,
                 self.ids.as_ref(),
-                &self.staging,
                 staged,
             );
-            let result =
+            let outcome =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(writer, &files)));
-            match result {
-                Ok(result) => files.finish(result),
-                Err(panic) => {
-                    // After a failed rollback the writer may still hold this
-                    // write; removal records wait for the next open (§16.6).
-                    if !matches!(self.access.observer.error(), Some(DbError::RollbackFailed)) {
-                        if let Err(error) = files.rollback() {
-                            panic!("file cleanup after callback panic failed: {error:?}");
-                        }
+            // After a failed rollback the writer may still hold this write;
+            // removal records wait for the next open (§16.6).
+            let usable = !matches!(self.access.observer.error(), Some(DbError::RollbackFailed));
+            let chosen = (outcome.is_ok() || usable).then(|| released(writer, &self.staging));
+            Ok::<_, E>((outcome, chosen))
+        })?;
+        match outcome {
+            Ok(result) => self.finish_removals(result, chosen.expect("chosen after a write")),
+            Err(panic) => {
+                if let Some(chosen) = chosen {
+                    let failures = self.remove_chosen(chosen);
+                    if !failures.is_empty() {
+                        panic!("file cleanup after callback panic failed: {failures:?}");
                     }
-                    std::panic::resume_unwind(panic)
                 }
+                std::panic::resume_unwind(panic)
             }
+        }
+    }
+
+    /// Remove what `chosen` names, after the writer that chose it is
+    /// released (§3.1, §16.6).
+    fn remove_chosen(&self, chosen: crate::file_removals::Chosen) -> Vec<DbError> {
+        #[cfg(test)]
+        {
+            let gate = self
+                .removal_gate
+                .lock()
+                .expect("removal gate lock poisoned")
+                .clone();
+            if let Some(gate) = gate {
+                gate();
+            }
+        }
+        self.access.remove_released(chosen)
+    }
+
+    /// `result`, after removing the files it released, as `chosen` names
+    /// them; a failed removal keeps its record for the next write or open
+    /// and joins the result.
+    fn finish_removals<R, E: crate::WriteFailure>(
+        &self,
+        result: Result<R, E>,
+        chosen: crate::file_removals::Chosen,
+    ) -> Result<R, E> {
+        let failures = self.remove_chosen(chosen);
+        if failures.is_empty() {
+            result
+        } else {
+            Err(E::with_cleanup(result.map(|_| ()), failures))
+        }
+    }
+}
+
+/// The removals the write that just ran under `writer` released, chosen
+/// with the staging set held (§16.6).
+fn released(
+    writer: &DatabaseConnection,
+    staging: &Mutex<BTreeSet<coven_foundation::files::FileName>>,
+) -> crate::file_removals::Chosen {
+    let active = staging.lock().expect("file staging lock poisoned");
+    crate::file_removals::choose(writer, &active)
+}
+
+#[cfg(test)]
+impl Database {
+    /// Run `gate` where released files' bytes are about to go, after the
+    /// writer is free, so a test can stall that disk work.
+    pub(crate) async fn test_gate_file_removal(&self, gate: impl Fn() + Send + Sync + 'static) {
+        let gate: Arc<dyn Fn() + Send + Sync> = Arc::new(gate);
+        self.call(move |inner| {
+            *inner
+                .removal_gate
+                .lock()
+                .expect("removal gate lock poisoned") = Some(gate);
+            Ok::<_, DbError>(())
         })
+        .await
+        .unwrap();
     }
 }
 

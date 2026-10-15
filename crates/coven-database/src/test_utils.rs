@@ -17,11 +17,12 @@ pub enum WriteCheckpoint {
     Observed,
     /// The write has released its staged-file reservations.
     StagingReleased,
-    /// An obsolete file's bytes have been removed.
+    /// An obsolete file's bytes have been removed, after the writer that
+    /// released them; its pending-removal row is about to be deleted.
     FileRemoved,
     /// The obsolete file's pending-removal row has been deleted.
     FileRemovalRecorded,
-    /// Post-commit file cleanup has returned.
+    /// Post-commit file cleanup has committed the deletion of those rows.
     Finished,
 }
 

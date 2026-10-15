@@ -171,23 +171,9 @@ pub(super) fn put(
         )?;
         Ok(())
     });
-    if result.is_err() {
-        let cleanup = remove_pending(db, directory, name);
-        if let Err(cleanup) = cleanup {
-            return Err(DbError::FileCleanup {
-                write: result.map_err(Box::new),
-                failures: vec![cleanup],
-            });
-        }
-    }
+    // A failed publication leaves its name recorded; the caller removes any
+    // bytes it wrote once the writer is free.
     result
-}
-fn remove_pending(
-    db: &DatabaseConnection,
-    directory: &StoreDir,
-    name: &FileName,
-) -> Result<(), DbError> {
-    db.transaction(|db| crate::file_removals::remove(db, directory, name, "cache"))
 }
 pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<Option<u64>, DbError> {
     db.query(
@@ -215,12 +201,10 @@ pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbE
         .pop()
         .unwrap_or(0))
 }
-pub(super) fn trim(
-    db: &DatabaseConnection,
-    directory: &StoreDir,
-    namespace: &str,
-) -> Result<(), DbError> {
-    let paths = db.transaction(|db| {
+/// Evict over-budget entries; returns their recorded names, whose bytes the
+/// caller removes once the writer is free (§16.6).
+pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
+    db.transaction(|db| {
         let Some(budget) = budget(db, namespace)? else {
             return Ok(Vec::new());
         };
@@ -252,16 +236,13 @@ pub(super) fn trim(
             removed.push(path);
         }
         Ok(removed)
-    })?;
-    remove_paths(db, directory, paths)
+    })
 }
-pub(super) fn evict(
-    db: &DatabaseConnection,
-    directory: &StoreDir,
-    file: &FileRef,
-) -> Result<(), DbError> {
+/// Drop a file's cache entries; returns their recorded names, whose bytes
+/// the caller removes once the writer is free (§16.6).
+pub(super) fn evict(db: &DatabaseConnection, file: &FileRef) -> Result<Vec<String>, DbError> {
     let id = id(file)?;
-    let paths = db.transaction(|db| {
+    db.transaction(|db| {
         let paths = db.query(
             "SELECT path FROM _coven_cache WHERE namespace=?1 AND file_id=?2",
             (file.namespace(), &id),
@@ -278,32 +259,7 @@ pub(super) fn evict(
             (file.namespace(), &id),
         )?;
         Ok(paths)
-    })?;
-    remove_paths(db, directory, paths)
-}
-fn remove_paths(
-    db: &DatabaseConnection,
-    directory: &StoreDir,
-    paths: Vec<String>,
-) -> Result<(), DbError> {
-    let mut failures = Vec::new();
-    for path in paths {
-        match FileName::new(path)
-            .map_err(|_| DbError::DamagedDatabase)
-            .and_then(|name| remove_pending(db, directory, &name))
-        {
-            Ok(()) => {}
-            Err(error) => failures.push(error),
-        }
-    }
-    if failures.is_empty() {
-        Ok(())
-    } else {
-        Err(DbError::FileCleanup {
-            write: Ok(()),
-            failures,
-        })
-    }
+    })
 }
 pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let id = id(file)?;

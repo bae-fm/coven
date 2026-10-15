@@ -119,8 +119,7 @@ impl DatabaseBuilder {
             Some(origin),
             self.migration_operation.as_deref(),
         )?;
-        crate::file_removals::FileRemovals::new(&writer, &self.directory, &BTreeSet::new())
-            .finish(Ok::<_, DbError>(()))?;
+        crate::file_removals::finish_at_open(&writer, &self.directory)?;
         let mut write_schema = crate::write_schema::WriteSchema::read(&writer, tables.clone())?;
         write_schema.conversions = crate::migration_receive::read(&writer, &migrations)?;
         write_schema.prepare(&writer)?;
@@ -172,6 +171,8 @@ impl DatabaseBuilder {
                 clock,
                 ids,
                 staging: Mutex::new(BTreeSet::new()),
+                #[cfg(test)]
+                removal_gate: Mutex::new(None),
             }))),
         })
     }
