@@ -5065,8 +5065,8 @@ Carol's tablet:
     reset admits. If Carl's reset later drops, replay keeps Ana's, and a
     reload would skip write 5, so Ben keeps it
     ([`dropped_reset_held`, `dropped_reset_skips`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
-  - A raise entry can name a snapshot that is not listed yet, never counts,
-    or does not mark its raise. Replay can keep it, but the reload refuses
+  - A raise or reset entry can name a snapshot that is not listed yet, never
+    counts, or is marked wrongly. Replay can keep it, but the reload refuses
     that boundary and waits until its named snapshot is listed, counting
     and marked; it never skips a deleted write under it
     ([`reload_never_skips`](proofs/io/CovenIO/RaiseHistory.lean)).
