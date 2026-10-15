@@ -121,8 +121,8 @@ pub(crate) fn enqueue(
         Source::Copy(_) => (None, None),
     };
     db.internal_execute(
-        "INSERT INTO _coven_file_uploads(reference,device,file,original,modified_at,queued_at)
-         VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO _coven_file_uploads(reference,device,file,original,modified_at,queued_at,pinned)
+         VALUES(?1,?2,?3,?4,?5,?6,0)",
         (
             file.encode()?,
             device,
@@ -205,6 +205,32 @@ pub(crate) fn queued(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
     )
 }
 
+/// Pin or unpin a file this device still has queued, returning whether it
+/// is queued. Its upload's completion carries the pin to the stored file.
+pub(crate) fn set_pinned(
+    db: &DatabaseConnection,
+    file: &FileRef,
+    pinned: bool,
+) -> Result<bool, DbError> {
+    Ok(db.internal_execute(
+        "UPDATE _coven_file_uploads SET pinned=?3 WHERE device=?1 AND file=?2",
+        (
+            file.uploader().0.to_be_bytes(),
+            file.id().0.as_bytes(),
+            pinned,
+        ),
+    )? == 1)
+}
+
+/// Whether the queued file is pinned.
+pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE device=?1 AND file=?2 AND pinned=1)",
+        (file.uploader().0.to_be_bytes(), file.id().0.as_bytes()),
+        |r| r.get(0),
+    )
+}
+
 /// The first-read hash of one queued plaintext chunk. A missing hash is
 /// damage, found before any byte of that chunk is encrypted.
 pub(crate) fn chunk_hash(
@@ -238,17 +264,18 @@ pub(crate) fn chunk_hash(
 /// chunk hashes, and the owned copy kept only until upload. The app row and
 /// every `FileRef` stay unchanged, whatever happened to the row meanwhile.
 /// A released copy no other queued file shares is recorded for removal after
-/// the caller commits.
-pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<FileRef, DbError> {
-    let (device, file, reference) = db
+/// the caller commits. Returns the reference and whether it was pinned.
+pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(FileRef, bool), DbError> {
+    let (device, file, reference, pinned) = db
         .query_row(
-            "SELECT device,file,reference FROM _coven_file_uploads WHERE id=?1",
+            "SELECT device,file,reference,pinned FROM _coven_file_uploads WHERE id=?1",
             [id],
             |r| {
                 Ok((
                     r.get::<_, Vec<u8>>(0)?,
                     r.get::<_, Vec<u8>>(1)?,
                     r.get::<_, Vec<u8>>(2)?,
+                    r.get::<_, bool>(3)?,
                 ))
             },
         )
@@ -271,5 +298,5 @@ pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<FileRef, DbEr
         )?;
     }
     db.internal_execute("DELETE FROM _coven_file_uploads WHERE id=?1", [id])?;
-    FileRef::decode(&reference)
+    Ok((FileRef::decode(&reference)?, pinned))
 }

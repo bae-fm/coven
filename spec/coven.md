@@ -5420,6 +5420,9 @@ Carol's tablet:
     chunks, checks its content hash, and syncs it before publishing the pin.
     Publication replaces the separate cached chunks atomically. Cancellation
     or a crash leaves no partially downloaded file exempt from eviction.
+  - A file still queued here is pinned at once. The transaction retiring its
+    upload carries the pin to the stored file, which coven then keeps whole
+    from storage like any pin.
 - The app can remove an uploaded file from the cache, which never touches
   storage.
 - Eager-fill work and progress are derived from cache reservations and verified
@@ -5603,7 +5606,7 @@ Carol's tablet:
     file length does not become a single SQLite-value limit;
   - `_coven_file_uploads`: the upload queue, each file's captured reference,
     source location and original-source metadata, independent id and key,
-    and its provider session while one is in progress;
+    whether it is pinned, and its provider session while one is in progress;
     failures and waits use `_coven_pending`, not a second failure column;
     - Provider sessions belong to this queue; file upload operations do not
       keep a second recording of the same session.
@@ -5625,6 +5628,8 @@ Carol's tablet:
     as last noted, and the changed references awaiting an eager fill, kept in
     the transaction that changes the row, so finding eager work reads no
     unchanged row;
+  - `_coven_pin_requests`: pins a completed upload carried to its stored
+    file, until a whole pinned copy is published;
   - `_coven_file_removals`: unused local copies waiting to be deleted;
   - `_coven_cache_writes`: cache ranges whose bytes are being written;
   - `_coven_file_candidates`: stored files awaiting a deletion decision

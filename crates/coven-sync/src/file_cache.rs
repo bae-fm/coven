@@ -19,17 +19,15 @@ pub(crate) fn download_subject(file: &FileRef) -> RetrySubject {
 }
 impl Files {
     /// Download missing chunks and retain complete files regardless of
-    /// budgets. Progress is the committed coverage `pin_progress` reads.
+    /// budgets. Progress is the committed coverage `pin_progress` reads. A
+    /// file still queued here is whole already; its upload carries the pin.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
         let limit = self.transfer_limits().downloads.get();
         futures_util::stream::iter(files.to_vec())
             .map(|file| async move {
-                // A file still queued here is already whole on this device.
-                if self.inner.database.open_local(&file).await?.is_none()
-                    && !self.inner.database.pin_complete(&file).await?
-                {
+                if !self.inner.database.pin_complete(&file).await? {
                     UploadedFile::open(self.inner.clone(), file.clone())
                         .await?
                         .keep_whole()
@@ -97,6 +95,7 @@ impl FilesInner {
         {
             return Ok(());
         }
+        self.fill_pins().await?;
         let files = self.database.eager_work().await?;
         if files.is_empty() {
             return Ok(());
@@ -168,6 +167,55 @@ impl FilesInner {
                 Some(reason) => {
                     self.record_download_failure(subject, retry, reason, waits.get(&retry))
                         .await?
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Pins carried from completed uploads (§16.4): each file is kept whole
+    /// from storage as an app's pin is. One file's failure is its own
+    /// pending record; a pin whose row no longer names its file has nothing
+    /// to keep.
+    async fn fill_pins(self: &Arc<Self>) -> Result<(), crate::SyncError> {
+        let files = self.database.pin_requests().await?;
+        if files.is_empty() {
+            return Ok(());
+        }
+        let waits: std::collections::BTreeMap<_, _> =
+            self.database.download_waits().await?.into_iter().collect();
+        let _pins = self.pins.lock().await;
+        for file in files {
+            let retry = download_subject(&file);
+            if !self.waits.due(retry, waits.get(&retry)) {
+                continue;
+            }
+            let kept = async {
+                UploadedFile::open(self.clone(), file.clone())
+                    .await?
+                    .keep_whole()
+                    .await
+            }
+            .await;
+            let subject = PendingSubject::File {
+                device: file.uploader(),
+                file: file.id(),
+            };
+            match kept {
+                Ok(()) => {
+                    self.database.clear_file_pending(subject).await?;
+                    self.waits.forget(retry);
+                }
+                Err(FileReadError::Database(
+                    DbError::FileRefChanged { .. } | DbError::FileAbsent { .. },
+                )) => self.database.settle_pin_request(file).await?,
+                Err(error) => {
+                    let reason = self.read_pending(&file, &error);
+                    if !retries(&reason) {
+                        self.database.settle_pin_request(file).await?;
+                    }
+                    self.record_download_failure(subject, retry, reason, waits.get(&retry))
+                        .await?;
                 }
             }
         }

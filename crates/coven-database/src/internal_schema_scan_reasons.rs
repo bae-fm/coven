@@ -64,6 +64,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the cancellation table holds at most one row"),
 ("eager_work.rs", "SELECT reference FROM _coven_eager_work ORDER BY namespace,file_id", "_coven_eager_work") =>
     Some("the eager fill reads every pending changed reference"),
+("file_cache.rs", "SELECT reference FROM _coven_pin_requests ORDER BY namespace,file_id", "_coven_pin_requests") =>
+    Some("the file worker keeps every carried pin whole"),
 ("cache_progress.rs", "SELECT reference FROM _coven_eager_requests ORDER BY namespace,file_id", "_coven_eager_requests") =>
     Some("eager progress covers the whole requested set"),
 ("cache_progress.rs", "SELECT EXISTS(SELECT 1 FROM _coven_eager_requests JOIN _coven_eager_work USING(namespace,file_id))", "_coven_eager_requests") =>

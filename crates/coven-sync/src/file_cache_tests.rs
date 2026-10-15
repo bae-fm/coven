@@ -555,6 +555,73 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
     a.close().await;
 }
 
+/// A pin taken while the file is still queued here is kept through its
+/// upload: completing the upload carries the pin to the stored file, and the
+/// file worker keeps it whole from storage without the app pinning again, so
+/// reading it then needs no request. A pin released while queued leaves
+/// nothing pinned (§16.4, E8).
+#[tokio::test]
+async fn a_pin_taken_while_queued_survives_the_upload() {
+    for original in [false, true] {
+        let provenance = match original {
+            false => Provenance::AppProvided,
+            true => Provenance::UserProvided,
+        };
+        let f = Fixture::new(provenance, CacheFill::CacheLazy).await;
+        let bytes = vec![81; CHUNK * 3];
+        let attach = |id: &'static str| {
+            let f = &f;
+            let bytes = bytes.clone();
+            async move {
+                match original {
+                    false => f.attach("files", id, bytes).await,
+                    true => f.original(id, &bytes).await,
+                }
+            }
+        };
+        let kept = attach("kept").await;
+        let released = attach("released").await;
+        f.files
+            .pin(&[kept.clone(), released.clone()])
+            .await
+            .unwrap();
+        f.files
+            .unpin(std::slice::from_ref(&released))
+            .await
+            .unwrap();
+        let pinned = || {
+            f.database
+                .rows_pinned("files", vec!["kept".into(), "released".into()])
+        };
+        assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
+        f.drain().await;
+        assert!(!f.queued(&kept).await);
+        assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
+        f.files.inner.fill_eager().await.unwrap();
+        assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
+        assert!(f
+            .files
+            .inner
+            .database
+            .pin_requests()
+            .await
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            f.database
+                .pin_progress(vec![kept.clone(), released.clone()])
+                .await
+                .unwrap()
+                .files_completed,
+            1
+        );
+        let before = f.storage.request_count();
+        assert_eq!(f.files.read_file(&kept).await.unwrap(), bytes);
+        assert_eq!(f.storage.request_count(), before);
+        f.close().await;
+    }
+}
+
 /// Pin progress is a query over committed, verified cache coverage: bytes a
 /// concurrent reader caches count, a failed read adds none, eviction removes
 /// them, and reopening reads the same answer (§16.4, E8).

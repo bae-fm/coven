@@ -747,6 +747,7 @@ macro_rules! coven_tables {
                 modified_at BLOB CHECK(modified_at IS NULL OR length(modified_at)=13),
                 queued_at BLOB NOT NULL,
                 session BLOB,
+                pinned INTEGER NOT NULL CHECK(pinned IN (0,1)),
                 UNIQUE(device,file),
                 CHECK((original IS NULL)=(modified_at IS NULL))
             ) STRICT;
@@ -883,6 +884,16 @@ macro_rules! coven_tables {
         ");
         $visit!(_coven_eager_work, "
             CREATE TABLE _coven_eager_work (
+                namespace TEXT NOT NULL,
+                file_id TEXT NOT NULL,
+                reference BLOB NOT NULL,
+                PRIMARY KEY(namespace,file_id)
+            ) STRICT, WITHOUT ROWID;
+        ");
+        // Pins carried from queued uploads to their stored files, until a
+        // whole pinned copy is published or the app unpins (§16.4).
+        $visit!(_coven_pin_requests, "
+            CREATE TABLE _coven_pin_requests (
                 namespace TEXT NOT NULL,
                 file_id TEXT NOT NULL,
                 reference BLOB NOT NULL,

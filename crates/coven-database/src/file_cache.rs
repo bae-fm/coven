@@ -357,20 +357,53 @@ pub(super) fn evict(db: &DatabaseConnection, file: &FileRef) -> Result<Vec<Strin
         Ok(paths)
     })
 }
+/// Pin a whole cached file, or one still queued here, whose upload carries
+/// the pin to the stored file. Whether either held the file.
 pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let id = id(file)?;
-    Ok(db.internal_execute("UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE))?==1)
+    Ok(db.internal_execute("UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE))?==1
+        || crate::file_queue::set_pinned(db, file, true)?)
 }
 pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     db.internal_execute(
         "UPDATE _coven_cache SET pinned=0 WHERE namespace=?1 AND file_id=?2",
         (file.namespace(), id(file)?),
     )?;
-    Ok(())
+    crate::file_queue::set_pinned(db, file, false)?;
+    settle_pin(db, file)
 }
 pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     let id = id(file)?;
-    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))
+    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3 UNION ALL SELECT 1 FROM _coven_pin_requests WHERE namespace=?1 AND file_id=?2)",(file.namespace(),&id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))?
+        || crate::file_queue::pinned(db, file)?)
+}
+/// Carry a queued file's pin to the stored file as its upload completes: the
+/// pin then waits for a whole copy from storage like any pin (§16.4).
+pub(super) fn request_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
+    db.internal_execute(
+        "INSERT INTO _coven_pin_requests(namespace,file_id,reference) VALUES(?1,?2,?3)
+         ON CONFLICT(namespace,file_id) DO UPDATE SET reference=excluded.reference",
+        (file.namespace(), id(file)?, file.encode()?),
+    )?;
+    Ok(())
+}
+pub(super) fn pin_requests(db: &DatabaseConnection) -> Result<Vec<FileRef>, DbError> {
+    db.query(
+        "SELECT reference FROM _coven_pin_requests ORDER BY namespace,file_id",
+        [],
+        |r| r.get::<_, Vec<u8>>(0),
+    )?
+    .iter()
+    .map(|bytes| FileRef::decode(bytes))
+    .collect()
+}
+/// The carried pin is kept, refused or released.
+pub(super) fn settle_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
+    db.internal_execute(
+        "DELETE FROM _coven_pin_requests WHERE namespace=?1 AND file_id=?2",
+        (file.namespace(), id(file)?),
+    )?;
+    Ok(())
 }
 /// Check a finished whole cache file's header and length on disk, and return
 /// its size. It reads only the reserved file, so no writer is held (§3.1).
@@ -416,7 +449,7 @@ pub(super) fn publish(
         "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
         [name.as_str()],
     )?;
-    Ok(())
+    settle_pin(db, file)
 }
 fn observation(error: coven_foundation::files::ObservationError) -> DbError {
     match error {

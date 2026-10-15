@@ -214,7 +214,6 @@ pub(crate) fn retire_eager(db: &DatabaseConnection) -> Result<(), DbError> {
 }
 
 /// Pin answers in key order; a key with no row carrying a file is `None`.
-/// A file not yet uploaded reads as not pinned.
 pub(crate) fn rows_pinned(
     db: &DatabaseConnection,
     schema: &WriteSchema,

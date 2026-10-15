@@ -2819,9 +2819,10 @@ impl CovenHandle {
     /// user-provided file, or `None` when the row has none.
     pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
 
-    /// Keeps uploaded files whole on this device regardless of the cache
-    /// budget, downloading what is missing before the call returns.
-    /// Progress is read from pin_progress().
+    /// Keeps files whole on this device regardless of the cache budget,
+    /// downloading what is missing before the call returns; a file still
+    /// queued here keeps its pin through its upload. Progress is read from
+    /// pin_progress().
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Verified cache coverage for these fixed references, in one snapshot.
@@ -2834,8 +2835,7 @@ impl CovenHandle {
     pub async fn unpin(&self, files: &[FileRef]) -> Result<(), FileReadError>;
 
     /// Whether each row's file is pinned, one answer per key in order, or
-    /// `None` for a key with no row carrying a file. A file not yet uploaded
-    /// reads as not pinned.
+    /// `None` for a key with no row carrying a file.
     pub async fn rows_pinned(&self, table: &str, keys: Vec<RowKey>) -> CovenResult<Vec<Option<bool>>>;
 
     /// The same internal query, live. To watch different keys, drop this query

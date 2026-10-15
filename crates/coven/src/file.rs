@@ -30,9 +30,10 @@ impl CovenHandle {
     pub async fn set_uploads_paused(&self, paused: bool) -> CovenResult<()> {
         Ok(self.files.set_uploads_paused(paused).await?)
     }
-    /// Keeps uploaded files whole on this device regardless of the cache
-    /// budget, downloading what is missing before the call returns. Progress
-    /// is read from `pin_progress()`.
+    /// Keeps files whole on this device regardless of the cache budget,
+    /// downloading what is missing before the call returns; a file still
+    /// queued here keeps its pin through its upload. Progress is read from
+    /// `pin_progress()`.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.files.pin(files).await
     }
@@ -49,8 +50,7 @@ impl CovenHandle {
         self.files.unpin(files).await
     }
     /// Whether each row's file is pinned, one answer per key in order, or
-    /// `None` for a key with no row carrying a file. A file not yet uploaded
-    /// reads as not pinned.
+    /// `None` for a key with no row carrying a file.
     pub async fn rows_pinned(
         &self,
         table: &str,

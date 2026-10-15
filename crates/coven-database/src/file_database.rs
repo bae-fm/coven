@@ -122,6 +122,17 @@ impl FileDatabase {
     pub async fn eager_work(&self) -> Result<Vec<FileRef>, DbError> {
         self.read(crate::eager_work::read).await
     }
+    /// Pins carried from completed uploads that still wait for a whole copy.
+    pub async fn pin_requests(&self) -> Result<Vec<FileRef>, DbError> {
+        self.read(cache::pin_requests).await
+    }
+    /// Drop a carried pin that cannot be kept: refused for good, or its row
+    /// no longer names the file.
+    pub async fn settle_pin_request(&self, file: FileRef) -> Result<(), DbError> {
+        self.require_writer()?;
+        self.run(move |db, _, _, _| db.transaction(|db| cache::settle_pin(db, &file)))
+            .await
+    }
     /// Settle eager work: downloaded, permanently refused or cancelled. The
     /// requested set retires with its last settled file.
     pub async fn settle_eager_work(&self, files: Vec<FileRef>) -> Result<(), DbError> {
@@ -319,7 +330,8 @@ impl FileDatabase {
     /// it and this device's pending record about the file. No app row, file
     /// reference or write changes, so a row retargeted, moved or deleted
     /// meanwhile keeps its newer state. Afterwards this device reads the file
-    /// from the cache or storage.
+    /// from the cache or storage. A pin taken while queued becomes the stored
+    /// file's carried pin in that transaction (§16.4).
     pub async fn complete_upload<S: serde::Serialize + Send + 'static>(
         &self,
         id: i64,
@@ -334,7 +346,10 @@ impl FileDatabase {
                     let device = inner.access.device;
                     let schema = &inner.access.write_schema;
                     let result = writer.transaction(|db| {
-                        let reference = file_queue::complete(db, id)?;
+                        let (reference, pinned) = file_queue::complete(db, id)?;
+                        if pinned {
+                            cache::request_pin(db, &reference)?;
+                        }
                         crate::eager_work::uploaded(db, schema, &reference)?;
                         crate::pending::clear(db, &subject, device)
                     });
@@ -542,8 +557,9 @@ impl FileDatabase {
             .await?;
         self.removed(chosen).await
     }
-    /// Pin a complete, previously checked cache file atomically if one exists.
-    /// The presence check and state change share a transaction with eviction.
+    /// Pin a complete, previously checked cache file, or a file still queued
+    /// here, atomically if one exists. The presence check and state change
+    /// share a transaction with eviction and with the upload's completion.
     pub async fn pin_complete(&self, file: &FileRef) -> Result<bool, DbError> {
         let file = file.clone();
         self.run(move |db, schema, _, _| {

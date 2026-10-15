@@ -148,6 +148,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_peer_positions",
                 "_coven_pending",
                 "_coven_pending_resets",
+                "_coven_pin_requests",
                 "_coven_positions",
                 "_coven_positions_post",
                 "_coven_provider_access",
@@ -336,8 +337,8 @@ mod fixture {
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
      INSERT INTO _coven_access_keys SELECT 'access_' || i,CASE WHEN i%2=0 THEN i END FROM fixture;
-     INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at)
-       SELECT i,key,device,substr(key,17,16),zeroblob(13) FROM fixture;
+     INSERT INTO _coven_file_uploads(id,reference,device,file,queued_at,pinned)
+       SELECT i,key,device,substr(key,17,16),zeroblob(13),i%2 FROM fixture;
      INSERT INTO _coven_retries(operation,upload,failures,not_before,wait)
        SELECT CASE WHEN i%2=0 THEN i END,CASE WHEN i%2=1 THEN i END,1,zeroblob(13),1000 FROM fixture;
      INSERT INTO _coven_retries(scope,failures,not_before,wait)
@@ -352,6 +353,7 @@ mod fixture {
      INSERT INTO _coven_eager_requests SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_eager_rows SELECT tab,key,'file_' || i FROM fixture;
      INSERT INTO _coven_eager_work SELECT audience,'file_' || i,key FROM fixture;
+     INSERT INTO _coven_pin_requests SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
