@@ -420,11 +420,22 @@ impl FileDatabase {
         }
     }
 
-    /// Cached encrypted chunk or header (-1), read with its eviction protected by SQLite.
+    /// Cached encrypted chunk or header (-1). Its bytes are read with no
+    /// writer held (§3.1); an entry evicted meanwhile reads as not cached.
     pub async fn cached(&self, file: &FileRef, index: i64) -> Result<Option<Vec<u8>>, DbError> {
         let file = file.clone();
-        self.run(move |db, _, directory, _| cache::read(db, directory, &file, index))
-            .await
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => {
+                database
+                    .call(move |inner| cache::read(&inner.access, &file, index))
+                    .await
+            }
+            FileDatabaseAccess::Reader(database) => {
+                database
+                    .call(move |access| cache::read(access, &file, index))
+                    .await
+            }
+        }
     }
     /// Keep one verified range of `chunks` consecutive encrypted chunks from
     /// `first`, or the header (`first` = -1), durably before publishing its

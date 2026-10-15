@@ -811,3 +811,55 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     read_only.close().await.unwrap();
     db.close().await.unwrap();
 }
+
+/// §3.1: a cached chunk's bytes are read with no writer held. A FIFO in
+/// place of a published range stands in for a stalled disk: the read blocks
+/// opening it while an app write commits. Released, it is no regular file,
+/// so the read fails.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_stalled_cache_read_holds_back_no_app_write() {
+    use crate::file_write::tests::{local_count, SCHEMA};
+    use std::time::Duration;
+    let store = TestStore::new();
+    let db = store
+        .schema(tables(Provenance::AppProvided), SCHEMA)
+        .await
+        .unwrap();
+    attach(&db, vec![5; 3], true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
+    let owner = FileDatabase::new(db.clone());
+    let name = FileName::new("range").unwrap();
+    owner
+        .cache_range(&file, 0, 1, name.clone(), vec![1; 19])
+        .await
+        .unwrap();
+    let path = cache_path(&store, &name);
+    std::fs::remove_file(&path).unwrap();
+    fifo(&path);
+    let reading = tokio::spawn(async move { owner.cached(&file, 0).await });
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert!(!reading.is_finished(), "the cache read is stalled");
+    let written = tokio::time::timeout(
+        Duration::from_secs(5),
+        db.write(|sql| {
+            sql.execute("UPDATE files SET title='while reading'", [])?;
+            Ok(())
+        }),
+    )
+    .await;
+    // Release the read before judging, so a held writer fails the test
+    // instead of hanging it.
+    let release = path.clone();
+    tokio::task::spawn_blocking(move || {
+        drop(std::fs::OpenOptions::new().write(true).open(release))
+    })
+    .await
+    .unwrap();
+    written
+        .expect("an app write waited for a stalled cache read")
+        .unwrap();
+    assert!(reading.await.unwrap().is_err());
+    assert_eq!(local_count(&db, "_coven_cache"), 1);
+    db.close().await.unwrap();
+}

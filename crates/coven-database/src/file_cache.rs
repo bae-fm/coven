@@ -1,4 +1,5 @@
-//! Cache publication and eviction obey the same bytes-before-row rule as attachments.
+//! Cache publication and eviction obey the same bytes-before-row rule as
+//! attachments. Cache bytes are written and read with no writer held (§3.1).
 
 use super::DatabaseAccess;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
@@ -7,7 +8,7 @@ use coven_crypto::FILE_CHUNK_TAG_LEN;
 pub(super) use crate::internal_schema::{
     CACHE_COMPLETE_FILE as COMPLETE_FILE, CACHE_HEADER as HEADER,
 };
-use coven_foundation::files::{FileArea, FileName, StoreDir};
+use coven_foundation::files::{FileArea, FileName, ObservationError, StoreDir};
 
 pub(crate) fn id(file: &FileRef) -> Result<String, DbError> {
     Ok(format!("{}/{}", file.uploader().0, file.id()))
@@ -71,32 +72,53 @@ fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbErro
         target.plaintext_length + FILE_CHUNK_TAG_LEN,
     ))
 }
-pub(super) fn read(
-    db: &DatabaseConnection,
-    directory: &StoreDir,
+/// The cached bytes of chunk `index`, or the header (-1). The entry is
+/// looked up, and its read recorded, under the writer; its bytes are read
+/// with no writer held (§3.1). An entry evicted between the lookup and
+/// opening its bytes is no longer cached.
+pub(super) fn read<L>(
+    access: &DatabaseAccess<L>,
     file: &FileRef,
     index: i64,
 ) -> Result<Option<Vec<u8>>, DbError> {
-    db.transaction(|db| {
-        let Some((path, first, _, length)) = covering(db, file, index)? else {
-            return Ok(None);
-        };
-        let name = FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?;
-        let reader = directory
-            .file(FileArea::Cache, &name)
-            .open_reader()
-            .map_err(observation)?;
-        if reader.size() != u64::try_from(length).map_err(|_| DbError::DamagedDatabase)? {
-            return Err(DbError::DamagedDatabase);
+    let entry = access.with_writer(|db| db.read_transaction(|| covering(db, file, index)))?;
+    let Some((path, first, _, length)) = entry else {
+        return Ok(None);
+    };
+    let name = FileName::new(&path).map_err(|_| DbError::DamagedDatabase)?;
+    let reader = match access.directory.file(FileArea::Cache, &name).open_reader() {
+        Ok(reader) => reader,
+        Err(ObservationError::Missing(_)) => {
+            let recorded = access.with_writer(|db| {
+                db.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE path=?1)",
+                    [&path],
+                    |r| r.get::<_, bool>(0),
+                )
+            })?;
+            return if recorded {
+                Err(DbError::DamagedDatabase)
+            } else {
+                Ok(None)
+            };
         }
-        let (offset, length) = within(file, first, index)?;
-        let bytes = reader.read_at(offset, length).map_err(observation)?;
-        db.internal_execute(
-            "UPDATE _coven_cache SET last_read=?2 WHERE path=?1",
-            (&path, tick(db)?),
-        )?;
-        Ok(Some(bytes))
-    })
+        Err(error) => return Err(observation(error)),
+    };
+    if reader.size() != u64::try_from(length).map_err(|_| DbError::DamagedDatabase)? {
+        return Err(DbError::DamagedDatabase);
+    }
+    let (offset, length) = within(file, first, index)?;
+    let bytes = reader.read_at(offset, length).map_err(observation)?;
+    access.with_writer(|db| {
+        db.transaction(|db| {
+            db.internal_execute(
+                "UPDATE _coven_cache SET last_read=?2 WHERE path=?1",
+                (&path, tick(db)?),
+            )?;
+            Ok(())
+        })
+    })?;
+    Ok(Some(bytes))
 }
 /// Publish one verified range of `chunks` consecutive chunks from `first`,
 /// or the header (`first` = -1), as one file and one row (§16.6). Its name
