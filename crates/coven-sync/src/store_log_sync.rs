@@ -801,3 +801,6 @@ mod key_acquisition;
 
 #[path = "key_rotation.rs"]
 mod key_rotation;
+
+#[path = "copy_replacement.rs"]
+mod copy_replacement;

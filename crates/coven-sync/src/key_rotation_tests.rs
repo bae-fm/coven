@@ -105,51 +105,6 @@ async fn a_forged_copy_to_an_outsider_exposes_the_key_and_costs_one_rotation() {
     assert_eq!(restored.log().await, ana.log().await);
 }
 
-/// The provider corrupts a key copy this device published before any of its
-/// scans read it. Undecodable bytes at an own number are damage, never another
-/// copy's object (`OwnCopyDamage.unreadable_is_damage`): the first phase is
-/// incomplete as on any unreadable copy, a catch-up that must be complete
-/// names the path, and the device keeps its id and its unsent write. A reset
-/// would discard the write and leave the phase incomplete all the same
-/// (`damage_resets_uncopied`, `reset_never_completes`).
-#[tokio::test]
-async fn an_undecodable_own_copy_waits_as_damage() {
-    use crate::device_log_sync::tests::{group, sql, STORE_ID};
-    let storage = crate::device_log_sync::tests::storage();
-    let ana = group(storage.clone(), 1).await.remove(0);
-    let ring = ana.custody.read().unwrap().unwrap();
-    let key = ring.store_key(key(1)).unwrap().clone();
-    let (id, sealing) = (ana.member.member(), ana.member.keys().public_keys().sealing);
-    let copy = ana
-        .db
-        .prepare_key_upload(move |path| {
-            crate::store_log_keys::store_copy(path, &key, &id, &sealing)
-        })
-        .await
-        .unwrap();
-    crate::store_log_object::upload_keys(STORE_ID, Some(storage.as_ref()), &ana.db, &ana.send)
-        .await
-        .unwrap();
-    let path = copy.path(STORE_ID);
-    storage.delete(&path).await.unwrap();
-    storage.create(&path, b"not a sealed key").await.unwrap();
-    sql(&ana.db, "INSERT INTO notes VALUES('one','title','body')").await;
-    assert!(matches!(
-        ana.sync.scan_store_log_once(true).await,
-        Err(SyncError::Damaged(damage)) if damage.path == path.as_str()
-    ));
-    assert!(!ana.sync.scan_store_log_once(false).await.unwrap());
-    assert_eq!(copy_damage(&ana.db).await, std::slice::from_ref(&path));
-    assert_eq!(ana.send.stopped(), None);
-    assert_eq!(ana.directory.device_reset().unwrap(), None);
-    let attempted = ana
-        .db
-        .read_oldest_upload(|upload| Ok::<_, coven_database::DbError>(upload.keys.is_some()))
-        .await
-        .unwrap();
-    assert_eq!(attempted, Some(false));
-}
-
 /// The paths of this device's damaged-copy records, each a parse refusal.
 async fn copy_damage(db: &coven_database::Database) -> Vec<coven_storage::ObjectPath> {
     db.pending::<crate::PendingRecord>()
@@ -230,8 +185,8 @@ async fn an_incomplete_copy_observation_blocks_first_attempts() {
     ana.sync().await;
     // An undecodable copy in another known writer's log leaves an observation
     // incomplete. It cannot renew the earlier completion once that expires.
-    // (In this device's own log it is the same damage; see
-    // `an_undecodable_own_copy_waits_as_damage`.)
+    // (In this device's own log its confirmed bytes stand in; see
+    // `the_publisher_replaces_a_damaged_copy_and_readers_complete`.)
     let writer = ben.db.local_store_log().await.unwrap().device;
     let bad = coven_storage::ObjectPath::key_copy(store(1), writer, 1.try_into().unwrap());
     storage.create(&bad, b"not a sealed key").await.unwrap();

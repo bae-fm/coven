@@ -194,6 +194,15 @@ pub enum StoreChange {
         /// The member's new public pair.
         keys: MemberPublicKeys,
     },
+    /// Record that the provider damaged one of the writing device's own key
+    /// copies and that a later copy of its log reseals what it held (§11).
+    /// Both numbers belong to the device whose log holds this entry.
+    ReplaceKeyCopy {
+        /// The copy number whose bytes no longer decode.
+        damaged: u64,
+        /// The copy number holding the same key for the same recipient.
+        replacement: u64,
+    },
 }
 
 impl StoreChange {
@@ -225,6 +234,17 @@ impl StoreChange {
                 positive(snapshot.number)
             }
             Self::Reset { snapshot } => positive(snapshot.number),
+            Self::ReplaceKeyCopy {
+                damaged,
+                replacement,
+            } => {
+                positive(*damaged)?;
+                require(
+                    damaged < replacement,
+                    "key-copy replacement",
+                    Rule::CopyReplacement,
+                )
+            }
             Self::RemoveMember { .. }
             | Self::RotateKey { .. }
             | Self::SetAccess { .. }
@@ -274,6 +294,7 @@ store_changes!(
     14 => SetAccess { member, access },
     15 => RotateKey { audience, key, key_hash },
     16 => ReplaceMemberKeys { member, keys },
+    17 => ReplaceKeyCopy { damaged, replacement },
 );
 
 /// One store-log entry. Its eventual signature establishes who authored it (§9).

@@ -235,7 +235,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
 
 #[test]
 fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
-    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16];
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17];
     let changes = test_utils::store_changes();
     assert_eq!(changes.len(), tags.len());
     for (change, tag) in changes.into_iter().zip(tags) {
@@ -609,4 +609,18 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
     let mut changed = creation.clone();
     changed[signing..signing + 32].copy_from_slice(&weak);
     assert_eq!(Object::decode(&changed), Err(Error::InvalidSigningKey));
+}
+
+/// A key-copy replacement names a positive damaged number and a later one.
+#[test]
+fn a_key_copy_replacement_names_a_later_copy() {
+    for (damaged, replacement, valid) in [(3, 4, true), (0, 4, false), (4, 4, false), (5, 4, false)]
+    {
+        let bytes = frame(StoreChange::ReplaceKeyCopy {
+            damaged,
+            replacement,
+        })
+        .encode();
+        assert_eq!(bytes.is_ok(), valid, "{damaged} -> {replacement}");
+    }
 }

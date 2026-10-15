@@ -336,6 +336,17 @@ macro_rules! coven_tables {
                 number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000')
             ) STRICT, WITHOUT ROWID;
         ");
+        // The bytes of every copy this installation confirmed, kept for good:
+        // if the provider damages one, they stand in for it in this device's
+        // own copy reading and name what its replacement reseals (§11).
+        $visit!(_coven_published_key_copies, "
+            CREATE TABLE _coven_published_key_copies (
+                writer BLOB NOT NULL CHECK(length(writer)=8),
+                number BLOB NOT NULL CHECK(length(number)=8 AND number>x'0000000000000000'),
+                bytes BLOB NOT NULL,
+                PRIMARY KEY(writer,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_key_uploads, "
             CREATE TABLE _coven_key_uploads (
                 writer BLOB NOT NULL CHECK(length(writer)=8),

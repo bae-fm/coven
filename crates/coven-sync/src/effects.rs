@@ -103,7 +103,9 @@ impl Authority {
                 target: *member,
                 s3: matches!(access, coven_format::MemberAccess::S3AccessKey { .. }),
             },
-            AddDevice { .. } | CreateCircle { .. } => Self::Member,
+            // The copies it names are in the log holding the entry, whose
+            // device belongs to its author (`author_matches_device`).
+            AddDevice { .. } | CreateCircle { .. } | ReplaceKeyCopy { .. } => Self::Member,
             RotateKey { audience, .. } => Self::audience(audience),
             RaiseSchema { snapshot, .. } => Self::audience(&snapshot.audience),
             RemoveDevice { device } => Self::Device(*device),
@@ -251,8 +253,8 @@ pub(crate) fn change_in_place(
 ) -> bool {
     use StoreChange::*;
     match change {
-        // A replacement is an event even when its payload repeats (§9).
-        RotateKey { .. } | ReplaceMemberKeys { .. } => false,
+        // A replacement is an event even when its payload repeats (§9, §11).
+        RotateKey { .. } | ReplaceMemberKeys { .. } | ReplaceKeyCopy { .. } => false,
         CreateStore { .. } => state.store.is_some(),
         AddMember {
             member: id,
@@ -316,7 +318,7 @@ pub(crate) fn validate_effect(
         return Ok(true);
     }
     let missing = match change {
-        RotateKey { .. } | CreateStore { .. } | AddMember { .. } => None,
+        RotateKey { .. } | CreateStore { .. } | AddMember { .. } | ReplaceKeyCopy { .. } => None,
         // Replacement never restores a removed member (`removed_cannot_be_replaced`).
         ReplaceMemberKeys { member: id, keys } => match member(state, id) {
             None => Some(EntryTarget::Member(*id)),
@@ -427,8 +429,9 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
     use StoreChange::*;
     match &entry.change {
         // A rotation's key comes from its received introduction (§11); it has
-        // no membership effect, including after concurrent deletion.
-        RotateKey { .. } => {}
+        // no membership effect, including after concurrent deletion. A copy
+        // replacement is read from the kept entries themselves.
+        RotateKey { .. } | ReplaceKeyCopy { .. } => {}
         CreateStore {
             store,
             name,

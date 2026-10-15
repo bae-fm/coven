@@ -579,6 +579,34 @@ impl Database {
         .await
     }
 
+    /// The exact bytes of this installation's confirmed copy `number`. Absent
+    /// for a number it never confirmed, including one only reserved (§11).
+    pub async fn confirmed_key_copy(
+        &self,
+        number: std::num::NonZeroU64,
+    ) -> Result<Option<Vec<u8>>, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                crate::key_upload::confirmed(writer, inner.access.device, number)
+            })
+        })
+        .await
+    }
+
+    /// The number a copy reserved now would take: one past this installation's
+    /// last reserved or confirmed copy.
+    pub async fn next_key_copy_number(&self) -> Result<std::num::NonZeroU64, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                crate::key_upload::last_reserved(writer, inner.access.device)?
+                    .checked_add(1)
+                    .and_then(std::num::NonZeroU64::new)
+                    .ok_or(DbError::KeyCopyNumberExhausted)
+            })
+        })
+        .await
+    }
+
     /// Confirm the writer's next copy after storage accepted its exact bytes.
     /// Confirmation and queue retirement commit together; repetitions are idempotent.
     pub async fn complete_key_upload(&self, copy: crate::KeyUpload) -> Result<(), DbError> {

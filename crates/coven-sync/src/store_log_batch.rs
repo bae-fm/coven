@@ -102,9 +102,10 @@ impl StoreLogSync {
                 if let Some((writer, number)) = copy.metadata.path.key_copy_position() {
                     // A number beyond the reservations is storage ahead,
                     // whatever its bytes. Undecodable bytes within them are
-                    // provider damage, never another copy's object: the
-                    // copy reading below reports them and the phase waits
-                    // (§11, `OwnCopyDamage.unreadable_is_damage`).
+                    // provider damage, never another copy's object
+                    // (§11, `OwnCopyDamage.unreadable_is_damage`): the copy
+                    // reading below stands this device's confirmed bytes in
+                    // for them and replaces the copy.
                     if writer == local.device {
                         listed_copies = listed_copies.max(number.get());
                     }
@@ -351,7 +352,7 @@ impl StoreLogSync {
         let mut unreadable = None;
         if complete {
             self.acquire_keys(&local.log, &member, &mut ring).await?;
-            let reading = keys::read_copies(
+            let mut reading = keys::read_copies(
                 &self.database,
                 &self.reads,
                 self.download_limit,
@@ -359,9 +360,13 @@ impl StoreLogSync {
                 local.store,
             )
             .await?;
+            let own_damage = reading
+                .settle(&local.log, &self.database, local.device)
+                .await?;
             // Each completed reading decides this device's records of
-            // undecodable copies: a copy that now reads, or is no longer
-            // read, loses its record (§19.1).
+            // undecodable copies: a copy that now reads, is no longer read,
+            // is marked replaced or is this device's own confirmed copy
+            // loses its record (§19.1).
             self.database
                 .replace_local_pending(
                     |record: &PendingRecord| {
@@ -408,6 +413,11 @@ impl StoreLogSync {
                         .lock()
                         .expect("finality lock poisoned")
                         .complete_catch_up(sample);
+                    // With sending authority, this device replaces each of
+                    // its own copies the provider damaged (§11).
+                    if binding == crate::send_gate::Binding::Device {
+                        self.schedule_copy_replacements(&own_damage).await?;
+                    }
                 }
                 Some(damage) => unreadable = Some(damage),
             }

@@ -258,3 +258,16 @@ import CovenStorage
 #print axioms CovenStorage.KeyDelivery.Listing.catchUp_accounts
 #print axioms CovenStorage.KeyDelivery.Listing.lost_database_key_found_by_listing
 #print axioms CovenStorage.KeyDelivery.Listing.catch_up_deletes_in_flight_key
+#print axioms CovenStorage.CopyReplacement.step_inv
+#print axioms CovenStorage.CopyReplacement.run_inv
+#print axioms CovenStorage.CopyReplacement.marked_is_damage
+#print axioms CovenStorage.CopyReplacement.skipped_is_damage
+#print axioms CovenStorage.CopyReplacement.own_record_matches
+#print axioms CovenStorage.CopyReplacement.complete_once_marked
+#print axioms CovenStorage.CopyReplacement.publisher_marks
+#print axioms CovenStorage.CopyReplacement.Examples.replaced_copy_completes
+#print axioms CovenStorage.CopyReplacement.Examples.owner_read_first_stalls
+#print axioms CovenStorage.CopyReplacement.Examples.non_owner_cannot_mark
+#print axioms CovenStorage.CopyReplacement.Examples.damaged_replacement_replaced_again
+#print axioms CovenStorage.CopyReplacement.Examples.cross_damage_stalls
+#print axioms CovenStorage.CopyReplacement.complete_of_published

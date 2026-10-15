@@ -2634,6 +2634,9 @@ pub enum OperationKind {
     DeleteAccessKey,
     /// An admin desktop replacing a member's S3 key (§13).
     ReplaceAccessKey,
+    /// Reseal this device's key copy the provider damaged under a new
+    /// number and record the replacement in the store log (§11).
+    ReplaceKeyCopy,
     /// Snapshot and reset an audience (§19.3).
     Reset,
 }

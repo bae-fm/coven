@@ -104,8 +104,9 @@ impl StoreLogSync {
             let local = self.database.local_store_log().await?;
             let mut ring = self.store_keys.read()?;
             self.update_keys(&local.log, &member, &mut ring).await?;
-            let Some(change) =
-                self.operation_change(&local, &member.member(), &mut data, &mut ring)?
+            let Some(change) = self
+                .operation_change(&local, &member.member(), &mut data, &mut ring)
+                .await?
             else {
                 self.database
                     .advance_operation(data.update(record, data.entry_step_number(5))?)
@@ -299,7 +300,7 @@ impl StoreLogSync {
         Ok(Progress::Advanced)
     }
 
-    fn operation_change(
+    async fn operation_change(
         &self,
         local: &LocalStoreLog,
         me: &MemberId,
@@ -380,6 +381,20 @@ impl StoreLogSync {
                 member: *member,
             },
             Intent::DeleteCircle { circle } => StoreChange::DeleteCircle { circle: *circle },
+            Intent::ReplaceKeyCopy { damaged } => {
+                // A kept entry already records it: nothing is left (§18).
+                if super::copy_replacement::replaced_copies(&local.log)
+                    .contains(&(local.device, *damaged))
+                {
+                    return Ok(None);
+                }
+                effects::Authority::Member.check(state, me)?;
+                // Sealing checks that the copy it reserves takes this number.
+                StoreChange::ReplaceKeyCopy {
+                    damaged: damaged.get(),
+                    replacement: self.database.next_key_copy_number().await?.get(),
+                }
+            }
         };
         // A started operation finishes without another entry if its effect has
         // already happened (§18), even if that effect removed its authority.

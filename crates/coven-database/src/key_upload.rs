@@ -52,17 +52,21 @@ impl KeyUploadBatch {
         })
     }
 
+    /// The number the next [`Self::push`] seals at.
+    pub fn next_number(&self) -> Result<NonZeroU64, DbError> {
+        self.previous
+            .checked_add(1)
+            .and_then(NonZeroU64::new)
+            .ok_or(DbError::KeyCopyNumberExhausted)
+    }
+
     /// Seal at the next path. A failed seal consumes no number.
     pub fn push<F, E>(&mut self, seal: F) -> Result<(), E>
     where
         F: FnOnce(&ObjectPath) -> Result<Vec<u8>, E>,
         E: From<DbError>,
     {
-        let number = self
-            .previous
-            .checked_add(1)
-            .ok_or(DbError::KeyCopyNumberExhausted)?;
-        let number = NonZeroU64::new(number).expect("incremented copy number");
+        let number = self.next_number()?;
         let bytes = seal(&ObjectPath::key_copy(self.store, self.writer, number))?;
         self.copies.push(KeyUpload {
             writer: self.writer,
@@ -176,9 +180,30 @@ pub(crate) fn complete(database: &DatabaseConnection, copy: &KeyUpload) -> Resul
         }
         let args = (copy.writer.0.to_be_bytes(), copy.number.get().to_be_bytes());
         db.internal_execute("INSERT INTO _coven_key_publications(writer,number) VALUES(?1,?2) ON CONFLICT(writer) DO UPDATE SET number=excluded.number", (&args.0[..], &args.1[..]))?;
+        db.internal_execute("INSERT INTO _coven_published_key_copies(writer,number,bytes) VALUES(?1,?2,?3)", (&args.0[..], &args.1[..], &copy.bytes))?;
         db.internal_execute("DELETE FROM _coven_key_uploads WHERE writer=?1 AND number=?2", (&args.0[..], &args.1[..]))?;
         Ok(())
     })
+}
+
+/// The exact bytes `writer` confirmed at `number`, if this installation
+/// confirmed that copy.
+pub(crate) fn confirmed(
+    database: &DatabaseConnection,
+    writer: DeviceId,
+    number: NonZeroU64,
+) -> Result<Option<Vec<u8>>, DbError> {
+    Ok(database
+        .query(
+            "SELECT bytes FROM _coven_published_key_copies WHERE writer=?1 AND number=?2",
+            (
+                writer.0.to_be_bytes().as_slice(),
+                number.get().to_be_bytes().as_slice(),
+            ),
+            |row| row.get(0),
+        )?
+        .into_iter()
+        .next())
 }
 
 pub(crate) fn published(database: &DatabaseConnection, writer: DeviceId) -> Result<u64, DbError> {

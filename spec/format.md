@@ -309,6 +309,7 @@
 | 14 | Set access | `member:MemberId \| access:MemberAccess` |
 | 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
 | 16 | Replace member keys | `member:MemberId \| keys:MemberKeys` |
+| 17 | Replace key copy | `damaged:u64 \| replacement:u64` |
 
 - Tag 12 is unused. The other tags retain their numbers.
 - A role is `0` admin or `1` member. `SnapshotId` is
@@ -344,6 +345,12 @@
   An admin's entry for another member must carry an S3 key. Concurrent
   set-access entries conflict when they name the same member; equal ones
   name the same account or key id.
+- Replace-key-copy names two copy numbers in the key-copy log of its own
+  writing device, `keys/<device>/<n>`: a damaged copy and a later one that
+  reseals the same key to the same recipient. `damaged` is positive and less
+  than `replacement`. It changes no replay state, conflicts with nothing,
+  and needs its author to be a member; readers skip an undecodable copy a
+  kept one marks (§11).
 - `key` and `key_hash` occur only on creation and rotation: the id and
   SHA-256 of the exact 32 key bytes ([§11](coven.md#11-keys)). The hash is
   inside the encrypted entry, never a cleartext path component. Key ids
