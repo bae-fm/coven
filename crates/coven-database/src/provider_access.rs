@@ -73,11 +73,21 @@ pub(crate) fn adopt<P: PendingValue>(
     changes: &[ProviderAccessChange],
 ) -> Result<(), DbError> {
     for change in changes {
-        db.internal_execute("INSERT INTO _coven_provider_access(account,intended,granted) VALUES(?1,?2,?3) ON CONFLICT(account) DO NOTHING",
-            (&change.account,change.intended,change.initially_granted))?;
-        let before = read(db, &change.account)?.ok_or(DbError::Invariant {
-            what: "an account's intended access row was just ensured",
-        })?;
+        let before = match read(db, &change.account)? {
+            Some(before) => before,
+            None => {
+                db.internal_execute(
+                    "INSERT INTO _coven_provider_access(account,intended,granted) VALUES(?1,?2,?3)",
+                    (&change.account, change.intended, change.initially_granted),
+                )?;
+                ProviderAccess {
+                    intended: change.intended,
+                    granted: Some(change.initially_granted),
+                    invitation: None,
+                    request: None,
+                }
+            }
+        };
         db.internal_execute(
             "UPDATE _coven_provider_access SET intended=?1 WHERE account=?2 AND intended!=?1",
             (change.intended, &change.account),
