@@ -173,14 +173,13 @@ impl StorageError {
     }
 
     /// The wait a provider response asked every consumer to observe, from
-    /// its `Retry-After` or, for Dropbox, its error's `retry_after`.
+    /// its `Retry-After`, Dropbox's `retry_after` or CloudKit's
+    /// `CKErrorRetryAfterKey`.
     pub(crate) fn retry_after(&self) -> Option<crate::RetryAfter> {
         match self {
             Self::Provider {
                 provider, source, ..
-            } => source
-                .downcast_ref::<crate::providers::ProviderResponse>()?
-                .retry_after(*provider),
+            } => crate::providers::retry_after(*provider, source.as_ref()),
             Self::Cleanup { operation, .. } => operation.retry_after(),
             Self::Failure(_) | Self::Caused { .. } => None,
         }

@@ -122,26 +122,21 @@ pub(super) fn current_account(container: &CKContainer) -> CloudKitRequest<String
         operation.setDesiredKeys(Some(&strings(&[])));
         let block = RcBlock::new(
             move |records: *mut NSDictionary<CKRecordID, CKRecord>, failure: *mut NSError| {
-                let response = if let Some(error) = error(failure) {
-                    Err(error)
-                } else {
-                    match records.as_ref() {
-                        Some(records) if records.count() == 1 => {
-                            let account = records
-                                .allValues()
-                                .objectAtIndex(0)
-                                .recordID()
-                                .recordName()
-                                .to_string();
-                            if account.is_empty() {
-                                Err(StorageFailure::Authentication.into())
-                            } else {
-                                Ok(account)
-                            }
-                        }
-                        _ => Err(StorageFailure::Authentication
-                            .with_source("CloudKit returned no account")),
-                    }
+                let response = match error(failure) {
+                    Some(error) => Err(error),
+                    None => super::record::account_name(
+                        records
+                            .as_ref()
+                            .filter(|records| records.count() == 1)
+                            .map(|records| {
+                                records
+                                    .allValues()
+                                    .objectAtIndex(0)
+                                    .recordID()
+                                    .recordName()
+                                    .to_string()
+                            }),
+                    ),
                 };
                 complete(response);
             },

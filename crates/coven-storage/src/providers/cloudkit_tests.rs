@@ -478,6 +478,34 @@ async fn cloudkit_live() {
     super::zone::delete(&native).wait().await.unwrap();
 }
 
+/// Run only from the entitled macOS app described in cloudkit-live.md. The
+/// server's refusals keep the evidence that it answered (E5).
+#[tokio::test]
+#[ignore = "requires a signed CloudKit host and an iCloud account"]
+async fn cloudkit_live_response_evidence() {
+    let ids: IdSourceRef = Arc::new(UuidIds);
+    let store = StoreId(ids.new_id());
+    println!("cloudkit_live_response_evidence zone=coven-{store}");
+    let config = super::zone::prepare("iCloud.fm.bae.desktop", store)
+        .await
+        .unwrap();
+    let native = Arc::new(CloudKitStorage::new(config, ids.clone()).await.unwrap());
+    let storage = StorageConnection::from_provider(native.clone());
+    let path = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
+    let absent = storage.read(&path).await.unwrap_err();
+    assert_eq!(absent.failure(), StorageFailure::NotFound);
+    assert!(absent.answered());
+    assert_eq!(absent.retry_after(), None);
+    storage.create(&path, b"encrypted bytes").await.unwrap();
+    let occupied = storage.create(&path, b"changed").await.unwrap_err();
+    assert_eq!(occupied.failure(), StorageFailure::AlreadyExists);
+    assert!(occupied.answered());
+    super::zone::delete(&native).wait().await.unwrap();
+    let deleted = storage.read(&path).await.unwrap_err();
+    assert_eq!(deleted.failure(), StorageFailure::ContainerNotFound);
+    assert!(deleted.answered());
+}
+
 #[test]
 fn partial_failures_keep_the_item_cause_and_do_not_hide_session_conflicts() {
     use super::record::save_error;

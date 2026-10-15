@@ -19,6 +19,7 @@ use coven_foundation::id_source::{DeviceId, IdSourceRef, StoreId};
 use objc2::{rc::Retained, AnyThread};
 use objc2_cloud_kit::{CKContainer, CKDatabase, CKRecordID, CKRecordSavePolicy, CKRecordZoneID};
 use objc2_foundation::NSString;
+pub(super) use record::NativeError;
 use record::{Record, PART_SIZE};
 pub(super) use zone::prepare;
 

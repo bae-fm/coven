@@ -5,10 +5,11 @@ use coven_format::value::StorageTime;
 use coven_foundation::files::{AssetFile, AssetFiles};
 use objc2::{rc::Retained, runtime::ProtocolObject, AnyThread, Message};
 use objc2_cloud_kit::{
-    CKAsset, CKErrorCode, CKErrorDomain, CKPartialErrorsByItemIDKey, CKRecord,
-    CKRecordChangedErrorClientRecordKey, CKRecordID, CKReference, CKReferenceAction, CKShare,
+    CKAsset, CKErrorCode, CKErrorDomain, CKErrorRetryAfterKey, CKPartialErrorsByItemIDKey,
+    CKRecord, CKRecordChangedErrorClientRecordKey, CKRecordID, CKReference, CKReferenceAction,
+    CKShare,
 };
-use objc2_foundation::{NSCopying, NSDictionary, NSError, NSString, NSURL};
+use objc2_foundation::{NSCopying, NSDictionary, NSError, NSNumber, NSString, NSURL};
 use std::time::Duration;
 
 pub(super) use crate::session::CLOUDKIT_PART_SIZE as PART_SIZE;
@@ -283,46 +284,140 @@ pub(super) fn failure(code: CKErrorCode) -> StorageFailure {
     }
 }
 
-fn classified(error: &NSError) -> StorageFailure {
-    unsafe {
-        if &*error.domain() != CKErrorDomain {
-            return StorageFailure::Refused;
+/// The signed-in account's user record name. A missing or empty one means
+/// no iCloud account is signed in: authentication, not a protocol error.
+pub(super) fn account_name(name: Option<String>) -> Result<String, StorageError> {
+    match name {
+        Some(name) if !name.is_empty() => Ok(name),
+        Some(_) => {
+            Err(StorageFailure::Authentication.with_source("CloudKit returned an empty account"))
         }
-        if CKErrorCode(error.code()) != CKErrorCode::PartialFailure {
-            return failure(CKErrorCode(error.code()));
-        }
-        let info = error.userInfo();
-        let Some(value) = info.objectForKey(CKPartialErrorsByItemIDKey) else {
-            return StorageFailure::Protocol;
-        };
-        let Some(errors) = value.downcast_ref::<NSDictionary>() else {
-            return StorageFailure::Protocol;
-        };
-        let mut classification = None;
-        for value in errors.allValues() {
-            let Some(error) = value.downcast_ref::<NSError>() else {
-                return StorageFailure::Protocol;
-            };
-            if &*error.domain() == CKErrorDomain
-                && CKErrorCode(error.code()) == CKErrorCode::BatchRequestFailed
-            {
-                continue;
-            }
-            let next = classified(error);
-            match classification {
-                None => classification = Some(next),
-                Some(prior) if prior == next => {}
-                Some(_) => return StorageFailure::Refused,
-            }
-        }
-        match classification {
-            Some(value) => value,
-            None => StorageFailure::Protocol,
-        }
+        None => Err(StorageFailure::Authentication.with_source("CloudKit returned no account")),
     }
 }
 
-struct NativeError(Retained<NSError>);
+/// The item errors of a CloudKit `partialFailure`, or None when `error` is
+/// another failure. A partial failure without readable items is malformed.
+fn partial_items(error: &NSError) -> Option<Result<Vec<Retained<NSError>>, StorageFailure>> {
+    if !in_cloudkit_domain(error) || CKErrorCode(error.code()) != CKErrorCode::PartialFailure {
+        return None;
+    }
+    unsafe {
+        let info = error.userInfo();
+        let Some(value) = info.objectForKey(CKPartialErrorsByItemIDKey) else {
+            return Some(Err(StorageFailure::Protocol));
+        };
+        let Some(errors) = value.downcast_ref::<NSDictionary>() else {
+            return Some(Err(StorageFailure::Protocol));
+        };
+        Some(
+            errors
+                .allValues()
+                .into_iter()
+                .map(|value| {
+                    value
+                        .downcast::<NSError>()
+                        .map_err(|_| StorageFailure::Protocol)
+                })
+                .collect(),
+        )
+    }
+}
+
+fn in_cloudkit_domain(error: &NSError) -> bool {
+    *error.domain() == *unsafe { CKErrorDomain }
+}
+
+fn classified(error: &NSError) -> StorageFailure {
+    let items = match partial_items(error) {
+        None if !in_cloudkit_domain(error) => return StorageFailure::Refused,
+        None => return failure(CKErrorCode(error.code())),
+        Some(Err(failure)) => return failure,
+        Some(Ok(items)) => items,
+    };
+    let mut classification = None;
+    for error in items {
+        if in_cloudkit_domain(&error)
+            && CKErrorCode(error.code()) == CKErrorCode::BatchRequestFailed
+        {
+            continue;
+        }
+        let next = classified(&error);
+        match classification {
+            None => classification = Some(next),
+            Some(prior) if prior == next => {}
+            Some(_) => return StorageFailure::Refused,
+        }
+    }
+    classification.unwrap_or(StorageFailure::Protocol)
+}
+
+/// Whether CloudKit's server answered. Only codes Apple documents as the
+/// server's decision or state count; transport failures, a lost response
+/// and the framework's local refusals do not (E5). A partial failure is an
+/// answer when any of its items is.
+fn answered(error: &NSError) -> bool {
+    if !in_cloudkit_domain(error) {
+        return false;
+    }
+    if let Some(items) = partial_items(error) {
+        return items.is_ok_and(|items| items.iter().any(|item| answered(item)));
+    }
+    matches!(
+        CKErrorCode(error.code()),
+        CKErrorCode::ServiceUnavailable
+            | CKErrorCode::RequestRateLimited
+            | CKErrorCode::ZoneBusy
+            | CKErrorCode::PermissionFailure
+            | CKErrorCode::UnknownItem
+            | CKErrorCode::ServerRecordChanged
+            | CKErrorCode::ServerRejectedRequest
+            | CKErrorCode::IncompatibleVersion
+            | CKErrorCode::ConstraintViolation
+            | CKErrorCode::ChangeTokenExpired
+            | CKErrorCode::BatchRequestFailed
+            | CKErrorCode::QuotaExceeded
+            | CKErrorCode::ZoneNotFound
+            | CKErrorCode::LimitExceeded
+            | CKErrorCode::UserDeletedZone
+            | CKErrorCode::TooManyParticipants
+            | CKErrorCode::AlreadyShared
+            | CKErrorCode::ReferenceViolation
+            | CKErrorCode::ParticipantMayNeedVerification
+            | CKErrorCode::ParticipantAlreadyInvited
+    )
+}
+
+/// `CKErrorRetryAfterKey`'s seconds on the error or any partial-failure item;
+/// the longest governs, since every item's wait must pass (SP waiting).
+fn retry_after(error: &NSError) -> Option<Duration> {
+    let own = unsafe { error.userInfo().objectForKey(CKErrorRetryAfterKey) }
+        .and_then(|value| value.downcast::<NSNumber>().ok())
+        .and_then(|seconds| Duration::try_from_secs_f64(seconds.doubleValue()).ok());
+    let items = partial_items(error)
+        .and_then(Result::ok)
+        .unwrap_or_default();
+    own.into_iter()
+        .chain(items.iter().filter_map(|item| retry_after(item)))
+        .max()
+}
+
+/// A CloudKit failure, with what its NSError states about the server's answer
+/// read once at conversion: whether the server answered, and its requested
+/// wait. The NSError stays the cause.
+pub(crate) struct NativeError {
+    error: Retained<NSError>,
+    answered: bool,
+    retry_after: Option<Duration>,
+}
+impl NativeError {
+    pub(crate) fn answered(&self) -> bool {
+        self.answered
+    }
+    pub(crate) fn retry_after(&self) -> Option<crate::RetryAfter> {
+        self.retry_after.map(crate::RetryAfter::Wait)
+    }
+}
 impl std::fmt::Debug for NativeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(self, f)
@@ -331,19 +426,23 @@ impl std::fmt::Debug for NativeError {
 impl std::fmt::Display for NativeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // NSError's userInfo can contain whole records and share URLs.
-        write!(f, "{} ({})", self.0.domain(), self.0.code())
+        write!(f, "{} ({})", self.error.domain(), self.error.code())
     }
 }
 impl std::error::Error for NativeError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        Some(&*self.0)
+        Some(&*self.error)
     }
 }
 pub(super) fn native_error(error: &NSError) -> StorageError {
     StorageError::Provider {
         provider: CloudProvider::CloudKit,
         failure: classified(error),
-        source: Box::new(NativeError(error.retain())),
+        source: Box::new(NativeError {
+            error: error.retain(),
+            answered: answered(error),
+            retry_after: retry_after(error),
+        }),
     }
 }
 
@@ -387,3 +486,7 @@ fn conflict_names(error: &NSError, name: &str) -> bool {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "cloudkit_record_tests.rs"]
+mod tests;

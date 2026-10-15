@@ -30,9 +30,28 @@ pub fn s3_member_policy(
 /// Whether a provider failure's native cause is a response the provider sent,
 /// even an error one (E5).
 pub(crate) fn response_arrived(source: &(dyn std::error::Error + 'static)) -> bool {
+    #[cfg(target_vendor = "apple")]
+    if let Some(native) = source.downcast_ref::<cloudkit::NativeError>() {
+        return native.answered();
+    }
     source.is::<ProviderResponse>()
         || source.is::<OAuthRedirectError>()
         || s3::response_status(source).is_some()
+}
+/// The wait a provider failure's native response asked every consumer to
+/// observe: HTTP `Retry-After`, Dropbox's `retry_after`, or CloudKit's
+/// `CKErrorRetryAfterKey` (SP waiting).
+pub(crate) fn retry_after(
+    provider: crate::CloudProvider,
+    source: &(dyn std::error::Error + 'static),
+) -> Option<crate::RetryAfter> {
+    #[cfg(target_vendor = "apple")]
+    if let Some(native) = source.downcast_ref::<cloudkit::NativeError>() {
+        return native.retry_after();
+    }
+    source
+        .downcast_ref::<ProviderResponse>()?
+        .retry_after(provider)
 }
 pub(crate) use s3::{
     admit_s3_setup, check_new_store as check_new_s3_store, check_s3_versioning,
