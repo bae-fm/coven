@@ -373,7 +373,14 @@ fn admission_case(base: &History, objects: &[(u8, u64, Vec<usize>)]) -> (Value, 
             disposition: coven_format::write::WriteDisposition::Apply,
         };
         verdicts.push(
-            match crate::write_object::authority(&log, &mut replays, &header) {
+            match crate::write_object::authority(
+                &log,
+                &mut replays,
+                &coven_format::write_stream::WriteHeaderFrame {
+                    header,
+                    parts: Vec::new(),
+                },
+            ) {
                 Ok(signer) => {
                     assert_eq!(signer, crate::replay::tests::keys(author).signing);
                     true

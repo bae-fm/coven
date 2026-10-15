@@ -83,12 +83,9 @@ impl coven_database::Authorship for EvidenceKeys {
         if !missing.is_empty() {
             return Err(SnapshotError::StoreLog { missing }.into());
         }
-        let signer = crate::write_object::authority(
-            &self.log,
-            &mut ReplayCache::new(&self.log),
-            &header.header,
-        )
-        .map_err(|_| invalid("write evidence author was not authorized to write"))?;
+        let signer =
+            crate::write_object::authority(&self.log, &mut ReplayCache::new(&self.log), &header)
+                .map_err(|_| invalid("write evidence author was not authorized to write"))?;
         signer
             .verify_write_header(
                 path.as_str(),

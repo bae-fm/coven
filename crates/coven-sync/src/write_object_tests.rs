@@ -307,3 +307,72 @@ pub(crate) async fn retired_devices(reader: &Device) -> (serde_json::Value, serd
         serde_json::json!(retired),
     )
 }
+
+/// Ben's phone's write with one part in each of `audiences`, recording that it
+/// had read the first `read` entries of `history`.
+fn ben_write(
+    history: &crate::replay::tests::History,
+    read: usize,
+    audiences: &[coven_merge::Audience],
+) -> coven_format::write_stream::WriteHeaderFrame {
+    let mut ends = std::collections::BTreeMap::new();
+    for entry in &history.entries[..read] {
+        let end = ends.entry(entry.position.device).or_insert(entry.position);
+        end.number = end.number.max(entry.position.number);
+    }
+    coven_format::write_stream::WriteHeaderFrame {
+        header: coven_format::write::WriteHeader {
+            position: coven_merge::WriteId {
+                device: DeviceId(1),
+                number: 1,
+            },
+            timestamp: coven_merge::Timestamp::new(1_000, 0, DeviceId(1)).unwrap(),
+            had_read: coven_format::value::WritePositions(Vec::new()),
+            store_log_read: coven_format::value::EntryPositions(ends.into_values().collect()),
+            schema_version: 1,
+            disposition: coven_format::write::WriteDisposition::Apply,
+        },
+        parts: audiences
+            .iter()
+            .map(|audience| coven_format::write_stream::PartHeader {
+                audience: audience.clone(),
+                record_count: 1,
+                plaintext_length: 1,
+            })
+            .collect(),
+    }
+}
+
+/// §7.1: a write counts only if its author was in each circle its parts name,
+/// in its recorded view. Ben's write into Gifts counts before he has read his
+/// removal from it (§14.6), and not after; a write into a circle he never
+/// joined never counts. His store part is unaffected. This is the
+/// author-in-circle premise of `CurrentData.passed_part_has_creation`.
+#[test]
+fn a_circle_part_counts_only_if_its_author_was_in_the_circle_in_its_view() {
+    use crate::replay::tests::{circle, gifts, keys, leave, make};
+    use coven_merge::Audience;
+    let mut history = gifts();
+    history.all(0, 0, leave(0, 1));
+    history.all(0, 0, make(1, "Ana's"));
+    let log = crate::replay::tests::checked_log(&history.entries);
+    let mut replays = crate::replay_cache::ReplayCache::new(&log);
+    let gifts = Audience::Circle(circle(0));
+    let others = Audience::Circle(circle(1));
+    for (read, audiences, counts) in [
+        (5, vec![Audience::Store, gifts.clone()], true),
+        (6, vec![gifts.clone()], false),
+        (6, vec![Audience::Store], true),
+        (7, vec![Audience::Store, others], false),
+    ] {
+        let write = ben_write(&history, read, &audiences);
+        match super::authority(&log, &mut replays, &write) {
+            Ok(signer) => {
+                assert!(counts, "{read} {audiences:?}");
+                assert_eq!(signer, keys(1).signing);
+            }
+            Err(crate::Refusal::NotAuthorized) => assert!(!counts, "{read} {audiences:?}"),
+            Err(other) => panic!("{other:?}"),
+        }
+    }
+}

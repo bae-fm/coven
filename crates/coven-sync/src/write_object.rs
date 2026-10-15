@@ -457,7 +457,7 @@ pub(crate) async fn download(
         if !missing.is_empty() {
             return Ok(Err(Unready::History(WriteWait::StoreLog(missing))));
         }
-        let signer = authority(log, replays, &opened.header.header)
+        let signer = authority(log, replays, &opened.header)
             .map_err(|failure| damaged(&object.path, failure))?;
         opened.verify_header(&object.path, &signer)?;
         let parts = match parts(
@@ -486,8 +486,9 @@ pub(crate) async fn download(
 pub(crate) fn authority(
     log: &StoreLog,
     replays: &mut ReplayCache<'_>,
-    header: &coven_format::write::WriteHeader,
+    frame: &WriteHeaderFrame,
 ) -> Result<SigningKey, Refusal> {
+    let header = &frame.header;
     for applied in &log.entries {
         let entry = &applied.entry;
         if !header.store_log_read.covers(entry.position) {
@@ -503,16 +504,25 @@ pub(crate) fn authority(
             return Err(Refusal::InvalidCausality { cause: None });
         }
     }
-    // A write made after reading its device's kept removal or replacement
-    // never counts: its recorded view no longer has the device active (§7.1, §10).
-    let view = replays.at(&header.store_log_read);
+    // A write made after reading its device's kept removal or replacement,
+    // or its author's removal from a circle it writes to, never counts: its
+    // recorded view no longer has the device active or the author in that
+    // circle (§7.1, §10, §14.6).
+    let view = &replays.at(&header.store_log_read).state;
     let device = view
-        .state
         .devices
         .get(&header.position.device)
         .ok_or(Refusal::NotAuthorized)?;
-    match view.state.members.get(&device.member) {
-        Some(owner) if device.active() && !owner.removed => Ok(owner.keys.signing),
+    match view.members.get(&device.member) {
+        Some(owner)
+            if device.active()
+                && !owner.removed
+                && frame.parts.iter().all(|part| {
+                    crate::key_introductions::belongs(view, &part.audience, &device.member)
+                }) =>
+        {
+            Ok(owner.keys.signing)
+        }
         _ => Err(Refusal::NotAuthorized),
     }
 }

@@ -1827,9 +1827,9 @@ Two mechanisms order writes:
 - Resolve the device's stable owner in `store_log_read` and verify with
   that member's current signing key in the replay of that view. A wrong
   signature is a signature refusal (§19.1), not a membership verdict.
-- A write counts only if its author was a member and its device one of
-  theirs in that recorded view, judged like an entry's
-  authority ([§9](#9-members-and-roles)). Otherwise refuse it as
+- A write counts only if, in that recorded view, its author was a member
+  and in each circle it writes to, and its device one of theirs, judged like
+  an entry's authority ([§9](#9-members-and-roles)). Otherwise refuse it as
   `NotAuthorized` and block its device's log at that number (§19.1).
   - It creates no lost values: the app must not be able to restore an
     unauthorized author's data.
@@ -4581,9 +4581,7 @@ Carol's tablet:
   - Carol's concurrent addition to Gifts, if it arrives, can leave it with
     Carol instead. The rows return and Carol reloads their history (§14.4).
 - A write Ben made to the circle before he had read his removal passes
-  this circle-membership check, as with a concurrent entry (§9). It still
-  follows §10's device-retirement checks, §17.1's schema rules and §8's
-  per-change data rule.
+  §7.1's circle check, as with a concurrent entry (§9).
   - Leaving a circle does not retire a device or start a device-retirement
     window. A separate removal of Ben or his device, or replacement of its
     id, does (§10).

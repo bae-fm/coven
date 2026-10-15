@@ -429,11 +429,15 @@ async fn lean_differential_member_key_replacements() {
                 continue;
             }
             let signer = write.signer.keys().public_keys().signing;
-            let authorized = crate::write_object::authority(&log, &mut replays, &header)
+            let frame = coven_format::write_stream::WriteHeaderFrame {
+                header,
+                parts: Vec::new(),
+            };
+            let authorized = crate::write_object::authority(&log, &mut replays, &frame)
                 .is_ok_and(|recorded| recorded == signer);
             let (late, fixed) = database
                 .test_write_landing(
-                    header,
+                    frame.header,
                     coven_database::Published {
                         stored_at: coven_format::value::StorageTime::since_epoch(
                             std::time::Duration::from_secs(write.stored * DAY),
