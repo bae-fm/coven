@@ -327,8 +327,13 @@ impl tokio::io::AsyncRead for FailingReader {
     }
 }
 
+/// An original is checked while it is prepared, before the writer is taken.
+/// Registering and committing touch nothing at its path, so a FIFO in its
+/// place, where a stalled mount would hang any stat or open, cannot hold
+/// back the write; its upload finds the change (§16.5).
+#[cfg(unix)]
 #[tokio::test]
-async fn originals_are_checked_during_preparation_at_registration_and_before_commit() {
+async fn originals_are_checked_while_prepared_and_never_under_the_writer() {
     let store = TestStore::new();
     let db = store
         .schema(tables(Provenance::UserProvided), SCHEMA)
@@ -346,34 +351,30 @@ async fn originals_are_checked_during_preparation_at_registration_and_before_com
     .await
     .unwrap_err();
     assert!(matches!(error, DbError::UserFileChanged { .. }));
-    for before_register in [true, false] {
-        std::fs::write(&path, b"original").unwrap();
-        let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
-        if before_register {
-            std::fs::write(&path, b"changed").unwrap();
-        }
-        let change_path = path.clone();
-        let error = db
-            .write(move |sql| {
-                sql.insert_user_file(
-                    "files",
-                    "7",
-                    prepared,
-                    "INSERT INTO files(id,size) VALUES('7',8)",
-                    &[],
-                )?;
-                if !before_register {
-                    std::fs::write(change_path, b"changed").unwrap();
-                }
-                Ok(())
-            })
-            .await
-            .unwrap_err();
-        assert!(matches!(error, DbError::UserFileChanged { .. }));
-        assert_eq!(local_count(&db, "files"), 0);
-        assert_eq!(local_count(&db, "_coven_user_files"), 0);
-    }
-    assert!(owned_paths(&store).is_empty());
+    std::fs::write(&path, b"original").unwrap();
+    let prepared = prepare_user_file(&path, |_| {}).await.unwrap();
+    std::fs::remove_file(&path).unwrap();
+    assert!(std::process::Command::new("mkfifo")
+        .arg(&path)
+        .status()
+        .unwrap()
+        .success());
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        db.write(move |sql| {
+            sql.insert_user_file(
+                "files",
+                "7",
+                prepared,
+                "INSERT INTO files(id,size) VALUES('7',8)",
+                &[],
+            )
+        }),
+    )
+    .await
+    .expect("a write waited on its original")
+    .unwrap();
+    assert_eq!(local_count(&db, "_coven_user_files"), 1);
     db.close().await.unwrap();
 }
 

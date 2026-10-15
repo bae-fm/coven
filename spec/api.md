@@ -1180,8 +1180,7 @@ impl SqlContext<'_, '_> {
     ) -> Result<(), DbError>;
 
     /// Records a prepared user-provided file on a row the write already has.
-    /// Fails if the row's size column disagrees with the file, or the file
-    /// changed since it was prepared.
+    /// Fails if the row's size column disagrees with the file.
     pub fn register_user_file(
         &self,
         table: &str,

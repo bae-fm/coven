@@ -47,7 +47,6 @@ pub(crate) struct FileWrite<'a> {
     device: DeviceId,
     ids: &'a dyn IdSource,
     staged: Vec<StagedFile>,
-    originals: RefCell<Vec<PreparedUserFile>>,
     attached: RefCell<BTreeMap<AppKey, AttachedFile>>,
     obsolete: RefCell<BTreeSet<FileName>>,
     changed_reference: RefCell<Option<(String, RowKey)>>,
@@ -67,7 +66,6 @@ impl<'a> FileWrite<'a> {
             device,
             ids,
             staged,
-            originals: RefCell::new(Vec::new()),
             attached: RefCell::new(BTreeMap::new()),
             obsolete: RefCell::new(BTreeSet::new()),
             changed_reference: RefCell::new(None),
@@ -185,7 +183,6 @@ impl<'a> FileWrite<'a> {
                 table: table.into(),
             });
         }
-        prepared.observed.validate()?;
         let (key, values) = file_row::lookup(db, self.schema, table, &key)?;
         file_row::check_size(&values, file, prepared.observed.size())?;
         file_row::set(
@@ -236,7 +233,6 @@ impl<'a> FileWrite<'a> {
                 },
             },
         );
-        self.originals.borrow_mut().push(prepared);
         Ok(())
     }
 
@@ -396,9 +392,6 @@ impl<'a> FileWrite<'a> {
             });
         }
         let db = self.database;
-        for original in self.originals.borrow().iter() {
-            original.observed.validate()?;
-        }
         for file in &self.staged {
             self.obsolete.borrow_mut().insert(file.name.clone());
         }

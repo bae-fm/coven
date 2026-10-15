@@ -26,7 +26,7 @@ impl<'connection, 'write> SqlContext<'connection, 'write> {
         self.register_user_file(table, key, prepared)
     }
 
-    /// Attach an original, checking its recorded facts and the row's size.
+    /// Attach an original prepared before the write, checking the row's size.
     pub fn register_user_file(
         &self,
         table: &str,

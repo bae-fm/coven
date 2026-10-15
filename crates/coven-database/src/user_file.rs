@@ -28,7 +28,7 @@ pub struct UserFile {
 
 /// Read a user's original once, recording its whole-file hash and each upload
 /// chunk's hash from the same bytes, and reporting total bytes read. Changes
-/// during the read or before attachment are refused.
+/// during the read are refused; later ones fail its upload.
 pub async fn prepare_user_file(
     path: &Path,
     progress: impl Fn(u64) + Send + Sync,
