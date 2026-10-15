@@ -14,7 +14,9 @@ mod read_handle;
 mod test_utils;
 
 pub use builder::CovenBuilder;
-pub use builder::{join_with_invite, restore_from_code, restore_from_keychain, BootstrapError};
+pub use builder::{
+    join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
+};
 pub use coven::Coven;
 pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind};
 pub use coven_sync::{

@@ -205,7 +205,7 @@ impl Installation {
         request: BootstrapRequest,
         storage: Arc<MemoryStorage>,
         cancel: &watch::Receiver<bool>,
-        status: impl Fn(&str),
+        status: impl Fn(BootstrapStatus),
     ) -> Result<Option<CovenHandle>, BootstrapError> {
         bootstrap_device(
             self.authenticated_builder(owner, storage).await,
@@ -321,4 +321,20 @@ pub(super) async fn fingerprint(
     .await
     .unwrap()
     .fingerprints
+}
+
+/// A status callback that cancels at the `phase.1`-th report of `phase.0`.
+pub(super) fn cancel_at<'a>(
+    phase: &'a (BootstrapStatus, usize),
+    stop: &'a watch::Sender<bool>,
+) -> impl Fn(BootstrapStatus) + 'a {
+    let seen = std::cell::Cell::new(0);
+    move |status| {
+        if status == phase.0 {
+            seen.set(seen.get() + 1);
+            if seen.get() == phase.1 {
+                stop.send(true).unwrap();
+            }
+        }
+    }
 }

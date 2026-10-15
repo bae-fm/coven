@@ -292,10 +292,11 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
 #[tokio::test]
 async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key() {
     let owner = Owner::new(CloudProvider::S3, false).await;
+    // Before connecting, while loading, and after loading before publication.
     for phase in [
-        "Preparing this device",
-        "Opening member keys and the store log",
-        "Keeping keys and credentials",
+        (BootstrapStatus::Connecting, 1),
+        (BootstrapStatus::Loading, 1),
+        (BootstrapStatus::Loading, 2),
     ] {
         let install = Installation::new();
         let store = scoped(&install, &owner);
@@ -308,17 +309,13 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
             install.builder(&owner, owner.storage.clone()),
             None,
             "Laptop",
-            |status| {
-                if status == phase {
-                    stop.send(true).unwrap();
-                }
-            },
+            cancel_at(&phase, &stop),
             &cancel,
         )
         .await;
         assert!(
             matches!(result, Err(BootstrapError::Cancelled)),
-            "{phase}: {result:?}"
+            "{phase:?}: {result:?}"
         );
         assert_eq!(
             store.synced_restore_code().unwrap().unwrap().as_bytes(),

@@ -86,12 +86,12 @@ impl Joining<'_> {
     pub(super) async fn admit(
         &mut self,
         sync: &mut StoreLogSync,
-        status: &impl Fn(&str),
+        database: &Database,
+        status: &impl Fn(BootstrapStatus),
     ) -> Result<bool, BootstrapError> {
-        status("Accepting provider access");
+        status(BootstrapStatus::Connecting);
         sync.accept_join(&self.invitation).await?;
         if !self.identity.attempted() {
-            status("Sending the join request");
             self.identity.record_attempt(&self.file, self.code)?;
             if let Err(error) = sync.submit_join(&self.identity).await {
                 // Only a request that may be stored makes its absence final.
@@ -101,7 +101,8 @@ impl Joining<'_> {
                 return Err(error.into());
             }
         }
-        status("Waiting for approval");
+        let mut shown = BootstrapStatus::WaitingForApproval;
+        status(shown.clone());
         // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay
         // survives reopening and a provider cooldown holds them (§16.5).
         loop {
@@ -115,7 +116,19 @@ impl Joining<'_> {
                     sync.join_poll_settled().await?;
                     return Ok(false);
                 }
-                JoinOutcome::Waiting => sync.join_poll_waiting().await?,
+                JoinOutcome::Waiting => {
+                    let pending = database.pending::<coven_sync::PendingRecord>().await?;
+                    let waiting = if pending.is_empty() {
+                        BootstrapStatus::WaitingForApproval
+                    } else {
+                        BootstrapStatus::Pending(pending)
+                    };
+                    if waiting != shown {
+                        shown = waiting;
+                        status(shown.clone());
+                    }
+                    sync.join_poll_waiting().await?
+                }
             }
         }
     }

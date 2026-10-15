@@ -237,3 +237,36 @@ async fn a_refused_join_request_is_sent_again() {
     result.unwrap().unwrap().close().await.unwrap();
     owner.close().await;
 }
+
+/// A join reports connecting, then waiting for approval, then loading (E10).
+#[tokio::test]
+async fn a_join_reports_each_bootstrap_phase_in_order() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let reported = std::sync::Mutex::new(Vec::new());
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |status| {
+            let mut reported = reported.lock().unwrap();
+            if reported.last() != Some(&status) {
+                reported.push(status);
+            }
+        },
+    );
+    let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    result.unwrap().unwrap().close().await.unwrap();
+    assert_eq!(
+        reported.into_inner().unwrap(),
+        [
+            BootstrapStatus::Connecting,
+            BootstrapStatus::WaitingForApproval,
+            BootstrapStatus::Loading,
+        ]
+    );
+    owner.close().await;
+}

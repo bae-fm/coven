@@ -386,10 +386,11 @@ async fn cancellation_while_waiting_removes_every_local_installation_value() {
 
 #[tokio::test]
 async fn cancellation_during_restore_and_before_publication_keeps_final_custody_empty() {
+    // Before connecting, while loading, and after loading before publication.
     for phase in [
-        "Preparing this device",
-        "Opening member keys and the store log",
-        "Keeping keys and credentials",
+        (BootstrapStatus::Connecting, 1),
+        (BootstrapStatus::Loading, 1),
+        (BootstrapStatus::Loading, 2),
     ] {
         let owner = Owner::new(CloudProvider::S3, false).await;
         let install = Installation::new();
@@ -400,16 +401,12 @@ async fn cancellation_during_restore_and_before_publication_keeps_final_custody_
                 Installation::restore_request(&owner),
                 owner.storage.clone(),
                 &cancel,
-                |status| {
-                    if status == phase {
-                        stop.send(true).unwrap();
-                    }
-                },
+                cancel_at(&phase, &stop),
             )
             .await;
         assert!(
             matches!(result, Err(BootstrapError::Cancelled)),
-            "{phase}: {result:?}"
+            "{phase:?}: {result:?}"
         );
         install.absent(owner.directory.id()).await;
         assert!(!install

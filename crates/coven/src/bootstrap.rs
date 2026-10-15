@@ -81,6 +81,22 @@ pub enum BootstrapError {
     },
 }
 
+/// Bootstrap progress (E10), before an open handle exists.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum BootstrapStatus {
+    /// Preparing this installation, accepting provider access and sending a
+    /// join request.
+    Connecting,
+    /// The join request waits for an admin's approval.
+    WaitingForApproval,
+    /// Loading the store log, snapshots and later writes, then keeping keys
+    /// and credentials.
+    Loading,
+    /// The join waits on these first unmet conditions, the records
+    /// `pending()` returns once the store is open (§19.1).
+    Pending(Vec<coven_sync::PendingRecord>),
+}
+
 /// Restore this person's store on a new device, returning its open handle.
 /// S3 requires a key entered separately or transferred beside the code. Other
 /// providers require None and use the builder's own sign-in. Invalid key inputs
@@ -90,7 +106,7 @@ pub async fn restore_from_code(
     code: &str,
     s3_credentials: Option<S3Credentials>,
     device_name: &str,
-    on_status: impl Fn(&str),
+    on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError> {
     check_cancel(cancel)?;
@@ -120,7 +136,7 @@ pub async fn restore_from_keychain(
     builder: CovenBuilder,
     s3_credentials: Option<S3Credentials>,
     device_name: &str,
-    on_status: impl Fn(&str),
+    on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
@@ -160,7 +176,7 @@ pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
-    on_status: impl Fn(&str),
+    on_status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
@@ -211,7 +227,7 @@ enum BootstrapRequest {
 async fn bootstrap_device(
     mut builder: CovenBuilder,
     request: BootstrapRequest,
-    status: impl Fn(&str),
+    status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
@@ -220,7 +236,7 @@ async fn bootstrap_device(
         BootstrapRequest::Restore { code, .. } => (code.store, &code.name),
         BootstrapRequest::Join { code, .. } => (code.store, &code.name),
     };
-    status("Preparing this device");
+    status(BootstrapStatus::Connecting);
     let pending = builder
         .layout
         .begin_bootstrap(id, name, builder.ids.as_ref())
@@ -237,7 +253,7 @@ async fn bootstrap_device(
             send,
             waits,
         })) => {
-            status("Keeping keys and credentials");
+            status(BootstrapStatus::Loading);
             let result = check_cancel(cancel).and_then(|()| {
                 builder.authentication.take();
                 let mut owners = builder.owners(
@@ -306,7 +322,7 @@ async fn prepare_and_load(
     builder: &mut CovenBuilder,
     pending: &BootstrapStore,
     request: &BootstrapRequest,
-    status: &impl Fn(&str),
+    status: &impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<Loaded>, BootstrapError> {
     let directory = pending.directory();
@@ -405,11 +421,12 @@ async fn prepare_and_load(
     );
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
-            if !joining.admit(&mut sync, status).await? {
+            if !joining.admit(&mut sync, &database, status).await? {
                 return Ok(false);
             }
+            status(BootstrapStatus::Loading);
         } else {
-            status("Opening member keys and the store log");
+            status(BootstrapStatus::Loading);
             if !sync
                 .bootstrap_member(coven_sync::BindingSource::Restore)
                 .await?
@@ -417,7 +434,6 @@ async fn prepare_and_load(
                 return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed).into());
             }
         }
-        status("Loading snapshots and later writes");
         sync.load_new_device(device_name, reset.map(|reset| reset.old_device))
             .await?;
         sync.download_later_writes(&mut writes).await?;
