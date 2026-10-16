@@ -1,5 +1,20 @@
 use super::*;
 
+/// Wait until `address` binds again, which is what the next sign-in needs.
+/// Closing our listener is not enough at once: a child another test is
+/// spawning holds an inherited copy of the socket until it execs, and until
+/// then the address still accepts connections and refuses a bind.
+async fn released(address: std::net::SocketAddr) {
+    let rebind = async {
+        while tokio::net::TcpListener::bind(address).await.is_err() {
+            tokio::task::yield_now().await;
+        }
+    };
+    tokio::time::timeout(std::time::Duration::from_secs(10), rebind)
+        .await
+        .expect("the listener is still bound");
+}
+
 #[tokio::test]
 async fn desktop_callback_returns_the_url_and_releases_the_listener() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -22,7 +37,7 @@ async fn desktop_callback_returns_the_url_and_releases_the_listener() {
         redirect.unwrap().as_str(),
         "http://localhost:19284/callback?code=code&state=state"
     );
-    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    released(address).await;
 }
 
 #[tokio::test]
@@ -37,5 +52,5 @@ async fn dropping_callback_wait_closes_the_listener() {
     })
     .await;
     drop(pending);
-    assert!(tokio::net::TcpStream::connect(address).await.is_err());
+    released(address).await;
 }
