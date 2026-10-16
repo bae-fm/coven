@@ -25,7 +25,7 @@ fn fail_next(failure: StorageFailure, retry_after: Option<u64>) -> Faults {
 }
 
 fn catch_up() -> PendingReason {
-    PendingReason::Waits(Prerequisite::CatchUp)
+    PendingReason::Waits(Prerequisite::StoreLogCatchUp)
 }
 
 fn network() -> PendingReason {
@@ -291,8 +291,9 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
             .await
             .unwrap()
             .iter()
-            .any(|record| record.reason == PendingReason::Waits(Prerequisite::CatchUp))
-        {}
+            .any(|record| record.reason == PendingReason::Waits(Prerequisite::StoreLogCatchUp))
+        {
+        }
     })
     .await
     .unwrap();

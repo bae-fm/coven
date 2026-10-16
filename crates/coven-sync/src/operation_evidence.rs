@@ -79,7 +79,7 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
     let mut needs = match reason {
         PendingReason::Missing { path } => rows(object_rows(path)),
         PendingReason::Waits(prerequisite) => match prerequisite {
-            Prerequisite::CatchUp => Needs::default(),
+            Prerequisite::StoreLogCatchUp | Prerequisite::WriteLogCatchUp => Needs::default(),
             Prerequisite::Object(path) => rows(object_rows(path)),
             Prerequisite::DeviceRegistration(device) => {
                 rows(vec![PrerequisiteRows::Device(*device)])

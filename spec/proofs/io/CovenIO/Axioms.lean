@@ -185,6 +185,7 @@ import CovenIO
 #print axioms CovenIO.DriveOrder.step_six_waits_on_reload
 #print axioms CovenIO.DriveOrder.no_cycle
 #print axioms CovenIO.DriveOrder.raise_keeps_its_place
+#print axioms CovenIO.DriveOrder.store_log_catch_up_keeps_place
 #print axioms CovenIO.DriveOrder.old_cycle
 #print axioms CovenIO.DriveOrder.named_only_cycle
 #print axioms CovenIO.DriveOrder.write_only_cycle

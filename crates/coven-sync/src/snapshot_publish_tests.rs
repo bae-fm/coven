@@ -195,7 +195,7 @@ async fn preparation_waits_for_a_complete_catch_up() {
         .unwrap();
     assert_eq!(
         waits(a.write_snapshot(Audience::Store).await.unwrap_err()),
-        crate::PendingReason::Waits(crate::Prerequisite::CatchUp)
+        crate::PendingReason::Waits(crate::Prerequisite::WriteLogCatchUp)
     );
     assert_eq!(listed(&storage).await.len(), 1);
 }
@@ -324,7 +324,7 @@ async fn an_arrival_before_preparation_waits_and_one_after_does_not() {
         assert!(matches!(
             step(&mut a, id).await,
             Some(Progress::Waiting(crate::PendingReason::Waits(
-                crate::Prerequisite::CatchUp
+                crate::Prerequisite::WriteLogCatchUp
             )))
         ));
     }

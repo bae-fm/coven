@@ -200,14 +200,14 @@ impl StoreLogSync {
         // before those reads is `T_c` (§15; io `completed_catchup_covers_old`).
         let Some(caught_at) = self.reads.write_catch_up() else {
             return Ok(Progress::Waiting(PendingReason::Waits(
-                Prerequisite::CatchUp,
+                Prerequisite::WriteLogCatchUp,
             )));
         };
         // An attempt whose sample is already more than a day old would be
         // abandoned before sending; a later catch-up samples again.
         if !self.may_count(caught_at) {
             return Ok(Progress::Waiting(PendingReason::Waits(
-                Prerequisite::CatchUp,
+                Prerequisite::WriteLogCatchUp,
             )));
         }
         // A raise snapshot is its migration's capture when that catch-up
@@ -281,7 +281,7 @@ impl StoreLogSync {
         {
             return Ok(Progress::Waiting(PendingReason::Waits(match wait {
                 coven_database::VerdictWait::Entry(entry) => Prerequisite::EntryFinality(entry),
-                coven_database::VerdictWait::CatchUp => Prerequisite::CatchUp,
+                coven_database::VerdictWait::CatchUp => Prerequisite::StoreLogCatchUp,
             })));
         }
         // Each attempt takes a path no earlier attempt used, so an abandoned
@@ -374,7 +374,7 @@ impl StoreLogSync {
         // A completed catch-up reads every position a counting snapshot
         // lists; one that landed after it waits for the next.
         tracing::debug!(?audience, "snapshot capture is behind the current snapshot");
-        Ok(Some(PendingReason::Waits(Prerequisite::CatchUp)))
+        Ok(Some(PendingReason::Waits(Prerequisite::WriteLogCatchUp)))
     }
 
     /// Each unfinished snapshot attempt's upload expiry, `T_c` plus one day,

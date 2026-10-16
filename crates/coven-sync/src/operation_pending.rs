@@ -72,18 +72,21 @@ impl StoreLogSync {
     }
 
     /// Whether the operation's recorded condition waits on a pending reload:
-    /// on the reload itself, on a device-log write, or on a catch-up. Only
-    /// step 6 sends or receives writes and catches up on them, and a pending
-    /// reload holds step 6 back (SP), so a raise waiting on its own captured
-    /// prefix, such as its migration marker, or preparing after the pass's
-    /// catch-up (§15), waits on the reload too.
+    /// on the reload itself, on a device-log write, or on a write-log
+    /// catch-up. Only step 6 sends or receives writes and catches up on them,
+    /// and a pending reload holds step 6 back (SP), so a raise waiting on its
+    /// own captured prefix, such as its migration marker, or preparing after
+    /// the pass's write-log catch-up (§15), waits on the reload too. A
+    /// store-log catch-up runs before step 6, so a wait on one does not.
     pub(crate) async fn waits_on_reload(&self, id: OperationId) -> Result<bool, SyncError> {
         Ok(self
             .database
             .operation_pending::<PendingRecord>(id)
             .await?
             .is_some_and(|pending| match &pending.reason {
-                PendingReason::Waits(Prerequisite::Reload(_) | Prerequisite::CatchUp) => true,
+                PendingReason::Waits(Prerequisite::Reload(_) | Prerequisite::WriteLogCatchUp) => {
+                    true
+                }
                 PendingReason::Waits(Prerequisite::Object(path)) => path.write_position().is_some(),
                 _ => false,
             }))
@@ -157,7 +160,10 @@ impl StoreLogSync {
     ) -> Result<(), SyncError> {
         let subject = coven_database::RetrySubject::Operation(record.id);
         if pending.retry() == Retry::Automatic
-            && pending.reason != PendingReason::Waits(Prerequisite::CatchUp)
+            && !matches!(
+                pending.reason,
+                PendingReason::Waits(Prerequisite::StoreLogCatchUp | Prerequisite::WriteLogCatchUp)
+            )
         {
             let held = match crate::RetryWaits::lacks_key(&pending.reason) {
                 Some((audience, key)) => Some(crate::store_log_keys::holds(
@@ -283,7 +289,7 @@ impl StoreLogSync {
             SyncError::Storage(error)
                 if error.failure() == coven_storage::StorageFailure::CatchUpRequired =>
             {
-                PendingReason::Waits(Prerequisite::CatchUp)
+                PendingReason::Waits(Prerequisite::StoreLogCatchUp)
             }
             SyncError::Storage(error) => match &self.storage {
                 Some(storage) => PendingReason::Storage {

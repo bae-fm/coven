@@ -167,9 +167,10 @@ async fn attempt_after_delay(
 /// IO `DriveOrder`: a raise holding the writer slot goes before a pending
 /// reload while it waits on anything else (`raise_keeps_its_place`); once its
 /// recorded condition names the reload, a write, such as its own migration
-/// marker, or the catch-up its preparation follows, it yields and the drive
-/// runs the reload (`no_cycle`): step 6 sends and receives writes and catches
-/// up on them only once no reload is pending (`step_six_waits_on_reload`).
+/// marker, or the write-log catch-up its preparation follows, it yields and
+/// the drive runs the reload (`no_cycle`): step 6 sends and receives writes
+/// and catches up on them only once no reload is pending
+/// (`step_six_waits_on_reload`).
 #[tokio::test]
 async fn a_raise_waiting_on_a_reload_yields_to_it() {
     use crate::snapshot_data::{ReloadScope, SnapshotJob, SnapshotTask, SnapshotTrigger};
@@ -190,7 +191,7 @@ async fn a_raise_waiting_on_a_reload_yields_to_it() {
             ))),
             true,
         ),
-        (PendingReason::Waits(Prerequisite::CatchUp), true),
+        (PendingReason::Waits(Prerequisite::WriteLogCatchUp), true),
     ] {
         let storage = storage();
         let mut a = device(storage, 1, member(1), store(1)).await;
@@ -228,8 +229,9 @@ async fn a_raise_waiting_on_a_reload_yields_to_it() {
             .record_operation_condition(&record, raise_waits.clone())
             .await
             .unwrap();
-        // The drive's decision; a raise waiting on a catch-up is due at once
-        // and, with no capture here, finishes before the reload either way.
+        // The drive's decision; a raise waiting on a write-log catch-up is due
+        // at once and, with no capture here, finishes before the reload
+        // either way.
         assert_eq!(a.sync.waits_on_reload(raise).await.unwrap(), reload_runs);
         let untouched = a.operation(reload).await;
         let db = a.db.clone();
@@ -439,7 +441,12 @@ fn wait_conditions() -> Vec<(PendingReason, Option<OperationId>, Value)> {
     let other = json!({"kind": "other"});
     conditions.extend([
         (
-            PendingReason::Waits(Prerequisite::CatchUp),
+            PendingReason::Waits(Prerequisite::StoreLogCatchUp),
+            None,
+            json!({"kind": "catch_up"}),
+        ),
+        (
+            PendingReason::Waits(Prerequisite::WriteLogCatchUp),
             None,
             json!({"kind": "catch_up"}),
         ),
@@ -549,4 +556,82 @@ fn io_differential_wait_rows() {
         }));
     }
     assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
+}
+
+/// IO `DriveOrder.store_log_catch_up_keeps_place`: a raise stopped only by
+/// §10's publication gate waits on a store-log catch-up, which runs before
+/// step 6, so it keeps its place ahead of a pending reload.
+#[tokio::test]
+async fn a_raise_stopped_by_the_publication_gate_keeps_its_place() {
+    use crate::device_log_sync::tests::{
+        group,
+        schema::{seed, update},
+    };
+    use crate::snapshot_data::{ReloadScope, SnapshotJob, SnapshotTask};
+    let storage = storage();
+    let mut devices = group(storage.clone(), 1).await;
+    seed(&mut devices).await;
+    update(&mut devices[0], storage.clone(), true, true).await;
+    let mut a = devices.remove(0);
+    if !a.send.can_send() {
+        a.catch_up().await;
+    }
+    // Its prefix and marker are stored: only the gate can stop the raise.
+    a.writes.upload_writes().await.unwrap();
+    let reload =
+        a.db.start_operation(
+            crate::operation_data::Data::Snapshots(SnapshotTask {
+                job: SnapshotJob::Reload {
+                    scope: ReloadScope::All,
+                    files: None,
+                },
+                temporary: Vec::new(),
+            })
+            .new_operation("coven")
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    a.sync.schedule_version_changes().await.unwrap();
+    let raise = a.db.operations().await.unwrap()[1].id;
+    async fn step(a: &mut Device, id: OperationId) -> Result<Progress, SyncError> {
+        let record = a.operation(id).await;
+        let data = crate::operation_data::Data::read(&record).unwrap();
+        a.sync.operation_step(&record, data).await
+    }
+    {
+        let _pass = a.caught_up_pass().await;
+        assert!(matches!(step(&mut a, raise).await, Ok(Progress::Advanced)));
+    }
+    a.send.invalidate();
+    let record = a.operation(raise).await;
+    let sent = step(&mut a, raise).await;
+    a.sync
+        .record_operation_error(&record, &sent.err().unwrap())
+        .await
+        .unwrap();
+    let untouched = a.operation(reload).await;
+    let db = a.db.clone();
+    let files = file_owner(&a);
+    let operations = operation_owner(a.sync, files);
+    operations.barrier().await.unwrap();
+    let pending = |id| {
+        let db = db.clone();
+        async move {
+            db.operation_pending::<PendingRecord>(id)
+                .await
+                .unwrap()
+                .map(|pending| pending.reason)
+        }
+    };
+    assert_eq!(
+        pending(raise).await,
+        Some(PendingReason::Waits(Prerequisite::StoreLogCatchUp))
+    );
+    assert_eq!(pending(reload).await, None);
+    assert_eq!(
+        db.operation(reload).await.unwrap().unwrap().last_step,
+        untouched.last_step
+    );
+    operations.close().await.unwrap();
 }

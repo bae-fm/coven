@@ -31,7 +31,7 @@ impl FilesInner {
         match error {
             UploadFailure::Storage(error) | UploadFailure::File(FileReadError::Storage(error)) => {
                 if error.failure() == StorageFailure::CatchUpRequired {
-                    return PendingReason::Waits(Prerequisite::CatchUp);
+                    return PendingReason::Waits(Prerequisite::StoreLogCatchUp);
                 }
                 match self.storage.read().expect("storage lock poisoned").as_ref() {
                     Some(storage) => PendingReason::Storage {
@@ -104,7 +104,7 @@ impl FilesInner {
         }
         .retry()
             == Retry::Automatic
-            && reason != PendingReason::Waits(Prerequisite::CatchUp);
+            && reason != PendingReason::Waits(Prerequisite::StoreLogCatchUp);
         let record = move |reported_by| PendingRecord {
             subject: file,
             reason,

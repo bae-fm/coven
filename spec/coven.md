@@ -4788,7 +4788,7 @@ Carol's tablet:
     catch-up received every entry stored by 30 days before the write and
     each received retirement of its device stored then is final (§9). Until
     then preparation waits, with `Waits(EntryFinality(entry))` naming such a
-    retirement, or `Waits(CatchUp)` while receipt falls short. Only
+    retirement, or `Waits(StoreLogCatchUp)` while receipt falls short. Only
     retirements hold it, never further writes, and every history reaches
     the finality it waits for
     ([`waiting_names`, `ready_of_final`, `every_history_prepares`](proofs/storelog-data/CovenStorelogData/ReloadVerdict.lean)).

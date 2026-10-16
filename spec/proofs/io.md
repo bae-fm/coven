@@ -1530,15 +1530,19 @@ publication waits while a reload is pending, so a raise whose own queued
 entry has not published records a wait on that reload, naming the reload
 operation. A raise snapshot also waits for its own captured prefix, such as
 its migration marker, to be stored, and in a pass it is prepared only after
-step 6's catch-up. Only step 6 sends or receives writes and catches up on
-them, and a pending reload holds step 6 back, so a wait on a write or a
-catch-up is a wait on the reload too (`step_six_waits_on_reload`). The worker
+step 6's write-log catch-up. Only step 6 sends or receives writes and catches
+up on them, and a pending reload holds step 6 back, so a wait on a write or a
+write-log catch-up is a wait on the reload too (`step_six_waits_on_reload`).
+A store-log catch-up, which §10's publication gate waits on, runs before
+step 6, so a raise waiting on one keeps its place
+(`store_log_catch_up_keeps_place`). The worker
 used to skip every reload while a raise held the writer slot, so each waited
 on the other (`DriveOrder.old_cycle`); the next rule yielded only to a
 condition naming the reload, so a raise waiting on its write still held the
 reload back (`named_only_cycle`), and the one after it did not yield to a
-raise preparing after the catch-up (`write_only_cycle`). Now a raise that
-waits on a reload, a write or a catch-up yields its place, and the reload runs
+raise preparing after the write-log catch-up (`write_only_cycle`). Now a
+raise that waits on a reload, a write or a write-log catch-up yields its
+place, and the reload runs
 (`no_cycle`); a raise waiting on anything else still goes first
 (`raise_keeps_its_place`). The drive reads the raise's condition when it
 reaches each reload, since the raise may have recorded it in the same drive.
@@ -1547,7 +1551,9 @@ rest of the drive.
 [`a_raise_waiting_on_a_reload_yields_to_it`](../../crates/coven-sync/src/operation_evidence_tests.rs)
 runs the real drive each way: the reload is skipped while the raise waits on
 positions, and runs once the raise's condition names it, a write or a
-catch-up.
+write-log catch-up;
+[`a_raise_stopped_by_the_publication_gate_keeps_its_place`](../../crates/coven-sync/src/operation_evidence_tests.rs)
+keeps the reload waiting behind a raise whose send met the gate.
 
 **Wakes — proved.** `Wakes.lean` models the sync loop and its write-queue
 observation (`sync_loop.rs`, `Database::sync_changes`). `write_never_lost`:

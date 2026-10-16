@@ -2279,9 +2279,10 @@ pub enum PendingSubject {
 
 /// A condition coven has not yet observed (§19.1).
 pub enum Prerequisite {
-    /// A completed membership and key-copy catch-up fresh enough to send
-    /// (§10), or one reaching 30 days before a snapshot's covered write (§15).
-    CatchUp,
+    /// The next completed store-log catch-up (§10, §15).
+    StoreLogCatchUp,
+    /// The next completed write-log catch-up, step 6 of a pass (§15).
+    WriteLogCatchUp,
     Object(ObjectPath),
     DeviceRegistration(DeviceId),
     SchemaPublication { audience: Audience, version: u32 },

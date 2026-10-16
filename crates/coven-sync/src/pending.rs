@@ -90,9 +90,10 @@ pub enum PendingSubject {
 /// A fact required before processing can continue.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Prerequisite {
-    /// Membership and key-copy discovery must finish within the sending
-    /// window, or reach thirty days before a snapshot's covered write (§15).
-    CatchUp,
+    /// The next completed store-log catch-up (§10, §15).
+    StoreLogCatchUp,
+    /// The next completed write-log catch-up, step 6 of a pass (§15).
+    WriteLogCatchUp,
     /// A storage object must arrive.
     Object(ObjectPath),
     /// The author's device must be registered.

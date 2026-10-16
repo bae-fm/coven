@@ -545,7 +545,7 @@ theorem prepared_never_refused {c : Checks} {v : Verdicts} {listed : List Listed
 /-- Preparation waits only for finality: a write that is not ready names either
 receipt short of thirty days before it, or a received retirement of its device
 stored more than thirty days before it that is not yet final (Rust
-`Waits(CatchUp)`, `Waits(EntryFinality)`). -/
+`Waits(StoreLogCatchUp)`, `Waits(EntryFinality)`). -/
 theorem waiting_names (p : Preparation) (prep : List Retirement) (stored : Nat × Nat → Nat)
     (w : Nat × Nat) (waiting : p.ready prep stored w = false) :
     p.through + window < stored w ∨
