@@ -25,8 +25,9 @@ fn malformed_provider_timestamps_are_protocol_failures_with_the_parse_cause() {
 
 #[test]
 fn oauth_error_codes_determine_the_action_before_http_status() {
+    // S3 classifies the Google token endpoint's replies to GCS admin sign-in.
     for provider in [
-        CloudProvider::GoogleDrive,
+        CloudProvider::S3,
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
     ] {
@@ -82,24 +83,6 @@ fn typed_provider_error_mapping() {
             416,
             serde_json::Value::Null,
             StorageFailure::InvalidRange,
-        ),
-        (
-            CloudProvider::GoogleDrive,
-            403,
-            serde_json::json!({"error":{"errors":[{"reason":"storageQuotaExceeded"}]}}),
-            StorageFailure::QuotaExceeded,
-        ),
-        (
-            CloudProvider::GoogleDrive,
-            403,
-            serde_json::json!({"error":{"errors":[{"reason":"insufficientFilePermissions"}]}}),
-            StorageFailure::PermissionDenied,
-        ),
-        (
-            CloudProvider::GoogleDrive,
-            401,
-            serde_json::json!({"error":{"errors":[{"reason":"authError"}]}}),
-            StorageFailure::Authentication,
         ),
         (
             CloudProvider::Dropbox,
@@ -497,9 +480,7 @@ async fn malformed_success_keeps_the_original_response() {
     )
     .await;
     let response = client().unwrap().get(&server.url).send().await.unwrap();
-    let error = json(CloudProvider::GoogleDrive, response)
-        .await
-        .unwrap_err();
+    let error = json(CloudProvider::OneDrive, response).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Protocol);
     assert!(!format!("{error} {error:?}").contains("credential-echo"));
     let StorageError::Provider { source, .. } = error else {
@@ -512,11 +493,7 @@ async fn malformed_success_keeps_the_original_response() {
 
 #[tokio::test]
 async fn throttling_retains_headers_without_printing_them() {
-    for provider in [
-        CloudProvider::GoogleDrive,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         let server = TestServer::new(Router::new().fallback(|| async {
             axum::http::Response::builder()
                 .status(429)
@@ -544,11 +521,7 @@ async fn throttling_retains_headers_without_printing_them() {
 #[tokio::test]
 async fn interrupted_bodies_keep_the_transport_failure() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    for provider in [
-        CloudProvider::GoogleDrive,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -729,7 +702,7 @@ async fn publication_is_rechecked_after_waiting_for_tokens() {
     assert_eq!(requests.load(Ordering::SeqCst), 1);
 }
 
-/// A Drive endpoint that rejects every token in `rejected` with HTTP 401 and
+/// A OneDrive endpoint that rejects every token in `rejected` with HTTP 401 and
 /// records each request's token and body.
 async fn rejecting_server(
     rejected: &'static [&'static str],
@@ -778,12 +751,12 @@ fn session_with(
     .unwrap()
 }
 
-const AUTH_ERROR: &str = r#"{"error":{"errors":[{"reason":"authError"}],"code":401}}"#;
+const AUTH_ERROR: &str = r#"{"error":{"code":"InvalidAuthenticationToken"}}"#;
 
 #[tokio::test]
 async fn a_rejected_token_refreshes_once_and_retries_the_same_request_once() {
     let custody = crate::token_custody::tests::CountingCustody::new(false);
-    let session = session_with(CloudProvider::GoogleDrive, custody.clone());
+    let session = session_with(CloudProvider::OneDrive, custody.clone());
     let (server, seen) = rejecting_server(&["token"], AUTH_ERROR).await;
     let reply = session
         .send(
@@ -814,14 +787,14 @@ async fn a_rejected_token_refreshes_once_and_retries_the_same_request_once() {
 #[tokio::test]
 async fn a_second_rejection_reaches_the_caller_without_another_refresh() {
     let custody = crate::token_custody::tests::CountingCustody::new(false);
-    let session = session_with(CloudProvider::GoogleDrive, custody.clone());
+    let session = session_with(CloudProvider::OneDrive, custody.clone());
     let (server, seen) = rejecting_server(&["token", "refreshed-0"], AUTH_ERROR).await;
     let reply = session
         .send(Method::GET, &server.url, &[], Body::Empty, true)
         .await
         .unwrap();
     assert_eq!(
-        checked(CloudProvider::GoogleDrive, reply)
+        checked(CloudProvider::OneDrive, reply)
             .await
             .unwrap_err()
             .failure(),
@@ -835,11 +808,7 @@ async fn a_second_rejection_reaches_the_caller_without_another_refresh() {
 async fn concurrent_rejected_requests_share_one_refresh() {
     let custody = crate::token_custody::tests::CountingCustody::new(false);
     let session = session_with(CloudProvider::OneDrive, custody.clone());
-    let (server, _) = rejecting_server(
-        &["token"],
-        r#"{"error":{"code":"InvalidAuthenticationToken"}}"#,
-    )
-    .await;
+    let (server, _) = rejecting_server(&["token"], AUTH_ERROR).await;
     let send = || session.send(Method::GET, &server.url, &[], Body::Empty, true);
     let (a, b, c, d) = tokio::join!(send(), send(), send(), send());
     for reply in [a, b, c, d] {
@@ -869,7 +838,7 @@ async fn rejections_a_refresh_cannot_cure_do_not_refresh() {
 #[tokio::test]
 async fn a_refresh_its_custody_cannot_commit_fails_the_request_without_retrying() {
     let custody = crate::token_custody::tests::CountingCustody::new(true);
-    let session = session_with(CloudProvider::GoogleDrive, custody.clone());
+    let session = session_with(CloudProvider::OneDrive, custody.clone());
     let (server, seen) = rejecting_server(&["token"], AUTH_ERROR).await;
     let error = session
         .send(Method::GET, &server.url, &[], Body::Empty, true)
@@ -887,86 +856,4 @@ async fn a_refresh_its_custody_cannot_commit_fails_the_request_without_retrying(
         .unwrap()
         .iter()
         .all(|(token, _)| token == "Bearer token"));
-}
-
-#[test]
-fn google_drive_reasons_distinguish_throttling_limits_authentication_and_permission() {
-    use serde_json::json;
-    for (status, reason, expected) in [
-        (403, "rateLimitExceeded", StorageFailure::RateLimited),
-        (429, "rateLimitExceeded", StorageFailure::RateLimited),
-        (403, "userRateLimitExceeded", StorageFailure::RateLimited),
-        (403, "sharingRateLimitExceeded", StorageFailure::RateLimited),
-        (403, "dailyLimitExceeded", StorageFailure::RateLimited),
-        (403, "storageQuotaExceeded", StorageFailure::QuotaExceeded),
-        (
-            403,
-            "activeItemCreationLimitExceeded",
-            StorageFailure::QuotaExceeded,
-        ),
-        (
-            403,
-            "numChildrenInNonRootLimitExceeded",
-            StorageFailure::QuotaExceeded,
-        ),
-        (
-            403,
-            "teamDriveFileLimitExceeded",
-            StorageFailure::QuotaExceeded,
-        ),
-        (
-            403,
-            "myDriveHierarchyDepthLimitExceeded",
-            StorageFailure::QuotaExceeded,
-        ),
-        (
-            403,
-            "teamDriveHierarchyTooDeep",
-            StorageFailure::QuotaExceeded,
-        ),
-        (401, "authError", StorageFailure::Authentication),
-        (
-            403,
-            "insufficientFilePermissions",
-            StorageFailure::PermissionDenied,
-        ),
-        (
-            403,
-            "appNotAuthorizedToFile",
-            StorageFailure::PermissionDenied,
-        ),
-        (403, "domainPolicy", StorageFailure::PermissionDenied),
-        // An undocumented 403 reason is still a refusal of this account.
-        (403, "somethingNew", StorageFailure::PermissionDenied),
-        (404, "notFound", StorageFailure::NotFound),
-    ] {
-        let body = json!({"error": {
-            "code": status,
-            "message": "provider detail",
-            "errors": [{"domain": "usageLimits", "reason": reason, "message": "provider detail"}],
-        }});
-        assert_eq!(
-            classify(
-                CloudProvider::GoogleDrive,
-                status,
-                &serde_json::to_vec(&body).unwrap()
-            ),
-            expected,
-            "{status} {reason}"
-        );
-    }
-}
-
-#[test]
-fn a_drive_throttle_keeps_its_retry_after_through_classification() {
-    let mut headers = reqwest::header::HeaderMap::new();
-    headers.insert(reqwest::header::RETRY_AFTER, "120".parse().unwrap());
-    let body = serde_json::json!({"error": {"errors": [{"reason": "sharingRateLimitExceeded"}]}});
-    let error = ProviderResponse::new(403, headers, serde_json::to_vec(&body).unwrap())
-        .into_error(CloudProvider::GoogleDrive);
-    assert_eq!(error.failure(), StorageFailure::RateLimited);
-    assert_eq!(
-        error.retry_after(),
-        Some(crate::RetryAfter::Wait(std::time::Duration::from_secs(120)))
-    );
 }

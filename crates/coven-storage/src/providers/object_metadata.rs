@@ -5,34 +5,6 @@ use crate::*;
 use serde_json::Value;
 use std::time::Duration;
 
-pub(super) fn drive(path: &ObjectPath, item: &Value) -> Result<StoredObject, StorageError> {
-    if http::string(item, "name")? != path.file_name()
-        || item["trashed"].as_bool() == Some(true)
-        || item["mimeType"]
-            .as_str()
-            .is_some_and(|kind| kind.starts_with("application/vnd.google-apps."))
-    {
-        return Err(StorageFailure::Protocol.with_source("Drive returned another object"));
-    }
-    let field = if path.is_replaceable() {
-        "modifiedTime"
-    } else {
-        "createdTime"
-    };
-    Ok(StoredObject {
-        path: path.clone(),
-        size: http::string(item, "size")?
-            .parse()
-            .map_err(|e| StorageFailure::Protocol.with_source(e))?,
-        stored_at: http::timestamp(item, field)?,
-        time_resolution: resolution(http::string(item, field)?)?,
-        object_id: http::string(item, "id")?.into(),
-        // File version includes metadata-only changes such as viewing the file.
-        revision: http::string(item, "headRevisionId")?.into(),
-        checksum: checksum(item, "md5Checksum", ChecksumValue::Md5Hex)?,
-    })
-}
-
 pub(super) fn onedrive(path: &ObjectPath, item: &Value) -> Result<StoredObject, StorageError> {
     if !item["file"].is_object() || http::string(item, "name")? != path.file_name() {
         return Err(StorageFailure::Protocol.with_source("OneDrive returned another object"));

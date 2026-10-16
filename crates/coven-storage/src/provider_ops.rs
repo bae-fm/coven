@@ -11,10 +11,6 @@ pub trait ProviderOps: Send + Sync {
     fn config(&self) -> StorageConfig;
     /// Largest complete body accepted by `create` or `replace`.
     fn single_request_limit(&self) -> u64;
-    /// Hold native create serialization across both complete and resumable uploads.
-    async fn lock_create(&self) -> Option<tokio::sync::MutexGuard<'_, ()>> {
-        None
-    }
     /// Signed-in account; S3 has no sharing account.
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
@@ -27,7 +23,7 @@ pub trait ProviderOps: Send + Sync {
     async fn set_s3_credentials(&self, _credentials: S3Credentials) -> Result<(), StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider does not use S3 keys"))
     }
-    /// Create in one request, including native duplicate cleanup on retries.
+    /// Create in one request.
     /// Returns the created object's metadata when the reply carries it.
     async fn create(
         &self,
@@ -63,8 +59,7 @@ pub trait ProviderOps: Send + Sync {
             .collect(crate::object_stream::BUFFERED_READ_LIMIT)
             .await
     }
-    /// Consume native pages into the connection's checked listing. Drive selects
-    /// its earliest copy before adding each object.
+    /// Consume native pages into the connection's checked listing.
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError>;
     /// List immediate store-log writer folders across every page, never the
     /// log contents. CloudKit selects permanent entry-one records in its zone.

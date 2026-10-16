@@ -18,11 +18,11 @@ impl ConnectionCredentials {
         match (self.location.provider(), &self.credentials) {
             (CloudProvider::S3, StorageCredentials::S3(keys)) => keys.validate(),
             (
-                CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive,
+                CloudProvider::Dropbox | CloudProvider::OneDrive,
                 StorageCredentials::OAuth(tokens),
             ) if !tokens.access_token.as_str().is_empty() && !tokens.client_id.is_empty() => {
                 let required = self.location.oauth_access().expect("OAuth location");
-                if tokens.access.permits(required) {
+                if tokens.access == required {
                     Ok(())
                 } else {
                     Err(StorageFailure::AccessNotGranted { required }.into())

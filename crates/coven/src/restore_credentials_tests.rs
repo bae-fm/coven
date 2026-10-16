@@ -103,7 +103,6 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
 async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
     for provider in [
         CloudProvider::S3,
-        CloudProvider::GoogleDrive,
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
         CloudProvider::CloudKit,
@@ -221,7 +220,6 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
 #[tokio::test]
 async fn non_s3_handles_refuse_both_credential_update_calls() {
     for provider in [
-        CloudProvider::GoogleDrive,
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
         CloudProvider::CloudKit,

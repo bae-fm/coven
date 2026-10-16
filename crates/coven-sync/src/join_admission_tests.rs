@@ -95,7 +95,7 @@ async fn approve(a: &mut Device, operation: OperationId) {
 /// installation and an old restore code report the replacement.
 #[tokio::test]
 async fn a_recovery_invite_binds_new_keys_to_the_existing_member() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, b, mut c] = accounts(storage.clone()).await;
     let carol = c.member.member();
     let create = begin(&mut a, Command::CreateCircle("Garden".into())).await;
@@ -201,7 +201,7 @@ async fn a_concurrent_replacement_decides_the_approval_without_a_new_attempt() {
         Racer::Admin { equal: true },
         Racer::Carol,
     ] {
-        let storage = google();
+        let storage = dropbox();
         let [mut a, mut b, mut c] = accounts(storage.clone()).await;
         let carol = c.member.member();
         // Ana's clock runs ahead, so Ben's concurrent entry is earlier.
@@ -338,7 +338,7 @@ async fn a_concurrent_replacement_decides_the_approval_without_a_new_attempt() {
 /// access the member already holds.
 #[tokio::test]
 async fn recovery_targets_and_requests_are_checked_before_anything_is_bound() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, b, mut c] = accounts(storage.clone()).await;
     let carol = c.member.member();
     let invite = |target| {

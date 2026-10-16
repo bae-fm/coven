@@ -791,8 +791,8 @@ leading bytes are all there but whose reported size is one too many.
 Every provider adapter reports the complete size on a ranged read: S3 and the
 HTTP providers from the reply's `Content-Range` total, checked against the
 object's metadata, Dropbox from its download metadata, and CloudKit from the
-record. coven-storage's conformance suite, run against the S3, Drive,
-Dropbox and OneDrive test servers and the in-memory provider, refuses a
+record. coven-storage's conformance suite, run against the S3, Dropbox and
+OneDrive test servers and the in-memory provider, refuses a
 ranged read whose metadata is not the complete object's; CloudKit's adapter
 test checks the same.
 

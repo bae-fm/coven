@@ -60,7 +60,7 @@ impl ByteRange {
 pub enum ProviderSignOut {
     /// Remove the app's access, then sign in again on retained devices.
     RemoveAppAccess {
-        /// Google Drive, Dropbox or OneDrive.
+        /// Dropbox or OneDrive.
         provider: CloudProvider,
     },
     /// Remove the device from the Apple account.
@@ -133,8 +133,8 @@ pub trait Storage: Send + Sync {
     /// create-once objects use resumable or multipart uploads. Store-log entries
     /// always use one request and reject an oversized body.
     /// Callers retaining sessions across crashes use `begin_upload` and record them.
-    /// S3 uses 5 GiB, Drive 5,000,000 bytes, Dropbox 150 MiB and OneDrive
-    /// 250,000,000 bytes. CloudKit uses bounded 8 MiB assets.
+    /// S3 uses 5 GiB, Dropbox 150 MiB and OneDrive 250,000,000 bytes.
+    /// CloudKit uses bounded 8 MiB assets.
     fn single_request_limit(&self) -> u64;
     /// Install replacement OAuth tokens after the owner commits them to key custody.
     /// S3 and CloudKit refuse OAuth tokens; they use different account credentials.
@@ -143,9 +143,7 @@ pub trait Storage: Send + Sync {
     }
     /// Create a complete encrypted object, refusing an occupied path with
     /// [`StorageFailure::AlreadyExists`]. Occupation alone proves nothing: a
-    /// retry compares the occupant's complete bytes itself (§10). On Drive a
-    /// retry keeps the earliest copy (createdTime, then id) and deletes later
-    /// copies from this writer.
+    /// retry compares the occupant's complete bytes itself (§10).
     /// Bodies above [`Self::single_request_limit`] use a session for immutable
     /// paths other than store-log entries, whose bodies must fit one request.
     /// A failed transfer aborts the session;
@@ -196,8 +194,7 @@ pub trait Storage: Send + Sync {
         Ok(self.read_object(path, Some(range)).await?.bytes)
     }
     /// List every object under the prefix, across all pages.
-    /// Missing or malformed metadata fails the call. Drive returns the earliest
-    /// stored copy of each path, breaking creation-time ties by native id.
+    /// Missing or malformed metadata fails the call.
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
     /// Discover store-log writers across every native page without reading history.
     /// Completeness has the same one-hour margin as object listings, measured
@@ -206,21 +203,19 @@ pub trait Storage: Send + Sync {
         &self,
         store: coven_foundation::id_source::StoreId,
     ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError>;
-    /// Delete an object; on Drive, remove it from the folder when this account is not its owner.
-    /// An already absent object succeeds, making operation retries safe.
+    /// Delete an object. An already absent object succeeds, making operation retries safe.
     /// Sync chooses the deleting device under §15; storage exposes no deletion-rights
     /// query. A provider refusal retains its cause, including a refused owned-object deletion.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
     /// Share the store using its owner's account, or tell an S3 admin to create a key.
     /// A signed-in sharing account that does not own the location gets `NotStoreOwner`.
-    /// Ownership comes from Drive's folder `ownedByMe`, Dropbox's folder `access_type`,
+    /// Ownership comes from Dropbox's folder `access_type`,
     /// OneDrive's current-account drive id, or CloudKit's current user record id compared with the zone owner.
     /// S3's console-key instructions need no sharing-account check.
     ///
     /// Dropbox upgrades viewers in place with `update_folder_member`; a pending
     /// viewer without a native account id gets [`StorageFailure::AccountIdUnavailable`]
-    /// and keeps its invitation. Drive updates direct readers in place and adds a
-    /// direct writer grant when read access is inherited.
+    /// and keeps its invitation.
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError>;
     /// Finish provider onboarding under the invited account, then check that the
     /// location can be read. The facade verifies coven's store identity and keys.
@@ -252,8 +247,7 @@ pub trait Storage: Send + Sync {
     /// are returned for owner action. An empty list confirms revocation.
     ///
     /// OneDrive resolves native identities across all permission pages and keeps
-    /// email-bearing grants until dependent ID-only removals succeed. Drive removes
-    /// direct access without changing parent permissions. Dropbox pages direct and
+    /// email-bearing grants until dependent ID-only removals succeed. Dropbox pages direct and
     /// inherited memberships separately and waits for the native removal job,
     /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;

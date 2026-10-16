@@ -69,7 +69,7 @@ async fn failures(d: &Device, id: OperationId) -> u32 {
 /// (IO `racing_commit_wakes`); one the attempt makes itself does not.
 #[tokio::test]
 async fn an_unrelated_commit_leaves_a_wait_and_its_own_prerequisite_wakes_it() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let id = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
     let mut peers = Peers::default();
@@ -126,7 +126,7 @@ async fn an_unrelated_commit_leaves_a_wait_and_its_own_prerequisite_wakes_it() {
 /// holding it.
 #[tokio::test]
 async fn a_key_wait_wakes_when_its_key_arrives() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let id = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
     let lacking = PendingReason::KeyUnavailable {
@@ -261,7 +261,7 @@ async fn a_raise_waiting_on_a_reload_yields_to_it() {
 
 fn storage_failure() -> PendingReason {
     PendingReason::Storage {
-        provider: coven_storage::CloudProvider::GoogleDrive,
+        provider: coven_storage::CloudProvider::Dropbox,
         failure: StorageFailure::Network,
     }
 }
@@ -275,7 +275,7 @@ fn storage_failure() -> PendingReason {
 #[tokio::test]
 #[ignore = "requires COVEN_IO_RUNNER"]
 async fn io_differential_waiting_evidence() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     // Room for the wall clock to be set back.
     a.clock
@@ -514,7 +514,7 @@ fn wait_conditions() -> Vec<(PendingReason, Option<OperationId>, Value)> {
         ),
         (
             PendingReason::Storage {
-                provider: coven_storage::CloudProvider::GoogleDrive,
+                provider: coven_storage::CloudProvider::Dropbox,
                 failure: coven_storage::StorageFailure::Network,
             },
             None,

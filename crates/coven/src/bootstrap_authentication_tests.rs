@@ -56,7 +56,7 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
 
 #[tokio::test]
 async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
-    let owner = Owner::new(CloudProvider::GoogleDrive, false).await;
+    let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let install = Installation::new();
     let sign_in = SignIn::new(owner.clock.clone()).await;
     let builder = sign_in.configure(install.builder(&owner, owner.storage.clone()));
@@ -72,7 +72,7 @@ async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
         )
         .await,
         Err(BootstrapError::OAuth(OAuthError::Reauthorize(
-            CloudProvider::GoogleDrive
+            CloudProvider::OneDrive
         )))
     ));
     assert_eq!(sign_in.presentation_count(), 0);
@@ -81,20 +81,20 @@ async fn bootstrap_requires_explicit_sign_in_and_never_presents_ui() {
 }
 
 #[tokio::test]
-async fn google_join_requires_full_access_before_contacting_storage() {
-    let owner = Owner::new(CloudProvider::GoogleDrive, false).await;
+async fn join_requires_the_shared_folder_access_before_contacting_storage() {
+    let owner = Owner::new(CloudProvider::Dropbox, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
     let sign_in = SignIn::new(owner.clock.clone()).await;
     let recipient = Arc::new(owner.recipient().for_device());
     let mut builder = sign_in.configure(install.builder(&owner, recipient.clone()));
     builder
-        .authenticate(OAuthAccess::GoogleDrive(GoogleDriveAccess::File))
+        .authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder))
         .await
         .unwrap();
     let before = recipient.request_count();
     let (_, cancel) = watch::channel(false);
-    let required = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
+    let required = OAuthAccess::Dropbox(DropboxAccess::FullDropbox);
     assert!(matches!(
         join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel).await,
         Err(BootstrapError::Sync(SyncError::Storage(error)))

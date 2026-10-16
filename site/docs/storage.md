@@ -21,9 +21,7 @@ same exact object reports `AlreadyPresent`; different bytes report
 `SlotCollision` and never replace the first object.
 
 The location is opaque to coven. For S3, Dropbox and OneDrive it is the object's
-logical key. Google Drive mints its own file ids, so a Drive slot carries the id
-and every operation names the file by it — two Drive files may share a name, and
-each slot still means exactly one of them.
+logical key.
 
 `ExactSlotStorage` also reads a mutable record with its provider revision and
 replaces it only if that revision still matches. Store publication uses this
@@ -66,7 +64,7 @@ With no provider selected there is no sync layer at all; the store is
 local-only and complete. At connect time coven builds the cloud home: it reads
 the selected provider's settings from config and its credentials from the OS
 keyring; a missing setting or credential fails with a `Storage` error naming
-the field ("S3 bucket not configured", "Google Drive OAuth token not in
+the field ("S3 bucket not configured", "Dropbox OAuth token not in
 keyring").
 
 ## The trait
@@ -170,7 +168,7 @@ a
 variant per provider, carrying exactly what another device needs to reach the
 same cloud home:
 
-- The consumer clouds (Drive, Dropbox, OneDrive) share the store folder with
+- The consumer clouds (Dropbox, OneDrive) share the store folder with
   the member's provider account and return its folder or drive id.
   setting access to `Absent` unshares it and reports `RevokeOutcome::Revoked`.
 - S3 returns the bucket, region, endpoint, access key, secret key, and optional
@@ -257,18 +255,16 @@ provider transport typed through this boundary.
 
 ## Providers
 
-The storage crate contains five cloud adapters plus an in-memory home for tests.
+The storage crate contains four cloud adapters plus an in-memory home for tests.
 Sync requires both exact immutable objects and provider-enforced conditional
-replacement. The Google Drive adapter rejects the versioned-record operations
-with a configuration error, so its byte-storage support does not make it a
-usable Store publication home.
+replacement.
 
 The host selects one
 local `exact_upload_verification` policy: `upload_checksum`, `metadata_hash`,
 `readback`, or `unchecked`. Invitations and restore codes do not carry that
-choice. Upload-checksum enforcement is available on S3; Dropbox, Google Drive,
-and OneDrive reject that policy during setup. Metadata mode uses the
-provider's content identity: S3's `HeadObject` SHA-256, Drive's `md5Checksum`,
+choice. Upload-checksum enforcement is available on S3; Dropbox and OneDrive
+reject that policy during setup. Metadata mode uses the
+provider's content identity: S3's `HeadObject` SHA-256,
 Dropbox's `content_hash` or OneDrive's `sha1Hash`. Readback downloads and verifies the full body.
 Unchecked mode trusts only an observed successful create response. It cannot
 confirm that an occupied slot holds the same bytes or settle a lost response,
@@ -286,24 +282,10 @@ presence alone.
   bounded and multipart objects when checksum or metadata verification is
   selected.
 
-- **Google Drive**
-  (`GoogleDriveCloudHome`)
-  implements immutable slots but refuses the conditional record operations
-  required by Store publication. It keeps files flat in one folder. Drive
-  filenames cannot carry the key's slashes, so each key is hex-encoded into a
-  slash-free filename and decoded on list; the encoding is exact and reversible,
-  never a lossy substitution. Drive assigns its own file id, which a slot
-  carries: reads, ranges and deletions name that id and then check that the file
-  it reached is the one the slot means — same id, the encoded name for the
-  slot's logical key, the store folder among its parents, the matching
-  `covenLogicalKey`, not trashed. Large files use a resumable upload session in
-  8 MiB chunks (Drive requires 256 KiB alignment). Exact-upload metadata
-  verification compares Drive's `md5Checksum` and size; an ambiguous create
-  response is settled through that metadata without downloading the body.
-
 - **OneDrive**
   (`OneDriveCloudHome`)
-  uses the same hex filename encoding and a Microsoft Graph resumable
+  hex-encodes each key into a slash-free filename, decoded exactly on list,
+  and uses a Microsoft Graph resumable
   upload session in 7.5 MiB chunks (Graph requires 320 KiB alignment).
   Metadata verification compares the Graph `sha1Hash` and size.
 
@@ -339,7 +321,7 @@ presence alone.
 
 ## OAuth sessions: refresh and retry
 
-Drive, Dropbox, and OneDrive share their token lifecycle through an OAuth
+Dropbox and OneDrive share their token lifecycle through an OAuth
 session. Each backend owns one and routes its requests through it. Before a
 request, the session checks the access token's expiry: if it expires within 60
 seconds it refreshes first, persisting the new tokens to the keyring. After a

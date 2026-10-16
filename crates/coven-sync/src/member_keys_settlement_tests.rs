@@ -18,7 +18,7 @@ use std::sync::Mutex;
 /// pair, so it cannot send.
 #[tokio::test]
 async fn an_admin_replacement_beats_self_replacement_without_a_new_attempt() {
-    let storage = google();
+    let storage = dropbox();
     let [_a, mut b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     let carol = c.member.member();
     // Carol's clock runs behind, so her entry is earlier.
@@ -97,7 +97,7 @@ async fn reopen_with(d: &mut Device, storage: Arc<MemoryStorage>, custody: Arc<F
 /// discarding returns the pending record; then it finishes.
 #[tokio::test]
 async fn self_replacement_resumes_the_same_attempt_after_each_failure() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     let carol = c.member.member();
     let custody = Arc::new(Flaky {
@@ -208,7 +208,7 @@ async fn self_replacement_resumes_the_same_attempt_after_each_failure() {
 /// pair is still current. After Ben replaced Carol's keys, it cannot.
 #[tokio::test]
 async fn discarding_before_reservation_needs_the_held_pair_current() {
-    let storage = google();
+    let storage = dropbox();
     let [_a, mut b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     let carol = c.member.member();
     let operation = begin(&mut c, Command::ReplaceOwnKeys).await;
@@ -319,7 +319,7 @@ async fn attempt_path(d: &Device, id: OperationId) -> ObjectPath {
 /// is stored once the exposed store key is rotated.
 #[tokio::test]
 async fn self_replacement_and_snapshots_never_strand_a_file_signed_by_a_retired_pair() {
-    let storage = google();
+    let storage = dropbox();
     let [_a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     write_note(&c, "row").await.unwrap();
     c.catch_up().await;

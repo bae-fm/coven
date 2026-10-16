@@ -74,7 +74,7 @@
   (4,194,304 bytes). D6's bounded names, member access and positions ensure
   every valid entry fits. Reject an oversized change before reserving its
   entry number or key copies. This bound permits one-request publication on
-  every provider, including Drive's 5,000,000-byte request limit.
+  every provider, including CloudKit's 8 MiB asset limit.
 - Identifiers order as their bytes, except where a row says otherwise. Names
   order by UTF-8 bytes; `RowId` orders by table, encoded key, then audience.
   A `Value` retains its SQLite storage class: an integer and an integral real

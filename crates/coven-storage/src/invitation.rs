@@ -66,10 +66,7 @@ impl StorageInvitation {
             return Err(StorageFailure::DropboxAppFolderNotShareable.into());
         }
         match (location.provider(), &acceptance) {
-            (
-                CloudProvider::S3 | CloudProvider::GoogleDrive | CloudProvider::OneDrive,
-                InvitationAcceptance::Granted,
-            )
+            (CloudProvider::S3 | CloudProvider::OneDrive, InvitationAcceptance::Granted)
             | (CloudProvider::Dropbox, InvitationAcceptance::DropboxMount) => {}
             (CloudProvider::OneDrive, InvitationAcceptance::OneDriveShare { token })
                 if !token.as_str().is_empty() => {}

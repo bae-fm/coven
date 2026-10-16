@@ -35,13 +35,10 @@ impl StorageConnector for Overwrites {
         &self,
         config: StorageConfig,
         auth: coven_storage::ProviderAuth,
-        device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
-        self.0
-            .connect(config, auth, device, publications, cooldown)
-            .await
+        self.0.connect(config, auth, publications, cooldown).await
     }
     async fn detect_s3(
         &self,
@@ -81,12 +78,11 @@ impl StorageConnector for BucketState {
         &self,
         config: StorageConfig,
         auth: coven_storage::ProviderAuth,
-        device: DeviceId,
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         self.storage
-            .connect(config, auth, device, publications, cooldown)
+            .connect(config, auth, publications, cooldown)
             .await
     }
     async fn detect_s3(

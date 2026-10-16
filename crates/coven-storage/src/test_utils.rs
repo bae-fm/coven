@@ -484,10 +484,7 @@ impl MemoryProvider {
             let state = self.state.lock().await;
             let allowed = match state.accounts.get(email) {
                 Some(AccountAccess::Joined) => true,
-                Some(AccountAccess::Invited) => {
-                    self.config.provider() == CloudProvider::GoogleDrive
-                }
-                None => false,
+                Some(AccountAccess::Invited) | None => false,
             };
             if !allowed {
                 return Err(StorageFailure::PermissionDenied.into());
@@ -535,7 +532,7 @@ impl ProviderOps for MemoryProvider {
     async fn set_oauth_tokens(&self, tokens: OAuthTokens) -> Result<(), StorageError> {
         if !matches!(
             self.config.provider(),
-            CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
+            CloudProvider::Dropbox | CloudProvider::OneDrive
         ) {
             return Err(
                 StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")

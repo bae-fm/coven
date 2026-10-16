@@ -51,73 +51,17 @@ pub(crate) struct StorageConnections {
 }
 
 impl StorageConnections {
+    /// Refuse an invite the location cannot share before any provider change.
     pub(crate) async fn prepare_invite(&self) -> Result<(), SyncError> {
-        // Keep sign-in cancellable. Only credential installation and the existing
-        // invitation operation retain their work after their awaiting future drops.
         let _call = self.lock_open().await?;
         let location = self.codes.location().await?.ok_or(SyncError::NoStorage)?;
-        match location {
+        if matches!(
+            location,
             StorageConfig::Dropbox {
                 location: DropboxLocation::AppFolder,
-            } => {
-                return Err(StorageFailure::DropboxAppFolderNotShareable.into());
             }
-            StorageConfig::GoogleDrive { .. } => {
-                let required = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
-                let flow = self.oauth.as_ref().ok_or_else(|| {
-                    SyncError::from(StorageFailure::AccessNotRegistered { required })
-                })?;
-                flow.require_access(required)
-                    .map_err(|error| oauth_error(required.provider(), error))?;
-                let data = self.connection().await?.ok_or(SyncError::NoStorage)?;
-                let StorageCredentials::OAuth(previous) = &data.credentials else {
-                    return Err(StorageFailure::InvalidConfiguration
-                        .with_source("Drive credentials must be OAuth")
-                        .into());
-                };
-                if !previous.access.permits(required) {
-                    flow.require_client(previous)
-                        .map_err(|error| oauth_error(required.provider(), error))?;
-                    let before = self
-                        .connector
-                        .connect(
-                            data.location.clone(),
-                            self.codes.provider_auth(data.credentials.clone()),
-                            self.device,
-                            self.send.clone(),
-                            self.waits.clone(),
-                        )
-                        .await?;
-                    let account = before.account().await?;
-                    let mut tokens = flow
-                        .authenticate(required)
-                        .await
-                        .map_err(|error| oauth_error(required.provider(), error))?;
-                    if tokens.refresh_token.is_none() {
-                        tokens.refresh_token = previous.refresh_token.clone();
-                    }
-                    // Until it is committed, the upgrade refreshes in this session.
-                    let upgrade = SessionSignIn::new(tokens.clone(), self.clients.clone());
-                    let candidate = self
-                        .connector
-                        .connect(
-                            data.location,
-                            ProviderAuth::OAuth {
-                                tokens,
-                                custody: upgrade.clone(),
-                            },
-                            self.device,
-                            self.send.clone(),
-                            self.waits.clone(),
-                        )
-                        .await?;
-                    if candidate.account().await? != account {
-                        return Err(StorageFailure::AccountMismatch.into());
-                    }
-                    self.codes.install_oauth(upgrade.tokens()?).await?;
-                }
-            }
-            _ => {}
+        ) {
+            return Err(StorageFailure::DropboxAppFolderNotShareable.into());
         }
         Ok(())
     }
@@ -222,10 +166,7 @@ impl StorageConnections {
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
             let provider = storage.provider();
-            if !matches!(
-                provider,
-                CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
-            ) {
+            if !matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
                 return Err(OAuthError::Unavailable(provider).into());
             }
             owner.check_location(&storage).await?;
@@ -307,13 +248,7 @@ impl StorageConnections {
         let credentials = auth.credentials();
         let storage = self
             .connector
-            .connect(
-                config.clone(),
-                auth,
-                self.device,
-                self.send.clone(),
-                self.waits.clone(),
-            )
+            .connect(config.clone(), auth, self.send.clone(), self.waits.clone())
             .await?;
         let path = ObjectPath::file(self.store, self.device, FileId(self.ids.new_id()));
         let plaintext = b"coven storage check";
@@ -374,7 +309,6 @@ impl StorageConnections {
                 .connect(
                     config.clone(),
                     owner.codes.provider_auth(data.credentials),
-                    owner.device,
                     owner.send.clone(),
                     owner.waits.clone(),
                 )
@@ -429,15 +363,3 @@ pub use admin::GuidedAccessKey;
 #[cfg(test)]
 #[path = "storage_tests.rs"]
 mod tests;
-
-fn oauth_error(provider: CloudProvider, error: OAuthError) -> SyncError {
-    match error {
-        OAuthError::Storage(error) => error.into(),
-        error => coven_storage::StorageError::Provider {
-            provider,
-            failure: StorageFailure::Authentication,
-            source: Box::new(error),
-        }
-        .into(),
-    }
-}

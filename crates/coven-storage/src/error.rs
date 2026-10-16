@@ -16,13 +16,8 @@ pub enum StorageFailure {
         /// Access the account must authorize.
         required: crate::OAuthAccess,
     },
-    /// Drive's File grant cannot see the folder; Full access is needed to inspect it.
-    /// This does not establish whether the folder is absent or shared by another person.
-    GoogleDriveFolderNotVisible,
     /// An App-folder store cannot be shared without relocating it.
     DropboxAppFolderNotShareable,
-    /// An incremental sign-in selected a different provider account.
-    AccountMismatch,
     /// The installation must complete membership and key-copy catch-up before sending.
     CatchUpRequired,
     /// No route to the provider, a timeout, or an interrupted response.

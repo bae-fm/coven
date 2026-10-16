@@ -120,9 +120,6 @@ fn location(provider: CloudProvider) -> StorageConfig {
             profile: None,
             prefix: "store".into(),
         },
-        CloudProvider::GoogleDrive => StorageConfig::GoogleDrive {
-            folder_id: "store".into(),
-        },
         CloudProvider::Dropbox => StorageConfig::Dropbox {
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "store".into(),

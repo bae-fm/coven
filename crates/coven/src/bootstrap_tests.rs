@@ -16,7 +16,6 @@ use fixtures::*;
 async fn restore_code_api_never_discloses_storage_credentials() {
     for provider in [
         CloudProvider::S3,
-        CloudProvider::GoogleDrive,
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
         CloudProvider::CloudKit,
@@ -132,7 +131,6 @@ async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() 
 async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
     for provider in [
         CloudProvider::S3,
-        CloudProvider::GoogleDrive,
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
         CloudProvider::CloudKit,
@@ -327,7 +325,7 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
 
 #[tokio::test]
 async fn permission_revocation_while_joining_keeps_the_provider_failure() {
-    let owner = Owner::new(CloudProvider::GoogleDrive, false).await;
+    let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
@@ -571,7 +569,7 @@ async fn keychain_discovery_refuses_ambiguous_or_mismatched_store_ids() {
 
 #[tokio::test]
 async fn a_device_removed_during_loading_receives_the_provider_refusal() {
-    let owner = Owner::new(CloudProvider::GoogleDrive, false).await;
+    let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
@@ -607,7 +605,7 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
         assert!(matches!(
             owner.handle.remove_device(devices[0].id).await.unwrap(),
             ProviderSignOut::RemoveAppAccess {
-                provider: CloudProvider::GoogleDrive
+                provider: CloudProvider::OneDrive
             }
         ));
         // Cut off this account in the fake to model provider refusal on the removed device.

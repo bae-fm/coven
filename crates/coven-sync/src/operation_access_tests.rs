@@ -24,7 +24,7 @@ impl Clock for CommandClock {
 
 #[tokio::test]
 async fn expiring_an_invitation_completes_a_retry_of_its_obsolete_grant() {
-    let [mut a, _, _] = accounts(google()).await;
+    let [mut a, _, _] = accounts(dropbox()).await;
     let invite = begin(
         &mut a,
         Command::Invite(
@@ -76,7 +76,7 @@ async fn account_operation(d: &Device) -> OperationId {
 
 #[tokio::test]
 async fn removal_answers_while_the_provider_request_is_held() {
-    let storage = google();
+    let storage = dropbox();
     let [a, _, c] = accounts(storage.clone()).await;
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
@@ -130,7 +130,7 @@ async fn removal_answers_while_the_provider_request_is_held() {
 #[tokio::test]
 async fn restart_repeats_unconfirmed_access_and_keeps_the_same_pending_subject() {
     for checkpoint in [0, 1, 2, 3] {
-        let storage = google();
+        let storage = dropbox();
         let [mut a, _, c] = accounts(storage.clone()).await;
         publish(&mut a, Command::RemoveMember(c.member.member())).await;
         let id = account_operation(&a).await;
@@ -207,7 +207,7 @@ async fn restart_repeats_unconfirmed_access_and_keeps_the_same_pending_subject()
 
 #[tokio::test]
 async fn a_cancelled_unsent_grant_never_reaches_the_provider() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _, _] = accounts(storage.clone()).await;
     let id = begin(
         &mut a,
@@ -298,12 +298,12 @@ async fn phase(a: &Device, storage: &MemoryStorage) -> serde_json::Value {
     } else {
         ("idle", serde_json::Value::Null, "none")
     };
-    let actual = match MemoryStorage::for_recipient(storage, ACCOUNT)
-        .unwrap()
-        .list(&ObjectPrefix::all(store(1)))
-        .await
-    {
-        Ok(_) => true,
+    // The account reaches the store once it mounts what the provider shares.
+    let actual = match joined(storage, ACCOUNT).await {
+        Ok(recipient) => {
+            recipient.list(&ObjectPrefix::all(store(1))).await.unwrap();
+            true
+        }
         Err(error) if error.failure() == StorageFailure::PermissionDenied => false,
         Err(error) => panic!("{error}"),
     };
@@ -311,7 +311,7 @@ async fn phase(a: &Device, storage: &MemoryStorage) -> serde_json::Value {
 }
 
 async fn access_history(initial: bool, events: &[&str]) -> Vec<serde_json::Value> {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _, c] = accounts(storage.clone()).await;
     if !initial {
         adopt_account(&mut a, &c.member, false).await;
@@ -411,7 +411,7 @@ async fn lean_differential_access_phases() {
 
 #[tokio::test]
 async fn a_lost_reply_followed_by_reversal_reconfirms_actual_provider_access() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _, c] = accounts(storage.clone()).await;
     adopt_account(&mut a, &c.member, false).await;
     let id = account_operation(&a).await;
@@ -440,7 +440,7 @@ async fn a_lost_reply_followed_by_reversal_reconfirms_actual_provider_access() {
 
 #[tokio::test]
 async fn unidentified_retained_permissions_do_not_confirm_a_returning_accounts_grant() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _, c] = accounts(storage.clone()).await;
     adopt_account(&mut a, &c.member, false).await;
     let id = account_operation(&a).await;
@@ -476,7 +476,7 @@ async fn unidentified_retained_permissions_do_not_confirm_a_returning_accounts_g
 
 #[tokio::test]
 async fn starting_revocation_invalidates_cached_invitation_tokens() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _, c] = accounts(storage).await;
     let id = begin(
         &mut a,
@@ -549,7 +549,7 @@ async fn discarding_an_invalid_s3_account_invite_leaves_no_provider_request() {
 
 #[tokio::test]
 async fn an_obsolete_held_revoke_is_followed_by_a_grant_before_completion() {
-    let storage = google();
+    let storage = dropbox();
     let [a, mut b, c] = accounts(storage.clone()).await;
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
@@ -564,7 +564,8 @@ async fn an_obsolete_held_revoke_is_followed_by_a_grant_before_completion() {
     adopt_account(&mut b, &c.member, true).await;
     resume.send(()).unwrap();
     assert!(pending(&operations, &a.db).await.is_empty());
-    assert!(MemoryStorage::for_recipient(&storage, ACCOUNT)
+    assert!(joined(&storage, ACCOUNT)
+        .await
         .unwrap()
         .list(&ObjectPrefix::all(store(1)))
         .await
@@ -586,7 +587,7 @@ async fn an_obsolete_held_revoke_is_followed_by_a_grant_before_completion() {
 
 #[tokio::test]
 async fn retained_provider_access_does_not_prevent_an_independent_sync_pass() {
-    let storage = google();
+    let storage = dropbox();
     let [a, _, c] = accounts(storage.clone()).await;
     storage
         .set_retained_access(
@@ -625,7 +626,7 @@ async fn retained_provider_access_does_not_prevent_an_independent_sync_pass() {
 
 #[tokio::test]
 async fn shared_accounts_follow_the_union_of_active_members() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, b, mut c] = accounts(storage.clone()).await;
     c.sync
         .make_and_upload_entry(StoreChange::SetAccess {

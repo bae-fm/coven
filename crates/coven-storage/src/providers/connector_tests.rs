@@ -21,7 +21,6 @@ async fn cloudkit_is_typed_unavailable_without_an_apple_framework() {
                 zone: "zone".into(),
             },
             ProviderAuth::CloudKit,
-            DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
         )

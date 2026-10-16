@@ -22,7 +22,6 @@ impl crate::providers::StorageConnector for MemoryStorage {
         &self,
         config: StorageConfig,
         auth: crate::ProviderAuth,
-        _device: coven_foundation::id_source::DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {

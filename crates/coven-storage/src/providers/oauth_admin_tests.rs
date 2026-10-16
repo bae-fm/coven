@@ -44,17 +44,14 @@ async fn admin_sign_in_requests_cloud_platform_with_pkce_and_keeps_no_refresh_to
         (None, true),
         (Some(CLOUD_PLATFORM.to_owned()), true),
         (
-            Some("https://www.googleapis.com/auth/drive.file".to_owned()),
+            Some("https://www.googleapis.com/auth/devstorage.read_only".to_owned()),
             false,
         ),
     ] {
         let state: Granted = Arc::new(Mutex::new((Vec::new(), granted)));
         let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
         let clients = OAuthClients::new(
-            Some(GoogleDriveClient::new(
-                "google-client".into(),
-                GoogleDriveAccess::File,
-            )),
+            Some("google-client".into()),
             None,
             None,
             Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),

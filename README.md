@@ -4,8 +4,8 @@ Sync normally means a backend: a server you run and pay for, and a database
 that holds every user's data in the clear.
 
 coven syncs without the server. Devices exchange end-to-end-encrypted changes
-through storage the user already has (Google Drive, Dropbox, OneDrive, iCloud,
-or any S3-compatible endpoint), and merge them locally.
+through storage the user already has (Dropbox, OneDrive, iCloud, or any
+S3-compatible endpoint), and merge them locally.
 
 The data is SQLite. You keep your schema; coven owns the connections and runs
 your queries through them, so it can capture each change with SQLite's session

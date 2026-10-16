@@ -19,9 +19,9 @@ fn response(headers: &[(reqwest::header::HeaderName, &str)], body: &str) -> Prov
 
 #[test]
 fn retry_after_seconds_and_dates_use_the_response_clock() {
-    let drive = CloudProvider::GoogleDrive;
+    let provider = CloudProvider::OneDrive;
     assert_eq!(
-        response(&[(RETRY_AFTER, "600")], "").retry_after(drive),
+        response(&[(RETRY_AFTER, "600")], "").retry_after(provider),
         Some(RetryAfter::Wait(Duration::from_secs(600)))
     );
     // An HTTP-date counts from the response's own Date, whatever the device
@@ -34,7 +34,7 @@ fn retry_after_seconds_and_dates_use_the_response_clock() {
             ],
             ""
         )
-        .retry_after(drive),
+        .retry_after(provider),
         Some(RetryAfter::Wait(Duration::from_secs(600)))
     );
     assert_eq!(
@@ -45,7 +45,7 @@ fn retry_after_seconds_and_dates_use_the_response_clock() {
             ],
             ""
         )
-        .retry_after(drive),
+        .retry_after(provider),
         Some(RetryAfter::Wait(Duration::ZERO))
     );
     // Without a basis the date cannot be converted; that is reported and
@@ -57,11 +57,11 @@ fn retry_after_seconds_and_dates_use_the_response_clock() {
             (DATE, "Wed, 21 Oct 2026 07:28:00 GMT"),
         ],
     ] {
-        let after = response(&headers, "").retry_after(drive);
+        let after = response(&headers, "").retry_after(provider);
         assert_eq!(after, Some(RetryAfter::NoTimeBasis));
         assert_eq!(after.unwrap().wait(), LONGEST_RETRY_DELAY);
     }
-    assert_eq!(response(&[], "").retry_after(drive), None);
+    assert_eq!(response(&[], "").retry_after(provider), None);
 }
 
 #[test]

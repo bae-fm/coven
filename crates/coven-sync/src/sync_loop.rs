@@ -2,7 +2,7 @@
 
 use crate::{Operations, SyncError, SyncFailure};
 use coven_database::{DatabaseChanges, DbError};
-use coven_foundation::{clock::ClockRef, id_source::DeviceId};
+use coven_foundation::clock::ClockRef;
 use coven_storage::{providers::StorageConnector, StorageConnection, StorageError, StorageFailure};
 use std::{
     sync::Arc,
@@ -88,7 +88,6 @@ struct SyncRun {
     status: watch::Sender<SyncStatus>,
     connection: Option<Arc<StorageConnection>>,
     connector: Arc<dyn StorageConnector>,
-    device: DeviceId,
     configured: bool,
     started: bool,
 }
@@ -106,7 +105,6 @@ impl SyncLoop {
         waits: Arc<crate::RetryWaits>,
         connection: Option<Arc<StorageConnection>>,
         connector: Arc<dyn StorageConnector>,
-        device: DeviceId,
         has_storage_credentials: bool,
     ) -> Self {
         let configured = connection.is_some() || has_storage_credentials;
@@ -130,7 +128,6 @@ impl SyncLoop {
                 status,
                 connection,
                 connector,
-                device,
                 configured,
                 started: false,
             }
@@ -249,7 +246,6 @@ impl SyncRun {
             .connect(
                 data.location,
                 self.codes.provider_auth(data.credentials),
-                self.device,
                 self.send.clone(),
                 self.waits.clone(),
             )

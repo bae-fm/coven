@@ -125,7 +125,7 @@ not prevented — this is the [non-member-with-write](#non-member-with-write-acc
 case, and coven's responsibility ends at detection.
 
 Whether the residual credential exists at all is provider-dependent. Consumer
-clouds (Google Drive, Dropbox, OneDrive) and CloudKit unshare the folder or zone
+clouds (Dropbox, OneDrive) and CloudKit unshare the folder or zone
 on removal, so the credential stops working and this adversary ceases to exist.
 S3 hands out one static bucket credential that cannot be withdrawn from a single
 member; there, revoking the *credential* is the bucket administrator's job, and

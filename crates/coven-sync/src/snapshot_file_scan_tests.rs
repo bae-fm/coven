@@ -1,6 +1,6 @@
 //! The one-time listing of a removed uploader's file folder (§16.5).
 use crate::operations::Command;
-use crate::store_log_sync::tests::operations::{accounts, drive_access, publish};
+use crate::store_log_sync::tests::operations::{accounts, drive_access, joined, publish};
 use crate::store_log_sync::tests::{store, Device};
 use coven_format::store_log::StoreChange;
 use coven_foundation::clock::FixedClock;
@@ -23,11 +23,11 @@ async fn fail_folder_listing(storage: &MemoryStorage, device: DeviceId) {
         .await;
 }
 
-/// Google Drive storage whose provider time the test advances.
-fn google() -> (Arc<MemoryStorage>, Arc<FixedClock>) {
+/// Dropbox storage whose provider time the test advances.
+fn dropbox() -> (Arc<MemoryStorage>, Arc<FixedClock>) {
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
     let storage = MemoryStorage::builder()
-        .provider(coven_storage::CloudProvider::GoogleDrive)
+        .provider(coven_storage::CloudProvider::Dropbox)
         .clock(clock.clone())
         .build()
         .unwrap();
@@ -63,7 +63,7 @@ fn folder_listings(storage: &MemoryStorage, device: DeviceId) -> usize {
 /// between the restore and the revocation.
 #[tokio::test]
 async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
-    let (storage, clock) = google();
+    let (storage, clock) = dropbox();
     let [mut a, mut b, c] = accounts(storage.clone()).await;
     let carol = c.device().await;
     let orphan = |n| ObjectPath::file(store(1), carol, FileId(uuid::Uuid::from_u128(n)));
@@ -103,9 +103,7 @@ async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
         ("ben@example.com", "cat@example.com", false),
         ("cat@example.com", "ben@example.com", true),
     ] {
-        b.sync.storage = Some(Arc::new(
-            MemoryStorage::for_recipient(&storage, held).unwrap(),
-        ));
+        b.sync.storage = Some(Arc::new(joined(&storage, held).await.unwrap()));
         b.sync
             .make_and_upload_entry(StoreChange::SetAccess {
                 member: b.member.member(),
@@ -128,9 +126,7 @@ async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
         ("ben@example.com", "cat@example.com"),
         ("cat@example.com", "ben@example.com"),
     ] {
-        b.sync.storage = Some(Arc::new(
-            MemoryStorage::for_recipient(&storage, held).unwrap(),
-        ));
+        b.sync.storage = Some(Arc::new(joined(&storage, held).await.unwrap()));
         b.sync
             .make_and_upload_entry(StoreChange::SetAccess {
                 member: b.member.member(),
@@ -157,7 +153,7 @@ async fn a_removed_uploaders_folder_is_listed_once_per_cut_off() {
 /// his account revoked, the next retention lists the phone's folder once.
 #[tokio::test]
 async fn a_removed_device_whose_member_keeps_access_waits_for_its_members_cut_off() {
-    let (storage, clock) = google();
+    let (storage, clock) = dropbox();
     let [mut a, b, _] = accounts(storage.clone()).await;
     let phone = b.device().await;
     let orphan = ObjectPath::file(store(1), phone, FileId(uuid::Uuid::from_u128(1)));
@@ -200,7 +196,7 @@ async fn io_differential_file_scan() {
         [false, false, true],
         [true, true, false],
     ] {
-        let (storage, clock) = google();
+        let (storage, clock) = dropbox();
         let [mut a, _, c] = accounts(storage.clone()).await;
         let carol = c.device().await;
         publish(&mut a, Command::RemoveMember(c.member.member())).await;
@@ -276,7 +272,7 @@ async fn io_differential_folder_restore() {
     let mut cases = Vec::new();
     let mut results = Vec::new();
     for history in histories {
-        let (storage, clock) = google();
+        let (storage, clock) = dropbox();
         let [mut a, mut b, c] = accounts(storage.clone()).await;
         let carol = c.device().await;
         let photo =
@@ -321,9 +317,7 @@ async fn io_differential_folder_restore() {
                     } else {
                         ("cat@example.com", "ben@example.com")
                     };
-                    b.sync.storage = Some(Arc::new(
-                        MemoryStorage::for_recipient(&storage, held).unwrap(),
-                    ));
+                    b.sync.storage = Some(Arc::new(joined(&storage, held).await.unwrap()));
                     b.sync
                         .make_and_upload_entry(StoreChange::SetAccess {
                             member: b.member.member(),

@@ -21,7 +21,7 @@ async fn maintenance_failures_a_person_clears_retry_on_a_changed_connection() {
     ] {
         let storage = Arc::new(
             MemoryStorage::builder()
-                .provider(coven_storage::CloudProvider::GoogleDrive)
+                .provider(coven_storage::CloudProvider::Dropbox)
                 .transfer_limits(65536, 65536)
                 .build()
                 .unwrap(),
@@ -80,7 +80,7 @@ async fn app_reload_and_reset_stay_pending_until_explicit_retry() {
     ] {
         let storage = Arc::new(
             MemoryStorage::builder()
-                .provider(coven_storage::CloudProvider::GoogleDrive)
+                .provider(coven_storage::CloudProvider::Dropbox)
                 .transfer_limits(65536, 65536)
                 .build()
                 .unwrap(),
@@ -428,7 +428,7 @@ async fn pending_queries_round_trip_every_subject_and_reason() {
         PendingReason::UpdateRequired(RequiredUpdate::CovenFormat { version: 2 }),
         PendingReason::NoStorage,
         PendingReason::Storage {
-            provider: CloudProvider::GoogleDrive,
+            provider: CloudProvider::Dropbox,
             failure: StorageFailure::Network,
         },
         PendingReason::Refused(Refusal::Signature { cause: None }),
@@ -534,7 +534,7 @@ async fn lean_differential_access_pending() {
     let mut rust = Vec::new();
     for remote in [false, true] {
         for failures in 0..=3 {
-            let storage = google();
+            let storage = dropbox();
             let [mut a, mut b, c] = accounts(storage.clone()).await;
             let account = "cat@example.com";
             let reporter = a.device().await;
@@ -700,7 +700,7 @@ async fn attempt_fails(d: &mut Device, id: OperationId) -> SyncError {
 
 #[tokio::test]
 async fn a_failed_operation_waits_its_delay_and_an_app_retry_overrides_only_that() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let id = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
     for wait in [1, 2, 4] {
@@ -736,7 +736,7 @@ async fn a_failed_operation_waits_its_delay_and_an_app_retry_overrides_only_that
 
 #[tokio::test]
 async fn a_provider_cooldown_holds_operations_requests_and_explicit_retries() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let id = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
     // An operation's request receives the provider's 600-second Retry-After.
@@ -780,7 +780,7 @@ async fn a_provider_cooldown_holds_operations_requests_and_explicit_retries() {
 
 #[tokio::test]
 async fn approval_polls_back_off_across_reopening_and_end_with_the_outcome() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     a.sync.join_poll_due().await.unwrap();
     for _ in 0..3 {

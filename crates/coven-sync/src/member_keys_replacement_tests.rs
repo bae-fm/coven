@@ -100,7 +100,7 @@ pub(super) async fn settle(d: &mut Device, id: OperationId) -> Result<Output, Sy
 /// stay, and writes resume under the new pair.
 #[tokio::test]
 async fn self_replacement_confirms_the_queue_and_installs_the_kept_pair() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     let carol = c.member.member();
     let create = begin(&mut a, Command::CreateCircle("Garden".into())).await;
@@ -183,7 +183,7 @@ async fn self_replacement_confirms_the_queue_and_installs_the_kept_pair() {
 /// pair signs, so Ana accepts it (§6, D9).
 #[tokio::test]
 async fn positions_held_across_self_replacement_stay_readable() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     c.sync().await;
     assert!(c.writes.post_positions().await.unwrap());
@@ -223,7 +223,7 @@ async fn positions_held_across_self_replacement_stay_readable() {
 /// signs a new attempt over the applied view with the installed pair.
 #[tokio::test]
 async fn a_positions_attempt_signed_before_self_replacement_is_signed_again() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     c.sync().await;
     assert!(c.writes.post_positions().await.unwrap());
@@ -287,7 +287,7 @@ async fn a_positions_attempt_signed_before_self_replacement_is_signed_again() {
 /// member are refused before anything is reserved.
 #[tokio::test]
 async fn a_non_owner_admin_replaces_another_members_keys() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, mut c] = accounts_with(storage.clone(), notes, schema).await;
     let (ben, carol) = (b.member.member(), c.member.member());
     let before = b.log().await.replay.state;
@@ -422,7 +422,7 @@ struct Held {
 /// Run one plan through the operation calls; returns Ana's final store log,
 /// every stored key copy and what Carol holds.
 async fn run(plan: &Plan) -> (StoreLog, Vec<KeyCopyPrefix>, Held, Vec<Device>) {
-    let storage = google();
+    let storage = dropbox();
     let [a, b, c] = accounts(storage.clone()).await;
     let carol = c.member.member();
     let prepared = [0, 1].map(|_| MemberIdentity::new(carol, MemberKeys::generate().unwrap()));

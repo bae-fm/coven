@@ -163,20 +163,18 @@ impl Network {
         )
         .synced_tables(tables.clone())
         .migrations(migrations.clone());
-        let (builder, sign_in) = if matches!(
-            provider,
-            CloudProvider::GoogleDrive | CloudProvider::Dropbox | CloudProvider::OneDrive
-        ) {
-            let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
-            let mut builder = sign_in.configure(builder);
-            builder
-                .authenticate(storage.config().oauth_access().unwrap())
-                .await
-                .unwrap();
-            (builder, Some(sign_in))
-        } else {
-            (builder, None)
-        };
+        let (builder, sign_in) =
+            if matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
+                let sign_in = crate::authentication::SignIn::new(clock.clone()).await;
+                let mut builder = sign_in.configure(builder);
+                builder
+                    .authenticate(storage.config().oauth_access().unwrap())
+                    .await
+                    .unwrap();
+                (builder, Some(sign_in))
+            } else {
+                (builder, None)
+            };
         let handle = builder.open(directory.id()).await.unwrap();
         handle.initialize_identity().unwrap();
         match provider {

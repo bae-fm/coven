@@ -150,8 +150,8 @@ also what gives coven its properties:
 
 - **Nothing to run or operate.** No backend to deploy, scale, patch, or pay for;
   a store needs only storage the user already has.
-- **Provider-agnostic and portable.** The same store works over S3, Google Drive,
-  Dropbox, OneDrive, or iCloud, and the data is the user's own — on a
+- **Provider-agnostic and portable.** The same store works over S3, Dropbox,
+  OneDrive, or iCloud, and the data is the user's own — on a
   [browsable home](/docs/encryption#opaque-and-browsable-homes) they can even read
   it in the storage console by name.
 - **Works offline.** Every device holds the full database and commits writes

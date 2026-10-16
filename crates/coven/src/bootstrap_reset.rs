@@ -69,7 +69,6 @@ pub(crate) async fn reset_device(
         .connect(
             data.location.clone(),
             super::provider_auth(&data, sign_in.as_ref())?,
-            settings.device_id,
             probe,
             // The damaged database cannot hold a cooldown for this one probe.
             Arc::new(coven_storage::NoCooldown),

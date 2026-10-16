@@ -46,12 +46,6 @@ fn restore_storage_is_exactly_the_location_for_every_provider() {
             r#"{"S3":{"bucket":"bucket","region":"region","endpoint":"http://localhost:9000/","profile":{"Custom":{"signing":"AwsSigV4","single_put":"IfNoneMatch","copy_publication":{"Multipart":"CloudflareIfNoneMatch"},"multipart_timestamp":"Start","checksums":"Absent","listing":"V1","revision":"ETag","response_headers":"S3","request_checksums":false}},"prefix":""}}"#,
         ),
         (
-            StorageConfig::GoogleDrive {
-                folder_id: "folder".into(),
-            },
-            r#"{"GoogleDrive":{"folder_id":"folder"}}"#,
-        ),
-        (
             StorageConfig::Dropbox {
                 location: crate::DropboxLocation::SharedFolder {
                     namespace_id: "folder".into(),

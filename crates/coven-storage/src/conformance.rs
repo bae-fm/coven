@@ -419,11 +419,6 @@ impl Conformance {
         let mut pending = storage.begin_upload(&path, 4).await.unwrap();
         let mut ready = storage.begin_upload(&path, 4).await.unwrap();
         storage.upload_part(&mut ready, b"data").await.unwrap();
-        // Drive publishes the final part immediately. Test finish by
-        // recovering its still-incomplete recording after the reply was lost.
-        if ready.is_complete() {
-            ready = pending.clone();
-        }
         deny.await;
         let mut errors = vec![
             storage.create(&path, b"data").await.err().unwrap(),

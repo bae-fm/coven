@@ -60,7 +60,7 @@ fn network_crates_are_rejected_outside_the_providers() {
 fn network_crates_are_allowed_in_the_providers() {
     let files = [
         RustFile::fixture(
-            "crates/coven-storage/src/providers/google_drive.rs",
+            "crates/coven-storage/src/providers/dropbox.rs",
             "use reqwest::Client;",
         ),
         RustFile::fixture(

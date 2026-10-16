@@ -24,12 +24,6 @@ fn credentials() -> S3Credentials {
 fn restore_metadata_retains_the_creation_access_choice() {
     for (location, access) in [
         (
-            StorageConfig::GoogleDrive {
-                folder_id: "folder".into(),
-            },
-            OAuthAccess::GoogleDrive(GoogleDriveAccess::File),
-        ),
-        (
             StorageConfig::Dropbox {
                 location: coven_storage::DropboxLocation::AppFolder,
             },

@@ -393,8 +393,7 @@ a zero-body pass cannot hide a listing of the whole history.
   repeated requests. No request belongs to two terms.
   - `D` counts discovery listing pages and terminal next-number misses.
     A successful next-number read belongs to `O`, not also to `D`.
-    Folder traversal and exact-name lookup overhead belong to `M`, except
-    when the lookup itself establishes the miss already counted in `D`.
+    Folder traversal overhead belongs to `M`.
     `O` counts distinct object versions whose headers or bodies are needed.
     At most two header ranges and one remaining-body stream are allowed
     per object without failures or eviction: at most `3 * O` requests.
@@ -426,9 +425,8 @@ a zero-body pass cannot hide a listing of the whole history.
   [`dropped_drain_stops_polling`](proofs/io/CovenIO/DroppedRegistrations.lean)).
   With each listing fitting one page, `D = 2 + 3 * N` on every provider. Folder ids are already known in this
   warm count. All extra pages, initialization lookups and retries are charged.
-  Drive's unknown-name miss is one exact parent/name query; a hit needs
-  that query, exact metadata and the download (§4). Metadata requests and
-  replacement rechecks contribute to `M`. Neither lists historical log objects.
+  Metadata requests and replacement rechecks contribute to `M`. Neither
+  lists historical log objects.
 - **New objects:** checked immutable facts and retained bytes are reused.
   Charge only newly needed versions to `O`; changed positions count as new
   versions. Work induced by them stays in its own term above.
@@ -512,8 +510,8 @@ the file's ranges under `F`.
 
 ## 4. Storage providers and access
 
-- A store lives on one provider: S3, Google Drive, Dropbox, OneDrive, or
-  iCloud through CloudKit.
+- A store lives on one provider: S3, Dropbox, OneDrive, or iCloud through
+  CloudKit.
 - CloudKit is built into `coven-storage` on Apple platforms, using
   `objc2-cloud-kit` and `block2` completion handlers awaited through a oneshot
   channel. The app supplies its container identifier and the iCloud entitlement
@@ -601,30 +599,6 @@ the file's ranges under `F`.
 - Access starts at the least privilege that supports the store. Full-account
   access exposes unrelated files and requires provider review; an app offering
   only one-person stores need not register it.
-  - **Google Drive:** every new store requests
-    `https://www.googleapis.com/auth/drive.file`. The same person can use the
-    store across devices and across client ids in the app's Google Cloud project.
-    This permission does not let another person read the creator's files, even
-    after the folder is shared with them.
-  - At the first invite, coven requests
-    `https://www.googleapis.com/auth/drive` on the same client, with
-    `include_granted_scopes=true`. Only a confirmed full grant permits the
-    sharing request. Existing files remain in place with the same ids, bytes,
-    timestamps and revisions. Cancellation, denial or an insufficient grant
-    fails the invite without granting the recipient access.
-  - The app declares whether it registered full Drive access. A client registered
-    only for `drive.file` receives a typed missing-access error from
-    `create_invite` before any provider change. Joining a shared Drive store
-    requires full Drive access too. Full `drive` requires Google's restricted-scope
-    review; `drive.file` avoids that review.
-  - A restore initially requests `drive.file`. A shared folder visible under that
-    grant reports that full access is required; a folder returning 404 reports
-    that it is not visible under this grant, preserving the provider cause. The
-    app requests full access and retries. A narrow grant cannot establish that
-    another person's shared folder is absent.
-  - E.g. Ana creates Notes with `drive.file` and opens it on her laptop. Inviting
-    Carol asks Ana for full Drive access; accepting lets coven share the existing
-    folder. Carol signs in with full Drive access to read Ana's files.
   - **Dropbox:** the app registers an App-folder key, a Full Dropbox key, or both.
     The access level is fixed when the store is created on Dropbox. With both
     keys, creation requires an explicit shared/not-shared choice, with no default.
@@ -641,7 +615,7 @@ the file's ranges under `F`.
     Inviting Carol reports that Notes needs relocation. Choosing shared when
     creating Household uses the Full Dropbox key and permits later invitations.
   - OneDrive, CloudKit and S3 retain their provider access rules below.
-- For Google Drive, Dropbox and OneDrive, the app triggers `authenticate` on
+- For Dropbox and OneDrive, the app triggers `authenticate` on
   the builder or open handle. Coven builds the sign-in request, checks the
   redirect, exchanges the code and holds the tokens; none pass through the app.
   - The builder takes one presenter: open this authorization URL and return the
@@ -1159,30 +1133,24 @@ the file's ranges under `F`.
     revision (Dropbox does); they do not change a reader's retained bytes.
     An error is never absence;
   - delete;
-  - grant and revoke a member's access, where the provider can: Google
-    Drive, Dropbox, OneDrive and iCloud share with an account.
-- On Drive, Dropbox and OneDrive, every directory component in D10 is a
+  - grant and revoke a member's access, where the provider can: Dropbox,
+    OneDrive and iCloud share with an account.
+- On Dropbox and OneDrive, every directory component in D10 is a
   real provider folder. List that folder directly, never the configured
   root followed by client-side filtering. S3 uses the exact key prefix;
   CloudKit queries the exact indexed ancestor directory in the selected zone.
-  Folder ids and known path-to-object ids stay with the connection. An
-  unknown Drive object uses an exact parent/name query; its id is then cached.
+  Folder ids stay with the connection.
   Failed discovery never installs a partial catalog as complete.
-  - On S3, device discovery lists `store-log/` with delimiter `/`. Drive,
-    Dropbox and OneDrive list its immediate children, without recursion.
+  - On S3, device discovery lists `store-log/` with delimiter `/`. Dropbox
+    and OneDrive list its immediate children, without recursion.
     CloudKit queries the indexed store-log directory and number for entry 1
     of each writer; those permanent records represent its device folders.
     No adapter downloads the history to derive the set of writers locally.
   - S3 and Dropbox downloads include their metadata without a preliminary
-    status request. Drive and OneDrive fetch exact metadata before downloading.
-    Their replaceable objects also require a metadata recheck after downloading
-    to reject a concurrent replacement. On Drive, an
-    unknown file id requires one [parent/name query](https://developers.google.com/workspace/drive/api/guides/search-files).
-    An empty complete result is the miss; a hit adds exact metadata and one
-    [file download](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get).
-    Count metadata requests, query pages and redirects in `M` unless already
-    counted as a discovery miss; an incomplete search
-    or provider error is not absence. Cache the id for subsequent reads.
+    status request. OneDrive fetches exact metadata before downloading. Its
+    replaceable objects also require a metadata recheck after downloading
+    to reject a concurrent replacement. Count metadata requests and redirects
+    in `M`; a provider error is not absence.
   - Ana's `files/` folder can hold 20,000 photos. Reading `store-log/`
     never enumerates those photos or another store's objects.
   - A store's folder or prefix can also hold things coven never wrote: a
@@ -1190,8 +1158,7 @@ the file's ranges under `F`.
     another store's folder. [D10](format.md#d10-paths) gives each object
     one spelling and no reader looks anywhere else, so a listing skips
     every entry that is not a D10 path, and writer discovery skips every
-    folder that is not a D10 device folder. Drive's exact lookups likewise
-    skip folders, documents and shortcuts sharing an object's name. What
+    folder that is not a D10 device folder. What
     the provider itself gets wrong still fails the listing: an entry
     outside the requested scope, missing metadata, or a failed or
     incomplete page.
@@ -1216,10 +1183,6 @@ the file's ranges under `F`.
     to whole seconds. GCS listings include milliseconds while HEAD and GET
     omit them; keeping both representations would give one immutable publication
     different times depending on the observation call.
-  - Drive file metadata, with an exact name lookup when its id is unknown:
-    `createdTime` for creation and `modifiedTime` for replacement, retaining
-    their RFC 3339 fractional-second precision
-    ([files](https://developers.google.com/workspace/drive/api/reference/rest/v3/files)).
   - Dropbox metadata: `server_modified`, in whole seconds, so
     `δ = 1 second`; never use `client_modified`
     ([timestamp format](https://github.com/dropbox/dropbox-api-spec/blob/main/common.stone)).
@@ -1231,7 +1194,7 @@ the file's ranges under `F`.
     with `δ = 1 millisecond`, the unit of CloudKit's date/time representation
     ([types and dictionaries](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/Types.html)).
 
-  For Drive and OneDrive, `p` returned fractional-second digits give
+  For OneDrive, `p` returned fractional-second digits give
   `δ = 10^(-p) seconds`: no fraction means one second, three digits one
   millisecond. Preserve the returned precision in comparisons; do not round
   a fractional timestamp to seconds or invent an order within an equal time.
@@ -1241,8 +1204,8 @@ the file's ranges under `F`.
 
   Exact status and reads carry the complete encrypted size, native object id,
   revision, timestamp and its resolution, plus any returned checksum. A ranged
-  read still describes the complete object. Drive uses `headRevisionId` (its file `version` can also change on reads), OneDrive
-  uses `eTag`, and Dropbox uses `rev`. CloudKit uses the record's `recordChangeTag`. On replaceable S3 paths, GCS uses its generation; AWS and R2 use a
+  read still describes the complete object. OneDrive uses `eTag`, and
+  Dropbox uses `rev`. CloudKit uses the record's `recordChangeTag`. On replaceable S3 paths, GCS uses its generation; AWS and R2 use a
   version id when versioning is enabled, otherwise a fresh `coven-revision`
   value stored atomically in the replacement's user metadata. Immutable S3
   objects use their ETag. S3 listings fetch exact status for replaceable paths
@@ -1250,18 +1213,18 @@ the file's ranges under `F`.
 
   Checksums name their algorithm, encoding and scope: whole-object or
   multipart composite. An ETag or revision is never inferred to be a checksum.
-  Drive exposes MD5, Dropbox its block-based content hash, OneDrive SHA-1 or
+  Dropbox exposes its block-based content hash, OneDrive SHA-1 or
   QuickXorHash, and S3 its explicitly returned checksum and scope. GCS's
   CRC32C is a whole-object checksum. R2's unscoped checksum is absent from
   coven's metadata; its scope is never guessed. RustFS, SeaweedFS and Ceph RGW return
   none; a checksum returned under their profile, scoped or not, contradicts
   the certified observation and fails as a protocol error rather than being
-  used. Metadata and downloaded bytes must describe the same revision: Drive
-  and OneDrive recheck replaceable metadata after download and fail if it
+  used. Metadata and downloaded bytes must describe the same revision:
+  OneDrive rechecks replaceable metadata after download and fails if it
   changed.
 
   File status and upload confirmation use this call, not a folder listing.
-  Count any name lookup and missing-container check separately. S3 HEAD's
+  Count any missing-container check separately. S3 HEAD's
   bodyless 404 requires a bucket check: every S3 service uses a zero-entry
   listing with the exact object's key as its prefix, under the configured
   prefix and store id. Catalogued profiles use ListObjectsV2; a custom V1
@@ -1307,8 +1270,6 @@ the file's ranges under `F`.
     supply the same key to the same member, but each uses its own
     `<store>/keys/<writer>/` folder in D10. Other writers never occupy that path.
     Duplicate valid copies have the same key meaning, not the same bytes.
-  - On Google Drive, which allows two files with one name, a retry first
-    looks for its own earlier copy.
 - On the providers that share with an account, only the member whose
   account holds the store can share it and take it back, so:
   - that member's devices make invites ([§12.2](#122-adding-a-person));
@@ -4023,8 +3984,8 @@ Carol's tablet:
   - the store's id and name;
   - the storage location only, never storage credentials.
 - On S3, the person keeps their access key separately, such as in a
-  password manager, and enters it on the new device. Google Drive, Dropbox
-  and OneDrive likewise need a sign-in to the person's provider account.
+  password manager, and enters it on the new device. Dropbox and OneDrive
+  likewise need a sign-in to the person's provider account.
 - It gets the code in one of three ways:
   - by scanning it as a QR code on one of the person's devices that has
     the store open. This device-to-device transfer may also carry the S3
@@ -4035,7 +3996,7 @@ Carol's tablet:
     kept S3 key if Keychain does not hold it;
   - by the person typing it in.
 - The QR code is blurred until the person taps to show it.
-- Where storage needs a sign-in, such as Google Drive, the new device
+- Where storage needs a sign-in, such as Dropbox, the new device
   asks coven to sign in to the person's own account first, through the builder's
   presenter. Restore and join use coven's held tokens. Restore codes never
   carry OAuth tokens.
@@ -4076,12 +4037,13 @@ Carol's tablet:
   coven generates a fresh id and the admin chooses a role. For recovery the
   admin selects an existing active member; its role and circle memberships
   are preserved. The requester cannot select a different replacement target.
-- E.g. Ana adds Carol, on Google Drive:
-  1. Ana enters Carol's Google account email and picks her role; her phone
+- E.g. Ana adds Carol, on Dropbox:
+  1. Ana enters Carol's Dropbox account email and picks her role; her phone
      shares the store's folder with that account and shows the invite.
-  2. Carol's phone scans it, signs in to her own Google account, makes
-     Carol's member keys, and writes a join request to storage, holding
-     the invite id, its chosen member id, both new public keys and her device's name.
+  2. Carol's phone scans it, signs in to her own Dropbox account, mounts
+     the shared folder, makes Carol's member keys, and writes a join
+     request to storage, holding the invite id, its chosen member id, both
+     new public keys and her device's name.
   3. Ana's phone shows the request, and Ana approves it.
   4. Ana's phone seals every store key it holds to Carol's new sealing key
      ([§11](#11-keys)), then writes "add member Carol" to the store log.
@@ -4194,7 +4156,7 @@ Carol's tablet:
   store log ([§9](#9-members-and-roles)), and cuts the device off from storage.
 - Providers can't cut off one device alone, so Ana cuts off all of hers,
   and signs in again on the ones she keeps:
-  - Google Drive, Dropbox and OneDrive: she removes the app's access from
+  - Dropbox and OneDrive: she removes the app's access from
     her provider account;
   - iCloud: she removes the phone from her Apple account;
   - S3: an admin desktop with the storage account's admin access, usually
@@ -5203,8 +5165,6 @@ Carol's tablet:
     account holds the store.
     On S3, where access-key ids do not identify their account, the member
     recorded by the kept creation entry performs this deletion.
-  - On Google Drive only an uploader can delete their files, so a removed
-    member's just leave the store's folder, and stay in their own account.
   - A device that never comes back keeps its covered log objects until it
     is removed.
 - A device that needs writes already deleted loads the latest snapshot
@@ -5507,7 +5467,7 @@ Carol's tablet:
     retry; it is never converted into permission to retry immediately.
 - A large file goes up through the provider's resumable or multipart
   upload, in parts.
-  - Providers require it above a size, such as Google Drive above 5 MB per
+  - Providers require it above a size, such as Dropbox above 150 MiB per
     request.
   - The upload session records each provider-confirmed part and its byte count
     before reporting progress. Resuming and the app's `uploads()` /

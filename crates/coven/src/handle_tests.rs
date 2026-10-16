@@ -765,9 +765,7 @@ fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
                 StorageFailure::AccessNotGranted {
                     required: OAuthAccess::OneDrive,
                 },
-                StorageFailure::GoogleDriveFolderNotVisible,
                 StorageFailure::DropboxAppFolderNotShareable,
-                StorageFailure::AccountMismatch,
                 StorageFailure::Authentication,
                 StorageFailure::PermissionDenied,
                 StorageFailure::AlreadyExists,

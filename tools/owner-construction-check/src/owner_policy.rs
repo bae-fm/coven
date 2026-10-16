@@ -197,11 +197,6 @@ pub(crate) const POLICY: Policy = Policy {
             "new",
         ),
         (
-            "crates/coven-storage/src/providers/google_drive.rs",
-            "GoogleDriveStorage",
-            "new",
-        ),
-        (
             "crates/coven-storage/src/providers/oauth.rs",
             "OAuthFlow",
             "new",
@@ -484,17 +479,11 @@ pub(crate) const POLICY: Policy = Policy {
             "close",
         ),
         ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
-        // A completed sign-in becomes this session's custody; a Drive upgrade
-        // is its own until committed.
+        // A completed sign-in becomes this session's custody.
         (
             "crates/coven/src/storage.rs",
             "StorageConnections",
             "authenticate",
-        ),
-        (
-            "crates/coven/src/storage.rs",
-            "StorageConnections",
-            "prepare_invite",
         ),
         ("crates/coven/src/storage.rs", "StorageConnections", "call"),
         ("crates/coven/src/storage.rs", "StorageConnections", "new"),

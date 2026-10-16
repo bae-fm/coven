@@ -119,16 +119,6 @@ fn direct_deserialization_cannot_bypass_session_validation() {
 fn session_states_must_match_their_provider_and_have_nonempty_ids() {
     let cases = [
         (
-            StorageConfig::GoogleDrive {
-                folder_id: "folder".into(),
-            },
-            SessionState::GoogleDrive {
-                url: SecretText::new("https://www.googleapis.com/upload?upload_id=1".into()),
-                file_id: SecretText::new("file".into()),
-            },
-            8 * 1024 * 1024,
-        ),
-        (
             StorageConfig::Dropbox {
                 location: crate::DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
@@ -167,7 +157,6 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
         assert_invalid_recording(&invalid);
         let mut invalid = valid.clone();
         match &mut invalid.state {
-            SessionState::GoogleDrive { file_id, .. } => *file_id = SecretText::new(String::new()),
             SessionState::Dropbox { id } | SessionState::CloudKit { id } => {
                 *id = SecretText::new(String::new())
             }

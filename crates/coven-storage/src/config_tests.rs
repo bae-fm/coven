@@ -11,11 +11,7 @@ fn sign_out_instructions_depend_only_on_the_provider() {
         CloudProvider::CloudKit.sign_out(),
         ProviderSignOut::RemoveFromAppleAccount
     );
-    for provider in [
-        CloudProvider::GoogleDrive,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         assert_eq!(
             provider.sign_out(),
             ProviderSignOut::RemoveAppAccess { provider }
@@ -111,14 +107,8 @@ fn catalogued_hosts_require_https_and_their_own_profile_name() {
 
 #[test]
 fn locations_select_the_required_initial_access() {
-    use crate::{DropboxAccess, DropboxLocation, GoogleDriveAccess, OAuthAccess};
+    use crate::{DropboxAccess, DropboxLocation, OAuthAccess};
     for (config, expected) in [
-        (
-            StorageConfig::GoogleDrive {
-                folder_id: "folder".into(),
-            },
-            Some(OAuthAccess::GoogleDrive(GoogleDriveAccess::File)),
-        ),
         (
             StorageConfig::Dropbox {
                 location: DropboxLocation::AppFolder,
@@ -179,7 +169,6 @@ fn every_native_location_identifier_is_required() {
             json!({"S3":{"bucket":"bucket","region":"region","endpoint":null,"prefix":""}}),
             "region",
         ),
-        (json!({"GoogleDrive":{"folder_id":"folder"}}), "folder_id"),
         (
             json!({"OneDrive":{"drive_id":"drive","folder_id":"folder"}}),
             "drive_id",

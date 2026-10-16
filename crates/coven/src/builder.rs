@@ -212,7 +212,6 @@ impl CovenBuilder {
                     .connect(
                         data.location,
                         coven_storage::ProviderAuth::new(data.credentials, credentials),
-                        directory.settings().map_err(CovenError::from)?.device_id,
                         send.clone(),
                         waits.clone(),
                     )
@@ -535,7 +534,6 @@ impl OpeningOwners {
             waits.clone(),
             self.storage,
             self.connector.clone(),
-            self.device,
             self.has_storage_credentials,
         );
         let ids = self.ids.clone();

@@ -69,7 +69,6 @@ features:
 <p class="kicker">Bring your own storage</p>
 
 <p class="providers">
-  <span>Google Drive</span>
   <span>Dropbox</span>
   <span>OneDrive</span>
   <span>iCloud (CloudKit)</span>

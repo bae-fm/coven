@@ -60,13 +60,28 @@ pub(crate) fn operation_owner(sync: StoreLogSync, files: Files) -> Operations {
     Operations::new(sync, files, writes, clock)
 }
 
-pub(crate) fn google() -> Arc<MemoryStorage> {
+pub(crate) fn dropbox() -> Arc<MemoryStorage> {
     Arc::new(
         MemoryStorage::builder()
-            .provider(coven_storage::CloudProvider::GoogleDrive)
+            .provider(coven_storage::CloudProvider::Dropbox)
             .build()
             .unwrap(),
     )
+}
+/// `account`'s view of `storage` after it mounts the folder the owner's grant
+/// shared, as a joining device does; refused while the account is not shared.
+pub(crate) async fn joined(
+    storage: &MemoryStorage,
+    account: &str,
+) -> Result<MemoryStorage, coven_storage::StorageError> {
+    let recipient = MemoryStorage::for_recipient(storage, account)?;
+    recipient
+        .join(
+            store(1),
+            &coven_storage::StorageInvitation::for_account(storage.config())?,
+        )
+        .await?;
+    Ok(recipient)
 }
 pub(crate) async fn accounts(storage: Arc<MemoryStorage>) -> [Device; 3] {
     accounts_with(storage, Vec::new, Vec::new).await
@@ -118,9 +133,7 @@ async fn accounts_with(
             })
             .await
             .unwrap();
-        d.sync.storage = Some(Arc::new(
-            MemoryStorage::for_recipient(&storage, email).unwrap(),
-        ));
+        d.sync.storage = Some(Arc::new(joined(&storage, email).await.unwrap()));
         d.sync().await;
         d.sync
             .make_and_upload_entry(StoreChange::AddDevice {
@@ -208,7 +221,7 @@ pub(crate) async fn drive_access(d: &mut Device) {
 
 #[tokio::test]
 async fn owner_removal_preserves_keys_and_revokes_the_account() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, mut c] = accounts(storage.clone()).await;
     let circle = begin(&mut a, Command::CreateCircle("Household".into())).await;
     let Output::CircleId(circle) = finish(&mut a, circle).await else {
@@ -245,7 +258,7 @@ async fn owner_removal_preserves_keys_and_revokes_the_account() {
 
 #[tokio::test]
 async fn outside_admin_removes_a_member_without_learning_the_circle_key() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, mut c] = accounts(storage).await;
     let id = begin(&mut b, Command::CreateCircle("Gifts".into())).await;
     let Output::CircleId(gifts) = finish(&mut b, id).await else {
@@ -273,7 +286,7 @@ async fn outside_admin_removes_a_member_without_learning_the_circle_key() {
 
 #[tokio::test]
 async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, c] = accounts(storage.clone()).await;
     assert!(matches!(
         b.sync
@@ -313,7 +326,7 @@ async fn another_admin_cannot_share_and_owner_applies_their_revocation() {
 #[tokio::test]
 async fn interrupted_plain_removal_keeps_its_entry_and_schedules_access_on_replay() {
     for lost_reply in [false, true] {
-        let storage = google();
+        let storage = dropbox();
         let [mut a, b, _] = accounts(storage.clone()).await;
         let local = a.db.local_store_log().await.unwrap();
         let number = local
@@ -380,7 +393,7 @@ mod member_keys_settlement;
 
 #[tokio::test]
 async fn independent_removals_keep_their_original_attempts() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, c] = accounts(storage.clone()).await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(2));
     let attempted = queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
@@ -410,7 +423,7 @@ async fn independent_removals_keep_their_original_attempts() {
 
 #[tokio::test]
 async fn circle_membership_rotates_and_shares_history() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, mut c] = accounts(storage).await;
     let create = begin(&mut a, Command::CreateCircle("Circle".into())).await;
     let Output::CircleId(circle) = finish(&mut a, create).await else {
@@ -458,7 +471,7 @@ mod circle_rows;
 #[tokio::test]
 async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard() {
     for discard in [false, true] {
-        let storage = google();
+        let storage = dropbox();
         let [mut a, _b, _c] = accounts(storage.clone()).await;
         let id = begin(&mut a, Command::CreateCircle("Retained".into())).await;
         let held = a.custody.read().unwrap().unwrap().to_secret_bytes();
@@ -537,7 +550,7 @@ async fn permanent_storage_failure_preserves_fixed_bytes_for_retry_and_discard()
 #[tokio::test]
 async fn retained_provider_grants_block_both_requested_and_remote_revocations() {
     for remote in [false, true] {
-        let storage = google();
+        let storage = dropbox();
         let [mut a, mut b, c] = accounts(storage.clone()).await;
         let shares = vec![coven_storage::RetainedAccess {
             provider_id: "parent-permission".into(),
@@ -585,7 +598,7 @@ async fn retained_provider_grants_block_both_requested_and_remote_revocations() 
 
 #[tokio::test]
 async fn removing_a_member_cuts_off_every_device_of_their_account() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, b, _c] = accounts(storage.clone()).await;
     let mut phone = device(storage.clone(), 4, b.member.clone(), store(1)).await;
     phone.sync.storage = Some(Arc::new(
@@ -622,7 +635,7 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
 
 #[tokio::test]
 async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_out() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, mut c] = accounts(storage.clone()).await;
     let b_id = b.device().await;
     assert!(matches!(
@@ -639,7 +652,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
             .unwrap(),
         Begun::Value(Output::SignOut(
             coven_storage::ProviderSignOut::RemoveAppAccess {
-                provider: coven_storage::CloudProvider::GoogleDrive
+                provider: coven_storage::CloudProvider::Dropbox
             }
         ))
     ));
@@ -669,7 +682,7 @@ async fn plain_device_removal_preserves_member_keys_and_returns_provider_sign_ou
 
 #[tokio::test]
 async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
-    let [a, b, c] = accounts(google()).await;
+    let [a, b, c] = accounts(dropbox()).await;
     let owner = a.member.member();
     let admin = b.member.member();
     let a_db = a.db.clone();
@@ -717,7 +730,7 @@ async fn role_changes_preserve_an_admin_and_owner_accounts_cannot_be_removed() {
 
 #[tokio::test]
 async fn resumed_removal_uses_the_targets_current_storage_account() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, b, _c] = accounts(storage.clone()).await;
     let mut owner_phone = device(storage.clone(), 4, a.member.clone(), store(1)).await;
     owner_phone.sync().await;
@@ -755,7 +768,7 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
 
 #[tokio::test]
 async fn store_reset_requires_admin_and_circle_reset_requires_membership() {
-    let [a, b, c] = accounts(google()).await;
+    let [a, b, c] = accounts(dropbox()).await;
     let files = file_owner(&a);
     let a = { operation_owner(a.sync, files) };
     let files = file_owner(&b);
@@ -793,7 +806,7 @@ mod minting;
 
 #[tokio::test]
 async fn removal_returns_unit_before_provider_work_and_has_no_operation_row() {
-    let storage = google();
+    let storage = dropbox();
     let [mut ana, ben, _] = accounts(storage.clone()).await;
     let result = ana
         .sync
@@ -823,7 +836,7 @@ mod access;
 
 #[tokio::test]
 async fn a_worker_stopped_on_its_journal_fails_later_calls_with_that_database_cause() {
-    let storage = google();
+    let storage = dropbox();
     let [a, _b, _c] = accounts(storage).await;
     let files = file_owner(&a);
     let db = a.db.clone();

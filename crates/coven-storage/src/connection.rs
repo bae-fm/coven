@@ -106,7 +106,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         let config = self.config();
         // Preserve native refusal order for a wrong location and an invalid part.
         let end = match config.provider() {
-            CloudProvider::S3 | CloudProvider::GoogleDrive | CloudProvider::CloudKit => {
+            CloudProvider::S3 | CloudProvider::CloudKit => {
                 let end = session.end_of_part(bytes.len())?;
                 session.check(&config)?;
                 end
@@ -175,7 +175,6 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError> {
         self.cooling()?;
-        let _guard = self.provider.lock_create().await;
         let publication = self.publication(path)?;
         let created = crate::transfer::upload_bytes(self, path, bytes, async {
             let object = self.provider.create(&publication, path, bytes).await?;

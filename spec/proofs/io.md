@@ -1594,14 +1594,13 @@ under its source and completion hypotheses; it does not prove row application.
 These obligations extend beyond the finality differential described above.
 The model does not establish them.
 
-- Count actual pages, metadata/body bytes, name lookups, redirects, native
+- Count actual pages, metadata/body bytes, redirects, native
   asset parts, SDK retries, publications, confirmations, deletions and access
   requests on every provider. Vary unchanged history/files, devices and pages.
   Incomplete scans preserve the committed catalog/reports; errors are not absence.
-  The three-device warm idle case is 11 native requests on S3, Drive, Dropbox,
+  The three-device warm idle case is 11 native requests on S3, Dropbox,
   OneDrive and CloudKit with one-page listings. One new S3 note with transfer
-  limit one and its positions PUT makes 13. Drive hits charge the parent/name
-  lookup and body download separately; unknown-name misses charge the lookup.
+  limit one and its positions PUT makes 13.
 - Exercise retained headers, signed prefixes, peer revisions, invalid-position
   verdicts, unfinished encrypted inputs and file-reference completeness across
   passes, reopen and eviction. Changed immutable size/time is a protocol failure.

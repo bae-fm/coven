@@ -82,8 +82,6 @@ impl ObjectRead {
 /// The algorithm and native encoding of a provider checksum.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum ChecksumValue {
-    /// Hexadecimal MD5 of the complete content (Drive).
-    Md5Hex(String),
     /// Hexadecimal SHA-1 of the complete content (OneDrive).
     Sha1Hex(String),
     /// Dropbox's hexadecimal SHA-256 of concatenated 4 MiB block hashes.

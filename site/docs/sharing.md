@@ -170,7 +170,7 @@ the current administrator can sign one, so a store whose administering device is
 lost keeps its data and its membership but cannot admit new devices until that
 device comes back.
 
-The transfer carries protocol authority and nothing else. A Google Drive or
+The transfer carries protocol authority and nothing else. A Dropbox or
 OneDrive folder belongs to whoever created it and coven cannot move that; an S3
 store's shared credential needs nothing moved. What checks that the new
 administrator can actually reach the provider is the capability probe it runs
@@ -376,7 +376,7 @@ base32-encoded binary frame and its typing-error checksum.
 
 The code never contains an S3 key or OAuth tokens. The person keeps their S3
 access key separately, for example in a password manager, and enters it on the
-new device. Google Drive, Dropbox and OneDrive require their own provider
+new device. Dropbox and OneDrive require their own provider
 sign-in. A QR scan from one of the person's own devices may transfer the code
 and S3 key as separate values; apps should blur the QR code until the person
 chooses to show it. iCloud Keychain also keeps the S3 key separately alongside the code.

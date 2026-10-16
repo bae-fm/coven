@@ -375,7 +375,6 @@ async fn prepare_and_load(
             .connect(
                 data.location.clone(),
                 provider_auth(&data, sign_in.as_ref())?,
-                settings.device_id,
                 send.clone(),
                 waits.clone(),
             )

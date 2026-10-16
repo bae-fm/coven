@@ -1,8 +1,8 @@
 # How coven compares
 
 coven is an embeddable engine for **end-to-end-encrypted, multi-writer SQLite
-sync over storage you already own**, an S3 bucket, a Google Drive folder, a
-Dropbox folder, an iCloud container. There is no coven server and no central
+sync over storage you already own**, an S3 bucket, a Dropbox or OneDrive
+folder, an iCloud container. There is no coven server and no central
 database: the cloud home is the only backend, and all trust is cryptographic.
 
 Lots of projects share one or two of those traits; the table below places coven

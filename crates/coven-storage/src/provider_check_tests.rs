@@ -109,7 +109,6 @@ async fn fresh_probe_may_be_omitted_from_setup_listing() {
     use crate::CloudProvider;
     for provider in [
         CloudProvider::S3,
-        CloudProvider::GoogleDrive,
         CloudProvider::Dropbox,
         CloudProvider::OneDrive,
         CloudProvider::CloudKit,

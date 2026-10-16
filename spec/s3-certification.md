@@ -1444,7 +1444,7 @@ CloudKit ran `cloudkit_live` in the signed host described in
 
 Time resolution: every S3 service returned whole-second `Last-Modified`
 values (`tv_nsec: 0` throughout). Dropbox and OneDrive report whole seconds,
-Drive and CloudKit milliseconds. Listing lag is measured from the upload
+CloudKit milliseconds. Listing lag is measured from the upload
 reply to the first listing that contains the object (20 trials; new device
 folders also 20 for S3); it does not establish the one-hour bound.
 
@@ -2378,7 +2378,7 @@ first listing, `after_s=0`; rollback and cleanup passed.
 
 ### Cloud drives
 
-All three refresh tokens were still valid.
+The Dropbox and OneDrive refresh tokens were still valid.
 
 - **Dropbox** (Full Dropbox app, shared folder; second account for
   sharing): all 7 `dropbox_live` tests passed, and the App-folder test
@@ -2391,16 +2391,6 @@ All three refresh tokens were still valid.
   different same-size overwrite changed it; the recipient read and wrote, and
   read `PermissionDenied` after revocation. The suite has no listing-lag
   measurement for Dropbox.
-- **Google Drive**: all 8 `drive_live` tests passed. Publication time is the
-  first complete publication: after 3, 10 and 20 s pauses the object's
-  `createdTime` (22:08:21.098Z, 22:08:47.498Z, 22:09:23.739Z) fell between the
-  marker created before the final part (22:08:19.307Z, 22:08:45.935Z,
-  22:09:22.147Z) and the one after completion. An unfinished upload was
-  unlisted and its native ID read 404. Listing lag over 20 objects: min
-  0.859 s, median 0.992 s, max 5.943 s; a new device folder 0.269 s, its first
-  object 0.218 s, discovery after the entry 0.251 s. The two-sign-in
-  `provider_access_live_google_upgrade` needs a person at the browser and was
-  not run.
 - **OneDrive** (personal): all 11 `onedrive_live` tests passed. The
   conditional copy of a 251,658,241-byte temporary returned 202, completed,
   and stamped `lastModifiedDateTime` 22:16:25Z between the copy markers

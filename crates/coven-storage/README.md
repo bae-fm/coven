@@ -1,6 +1,6 @@
 # coven-storage
 
-Encrypted object storage for S3, Google Drive, Dropbox, OneDrive and native
+Encrypted object storage for S3, Dropbox, OneDrive and native
 CloudKit on Apple platforms. This crate owns provider requests, transfer sessions, account
 sharing and recipient acceptance. Sync owns writers, member/invite accounting,
 retention eligibility and adjacent-chunk grouping.
@@ -23,11 +23,9 @@ inside the complete object; callers may combine neighbouring encrypted chunks
 in a request up to 1 MiB.
 
 `single_request_limit` exposes the adapter's body threshold: S3 5 GiB,
-Drive 5,000,000 bytes, Dropbox 150 MiB, OneDrive 250,000,000 bytes, and CloudKit
-8 MiB. Drive and OneDrive use decimal byte counts conservatively
-from their published MB values; these are adapter routing thresholds, not live
-measurements of server enforcement.
-[Drive uploads](https://developers.google.com/workspace/drive/api/guides/manage-uploads),
+Dropbox 150 MiB, OneDrive 250,000,000 bytes, and CloudKit 8 MiB. OneDrive uses
+a decimal byte count conservatively from its published MB value; these are
+adapter routing thresholds, not live measurements of server enforcement.
 [OneDrive content upload](https://learn.microsoft.com/en-us/graph/api/driveitem-put-content?view=graph-rest-1.0).
 Larger creates use
 resumable or multipart transfer for every object family, including writes and
@@ -51,9 +49,8 @@ keeps the recording incomplete. Abort deletes it as part of session cleanup.
 Published-object listings exclude this reserved namespace.
 
 `list` follows every provider page and returns path, encrypted byte size and
-provider storage time, rejecting missing or malformed metadata. Drive uses
-`createdTime` for immutable objects and `modifiedTime` for replacements
-(earliest created copy, ties by id), Dropbox `server_modified`, OneDrive
+provider storage time, rejecting missing or malformed metadata. Dropbox uses
+`server_modified`, OneDrive
 the top-level `lastModifiedDateTime`, CloudKit the publication record's server
 time, and S3 `LastModified`. OneDrive copy preserves the temporary's creation
 time, so its modification time records publication. AWS's native multipart
@@ -70,19 +67,7 @@ uploads contain no stored objects. The provider check removes its test object
 even after an unconfirmed create and retains both operation and cleanup failures.
 Changing an established store's location returns `LocationChangeUnsupported`.
 Storage exposes `delete`, not a deletion-rights query: sync chooses the deleting
-device under §15. Drive deletes objects owned by the account and otherwise
-removes them from their immediate parent folder. A refusal retains its native cause.
-
-Drive represents every directory component as a real folder, lists only the
-requested subtree and retains folder and object IDs with the connection. Unknown
-names use complete paginated parent/name queries; known objects use exact metadata
-by ID. Listing omissions never erase known IDs or establish object absence.
-Same-name folders form one directory: listings and exact lookups combine their
-children, applying the object duplicate rule across folders. New objects and
-subfolders use the oldest folder by `createdTime`, then ID. Listings and creation
-refresh the directory's ancestors to discover concurrent siblings; direct reads
-and warm exact-name misses use cached IDs. No folder is moved or removed to resolve
-a name collision.
+device under §15. A refusal retains its native cause.
 
 ## Provider operations and test evidence
 
@@ -95,9 +80,6 @@ using the same device and entry numbers in one location.
 Provider-specific suites exercise recorded sessions, lost replies, expiry,
 sharing authority and error causes. Passing a stub does not prove a provider's
 server-side guarantee.
-The live Drive duplicate-folder test creates siblings directly, verifies their
-combined listing and reads, checks the parent of a new publication, and deletes
-the test objects and folders.
 S3 selects shared behaviors from the const [profile table](src/providers/s3_profile.rs).
 The ignored `s3_certification` test reads `COVEN_LIVE_S3_ENV`, detects native
 behavior, exercises the adapter and deletes its live objects and uploads. GCS
@@ -105,7 +87,7 @@ and R2 passed suite version 1 on 2026-10-13; AWS remains uncertified without a
 live account. See the [procedure](../../spec/coven.md#4-storage-providers-and-access)
 and [raw evidence](../../spec/s3-certification.md).
 Every live test that reads an env file (`COVEN_LIVE_S3_ENV`,
-`COVEN_LIVE_DRIVE_ENV`, `COVEN_LIVE_DROPBOX_ENV`, `COVEN_LIVE_DROPBOX_B_ENV`,
+`COVEN_LIVE_DROPBOX_ENV`, `COVEN_LIVE_DROPBOX_B_ENV`,
 `COVEN_LIVE_ONEDRIVE_ENV`) reads it through one reader that fails the run on a
 setting its loader does not read, so a misplaced setting is never silently
 ignored. Process settings such as `COVEN_LIVE_S3_PROFILE` stay in the
@@ -114,7 +96,6 @@ environment.
 | Provider | Objects and listing | Recorded uploads | Sharing and recipient access |
 | --- | --- | --- | --- |
 | [S3](src/providers/s3.rs) | Profile-selected conditional PUT, unconditional positions/clock PUT, `GetObject`/Range, paged listing V2 or V1, `DeleteObject`. R2 ignores checksums without stated scope. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion (AWS/R2) or conditional copy from a recorded temporary (GCS), and HEAD recovery. | Explicit member access key; grant/sign-out return console instructions; deletion uses pending key subjects. With admin access the profile's minter makes and deletes member keys ([`s3_minting.rs`](src/providers/s3_minting.rs); AWS and SeaweedFS IAM in [`s3_iam.rs`](src/providers/s3_iam.rs), GCS service accounts in [`s3_gcs_keys.rs`](src/providers/s3_gcs_keys.rs), R2 account tokens in [`s3_r2_keys.rs`](src/providers/s3_r2_keys.rs), RustFS service accounts in [`s3_rustfs_keys.rs`](src/providers/s3_rustfs_keys.rs)). No credential discovery. |
-| [Drive](src/providers/google_drive.rs) | Real folders and exact leaf names; multipart/related create, media PATCH, media GET/Range, scoped paged `files.list`. Retry retains earliest createdTime then ID and deletes this writer's later copies. Owned objects are deleted; others are removed from their parent folder. | Generated file ID and resumable URL; PUT chunks/status; completion checked by native ID. | Folder-owner check; paged native permissions, direct create/update/delete; inherited/group/public/unknown access is retained and reported. Recipient uses its own OAuth account. |
 | [Dropbox](src/providers/dropbox.rs) | App-folder-relative or namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | App folders reject sharing. Shared namespaces use owner checks, direct/inherited member pages, viewer updates and asynchronous removal. Recipient mounts the invited shared folder. |
 | [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children excluding temporaries, delete. | Recorded temporary UUID and native upload URL, bounded/multiple missing ranges, conditional copy and monitor, immutable-byte recovery verification; cancellation and temporary deletion. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
 | [CloudKit](src/providers/cloudkit.rs) | Canonical paths as record names in a custom zone; create-once and replacement save policies, bounded CKAsset reads, paged prefix queries and server publication dates. | Recorded session UUID and 8 MiB asset parts; each part and confirmed boundary saved atomically; destination creation and session publication saved atomically. | Current account compared with zone owner; private read/write zone CKShare, participant removal, share metadata validation and native acceptance. |
@@ -128,25 +109,15 @@ provider locations, never S3 keys or OAuth tokens. Microsoft uses the common aut
 work/school accounts. After custody commits refreshed tokens, the owner calls
 `set_oauth_tokens`; tests verify the next request on the same adapter uses them.
 
-Google creation requests `drive.file`. The first invitation requests full `drive`
-on the same client with incremental authorization, verifies the account and
-grant, and commits credentials before sharing. Apps registered only for
-`drive.file` receive `AccessNotRegistered` before a provider change. A narrow
-connection refuses a shared folder with `AccessNotGranted` to avoid incomplete
-listings of other members' objects. A folder hidden from `drive.file` returns
-`GoogleDriveFolderNotVisible`, preserving its native 404; full access is needed
-to inspect that folder without assuming it has been deleted.
 Dropbox creation explicitly selects `DropboxLocation::AppFolder` or
 `SharedFolder`; the app supplies the corresponding registered key. App-folder
 paths omit `Dropbox-API-Path-Root` and cannot be shared. Changing that choice
 requires relocation, which this API does not perform. Token custody records
 the issuing client and granted access; refresh uses the same registration.
 
-The opt-in `provider_access_live_google_upgrade` test uses
-`COVEN_LIVE_GOOGLE_CLIENT_JSON` and two browser sign-ins to compare an object's
-bytes and metadata before and after upgrading. `provider_access_live_dropbox_app_folder`
-uses `COVEN_LIVE_DROPBOX_ENV` to create, reopen and remove a store with an
-App-folder app. Both use the production OAuth flow and adapters.
+The opt-in `provider_access_live_dropbox_app_folder` test uses
+`COVEN_LIVE_DROPBOX_ENV` to create, reopen and remove a store with an
+App-folder app, through the production OAuth flow and adapters.
 
 Sharing is per account. Sync must keep an account shared while a member or an
 owner's open invite still needs it. Storage retains grants that also reach other
@@ -164,13 +135,11 @@ there, and native mutation refusals are preserved.
 `StorageInvitation` records only native recipient-acceptance material, not a
 per-invite grant identity; ordinary formatting redacts its secrets.
 
-Before changing sharing, adapters check Drive's folder `ownedByMe`, Dropbox's
-folder `access_type`, OneDrive's current-account drive id, or CloudKit's current
-user record id compared with the recorded zone owner. A non-owner gets `NotStoreOwner` (`PermissionDenied`) before any
+Before changing sharing, adapters check Dropbox's folder `access_type`,
+OneDrive's current-account drive id, or CloudKit's current user record id
+compared with the recorded zone owner. A non-owner gets `NotStoreOwner` (`PermissionDenied`) before any
 mutation. S3's console-key instructions need no account-ownership check.
-Drive removes direct access without changing parent permissions and reports
-remaining inherited, group, domain or public access. It upgrades direct readers
-in place and adds a direct writer grant for inherited readers. Dropbox pages
+Dropbox pages
 direct and inherited memberships separately, removes only direct account
 membership, waits for its native removal job and reports group/parent access.
 Viewer upgrades use `update_folder_member`; a pending viewer without an account
@@ -200,10 +169,6 @@ does not implement provider HTTP or substitute for the provider suites.
   pending viewer without that ID receives typed `AccountIdUnavailable` and
   retains the invitation. An in-place upgrade for that case has not been
   established. [Official sharing schema](https://github.com/dropbox/dropbox-api-spec/blob/main/sharing.stone).
-- Drive DELETE/499 cancellation is stub-tested; its guarantee was not
-  established in the current Drive upload documentation. Older GData and Cloud
-  Storage documentation do not establish modern Drive behavior.
-  [Drive upload guide](https://developers.google.com/workspace/drive/api/guides/manage-uploads).
 - CloudKit calls Apple's framework through `objc2-cloud-kit` and `block2`, awaiting
   completion handlers through oneshot channels. Setup takes the entitled container
   identifier, obtains the owner and creates a store-specific custom zone. Other

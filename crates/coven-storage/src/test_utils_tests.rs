@@ -472,7 +472,6 @@ async fn a_rejected_fake_token_refreshes_once_through_custody_and_retries_once()
                 tokens: dropbox_tokens("token"),
                 custody: custody.clone(),
             },
-            DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
         )
@@ -565,11 +564,8 @@ async fn lost_publication_replies_and_expired_parts_are_distinct() {
     storage.finish_upload(&mut fresh).await.unwrap();
 }
 
-fn sharing_configs() -> [StorageConfig; 4] {
+fn sharing_configs() -> [StorageConfig; 3] {
     [
-        StorageConfig::GoogleDrive {
-            folder_id: "folder".into(),
-        },
         StorageConfig::Dropbox {
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "namespace".into(),
@@ -606,12 +602,10 @@ async fn recipient_access_follows_account_grants_and_acceptance() {
         else {
             panic!()
         };
-        if owner.config().provider() != CloudProvider::GoogleDrive {
-            assert_eq!(
-                member.read(&path).await.unwrap_err().failure(),
-                StorageFailure::PermissionDenied
-            );
-        }
+        assert_eq!(
+            member.read(&path).await.unwrap_err().failure(),
+            StorageFailure::PermissionDenied
+        );
         member
             .join(
                 STORE_ID,
@@ -735,7 +729,6 @@ async fn invalid_account_grants_leave_the_fake_unchanged() {
 #[tokio::test]
 async fn a_candidate_connection_does_not_replace_the_active_connections_tokens() {
     use crate::providers::StorageConnector;
-    use coven_foundation::id_source::DeviceId;
     let storage = MemoryStorage::builder()
         .provider(crate::CloudProvider::Dropbox)
         .build()
@@ -749,7 +742,6 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
         .connect(
             storage.config(),
             tokens("token"),
-            DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
         )
@@ -759,7 +751,6 @@ async fn a_candidate_connection_does_not_replace_the_active_connections_tokens()
         .connect(
             storage.config(),
             tokens("rejected"),
-            DeviceId(1),
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
         )

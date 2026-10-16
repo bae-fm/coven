@@ -7,6 +7,10 @@ use super::*;
 /// The scope managing service accounts, HMAC keys and managed folders.
 pub(crate) const CLOUD_PLATFORM: &str = "https://www.googleapis.com/auth/cloud-platform";
 
+/// Google sign-in administers GCS, an S3 location (§4): its redirect, its
+/// unavailability and its failures name the S3 provider.
+pub(super) const GOOGLE_ADMIN: CloudProvider = CloudProvider::S3;
+
 impl OAuthFlow {
     /// Present Google sign-in for admin access and return its access token.
     /// Dropping this future dismisses the sign-in; it times out after five
@@ -16,8 +20,8 @@ impl OAuthFlow {
             .clients
             .google
             .as_ref()
-            .ok_or(OAuthError::Unavailable(CloudProvider::GoogleDrive))?;
-        let redirect_uri = self.presenter.redirect_uri(CloudProvider::GoogleDrive);
+            .ok_or(OAuthError::Unavailable(GOOGLE_ADMIN))?;
+        let redirect_uri = self.presenter.redirect_uri(GOOGLE_ADMIN);
         let redirect = url::Url::parse(redirect_uri).map_err(|_| OAuthError::InvalidRedirect)?;
         if redirect.fragment().is_some()
             || redirect.query().is_some()
@@ -49,7 +53,7 @@ impl OAuthFlow {
         };
         let flow = async {
             let callback = self.presenter.present(&request.auth_url).await?;
-            let code = OAuthClients::redirect_code(CloudProvider::GoogleDrive, &request, callback)?;
+            let code = OAuthClients::redirect_code(GOOGLE_ADMIN, &request, callback)?;
             self.clients.admin_token(&request, &code).await
         };
         tokio::select! {
@@ -65,7 +69,7 @@ impl OAuthClients {
         request: &AuthorizeRequest,
         code: &SecretText,
     ) -> Result<SecretText, OAuthError> {
-        let provider = CloudProvider::GoogleDrive;
+        let provider = GOOGLE_ADMIN;
         let google = self
             .google
             .as_ref()

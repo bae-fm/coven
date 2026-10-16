@@ -1,8 +1,5 @@
 use super::http;
-use crate::{
-    CloudProvider, DropboxAccess, GoogleDriveAccess, OAuthAccess, OAuthTokens, StorageError,
-    StorageFailure,
-};
+use crate::{CloudProvider, DropboxAccess, OAuthAccess, OAuthTokens, StorageError, StorageFailure};
 use coven_crypto::{SecretBytes, SecretText};
 use coven_foundation::clock::ClockRef;
 use oauth2::{CsrfToken, PkceCodeChallenge};
@@ -133,28 +130,12 @@ impl OAuthFlow {
             _ = self.clients.clock.sleep(Duration::from_secs(300)) => Err(OAuthError::Timeout),
         }
     }
-
-    /// Refuse unavailable registered access without opening UI or contacting a provider.
-    pub fn require_access(&self, access: OAuthAccess) -> Result<(), OAuthError> {
-        self.clients.require_access(access)
-    }
-
-    /// An incremental request must use the same client as the held authorization.
-    pub fn require_client(&self, tokens: &OAuthTokens) -> Result<(), OAuthError> {
-        let (id, ..) = self.clients.config(tokens.access)?;
-        if id != tokens.client_id {
-            return Err(StorageFailure::InvalidConfiguration
-                .with_source("OAuth client differs from the held authorization")
-                .into());
-        }
-        Ok(())
-    }
 }
 
 /// The app's OAuth client ids and injected clock (E10).
 #[derive(Clone)]
 pub struct OAuthClients {
-    google: Option<GoogleDriveClient>,
+    google: Option<GoogleClient>,
     dropbox: Option<DropboxClients>,
     onedrive: Option<String>,
     clock: ClockRef,
@@ -163,23 +144,11 @@ pub struct OAuthClients {
     token_override: Option<String>,
 }
 
-/// One Google Cloud project client and its registered maximum access.
+/// The app's Google client, used only for GCS admin sign-in (§4).
 #[derive(Clone)]
-pub struct GoogleDriveClient {
+struct GoogleClient {
     id: String,
     secret: Option<SecretText>,
-    registered_access: GoogleDriveAccess,
-}
-
-impl GoogleDriveClient {
-    /// Register the maximum access this app offers; new stores still request File.
-    pub fn new(client_id: String, registered_access: GoogleDriveAccess) -> Self {
-        Self {
-            id: client_id,
-            secret: None,
-            registered_access,
-        }
-    }
 }
 
 /// The app's Dropbox registrations, with an explicit access choice when both exist.
@@ -205,15 +174,16 @@ pub enum DropboxClients {
 }
 
 impl OAuthClients {
-    /// Configure client ids, `None` for providers the app does not offer.
+    /// Configure client ids, `None` for sign-ins the app does not offer. The
+    /// Google client serves GCS admin sign-in only; no store lives on Google.
     pub fn new(
-        google_drive: Option<GoogleDriveClient>,
+        google_client_id: Option<String>,
         dropbox: Option<DropboxClients>,
         onedrive_client_id: Option<String>,
         clock: ClockRef,
     ) -> Self {
         Self {
-            google: google_drive,
+            google: google_client_id.map(|id| GoogleClient { id, secret: None }),
             dropbox,
             onedrive: onedrive_client_id,
             clock,
@@ -222,13 +192,13 @@ impl OAuthClients {
             token_override: None,
         }
     }
-    /// Supply the Google Desktop client's secret for code exchange and refresh.
-    /// Google's mobile clients do not require it. It is never sent to another provider.
+    /// Supply the Google Desktop client's secret for code exchange. It is never
+    /// sent to another provider.
     pub fn with_google_client_secret(mut self, secret: SecretText) -> Result<Self, OAuthError> {
         let google = self
             .google
             .as_mut()
-            .ok_or(OAuthError::Unavailable(CloudProvider::GoogleDrive))?;
+            .ok_or(OAuthError::Unavailable(admin::GOOGLE_ADMIN))?;
         if secret.as_str().is_empty() {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("empty Google client secret")
@@ -242,17 +212,6 @@ impl OAuthClients {
         access: OAuthAccess,
     ) -> Result<(&str, &'static str, &'static str, &'static str), OAuthError> {
         let (id, auth, token) = match access {
-            OAuthAccess::GoogleDrive(_) => {
-                let client = self
-                    .google
-                    .as_ref()
-                    .ok_or(OAuthError::Unavailable(access.provider()))?;
-                (
-                    Some(client.id.as_str()),
-                    "https://accounts.google.com/o/oauth2/v2/auth",
-                    "https://oauth2.googleapis.com/token",
-                )
-            }
             OAuthAccess::Dropbox(requested) => {
                 let client = self
                     .dropbox
@@ -296,29 +255,11 @@ impl OAuthClients {
             .ok_or(OAuthError::Unavailable(access.provider()))?;
         Ok((id, auth, token, access.scope()))
     }
-    fn require_access(&self, access: OAuthAccess) -> Result<(), OAuthError> {
-        self.config(access)?;
-        if access == OAuthAccess::GoogleDrive(GoogleDriveAccess::Full)
-            && self
-                .google
-                .as_ref()
-                .expect("configured Google client")
-                .registered_access
-                != GoogleDriveAccess::Full
-        {
-            return Err(StorageError::from(StorageFailure::AccessNotRegistered {
-                required: access,
-            })
-            .into());
-        }
-        Ok(())
-    }
     fn build_authorize_request(
         &self,
         access: OAuthAccess,
         redirect_uri: &str,
     ) -> Result<AuthorizeRequest, OAuthError> {
-        self.require_access(access)?;
         let (client_id, auth, _, scope) = self.config(access)?;
         let redirect = url::Url::parse(redirect_uri).map_err(|_| OAuthError::InvalidRedirect)?;
         if redirect.fragment().is_some()
@@ -340,21 +281,9 @@ impl OAuthClients {
             ("state", state.secret()),
             ("scope", scope),
         ]);
-        match access.provider() {
-            CloudProvider::GoogleDrive => {
-                url.query_pairs_mut()
-                    .append_pair("access_type", "offline")
-                    .append_pair("prompt", "consent");
-                if access == OAuthAccess::GoogleDrive(GoogleDriveAccess::Full) {
-                    url.query_pairs_mut()
-                        .append_pair("include_granted_scopes", "true");
-                }
-            }
-            CloudProvider::Dropbox => {
-                url.query_pairs_mut()
-                    .append_pair("token_access_type", "offline");
-            }
-            _ => {}
+        if access.provider() == CloudProvider::Dropbox {
+            url.query_pairs_mut()
+                .append_pair("token_access_type", "offline");
         }
         Ok(AuthorizeRequest {
             auth_url: url.into(),
@@ -496,16 +425,6 @@ impl OAuthClients {
     ) -> Result<OAuthTokens, OAuthError> {
         let provider = access.provider();
         let (client_id, _, token, _) = self.config(access)?;
-        let mut params = params.to_vec();
-        if provider == CloudProvider::GoogleDrive {
-            if let Some(secret) = self
-                .google
-                .as_ref()
-                .and_then(|client| client.secret.as_ref())
-            {
-                params.push(("client_secret", secret.as_str()));
-            }
-        }
         #[cfg(any(test, feature = "test-utils"))]
         let token = match &self.token_override {
             Some(url) => url.as_str(),
@@ -521,7 +440,7 @@ impl OAuthClients {
             })?;
         let response = client
             .post(token)
-            .form(&params)
+            .form(params)
             .send()
             .await
             .map_err(|e| http::transport(provider, e))?;

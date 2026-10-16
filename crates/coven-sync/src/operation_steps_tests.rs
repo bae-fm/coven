@@ -43,7 +43,7 @@ async fn transfer(a: &Device, b: &Device) {
 
 #[tokio::test]
 async fn circle_deletion_publishes_only_an_entry_and_does_not_wait_for_a_row_upload() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, _c] = accounts(storage).await;
     rows(&mut a).await;
     rows(&mut b).await;
@@ -89,7 +89,7 @@ async fn circle_deletion_publishes_only_an_entry_and_does_not_wait_for_a_row_upl
 
 #[tokio::test]
 async fn dropping_circle_deletion_restores_existing_and_arriving_rows() {
-    let [mut a, mut b, _c] = accounts(google()).await;
+    let [mut a, mut b, _c] = accounts(dropbox()).await;
     rows(&mut a).await;
     rows(&mut b).await;
     let create = begin(&mut a, Command::CreateCircle("Gifts".into())).await;
@@ -142,7 +142,7 @@ async fn dropping_circle_deletion_restores_existing_and_arriving_rows() {
 
 #[tokio::test]
 async fn circle_deletion_survives_an_earlier_concurrent_circle_removal() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, _c] = accounts(storage).await;
     rows(&mut a).await;
     rows(&mut b).await;
@@ -186,7 +186,7 @@ async fn circle_deletion_survives_an_earlier_concurrent_circle_removal() {
 
 #[tokio::test]
 async fn concurrent_circle_removal_keeps_deletion_entry_only() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, c] = accounts(storage).await;
     rows(&mut a).await;
     rows(&mut b).await;
@@ -343,7 +343,7 @@ async fn late_access_survives_restart_and_cannot_revive_confirmed_keys() {
 
 #[tokio::test]
 async fn removal_revokes_accounts_in_dropped_access_updates() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, _c] = accounts(storage.clone()).await;
     queue_removal(&mut a, Command::RemoveMember(b.member.member())).await;
     storage
@@ -382,7 +382,7 @@ async fn removal_revokes_accounts_in_dropped_access_updates() {
 /// still takes it back (§13).
 #[tokio::test]
 async fn removal_revokes_the_account_in_a_dropped_concurrent_addition() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, _c] = accounts(storage.clone()).await;
     let dan = member(4);
     let add = |email: &str| StoreChange::AddMember {
@@ -436,7 +436,7 @@ async fn removal_revokes_the_account_in_a_dropped_concurrent_addition() {
 
 #[tokio::test]
 async fn a_retained_grant_on_old_access_stays_pending_after_removal() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, _c] = accounts(storage.clone()).await;
     storage
         .grant_access("replacement@example.com")
@@ -489,7 +489,7 @@ async fn a_retained_grant_on_old_access_stays_pending_after_removal() {
 
 #[tokio::test]
 async fn grants_retained_on_two_accounts_are_each_reported_and_retried_alone() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, mut b, _c] = accounts(storage.clone()).await;
     storage
         .grant_access("replacement@example.com")

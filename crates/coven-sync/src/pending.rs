@@ -308,8 +308,6 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
         | PermissionDenied
         | AccessNotRegistered { .. }
         | AccessNotGranted { .. }
-        | AccountMismatch
-        | GoogleDriveFolderNotVisible
         | ContainerNotFound
         | RegionMismatch
         | ClockSkew

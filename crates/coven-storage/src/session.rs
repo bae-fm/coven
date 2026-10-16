@@ -4,8 +4,6 @@ use coven_crypto::SecretText;
 use serde::{Deserialize, Serialize};
 
 pub(crate) const CLOUDKIT_PART_SIZE: usize = 8 * 1024 * 1024;
-
-pub(crate) const GOOGLE_DRIVE_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 
@@ -86,10 +84,6 @@ pub(crate) enum SessionState {
     /// name (§4).
     S3Planned {
         token: SecretText,
-    },
-    GoogleDrive {
-        url: SecretText,
-        file_id: SecretText,
     },
     Dropbox {
         id: SecretText,
@@ -235,12 +229,6 @@ impl UploadSession {
                     return Err(StorageFailure::InvalidPart.into());
                 }
             }
-            SessionState::GoogleDrive { url, file_id }
-                if provider == CloudProvider::GoogleDrive =>
-            {
-                transfer_url(url)?;
-                nonempty(file_id)?;
-            }
             SessionState::Dropbox { id } if provider == CloudProvider::Dropbox => nonempty(id)?,
             SessionState::OneDrive { upload, .. } if provider == CloudProvider::OneDrive => {
                 match upload {
@@ -295,7 +283,6 @@ impl UploadSession {
         }
         let valid_size = match provider {
             CloudProvider::S3 => self.part_size == s3_part_size(self.total)?,
-            CloudProvider::GoogleDrive => self.part_size == GOOGLE_DRIVE_PART_SIZE,
             CloudProvider::Dropbox => self.part_size == DROPBOX_PART_SIZE,
             CloudProvider::OneDrive => self.part_size == ONEDRIVE_PART_SIZE,
             CloudProvider::CloudKit => self.part_size == CLOUDKIT_PART_SIZE,

@@ -58,10 +58,7 @@ impl OAuthPresenter for Presenter {
 }
 fn clients(clock: Arc<FixedClock>) -> OAuthClients {
     OAuthClients::new(
-        Some(GoogleDriveClient::new(
-            "google".into(),
-            GoogleDriveAccess::Full,
-        )),
+        Some("google".into()),
         Some(DropboxClients::FullDropbox {
             app_key: "dropbox".into(),
         }),
@@ -80,11 +77,7 @@ fn presenter(reply: impl Into<String>) -> Arc<Presenter> {
 async fn redirect_provider_errors_keep_their_classification_and_original_callback() {
     let state = Arc::new(Mutex::new(Provider::default()));
     let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
-    for provider in [
-        CloudProvider::GoogleDrive,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         for (code, expected) in [
             ("invalid_client", StorageFailure::InvalidConfiguration),
             ("unauthorized_client", StorageFailure::InvalidConfiguration),
@@ -162,11 +155,7 @@ async fn presenter_flow_binds_state_redirect_and_pkce_for_each_provider() {
     let presenter = presenter("https://callback.example?code=code&state=STATE");
     let clients = clients(clock).with_token_endpoint(server.url.clone());
     let flow = OAuthFlow::new(clients, presenter.clone());
-    for provider in [
-        CloudProvider::GoogleDrive,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         flow.authenticate(full_access(provider)).await.unwrap();
         let presented = presenter.requests.lock().unwrap().last().unwrap().clone();
         let url = url::Url::parse(&presented).unwrap();
@@ -191,7 +180,7 @@ async fn presenter_flow_binds_state_redirect_and_pkce_for_each_provider() {
             );
         }
     }
-    assert_eq!(state.lock().unwrap().requests.len(), 3);
+    assert_eq!(state.lock().unwrap().requests.len(), 2);
 }
 
 #[tokio::test]
@@ -293,7 +282,7 @@ async fn refresh_retains_unrotated_token() {
 }
 
 #[tokio::test]
-async fn google_client_secret_reaches_only_google_token_exchanges() {
+async fn google_client_secret_never_reaches_storage_sign_in() {
     let state = Arc::new(Mutex::new(Provider::default()));
     let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
     let presenter = presenter("https://callback.example?code=code&state=STATE");
@@ -305,11 +294,7 @@ async fn google_client_secret_reaches_only_google_token_exchanges() {
         presenter.clone(),
     );
     let refresh_token = SecretText::new("refresh".into());
-    for provider in [
-        CloudProvider::GoogleDrive,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         flow.authenticate(full_access(provider)).await.unwrap();
         let refreshed = flow
             .clients
@@ -327,10 +312,7 @@ async fn google_client_secret_reaches_only_google_token_exchanges() {
         assert_eq!(requests[0]["grant_type"], "authorization_code");
         assert_eq!(requests[1]["grant_type"], "refresh_token");
         for request in requests {
-            assert_eq!(
-                request.get("client_secret").map(String::as_str),
-                (provider == CloudProvider::GoogleDrive).then_some("desktop-secret")
-            );
+            assert_eq!(request.get("client_secret"), None);
         }
     }
     assert!(presenter
@@ -347,7 +329,7 @@ fn google_client_secret_requires_a_configured_client_and_nonempty_secret() {
     assert!(matches!(
         OAuthClients::new(None, None, None, clock.clone())
             .with_google_client_secret(SecretText::new("desktop-secret".into())),
-        Err(OAuthError::Unavailable(CloudProvider::GoogleDrive))
+        Err(OAuthError::Unavailable(CloudProvider::S3))
     ));
     assert!(matches!(
         clients(clock).with_google_client_secret(SecretText::new(String::new())),
@@ -365,11 +347,7 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
         presenter("https://callback.example?code=code&state=STATE"),
     );
 
-    for provider in [
-        CloudProvider::GoogleDrive,
-        CloudProvider::Dropbox,
-        CloudProvider::OneDrive,
-    ] {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         let previous = OAuthTokens {
             client_id: flow.clients.config(full_access(provider)).unwrap().0.into(),
             access: full_access(provider),
@@ -472,74 +450,6 @@ async fn presentation_timeout_uses_the_injected_clock() {
 mod access_tests {
     use super::*;
 
-    const FILE: OAuthAccess = OAuthAccess::GoogleDrive(GoogleDriveAccess::File);
-    const FULL: OAuthAccess = OAuthAccess::GoogleDrive(GoogleDriveAccess::Full);
-
-    #[tokio::test]
-    async fn google_requests_file_then_incremental_full_on_the_same_client() {
-        let state = Arc::new(Mutex::new(Provider::default()));
-        let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
-        let presenter = presenter("https://callback.example?code=code&state=STATE");
-        let flow = OAuthFlow::new(
-            clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
-                .with_token_endpoint(server.url.clone()),
-            presenter.clone(),
-        );
-        for access in [FILE, FULL] {
-            state.lock().unwrap().scope = Some(access.scope().into());
-            let tokens = flow.authenticate(access).await.unwrap();
-            assert_eq!(tokens.access, access);
-            assert_eq!(tokens.client_id, "google");
-        }
-        let urls = presenter.requests.lock().unwrap();
-        for (index, access) in [FILE, FULL].into_iter().enumerate() {
-            let url = url::Url::parse(&urls[index]).unwrap();
-            let params: BTreeMap<_, _> = url.query_pairs().into_owned().collect();
-            assert_eq!(params["scope"], access.scope());
-            assert_eq!(params["client_id"], "google");
-            assert_eq!(
-                params.get("include_granted_scopes").map(String::as_str),
-                (access == FULL).then_some("true")
-            );
-        }
-    }
-
-    #[tokio::test]
-    async fn google_unregistered_or_ungranted_full_access_is_typed() {
-        let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
-        let presenter = presenter("https://callback.example?code=code&state=STATE");
-        let flow = OAuthFlow::new(
-            OAuthClients::new(
-                Some(GoogleDriveClient::new(
-                    "google".into(),
-                    GoogleDriveAccess::File,
-                )),
-                None,
-                None,
-                clock.clone(),
-            ),
-            presenter.clone(),
-        );
-        assert!(
-            matches!(flow.authenticate(FULL).await, Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::AccessNotRegistered { required: FULL })
-        );
-        assert!(presenter.requests.lock().unwrap().is_empty());
-        let state = Arc::new(Mutex::new(Provider {
-            scope: Some(FILE.scope().into()),
-            ..Provider::default()
-        }));
-        let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
-        let flow = OAuthFlow::new(
-            clients(clock).with_token_endpoint(server.url.clone()),
-            presenter,
-        );
-        assert!(
-            matches!(flow.authenticate(FULL).await, Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::AccessNotGranted { required: FULL })
-        );
-        state.lock().unwrap().scope = Some(format!("{} {}", FILE.scope(), FULL.scope()));
-        assert_eq!(flow.authenticate(FULL).await.unwrap().access, FULL);
-    }
-
     #[tokio::test]
     async fn dropbox_choice_selects_its_app_key_scopes_and_refresh_client() {
         let state = Arc::new(Mutex::new(Provider::default()));
@@ -614,15 +524,11 @@ mod access_tests {
             presenter("cancel"),
         );
         let refresh = SecretText::new("refresh".into());
-        for (client, access, reduced) in [
-            ("google", FULL, FILE.scope()),
-            ("google", FILE, ""),
-            (
-                "dropbox",
-                OAuthAccess::Dropbox(DropboxAccess::FullDropbox),
-                OAuthAccess::Dropbox(DropboxAccess::AppFolder).scope(),
-            ),
-        ] {
+        for (client, access, reduced) in [(
+            "dropbox",
+            OAuthAccess::Dropbox(DropboxAccess::FullDropbox),
+            OAuthAccess::Dropbox(DropboxAccess::AppFolder).scope(),
+        )] {
             state.lock().unwrap().scope = None;
             let held = OAuthTokens {
                 client_id: client.into(),
@@ -642,7 +548,7 @@ mod access_tests {
     }
 
     #[tokio::test]
-    async fn changed_client_cannot_refresh_or_increment_the_held_authorization() {
+    async fn changed_client_cannot_refresh_the_held_authorization() {
         let state = Arc::new(Mutex::new(Provider::default()));
         let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
         let flow = OAuthFlow::new(
@@ -652,13 +558,10 @@ mod access_tests {
         );
         let tokens = OAuthTokens {
             client_id: "another-client".into(),
-            access: FILE,
+            access: OAuthAccess::Dropbox(DropboxAccess::FullDropbox),
             access_token: SecretText::new("token".into()),
             refresh_token: Some(SecretText::new("refresh".into())),
         };
-        assert!(
-            matches!(flow.require_client(&tokens), Err(OAuthError::Storage(error)) if error.failure() == StorageFailure::InvalidConfiguration)
-        );
         assert!(
             matches!(flow.clients.refresh(&tokens).await, Err(error) if error.failure() == StorageFailure::InvalidConfiguration)
         );

@@ -800,14 +800,9 @@ bytes, publications, snapshot queries or file queries. Additional pages
 scale with devices, not with historical objects or attached files.
 
 An S3 GET, Dropbox download, OneDrive path read or CloudKit record fetch
-establishes an absent next object in one request. Drive needs a
-[parent/name query](https://developers.google.com/workspace/drive/api/guides/search-files)
-when the file id is unknown. An empty complete query is that one miss;
-a hit adds a [download by file id](https://developers.google.com/workspace/drive/api/reference/rest/v3/files/get).
-Cache the id and charge this hit's lookup to `M`, its body to `O`.
-All query continuation pages, folder lookups, redirects and native asset
-reads count when required. Initialization and eviction have their own
-counts; an incomplete Drive search is a failure, never an idle miss.
+establishes an absent next object in one request. All folder lookups,
+redirects and native asset reads count when required. Initialization and
+eviction have their own counts.
 
 **Ben receives one note.** Household has Ana's phone, Ben's laptop and
 Carol's tablet. Each discovery listing fits one S3 page. An idle pass uses

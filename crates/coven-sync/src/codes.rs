@@ -3,8 +3,7 @@
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::id_source::{MemberId, StoreId};
 use coven_storage::{
-    CloudProvider, ConnectionCredentials, GoogleDriveAccess, InviteStorage, OAuthAccess,
-    StorageConfig,
+    CloudProvider, ConnectionCredentials, InviteStorage, OAuthAccess, StorageConfig,
 };
 
 /// The two codes that can open a store on a new device.
@@ -65,13 +64,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
         store_name,
         member,
         cloud_provider: location.provider(),
-        oauth_access: if kind == CodeKind::Invite
-            && location.provider() == CloudProvider::GoogleDrive
-        {
-            Some(OAuthAccess::GoogleDrive(GoogleDriveAccess::Full))
-        } else {
-            location.oauth_access()
-        },
+        oauth_access: location.oauth_access(),
     })
 }
 

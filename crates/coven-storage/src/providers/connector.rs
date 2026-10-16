@@ -1,13 +1,13 @@
 //! Provider construction from an explicit location and device credentials.
 
-use super::{DropboxStorage, GoogleDriveStorage, OAuthSession, OneDriveStorage, S3Storage};
+use super::{DropboxStorage, OAuthSession, OneDriveStorage, S3Storage};
 use crate::{
     ProviderAuth, ProviderOps, S3Credentials, S3Detection, StorageConfig, StorageConnection,
     StorageCredentials, StorageError, StorageFailure,
 };
 use coven_foundation::{
     clock::ClockRef,
-    id_source::{DeviceId, IdSourceRef, StoreId},
+    id_source::{IdSourceRef, StoreId},
 };
 use std::sync::Arc;
 
@@ -32,7 +32,6 @@ pub trait StorageConnector: Send + Sync {
         &self,
         config: StorageConfig,
         auth: ProviderAuth,
-        device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
@@ -104,7 +103,6 @@ impl StorageConnector for ProviderConnector {
         &self,
         config: StorageConfig,
         auth: ProviderAuth,
-        device: DeviceId,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
@@ -124,10 +122,6 @@ impl StorageConnector for ProviderConnector {
                 self.ids.clone(),
                 cooldown.clone(),
             )?),
-            (StorageConfig::GoogleDrive { .. }, ProviderAuth::OAuth { tokens, custody }) => {
-                let session = session(tokens, custody)?;
-                Arc::new(GoogleDriveStorage::new(config, device, session)?)
-            }
             (StorageConfig::Dropbox { .. }, ProviderAuth::OAuth { tokens, custody }) => {
                 let session = session(tokens, custody)?;
                 Arc::new(DropboxStorage::new(config, session)?)

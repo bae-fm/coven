@@ -5,8 +5,6 @@ use serde::{Deserialize, Serialize};
 pub enum CloudProvider {
     /// S3, including compatible providers.
     S3,
-    /// Google Drive.
-    GoogleDrive,
     /// Dropbox.
     Dropbox,
     /// OneDrive.
@@ -54,11 +52,6 @@ pub enum StorageConfig {
         /// otherwise `OwnBucketRequired { reason: Prefix }`.
         prefix: String,
     },
-    /// A Google Drive folder; paths within it start with the store id.
-    GoogleDrive {
-        /// Folder id; inviting another person shares it with their Google account.
-        folder_id: String,
-    },
     /// Dropbox's access and location, fixed when cloud storage is created.
     Dropbox {
         /// Required choice: not-shared App folder or a shared-capable namespace.
@@ -83,13 +76,9 @@ pub enum StorageConfig {
 }
 
 impl StorageConfig {
-    /// Access required to open this location. Shared Google invites require Full
-    /// in addition to the File grant sufficient for a personal restore.
+    /// Access required to open this location.
     pub fn oauth_access(&self) -> Option<crate::OAuthAccess> {
         match self {
-            Self::GoogleDrive { .. } => Some(crate::OAuthAccess::GoogleDrive(
-                crate::GoogleDriveAccess::File,
-            )),
             Self::Dropbox { location } => Some(crate::OAuthAccess::Dropbox(location.access())),
             Self::OneDrive { .. } => Some(crate::OAuthAccess::OneDrive),
             Self::S3 { .. } | Self::CloudKit { .. } => None,
@@ -99,7 +88,6 @@ impl StorageConfig {
     pub fn provider(&self) -> CloudProvider {
         match self {
             Self::S3 { .. } => CloudProvider::S3,
-            Self::GoogleDrive { .. } => CloudProvider::GoogleDrive,
             Self::Dropbox { .. } => CloudProvider::Dropbox,
             Self::OneDrive { .. } => CloudProvider::OneDrive,
             Self::CloudKit { .. } => CloudProvider::CloudKit,
@@ -138,7 +126,6 @@ impl StorageConfig {
                 }
                 vec![bucket, region]
             }
-            Self::GoogleDrive { folder_id } => vec![folder_id],
             Self::Dropbox {
                 location: crate::DropboxLocation::AppFolder,
             } => vec![],

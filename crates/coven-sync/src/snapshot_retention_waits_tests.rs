@@ -215,94 +215,66 @@ async fn a_write_waiting_for_its_key_holds_only_itself() {
 }
 
 #[tokio::test]
-/// On Google Drive the store owner cannot delete another account's file, but
-/// its delete takes the file out of the store's folder, where it stays in the
-/// uploader's own account (§15): the folder no longer lists it. The owner
-/// deletes once the member's removal is final.
-async fn removed_member_logs_belong_to_the_store_owner_and_leave_google_drives_folder() {
-    for google in [false, true] {
-        let (storage, storage_clock) = if google {
-            let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
-            let storage = MemoryStorage::builder()
-                .provider(coven_storage::CloudProvider::GoogleDrive)
-                .clock(clock.clone())
-                .build()
-                .unwrap();
-            (Arc::new(storage), clock)
-        } else {
-            timed_snapshot_storage()
-        };
-        let mut a = notes_device(storage.clone(), 1).await;
-        a.create(key(1)).await;
-        let mut b = device(storage.clone(), 2, member(2), store(1)).await;
-        b.reopen(storage.clone(), notes_tables(), notes_migrations())
-            .await;
-        let mut c = device(storage.clone(), 3, member(3), store(1)).await;
-        c.reopen(storage.clone(), notes_tables(), notes_migrations())
-            .await;
-        a.add(&b.member, MemberRole::Member).await;
-        // An admin whose account does not hold the store cannot delete or
-        // detach another member's objects.
-        if google {
-            a.sync
-                .make_and_upload_entry(StoreChange::AddMember {
-                    access: coven_format::MemberAccess::ProviderAccount("carol@example.com".into()),
-                    member: c.member.member(),
-                    keys: c.member.keys().public_keys(),
-                    role: MemberRole::Admin,
-                })
-                .await
-                .unwrap();
-        } else {
-            a.add(&c.member, MemberRole::Admin).await;
-        }
-        add_device(&mut b).await;
-        add_device(&mut c).await;
-        a.sync().await;
-        write_rows(&b, 0, 1, 17, Audience::Store).await;
-        a.db.apply_downloaded::<crate::PendingRecord>(
-            b.db.test_queued_writes().await.unwrap().remove(0).into(),
-            coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-        )
+/// §15: a removed member's log objects are deleted by a device of the member
+/// whose provider account holds the store, once the removal is final; another
+/// admin's device leaves them.
+async fn removed_member_logs_belong_to_the_store_owner() {
+    let (storage, storage_clock) = timed_snapshot_storage();
+    let mut a = notes_device(storage.clone(), 1).await;
+    a.create(key(1)).await;
+    let mut b = device(storage.clone(), 2, member(2), store(1)).await;
+    b.reopen(storage.clone(), notes_tables(), notes_migrations())
+        .await;
+    let mut c = device(storage.clone(), 3, member(3), store(1)).await;
+    c.reopen(storage.clone(), notes_tables(), notes_migrations())
+        .await;
+    a.add(&b.member, MemberRole::Member).await;
+    a.add(&c.member, MemberRole::Admin).await;
+    add_device(&mut b).await;
+    add_device(&mut c).await;
+    a.sync().await;
+    write_rows(&b, 0, 1, 17, Audience::Store).await;
+    a.db.apply_downloaded::<crate::PendingRecord>(
+        b.db.test_queued_writes().await.unwrap().remove(0).into(),
+        coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+    )
+    .await
+    .unwrap();
+    upload(&b, &storage).await;
+    a.write_snapshot(Audience::Store).await.unwrap();
+    a.sync
+        .make_and_upload_entry(StoreChange::RemoveMember {
+            member: b.member.member(),
+        })
         .await
         .unwrap();
-        upload(&b, &storage).await;
-        a.write_snapshot(Audience::Store).await.unwrap();
-        a.sync
-            .make_and_upload_entry(StoreChange::RemoveMember {
-                member: b.member.member(),
-            })
-            .await
-            .unwrap();
-        c.sync().await;
-        for device in [&a, &c] {
-            device
-                .clock
-                .set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
-        }
-        storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
-        c.sync.run_retention().await.unwrap();
-        assert_eq!(
-            storage
-                .list(&ObjectPrefix::device_logs(store(1)))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
-        // The owner's catch-up makes the day-0 removal final (§9).
-        a.sync().await;
-        a.sync.run_retention().await.unwrap();
-        assert_eq!(
-            storage
-                .list(&ObjectPrefix::device_logs(store(1)))
-                .await
-                .unwrap()
-                .len(),
-            0,
-            "google {google}"
-        );
+    c.sync().await;
+    for device in [&a, &c] {
+        device
+            .clock
+            .set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
     }
+    storage_clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400));
+    c.sync.run_retention().await.unwrap();
+    assert_eq!(
+        storage
+            .list(&ObjectPrefix::device_logs(store(1)))
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    // The owner's catch-up makes the day-0 removal final (§9).
+    a.sync().await;
+    a.sync.run_retention().await.unwrap();
+    assert_eq!(
+        storage
+            .list(&ObjectPrefix::device_logs(store(1)))
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
 }
 
 /// §15: when coverage and finality pass, the record names the first active

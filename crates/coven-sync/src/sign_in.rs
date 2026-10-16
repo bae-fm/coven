@@ -77,8 +77,8 @@ impl TokenCustody for DeviceCredentials {
 
 impl DeviceCredentials {
     /// Commit `refreshed` in place of `rejected`, unless custody holds other
-    /// tokens by now, which then win: a sign-in committed meanwhile, such as
-    /// a Drive upgrade, or another refresh of the same rejection.
+    /// tokens by now, which then win: a sign-in committed meanwhile, or
+    /// another refresh of the same rejection.
     fn commit_refresh(
         &self,
         rejected: &OAuthTokens,

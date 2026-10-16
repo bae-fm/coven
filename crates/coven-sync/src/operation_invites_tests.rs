@@ -40,6 +40,12 @@ pub(super) async fn request(
     name: &str,
 ) {
     let code = InviteCode::from_text(&invite.code).unwrap();
+    // A joining device accepts an account invite's provider access first (§12.2).
+    if let coven_storage::InviteStorage::Account(invitation) =
+        coven_storage::InviteStorage::decode(code.storage.as_bytes()).unwrap()
+    {
+        storage.join(code.store, &invitation).await.unwrap();
+    }
     let path = ObjectPath::join_request(code.store, invite.id);
     let plain = Object::JoinRequest(WireRequest {
         invite: invite.id,
@@ -69,7 +75,7 @@ pub(super) async fn request(
 
 #[tokio::test]
 async fn approve_seals_store_history_and_removes_the_request() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, b, _c] = accounts(storage.clone()).await;
     publish(&mut a, Command::RemoveMember(b.member.member())).await;
     drive_access(&mut a).await;
@@ -199,10 +205,10 @@ async fn invite_cursor_excludes_reserved_copies_until_the_invites_catch_up_publi
 #[tokio::test]
 async fn decline_cancel_discard_and_expiry_take_access_back() {
     for settle in ["decline", "cancel", "discard", "expiry"] {
-        let storage = google();
+        let storage = dropbox();
         let [mut a, _b, _c] = accounts(storage.clone()).await;
         let (operation, invite) = invite(&mut a, "join@example.com").await;
-        let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
+        let joining = joined(&storage, "join@example.com").await.unwrap();
         assert!(joining
             .list(&ObjectPrefix::store_logs(store(1)))
             .await
@@ -249,13 +255,13 @@ async fn decline_cancel_discard_and_expiry_take_access_back() {
 
 #[tokio::test]
 async fn another_open_invite_or_member_preserves_shared_account_access() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let (first, invite1) = invite(&mut a, "join@example.com").await;
     let (second, invite2) = invite(&mut a, "JOIN@example.com").await;
     begin(&mut a, Command::Cancel(invite1.id)).await;
     finish(&mut a, first).await;
-    let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
+    let joining = joined(&storage, "join@example.com").await.unwrap();
     assert!(joining
         .list(&ObjectPrefix::store_logs(store(1)))
         .await
@@ -311,7 +317,7 @@ async fn s3_invitation_carries_its_key_and_retains_the_manual_deletion_notice() 
 
 #[tokio::test]
 async fn a_request_must_repeat_the_member_id_its_invite_fixed() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let (operation, invite) = invite(&mut a, "join@example.com").await;
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
@@ -326,7 +332,7 @@ async fn a_request_must_repeat_the_member_id_its_invite_fixed() {
 
 #[tokio::test]
 async fn replacement_request_cannot_be_approved_from_a_stale_prompt() {
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let (operation, invite) = invite(&mut a, "join@example.com").await;
     let joining = MemoryStorage::for_recipient(&storage, "join@example.com").unwrap();
@@ -351,7 +357,7 @@ async fn replacement_request_cannot_be_approved_from_a_stale_prompt() {
 
 #[tokio::test]
 async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
-    let storage = google();
+    let storage = dropbox();
     let [a, _b, _c] = accounts(storage.clone()).await;
     let files = file_owner(&a);
     let waits = a.waits.clone();
@@ -411,7 +417,7 @@ async fn failed_join_request_still_expires_and_live_requests_are_delivered() {
 
 #[tokio::test]
 async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() {
-    let storage = google();
+    let storage = dropbox();
     let [a, _b, _c] = accounts(storage.clone()).await;
     let files = file_owner(&a);
     let operations = { operation_owner(a.sync, files) };
@@ -453,7 +459,7 @@ async fn cancelling_keeps_retained_provider_grants_visible_until_acknowledged() 
 
 #[tokio::test]
 async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
-    let storage = google();
+    let storage = dropbox();
     let [a, _b, _c] = accounts(storage.clone()).await;
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
@@ -504,7 +510,7 @@ async fn a_failed_invite_is_retained_and_expiry_finishes_on_reconnect() {
     assert_eq!(
         a.db.pending::<PendingRecord>().await.unwrap()[0].reason,
         PendingReason::Storage {
-            provider: coven_storage::CloudProvider::GoogleDrive,
+            provider: coven_storage::CloudProvider::Dropbox,
             failure: StorageFailure::Network,
         }
     );
@@ -562,7 +568,7 @@ fn request_calls(d: &Device, from: usize) -> Vec<coven_storage::test_utils::Memo
 #[tokio::test]
 async fn open_invites_share_one_request_listing_and_read_only_new_requests() {
     use coven_storage::test_utils::MemoryRequest;
-    let storage = google();
+    let storage = dropbox();
     let [mut a, _b, _c] = accounts(storage.clone()).await;
     let (first, _) = invite(&mut a, "one@example.com").await;
     let (second, invite_two) = invite(&mut a, "two@example.com").await;
@@ -612,7 +618,7 @@ async fn open_invites_share_one_request_listing_and_read_only_new_requests() {
 #[tokio::test]
 async fn a_request_awaiting_the_persons_decision_is_not_read_again() {
     use coven_storage::test_utils::MemoryRequest;
-    let storage = google();
+    let storage = dropbox();
     let [a, _b, _c] = accounts(storage.clone()).await;
     let connection = a.storage.clone();
     let files = file_owner(&a);

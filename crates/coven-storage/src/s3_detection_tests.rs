@@ -203,7 +203,8 @@ fn resolution_records_detected_settings_only_where_the_location_needs_them() {
             if error.failure() == StorageFailure::InvalidConfiguration
     ));
     assert!(detection
-        .resolve(StorageConfig::GoogleDrive {
+        .resolve(StorageConfig::OneDrive {
+            drive_id: "drive".into(),
             folder_id: "folder".into()
         })
         .is_err());
