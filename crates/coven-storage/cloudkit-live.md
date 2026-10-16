@@ -149,3 +149,59 @@ write and removes access. Enter `revoked` on the recipient's stdin; it requires
 its next read to fail. After that test succeeds, enter `verified` on the owner's
 stdin. The owner deletes the test zone. Both tests remove their invitation files
 after success. These files contain a secret share URL; do not commit or publish them.
+
+## Create-once race
+
+The ignored `providers::cloudkit::tests::race::tests::cloudkit_live_create_once_race`
+test measures whether a CloudKit save of a new record gives exactly one winner
+when several writers create the same path at once. It runs 200 rounds of 2
+writers, then 50 rounds of 8. Every writer is its own `CloudKitStorage`
+instance and connection, but `CKContainer.containerWithIdentifier` hands every
+instance in one process the same `CKContainer` and `CKDatabase` objects, so a
+process's writers share the framework's operation handling and its per-user
+CloudKit daemon; the test prints how many distinct objects it got. Each round
+uses a fresh path.
+Every writer is released at one instant of this Mac's clock, and each round
+requires exactly one success, every other writer refused as
+`AlreadyExists`, and the winner's bytes when the path is read back. A rate
+limit or network failure says nothing about the race: that attempt is retried
+on a fresh path after the requested wait, and five such attempts in a row fail
+the test. The test prints, per race size, the winners, each refusal's cause
+with its native error code, retried attempts and what their path held, how
+many rounds had every writer start before any finished, and every anomaly. It
+deletes its marked zone only when no round had an anomaly.
+
+`COVEN_CLOUDKIT_TEST_ROLE` selects the mode. `single` runs every writer on the
+signed-in account, in one process:
+
+```sh
+COVEN_CLOUDKIT_TEST_ROLE=single \
+  CovenCloudKitTests.app/Contents/MacOS/CovenCloudKitTests \
+  --exact providers::cloudkit::tests::race::tests::cloudkit_live_create_once_race \
+  --ignored --nocapture --test-threads=1
+```
+
+`owner` and `recipient` race two iCloud accounts on one Mac: one writer per
+account in each of the 200 rounds, then four per account in each of the 50.
+The recipient runs in a second macOS user's logged-in session, signed in to
+the second iCloud account, launching its own copy of the same signed host;
+copy the bundle somewhere that user can read, such as `/Users/Shared`, with
+`ditto`, which keeps the signature. On both, set `COVEN_CLOUDKIT_TEST_EMAIL`
+to the recipient's iCloud email and `COVEN_CLOUDKIT_TEST_INVITATION` to a
+private file path in that user's home directory.
+
+Start the owner first. It creates and marks the zone, shares it with the
+recipient, creates a directory named `coven-cloudkit-race-<random id>` in
+`/Users/Shared` (sticky and writable by both users), and writes the invitation
+file with mode 0600. Copy that file to the recipient's path as its owner, for
+example with `sudo install -m 600 -o <recipient user> <owner path> <recipient path>`,
+and start the recipient's test with `COVEN_CLOUDKIT_TEST_ROLE=recipient`. It
+accepts the share and writes through its shared database. The two processes
+then step every attempt through files in that directory: the owner announces
+the path, waits until the recipient is ready, and sets a release instant
+250 ms ahead on the clock both share; after the race the recipient writes its
+outcomes there and the owner tallies the round. The owner waits up to an hour
+for the recipient to join and ten minutes for each later step. After success
+the owner deletes the zone and the directory and both remove their invitation
+files. A process that fails tells the other to stop; the directory and zone
+stay for inspection, and the leftover-zone test above removes the zone.

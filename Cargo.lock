@@ -1067,6 +1067,7 @@ dependencies = [
  "coven-format",
  "coven-foundation",
  "coven-merge",
+ "futures-util",
  "hex",
  "oauth2",
  "objc2",

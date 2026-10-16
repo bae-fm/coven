@@ -18,6 +18,8 @@ use std::{
 
 #[path = "cloudkit_live_zone.rs"]
 pub(super) mod live_zone;
+#[path = "cloudkit_race.rs"]
+mod race;
 
 fn path() -> ObjectPath {
     ObjectPath::device_log(

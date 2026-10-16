@@ -39,6 +39,7 @@ coven-foundation = { workspace = true, features = ["test-utils"] }
 coven-crypto = { workspace = true, features = ["test-utils"] }
 tokio = { workspace = true, features = ["macros", "rt", "test-util"] }
 axum.workspace = true
+futures-util.workspace = true
 tempfile.workspace = true
 
 [features]
