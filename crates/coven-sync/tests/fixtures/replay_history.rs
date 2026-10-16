@@ -15,8 +15,10 @@ pub(crate) fn realistic_history() -> History {
                 },
             ),
         );
+        // Each installation registers itself (§10): the member's phone,
+        // then a second device.
         h.all(m, u64::from(m), device(u64::from(m)));
-        h.all(m, u64::from(m), device(100 + u64::from(m)));
+        h.all(m, 100 + u64::from(m), device(100 + u64::from(m)));
     }
     for c in 0..10 {
         h.all(c as u8, c, make(c, &format!("Circle {c}")));
@@ -47,7 +49,9 @@ pub(crate) fn realistic_history() -> History {
                 let other = (c + 1) % 10;
                 h.push(other as u8, other, &past, rename(c, &format!("Trips {n}")));
             }
-            _ if n % 100 == 25 => h.all(0, 0, device(1_000 + n as u64)),
+            // Ana's temporary device registers itself; her phone removes it
+            // 50 entries later.
+            _ if n % 100 == 25 => h.all(0, 1_000 + n as u64, device(1_000 + n as u64)),
             _ if n % 100 == 75 => h.all(
                 0,
                 0,
