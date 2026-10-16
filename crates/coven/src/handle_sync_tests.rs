@@ -92,9 +92,31 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     insert(&device.handle, "third").await;
     resume.send(()).unwrap();
     wait_for_writes(device, writes + 3).await;
-    // Retiring uploaded rows and posting positions schedule nothing more.
+    // The first pass may send all three writes; the racing writes still
+    // retain one more pass, which publishes `Syncing` before it lists
+    // positions. Once it has listed them, the next `Synced` is its own.
+    // A catch-up replaces the clock before it lists positions, so the count
+    // can dip below `before` for a moment.
+    let counted = || (passes(device) - snapshot_catch_ups(device)).saturating_sub(before);
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while counted() < 2 {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the retained pass never ran: {} passes", counted()));
+    let mut status = device.handle.subscribe_sync_status();
+    tokio::time::timeout(
+        Duration::from_secs(10),
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // Retiring uploaded rows and posting positions schedule nothing more:
+    // no third pass follows the retained one.
     tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(passes(device) - snapshot_catch_ups(device) - before, 2);
+    assert_eq!(counted(), 2);
     network.close().await;
 }
 
