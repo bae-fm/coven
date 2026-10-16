@@ -621,6 +621,7 @@ async fn a_stalled_pin_read_holds_back_no_app_write() {
     db.close().await.unwrap();
 }
 
+#[cfg(unix)]
 fn cache_path(store: &TestStore, name: &FileName) -> std::path::PathBuf {
     store
         .database_path()
