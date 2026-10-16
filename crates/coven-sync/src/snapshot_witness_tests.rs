@@ -39,7 +39,9 @@ async fn landed(storage: &MemoryStorage, id: &coven_format::store_log::SnapshotI
 }
 
 /// §15: exactly one storage day after the covering snapshot landed the write
-/// stays; one nanosecond later it goes (io `eligible_after_day`).
+/// stays; one clock unit later it goes (io `eligible_after_day`). The unit is
+/// the platform's `SystemTime` step: a nanosecond, but 100 on Windows, where
+/// adding one nanosecond leaves the time unchanged.
 #[tokio::test]
 async fn coverage_matures_one_unit_after_a_storage_day() {
     let (storage, clock) = timed_snapshot_storage();
@@ -56,7 +58,11 @@ async fn coverage_matures_one_unit_after_a_storage_day() {
     at(&clock, landed + DAY, &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert_eq!(logs(&storage).await.len(), 1, "exactly one day is not more");
-    at(&clock, landed + DAY + Duration::from_nanos(1), &[&a]).await;
+    let day = landed + DAY;
+    let later = (1..)
+        .map(|n| day + Duration::from_nanos(n))
+        .find(|t| *t > day);
+    at(&clock, later.unwrap(), &[&a]).await;
     a.sync.run_retention().await.unwrap();
     assert!(logs(&storage).await.is_empty());
 }
