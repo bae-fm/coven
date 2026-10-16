@@ -37,6 +37,16 @@ jobs:
         shell: bash
     steps:
       - uses: actions/checkout@v6
+      # coven-format's pinned-bytes test reruns its Python fixture generator,
+      # which seals with libsodium (D14). That test is left out on Windows.
+      - name: Install libsodium
+        if: runner.os != 'Windows'
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            sudo apt-get update && sudo apt-get install -y libsodium23
+          else
+            brew install libsodium
+          fi
       # The pinned toolchain and components come from rust-toolchain.toml on
       # the first cargo invocation.
       - uses: Swatinem/rust-cache@v2

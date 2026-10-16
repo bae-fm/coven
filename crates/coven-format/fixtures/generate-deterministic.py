@@ -1,7 +1,10 @@
 """Generate format-1 fixtures independently of Rust, using hashlib/hmac and libsodium.
 
 Run with Python 3 and libsodium installed. All keys, seeds and fixed nonces are
-public test material.
+public test material. With no argument it rewrites the fixtures beside it; with
+a directory argument it writes them there instead, which is how
+`lib_tests::every_object_and_snapshot_section_has_pinned_bytes` compares this
+generator's output with the checked-in bytes.
 
 The member-bearing plaintext frames (store-log entries, the join request, the
 clock and the pending-report grammar) and both codes are encoded here from D2,
@@ -17,6 +20,7 @@ import ctypes as c
 import ctypes.util
 import hashlib
 import hmac
+import sys
 from pathlib import Path
 
 ANA = bytes([0x4D]) * 16
@@ -79,6 +83,10 @@ def entry_id(device, number):
 
 def timestamp(ms, counter, device):
     return ms.to_bytes(6, "big") + u16(counter) + u64(device)
+
+
+def storage_time(seconds, nanos):
+    return u64(seconds) + u32(nanos)
 
 
 def store_audience():
@@ -386,7 +394,8 @@ def changes(sodium):
         b"\x08" + CIRCLE,
         b"\x09" + CIRCLE + ANA,
         b"\x0a" + CIRCLE + ANA,
-        b"\x0b" + u32(2) + snapshot_id(store_audience(), 1, 1),
+        b"\x0b" + u32(2) + snapshot_id(store_audience(), 1, 1)
+        + storage_time(1_700_000_000, 5),
         b"\x0d" + snapshot_id(circle_audience(CIRCLE), 1, 1),
         b"\x0e" + ANA + b"\x01" + text(b"replacement-key") + b"\x01" + text(b"coven-member")
         + b"\x00" + text(b"coven-store"),
@@ -417,7 +426,8 @@ def objects(sodium, positions):
     frames = [
         entry(every[0]),
         entry(every[2], number=2, stamp=(7, 0, 1)),
-        entry(b"\x0b" + u32(3) + snapshot_id(circle_audience((7).to_bytes(16, "big")), 9, 11)),
+        entry(b"\x0b" + u32(3) + snapshot_id(circle_audience((7).to_bytes(16, "big")), 9, 11)
+              + storage_time(1_700_000_100, 0)),
         join_request(sodium),
         positions,
     ]
@@ -498,6 +508,11 @@ def invite_code():
 
 def main():
     library = ctypes.util.find_library("sodium")
+    # On macOS ctypes searches /usr/local/lib but not Apple-silicon Homebrew's
+    # /opt/homebrew/lib, so only Homebrew's own Python finds libsodium there.
+    homebrew = Path("/opt/homebrew/lib/libsodium.dylib")
+    if library is None and sys.platform == "darwin" and homebrew.exists():
+        library = str(homebrew)
     if library is None:
         raise RuntimeError("libsodium is required to generate these fixtures")
     sodium = c.CDLL(library)
@@ -514,16 +529,17 @@ def main():
     sodium.crypto_scalarmult.argtypes = [pointer, pointer, pointer]
 
     directory = Path(__file__).resolve().parent
+    out = Path(sys.argv[1]) if len(sys.argv) > 1 else directory
     pinned = [bytes.fromhex(line) for line in (directory / "v1.hex").read_text().splitlines()]
     # The object frames come first; the write header (kind 1) starts the rest.
     rest_at = next(i for i, frame_ in enumerate(pinned) if frame_[0] == 1)
     positions = [frame_ for frame_ in pinned[:rest_at] if frame_[0] == 8]
     assert len(positions) == 1
     frames = objects(sodium, positions[0]) + pinned[rest_at:]
-    (directory / "v1.hex").write_text("".join(frame_.hex() + "\n" for frame_ in frames))
-    (directory / "clock.hex").write_text(clock().hex() + "\n")
-    (directory / "creation-marker.hex").write_text(creation_marker().hex() + "\n")
-    (directory / "pending-reports.hex").write_text(pending_reports(sodium).hex() + "\n")
+    (out / "v1.hex").write_text("".join(frame_.hex() + "\n" for frame_ in frames))
+    (out / "clock.hex").write_text(clock().hex() + "\n")
+    (out / "creation-marker.hex").write_text(creation_marker().hex() + "\n")
+    (out / "pending-reports.hex").write_text(pending_reports(sodium).hex() + "\n")
 
     path = STORE_TEXT + b"devices/1/3"
     # The write prefix (kind 32) follows the plaintext frames; its header and
@@ -601,8 +617,8 @@ def main():
         ("restore-code.hex", restore_code()),
         ("invite-code.hex", invite_code()),
     ]:
-        (directory / name).write_text(data.hex() + "\n")
-    (directory / "codes.txt").write_text(
+        (out / name).write_text(data.hex() + "\n")
+    (out / "codes.txt").write_text(
         code_text("CVR1-", restore_code()) + "\n" + code_text("CVI1-", invite_code()) + "\n")
 
 

@@ -34,6 +34,92 @@ fn every_object_and_snapshot_section_has_pinned_bytes() {
     for (bytes, expected) in objects.into_iter().zip(expected) {
         assert_eq!(bytes.as_slice(), expected);
     }
+    #[cfg(not(windows))]
+    generator_reproduces_every_fixture_it_writes();
+}
+
+/// Every fixture `fixtures/generate-deterministic.py` writes.
+#[cfg(not(windows))]
+const GENERATED_FIXTURES: [&str; 15] = [
+    "clock.hex",
+    "codes.txt",
+    "creation-marker.hex",
+    "invite-code.hex",
+    "pending-reports.hex",
+    "restore-code.hex",
+    "sealed-circle-key.hex",
+    "sealed-clock.hex",
+    "sealed-join-request.hex",
+    "sealed-positions.hex",
+    "sealed-snapshot.hex",
+    "sealed-store-key.hex",
+    "sealed-store-log.hex",
+    "sealed-write.hex",
+    "v1.hex",
+];
+
+/// The generator encodes the member-bearing frames and codes from D2–D13 and
+/// seals every sealed fixture with Python and libsodium, independently of this
+/// crate (D14). Its output must equal the checked-in fixtures byte for byte,
+/// which the encoder must equal in turn, so neither the generator, the pinned
+/// hex nor the encoder can change alone. This needs `python3` with libsodium
+/// installed. Windows is left out: the generator loads libsodium the Unix way,
+/// and the bytes it checks are the same on every platform.
+#[cfg(not(windows))]
+fn generator_reproduces_every_fixture_it_writes() {
+    let fixtures = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let out = tempfile::tempdir().unwrap();
+    let run = std::process::Command::new("python3")
+        .arg(fixtures.join("generate-deterministic.py"))
+        .arg(out.path())
+        .output()
+        .expect("python3 runs fixtures/generate-deterministic.py");
+    assert!(
+        run.status.success(),
+        "fixtures/generate-deterministic.py failed:\n{}",
+        String::from_utf8_lossy(&run.stderr)
+    );
+    let written: std::collections::BTreeSet<_> = std::fs::read_dir(out.path())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .collect();
+    assert_eq!(
+        written,
+        GENERATED_FIXTURES
+            .iter()
+            .map(|name| name.to_string())
+            .collect()
+    );
+    for name in GENERATED_FIXTURES {
+        let generated = std::fs::read_to_string(out.path().join(name)).unwrap();
+        let pinned = std::fs::read_to_string(fixtures.join(name)).unwrap();
+        let mut lines = generated.lines().zip(pinned.lines()).enumerate();
+        if let Some((line, (generated, pinned))) = lines.find(|(_, (g, p))| g != p) {
+            let at = generated
+                .bytes()
+                .zip(pinned.bytes())
+                .position(|(g, p)| g != p)
+                .unwrap_or(generated.len().min(pinned.len()));
+            let excerpt = |text: &str| text[at..text.len().min(at + 64)].to_string();
+            panic!(
+                "fixtures/{name} line {} differs from the generator's from hex digit {at}:\n\
+                 generator {}\n\
+                 pinned    {}",
+                line + 1,
+                excerpt(generated),
+                excerpt(pinned)
+            );
+        }
+        assert_eq!(
+            generated.lines().count(),
+            pinned.lines().count(),
+            "fixtures/{name} and the generator's have different line counts"
+        );
+        assert!(
+            generated == pinned,
+            "fixtures/{name} and the generator's differ in line endings"
+        );
+    }
 }
 
 #[test]
