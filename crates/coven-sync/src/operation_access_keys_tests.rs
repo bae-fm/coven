@@ -464,8 +464,8 @@ async fn an_occupied_delivery_counts_only_with_its_own_complete_bytes() {
         .await;
     assert!(matches!(
         a.step(id).await,
-        Err(SyncError::DeviceReset(
-            coven_foundation::files::DeviceResetReason::SlotMismatch
+        Err(SyncError::DeviceIdInUse(
+            crate::DeviceIdEvidence::DifferentBytes
         ))
     ));
     assert_eq!(a.operation(id).await.last_step, 1);

@@ -15,9 +15,6 @@ impl StoreLogSync {
         &self,
         require_complete: bool,
     ) -> Result<bool, SyncError> {
-        if self.send.stopped().is_some() {
-            return Err(self.record_device_reset().await);
-        }
         self.send.begin();
         // Reservations precede the scan: received own entries must not hide
         // that storage was ahead of this copy (§10).
@@ -435,9 +432,8 @@ impl StoreLogSync {
                 {
                     crate::identity::Gate::Send => {}
                     crate::identity::Gate::Pending(error) => return Err(error),
-                    crate::identity::Gate::Reset(reason) => {
-                        self.send.stop(reason);
-                        return Err(self.record_device_reset().await);
+                    crate::identity::Gate::InUse(evidence) => {
+                        return Err(self.send.stop(evidence));
                     }
                     crate::identity::Gate::Stopped => return Err(SyncError::Removed),
                 }

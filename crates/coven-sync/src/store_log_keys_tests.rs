@@ -652,8 +652,8 @@ async fn unequal_occupant_of_an_own_copy_path_stops_the_copy_and_keeps_it_queued
     storage.create(&copy.path(store(1)), &other).await.unwrap();
     assert!(matches!(
         ana.sync.step().await,
-        Err(SyncError::DeviceReset(
-            coven_foundation::files::DeviceResetReason::SlotMismatch
+        Err(SyncError::DeviceIdInUse(
+            crate::DeviceIdEvidence::DifferentBytes
         ))
     ));
     assert_eq!(ana.db.key_uploads().await.unwrap(), [copy]);

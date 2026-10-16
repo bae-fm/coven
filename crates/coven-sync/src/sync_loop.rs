@@ -531,7 +531,7 @@ impl SyncRun {
                                 futures_util::FutureExt::shared(self.clock.sleep(wait)),
                             ));
                             let error = SyncFailure::from(error);
-                            self.started = !matches!(error, SyncFailure::Removed | SyncFailure::DeviceReset(_) | SyncFailure::UpdateRequired(_));
+                            self.started = !matches!(error, SyncFailure::Removed | SyncFailure::DeviceIdInUse(_) | SyncFailure::UpdateRequired(_));
                             // Only this attempt decides: a provider's error
                             // response, even one classified Network, is Failed.
                             let status = match error {

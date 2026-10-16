@@ -57,8 +57,6 @@ pub(crate) enum HandleFailure {
     /// Rolling back a failed transaction failed, so the writer may still hold
     /// its uncommitted changes.
     Rollback,
-    /// Sync decided to replace this stale or mismatched copy (§10).
-    DeviceReset(coven_foundation::files::DeviceReset),
 }
 
 impl HandleFailure {
@@ -66,7 +64,6 @@ impl HandleFailure {
         match self {
             Self::Pending(cause) => DbError::PendingPersistence(cause.clone()),
             Self::Rollback => DbError::RollbackFailed,
-            Self::DeviceReset(reset) => DbError::DeviceReset(*reset),
         }
     }
 }

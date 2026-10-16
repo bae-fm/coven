@@ -53,7 +53,7 @@ def Evidence.observed (e : Evidence) : Counters :=
   ⟨(e.listed.logs.combine e.covered).combine e.posted, e.listed.keyCopies, e.listed.snapshot⟩
 
 inductive ResetReason where
-  | identityMismatch | storageAhead | slotMismatch | replaced | damage
+  | identityMismatch | storageAhead | replaced
   deriving DecidableEq, Repr
 
 inductive Gate where
@@ -140,14 +140,14 @@ theorem send_of_within (d : Nat) (r : Counters) (e : Evidence)
     omega
   simp [checkIdentity, removed, replaced, within]
 
-/-- A replacement is accepted only for its member's old, distinct id (D6).
-Store-log authority and finality are supplied by replay, not redone here. -/
+/-- The reset the app's `reset_device` records: a replacement accepted only
+for its member's old, distinct id (D6). Store-log authority and finality are
+supplied by replay, not redone here. -/
 structure Replacement where
   old : Nat
   fresh : Nat
   ends : Ends
   registrationNumber : Nat
-  reason : ResetReason
   deriving DecidableEq, Repr
 
 def replacementAllowed (owner author : Nat) (r : Replacement) : Bool :=

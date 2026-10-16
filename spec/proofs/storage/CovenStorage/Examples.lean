@@ -8,7 +8,7 @@ deriving instance DecidableEq for Except
 def registeredEvidence : Evidence := ⟨⟨⟨0, 1⟩, 0, 0⟩, ⟨0, 0⟩, ⟨0, 0⟩, false, false⟩
 def installed : Local := ⟨7, ⟨⟨0, 1⟩, 0, 0⟩, [], []⟩
 def pending : Local := commitWrite installed [42]
-def replacement : Replacement := ⟨7, 8, ⟨0, 1⟩, 1, .identityMismatch⟩
+def replacement : Replacement := ⟨7, 8, ⟨0, 1⟩, 1⟩
 
 /-- One committed write, never uploaded, suffices. §10 explicitly orders
 this loss and its reset notice; it contradicts unqualified no-loss. -/
@@ -17,8 +17,7 @@ theorem unsent_restore_loss :
     checkIdentity 7 pending.reserved none (.ok registeredEvidence) = .reset .identityMismatch ∧
     writable (beginReset pending replacement) = false ∧
     (finishReset replacement []).queue = [] ∧
-    Path.write 7 1 ∉ (finishReset replacement []).applied ∧
-    replacement.reason = .identityMismatch := by decide
+    Path.write 7 1 ∉ (finishReset replacement []).applied := by decide
 
 example : Path.write 7 1 ∈ pending.applied ∧
     Path.write 7 1 ∉ (finishReset replacement []).applied := by decide
@@ -108,7 +107,7 @@ theorem two_live_copies_race :
     create (create emptyStorage (.write 7 1) [42] 10) (.write 7 1) [43] 11 (.write 7 1) =
       some ⟨[42], 10⟩ ∧
     compareOccupied [43] (.ok (some ⟨[42], 10⟩)) = .reset ∧
-    (finishReset ⟨7, 8, ⟨1, 1⟩, 1, .slotMismatch⟩ [.write 7 1]).queue = [] := by decide
+    (finishReset ⟨7, 8, ⟨1, 1⟩, 1⟩ [.write 7 1]).queue = [] := by decide
 
 example : compareOccupied [43] (.ok (some ⟨[42], 10⟩)) = .reset ∧
     create (create emptyStorage (.write 7 1) [42] 10) (.write 7 1) [43] 11 (.write 7 1) =

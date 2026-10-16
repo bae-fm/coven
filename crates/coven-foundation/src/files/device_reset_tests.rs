@@ -6,7 +6,6 @@ fn reset(old: u64, new: u64) -> DeviceReset {
     DeviceReset {
         old_device: DeviceId(old),
         new_device: DeviceId(new),
-        reason: DeviceResetReason::StorageAhead,
     }
 }
 
@@ -28,7 +27,7 @@ async fn a_recorded_reset_moves_local_state_aside_and_keeps_its_fresh_id_across_
         .unwrap();
     let decided = reset(old.0, old.0 + 1);
     assert_eq!(directory.record_device_reset(&decided).unwrap(), decided);
-    // A second detection never chooses another id.
+    // A retried reset never chooses another id.
     assert_eq!(
         directory
             .record_device_reset(&reset(old.0, old.0 + 2))

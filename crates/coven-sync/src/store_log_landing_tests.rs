@@ -752,8 +752,8 @@ async fn setup_compares_an_occupied_access_entry_before_committing() {
                     Box::new(|| panic!("another copy's entry must not commit")),
                 )
                 .await,
-            Err(SyncError::DeviceReset(
-                coven_foundation::files::DeviceResetReason::SlotMismatch
+            Err(SyncError::DeviceIdInUse(
+                crate::DeviceIdEvidence::DifferentBytes
             ))
         ));
         assert!(b.db.local_store_log().await.unwrap().upload.is_some());

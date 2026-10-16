@@ -153,8 +153,8 @@ impl StoreDir {
         super::device_reset::read(&self.path)
     }
 
-    /// Durably decide to replace this installation; the first decision wins.
-    /// Its owner stops using the database; the next bootstrap moves it aside.
+    /// Durably record `reset_device`'s decision to replace this installation;
+    /// the first decision wins. The next bootstrap moves the old copy aside.
     pub fn record_device_reset(
         &self,
         reset: &super::DeviceReset,

@@ -351,7 +351,6 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
         .unwrap();
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old_device);
-    assert_eq!(reset.reason, DeviceResetReason::IdentityMismatch);
     assert_eq!(directory.settings().unwrap().device_id, reset.new_device);
     // The discarded copy's unsent rows and files do not come back.
     assert!(handle

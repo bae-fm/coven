@@ -145,16 +145,16 @@ caller that abandons a create without retrying it, such as a device reset.
 ## Restore, another live copy, and writes
 
 **Unqualified no-loss fails.** `unsent_restore_loss` starts with one committed
-data write, still queued. Restoring onto an installation without matching
-custody triggers §10's reset. The old database becomes unavailable; the new
-device loads storage, which does not contain that write. Its queue and applied
-history do not contain the edit. The example also checks the reset reason.
+data write, still queued. Restored onto an installation without matching
+custody, the copy fails §10's check, and the app's reset makes the old
+database unavailable; the new device loads storage, which does not contain
+that write. Its queue and applied history do not contain the edit.
 One unsent write suffices; no competing write is needed.
 
 `two_live_copies_race` checks the other permitted loss. Two copies reserve
 write 1 under device 7, with different values. Both pass the identity check
 before either publishes. Storage keeps the first value. Complete-byte comparison
-resets the losing copy, discarding its queued value. §3 and §10 describe this
+stops the losing copy, and its reset discards its queued value. §3 and §10 describe this
 loss explicitly; it is not a claim that their qualified durability guarantee
 promises otherwise. Both histories have literal Lean `example` declarations.
 
@@ -281,16 +281,17 @@ above; this is not a second proof of the row merge or eventual delivery.
 
 **Post-read objects are rejected.** `after_read_rejected` covers writes and
 store-log entries: reading any kept replacement of the old id excludes the
-object. `old_copy_stops` makes observation enter reset and prevents further
-commits or sends from that copy. `observed_replacement_blocks_send` covers
+object. `old_copy_stops` makes observation stop every send from that copy
+without recording anything; its later local commits read the replacement, so
+no reader keeping it accepts them. `observed_replacement_blocks_send` covers
 every send kind, including a backup whose local read positions were erased.
-`reset_uses_new_path` gives the resetting copy its own fresh id and write 1.
+`reset_uses_new_path` gives the app's reset its own fresh id and write 1.
 `restored_and_live_copies_stop` checks these transitions together.
 
 **Unqualified no-loss still fails.** `ReplacementRead.Examples.unsent_loss`
 checks one committed, unstored write discarded on reset. Two copies can also
 pass the check and publish different bytes to write 1: the first value remains,
-the other copy resets (`colliding_copies_lose_one_value`). Both have literal
+the other copy stops (`colliding_copies_lose_one_value`). Both have literal
 Lean `example` witnesses. These are the same losses §10 explicitly permits;
 the landing deadline separately decides whether a stored pre-read object's
 effects count.
@@ -349,7 +350,7 @@ deletion, is an [IO verification obligation](io.md#discovery-obligations).
 for the Rust differential tests of coven-sync's pre-send check, with every
 counter, key copies included, below, at and beyond its reservation. It also
 runs `beginReset`, `retryReset`, `finishReset` and the first `commitWrite`
-against coven's recorded reset, failed `reset_device` retries and the
+against the reset `reset_device` records, its failed retries and the
 published replacement, and `resetUnconnected` against the reset of a store
 that never set up storage. Its `sequence` check runs `IdentityCounters.Sequence`
 against the snapshot reservation coven-database records as preparations

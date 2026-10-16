@@ -1,9 +1,11 @@
-//! A stale or damaged installation becomes a new device in its own directory (§10, §19.2).
+//! The app's `reset_device` replaces this installation with a new device in
+//! its own directory (§10, §19.2).
 //!
-//! The durable record is the decision: once written, ordinary opens refuse the
-//! store and every retry uses the same fresh id. Turning the directory into an
-//! unpublished bootstrap moves the discarded local state aside as a whole,
-//! under the writer, bootstrap and reader locks. It stays for inspection only.
+//! The durable record is that call's decision: once written, ordinary opens
+//! refuse the store and every retry uses the same fresh id. Turning the
+//! directory into an unpublished bootstrap moves the discarded local state
+//! aside as a whole, under the writer, bootstrap and reader locks. It stays
+//! for inspection only.
 
 use std::fs;
 use std::path::Path;
@@ -24,21 +26,6 @@ const KEPT: [&str; 4] = [
     "member-keys.sealed",
 ];
 
-/// Why this installation is being replaced by a new device (E5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum DeviceResetReason {
-    /// The database's id does not match device-only custody.
-    IdentityMismatch,
-    /// Storage proves counters beyond those reserved in the local database.
-    StorageAhead,
-    /// An occupied immutable path holds different bytes.
-    SlotMismatch,
-    /// The store log has a kept replacement of this device's id.
-    Replaced,
-    /// The database could not be trusted; no local work was salvaged (§19.2).
-    DatabaseDamage,
-}
-
 /// A replacement of this installation, not a membership removal (E5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceReset {
@@ -46,8 +33,6 @@ pub struct DeviceReset {
     pub old_device: DeviceId,
     /// The fresh id the replacement registers.
     pub new_device: DeviceId,
-    /// Why the old copy cannot continue.
-    pub reason: DeviceResetReason,
 }
 
 pub(super) fn read(directory: &Path) -> Result<Option<DeviceReset>, FileError> {
@@ -65,8 +50,7 @@ pub(super) fn read(directory: &Path) -> Result<Option<DeviceReset>, FileError> {
         .transpose()
 }
 
-/// Keep the first decision. A later detection in the same copy, or another
-/// reason found before reopening, never changes the chosen fresh id.
+/// Keep the first decision: a retried reset never changes the chosen fresh id.
 pub(super) fn record(directory: &Path, reset: &DeviceReset) -> Result<DeviceReset, FileError> {
     if let Some(recorded) = read(directory)? {
         return Ok(recorded);

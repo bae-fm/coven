@@ -1,5 +1,8 @@
 use super::*;
-use coven_storage::{test_utils::MemoryStorage, Storage};
+use coven_storage::{
+    test_utils::{MemoryRequest, MemoryStorage},
+    Storage,
+};
 use std::time::{Duration, UNIX_EPOCH};
 
 struct Fixture {
@@ -127,7 +130,6 @@ fn interrupted_reset(f: &Fixture) -> DeviceReset {
         .record_device_reset(&DeviceReset {
             old_device: f.directory.settings().unwrap().device_id,
             new_device: UuidIds.new_device_id(),
-            reason: DeviceResetReason::IdentityMismatch,
         })
         .unwrap()
 }
@@ -174,7 +176,6 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     let reset = handle.device_reset().await.unwrap().unwrap();
     assert_eq!(reset.old_device, old);
     assert_ne!(reset.new_device, old);
-    assert_eq!(reset.reason, DeviceResetReason::IdentityMismatch);
     assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
     assert_eq!(custody(&f).device_id().unwrap(), Some(reset.new_device));
     // Stored history loads; the unsent edit is discarded, not renumbered.
@@ -195,6 +196,104 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     handle.close().await.unwrap();
     let handle = reopen(&f).open(f.directory.id()).await.unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
+    handle.close().await.unwrap();
+}
+
+fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}
+
+fn sends(f: &Fixture) -> usize {
+    f.storage
+        .request_trace()
+        .iter()
+        .filter(|r| matches!(r, MemoryRequest::Create(_) | MemoryRequest::Replace(_)))
+        .count()
+}
+
+/// A backup restored after its device uploaded more: another copy used this
+/// device's id. Sync stops sending and says why, recording nothing; the
+/// database keeps working, reopening finds the same evidence, and calling
+/// reset_device, the app's choice, starts a new device (§10).
+#[tokio::test]
+async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    uploaded(&f, "kept").await;
+    f.handle.close().await.unwrap();
+    let store = f.directory.database_path().parent().unwrap().to_owned();
+    let backup = tempfile::tempdir().unwrap();
+    copy_tree(&store, backup.path());
+    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    handle.start_sync().await.unwrap();
+    f.advance(Duration::from_secs(1));
+    let written = f.clock.now();
+    handle
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('newer','uploaded')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    status(
+        &handle,
+        |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= written),
+    )
+    .await;
+    handle.close().await.unwrap();
+    std::fs::remove_dir_all(&store).unwrap();
+    copy_tree(backup.path(), &store);
+    let old = f.directory.settings().unwrap().device_id;
+    let before = sends(&f);
+    for opening in 0..2 {
+        let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+        handle.start_sync().await.unwrap();
+        status(&handle, |s| {
+            matches!(
+                s,
+                SyncStatus::Failed {
+                    error: SyncFailure::DeviceIdInUse(DeviceIdEvidence::StorageAhead)
+                }
+            )
+        })
+        .await;
+        // Reads and local writes still work; nothing is recorded.
+        assert_eq!(notes(&handle).await, ["kept"]);
+        assert_eq!(handle.device_reset().await.unwrap(), None);
+        if opening == 1 {
+            handle
+                .write(|sql| {
+                    sql.execute("INSERT INTO notes VALUES('unsent','local')", [])?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+        }
+        handle.close().await.unwrap();
+        assert_eq!(f.directory.device_reset().unwrap(), None);
+        assert_eq!(f.directory.settings().unwrap().device_id, old);
+    }
+    assert_eq!(sends(&f), before);
+    let handle = reopen(&f)
+        .reset_device(f.directory.id(), "Restored phone")
+        .await
+        .unwrap();
+    let reset = handle.device_reset().await.unwrap().unwrap();
+    assert_eq!(reset.old_device, old);
+    assert_ne!(reset.new_device, old);
+    assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
+    // Stored history loads; the copy's unsent edit is discarded.
+    assert_eq!(notes(&handle).await, ["kept", "newer"]);
     handle.close().await.unwrap();
 }
 

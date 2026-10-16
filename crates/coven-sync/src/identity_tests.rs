@@ -24,22 +24,19 @@ fn verdict(gate: &Gate) -> String {
         Gate::Send => "send".into(),
         Gate::Pending(_) => "pending".into(),
         Gate::Stopped => "stopped".into(),
-        Gate::Reset(reason) => format!(
+        Gate::InUse(evidence) => format!(
             "reset:{}",
-            match reason {
-                DeviceResetReason::IdentityMismatch => "identity-mismatch",
-                DeviceResetReason::StorageAhead => "storage-ahead",
-                DeviceResetReason::SlotMismatch => "slot-mismatch",
-                DeviceResetReason::Replaced => "replaced",
-                DeviceResetReason::DatabaseDamage => "damage",
+            match evidence {
+                DeviceIdEvidence::StorageAhead => "storage-ahead",
+                DeviceIdEvidence::DifferentBytes => "different-bytes",
+                DeviceIdEvidence::Replaced => "replaced",
             }
         ),
     }
 }
 
 #[test]
-fn equal_counters_send_and_any_larger_stored_number_resets() {
-    let device = DeviceId(4);
+fn equal_counters_send_and_any_larger_stored_number_stops() {
     let mine = reserved(5, 2, 3, 9);
     let equal = Counters {
         logs: Ends {
@@ -50,10 +47,7 @@ fn equal_counters_send_and_any_larger_stored_number_resets() {
         snapshots: 9,
     };
     // A reserved upload already in storage is not stale (§10).
-    assert!(matches!(
-        check(device, &mine, Some(device), Ok(evidence(equal))),
-        Gate::Send
-    ));
+    assert!(matches!(check(&mine, Ok(evidence(equal))), Gate::Send));
     for ahead in [
         Counters {
             logs: Ends {
@@ -79,8 +73,8 @@ fn equal_counters_send_and_any_larger_stored_number_resets() {
         },
     ] {
         assert!(matches!(
-            check(device, &mine, Some(device), Ok(evidence(ahead))),
-            Gate::Reset(DeviceResetReason::StorageAhead)
+            check(&mine, Ok(evidence(ahead))),
+            Gate::InUse(DeviceIdEvidence::StorageAhead)
         ));
     }
     // A log deleted after a rollback is still exposed by coverage or a post.
@@ -106,42 +100,28 @@ fn equal_counters_send_and_any_larger_stored_number_resets() {
             ..Evidence::default()
         };
         assert!(matches!(
-            check(device, &mine, Some(device), Ok(found)),
-            Gate::Reset(DeviceResetReason::StorageAhead)
+            check(&mine, Ok(found)),
+            Gate::InUse(DeviceIdEvidence::StorageAhead)
         ));
     }
 }
 
 #[test]
-fn missing_custody_resets_and_a_failed_scan_sends_nothing() {
-    let device = DeviceId(4);
+fn a_failed_scan_sends_nothing_and_a_kept_replacement_stops() {
     let mine = reserved(1, 1, 0, 0);
-    for custody in [None, Some(DeviceId(5))] {
-        assert!(matches!(
-            check(device, &mine, custody, Ok(Evidence::default())),
-            Gate::Reset(DeviceResetReason::IdentityMismatch)
-        ));
-    }
     assert!(matches!(
-        check(
-            device,
-            &mine,
-            Some(device),
-            Err(StorageFailure::Network.into())
-        ),
+        check(&mine, Err(StorageFailure::Network.into())),
         Gate::Pending(_)
     ));
     assert!(matches!(
         check(
-            device,
             &mine,
-            Some(device),
             Ok(Evidence {
                 replaced: true,
                 ..Evidence::default()
             })
         ),
-        Gate::Reset(DeviceResetReason::Replaced)
+        Gate::InUse(DeviceIdEvidence::Replaced)
     ));
 }
 
@@ -233,29 +213,24 @@ fn st_differential_identity() {
     let mine = reserved(2, 1, 3, 4);
     let mut cases = Vec::new();
     let mut actual = Vec::new();
-    for custody in [None, Some(7), Some(8)] {
-        for scan in scans() {
-            cases.push(json!({
-                "check": "identity",
-                "device": 7,
-                "reserved": {"writes": mine.writes, "entries": mine.entries,
-                             "key_copies": mine.key_copies, "snapshot": mine.snapshots},
-                "custody": custody,
-                "scan": scan_json(&scan),
-            }));
-            actual.push(json!(verdict(&check(
-                DeviceId(7),
-                &mine,
-                custody.map(DeviceId),
-                scan_result(&scan),
-            ))));
-        }
+    // Custody names this device: opening refuses any other (T276).
+    for scan in scans() {
+        cases.push(json!({
+            "check": "identity",
+            "device": 7,
+            "reserved": {"writes": mine.writes, "entries": mine.entries,
+                         "key_copies": mine.key_copies, "snapshot": mine.snapshots},
+            "custody": 7,
+            "scan": scan_json(&scan),
+        }));
+        actual.push(json!(verdict(&check(&mine, scan_result(&scan)))));
     }
     assert_eq!(actual, identity_runner(&cases));
 }
 
-/// The real stop: the catch-up that applies a kept replacement checks it with
-/// custody already compared at opening, and the stopped gate answers later.
+/// The real stop: the catch-up that applies a kept replacement checks it,
+/// with custody already compared at opening, and the stopped gate answers
+/// later. Stopping chooses no fresh id.
 #[test]
 #[ignore = "requires COVEN_IDENTITY_LEAN"]
 fn st_differential_replacement_read() {
@@ -266,42 +241,40 @@ fn st_differential_replacement_read() {
     let quiet = Ok(Evidence::default());
     for olds in [vec![], vec![3], vec![7], vec![3, 7], vec![7, 3]] {
         for later in [quiet, Err(())] {
-            for custody in [Some(7), None] {
-                let gate = SendGate::new(std::sync::Arc::new(
-                    coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH),
-                ));
-                let mut events = Vec::new();
-                let mut results = Vec::new();
-                // Ana's devices 3 and 7; each restored copy registers a new id.
-                let mut history = History::new();
-                history.all(0, 3, crate::replay::tests::device(3));
-                history.all(0, 7, crate::replay::tests::device(7));
-                for (index, old) in olds.iter().enumerate() {
-                    let fresh = 100 + index as u64;
-                    history.all(0, fresh, replace(fresh, *old));
-                    events.push(json!({"op":"observe","old":old,"fresh":fresh,"own_fresh":200}));
-                    let observed = Evidence {
-                        replaced: replaced(&checked_log(&history.entries), device),
-                        ..Evidence::default()
-                    };
-                    if let Gate::Reset(reason) = check(device, &mine, Some(device), Ok(observed)) {
-                        gate.stop(reason);
-                    }
-                    events.push(json!({"op":"gate","custody":custody,"scan":scan_json(&later)}));
-                    results.push(json!(verdict(&match gate.stopped() {
-                        Some(reason) => Gate::Reset(reason),
-                        None => check(device, &mine, custody.map(DeviceId), scan_result(&later),),
-                    })));
+            let gate = SendGate::new(std::sync::Arc::new(
+                coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH),
+            ));
+            let mut events = Vec::new();
+            let mut results = Vec::new();
+            // Ana's devices 3 and 7; each restored copy registers a new id.
+            let mut history = History::new();
+            history.all(0, 3, crate::replay::tests::device(3));
+            history.all(0, 7, crate::replay::tests::device(7));
+            for (index, old) in olds.iter().enumerate() {
+                let fresh = 100 + index as u64;
+                history.all(0, fresh, replace(fresh, *old));
+                events.push(json!({"op":"observe","old":old,"fresh":fresh}));
+                let observed = Evidence {
+                    replaced: replaced(&checked_log(&history.entries), device),
+                    ..Evidence::default()
+                };
+                if let Gate::InUse(evidence) = check(&mine, Ok(observed)) {
+                    gate.stop(evidence);
                 }
-                cases.push(json!({
-                    "check": "replacement",
-                    "device": 7,
-                    "reserved": {"writes": mine.writes, "entries": mine.entries,
-                                 "key_copies": mine.key_copies, "snapshot": mine.snapshots},
-                    "events": events,
-                }));
-                actual.push(json!(results));
+                events.push(json!({"op":"gate","custody":7,"scan":scan_json(&later)}));
+                results.push(json!(verdict(&match gate.stopped() {
+                    Some(evidence) => Gate::InUse(evidence),
+                    None => check(&mine, scan_result(&later)),
+                })));
             }
+            cases.push(json!({
+                "check": "replacement",
+                "device": 7,
+                "reserved": {"writes": mine.writes, "entries": mine.entries,
+                             "key_copies": mine.key_copies, "snapshot": mine.snapshots},
+                "events": events,
+            }));
+            actual.push(json!(results));
         }
     }
     assert_eq!(actual, identity_runner(&cases));
@@ -469,10 +442,10 @@ fn st_differential_replacement_admission() {
     assert_eq!(actual, identity_runner(&cases));
 }
 
-/// A replaced local id resets this copy; a removed one stops it for good,
-/// even when a kept replacement also names it (§10).
+/// A replaced local id stops this copy with that evidence; a removed one
+/// stops it for good, even when a kept replacement also names it (§10).
 #[test]
-fn local_checks_reset_a_replaced_id_and_keep_a_removed_one_stopped() {
+fn local_checks_stop_a_replaced_id_and_keep_a_removed_one_stopped() {
     let ben = crate::store_log_sync::tests::member(2);
     assert_eq!(ben.member(), crate::replay::tests::member(1));
     let mut replaced_phone = household(MemberRole::Admin, MemberRole::Member);
@@ -481,7 +454,7 @@ fn local_checks_reset_a_replaced_id_and_keep_a_removed_one_stopped() {
     assert!(replaced(&log, DeviceId(1)));
     assert!(matches!(
         crate::write_seal::check_member(&log, &ben, DeviceId(1)),
-        Err(SyncError::DeviceReset(DeviceResetReason::Replaced))
+        Err(SyncError::DeviceIdInUse(DeviceIdEvidence::Replaced))
     ));
     assert!(crate::write_seal::check_member(&log, &ben, DeviceId(5)).is_ok());
     for removal in [

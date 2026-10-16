@@ -30,9 +30,7 @@ private def gateJson : Gate → Json
   | .stopped => "stopped"
   | .reset .identityMismatch => "reset:identity-mismatch"
   | .reset .storageAhead => "reset:storage-ahead"
-  | .reset .slotMismatch => "reset:slot-mismatch"
   | .reset .replaced => "reset:replaced"
-  | .reset .damage => "reset:damage"
 
 private def custody (j : Json) : Except String (Option Nat) :=
   match j.getObjVal? "custody" with
@@ -45,7 +43,7 @@ private def identity (j : Json) : Except String Json := do
   let reserved ← counters (← j.getObjVal? "reserved")
   return gateJson (checkIdentity device reserved (← custody j) (← scan (← j.getObjVal? "scan")))
 
-/-- Observe kept registrations, then query the gate, as an active device does. -/
+/-- Observe kept registrations, then query the gate, as a running copy does. -/
 private def replacement (j : Json) : Except String Json := do
   let device ← j.getObjValAs? Nat "device"
   let reserved ← counters (← j.getObjVal? "reserved")
@@ -56,7 +54,7 @@ private def replacement (j : Json) : Except String Json := do
     | "observe" =>
       let r : ReplacementRead.Registration :=
         ⟨← event.getObjValAs? Nat "old", ← event.getObjValAs? Nat "fresh", 1⟩
-      state := ReplacementRead.observe state r (← event.getObjValAs? Nat "own_fresh")
+      state := ReplacementRead.observe state r
     | "gate" =>
       let g := ReplacementRead.gate state .write (← custody event) (← scan (← event.getObjVal? "scan"))
       results := results.push (gateJson g)
@@ -71,7 +69,7 @@ private def reset (j : Json) : Except String Json := do
   let queued ← j.getObjValAs? Nat "queued"
   let copy : Local := ⟨← j.getObjValAs? Nat "old", ⟨⟨queued, 0⟩, 0, 0⟩,
     (List.range queued).map fun n => .untried ⟨.write 0 (n + 1), []⟩, []⟩
-  let r : Replacement := ⟨copy.device, ← j.getObjValAs? Nat "fresh", ⟨0, 0⟩, 1, .storageAhead⟩
+  let r : Replacement := ⟨copy.device, ← j.getObjValAs? Nat "fresh", ⟨0, 0⟩, 1⟩
   let mut state := beginReset copy r
   let mut writable := #[]
   for _ in List.range (← j.getObjValAs? Nat "retries") do

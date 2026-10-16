@@ -455,7 +455,7 @@ mod recovery {
                 .unwrap();
             let reset = recovered.device_reset().await.unwrap().unwrap();
             assert_eq!(reset.old_device, old_device);
-            assert_eq!(reset.reason, DeviceResetReason::DatabaseDamage);
+            assert_ne!(reset.new_device, old_device);
             // The damaged files stay aside for inspection, never as live state.
             let archive = directory
                 .database_path()

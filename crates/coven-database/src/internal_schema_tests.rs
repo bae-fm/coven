@@ -302,7 +302,7 @@ mod fixture {
        SELECT i,CAST(n || device AS BLOB),n,x'00' FROM fixture;
      INSERT INTO _coven_peer_positions SELECT n,x'00' FROM fixture;
      INSERT INTO _coven_positions_post VALUES(1,x'00');
-     INSERT INTO _coven_device_reset VALUES(1,zeroblob(8),counter(1),'storage-ahead');
+     INSERT INTO _coven_device_reset VALUES(1,zeroblob(8),counter(1));
      INSERT INTO _coven_positions SELECT n,n FROM fixture;
      INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;

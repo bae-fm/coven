@@ -577,9 +577,9 @@ impl OperationRun {
 
     async fn sync_pass(&mut self) -> Result<Option<PendingRecord>, SyncError> {
         let result = self.pass_steps().await;
-        // Any sender may have stopped this copy; decide its reset durably.
-        if self.sync.send_stopped() {
-            return Err(self.sync.record_device_reset().await);
+        // Any sender may have stopped this copy; the pass reports why.
+        if let Some(evidence) = self.sync.send_stopped() {
+            return Err(SyncError::DeviceIdInUse(evidence));
         }
         result?;
         self.sync.failing_work().await

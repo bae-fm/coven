@@ -1,6 +1,6 @@
 //! Session authority for every publisher, measured from read-only catch-up start.
 use crate::{store_log_keys::ObservedCopy, SyncError};
-use coven_foundation::{clock::ClockRef, files::DeviceResetReason};
+use coven_foundation::clock::ClockRef;
 use coven_storage::{ObjectPath, PublicationGate, StorageError, StorageFailure};
 use std::{
     collections::BTreeSet,
@@ -31,11 +31,12 @@ struct Session {
     bootstrap: Vec<Arc<Bootstrap>>,
     /// Snapshot and own-post evidence read once after opening or reconnecting.
     evidence: Option<crate::identity::SessionEvidence>,
-    /// A copy that must reset never sends again in this process (§10).
-    stopped: Option<DeviceResetReason>,
+    /// A copy that found another using its id never sends again from this
+    /// owner (§10). Nothing records it: a new owner checks again.
+    stopped: Option<crate::DeviceIdEvidence>,
 }
 impl Session {
-    fn closed(stopped: Option<DeviceResetReason>) -> Self {
+    fn closed(stopped: Option<crate::DeviceIdEvidence>) -> Self {
         Self {
             starting: None,
             completed: None,
@@ -85,8 +86,8 @@ impl SendGate {
         copies: Vec<ObservedCopy>,
     ) -> Result<(), SyncError> {
         let mut session = self.session.lock().expect("send gate poisoned");
-        if let Some(reason) = session.stopped {
-            return Err(SyncError::DeviceReset(reason));
+        if let Some(evidence) = session.stopped {
+            return Err(SyncError::DeviceIdInUse(evidence));
         }
         let started = session
             .starting
@@ -114,19 +115,19 @@ impl SendGate {
         }
         self.notify();
     }
-    /// Close this installation for good: its copy is stale or replaced, and
-    /// only a reset as a new device may send again (§10). The first reason wins.
-    pub(crate) fn stop(&self, reason: DeviceResetReason) -> SyncError {
-        let reason = {
+    /// Close this owner for good: another copy uses this device's id (§10).
+    /// The first evidence wins.
+    pub(crate) fn stop(&self, evidence: crate::DeviceIdEvidence) -> SyncError {
+        let evidence = {
             let mut session = self.session.lock().expect("send gate poisoned");
-            let reason = *session.stopped.get_or_insert(reason);
-            *session = Session::closed(Some(reason));
-            reason
+            let evidence = *session.stopped.get_or_insert(evidence);
+            *session = Session::closed(Some(evidence));
+            evidence
         };
         self.notify();
-        SyncError::DeviceReset(reason)
+        SyncError::DeviceIdInUse(evidence)
     }
-    pub(crate) fn stopped(&self) -> Option<DeviceResetReason> {
+    pub(crate) fn stopped(&self) -> Option<crate::DeviceIdEvidence> {
         self.session.lock().expect("send gate poisoned").stopped
     }
     pub(crate) fn session_evidence(&self) -> Option<crate::identity::SessionEvidence> {

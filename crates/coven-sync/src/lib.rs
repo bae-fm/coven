@@ -10,6 +10,7 @@ mod effects;
 mod entry_signature;
 mod finality;
 mod identity;
+pub use identity::DeviceIdEvidence;
 mod pass_reads;
 mod recent_return;
 mod retry_waits;

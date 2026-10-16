@@ -261,7 +261,7 @@ impl FilesInner {
         Ok(true)
     }
     /// A file path is this device's own: different occupant bytes mean another
-    /// copy holds its id, which stops every send until the store resets (§10).
+    /// copy uses its id, which stops every send from this owner (§10).
     /// The comparison read is an upload-worker request, so it passes the same
     /// fresh catch-up check as a send (SP, file uploads outside the pass).
     async fn settle_occupied(
@@ -274,7 +274,7 @@ impl FilesInner {
         match crate::identity::settle_occupied(storage, &self.send, path, expected).await {
             Ok(()) => Ok(()),
             Err(SyncError::Storage(error)) => Err(error.into()),
-            Err(SyncError::DeviceReset(_)) => Err(coven_storage::StorageFailure::AlreadyExists
+            Err(SyncError::DeviceIdInUse(_)) => Err(coven_storage::StorageFailure::AlreadyExists
                 .with_source("another copy of this device published different bytes")
                 .into()),
             Err(error) => Err(coven_storage::StorageFailure::Protocol

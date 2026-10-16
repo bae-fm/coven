@@ -145,10 +145,10 @@ pub(crate) fn check_device(
     match crate::effects::device(state, device) {
         _ if crate::effects::member(state, &identity).is_none() => Err(SyncError::Removed),
         Some(d) if d.member != identity => Err(SyncError::Removed),
-        // A kept replacement of this id resets this copy; it never sends (§10).
-        Some(d) if d.state == coven_database::DeviceState::Replaced => Err(SyncError::DeviceReset(
-            coven_foundation::files::DeviceResetReason::Replaced,
-        )),
+        // A kept replacement of this id stops this copy; it never sends (§10).
+        Some(d) if d.state == coven_database::DeviceState::Replaced => {
+            Err(SyncError::DeviceIdInUse(crate::DeviceIdEvidence::Replaced))
+        }
         Some(_) => Ok(()),
         None => Err(SyncError::Removed),
     }

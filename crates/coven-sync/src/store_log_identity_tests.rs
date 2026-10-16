@@ -2,7 +2,7 @@ use super::*;
 use crate::device_log_sync::tests::{group, sql, storage};
 use crate::store_log_sync::tests::Device;
 use coven_database::{DatabaseBuilder, RowIdentity, SyncedTable};
-use coven_foundation::files::{DeviceResetReason, StoreLayout};
+use coven_foundation::files::StoreLayout;
 use coven_storage::test_utils::{MemoryRequest, MemoryStorage};
 
 fn tables() -> Vec<SyncedTable> {
@@ -120,15 +120,22 @@ fn sends(trace: &[MemoryRequest]) -> usize {
         .count()
 }
 
-fn reset_reason(error: SyncError) -> DeviceResetReason {
+fn evidence(error: SyncError) -> crate::DeviceIdEvidence {
     match error {
-        SyncError::DeviceReset(reason) => reason,
-        error => panic!("expected a device reset, got {error:?}"),
+        SyncError::DeviceIdInUse(evidence) => evidence,
+        error => panic!("expected another copy using this id, got {error:?}"),
     }
 }
 
+/// Stopping records nothing: no reset decision, and the database still works.
+async fn nothing_recorded(device: &Device) {
+    assert_eq!(device.directory.device_reset().unwrap(), None);
+    assert_eq!(device.db.device_reset().await.unwrap(), None);
+    device.db.local_store_log().await.unwrap();
+}
+
 #[tokio::test]
-async fn a_restored_backup_behind_storage_resets_before_sending_its_queue() {
+async fn a_restored_backup_behind_storage_stops_before_sending_its_queue() {
     let storage = storage();
     let mut devices = group(storage.clone(), 1).await;
     let original = &mut devices[0];
@@ -144,24 +151,35 @@ async fn a_restored_backup_behind_storage_resets_before_sending_its_queue() {
     // storage already holds; storage's write 3 is beyond every reservation.
     sql(&restored.db, "INSERT INTO notes VALUES('restored','t','b')").await;
     let before = storage.request_trace().len();
-    let reason = reset_reason(restored.sync.sync_store_log().await.unwrap_err());
-    assert_eq!(reason, DeviceResetReason::StorageAhead);
-    assert!(matches!(
-        restored.writes.upload_writes().await,
-        Err(SyncError::DeviceReset(DeviceResetReason::StorageAhead))
-    ));
+    assert_eq!(
+        evidence(restored.sync.sync_store_log().await.unwrap_err()),
+        crate::DeviceIdEvidence::StorageAhead
+    );
+    assert!(restored.writes.upload_writes().await.is_err());
+    assert_eq!(
+        evidence(restored.sync.sync_store_log().await.unwrap_err()),
+        crate::DeviceIdEvidence::StorageAhead
+    );
     assert_eq!(sends(&storage.request_trace()[before..]), 0);
-    let reset = restored.directory.device_reset().unwrap().unwrap();
-    assert_eq!(reset.old_device, coven_foundation::id_source::DeviceId(1));
-    assert_ne!(reset.new_device, reset.old_device);
-    assert_eq!(reset.reason, DeviceResetReason::StorageAhead);
-    assert!(matches!(
-        restored.db.local_store_log().await,
-        Err(coven_database::DbError::DeviceReset(recorded)) if recorded == reset
-    ));
-    // The first decision keeps its id when the copy detects it again.
-    assert!(restored.sync.sync_store_log().await.is_err());
-    assert_eq!(restored.directory.device_reset().unwrap(), Some(reset));
+    nothing_recorded(&restored).await;
+    // Unrelated reads still answer while sending is stopped.
+    let titles: Vec<String> = restored
+        .db
+        .read(|sql| Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?))
+        .await
+        .unwrap();
+    assert_eq!(titles, ["first", "restored"]);
+    // Reopening finds the same evidence again; still nothing is sent.
+    restored
+        .reopen(storage.clone(), tables(), migrations())
+        .await;
+    let before = storage.request_trace().len();
+    assert_eq!(
+        evidence(restored.sync.sync_store_log().await.unwrap_err()),
+        crate::DeviceIdEvidence::StorageAhead
+    );
+    assert_eq!(sends(&storage.request_trace()[before..]), 0);
+    nothing_recorded(&restored).await;
 }
 
 #[tokio::test]
@@ -180,7 +198,7 @@ async fn a_backup_that_storage_has_not_passed_continues_as_the_same_device() {
 }
 
 #[tokio::test]
-async fn a_second_live_copy_that_loses_a_slot_stops_and_resets() {
+async fn a_second_live_copy_that_loses_a_slot_stops() {
     let storage = storage();
     let mut devices = group(storage.clone(), 1).await;
     let original = &mut devices[0];
@@ -193,21 +211,26 @@ async fn a_second_live_copy_that_loses_a_slot_stops_and_resets() {
     assert_eq!(original.writes.upload_writes().await.unwrap().len(), 1);
     // Its attempt finds the path occupied by different bytes.
     assert_eq!(
-        reset_reason(second.writes.upload_writes().await.unwrap_err()),
-        DeviceResetReason::SlotMismatch
+        evidence(second.writes.upload_writes().await.unwrap_err()),
+        crate::DeviceIdEvidence::DifferentBytes
     );
     let before = storage.request_trace().len();
-    // The losing copy's later sends wait; the pass records its reset.
+    // The losing copy's later sends wait; the pass reports the same evidence.
     assert!(second.writes.upload_writes().await.is_err());
     assert_eq!(
-        reset_reason(second.sync.sync_store_log().await.unwrap_err()),
-        DeviceResetReason::SlotMismatch
+        evidence(second.sync.sync_store_log().await.unwrap_err()),
+        crate::DeviceIdEvidence::DifferentBytes
     );
     assert_eq!(sends(&storage.request_trace()[before..]), 0);
+    nothing_recorded(&second).await;
+    // Reopened, its first attempt meets the same occupied path again.
+    second.reopen(storage.clone(), tables(), migrations()).await;
+    second.catch_up().await;
     assert_eq!(
-        second.directory.device_reset().unwrap().unwrap().reason,
-        DeviceResetReason::SlotMismatch
+        evidence(second.writes.upload_writes().await.unwrap_err()),
+        crate::DeviceIdEvidence::DifferentBytes
     );
+    nothing_recorded(&second).await;
     // The winning copy's bytes stay, and it keeps syncing.
     original.sync.sync_store_log().await.unwrap();
 }
@@ -216,11 +239,11 @@ async fn a_second_live_copy_that_loses_a_slot_stops_and_resets() {
 async fn reading_its_own_replacement_stops_the_old_copy() {
     let storage = storage();
     let mut devices = group(storage.clone(), 1).await;
-    let first = &mut devices[..1];
     // A reset of the first copy registers itself under a fresh id, replacing
     // the first device's id.
     let mut replacement =
-        crate::device_log_sync::tests::device_of(storage.clone(), 9, first[0].member.clone()).await;
+        crate::device_log_sync::tests::device_of(storage.clone(), 9, devices[0].member.clone())
+            .await;
     replacement.sync.sync_store_log().await.unwrap();
     replacement
         .sync
@@ -230,12 +253,23 @@ async fn reading_its_own_replacement_stops_the_old_copy() {
         })
         .await
         .unwrap();
+    let old = &mut devices[0];
     let before = storage.request_trace().len();
     assert_eq!(
-        reset_reason(first[0].sync.sync_store_log().await.unwrap_err()),
-        DeviceResetReason::Replaced
+        evidence(old.sync.sync_store_log().await.unwrap_err()),
+        crate::DeviceIdEvidence::Replaced
     );
     assert_eq!(sends(&storage.request_trace()[before..]), 0);
+    nothing_recorded(old).await;
+    // The applied replacement stops it again after reopening.
+    old.reopen(storage.clone(), tables(), migrations()).await;
+    let before = storage.request_trace().len();
+    assert_eq!(
+        evidence(old.sync.sync_store_log().await.unwrap_err()),
+        crate::DeviceIdEvidence::Replaced
+    );
+    assert_eq!(sends(&storage.request_trace()[before..]), 0);
+    nothing_recorded(old).await;
 }
 
 #[tokio::test]
@@ -362,8 +396,8 @@ async fn other_operations_never_hide_a_newer_own_snapshot() {
         );
         let before = storage.request_trace().len();
         assert_eq!(
-            reset_reason(restored.sync.sync_store_log().await.unwrap_err()),
-            DeviceResetReason::StorageAhead,
+            evidence(restored.sync.sync_store_log().await.unwrap_err()),
+            crate::DeviceIdEvidence::StorageAhead,
             "{extra} other operations"
         );
         assert_eq!(sends(&storage.request_trace()[before..]), 0);

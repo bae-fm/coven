@@ -1,10 +1,9 @@
 //! Evidence that this installation still owns its counters, gathered by the
-//! first phase before any send, and the durable decision to reset (§10).
+//! first phase before any send (§10).
 
 use super::*;
 use crate::identity::{self, Counters, Ends, Evidence, SessionEvidence};
 use coven_database::IdentityReservations;
-use coven_foundation::files::DeviceReset;
 
 impl StoreLogSync {
     /// Judge this completed first phase. Own entries and key copies come from
@@ -61,7 +60,7 @@ impl StoreLogSync {
             })
         };
         // Custody was compared with this database's id when the store opened.
-        identity::check(local.device, reserved, Some(local.device), scan.await)
+        identity::check(reserved, scan.await)
     }
 
     async fn session_identity_evidence(
@@ -115,36 +114,6 @@ impl StoreLogSync {
             posted,
             snapshots,
         })
-    }
-
-    /// Durably decide to replace this stopped copy, keeping the first fresh id,
-    /// then refuse every later database call (§10). The app reopens through
-    /// `reset_device`, which moves this copy aside and loads a new device.
-    pub(crate) async fn record_device_reset(&self) -> SyncError {
-        let Some(reason) = self.send.stopped() else {
-            return coven_database::DbError::Invariant {
-                what: "a device reset is decided only after sending stopped",
-            }
-            .into();
-        };
-        let recorded = (|| {
-            let old = self
-                .directory
-                .settings()
-                .map_err(SyncError::disk)?
-                .device_id;
-            let reset = self.directory.record_device_reset(&DeviceReset {
-                old_device: old,
-                new_device: self.ids.new_device_id(),
-                reason,
-            })?;
-            self.database.stop_for_device_reset(reset)?;
-            Ok::<_, SyncError>(())
-        })();
-        match recorded {
-            Ok(()) => SyncError::DeviceReset(reason),
-            Err(error) => error,
-        }
     }
 }
 

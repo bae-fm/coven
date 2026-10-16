@@ -53,8 +53,8 @@ pub use coven_format::{IamPolicy, MemberAccess, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{
-    BootstrapDirectoryError, DeviceReset, DeviceResetReason, FileError, FileName, FileNameError,
-    SettingsError, StoreDir, StoreInfo, StoreLayout, StoreLayoutError, StoreLockError,
+    BootstrapDirectoryError, DeviceReset, FileError, FileName, FileNameError, SettingsError,
+    StoreDir, StoreInfo, StoreLayout, StoreLayoutError, StoreLockError,
 };
 pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{
@@ -89,11 +89,12 @@ pub use circles::Circles;
 pub use coven_format::store_log::{MemberRole, SnapshotId};
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
-    AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject, DeviceInfo,
-    DeviceState, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteTarget,
-    JoinRequest, LocalFailure, MemberInfo, OldKeyDeletion, OperationError, OperationId,
-    OperationKind, PendingReason, PendingRecord, PendingSubject, Prerequisite,
-    ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError, SyncFailure, SyncStatus,
+    AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject,
+    DeviceIdEvidence, DeviceInfo, DeviceState, FileMissingReason, FileSourceFailure, Invite,
+    InviteAccess, InviteTarget, JoinRequest, LocalFailure, MemberInfo, OldKeyDeletion,
+    OperationError, OperationId, OperationKind, PendingReason, PendingRecord, PendingSubject,
+    Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError, SyncFailure,
+    SyncStatus,
 };
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

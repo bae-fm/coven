@@ -1,13 +1,14 @@
-//! Finish a recorded device reset as a new installation (§10, §19.2).
+//! Reset this installation as a new device, at the app's call (§10, §19.2).
 
 use super::*;
 
-/// Replace this installation with a new device loaded from storage: a
-/// recorded stale-copy reset (§10), or a damaged database (§19.2). Settings,
-/// credentials, the connection and both key custodies are checked before
-/// anything moves; a failure leaves the files in place with its typed error.
-/// The new device names the old id as the one it replaces (§12.1). Only the
-/// old database's operation journal is read, for the S3 key deletions it owed.
+/// Replace this installation with a new device loaded from storage, whatever
+/// the app's reason: another copy using this device's id, a missing device
+/// entry (§10), or a damaged database (§19.2). Settings, credentials, the
+/// connection and both key custodies are checked before anything moves; a
+/// failure leaves the files in place with its typed error. The new device
+/// names the old id as the one it replaces (§12.1). Only the old database's
+/// operation journal is read, for the S3 key deletions it owed.
 pub(crate) async fn reset_device(
     mut builder: CovenBuilder,
     store: StoreId,
@@ -19,22 +20,15 @@ pub(crate) async fn reset_device(
         .map_err(CovenError::from)?;
     let settings = directory.settings().map_err(CovenError::from)?;
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
-    // Calling reset_device is the app's approval of a missing device entry.
-    let missing = keychain.device_id()? != Some(settings.device_id);
     let location = StorageSettings::new(directory.clone());
     if location.read().map_err(SyncError::from)?.is_none() {
-        // Only a decided reset or a missing entry proceeds without storage.
+        // Without storage only a decided reset or a missing device entry
+        // proceeds: there is nothing to load a damaged database from.
         if recorded.is_none() {
-            if !missing {
+            if keychain.device_id()? == Some(settings.device_id) {
                 return Err(SyncError::NoStorage.into());
             }
-            record(
-                &builder,
-                &directory,
-                &settings,
-                DeviceResetReason::IdentityMismatch,
-            )
-            .await?;
+            record(&builder, &directory, &settings).await?;
         }
         return reset_unconnected(builder, store, &settings.name, keychain).await;
     }
@@ -86,12 +80,7 @@ pub(crate) async fn reset_device(
         .await
         .map_err(SyncError::from)?;
     if recorded.is_none() {
-        let reason = if missing {
-            DeviceResetReason::IdentityMismatch
-        } else {
-            DeviceResetReason::DatabaseDamage
-        };
-        record(&builder, &directory, &settings, reason).await?;
+        record(&builder, &directory, &settings).await?;
     }
     let code = RestoreCode {
         store,
@@ -121,14 +110,12 @@ async fn record(
     builder: &CovenBuilder,
     directory: &StoreDir,
     settings: &coven_foundation::files::StoreSettings,
-    reason: DeviceResetReason,
 ) -> Result<(), BootstrapError> {
     let lock = directory.lock_for_open().await.map_err(CovenError::from)?;
     directory
         .record_device_reset(&DeviceReset {
             old_device: settings.device_id,
             new_device: builder.ids.new_device_id(),
-            reason,
         })
         .map_err(SyncError::from)?;
     drop(lock);

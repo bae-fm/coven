@@ -146,8 +146,8 @@ impl StoreLogSync {
         self.send.invalidate();
     }
 
-    pub(crate) fn send_stopped(&self) -> bool {
-        self.send.stopped().is_some()
+    pub(crate) fn send_stopped(&self) -> Option<crate::DeviceIdEvidence> {
+        self.send.stopped()
     }
 
     pub(crate) fn copy_observation(&self) -> Result<Vec<keys::ObservedCopy>, SyncError> {
@@ -351,6 +351,10 @@ impl StoreLogSync {
         {
             self.send.invalidate();
             return Err(SyncError::Removed);
+        }
+        // Another copy using this device's id stops this owner the same way.
+        if let Some(evidence) = self.send.stopped() {
+            return Err(SyncError::DeviceIdInUse(evidence));
         }
         // Held credentials a kept replacement retired cannot author anything;
         // the installation keeps its device id and queues (§10). A pair no

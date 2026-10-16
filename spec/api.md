@@ -475,10 +475,6 @@ pub enum DbError {
     /// that transaction, holding its uncommitted changes or its old snapshot;
     /// this handle, read-only or not, refuses calls until reopened (§5).
     RollbackFailed,
-    /// Sync found this copy stale, replaced or holding another copy's slot.
-    /// Every later call and live query of this handle fails; reopening
-    /// requires `reset_device` (§10).
-    DeviceReset(DeviceReset),
     /// Saving pending state failed. The call that lost the update and every
     /// later call and live query fail with this same cause until the store is
     /// reopened (E5).
@@ -892,9 +888,9 @@ impl CovenBuilder {
     /// opens as `Stopped`; otherwise its status is `Disconnected`.
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
 
-    /// Replaces a damaged local database, or a copy whose device entry is
-    /// missing (§10), with a new device loaded from storage (§19.2); finishes
-    /// a reset sync recorded. Uses saved settings and custody; no salvage.
+    /// Replaces this copy with a new device loaded from storage when the app
+    /// chooses: a damaged database (§19.2), a missing device entry, or another
+    /// copy using this id (§10). Uses saved settings and custody; no salvage.
     /// Checks storage and keys before moving the old directory aside.
     /// Uses the existing bootstrap state and errors; an interrupted call
     /// resumes with the same fresh id. The returned handle holds a device-reset
@@ -1692,8 +1688,10 @@ while let Ok(values) = lost.next().await {
     unpublished schema, failed file or retention wait stops its subject
     and lets independent work continue; it does not set `Failed`.
   - Removal records a `Connection` block with `Removed`, and stops the loop
-    for good. Local failures also name their pending subject and preserve
-    their typed cause for a waiting caller.
+    for good. Another copy using this device's id fails the pass with
+    `DeviceIdInUse` and stops the loop, recording nothing (§10). Local
+    failures also name their pending subject and preserve their typed cause
+    for a waiting caller.
   - If the database cannot save a pending record, stop the loop and fail database
     calls and live queries with that cause, as `DbError::PendingPersistence`,
     until the store is reopened.
@@ -2171,9 +2169,9 @@ pub enum SyncError {
     Damaged(DamagedObject),
     /// This device or its member was removed; syncing stops for good (§10).
     Removed,
-    /// This copy cannot keep its device id. It sends nothing more; the reset
-    /// is recorded and `reset_device` finishes it (§10).
-    DeviceReset(DeviceResetReason),
+    /// Another copy uses this device's id; this one sends nothing more.
+    /// Nothing is recorded; `reset_device` is the app's option (§10).
+    DeviceIdInUse(DeviceIdEvidence),
     /// Held signing credentials are no longer current for this stable id.
     /// Sending stops; restoring with current keys registers a new device.
     MemberKeysReplaced { member: MemberId },
@@ -2217,6 +2215,16 @@ pub enum SyncError {
     /// Deleting an S3 key with admin access did not establish its absence;
     /// the key stays pending (§13).
     AccessKeyNotDeleted(DeleteAccessKeyError),
+}
+
+/// What showed that another copy uses this device's id (§10).
+pub enum DeviceIdEvidence {
+    /// Storage holds an own object numbered beyond this copy's reservations.
+    StorageAhead,
+    /// One of this device's own immutable paths holds different bytes.
+    DifferentBytes,
+    /// The store log keeps a replacement of this device's id.
+    Replaced,
 }
 
 /// Why coven's deletion of an S3 key did not clear its record (§13).
@@ -2525,20 +2533,6 @@ impl CovenHandle {
 pub struct DeviceReset {
     pub old_device: DeviceId,
     pub new_device: DeviceId,
-    pub reason: DeviceResetReason,
-}
-
-pub enum DeviceResetReason {
-    /// The database's id does not match device-only custody.
-    IdentityMismatch,
-    /// Storage proves counters beyond those reserved in the local database.
-    StorageAhead,
-    /// An occupied immutable path holds different bytes.
-    SlotMismatch,
-    /// The store log has a kept replacement of this device's id.
-    Replaced,
-    /// The database could not be trusted; no local work was salvaged (§19.2).
-    DatabaseDamage,
 }
 
 pub enum SyncStatus {

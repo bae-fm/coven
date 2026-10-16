@@ -556,8 +556,8 @@ async fn a_different_occupant_resets_on_every_arm_and_a_failed_read_stays_pendin
         assert!(
             matches!(
                 devices[0].writes.upload_writes().await,
-                Err(SyncError::DeviceReset(
-                    coven_foundation::files::DeviceResetReason::SlotMismatch
+                Err(SyncError::DeviceIdInUse(
+                    crate::DeviceIdEvidence::DifferentBytes
                 ))
             ),
             "{arm}"

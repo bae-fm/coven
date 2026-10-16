@@ -118,43 +118,58 @@ theorem receipt_after_restore (fresh number : Nat) (kept : List Registration)
       · exact Or.inl ⟨o, ho, ha, hp⟩
       · exact Or.inr ⟨o, ho, ha, hp⟩
 
+/-- A copy is active, or stopped by reading a kept replacement of its own id.
+Stopping records nothing and chooses no fresh id: local commits continue and
+nothing is sent. Only the app's `reset_device` (`finish`) registers a new
+device (§10). -/
 inductive Device where
   | active (state : Local) (past : List Path)
-  | resetting (registration : Registration) (reason : ResetReason)
+  | stopped (state : Local) (past : List Path)
   deriving DecidableEq, Repr
 
-/-- The observing copy chooses its own fresh id. It does not take over the
-other copy's replacement id. Fresh-id generation is supplied by bootstrap. -/
-def observe (d : Device) (r : Registration) (fresh : Nat) : Device :=
+/-- Reading its own replacement stops the copy; it never takes over the
+replacing device's id. A stopped copy reads nothing more until reopened. -/
+def observe (d : Device) (r : Registration) : Device :=
   match d with
-  | .resetting _ _ => d
+  | .stopped _ _ => d
   | .active l past =>
-    if l.device = r.old then .resetting ⟨l.device, fresh, 1⟩ .replaced
+    if l.device = r.old then .stopped l (applyOnce past r.entry)
     else .active l (applyOnce past r.entry)
 
+/-- A local commit records the reads it follows, stopped or not. -/
 def commit (d : Device) (bytes : Bytes) : Device × Option LogObject :=
   match d with
-  | .resetting _ _ => (d, none)
   | .active l past =>
     let next := commitWrite l bytes
     (.active next past, some ⟨l.device, next.reserved.logs.writes, .writes, past⟩)
+  | .stopped l past =>
+    let next := commitWrite l bytes
+    (.stopped next past, some ⟨l.device, next.reserved.logs.writes, .writes, past⟩)
 
 def gate (d : Device) (kind : SendKind) (custody : Option Nat)
     (scan : Except ReadFailure Evidence) : Gate :=
   match d with
   | .active l _ => authorizeSend kind l.device l.reserved custody scan
-  | .resetting _ reason => .reset reason
+  | .stopped _ _ => .reset .replaced
 
 def finish (r : Registration) (loaded : Applied) (past : List Path) : Device :=
   .active (loadDevice r.fresh r.number loaded) past
 
+/-- Reading its own replacement stops every send, whatever custody and the
+scan say, and stays stopped across local commits. Each such commit records
+the replacement among its reads, so no reader keeping it accepts the object. -/
 theorem old_copy_stops (l : Local) (past : List Path) (r : Registration)
-    (fresh : Nat) (old : l.device = r.old) (bytes : Bytes)
+    (old : l.device = r.old) (bytes : Bytes)
     (kind : SendKind) (custody : Option Nat) (scan : Except ReadFailure Evidence) :
-    observe (.active l past) r fresh = .resetting ⟨l.device, fresh, 1⟩ .replaced ∧
-    (commit (observe (.active l past) r fresh) bytes).2 = none ∧
-    gate (observe (.active l past) r fresh) kind custody scan = .reset .replaced := by
-  simp [observe, old, commit, gate]
+    observe (.active l past) r = .stopped l (applyOnce past r.entry) ∧
+    gate (commit (observe (.active l past) r) bytes).1 kind custody scan = .reset .replaced ∧
+    ∀ o, (commit (observe (.active l past) r) bytes).2 = some o → accepts [r] o = false := by
+  refine ⟨by simp [observe, old], by simp [observe, old, commit, gate], ?_⟩
+  intro o made
+  simp only [observe, old, ↓reduceIte, commit, Option.some.injEq] at made
+  subst made
+  exact after_read_rejected [r] _ r (List.mem_singleton_self r) rfl
+    ((applyOnce_members past r.entry r.entry).mpr (Or.inl rfl))
 
 theorem observed_replacement_blocks_send (l : Local) (past : List Path)
     (kind : SendKind) (custody : Option Nat) (e : Evidence) (replaced : e.replaced = true) :

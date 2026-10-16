@@ -125,7 +125,7 @@ pub(crate) async fn create_entry(
 
 /// Create one of this device's immutable objects, returning the reply's
 /// metadata when the provider sent it. An occupied path counts as stored
-/// only with equal complete bytes; others reset this copy (§10).
+/// only with equal complete bytes; others stop this copy (§10).
 pub(crate) async fn create_own(
     storage: &dyn Storage,
     send: &crate::SendGate,

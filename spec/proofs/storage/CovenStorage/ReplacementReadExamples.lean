@@ -33,10 +33,12 @@ theorem restored_and_live_copies_stop :
       (.ok { registeredEvidence with listed := pending.reserved }) = .reset .storageAhead ∧
     gate (.active installed []) .entry (some 7)
       (.ok { registeredEvidence with replaced := true }) = .reset .replaced ∧
-    observe (.active pending [.entry 7 1]) replaced 9 = .resetting replacedAgain .replaced ∧
-    (commit (observe (.active pending [.entry 7 1]) replaced 9) [44]).2 = none ∧
-    gate (observe (.active pending [.entry 7 1]) replaced 9) .file (some 7)
+    observe (.active pending [.entry 7 1]) replaced =
+      .stopped pending [replaced.entry, .entry 7 1] ∧
+    gate (commit (observe (.active pending [.entry 7 1]) replaced) [44]).1 .file (some 7)
       (.ok registeredEvidence) = .reset .replaced ∧
+    (commit (observe (.active pending [.entry 7 1]) replaced) [44]).2.map (accepts [replaced]) =
+      some false ∧
     (commit (finish replacedAgain (load [replaced] [firstWrite, racingWrite])
       [replaced.entry, replacedAgain.entry]) [44]).2 =
       some ⟨9, 1, .writes, [replaced.entry, replacedAgain.entry]⟩ := by decide

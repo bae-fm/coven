@@ -287,8 +287,7 @@ macro_rules! coven_tables {
             CREATE TABLE _coven_device_reset (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 old_device BLOB NOT NULL CHECK(length(old_device)=8),
-                new_device BLOB NOT NULL CHECK(length(new_device)=8),
-                reason TEXT NOT NULL CHECK(reason IN ('identity-mismatch','storage-ahead','slot-mismatch','replaced','database-damage'))
+                new_device BLOB NOT NULL CHECK(length(new_device)=8)
             ) STRICT;
         ");
         // §15's historical coverage: per audience and writer, the earliest

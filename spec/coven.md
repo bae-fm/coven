@@ -218,8 +218,8 @@ are those of [§2](#2-threat-model); the write-ups state their additional limits
     attempt, and storage acceptance and local acknowledgement eventually succeed
     ([queue proof: `every_queued_write_settles`](proofs/queue.md#what-is-proved));
   - a damaged local database or restored stale copy starts again from
-    storage. Edits it had not uploaded are lost, and the app is told
-    (§10, §19.2). The [storage model](proofs/storage.md#restore-another-live-copy-and-writes)
+    storage when the app resets it. Edits it had not uploaded are lost, and
+    the app is told (§10, §19.2). The [storage model](proofs/storage.md#restore-another-live-copy-and-writes)
     checks the loss and reset boundary, not successful recovery or app notification;
   - a recorded rotation or snapshot publication resumes with the same data
     within one attempt, and finishes under §18's prerequisites and fair
@@ -3441,11 +3441,11 @@ Carol's tablet:
     evidence for the running session. This is initialization work, not an
     every-pass history listing; all occupied paths still require comparison.
   - A stored number beyond this database's last reserved number for that
-    kind of object proves this is a stale copy. An outstanding local reservation is not stale
-    merely because its upload succeeded before a crash.
+    kind of object proves another copy uses this id. An outstanding local
+    reservation is not stale merely because its upload succeeded before a crash.
     - A writer's key copies compare with the greatest copy number it
       reserved, confirmed or not. A live copy's stored copies never pass
-      that number, and a stored copy beyond it resets the copy
+      that number, and a stored copy beyond it stops the copy
       ([`live_copy_sends`, `key_copy_ahead_resets`](proofs/storage/CovenStorage/IdentityCounters.lean)).
       A number within the reservations whose clear prefix does not decode
       is storage damage, not a stale copy: it waits (§11).
@@ -3454,7 +3454,7 @@ Carol's tablet:
       attempt's path is never reused (§15). Snapshots compare with the
       greatest number reserved, published or not; other operations reserve
       none. A live copy's stored snapshots never pass it, and a stored
-      snapshot beyond it resets the copy. Comparing with every operation id
+      snapshot beyond it stops the copy. Comparing with every operation id
       instead would let a restored copy's other operations hide its newer
       self's snapshot, whose deleted path the restored copy could then reuse
       ([`live_copy_sends`, `snapshot_ahead_resets`, `key_copies_counted`, `operation_ids_hide_newer_snapshot`](proofs/storage/CovenStorage/IdentityCounters.lean)).
@@ -3504,9 +3504,12 @@ Carol's tablet:
     drop and restore the retirement before it is final. Key replacement
     bounds old-credential publication; it does not end the member's device
     logs. Devices using the new credentials continue those logs.
-- A stale copy resets as a new device using storage and saved custody.
-  - Stop its local writes and transfers. Discard its database and pending
-    local work; do not salvage or renumber waiting writes.
+- Evidence that another copy uses this device's id (above, a byte mismatch
+  below, or a kept replacement) stops sending with `SyncError::DeviceIdInUse`
+  naming it. Nothing is recorded; reopening finds it again. The app may call
+  `reset_device`, making this copy a new device from storage and custody.
+  - Discard its database and pending local work; do not salvage or renumber
+    waiting writes.
   - Keep the deletions the old database owed: each key its operation
     journal, read in place, holds pending `DeleteAccessKey` stays pending in
     the new database before it is published. A key it made but never
@@ -3542,17 +3545,14 @@ Carol's tablet:
     - A claim whose device never goes on to create keeps refusing other
       installations at that location; that device's retried setup completes
       it.
-  - Tell the app which old id was replaced and why, and that unsent edits
-    were discarded. Store the `DeviceReset` record in `_coven_device_reset`
-    in the replacement database before publishing its usable handle (E5).
-    Bootstrap retains the old/new ids and reason until that record commits;
-    directory publication and returning a usable handle require that commit.
-    The record survives reopening, is local to this installation and is not
-    snapshot data. `device_reset()` and `subscribe_device_reset()` use the
-    same query.
-  - Until replacement finishes, keep the installation unavailable. Retry
-    through the existing bootstrap state, using the same new id and entry.
-    Never reopen the discarded copy as a working store.
+  - Before publishing the replacement handle, commit its `DeviceReset`
+    notice, the old and new ids, to `_coven_device_reset` (E5); bootstrap
+    keeps both ids until then. It tells the app unsent edits were discarded,
+    survives reopening, is local and is not snapshot data.
+    `device_reset()` and `subscribe_device_reset()` use the same query.
+  - Until replacement finishes, opening refuses the installation; a retried
+    `reset_device` keeps the same new id and entry. Never reopen the
+    discarded copy as a working store.
 - The new device's add entry names the old id it replaces (D6).
   - The old id is shown as replaced. This changes no membership or keys.
   - Only that member can replace the id. The new id differs from the old.
@@ -3581,9 +3581,8 @@ Carol's tablet:
     to extend and no wait for another replacement to include it. Retain
     relevant inputs until the deciding entries are final; a changed replay
     recomputes write admission atomically (§9).
-  - A still-running old copy stops sending when it reads its replacement,
-    and resets the same way, choosing its own fresh id. It does not take
-    over the id of the device whose replacement it read.
+  - A still-running old copy stops sending when it reads its replacement.
+    Resetting it gives it its own fresh id, never the replacing device's.
   - Replacement does not exempt an entry from §9's landing rule. A stale
     registration or replacement retry that lands too late is consumed and
     reported. Its id is never registered again (above); registering again
@@ -3593,8 +3592,8 @@ Carol's tablet:
     once and record completion locally (§6).
 - E.g. Ana backs up her phone after write 5, then uploads writes 6 and 7.
   Her restored phone still has counter 5.
-  - Its storage check finds newer writes before it sends anything. It registers
-    as `ana-phone-2`, replacing `ana-phone`, and loads 6 and 7.
+  - Its storage check finds newer writes before it sends anything. Reset, it
+    registers as `ana-phone-2`, replacing `ana-phone`, and loads 6 and 7.
   - Its first new write is `<store>/devices/ana-phone-2/1`.
     Edits made only in the restored copy are discarded, with an app notice.
 - Ana's still-running old phone can have write 8 in flight when that
@@ -3613,7 +3612,7 @@ Carol's tablet:
     The check passes and that same device uploads the queued write.
 - An occupied immutable path succeeds only if its complete stored bytes
   equal the bytes this attempt would send. Compare before retiring its queue
-  row; a mismatch on this device's path triggers the same device reset.
+  row; a mismatch on this device's path stops the copy the same way.
   - This applies to writes, entries, snapshots, files, each writer's
     sealed key copies and S3 key deliveries at
     `access-keys/<member>/<attempt>`, whose fresh attempt id only copies of
@@ -3623,7 +3622,7 @@ Carol's tablet:
   - A read failure keeps the attempt pending; occupation alone proves nothing.
   - Two live copies can pass the check together and send different bytes
     to one path. Content-bound nonces separate their encryption (§11.1);
-    the byte check still resets the losing copy and discards its unsent edits.
+    the byte check still stops the losing copy, whose reset discards its edits.
 - Every write record is signed with the current signing key of its device's
   stable owner in the replay of its `store_log_read`. The device path and
   that recorded view supply the author and key; the write adds neither field.
@@ -6493,7 +6492,7 @@ holds failures and rejected entries, without making either wait look completed.
   - Reset boundaries still decide which parts apply (§19.3).
 - A damaged database fails to open with `DbError::DamagedDatabase`.
   The app calls `CovenBuilder::reset_device` (E1).
-  - Use the same new-device path as a stale copy (§10), from saved settings
+  - Use §10's reset to a new device, from saved settings
     and custody; only §10's owed deletions carry over.
   - Check storage and unlock the member and store keys before moving the
     damaged files. A missing setting, unavailable key or failed connection
@@ -6508,7 +6507,7 @@ holds failures and rejected entries, without making either wait look completed.
   - Load storage under the fresh id, then publish the replacement handle.
     Never import unsent rows or files from the damaged directory.
   - Before publishing that handle, commit its `_coven_device_reset` record
-    with the old and new ids and `DatabaseDamage` (E5). Both notice queries
+    with the old and new ids (E5). Both notice queries
     report that unsent edits may have been lost, including after reopening.
     Failure to store the notice fails replacement; it cannot publish a usable
     handle that conceals the discarded installation.

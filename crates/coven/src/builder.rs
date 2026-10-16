@@ -159,9 +159,10 @@ impl CovenBuilder {
     }
 
     /// Replace this installation with a new device loaded from storage (§10,
-    /// §19.2): for a reset sync decided, a damaged database, or a device entry
-    /// `open` found missing. Uses saved settings, credentials and member keys;
-    /// nothing unsent is salvaged.
+    /// §19.2), whenever the app chooses: after sync found another copy using
+    /// this device's id, a damaged database, or a device entry `open` found
+    /// missing. Uses saved settings, credentials and member keys; nothing
+    /// unsent is salvaged.
     /// An interrupted call resumes with the same fresh id. The returned
     /// handle's `device_reset()` names the old and new ids.
     pub async fn reset_device(
@@ -270,7 +271,7 @@ impl CovenBuilder {
             let mut builder = self;
             let settings = lock.settings()?;
             let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
-            // A reset sync already decided waits for reset_device (§10).
+            // An interrupted reset_device resumes only through reset_device (§10).
             if directory.unfinished_device_reset()?.is_some() {
                 return Err(StoreLockError::BootstrapPending(settings.id).into());
             }

@@ -90,16 +90,4 @@ impl Database {
     pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>> {
         self.subscribe(|sql| sql.device_reset())
     }
-
-    /// Refuse every later call and live query of this copy: sync decided to
-    /// replace it, and nothing it holds may be used or sent again (§10).
-    pub fn stop_for_device_reset(&self, reset: DeviceReset) -> Result<(), DbError> {
-        let guard = self.inner.read().expect("database lock poisoned");
-        let inner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        inner
-            .access
-            .observer
-            .fail(crate::observation::HandleFailure::DeviceReset(reset));
-        Ok(())
-    }
 }

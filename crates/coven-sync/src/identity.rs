@@ -4,8 +4,19 @@
 use crate::{SendGate, SyncError};
 use coven_crypto::{ObjectDigest, ObjectHasher};
 use coven_database::{DeviceState, IdentityReservations, StoreLog};
-use coven_foundation::{files::DeviceResetReason, id_source::DeviceId};
+use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, Storage, StorageFailure};
+
+/// What showed that another copy uses this device's id (§10, E5).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceIdEvidence {
+    /// Storage holds an own object numbered beyond this copy's reservations.
+    StorageAhead,
+    /// One of this device's own immutable paths holds different bytes.
+    DifferentBytes,
+    /// The store log keeps a replacement of this device's id.
+    Replaced,
+}
 
 /// The greatest own write and entry numbers one kind of evidence shows.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -61,12 +72,13 @@ impl Evidence {
     }
 }
 
-/// The identity verdict before any send (Lean `CovenStorage.checkIdentity`).
+/// The identity verdict before any send (Lean `CovenStorage.checkIdentity`
+/// with custody naming this device: opening refuses any other custody).
 #[derive(Debug)]
 pub(crate) enum Gate {
     Send,
     Pending(SyncError),
-    Reset(DeviceResetReason),
+    InUse(DeviceIdEvidence),
     Stopped,
 }
 
@@ -79,21 +91,13 @@ pub(crate) fn ahead(observed: &Counters, reserved: &IdentityReservations) -> boo
         || observed.snapshots > reserved.snapshots
 }
 
-pub(crate) fn check(
-    device: DeviceId,
-    reserved: &IdentityReservations,
-    custody: Option<DeviceId>,
-    scan: Result<Evidence, SyncError>,
-) -> Gate {
-    if custody != Some(device) {
-        return Gate::Reset(DeviceResetReason::IdentityMismatch);
-    }
+pub(crate) fn check(reserved: &IdentityReservations, scan: Result<Evidence, SyncError>) -> Gate {
     match scan {
         Err(error) => Gate::Pending(error),
         Ok(evidence) if evidence.removed => Gate::Stopped,
-        Ok(evidence) if evidence.replaced => Gate::Reset(DeviceResetReason::Replaced),
+        Ok(evidence) if evidence.replaced => Gate::InUse(DeviceIdEvidence::Replaced),
         Ok(evidence) if ahead(&evidence.observed(), reserved) => {
-            Gate::Reset(DeviceResetReason::StorageAhead)
+            Gate::InUse(DeviceIdEvidence::StorageAhead)
         }
         Ok(_) => Gate::Send,
     }
@@ -143,7 +147,7 @@ pub(crate) async fn stored_digest(
 }
 
 /// Equal complete bytes count as stored. Different bytes on this device's own
-/// path mean another copy holds its id: stop every send and reset (§10).
+/// path mean another copy uses its id: stop every send (§10).
 pub(crate) async fn settle_occupied(
     storage: &dyn Storage,
     send: &SendGate,
@@ -157,7 +161,7 @@ pub(crate) async fn settle_occupied(
         path = path.as_str(),
         "own immutable path holds another copy's bytes"
     );
-    Err(send.stop(DeviceResetReason::SlotMismatch))
+    Err(send.stop(DeviceIdEvidence::DifferentBytes))
 }
 
 #[cfg(test)]

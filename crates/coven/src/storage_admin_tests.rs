@@ -201,13 +201,13 @@ async fn a_reset_leaves_an_invites_made_key_live() {
             }
             std::fs::write(&database, b"not a database").unwrap();
         }
-        // Without a recorded stale-copy reset the reset records damage itself.
+        // An interrupted reset already recorded its decision; otherwise the
+        // reset records it itself.
         if recorded {
             directory
                 .record_device_reset(&coven_foundation::files::DeviceReset {
                     old_device: directory.settings().unwrap().device_id,
                     new_device: DeviceId(9000),
-                    reason: coven_foundation::files::DeviceResetReason::SlotMismatch,
                 })
                 .unwrap();
         }

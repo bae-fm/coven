@@ -20,7 +20,7 @@ mod settings;
 pub use atomic_file::{AtomicFile, FileError, FileWriter};
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::StoreCreationError;
-pub use device_reset::{DeviceReset, DeviceResetReason};
+pub use device_reset::DeviceReset;
 pub use directory::{FileArea, FileName, FileNameError, StoreDir, StoreFile};
 pub use file_reader::FileReader;
 pub use layout::{StoreInfo, StoreLayout, StoreLayoutError};
