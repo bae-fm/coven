@@ -43,6 +43,7 @@ impl StoreLogSync {
         crate::effects::validate_change(
             state,
             me,
+            local.device,
             &StoreChange::SetAccess {
                 member,
                 access: MemberAccess::S3AccessKey {

@@ -614,7 +614,7 @@ async fn ordinary_members_can_rotate_concurrently_and_both_keys_remain_readable(
 
 #[tokio::test]
 async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
-    use coven_foundation::{clock::FixedClock, id_source::DeviceId};
+    use coven_foundation::clock::FixedClock;
     use coven_storage::test_utils::MemoryStorage;
     use std::{
         sync::Arc,
@@ -676,10 +676,10 @@ async fn dropped_rotation_restarts_with_new_material_only_after_revalidation() {
                 member: ben.member.member(),
             }
         } else {
-            StoreChange::AddDevice {
-                device: DeviceId(9),
-                name: "witness".into(),
-                replaces: None,
+            let member = ana.member.member();
+            StoreChange::SetAccess {
+                access: ana.log().await.replay.state.members[&member].access.clone(),
+                member,
             }
         };
         ana.sync.make_and_upload_entry(witness).await.unwrap();

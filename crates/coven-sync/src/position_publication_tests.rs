@@ -1,4 +1,4 @@
-use crate::device_log_sync::tests::{group, storage, STORE_ID};
+use crate::device_log_sync::tests::{device_of, group, storage, STORE_ID};
 use crate::posted_positions::{observe, open, tests::signed_positions};
 use crate::store_log_sync::tests::Device;
 use crate::{PendingReason as Reason, PendingRecord, PendingSubject as Subject};
@@ -464,15 +464,17 @@ async fn an_initial_post_with_own_uploads_claims_only_the_empty_past() {
 
 #[tokio::test]
 async fn waiting_author_and_key_reuse_retained_bytes_after_the_prerequisite_arrives() {
-    use coven_format::store_log::StoreChange;
     let storage = storage();
     let mut devices = group(storage.clone(), 1).await;
+    let mut two = device_of(storage.clone(), 2, devices[0].member.clone()).await;
     let device = &mut devices[0];
     let mut peer = device.writes.current_positions().await.unwrap().unwrap();
     peer.device = DeviceId(2);
-    // Its signed view names device 2's registration, not yet applied (D9).
-    peer.store_log.0[0].number += 1;
-    let registration = crate::store_log_object::path(STORE_ID, peer.store_log.0[0]);
+    // Its signed view names device 2's own registration, not yet applied (D9).
+    let mut own = peer.store_log.0[0];
+    (own.device, own.number) = (DeviceId(2), 1);
+    peer.store_log.0.push(own);
+    let registration = crate::store_log_object::path(STORE_ID, own);
     let waits = Reason::Waits(crate::Prerequisite::Object(registration));
     let path = ObjectPath::positions(STORE_ID, peer.device);
     storage
@@ -484,15 +486,9 @@ async fn waiting_author_and_key_reuse_retained_bytes_after_the_prerequisite_arri
     let reads = storage.reads().await;
     device.writes.observe_positions().await.unwrap();
     assert_eq!(storage.reads().await, reads);
-    device
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
-            name: "two".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    two.sync.sync_store_log().await.unwrap();
+    two.sync.load_new_device("two", None).await.unwrap();
+    device.sync.sync_store_log().await.unwrap();
     let reads = storage.reads().await;
     assert!(device
         .writes

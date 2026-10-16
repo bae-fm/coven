@@ -21,7 +21,7 @@ entry 8, which lives in that device's own folder, while every other reader
 keeps it. The history registers the id twice, which the rule forbids. -/
 def carolAgain : CovenStorelog.Log
   | 7 => entry 0 0 (List.range 7) (.addMember 2 .member "initial")
-  | 8 => entry 2 2 (List.range 8) (.addDevice 2 2)
+  | 8 => entry 2 2 (List.range 8) (.addDevice 2)
   | w => carol w
 
 theorem reregistration_lifts_retirement :
@@ -65,7 +65,7 @@ def latePhone : CovenStorelog.Finality.History :=
     | 0 => entry 0 0 [] (.create "initial")
     | 1 => entry 0 0 [0] (.addMember 1 .member "initial")
     | 2 => entry 0 0 [0, 1] (.makeCircle 5 "trip")
-    | _ => entry 1 4 [0, 1] (.addDevice 1 4),
+    | _ => entry 1 4 [0, 1] (.addDevice 1),
    fun w => if w = 3 then 33 else w,
    fun w => if w = 3 then 2 else w⟩
 

@@ -18,7 +18,7 @@ inductive Action where
   | setAccess (member : Nat) (access : String)
   | removeMember (member : Nat)
   | changeRole (member : Nat) (role : Role)
-  | addDevice (member device : Nat)
+  | addDevice (member : Nat)
   | removeDevice (member device : Nat)
   | makeCircle (circle : Nat) (name : String) (key : KeyCommitment)
   | renameCircle (circle : Nat) (name : String)
@@ -38,7 +38,7 @@ def Action.membership : Action → CovenStorelog.Action
   | .setAccess m access => .setAccess m access
   | .removeMember m => .removeMember m []
   | .changeRole m r => .changeRole m r
-  | .addDevice m d => .addDevice m d
+  | .addDevice m => .addDevice m
   | .removeDevice m d => .removeDevice m d
   | .makeCircle c name _ => .makeCircle c name
   | .renameCircle c name => .renameCircle c name

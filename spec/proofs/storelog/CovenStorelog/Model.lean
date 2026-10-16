@@ -28,7 +28,8 @@ inductive Action where
   | setAccess (member : Nat) (access : String)
   | removeMember (member : Nat) (circleKeys : List Nat)
   | changeRole (member : Nat) (role : Role)
-  | addDevice (member device : Nat)
+  /-- Registers the entry's writing device for `member` (§10). -/
+  | addDevice (member : Nat)
   | removeDevice (member device : Nat)
   | makeCircle (circle : Nat) (name : String)
   | renameCircle (circle : Nat) (name : String)
@@ -134,7 +135,7 @@ def authorized (s : State) (e : Entry) : Bool :=
   match e.action with
   | .create _ => !s.created
   | .addMember _ _ _ | .removeMember _ _ | .changeRole _ _ => admin s e.author
-  | .setAccess m _ | .addDevice m _ => member s e.author && e.author == m
+  | .setAccess m _ | .addDevice m => member s e.author && e.author == m
   | .removeDevice m d => lookup s.devices d == some m &&
       member s e.author && (e.author == m || admin s e.author)
   | .makeCircle _ _ | .raiseSchema _ ⟨.store, _⟩ => member s e.author
@@ -152,7 +153,7 @@ def alreadyInPlace (s : State) (e : Entry) : Bool :=
   | .addMember m r _ | .changeRole m r => lookup s.members m == some r
   | .setAccess m access => member s m && lookup s.access m == some access
   | .removeMember m _ => !member s m
-  | .addDevice m d => lookup s.devices d == some m
+  | .addDevice m => lookup s.devices e.device == some m
   | .removeDevice _ d => (lookup s.devices d).isNone
   | .makeCircle c name => lookup s.circles c == some ⟨name, [e.author]⟩
   | .renameCircle c name => (lookup s.circles c).any (fun x => x.name == name)
@@ -198,9 +199,9 @@ def effect (s : State) (w : Nat) (e : Entry)
         circles := removeFromCircles s.circles m remove } else none
   | .changeRole m r =>
       if member s m then some { s with members := put s.members m r } else none
-  | .addDevice m d =>
-      if member s m && (lookup s.devices d).isNone
-      then some { s with devices := put s.devices d m } else none
+  | .addDevice m =>
+      if member s m && (lookup s.devices e.device).isNone
+      then some { s with devices := put s.devices e.device m } else none
 
   | .removeDevice m d =>
       if lookup s.devices d == some m

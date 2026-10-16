@@ -205,9 +205,9 @@ successful durable retention are the conditions used in the theorems.
 **The writer set ignores replay verdicts — proved, with the old rule's
 counterexample.** [`Writers`](io/CovenIO/Writers.lean) gives one writer set
 for all three logs. `known` holds the remembered folders and every device a
-received store-log entry was written from or registers. Kept and dropped
-entries count alike; no verdict is an input. `known_monotone` shows that more
-entries or folders never remove a writer.
+received store-log entry was written from, which a registration registers.
+Kept and dropped entries count alike; no verdict is an input.
+`known_monotone` shows that more entries or folders never remove a writer.
 
 `registered_named` connects this set to the store-log model's replay. If the
 replay of a set of entries registers a device, an entry of that set names it.
@@ -267,7 +267,7 @@ arrival order). `drained_device_writes_late` makes the drain exact for
 writes: once the registration's drop is final, which needs a sample more than
 30 days after it, no write of the device published at or after that sample
 counts. `registered_or_retired` closes the gap: every device a received
-registration names is either registered by a kept entry or retired, so it
+registration registers is either registered by a kept entry or retired, so it
 leaves the polled set once its drain completes (`dropped_drain_stops_polling`
 keeps the request bound). `phone_write_window` checks the 30-day boundary on
 the phone.
@@ -1060,9 +1060,9 @@ strictly after a kept retirement's 30-day deadline, and
 by itself. `dropped_retirement_restores` removes an exclusion when no other
 kept retirement blocks the write. `retired_write_boundary_and_restore` checks
 equality, one second beyond, restoration after dropping the retirement, and
-the own-view rejection. `read_unretired_write_counts` checks storage's
-`full_set_excludes_unstopped_write` history: a write that read a replacement
-its own replay dropped is judged by that replacement's window.
+the own-view rejection. `read_unretired_write_counts` checks that a write
+whose own view keeps no retirement of its device is judged by a kept
+retirement's window.
 Ordinary authority, schema and reset eligibility remain separate.
 
 This rule applies only to writes. Entries retain §9's permanent deadline

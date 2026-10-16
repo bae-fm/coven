@@ -69,11 +69,12 @@ impl Database {
     }
 
     /// Writers known without listing storage: this device, every device a
-    /// received entry wrote from or names in a registration, and every writer
-    /// folder remembered from an earlier listing. Kept and dropped entries
-    /// count alike, so no replay verdict removes a writer; replay registers a
-    /// device only through such an entry (`Writers.registered_named`). One set
-    /// serves the entry, key-copy and write logs (§6).
+    /// received entry wrote from (a registration's own, §10) or names as the
+    /// id it replaces, and every writer folder remembered from an earlier
+    /// listing. Kept and dropped entries count alike, so no replay verdict
+    /// removes a writer; replay registers a device only through such an entry
+    /// (`Writers.registered_named`). One set serves the entry, key-copy and
+    /// write logs (§6).
     pub async fn known_log_writers(
         &self,
     ) -> Result<std::collections::BTreeSet<coven_foundation::id_source::DeviceId>, DbError> {
@@ -84,11 +85,11 @@ impl Database {
                 for entry in log.entries.iter().map(|applied| &applied.entry) {
                     writers.insert(entry.position.device);
                     if let StoreChange::AddDevice {
-                        device, replaces, ..
+                        replaces: Some(old),
+                        ..
                     } = &entry.change
                     {
-                        writers.insert(*device);
-                        writers.extend(replaces);
+                        writers.insert(*old);
                     }
                 }
                 Ok::<_, DbError>(writers)

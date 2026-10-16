@@ -26,8 +26,8 @@ her tablet can receive those two concurrent entries in either order. -/
 def fileLog : Log
   | 0 => entry 0 0 [] (.create "ana")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
-  | 3 => entry 0 0 (List.range 3) (.addDevice 0 2)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
+  | 3 => entry 0 2 (List.range 3) (.addDevice 0)
   | 4 => entry 0 0 (List.range 4) (.makeCircle 0 "Gifts")
   | 5 => entry 0 0 (List.range 5) (.addToCircle 0 1)
   | 6 => entry 0 0 (List.range 6) (.removeFromCircle 0 1)
@@ -81,8 +81,8 @@ def accessLog : Log
   | 0 => entry 0 0 [] (.create "ana")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben")
   | 2 => entry 0 0 [0, 1] (.addMember 2 .member "carol")
-  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1 1)
-  | 4 => entry 0 0 (List.range 4) (.addDevice 0 3)
+  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1)
+  | 4 => entry 0 3 (List.range 4) (.addDevice 0)
   | 5 => entry 0 0 (List.range 5) (.removeMember 1 [])
   | _ => entry 1 1 (List.range 5) (.removeMember 2 [])
 
@@ -123,9 +123,9 @@ def keyLog : Log
   | 0 => entry 0 0 [] (.create "ana")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben")
   | 2 => entry 0 0 [0, 1] (.addMember 2 .member "carol")
-  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1 1)
-  | 4 => entry 2 2 (List.range 4) (.addDevice 2 2)
-  | 5 => entry 0 0 (List.range 5) (.addDevice 0 3)
+  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1)
+  | 4 => entry 2 2 (List.range 4) (.addDevice 2)
+  | 5 => entry 0 3 (List.range 5) (.addDevice 0)
   | 6 => entry 0 3 (List.range 6) (.changeRole 1 .member)
   | 7 => entry 1 1 (List.range 6) (.removeMember 0 [])
   | _ => entry 0 0 (List.range 6) (.removeMember 2 [])
@@ -144,8 +144,8 @@ def additionLog : Log
   | 0 => entry 0 0 [] (.create "ana")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben")
   | 2 => entry 0 0 [0, 1] (.addMember 2 .member "carol")
-  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1 1)
-  | 4 => entry 2 2 (List.range 4) (.addDevice 2 2)
+  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1)
+  | 4 => entry 2 2 (List.range 4) (.addDevice 2)
   | 5 => entry 0 0 (List.range 5) (.makeCircle 0 "Gifts")
   | 6 => entry 0 0 (List.range 6) (.addToCircle 0 1)
   | 7 => entry 1 1 (List.range 7) (.removeFromCircle 0 0)
@@ -170,7 +170,7 @@ removal of Ana defeats her circle creation or her approval of Carol. -/
 def introductionLog (action : Action) : Log
   | 0 => entry 0 0 [] (.create "ana")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | 3 => entry 1 1 (List.range 3) (.removeMember 0 [])
   | _ => entry 0 0 (List.range 3) action
 
@@ -203,8 +203,8 @@ theorem invitation_key_counterexample :
 concurrent removal of Ana can later defeat that registration; check_stopped
 does not erase the installed rows or the member's already opened keys. -/
 def registrationLog : Log
-  | 4 => entry 0 2 (List.range 3) (.addDevice 0 2)
-  | n => introductionLog (.addDevice 0 2) n
+  | 4 => entry 0 2 (List.range 3) (.addDevice 0)
+  | n => introductionLog (.addDevice 0) n
 
 theorem registration_valid : Valid registrationLog 5 := validCheck_sound _ _ (by decide)
 
@@ -222,7 +222,7 @@ theorem registration_fate_counterexample :
 entry can finish locally before learning of the earlier winner. -/
 def credentialLog : Log
   | 0 => entry 0 0 [] (.create "original")
-  | 1 => entry 0 0 [0] (.addDevice 0 1)
+  | 1 => entry 0 1 [0] (.addDevice 0)
   | 2 => entry 0 0 [0, 1] (.setAccess 0 "earlier")
   | _ => entry 0 1 [0, 1] (.setAccess 0 "later")
 

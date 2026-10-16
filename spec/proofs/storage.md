@@ -242,22 +242,17 @@ one entry (`OnePerPath`).
   exactly when its replay keeps one (§10), so admission and stopping use one
   judgement.
 
-Two checked histories show where the single kept set goes wrong.
+A checked history shows where the single kept set goes wrong.
 `dropped_replacement_keeps_verdict` is the history coven-sync pins in
-`a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts`:
-Ana registers device 5 while Ben's restored copy, unaware, registers 5
-replacing his phone 1. Phone 1's entry made after reading Ben's replacement is
-excluded, and stays excluded once Ana's registration arrives and the full
-replay drops the replacement; the single set would accept it then.
-`full_set_excludes_unstopped_write` is the other direction: Carol removes Ana
-concurrently with Ana registering device 5, so the full replay drops Ana's
-registration and keeps Ben's replacement. Phone 1's write read both
-registrations but not the removal; its own replay kept Ana's and dropped
-Ben's, so the phone had not stopped. The per-object rule counts the write;
-the single set would exclude a write its copy could not yet know was
-replaced. Both histories use a small replay that keeps and drops what the
-real one does on these entries. The `admission` differential runs both
-histories through Rust's real replay and checks those verdicts.
+`a_dropped_replacement_stops_replacing_without_rejudging_recorded_pasts`:
+Ana removes Ben while his restored copy, unaware, registers 5 replacing his
+phone 1. Phone 1's entry made after reading Ben's replacement is excluded,
+and stays excluded once Ana's removal arrives and the full replay drops the
+replacement; the single set would accept it then. It uses a small replay
+that keeps and drops what the real one does on these entries. The opposite
+case, an object whose own view drops a replacement the full replay keeps, has
+no history: one entry ever registers an id (§10), so only its author's removal
+drops a replacement, and an object that read that removal is excluded anyway.
 
 §10's 30-day window follows the same rule. A write whose own replay keeps
 its retirement never counts; every other write is bounded by the 30 days of

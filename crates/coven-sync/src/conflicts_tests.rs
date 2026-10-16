@@ -330,17 +330,23 @@ pub(crate) fn independent_histories() -> Vec<History> {
         .flat_map(|pair| {
             [false, true].map(|reverse| {
                 let mut h = household(Admin, Admin);
-                h.all(1, 1, device(4));
+                h.all(1, 4, device(4));
                 for c in [0, 1] {
                     h.all(0, 0, make(c, "Shared"));
                     h.all(0, 0, join(c, 2));
                 }
                 let past: Vec<_> = (0..h.entries.len()).collect();
-                let mut pair = pair.clone();
+                // A device addition registers its writer (§10), so it keeps
+                // its own writer whichever change is stamped first.
+                let mut pair: Vec<_> = pair.clone().into_iter().zip([30, 31]).collect();
                 if reverse {
                     pair.swap(0, 1);
                 }
-                for ((author, change), writer) in pair.into_iter().zip([20, 21]) {
+                for (((author, change), own), writer) in pair.into_iter().zip([20, 21]) {
+                    let writer = match change {
+                        StoreChange::AddDevice { .. } => own,
+                        _ => writer,
+                    };
                     h.push(author, writer, &past, change);
                 }
                 h
@@ -417,7 +423,12 @@ pub(crate) fn contradictory_histories() -> Vec<(History, usize)> {
             } else {
                 [addition.clone(), removal.clone()]
             };
-            for ((author, change), writer) in pair.into_iter().zip([20, 21]) {
+            for ((author, change), other) in pair.into_iter().zip([20, 21]) {
+                // Ben's re-addition of his phone 1 is that device's own entry.
+                let writer = match change {
+                    StoreChange::AddDevice { .. } => 1,
+                    _ => other,
+                };
                 h.push(author, writer, &past, change);
             }
             histories.push((h, base + usize::from(removal_first)));
@@ -683,7 +694,7 @@ fn a_replacement_needs_keys_no_pair_has_bound() {
             keys: pair,
         };
         assert_eq!(
-            validate_change(&replay(&h.entries).state, &member(1), &change),
+            validate_change(&replay(&h.entries).state, &member(1), DeviceId(1), &change),
             Err(DropReason::KeysAlreadyUsed)
         );
         h.all(1, 1, change);
@@ -853,7 +864,13 @@ fn a_replacement_never_restores_a_removed_member() {
     h.all(0, 0, remove(1));
     let state = replay(&h.entries).state;
     assert_eq!(
-        crate::effects::validate_effect(&state, &StoreLogCheck::Allowed, &member(0), &rekey(1, 7)),
+        crate::effects::validate_effect(
+            &state,
+            &StoreLogCheck::Allowed,
+            &member(0),
+            DeviceId(0),
+            &rekey(1, 7),
+        ),
         Err(DropReason::TargetGone(EntryTarget::Member(member(1))))
     );
 }

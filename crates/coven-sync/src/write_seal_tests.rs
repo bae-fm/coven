@@ -58,7 +58,6 @@ pub(crate) async fn household(storage: Arc<MemoryStorage>) -> Vec<Device> {
         device
             .sync
             .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(i as u64 + 1),
                 name: i.to_string(),
                 replaces: None,
             })
@@ -261,14 +260,16 @@ async fn a_circle_restored_and_rejoined_after_deletion_reloads_previously_skippe
         panic!("three members")
     };
     let circle = CircleId(Uuid::from_u128(10));
-    ana.sync
+    tablet.sync.sync_store_log().await.unwrap();
+    tablet
+        .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(4),
             name: "Ana tablet".into(),
             replaces: None,
         })
         .await
         .unwrap();
+    ana.sync.sync_store_log().await.unwrap();
     ana.sync
         .make_and_upload_entry(StoreChange::AddCircleMember {
             circle,

@@ -255,7 +255,13 @@ fn settle(
             if dropped.contains_key(&entry.position) {
                 continue;
             }
-            match effects::validate_effect(&state, &views[index], &entry.author, &entry.change) {
+            match effects::validate_effect(
+                &state,
+                &views[index],
+                &entry.author,
+                entry.position.device,
+                &entry.change,
+            ) {
                 Err(reason) => {
                     dropped.insert(entry.position, reason);
                     continue;

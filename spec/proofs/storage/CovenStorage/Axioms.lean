@@ -167,8 +167,6 @@ import CovenStorage
 #print axioms CovenStorage.ReplacementRead.Examples.colliding_copies_lose_one_value
 #print axioms CovenStorage.ReplacementRead.Examples.pinned_set_determined
 #print axioms CovenStorage.ReplacementRead.Examples.dropped_replacement_keeps_verdict
-#print axioms CovenStorage.ReplacementRead.Examples.removal_set_determined
-#print axioms CovenStorage.ReplacementRead.Examples.full_set_excludes_unstopped_write
 
 #print axioms CovenStorage.RowAuthorship.revealed_authentic
 #print axioms CovenStorage.RowAuthorship.snapshot_authorship

@@ -11,9 +11,9 @@ removal of Ben initially drops the creation; Ben's removal later defeats hers. -
 def log : CurrentReplay.Log
   | 0 => entry 0 0 [] (.create "ana" (key 0))
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | 3 => entry 0 0 (List.range 3) (.addMember 2 .member "carol")
-  | 4 => entry 2 2 (List.range 4) (.addDevice 2 2)
+  | 4 => entry 2 2 (List.range 4) (.addDevice 2)
   | 5 => entry 1 1 (List.range 5) (.makeCircle 0 "Gifts" (key 1))
   | 6 => entry 1 1 (List.range 6) (.addToCircle 0 2)
   | 7 => entry 1 1 (List.range 7) (.removeMember 0)
@@ -64,7 +64,7 @@ theorem passed_part_forces_return_reload :
 lands its own creation at the deadline, or one tick past it. -/
 def lateLog : CurrentReplay.Log
   | 0 => entry 0 0 [] (.create "ana" (key 0))
-  | 1 => entry 0 0 [0] (.addDevice 0 1)
+  | 1 => entry 0 1 [0] (.addDevice 0)
   | 2 => entry 0 0 [0, 1] (.makeCircle 1 "Notes" (key 1))
   | 3 => entry 0 1 [0, 1] (.makeCircle 0 "Gifts" (key 2))
   | _ => entry 0 0 (List.range 4) (.makeCircle 0 "Gifts" (key 3))

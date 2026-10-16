@@ -346,22 +346,16 @@ async fn queued_entries_wait_for_reload_and_finishing_a_queued_reset_blocks_new_
             .await,
         Err(SyncError::Storage(_))
     ));
-    let change = StoreChange::AddDevice {
-        device: DeviceId(77),
-        name: "waiting".into(),
-        replaces: None,
+    let member = a.member.member();
+    let change = StoreChange::SetAccess {
+        access: a.log().await.replay.state.members[&member].access.clone(),
+        member,
     };
     assert!(matches!(
         a.sync.make_and_upload_entry(change.clone()).await,
         Err(SyncError::ReloadPending(_))
     ));
-    assert!(!a
-        .log()
-        .await
-        .replay
-        .state
-        .devices
-        .contains_key(&DeviceId(77)));
+    assert!(a.db.local_store_log().await.unwrap().upload.is_none());
     a.sync.sync_store_log().await.unwrap();
     a.sync.storage = Some(key_distribution::failing_creation(
         storage.clone(),
@@ -870,7 +864,7 @@ fn data_differential_boundaries() {
     // Ben's deletion defeats the reset until Ana's concurrent removal of Ben
     // arrives. The deletion then drops, so the same reset entry returns.
     let mut h = gifts();
-    h.all(0, 0, device(3));
+    h.all(0, 3, device(3));
     let past: Vec<_> = (0..h.entries.len()).collect();
     let removal = h.entries.len();
     h.push(0, 0, &past, remove(1));

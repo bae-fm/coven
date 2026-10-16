@@ -99,17 +99,16 @@ pub(crate) fn role(n: u8, role: MemberRole) -> StoreChange {
 pub(crate) fn remove(n: u8) -> StoreChange {
     StoreChange::RemoveMember { member: member(n) }
 }
+/// A registration of device `n`, which only device `n` writes (§10).
 pub(crate) fn device(n: u64) -> StoreChange {
     StoreChange::AddDevice {
-        device: DeviceId(n),
         name: format!("Device {n}"),
         replaces: None,
     }
 }
-/// A restored copy registering `new`, naming the old id it replaces (D6).
+/// Restored copy `new` registering itself, naming the old id it replaces (D6).
 pub(crate) fn replace(new: u64, old: u64) -> StoreChange {
     StoreChange::AddDevice {
-        device: DeviceId(new),
         name: format!("Device {new}"),
         replaces: Some(DeviceId(old)),
     }
@@ -283,11 +282,11 @@ fn creation_registers_its_author_and_named_device() {
 #[test]
 fn opening_log_device_addition_and_concurrent_admin_grant_both_apply() {
     let mut h = household(Member, Member).prefix(2);
-    h.push(1, 1, &[0, 1], device(2));
-    h.push(0, 3, &[0, 1], role(1, Admin));
+    h.push(1, 1, &[0, 1], device(1));
+    h.push(0, 0, &[0, 1], role(1, Admin));
     h.every_order(|r| {
         assert_eq!(r.state.members[&member(1)].role, Admin);
-        assert_eq!(r.state.devices[&DeviceId(2)].member, member(1));
+        assert_eq!(r.state.devices[&DeviceId(1)].member, member(1));
         assert!(h.drops(r).is_empty());
     });
 }
@@ -427,7 +426,7 @@ fn dropped_removal_does_not_block_the_phone() {
     let mut h = losing_removal();
     h.push(1, 1, &[0, 1, 2, 3], remove(0));
     h.push(0, 0, &[0, 1, 2, 3], remove(1));
-    h.push(1, 4, &[0, 1, 2, 3], device(5));
+    h.push(1, 5, &[0, 1, 2, 3], device(5));
     h.every_order(|r| {
         assert_eq!(r.state.devices[&DeviceId(5)].member, member(1));
         assert_eq!(h.drops(r), [5]);

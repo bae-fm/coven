@@ -113,14 +113,13 @@ pub enum StoreChange {
         /// The target role.
         role: MemberRole,
     },
-    /// Add an install belonging to the entry's author.
+    /// Register the writing install for the entry's author: an install
+    /// registers only itself (§10).
     AddDevice {
-        /// The install's id.
-        device: DeviceId,
         /// The device's name.
         name: String,
         /// The older install of the same member being replaced, if any (§10).
-        /// Must differ from `device`; replacement carries no log ends.
+        /// Must differ from the writing device; replacement carries no log ends.
         replaces: Option<DeviceId>,
     },
     /// Remove a device's access.
@@ -210,19 +209,9 @@ impl StoreChange {
                 name(n)?;
                 name(device_name)
             }
-            Self::AddDevice {
-                device,
-                name: n,
-                replaces,
-            } => {
-                name(n)?;
-                require(
-                    replaces.as_ref() != Some(device),
-                    "replacement device",
-                    Rule::DeviceReplacement,
-                )
-            }
-            Self::CreateCircle { name: n, .. } | Self::RenameCircle { name: n, .. } => name(n),
+            Self::AddDevice { name: n, .. }
+            | Self::CreateCircle { name: n, .. }
+            | Self::RenameCircle { name: n, .. } => name(n),
             Self::RaiseSchema {
                 version, snapshot, ..
             } => {
@@ -267,7 +256,7 @@ store_changes!(
     1 => AddMember { member, keys, role, access },
     2 => RemoveMember { member },
     3 => ChangeRole { member, role },
-    4 => AddDevice { device, name => crate::wire::get_name, replaces },
+    4 => AddDevice { name => crate::wire::get_name, replaces },
     5 => RemoveDevice { device },
     6 => CreateCircle { circle, name => crate::wire::get_name, key, key_hash },
     7 => RenameCircle { circle, name => crate::wire::get_name },
@@ -306,12 +295,18 @@ impl StoreLogEntry {
             Rule::TimestampDevice,
         )?;
         self.had_read.without_own_device(self.position.device)?;
-        if let StoreChange::CreateStore { .. } = &self.change {
-            require(
+        match &self.change {
+            StoreChange::CreateStore { .. } => require(
                 self.position.number == 1 && self.had_read.0.is_empty(),
                 "first store entry",
                 Rule::OwnPosition,
-            )?;
+            )?,
+            StoreChange::AddDevice { replaces, .. } => require(
+                *replaces != Some(self.position.device),
+                "replacement device",
+                Rule::DeviceReplacement,
+            )?,
+            _ => {}
         }
         self.change.validate()
     }

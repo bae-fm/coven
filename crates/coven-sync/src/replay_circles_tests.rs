@@ -9,7 +9,7 @@ pub(crate) fn circle_history() -> History {
     h.all(0, 0, add(2, MemberRole::Member));
     h.all(0, 0, add(3, MemberRole::Admin));
     h.all(1, 1, device(1));
-    h.all(0, 0, device(2));
+    h.all(0, 2, device(2));
     h.all(0, 0, make(0, "Gifts"));
     h.all(0, 0, join(0, 1));
     h

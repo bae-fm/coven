@@ -12,7 +12,7 @@ def entry := CurrentReplay.Entry.mk
 def circleLog : CurrentReplay.Log
   | 0 => entry 0 0 [] (.create "ana" (key 0))
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | 3 => entry 0 0 [0, 1, 2] (.makeCircle 0 "Gifts" (key 1))
   | 4 => entry 0 0 (List.range 4) (.addToCircle 0 1)
   | 5 => entry 0 0 (List.range 5) (.removeMember 1)

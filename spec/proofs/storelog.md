@@ -237,7 +237,8 @@
   device; its owner or an admin removes it. A removal requires the device
   to belong to its named member in the author's view: an unseen device
   cannot be removed. The model carries that member explicitly; Rust derives
-  it from the author's view. Writing-device registration is not an additional
+  it from the author's view. A device addition registers the device that
+  wrote it ([§10](../coven.md#10-device-identity)); that is not an additional
   authority condition, so a new device adds itself.
   Lean: `device_add_authority`, `device_removal_authority`,
   `Examples.device_removal_checks_owner`, `Examples.new_device_registers_itself`.

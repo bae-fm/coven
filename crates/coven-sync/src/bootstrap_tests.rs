@@ -107,8 +107,8 @@ async fn a_retried_load_publishes_the_queued_registration_only() {
         .entries
         .iter()
         .filter(|applied| {
-            matches!(&applied.entry.change,
-                StoreChange::AddDevice { device, .. } if *device == id)
+            applied.entry.position.device == id
+                && matches!(&applied.entry.change, StoreChange::AddDevice { .. })
         })
         .map(|applied| applied.entry.position)
         .collect();

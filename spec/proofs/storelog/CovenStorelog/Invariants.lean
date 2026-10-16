@@ -155,7 +155,7 @@ theorem circles_nonempty (M : Log) (n : Nat) (S : EntrySet) {c : Nat} {circle : 
   (resolve_references M n S).nonempty c circle h
 
 theorem device_add_authority (M : Log) (n : Nat) (S : EntrySet) {w m d : Nat}
-    (hw : w ∈ (resolve M n S).kept) (he : (M w).action = .addDevice m d) :
+    (hw : w ∈ (resolve M n S).kept) (he : (M w).action = .addDevice m) :
     member (authorView M w) (M w).author = true ∧ (M w).author = m := by
   simpa [authorized, he] using authority_uses_author_view M n S hw
 

@@ -19,15 +19,7 @@ fn write(device: u64, number: u64) -> WriteId {
 async fn a_write_waits_on_its_authors_unapplied_entry_until_that_entry_arrives() {
     let storage = storage();
     let mut devices = group(storage.clone(), 3).await;
-    devices[0]
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(4),
-            name: "fourth".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    let entry = devices[0].restate_access().await.unwrap();
     sql(
         &devices[0].db,
         "INSERT INTO notes VALUES('one','waits','body')",
@@ -40,7 +32,7 @@ async fn a_write_waits_on_its_authors_unapplied_entry_until_that_entry_arrives()
     )
     .await;
     devices[2].writes.upload_writes().await.unwrap();
-    // The reader has not applied entry 4 of the author's log, which the
+    // The reader has not applied the author's newest entry, which the
     // write read: the write waits on that object, and the other log applies.
     devices[1].writes.download_writes().await.unwrap();
     assert_eq!(
@@ -48,11 +40,7 @@ async fn a_write_waits_on_its_authors_unapplied_entry_until_that_entry_arrives()
         vec![PendingRecord {
             subject: PendingSubject::Write(write(1, 1)),
             reason: PendingReason::Waits(Prerequisite::Object(crate::store_log_object::path(
-                STORE_ID,
-                coven_format::value::EntryId {
-                    device: DeviceId(1),
-                    number: 4,
-                },
+                STORE_ID, entry,
             ))),
             reported_by: DeviceId(2),
         }]
@@ -209,17 +197,16 @@ async fn a_complete_invalid_write_refuses_its_log_while_others_apply() {
 async fn unregistered_peers_positions_wait_then_check_from_retained_bytes() {
     let storage = storage();
     let mut devices = group(storage.clone(), 2).await;
-    devices[0]
+    let mut third = device(storage.clone(), 3).await;
+    third.sync.sync_store_log().await.unwrap();
+    third
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(3),
             name: "third".into(),
             replaces: None,
         })
         .await
         .unwrap();
-    let mut third = device(storage.clone(), 3).await;
-    third.sync.sync_store_log().await.unwrap();
     assert!(third.writes.post_positions().await.unwrap());
     let path = ObjectPath::positions(STORE_ID, DeviceId(3));
     devices[1].writes.download_writes().await.unwrap();
@@ -231,8 +218,8 @@ async fn unregistered_peers_positions_wait_then_check_from_retained_bytes() {
             reason: PendingReason::Waits(Prerequisite::Object(crate::store_log_object::path(
                 STORE_ID,
                 coven_format::value::EntryId {
-                    device: DeviceId(1),
-                    number: 3
+                    device: DeviceId(3),
+                    number: 1
                 }
             ))),
             reported_by: DeviceId(2),

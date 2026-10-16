@@ -351,7 +351,7 @@
 | 1 | Add member | `member:MemberId \| keys:MemberKeys \| role:u8 \| access:MemberAccess` |
 | 2 | Remove member | `member:MemberId` |
 | 3 | Change role | `member:MemberId \| role:u8` |
-| 4 | Add device | `device:DeviceId \| name:name \| replaces:Option<DeviceId>` |
+| 4 | Add device | `name:name \| replaces:Option<DeviceId>`; registers the writing device, which `replaces` must not name |
 | 5 | Remove device | `device:DeviceId` |
 | 6 | Create circle | `circle:uuid \| name:name \| key:uuid \| key_hash:32 bytes` |
 | 7 | Rename circle | `circle:uuid \| name:name` |

@@ -181,7 +181,6 @@ impl StoreLogSync {
             Some(_) => {}
             None => {
                 self.make_and_upload_entry(StoreChange::AddDevice {
-                    device: local.device,
                     name: name.into(),
                     replaces,
                 })

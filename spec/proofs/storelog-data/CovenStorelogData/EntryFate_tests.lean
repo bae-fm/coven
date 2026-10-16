@@ -131,7 +131,7 @@ can reverse an exclusion. This variant needs one old-schema write. Both admins
 start online from the same prefix; their calls overlap. -/
 def boundaryLog : Log
   | 0 => entry 0 0 [] (.create "ana")
-  | 1 => entry 0 0 [0] (.addDevice 0 1)
+  | 1 => entry 0 1 [0] (.addDevice 0)
   | 2 => entry 0 0 [0, 1] (.reset ⟨.store, 0⟩)
   | _ => entry 0 1 [0, 1] (.raiseSchema 2 ⟨.store, 1⟩)
 
@@ -201,8 +201,8 @@ def memberLog : Log
   | 0 => entry 0 0 [] (.create "S3")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "S3")
   | 2 => entry 0 0 [0, 1] (.addMember 2 .member "S3")
-  | 3 => entry 1 1 (List.range 3) (.addDevice 1 1)
-  | 4 => entry 2 2 (List.range 4) (.addDevice 2 2)
+  | 3 => entry 1 1 (List.range 3) (.addDevice 1)
+  | 4 => entry 2 2 (List.range 4) (.addDevice 2)
   | 5 => entry 0 0 (List.range 5) (.removeMember 1 [])
   | _ => entry 1 1 (List.range 5) (.removeMember 2 [])
 
@@ -211,8 +211,8 @@ def memberStopped : Device :=
 
 def deviceLog : Log
   | 0 => entry 0 0 [] (.create "S3")
-  | 1 => entry 0 0 [0] (.addDevice 0 1)
-  | 2 => entry 0 0 [0, 1] (.addDevice 0 2)
+  | 1 => entry 0 1 [0] (.addDevice 0)
+  | 2 => entry 0 2 [0, 1] (.addDevice 0)
   | 3 => entry 0 0 (List.range 3) (.removeDevice 0 1)
   | _ => entry 0 1 (List.range 3) (.removeDevice 0 2)
 

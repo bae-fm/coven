@@ -17,7 +17,7 @@ fn history(late: bool) -> StoreLog {
     history.push(0, 1, &[0], device(1));
     history.push(0, 2, &[0], device(2));
     if late {
-        history.push(0, 2, &[0, 2], device(3));
+        history.push(0, 3, &[0, 2], device(3));
     }
     let publications = history
         .entries
@@ -223,7 +223,7 @@ fn lean_differential_finality_horizon() {
             history.push(0, 2, &[0], device(2));
             history.push(
                 0,
-                2,
+                3,
                 if read_other { &[0, 1, 2] } else { &[0, 2] },
                 device(3),
             );

@@ -2,8 +2,8 @@ import CovenIO.Writers
 
 /-! §6 and §10: what retires a device that no kept entry registers.
 
-`Writers.known` probes every device a received registration names, kept or
-dropped, until it drains. A device is drained only after a kept entry retiring
+`Writers.known` probes every device a received registration registers, kept
+or dropped, until it drains. A device is drained only after a kept entry retiring
 it is final, and the kept retirements (removal of the device, removal of its
 member joined through the devices kept registrations name) never name a device
 whose every registration dropped: Carol's device once her own addition drops,
@@ -21,12 +21,11 @@ namespace CovenIO.Writers
 
 open CovenStorelog (Log Result)
 
-/-- The device an entry registers: creation registers its writing device, a
-device addition the device it names. -/
+/-- The device an entry registers: creation and a device addition register
+their writing device (§10). -/
 def registered (e : CovenStorelog.Entry) : Option Nat :=
   match e.action with
-  | .create _ => some e.device
-  | .addDevice _ d => some d
+  | .create _ | .addDevice _ => some e.device
   | _ => none
 
 /-- Some kept entry registers `d`. Removal and replacement keep the device on
@@ -38,7 +37,7 @@ def keptRegisters (M : Log) (r : Result) (d : Nat) : Bool :=
 def keptDevices (M : Log) (r : Result) (m : Nat) : List Nat :=
   r.kept.filterMap fun w => match (M w).action with
     | .create _ => if (M w).author = m then some (M w).device else none
-    | .addDevice owner d => if owner = m then some d else none
+    | .addDevice owner => if owner = m then some (M w).device else none
     | _ => none
 
 /-- Kept retirements: a device removal, and a member removal joined through the

@@ -31,7 +31,7 @@ Different statements about a member/device and competing snapshots remain. -/
 def contradiction (a b : Entry) : Bool :=
   !sameMeaning a b && !(isRemoval a.action && isRemoval b.action) &&
     (sameTarget (memberTarget a.action) (memberTarget b.action) ||
-     sameTarget (deviceTarget a.action) (deviceTarget b.action) ||
+     sameTarget (deviceTarget a) (deviceTarget b) ||
      match a.action, b.action with
      | .raiseSchema v s, .raiseSchema w t => s.audience == t.audience && v == w && s != t
      | .reset s, .reset t => s.audience == t.audience && s != t

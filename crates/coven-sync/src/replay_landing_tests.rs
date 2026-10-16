@@ -123,7 +123,7 @@ fn lean_differential_storage_admission() {
 
     // A late device removal does not erase the owner seen by a new attempt.
     let mut devices = History::new();
-    devices.all(0, 0, device(1));
+    devices.all(0, 1, device(1));
     devices.push(
         0,
         0,
@@ -162,7 +162,18 @@ fn lean_differential_storage_admission() {
     // Own earlier entries are read implicitly even when replay drops them.
     let mut own = History::new();
     own.push(0, 0, &[], role(4, MemberRole::Admin));
-    own.push(0, 0, &[], device(9));
+    own.push(
+        0,
+        0,
+        &[],
+        StoreChange::SetAccess {
+            member: crate::replay::tests::member(0),
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+                principal: coven_format::S3Principal::Console,
+            },
+        },
+    );
     assert!(own.entries[2].had_read.0.is_empty());
     let stored = [0, 1, 100];
     let arrivals = orders(&own);

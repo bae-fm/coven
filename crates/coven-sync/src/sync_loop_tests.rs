@@ -254,7 +254,6 @@ impl Device<StoreLogSync> {
     async fn add_device(&mut self, number: u64) {
         self.owner
             .make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
-                device: DeviceId(number),
                 name: number.to_string(),
                 replaces: None,
             })
@@ -549,16 +548,23 @@ async fn group(case: Scenario) -> Vec<Device<Operations>> {
 async fn group_on(case: Scenario, storage: MemoryStorage) -> Vec<Device<Operations>> {
     let mut owner = Device::new(&storage, 1, member(1)).await;
     owner.create().await;
-    owner.add_device(2).await;
-    owner.add_device(3).await;
+    // Each further installation registers itself (§10).
+    let mut peers = Vec::new();
+    for number in [2, 3] {
+        let mut peer = Device::new(&storage, number, member(1)).await;
+        assert!(peer
+            .owner
+            .bootstrap_member(crate::BindingSource::Restore)
+            .await
+            .unwrap());
+        peer.add_device(number).await;
+        peers.push(peer);
+    }
     if matches!(case, Scenario::FirstCatchup) {
         owner.add_member(&member(2)).await;
     }
-    let mut devices = vec![
-        owner.start(),
-        Device::new(&storage, 2, member(1)).await.start(),
-        Device::new(&storage, 3, member(1)).await.start(),
-    ];
+    let mut devices = vec![owner.start()];
+    devices.extend(peers.into_iter().map(Device::start));
     // Finish initial publications and peer observations before measuring a warm pass.
     for _ in 0..3 {
         for device in &mut devices {

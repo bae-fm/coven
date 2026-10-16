@@ -1708,7 +1708,7 @@ File uploads run in their own worker (§16.5); a pass does not wait for them.
     Snapshots and files are not discovered by next number.
 - Discover unknown writers by listing only the immediate device folders in
   `<store>/store-log/`. Keep that set together with every device a received
-  entry was written from or names in a registration, kept or dropped,
+  entry was written from or names as replaced, kept or dropped,
   including removed and replaced devices. This one set serves all three
   logs; a replay verdict never removes a device from it. A write from a
   device whose addition a later entry drops still counts (§7.1), so every
@@ -2984,7 +2984,8 @@ Carol's tablet:
     ```
 
   - The store's first entry creates it, names its first admin, and adds
-    the device that wrote it, with its name.
+    the device that wrote it, with its name. A device addition likewise adds
+    the device that wrote it.
 - Administrative actions require storage to be reachable. Before starting
   membership, role, access, circle or reset work, catch up on the store log
   and run the candidate through the same authority and replay rules against
@@ -3571,10 +3572,10 @@ Carol's tablet:
     A copy stops when its own replay keeps a replacement of its id, so every
     object it made before stopping counts
     ([`unstopped_copy_counts`](proofs/storage/CovenStorage/ReplacementViews.lean)).
-    E.g. Ana registers device 5 while Ben's restored copy, unaware, registers
-    5 replacing his phone 1, and phone 1 then reads only Ben's registration.
-    Its later entries stay excluded after Ana's registration arrives and
-    the full replay drops Ben's (`dropped_replacement_keeps_verdict`).
+    E.g. Ana removes Ben while his restored copy, unaware, registers 5
+    replacing his phone 1, and phone 1 then reads only that registration.
+    Its later entries stay excluded after Ana's removal arrives and the
+    full replay drops the replacement (`dropped_replacement_keeps_verdict`).
   - Publication after replacement does not change what the object had read,
     but its storage time decides the landing check. There is no upper number
     to extend and no wait for another replacement to include it. Retain

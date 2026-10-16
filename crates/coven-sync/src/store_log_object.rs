@@ -271,13 +271,12 @@ pub(crate) fn author_matches_view(
 ) -> bool {
     match view.devices.get(&entry.position.device) {
         Some(device) => device.member == entry.author,
-        // Creation and self-registration establish an absent binding. Replay
-        // separately checks authority.
-        None => match &entry.change {
-            StoreChange::CreateStore { .. } => true,
-            StoreChange::AddDevice { device, .. } => *device == entry.position.device,
-            _ => false,
-        },
+        // Creation and a device addition register their own writer (§10),
+        // establishing an absent binding. Replay separately checks authority.
+        None => matches!(
+            entry.change,
+            StoreChange::CreateStore { .. } | StoreChange::AddDevice { .. }
+        ),
     }
 }
 
@@ -291,14 +290,13 @@ pub(crate) fn registration_refused(
     log: &StoreLog,
     device: coven_foundation::id_source::DeviceId,
 ) -> Option<coven_database::DropReason> {
-    let registration = log
-        .entries
-        .iter()
-        .find(|applied| match &applied.entry.change {
-            StoreChange::AddDevice { device: named, .. } => *named == device,
-            StoreChange::CreateStore { .. } => applied.entry.position.device == device,
-            _ => false,
-        })?;
+    let registration = log.entries.iter().find(|applied| {
+        applied.entry.position.device == device
+            && matches!(
+                applied.entry.change,
+                StoreChange::CreateStore { .. } | StoreChange::AddDevice { .. }
+            )
+    })?;
     Some(match log.replay.entries.get(&registration.entry.position) {
         Some(coven_database::EntryOutcome::Dropped(reason)) => reason.clone(),
         _ => coven_database::DropReason::NotAllowed,

@@ -141,18 +141,7 @@ async fn probed_writers(
     let entries: Vec<_> = log
         .entries
         .iter()
-        .map(|applied| {
-            let registers = match &applied.entry.change {
-                StoreChange::AddDevice {
-                    device, replaces, ..
-                } => {
-                    assert!(replaces.is_none(), "replacement is outside this case");
-                    Some(device.0)
-                }
-                _ => None,
-            };
-            serde_json::json!({"writer": applied.entry.position.device.0, "registers": registers})
-        })
+        .map(|applied| serde_json::json!({"writer": applied.entry.position.device.0}))
         .collect();
     let listed: Vec<_> = reader
         .db
@@ -263,12 +252,9 @@ pub(crate) async fn retired_devices(reader: &Device) -> (serde_json::Value, serd
             StoreChange::CreateStore { .. } => {
                 serde_json::json!({"action": "create", "author": author, "writer": writer})
             }
-            StoreChange::AddDevice {
-                device, replaces, ..
-            } => {
+            StoreChange::AddDevice { replaces, .. } => {
                 assert!(replaces.is_none(), "replacement is outside this case");
-                serde_json::json!({"action": "addDevice", "author": author, "writer": writer,
-                    "device": device.0})
+                serde_json::json!({"action": "addDevice", "author": author, "writer": writer})
             }
             StoreChange::RemoveDevice { device } => {
                 serde_json::json!({"action": "removeDevice", "author": author, "writer": writer,

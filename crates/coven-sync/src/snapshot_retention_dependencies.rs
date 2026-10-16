@@ -43,17 +43,16 @@ impl Dependencies {
                         .or_default()
                         .insert(entry.position);
                 }
-                StoreChange::CreateStore { .. } => {
+                // A registration registers the device that wrote it (§10).
+                StoreChange::CreateStore { .. } | StoreChange::AddDevice { .. } => {
                     let device = entry.position.device;
                     registered.entry(device).or_default().insert(entry.author);
                     devices.entry(device).or_default().insert(entry.position);
-                }
-                StoreChange::AddDevice {
-                    device, replaces, ..
-                } => {
-                    registered.entry(*device).or_default().insert(entry.author);
-                    devices.entry(*device).or_default().insert(entry.position);
-                    if let Some(replaced) = replaces {
+                    if let StoreChange::AddDevice {
+                        replaces: Some(replaced),
+                        ..
+                    } = &entry.change
+                    {
                         devices.entry(*replaced).or_default().insert(entry.position);
                     }
                 }

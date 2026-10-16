@@ -132,7 +132,8 @@ impl StoreLogSync {
             let local = self.database.local_store_log().await?;
             let me = self.operation_member()?.member();
             self.validate_administration(&local, &me, &change)?;
-            if crate::effects::change_in_place(&local.log.replay.state, &me, &change) {
+            if crate::effects::change_in_place(&local.log.replay.state, &me, local.device, &change)
+            {
                 return Ok(());
             }
             let published = self.make_and_upload_entry(change.clone()).await;

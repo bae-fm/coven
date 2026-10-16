@@ -195,9 +195,10 @@ async fn a_failed_drain_read_leaves_the_device_polled() {
         removed.pass(FINAL).await.unwrap();
         let mut faults = coven_storage::test_utils::Faults::none();
         match log {
+            // The phone's own registration is its entry 1 (§10).
             "entry" => {
                 faults.read_failures.insert(
-                    ObjectPath::store_log(STORE_ID, DeviceId(2), 1.try_into().unwrap()),
+                    ObjectPath::store_log(STORE_ID, DeviceId(2), 2.try_into().unwrap()),
                     StorageFailure::Network,
                 );
             }
@@ -289,7 +290,7 @@ fn io_differential_retired_drain() {
                 match failed {
                     Some(0) => {
                         faults.read_failures.insert(
-                            ObjectPath::store_log(STORE_ID, DeviceId(2), 1.try_into().unwrap()),
+                            ObjectPath::store_log(STORE_ID, DeviceId(2), 2.try_into().unwrap()),
                             StorageFailure::Network,
                         );
                     }
@@ -322,11 +323,11 @@ fn io_differential_retired_drain() {
                 }
                 (drained, polled)
             });
-            // Device 2 published no entries or copies and one write; Ana
-            // has received its write, so each scan starts at that position.
+            // Device 2 published its own registration (§10), no copies and
+            // one write; Ana has received both, so each scan starts there.
             let logs: Vec<_> = (0..3)
                 .map(|kind| {
-                    let count = u64::from(kind == 2);
+                    let count = u64::from(kind != 1);
                     json!({"count":count,"start":count,"failed":failed == Some(kind)})
                 })
                 .collect();

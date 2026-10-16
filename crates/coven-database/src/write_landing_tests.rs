@@ -27,8 +27,14 @@ pub(crate) async fn retire(
     seconds: u64,
 ) -> EntryId {
     let log = target.store_log().await.unwrap();
+    // A registration is its device's own entry (§10); member 1 removes from
+    // device 97.
     let id = EntryId {
-        device: DeviceId(97),
+        device: match kind {
+            "replacement" => DeviceId(900 + number),
+            "registration" | "late" => writer,
+            _ => DeviceId(97),
+        },
         number,
     };
     let owner = member(2);
@@ -58,7 +64,7 @@ pub(crate) async fn retire(
             StoreChange::RemoveMember { member: owner }
         }
         "replacement" => {
-            let fresh = DeviceId(900 + number);
+            let fresh = id.device;
             replay.state.devices.get_mut(&writer).unwrap().state = DeviceState::Replaced;
             replay.state.devices.insert(
                 fresh,
@@ -69,7 +75,6 @@ pub(crate) async fn retire(
                 },
             );
             StoreChange::AddDevice {
-                device: fresh,
                 name: "restored".into(),
                 replaces: Some(writer),
             }
@@ -77,7 +82,6 @@ pub(crate) async fn retire(
         "registration" | "late" => {
             replay.state.devices.remove(&writer);
             StoreChange::AddDevice {
-                device: writer,
                 name: "writer".into(),
                 replaces: None,
             }
@@ -93,7 +97,11 @@ pub(crate) async fn retire(
             id.device,
         )
         .unwrap(),
-        author: member(1),
+        author: if id.device == DeviceId(97) {
+            member(1)
+        } else {
+            owner
+        },
         had_read: EntryPositions(Vec::new()),
         change,
     };

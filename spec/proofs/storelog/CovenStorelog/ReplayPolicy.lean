@@ -12,7 +12,7 @@ def membershipState : Action → Option Nat
 
 def requiredMembers (e : Entry) : List Nat :=
   match e.action with
-  | .setAccess m _ | .changeRole m _ | .addDevice m _ | .removeDevice m _ => [m]
+  | .setAccess m _ | .changeRole m _ | .addDevice m | .removeDevice m _ => [m]
   | .addToCircle _ m | .removeFromCircle _ m => [m]
   | .makeCircle _ _ | .deleteCircle _ => [e.author]
   | _ => []
@@ -30,7 +30,7 @@ def sameResult (a b : Entry) : Bool :=
 def contradiction (va vb : State) (a b : Entry) : Bool :=
   !sameResult a b &&
     (sameTarget (membershipState a.action) (membershipState b.action) ||
-     sameTarget (deviceTarget a.action) (deviceTarget b.action) ||
+     sameTarget (deviceTarget a) (deviceTarget b) ||
      removesRequired a b || removesRequired b a ||
      (match a.action, b.action with
       | .setAccess m _, .setAccess n _ => m == n
@@ -212,12 +212,12 @@ theorem rotations_conflict_with_nothing (a b : Entry) (va vb : State)
 
 /-- The examples distinguish compatible changes from merely shared ids. -/
 example (m d e : Nat) (different : d ≠ e) (view : State) :
-    contradiction view view ⟨m, d, [], .addDevice m d⟩ ⟨m, e, [], .addDevice m e⟩ = false := by
+    contradiction view view ⟨m, d, [], .addDevice m⟩ ⟨m, e, [], .addDevice m⟩ = false := by
   simp [contradiction, sameResult, sameMeaning, sameTarget, membershipState,
     deviceTarget, removesRequired, circleTarget, different]
 
 example (m : Nat) (view : State) :
-    contradiction view view ⟨m, 0, [], .addDevice m 1⟩ ⟨m, 2, [], .setAccess m "replacement"⟩ = false := by
+    contradiction view view ⟨m, 1, [], .addDevice m⟩ ⟨m, 2, [], .setAccess m "replacement"⟩ = false := by
   simp [contradiction, sameResult, sameMeaning, sameTarget, membershipState,
     deviceTarget, removesRequired, circleTarget]
 

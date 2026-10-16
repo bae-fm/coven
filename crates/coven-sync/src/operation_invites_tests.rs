@@ -727,14 +727,7 @@ async fn dropped_approval_settles_its_invite(reads_first: bool) {
     }
     a.restore_storage();
     clock.set(UNIX_EPOCH + Duration::from_secs(86400));
-    b.sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: coven_foundation::id_source::DeviceId(9),
-            name: "witness".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    b.restate_access().await.unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
     // Without this catch-up, her earlier one is still fresh by her clock but
     // a month older in storage time than her publication: she reads the

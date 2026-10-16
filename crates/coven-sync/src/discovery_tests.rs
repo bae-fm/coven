@@ -205,8 +205,10 @@ async fn malformed_copy_does_not_hide_a_later_valid_copy() {
     );
 }
 
+/// A device's registration is in its own folder (§10), so a reader whose
+/// listing lags learns the new writer from a known writer's recorded past.
 #[tokio::test]
-async fn registration_learned_during_a_scan_discovers_an_unlisted_writer() {
+async fn a_recorded_past_learned_during_a_scan_discovers_an_unlisted_writer() {
     use coven_format::store_log::StoreChange;
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let mut author = device(storage.clone(), 1, member(1), store(1)).await;
@@ -215,15 +217,6 @@ async fn registration_learned_during_a_scan_discovers_an_unlisted_writer() {
     receiver
         .sync
         .bootstrap_member(crate::BindingSource::Restore)
-        .await
-        .unwrap();
-    author
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
-            name: "second".into(),
-            replaces: None,
-        })
         .await
         .unwrap();
     let mut second = device(storage.clone(), 2, member(1), store(1)).await;
@@ -235,12 +228,13 @@ async fn registration_learned_during_a_scan_discovers_an_unlisted_writer() {
     let entry = second
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(3),
-            name: "third".into(),
+            name: "second".into(),
             replaces: None,
         })
         .await
         .unwrap();
+    author.catch_up().await;
+    author.restate_access().await.unwrap();
     storage
         .set_faults(coven_storage::test_utils::Faults {
             hide_listings: true,
@@ -513,16 +507,8 @@ async fn applied_entries_are_not_read_again() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let mut author = device(storage.clone(), 1, member(1), store(1)).await;
     author.create(key(1)).await;
-    for device in [10, 11, 12] {
-        author
-            .sync
-            .make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
-                device: DeviceId(device),
-                name: "phone".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+    for _ in 0..3 {
+        author.restate_access().await.unwrap();
     }
     author.catch_up().await;
     let log = author.log().await;

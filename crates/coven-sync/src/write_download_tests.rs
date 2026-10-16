@@ -132,7 +132,6 @@ async fn retirement_checks_the_authors_past_not_the_receivers_present() {
             device: DeviceId(1),
         },
         StoreChange::AddDevice {
-            device: DeviceId(9),
             name: "restored".into(),
             replaces: Some(DeviceId(1)),
         },
@@ -151,11 +150,30 @@ async fn retired_write_is_judged_by_its_recorded_past(retirement: StoreChange) {
     .await;
     let mut after = queued(&devices[0].db).await;
     devices[0].writes.upload_writes().await.unwrap();
-    devices[1]
-        .sync
-        .make_and_upload_entry(retirement)
-        .await
-        .unwrap();
+    match &retirement {
+        // Restored copy 9 registers itself (§10).
+        StoreChange::AddDevice { .. } => {
+            let mut restored = crate::device_log_sync::tests::device_of(
+                storage.clone(),
+                9,
+                devices[0].member.clone(),
+            )
+            .await;
+            restored.sync.sync_store_log().await.unwrap();
+            restored
+                .sync
+                .make_and_upload_entry(retirement)
+                .await
+                .unwrap();
+        }
+        _ => {
+            devices[1]
+                .sync
+                .make_and_upload_entry(retirement)
+                .await
+                .unwrap();
+        }
+    }
     devices[2].sync.sync_store_log().await.unwrap();
     devices[2].writes.download_writes().await.unwrap();
     assert_eq!(rows(&devices[2].db).await[0].1, "before");
@@ -490,15 +508,7 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
     for reload in [false, true] {
         let storage = storage();
         let mut devices = group(storage.clone(), 2).await;
-        devices[0]
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(3),
-                name: "third".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        devices[0].restate_access().await.unwrap();
         sql(
             &devices[0].db,
             "INSERT INTO notes VALUES('one','before','body')",
@@ -529,7 +539,7 @@ async fn missing_read_view_waits_then_replays_after_the_store_log_arrives() {
             .unwrap();
         assert!(
             matches!(result, ApplyOutcome::Waiting(coven_database::WriteWait::StoreLog(ref missing))
-            if missing.len() == 1 && missing[0].device == DeviceId(1) && missing[0].number == 3)
+            if missing.len() == 1 && missing[0].device == DeviceId(1) && missing[0].number == 2)
         );
         devices[1].writes.download_writes().await.unwrap();
         assert!(rows(&devices[1].db).await.is_empty());
@@ -563,15 +573,7 @@ async fn retention_waits_for_store_log_entries() {
                 .await
                 .unwrap();
         }
-        devices[0]
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(3),
-                name: "third".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        devices[0].restate_access().await.unwrap();
         sql(
             &devices[0].db,
             "INSERT INTO notes VALUES('one','title','body')",

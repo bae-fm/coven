@@ -215,14 +215,16 @@ async fn a_second_live_copy_that_loses_a_slot_stops_and_resets() {
 #[tokio::test]
 async fn reading_its_own_replacement_stops_the_old_copy() {
     let storage = storage();
-    let mut devices = group(storage.clone(), 2).await;
-    let (first, rest) = devices.split_at_mut(1);
-    // The second device belongs to the same member; it registers a fresh id
-    // replacing the first device's id, as a reset of that copy would.
-    rest[0]
+    let mut devices = group(storage.clone(), 1).await;
+    let first = &mut devices[..1];
+    // A reset of the first copy registers itself under a fresh id, replacing
+    // the first device's id.
+    let mut replacement =
+        crate::device_log_sync::tests::device_of(storage.clone(), 9, first[0].member.clone()).await;
+    replacement.sync.sync_store_log().await.unwrap();
+    replacement
         .sync
         .make_and_upload_entry(coven_format::store_log::StoreChange::AddDevice {
-            device: coven_foundation::id_source::DeviceId(9),
             name: "replacement".into(),
             replaces: Some(coven_foundation::id_source::DeviceId(1)),
         })

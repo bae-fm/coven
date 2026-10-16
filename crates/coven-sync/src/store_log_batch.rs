@@ -212,12 +212,14 @@ impl StoreLogSync {
             }
             for entry in opened.values().map(|opened| &opened.entry) {
                 writers.extend(entry.had_read.0.iter().map(|id| id.device));
+                // A registration names its own writer (§10); a replacement
+                // also names the old id it retires.
                 if let StoreChange::AddDevice {
-                    device, replaces, ..
+                    replaces: Some(old),
+                    ..
                 } = &entry.change
                 {
-                    writers.insert(*device);
-                    writers.extend(replaces);
+                    writers.insert(*old);
                 }
             }
             if writers.len() == probed.len() {

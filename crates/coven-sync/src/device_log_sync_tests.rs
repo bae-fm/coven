@@ -82,11 +82,12 @@ pub(crate) async fn group(storage: Arc<MemoryStorage>, count: u64) -> Vec<Device
         })
         .await
         .unwrap();
-    for number in 2..=count {
-        devices[0]
+    // Each further installation registers itself (§10).
+    for (device, number) in devices[1..].iter_mut().zip(2..) {
+        device.sync.sync_store_log().await.unwrap();
+        device
             .sync
             .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(number),
                 name: number.to_string(),
                 replaces: None,
             })

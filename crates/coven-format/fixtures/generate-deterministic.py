@@ -379,7 +379,7 @@ def changes(sodium):
         b"\x01" + BEN + pair(sodium, 0x35) + b"\x01" + b"\x00" + text(b"member@example.test"),
         b"\x02" + BEN,
         b"\x03" + ANA + b"\x00",
-        b"\x04" + u64(2) + text(b"D") + b"\x00",
+        b"\x04" + text(b"D") + b"\x00",
         b"\x05" + u64(2),
         b"\x06" + CIRCLE + text(b"C") + bytes([1]) * 16 + initial_hash,
         b"\x07" + CIRCLE + text(b"N"),
@@ -411,14 +411,13 @@ def clock():
 
 
 def objects(sodium, positions):
-    """`test_utils::objects`: creation, removal, a raise, a replacing device,
-    the join request, posted positions, the other changes, then the clock."""
+    """`test_utils::objects`: creation, removal, a raise, the join request,
+    posted positions, the other changes, then the clock."""
     every = changes(sodium)
     frames = [
         entry(every[0]),
         entry(every[2], number=2, stamp=(7, 0, 1)),
         entry(b"\x0b" + u32(3) + snapshot_id(circle_audience((7).to_bytes(16, "big")), 9, 11)),
-        entry(b"\x04" + u64(2) + text(b"D") + b"\x01" + u64(1)),
         join_request(sodium),
         positions,
     ]

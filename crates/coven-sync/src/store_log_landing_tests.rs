@@ -30,15 +30,7 @@ async fn own_publication_is_observed_even_when_the_listing_lags() {
             ..Faults::none()
         })
         .await;
-    let created = a
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
-            name: "new device".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    let created = a.restate_access().await.unwrap();
     let log = a.log().await;
     assert_eq!(
         log.entries.last().unwrap().stored_at,
@@ -65,15 +57,7 @@ async fn own_publication_does_not_restart_entry_discovery() {
     b.sync.load_new_device("second", None).await.unwrap();
     b.catch_up().await;
     let before = storage.request_trace().len();
-    let created = b
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(9),
-            name: "new device".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    let created = b.restate_access().await.unwrap();
     let requests = &storage.request_trace()[before..];
     assert!(
         requests.iter().all(|request| match request {
@@ -111,24 +95,9 @@ async fn own_entry_landing_a_month_past_its_catch_up_is_judged_as_readers_judge_
     b.sync.load_new_device("second", None).await.unwrap();
     b.catch_up().await;
     clock.set(UNIX_EPOCH + Duration::from_secs(86400));
-    let witness = a
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(9),
-            name: "witness".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    let witness = a.restate_access().await.unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(31 * 86400) + Duration::from_millis(1));
-    let late = b
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(8),
-            name: "late".into(),
-            replaces: None,
-        })
-        .await;
+    let late = b.restate_access().await;
     assert!(
         matches!(
             late,
@@ -175,7 +144,6 @@ async fn late_registration() -> LateRegistration {
     assert!(b
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "restored".into(),
             replaces: None,
         })
@@ -186,7 +154,6 @@ async fn late_registration() -> LateRegistration {
     let witness = c
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(3),
             name: "new".into(),
             replaces: None,
         })
@@ -317,14 +284,7 @@ async fn equality_at_thirty_days_is_kept_and_lost_reply_preserves_publication_ti
     a.create(key(1)).await;
     b.sync().await;
     clock.set(UNIX_EPOCH + Duration::from_secs(86400));
-    a.sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(9),
-            name: "witness".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    a.restate_access().await.unwrap();
     let landed = UNIX_EPOCH + Duration::from_secs(31 * 86400);
     clock.set(landed);
     storage
@@ -336,7 +296,6 @@ async fn equality_at_thirty_days_is_kept_and_lost_reply_preserves_publication_ti
     assert!(b
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "registration".into(),
             replaces: None,
         })
@@ -493,7 +452,6 @@ async fn operations_retry_late_entries_with_new_numbers_and_introduced_keys() {
         b.sync().await;
         b.sync
             .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(2),
                 name: "snapshot writer".into(),
                 replaces: None,
             })
@@ -512,14 +470,7 @@ async fn operations_retry_late_entries_with_new_numbers_and_introduced_keys() {
         let fixed = b.db.local_store_log().await.unwrap().upload.unwrap();
         b.step(id).await.unwrap(); // prerequisite copies
         clock.set(UNIX_EPOCH + Duration::from_secs(86400));
-        a.sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(9),
-                name: "witness".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        a.restate_access().await.unwrap();
         clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
         b.step(id).await.unwrap(); // publish the fixed entry
         let bytes = storage
@@ -600,14 +551,7 @@ async fn operations_retry_late_entries_with_new_numbers_and_introduced_keys() {
                 }]
             );
         }
-        b.sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(10),
-                name: "later device".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        b.restate_access().await.unwrap();
         assert_eq!(
             b.db.pending::<crate::PendingRecord>().await.unwrap(),
             reports,
@@ -661,14 +605,7 @@ async fn setup_consumes_a_late_access_entry_before_committing_credentials() {
         .is_err());
     let fixed = b.db.local_store_log().await.unwrap().upload.unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(86400));
-    a.sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(9),
-            name: "witness".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    a.restate_access().await.unwrap();
     clock.set(UNIX_EPOCH + Duration::from_secs(32 * 86400));
     assert!(matches!(
         b.sync

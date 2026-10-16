@@ -170,7 +170,7 @@ theorem effect_references {s t : State} {w : Nat} {e : Entry}
       split at h
       · cases h; exact hs.removeMember m
       · cases h
-  | addDevice m d =>
+  | addDevice m =>
       simp only [effect, ha] at h
       split at h
       · rename_i hg

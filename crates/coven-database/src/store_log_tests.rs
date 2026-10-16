@@ -898,7 +898,6 @@ async fn a_failed_drop_report_rolls_back_consumption_and_replay() {
     let mut change = entry(
         1,
         StoreChange::AddDevice {
-            device: own,
             name: "delayed device".into(),
             replaces: None,
         },

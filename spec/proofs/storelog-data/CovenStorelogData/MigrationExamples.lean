@@ -14,7 +14,7 @@ snapshot; Ben's later concurrent raise names his own. -/
 def log : Log
   | 0 => entry 0 0 [] (.create "S3")
   | 1 => entry 0 0 [0] (.addMember 1 .member "S3")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | 3 => entry 0 0 [0, 1, 2] (.raiseSchema 2 ⟨.store, 0⟩)
   | _ => entry 1 1 [0, 1, 2] (.raiseSchema 2 ⟨.store, 1⟩)
 

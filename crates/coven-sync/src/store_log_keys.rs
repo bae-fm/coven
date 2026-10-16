@@ -106,8 +106,13 @@ pub(crate) fn seal(
     }
     // Preparation records the whole current log, so this unpublished candidate
     // has no concurrent opponent or publication time yet.
-    crate::effects::validate_change(&log.replay.state, &entry.author, &entry.change)
-        .map_err(SyncError::Rejected)?;
+    crate::effects::validate_change(
+        &log.replay.state,
+        &entry.author,
+        entry.position.device,
+        &entry.change,
+    )
+    .map_err(SyncError::Rejected)?;
     // A key id identifies one introduction and one committed hash.
     let used: BTreeSet<_> = log
         .entries

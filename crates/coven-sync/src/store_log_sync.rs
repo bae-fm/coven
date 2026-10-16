@@ -252,14 +252,16 @@ impl StoreLogSync {
             }
         }
         keys::check_shared_keys(&local.log, &change, &ring)?;
-        if let StoreChange::AddDevice { device, .. } = &change {
-            if let Some(reason) = object::registration_refused(&local.log, *device) {
+        let registration = matches!(
+            &change,
+            StoreChange::CreateStore { .. } | StoreChange::AddDevice { .. }
+        );
+        if matches!(&change, StoreChange::AddDevice { .. }) {
+            if let Some(reason) = object::registration_refused(&local.log, local.device) {
                 return Err(SyncError::Rejected(reason));
             }
         }
-        let bootstrap = !local.log.replay.state.devices.contains_key(&local.device)
-            && (matches!(&change, StoreChange::CreateStore { .. })
-                || matches!(&change, StoreChange::AddDevice { device, .. } if *device == local.device));
+        let bootstrap = registration && !local.log.replay.state.devices.contains_key(&local.device);
         let observed = if matches!(change, StoreChange::CreateStore { .. }) {
             Vec::new()
         } else {
@@ -541,9 +543,9 @@ impl StoreLogSync {
             {
                 false
             }
-            StoreChange::AddDevice { device, .. }
-                if *device == local.device
-                    && !local.log.replay.state.devices.contains_key(device) =>
+            StoreChange::AddDevice { .. }
+                if upload.entry.position.device == local.device
+                    && !local.log.replay.state.devices.contains_key(&local.device) =>
             {
                 true
             }

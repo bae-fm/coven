@@ -10,9 +10,9 @@ set_option maxHeartbeats 16000000
 def household (ben carol : Role) : Log
   | 0 => entry 0 0 [] (.create "initial")
   | 1 => entry 0 0 [0] (.addMember 1 ben "initial")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | 3 => entry 0 0 [0, 1, 2] (.addMember 2 carol "initial")
-  | _ => entry 2 2 [0, 1, 2, 3] (.addDevice 2 2)
+  | _ => entry 2 2 [0, 1, 2, 3] (.addDevice 2)
 
 def both : Log
   | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 3 .member "initial")
@@ -20,7 +20,7 @@ def both : Log
   | w => household .admin .member w
 
 def phoneAndRemoval : Log
-  | 3 => entry 1 4 [0, 1, 2] (.addDevice 1 4)
+  | 3 => entry 1 4 [0, 1, 2] (.addDevice 1)
   | 4 => entry 0 0 [0, 1, 2] (.removeMember 1 [])
   | w => household .admin .member w
 
@@ -38,7 +38,7 @@ def carol : Log
   | 3 => entry 0 0 [0, 1, 2] (.addMember 3 .member "initial")
   | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 2 .member "initial")
   | 5 => entry 1 1 [0, 1, 2, 3] (.removeMember 3 [])
-  | 6 => entry 2 2 [0, 1, 2, 3, 4] (.addDevice 2 2)
+  | 6 => entry 2 2 [0, 1, 2, 3, 4] (.addDevice 2)
   | w => household .admin .member w
 
 def equalAdds : Log
@@ -59,15 +59,16 @@ def removedAuthor : Log
 def removalAndPhone : Log
   | 4 => entry 1 1 [0, 1, 2, 3] (.removeMember 0 [])
   | 5 => entry 0 0 [0, 1, 2, 3] (.removeMember 1 [])
-  | 6 => entry 1 4 [0, 1, 2, 3] (.addDevice 1 5)
+  | 6 => entry 1 5 [0, 1, 2, 3] (.addDevice 1)
   | w => losingRemoval w
 
-/-- §9's opening log: Ben registers his phone while Ana's iPad promotes him. -/
+/-- §9's opening log: Ben's laptop registers itself while Ana's phone
+promotes him. -/
 def openingLog : Log
   | 0 => entry 0 0 [] (.create "initial")
   | 1 => entry 0 0 [0] (.addMember 1 .member "initial")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 2)
-  | _ => entry 0 3 [0, 1] (.changeRole 1 .admin)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
+  | _ => entry 0 0 [0, 1] (.changeRole 1 .admin)
 
 /-- The entry examples are valid, so their universal causal-order claims
 have actual arrival orders (in particular, timestamp order). -/
@@ -80,7 +81,7 @@ theorem member_examples_valid :
 
 /-- Both changes concern Ben; the admin grant loses to the device addition. -/
 theorem opening_log : EveryOrder openingLog 4 (List.range 4) (fun r =>
-    lookup r.state.members 1 = some .member ∧ lookup r.state.devices 2 = some 1 ∧
+    lookup r.state.members 1 = some .member ∧ lookup r.state.devices 1 = some 1 ∧
     r.dropped = [3]) := by
   apply every_order; decide
 

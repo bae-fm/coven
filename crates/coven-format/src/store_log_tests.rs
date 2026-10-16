@@ -6,16 +6,15 @@ const HEADER: usize = 59;
 
 #[test]
 fn device_registration_decodes_optional_replacement() {
-    for (replaces, payload) in [None, Some(DeviceId(1))].into_iter().zip([
-        &b"\x04\0\0\0\0\0\0\0\x02\0\0\0\x01D\0"[..],
-        &b"\x04\0\0\0\0\0\0\0\x02\0\0\0\x01D\x01\0\0\0\0\0\0\0\x01"[..],
+    for (replaces, payload) in [None, Some(DeviceId(3))].into_iter().zip([
+        &b"\x04\0\0\0\x01D\0"[..],
+        &b"\x04\0\0\0\x01D\x01\0\0\0\0\0\0\0\x03"[..],
     ]) {
         let mut bytes = Object::StoreLog(test_utils::store_log()).encode().unwrap();
         bytes.truncate(HEADER);
         bytes.extend_from_slice(payload);
         set_length(&mut bytes);
         let expected = frame(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "D".into(),
             replaces,
         });
@@ -29,8 +28,9 @@ fn device_registration_decodes_optional_replacement() {
 fn device_registration_rejects_self_replacement() {
     for device in [DeviceId(0), DeviceId(1), DeviceId(u64::MAX)] {
         let entry = StoreLogEntry {
+            position: EntryId { device, number: 1 },
+            timestamp: Timestamp::new(6, 3, device).unwrap(),
             change: StoreChange::AddDevice {
-                device,
                 name: "Phone".into(),
                 replaces: Some(device),
             },
@@ -53,34 +53,31 @@ fn device_registration_rejects_self_replacement() {
 
 #[test]
 fn device_registration_preserves_full_ids_and_checks_names() {
-    for device in [DeviceId(0), DeviceId(u64::MAX)] {
-        for replaces in [None, Some(DeviceId(!device.0))] {
-            for (name, valid) in [
-                ("Phone", true),
-                ("电话", true),
-                (&"x".repeat(1024), true),
-                ("", false),
-                ("bad\0name", false),
-                (&"x".repeat(1025), false),
-            ] {
-                let entry = StoreLogEntry {
-                    change: StoreChange::AddDevice {
-                        device,
-                        name: name.into(),
-                        replaces,
-                    },
-                    ..test_utils::store_log()
-                };
-                let object = Object::StoreLog(entry.clone());
-                let encoded = object.encode();
-                let decoded = Object::decode(&encode_frame(4, &entry).unwrap());
-                if valid {
-                    assert_eq!(decoded.unwrap(), object);
-                    assert_eq!(Object::decode(&encoded.unwrap()).unwrap(), object);
-                } else {
-                    assert!(encoded.is_err());
-                    assert!(decoded.is_err());
-                }
+    for replaces in [None, Some(DeviceId(0)), Some(DeviceId(u64::MAX))] {
+        for (name, valid) in [
+            ("Phone", true),
+            ("电话", true),
+            (&"x".repeat(1024), true),
+            ("", false),
+            ("bad\0name", false),
+            (&"x".repeat(1025), false),
+        ] {
+            let entry = StoreLogEntry {
+                change: StoreChange::AddDevice {
+                    name: name.into(),
+                    replaces,
+                },
+                ..test_utils::store_log()
+            };
+            let object = Object::StoreLog(entry.clone());
+            let encoded = object.encode();
+            let decoded = Object::decode(&encode_frame(4, &entry).unwrap());
+            if valid {
+                assert_eq!(decoded.unwrap(), object);
+                assert_eq!(Object::decode(&encoded.unwrap()).unwrap(), object);
+            } else {
+                assert!(encoded.is_err());
+                assert!(decoded.is_err());
             }
         }
     }
@@ -88,16 +85,15 @@ fn device_registration_preserves_full_ids_and_checks_names() {
 
 #[test]
 fn device_registration_rejects_malformed_replacement_payloads() {
-    for replaces in [None, Some(DeviceId(1))] {
+    for replaces in [None, Some(DeviceId(3))] {
         let bytes = frame(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "D".into(),
             replaces,
         })
         .encode()
         .unwrap();
-        // Tag, device and length-prefixed name precede the D2 option tag.
-        let option = HEADER + 1 + 8 + 4 + 1;
+        // Tag and length-prefixed name precede the D2 option tag.
+        let option = HEADER + 1 + 4 + 1;
         for tag in 2..=u8::MAX {
             let mut malformed = bytes.clone();
             malformed[option] = tag;

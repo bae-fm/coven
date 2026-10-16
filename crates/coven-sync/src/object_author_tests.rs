@@ -48,7 +48,6 @@ async fn household() -> (
     ben.sync().await;
     ben.sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "Ben's laptop".into(),
             replaces: None,
         })
@@ -82,14 +81,7 @@ async fn an_installation_holding_replaced_keys_stops_sending() {
     assert!(state.devices[&DeviceId(2)].active());
     let caught_up = ben.sync.sync_store_log().await;
     assert!(caught_up.as_ref().is_err_and(replaced), "{caught_up:?}");
-    let entry = ben
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(3),
-            name: "Ben's phone".into(),
-            replaces: None,
-        })
-        .await;
+    let entry = ben.restate_access().await;
     assert!(entry.as_ref().is_err_and(replaced), "{entry:?}");
     let posted = ben.writes.post_positions().await;
     assert!(posted.as_ref().is_err_and(replaced), "{posted:?}");
@@ -114,15 +106,7 @@ async fn newer_custody_never_re_signs_an_entry_fixed_under_old_keys() {
         .number
         + 1;
     ben.interrupt_entry(next).await;
-    assert!(ben
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(3),
-            name: "Ben's phone".into(),
-            replaces: None,
-        })
-        .await
-        .is_err());
+    assert!(ben.restate_access().await.is_err());
     ben.restore_storage();
     ana.sync
         .make_and_upload_entry(StoreChange::ReplaceMemberKeys {

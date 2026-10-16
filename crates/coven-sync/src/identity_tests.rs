@@ -423,8 +423,10 @@ fn admission_case(base: &History, objects: &[(u8, u64, Vec<usize>)]) -> (Value, 
 /// Ben's phone 1 and Carol's tablet 2, with every subset of replacements by
 /// Ben's restored copies 5 and 6 (concurrent), Carol's copy 8 of her tablet
 /// and Carol's unauthorized claim 7 on Ben's phone, and every subset of them
-/// read. Then two histories where an object's own view and the full replay
-/// disagree about a replacement, in each direction.
+/// read. One entry ever registers an id (§10), so only its author's removal
+/// drops a replacement, which also excludes his objects; the history where an
+/// object's own view keeps a replacement the full replay drops is pinned by
+/// `a_dropped_replacement_stops_replacing_without_rejudging_recorded_pasts`.
 #[test]
 #[ignore = "requires COVEN_IDENTITY_LEAN"]
 fn st_differential_replacement_admission() {
@@ -464,41 +466,6 @@ fn st_differential_replacement_admission() {
         }
         judge(&base, &objects);
     }
-    let registered: Vec<usize> = (0..5).collect();
-    let with = |extra: &[usize]| [&registered[..], extra].concat();
-    // The pinned history: Ana registers device 5 while Ben's restored copy,
-    // unaware, registers 5 replacing phone 1. The full replay drops the
-    // replacement; an object whose own view kept it stays excluded.
-    let mut pinned = household(MemberRole::Admin, MemberRole::Member);
-    pinned.push(0, 0, &registered, crate::replay::tests::device(5));
-    pinned.push(1, 5, &registered, replace(5, 1));
-    assert!(registrations(&checked_log(&pinned.entries).replay, &pinned.entries).is_empty());
-    let objects: Vec<_> = [with(&[]), with(&[6]), with(&[5, 6])]
-        .into_iter()
-        .map(|past| (1, 1, past))
-        .collect();
-    assert_eq!(
-        judge(&pinned, &objects),
-        [true, true, false, false, true, true]
-    );
-    // The other direction: Carol removes Ana concurrently with Ana registering
-    // device 5, so the full replay drops Ana's registration and keeps Ben's
-    // replacement. A view without the removal drops the replacement instead,
-    // and phone 1's objects there still count.
-    let mut removal = household(MemberRole::Member, MemberRole::Admin);
-    removal.push(2, 2, &registered, crate::replay::tests::remove(0));
-    removal.push(0, 0, &registered, crate::replay::tests::device(5));
-    removal.push(1, 5, &registered, replace(5, 1));
-    let full = registrations(&checked_log(&removal.entries).replay, &removal.entries);
-    assert_eq!(full, [json!({"old": 1, "fresh": 5, "number": 1})]);
-    let objects: Vec<_> = [with(&[]), with(&[7]), with(&[6, 7]), with(&[5, 6, 7])]
-        .into_iter()
-        .map(|past| (1, 1, past))
-        .collect();
-    assert_eq!(
-        judge(&removal, &objects),
-        [true, true, false, false, true, true, false, false]
-    );
     assert_eq!(actual, identity_runner(&cases));
 }
 

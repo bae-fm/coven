@@ -130,7 +130,6 @@ async fn add_device(device: &mut Device) {
     device
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: id,
             name: id.0.to_string(),
             replaces: None,
         })
@@ -755,13 +754,7 @@ async fn reload_reselects_after_store_log_changes_and_preserves_interleaved_app_
     let record = a.operation(id).await;
     a.sync.operation_step(&record, data).await.unwrap();
     assert!(matches!(
-        a.sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(77),
-                name: "pending".into(),
-                replaces: None,
-            })
-            .await,
+        a.restate_access().await,
         Err(SyncError::ReloadPending(_))
     ));
     b.sync

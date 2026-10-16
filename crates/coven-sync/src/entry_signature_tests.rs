@@ -423,8 +423,8 @@ pub(crate) fn action(entry: &StoreLogEntry, numbers: &mut Numbers) -> Value {
         }
         StoreChange::ChangeRole { member, role } => json!({"kind": 3,
             "member": Numbers::member(member), "role": u64::from(*role == MemberRole::Member)}),
-        StoreChange::AddDevice { device, .. } => {
-            json!({"kind": 4, "member": Numbers::member(&entry.author), "device": device.0})
+        StoreChange::AddDevice { .. } => {
+            json!({"kind": 4, "member": Numbers::member(&entry.author)})
         }
         StoreChange::CreateCircle {
             circle,

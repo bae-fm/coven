@@ -337,7 +337,7 @@ impl StoreLogSync {
                 };
                 // A repeated addition or a recorded key is already in place;
                 // a replacement never is, and approval publishes its own (§9).
-                if effects::change_in_place(state, me, &change) {
+                if effects::change_in_place(state, me, local.device, &change) {
                     return Ok(None);
                 }
                 self.validate_administration(local, me, &change)?;
@@ -350,7 +350,7 @@ impl StoreLogSync {
             }
             Data::ReplaceAccessKey(work) => {
                 let change = Self::replacement_change(work)?;
-                if effects::change_in_place(state, me, &change) {
+                if effects::change_in_place(state, me, local.device, &change) {
                     return Ok(None);
                 }
                 self.validate_administration(local, me, &change)?;
@@ -405,7 +405,7 @@ impl StoreLogSync {
         };
         // A started operation finishes without another entry if its effect has
         // already happened (§18), even if that effect removed its authority.
-        if effects::change_in_place(state, me, &change) {
+        if effects::change_in_place(state, me, local.device, &change) {
             tracing::debug!(?change, "operation change is already in place");
             Ok(None)
         } else {

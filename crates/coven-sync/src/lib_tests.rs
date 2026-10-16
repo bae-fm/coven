@@ -56,7 +56,13 @@ impl Generator {
             if let StoreChange::SetAccess { member: target, .. } = &mut change {
                 *target = member(author);
             }
-            h.all(author, u64::from(author), change);
+            // A registration is its new device's own entry (§10); each
+            // member's devices take ids of their own.
+            let writer = match &change {
+                StoreChange::AddDevice { .. } => 10 + 10 * u64::from(author) + self.pick(3) as u64,
+                _ => u64::from(author),
+            };
+            h.all(author, writer, change);
             let past: Vec<_> = (0..h.entries.len()).collect();
             let mut changes = self.concurrent_changes();
             if self.pick(2) == 0 {
@@ -237,9 +243,9 @@ pub(crate) fn input(h: &History, stored: &[u64], received: &[Vec<usize>]) -> Val
             StoreChange::AddMember { member, role, access, .. } => json!({"kind":1,"member":member_number(member),"role":role_number(*role),"access":serde_json::to_string(access).unwrap()}),
             StoreChange::RemoveMember { member } => json!({"kind":2,"member":member_number(member)}),
             StoreChange::ChangeRole { member, role } => json!({"kind":3,"member":member_number(member),"role":role_number(*role)}),
-            StoreChange::AddDevice { device, replaces, .. } => {
+            StoreChange::AddDevice { replaces, .. } => {
                 assert!(replaces.is_none(), "CurrentReplay does not model replacement registrations");
-                json!({"kind":4,"member":member_number(&entry.author),"device":device.0})
+                json!({"kind":4,"member":member_number(&entry.author)})
             },
             StoreChange::RemoveDevice { device } => {
                 let view = crate::replay(&past.iter().map(|&i| h.entries[i].clone()).collect::<Vec<_>>(), &publications).state;
@@ -580,7 +586,7 @@ fn lean_differential_checked_examples() {
     histories.push(last_admins);
 
     let mut devices = History::new();
-    devices.push(0, 0, &[0], device(1));
+    devices.push(0, 1, &[0], device(1));
     devices.push(0, 2, &[0], device(2));
     assert_eq!(
         projected(&devices, &replay(&devices.entries)),
@@ -773,9 +779,8 @@ fn projection_rejects_replacement_registrations() {
     let mut h = History::new();
     h.all(
         0,
-        0,
+        1,
         StoreChange::AddDevice {
-            device: DeviceId(1),
             name: "Replacement".into(),
             replaces: Some(DeviceId(0)),
         },
@@ -927,10 +932,19 @@ fn lean_differential_online_administration() {
                 },
             ] {
                 let current = replay(&base.entries);
-                let validated =
-                    crate::effects::validate_change(&current.state, &member(author), &change);
+                // A device addition registers its writer, device 20 (§10).
+                let writer = match change {
+                    StoreChange::AddDevice { .. } => 20,
+                    _ => u64::from(author),
+                };
+                let validated = crate::effects::validate_change(
+                    &current.state,
+                    &member(author),
+                    DeviceId(writer),
+                    &change,
+                );
                 let mut h = base.clone();
-                h.all(author, u64::from(author), change);
+                h.all(author, writer, change);
                 let replayed = replay(&h.entries);
                 let entry = h.entries.last().unwrap();
                 match &replayed.entries[&entry.position] {

@@ -36,11 +36,14 @@ theorem before_asymm (M : Log) {a b : Nat} (h : before M a b = true) :
 
 def memberTarget : Action → Option Nat
   | .addMember m _ _ | .setAccess m _ | .removeMember m _ | .changeRole m _ |
-    .addDevice m _ | .removeDevice m _ | .addToCircle _ m | .removeFromCircle _ m => some m
+    .addDevice m | .removeDevice m _ | .addToCircle _ m | .removeFromCircle _ m => some m
   | _ => none
 
-def deviceTarget : Action → Option Nat
-  | .addDevice _ d | .removeDevice _ d => some d
+/-- A device addition targets the device that wrote it (§10). -/
+def deviceTarget (e : Entry) : Option Nat :=
+  match e.action with
+  | .addDevice _ => some e.device
+  | .removeDevice _ d => some d
   | _ => none
 
 def circleTarget : Action → Option Nat
@@ -100,7 +103,7 @@ def specialConflict (va vb : State) (a b : Action) : Bool :=
 def pairConflict (M : Log) (views : Nat → State) (a b : Nat) : Bool :=
   concurrent M a b && !sameMeaning (M a) (M b) &&
     (sameTarget (memberTarget (M a).action) (memberTarget (M b).action) ||
-     sameTarget (deviceTarget (M a).action) (deviceTarget (M b).action) ||
+     sameTarget (deviceTarget (M a)) (deviceTarget (M b)) ||
      specialConflict (views a) (views b) (M a).action (M b).action)
 
 /-- Apart from being about the removed member, a circle addition conflicts

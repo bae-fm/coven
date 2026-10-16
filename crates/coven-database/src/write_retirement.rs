@@ -14,8 +14,9 @@ use rusqlite::params;
 /// The columns `_coven_store_log` keeps for an entry that can retire writes:
 /// the device a removal or device replacement retires, the member a removal
 /// retires, a member-key replacement's target and new signing key (§10), and
-/// the device a registration names, which retires that device if replay
-/// drops the registration, or it landed too late, and keeps none (§6, §10).
+/// the device a registration registers, its writer, which retires that device
+/// if replay drops the registration, or it landed too late, and keeps none
+/// (§6, §10).
 #[derive(Default)]
 pub(crate) struct Retires {
     pub(crate) device: Option<Vec<u8>>,
@@ -28,11 +29,9 @@ pub(crate) struct Retires {
 pub(crate) fn retires(entry: &coven_format::store_log::StoreLogEntry) -> Retires {
     let bytes = |device: &coven_foundation::id_source::DeviceId| device.0.to_be_bytes().to_vec();
     match &entry.change {
-        StoreChange::AddDevice {
-            device, replaces, ..
-        } => Retires {
+        StoreChange::AddDevice { replaces, .. } => Retires {
             device: replaces.as_ref().map(bytes),
-            registers: Some(bytes(device)),
+            registers: Some(bytes(&entry.position.device)),
             ..Retires::default()
         },
         StoreChange::RemoveDevice { device } => Retires {

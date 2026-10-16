@@ -443,6 +443,18 @@ impl Device {
     pub(crate) async fn device(&self) -> DeviceId {
         self.db.local_store_log().await.unwrap().device
     }
+    /// An entry any member may make that changes nothing: their own current
+    /// storage access, recorded again. Tests that need some entry from this
+    /// device use it; only a device's own installation registers it (§10).
+    pub(crate) async fn restate_access(&mut self) -> Result<EntryId, SyncError> {
+        let member = self.member.member();
+        let access = self.log().await.replay.state.members[&member]
+            .access
+            .clone();
+        self.sync
+            .make_and_upload_entry(StoreChange::SetAccess { member, access })
+            .await
+    }
 }
 
 #[tokio::test]
@@ -546,14 +558,7 @@ async fn fixed_bytes_survive_restart_and_lost_create_reply() {
             ObjectPath::store_log(store(1), DeviceId(1), 2.try_into().unwrap()),
             lost_reply,
         ));
-        let result = a
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(20),
-                name: "Other".into(),
-                replaces: None,
-            })
-            .await;
+        let result = a.restate_access().await;
         assert!(matches!(result, Err(SyncError::Storage(_))));
         let fixed = a.db.local_store_log().await.unwrap().upload.unwrap();
         let expected = a.reseal(&fixed).await;
@@ -688,15 +693,7 @@ async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
     b.sync().await;
     a.clock.set(UNIX_EPOCH + Duration::from_secs(365 * 86400));
     a.catch_up().await;
-    let future = a
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(50),
-            name: "future".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    let future = a.restate_access().await.unwrap();
     b.sync().await;
     assert!(b.log().await.replay.entries.contains_key(&future));
     b.clock.set(UNIX_EPOCH - Duration::from_secs(1));
@@ -706,7 +703,6 @@ async fn far_future_entry_applies_and_a_restored_device_stamps_after_it() {
     let restored = b
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: id,
             name: "restored".into(),
             replaces: None,
         })

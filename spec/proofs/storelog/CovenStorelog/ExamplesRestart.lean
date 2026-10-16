@@ -10,8 +10,8 @@ concurrent entries add Carol as admin, demote Ben, and remove Ana. -/
 def losingRemoval : Log
   | 0 => entry 0 0 [] (.create "initial")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "initial")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
-  | 3 => entry 1 4 [0, 1, 2] (.addDevice 1 4)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
+  | 3 => entry 1 4 [0, 1, 2] (.addDevice 1)
   | 4 => entry 0 0 [0, 1, 2, 3] (.addMember 2 .admin "initial")
   | 5 => entry 1 1 [0, 1, 2, 3] (.changeRole 1 .member)
   | _ => entry 1 4 [0, 1, 2, 3] (.removeMember 0 [])

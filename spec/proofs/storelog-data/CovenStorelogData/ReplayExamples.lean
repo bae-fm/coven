@@ -17,8 +17,8 @@ def log : Log
   | 0 => entry 0 0 [] (.create "S3")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "S3")
   | 2 => entry 0 0 [0, 1] (.addMember 2 .admin "S3")
-  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1 1)
-  | 4 => entry 2 2 [0, 1, 2, 3] (.addDevice 2 2)
+  | 3 => entry 1 1 [0, 1, 2] (.addDevice 1)
+  | 4 => entry 2 2 [0, 1, 2, 3] (.addDevice 2)
   | 5 => entry 1 1 (List.range 5) (.makeCircle 0 "Gifts")
   | 6 => entry 2 2 (List.range 6) (.removeMember 0 [])
   | 7 => entry 0 0 (List.range 6) (.removeMember 1 [])
@@ -52,7 +52,7 @@ against the preceding registration. The member remains in the store. -/
 def deviceLog : Log
   | 0 => entry 0 0 [] (.create "S3")
   | 1 => entry 0 0 [0] (.addMember 1 .member "S3")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | _ => entry 0 0 [0, 1, 2] (.removeDevice 1 1)
 
 theorem device_removal_authority :

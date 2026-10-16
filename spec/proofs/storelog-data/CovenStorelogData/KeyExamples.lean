@@ -13,7 +13,7 @@ the earlier stamp; Ben rotates separately after his removal of Ana, then writes.
 def log : Log
   | 0 => entry 0 0 [] (.create "ana-S3")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "ben-S3")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | 3 => entry 0 0 [0, 1, 2] (.removeMember 1 [])
   | 4 => entry 1 1 [0, 1, 2] (.removeMember 0 [])
   | _ => entry 1 1 [0, 1, 2, 4] (.rotateKey .store 2)

@@ -30,7 +30,7 @@ private theorem effect_source {s t : State} {e : Entry} {w c : Nat} {circle : Ci
     split at effected
     · cases effected; exact Or.inl ⟨circle, present⟩
     · cases effected
-  | addDevice m d =>
+  | addDevice m =>
     simp only [effect, action] at effected
     split at effected
     · cases effected; exact Or.inl ⟨circle, present⟩

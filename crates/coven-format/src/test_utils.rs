@@ -596,7 +596,6 @@ pub fn store_changes() -> Vec<StoreChange> {
             role: MemberRole::Admin,
         },
         StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "D".into(),
             replaces: None,
         },
@@ -675,14 +674,6 @@ pub fn objects() -> Vec<Object> {
                     number: 11,
                 },
                 caught_at: crate::value::StorageTime::new(1_700_000_100, 0).expect("a valid time"),
-            },
-            ..store_log()
-        }),
-        Object::StoreLog(StoreLogEntry {
-            change: StoreChange::AddDevice {
-                device: DeviceId(2),
-                name: "D".into(),
-                replaces: Some(DeviceId(1)),
             },
             ..store_log()
         }),

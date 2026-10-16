@@ -397,7 +397,7 @@ mod histories {
     /// lands at the deadline or past it; another creation names the same id.
     pub(super) fn late_creation(landing: u64) -> (History, Vec<u64>) {
         let mut h = History::new();
-        h.all(0, 0, device(1));
+        h.all(0, 1, device(1));
         h.all(0, 0, make(1, "Notes"));
         h.push(0, 1, &[0, 1], make(0, "Gifts"));
         h.all(0, 0, make(0, "Gifts"));
@@ -666,7 +666,6 @@ async fn data_differential_reload_choice() {
     let own = ben.db.local_store_log().await.unwrap().device;
     ben.sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: own,
             name: own.0.to_string(),
             replaces: None,
         })

@@ -652,9 +652,9 @@ private def wakes (j : Json) : Except String Json := do
     s := next
   return toJson out
 
-/-- `Writers.known`: the received entries, by writing device and registered
-device, and remembered folders give the write logs probed, less drained ids
-and the reader itself. No replay verdict is an input. -/
+/-- `Writers.known`: the received entries, by writing device, and remembered
+folders give the write logs probed, less drained ids and the reader itself.
+No replay verdict is an input. -/
 private def writers (j : Json) : Except String Json := do
   let entries ← j.getObjValAs? (Array Json) "entries"
   let listed ← j.getObjValAs? (List Nat) "listed"
@@ -662,11 +662,7 @@ private def writers (j : Json) : Except String Json := do
   let own ← j.getObjValAs? Nat "self"
   let blank : CovenStorelog.Entry := ⟨0, 0, [], .rotateKey .store 0⟩
   let log ← entries.mapM fun e => do
-    let writer ← e.getObjValAs? Nat "writer"
-    let action := match ← e.getObjValAs? (Option Nat) "registers" with
-      | some device => CovenStorelog.Action.addDevice 0 device
-      | none => .rotateKey .store 0
-    pure ({ blank with device := writer, action } : CovenStorelog.Entry)
+    pure ({ blank with device := ← e.getObjValAs? Nat "writer" } : CovenStorelog.Entry)
   let life : Nat → Retired.Life := fun w => if w ∈ drained then .drained else .active
   let known := Writers.known (fun w => log.getD w blank) (List.range log.size) listed
   return toJson ((Retired.polling life known).filter (· ≠ own) |>.mergeSort)
@@ -709,7 +705,7 @@ private def retirementDevices (j : Json) : Except String Json := do
     let device ← e.getObjValAs? Nat "writer"
     let action ← match ← e.getObjValAs? String "action" with
       | "create" => pure (CovenStorelog.Action.create "")
-      | "addDevice" => do pure (.addDevice author (← e.getObjValAs? Nat "device"))
+      | "addDevice" => pure (.addDevice author)
       | "removeDevice" => do pure (.removeDevice 0 (← e.getObjValAs? Nat "device"))
       | "removeMember" => do pure (.removeMember (← e.getObjValAs? Nat "member") [])
       | _ => pure (.rotateKey .store 0)

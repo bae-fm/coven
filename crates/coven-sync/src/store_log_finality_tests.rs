@@ -35,7 +35,6 @@ mod listing {
             author: owner.member.member(),
             had_read: EntryPositions(vec![creation.position]),
             change: StoreChange::AddDevice {
-                device: DeviceId(writer),
                 name: format!("Writer {writer}"),
                 replaces: None,
             },

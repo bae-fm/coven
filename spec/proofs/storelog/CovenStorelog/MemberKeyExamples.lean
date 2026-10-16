@@ -14,7 +14,7 @@ def adminKeys : MemberKeys := ⟨103, 203⟩
 def history : Log
   | 0 => ⟨0, 100, 0, [], .entry (.create "Ana" storeKey) ana⟩
   | 1 => ⟨0, 100, 0, [0], .entry (.addMember 1 .member "Ben") ben⟩
-  | 2 => ⟨1, 101, 1, [0, 1], .entry (.addDevice 1 1) ()⟩
+  | 2 => ⟨1, 101, 1, [0, 1], .entry (.addDevice 1) ()⟩
   | 3 => ⟨1, 101, 1, [0, 1, 2], .replaceMemberKeys 1 selfKeys⟩
   | 4 => ⟨0, 100, 0, [0, 1, 2], .replaceMemberKeys 1 adminKeys⟩
   | 5 => ⟨1, 101, 1, [0, 1, 2, 3, 4], .entry (.setAccess 1 "old signer") ()⟩
@@ -45,14 +45,14 @@ theorem signer_uses_recorded_view :
 def twoSelf : History := { H with
   attempted := (fun e => if e = 5 then 4 else e),
   log := fun e =>
-  if e = 3 then ⟨1, 101, 1, [0, 1, 2], .entry (.addDevice 1 2) ()⟩ else
+  if e = 3 then ⟨1, 101, 2, [0, 1, 2], .entry (.addDevice 1) ()⟩ else
   if e = 4 then ⟨1, 101, 1, [0, 1, 2, 3], .replaceMemberKeys 1 selfKeys⟩ else
   if e = 5 then ⟨1, 101, 2, [0, 1, 2, 3], .replaceMemberKeys 1 adminKeys⟩ else history e }
 
 def twoAdmin : History := { H with
   attempted := (fun e => if e = 5 then 4 else e),
   log := fun e =>
-  if e = 3 then ⟨0, 100, 0, [0, 1, 2], .entry (.addDevice 0 2) ()⟩ else
+  if e = 3 then ⟨0, 100, 2, [0, 1, 2], .entry (.addDevice 0) ()⟩ else
   if e = 4 then ⟨0, 100, 0, [0, 1, 2, 3], .replaceMemberKeys 1 selfKeys⟩ else
   if e = 5 then ⟨0, 100, 2, [0, 1, 2, 3], .replaceMemberKeys 1 adminKeys⟩ else history e }
 
@@ -90,7 +90,7 @@ read replacement, even though the receiver already has the replacement. -/
 def unread : History := { H with
   attempted := (fun e => if e = 5 then 4 else H.attempted e),
   log := fun e =>
-  if e = 3 then ⟨1, 101, 1, [0, 1, 2], .entry (.addDevice 1 2) ()⟩ else
+  if e = 3 then ⟨1, 101, 2, [0, 1, 2], .entry (.addDevice 1) ()⟩ else
   if e = 5 then ⟨1, 101, 2, [0, 1, 2, 3], .entry (.setAccess 1 "concurrent") ()⟩ else history e }
 
 theorem old_unread_entry_counts :

@@ -15,7 +15,7 @@ Ben deletes the circle. Each operation read only the common prefix. -/
 def log : Log
   | 0 => entry 0 0 [] (.create "S3")
   | 1 => entry 0 0 [0] (.addMember 1 .admin "S3")
-  | 2 => entry 1 1 [0, 1] (.addDevice 1 1)
+  | 2 => entry 1 1 [0, 1] (.addDevice 1)
   | 3 => entry 0 0 [0, 1, 2] (.makeCircle 0 "Gifts")
   | 4 => entry 0 0 [0, 1, 2, 3] (.addToCircle 0 1)
   | 5 => entry 0 0 (List.range 5) (.removeFromCircle 0 1)

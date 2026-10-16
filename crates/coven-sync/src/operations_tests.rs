@@ -122,10 +122,8 @@ async fn accounts_with(
             MemoryStorage::for_recipient(&storage, email).unwrap(),
         ));
         d.sync().await;
-        let device = d.device().await;
         d.sync
             .make_and_upload_entry(StoreChange::AddDevice {
-                device,
                 name: email.into(),
                 replaces: None,
             })
@@ -598,7 +596,6 @@ async fn removing_a_member_cuts_off_every_device_of_their_account() {
     phone
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: phone_id,
             name: "Second phone".into(),
             replaces: None,
         })
@@ -724,11 +721,9 @@ async fn resumed_removal_uses_the_targets_current_storage_account() {
     let [mut a, b, _c] = accounts(storage.clone()).await;
     let mut owner_phone = device(storage.clone(), 4, a.member.clone(), store(1)).await;
     owner_phone.sync().await;
-    let device_id = owner_phone.device().await;
     owner_phone
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: device_id,
             name: "Owner phone".into(),
             replaces: None,
         })

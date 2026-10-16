@@ -182,7 +182,12 @@ pub(crate) fn generate(seed: u64) -> Case {
             // Signed with his original key, current or not in that view.
             _ => (history::device(13), identity(BEN)),
         };
-        h.push(BEN, 11, &read, change);
+        // A device addition registers its writer, device 13 (§10).
+        let writer = match change {
+            coven_format::store_log::StoreChange::AddDevice { .. } => 13,
+            _ => 11,
+        };
+        h.push(BEN, writer, &read, change);
         signers.push(signer);
         attempted.push(start);
         stored.push(start + [0, 30, 31][g.pick(3)]);

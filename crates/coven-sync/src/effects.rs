@@ -244,9 +244,12 @@ fn repeats(
     added.keys == *keys && added.role == role && added.access.same_credential(access)
 }
 
+/// `writer` is the device the entry is written from, which a device addition
+/// registers (§10).
 pub(crate) fn change_in_place(
     state: &StoreLogState,
     author: &MemberId,
+    writer: DeviceId,
     change: &StoreChange,
 ) -> bool {
     use StoreChange::*;
@@ -265,12 +268,8 @@ pub(crate) fn change_in_place(
         }
         ChangeRole { member: id, role } => member(state, id).is_some_and(|m| m.role == *role),
         RemoveMember { member: id, .. } => member(state, id).is_none(),
-        AddDevice {
-            device: id,
-            replaces,
-            ..
-        } => {
-            device(state, *id).is_some_and(|d| d.member == *author)
+        AddDevice { replaces, .. } => {
+            device(state, writer).is_some_and(|d| d.member == *author)
                 && replaces.is_none_or(|old| state.devices.get(&old).is_none_or(|d| !d.active()))
         }
         RemoveDevice { device: id } => device(state, *id).is_none(),
@@ -294,9 +293,16 @@ pub(crate) fn change_in_place(
 pub(crate) fn validate_change(
     state: &StoreLogState,
     author: &MemberId,
+    writer: DeviceId,
     change: &StoreChange,
 ) -> Result<bool, DropReason> {
-    validate_effect(state, &check_change(state, author, change), author, change)
+    validate_effect(
+        state,
+        &check_change(state, author, change),
+        author,
+        writer,
+        change,
+    )
 }
 
 /// Returns whether the authorized change is already in place.
@@ -304,6 +310,7 @@ pub(crate) fn validate_effect(
     state: &StoreLogState,
     view: &StoreLogCheck,
     author: &MemberId,
+    writer: DeviceId,
     change: &StoreChange,
 ) -> Result<bool, DropReason> {
     use StoreChange::*;
@@ -312,7 +319,7 @@ pub(crate) fn validate_effect(
         StoreLogCheck::KeysAlreadyUsed => return Err(DropReason::KeysAlreadyUsed),
         _ => {}
     }
-    if change_in_place(state, author, change) {
+    if change_in_place(state, author, writer, change) {
         return Ok(true);
     }
     let missing = match change {
@@ -334,19 +341,15 @@ pub(crate) fn validate_effect(
         RemoveMember { member: id } | ChangeRole { member: id, .. } => member(state, id)
             .is_none()
             .then_some(EntryTarget::Member(*id)),
-        AddDevice {
-            device: id,
-            replaces,
-            ..
-        } => {
+        AddDevice { replaces, .. } => {
             if member(state, author).is_none() {
                 Some(EntryTarget::Member(*author))
             } else if let Some(old) = replaces.filter(|old| !state.devices.contains_key(old)) {
                 Some(EntryTarget::Device(old))
             } else {
-                device(state, *id)
+                device(state, writer)
                     .is_some()
-                    .then_some(EntryTarget::Device(*id))
+                    .then_some(EntryTarget::Device(writer))
             }
         }
         RemoveDevice { device: id } => {
@@ -499,13 +502,10 @@ pub(crate) fn apply_effect(next: &mut StoreLogState, view: &StoreLogCheck, entry
         ChangeRole { member: id, role } => {
             next.members.get_mut(id).expect("checked member").role = *role;
         }
-        AddDevice {
-            device: id,
-            name,
-            replaces,
-        } => {
+        // A device addition registers the device that wrote it (§10).
+        AddDevice { name, replaces } => {
             next.devices.insert(
-                *id,
+                entry.position.device,
                 StoreDevice {
                     member: entry.author,
                     name: name.clone(),

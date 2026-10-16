@@ -236,7 +236,7 @@ impl StoreLogSync {
             }
             Command::SetAccess(access) => {
                 let change = StoreChange::SetAccess { member: me, access };
-                if !effects::validate_change(state, &me, &change)? {
+                if !effects::validate_change(state, &me, local.device, &change)? {
                     self.make_and_upload_entry(change).await?;
                 }
                 return Ok(Begun::Value(Output::Unit));
@@ -421,7 +421,7 @@ impl StoreLogSync {
         author: &MemberId,
         change: &StoreChange,
     ) -> Result<(), SyncError> {
-        effects::validate_change(&local.log.replay.state, author, change)?;
+        effects::validate_change(&local.log.replay.state, author, local.device, change)?;
         if let StoreChange::RemoveMember { member } = change {
             if let Some(target) = effects::member(&local.log.replay.state, member) {
                 if matches!(

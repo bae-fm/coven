@@ -56,23 +56,12 @@ fn folder_ownership_includes_implicit_own_registration_and_waits_for_it() {
     h.all(0, 0, history::add(1, MemberRole::Member));
     h.all(1, 1, history::device(1));
     h.all(0, 0, history::add(2, MemberRole::Member));
-    h.push(1, 1, &[0, 1], history::device(90));
+    h.push(1, 1, &[0, 1], history::role(2, MemberRole::Member));
     let candidate = &h.entries[4];
     let waiting = checked_log(&h.entries[..2]);
     assert!(!object::ready(&waiting, candidate, store(1)).unwrap());
     let log = checked_log(&h.entries[..4]);
     assert!(object::ready(&log, candidate, store(1)).unwrap());
-}
-
-#[test]
-fn folder_ownership_waits_for_a_registration_in_the_recorded_past() {
-    use crate::replay::tests as history;
-    let mut h = history::History::new();
-    h.all(0, 0, history::device(70));
-    h.all(0, 70, history::device(90));
-    let candidate = &h.entries[2];
-    assert!(!object::ready(&checked_log(&h.entries[..1]), candidate, store(1)).unwrap());
-    assert!(object::ready(&checked_log(&h.entries[..2]), candidate, store(1)).unwrap());
 }
 
 #[test]
@@ -95,14 +84,14 @@ fn a_dropped_registration_does_not_prevent_registering_again() {
     assert_eq!(replay.state.devices[&DeviceId(1)].member, candidate.author);
 }
 
+/// One entry ever registers a device id, so its owner is the same in every
+/// recorded view: a removal retires the device but gives it to no one (§10).
 #[test]
-fn folder_ownership_uses_registration_in_the_recorded_view() {
+fn folder_ownership_stays_with_its_one_registration() {
     use crate::replay::tests as history;
     let mut h = history::History::new();
     h.all(0, 0, history::add(1, MemberRole::Member));
-    h.all(1, 1, history::device(1));
-    h.all(1, 1, history::device(70));
-    h.all(1, 70, history::device(90));
+    h.all(1, 70, history::device(70));
     h.all(
         0,
         0,
@@ -110,104 +99,117 @@ fn folder_ownership_uses_registration_in_the_recorded_view() {
             device: DeviceId(70),
         },
     );
-    h.all(0, 0, history::device(70));
     let log = checked_log(&h.entries);
-    assert_eq!(
-        log.replay.state.devices[&DeviceId(70)].member,
-        history::member(0)
-    );
+    assert!(log.replay.state.devices[&DeviceId(70)].removed());
+    for past in [&[0, 1, 2][..], &[0, 1, 2, 3]] {
+        let mut candidate = h.clone();
+        candidate.push(1, 70, past, history::role(1, MemberRole::Member));
+        let mut candidate = candidate.entries.last().unwrap().clone();
+        assert!(object::ready(&log, &candidate, store(1)).unwrap());
+        candidate.author = history::member(0);
+        assert!(matches!(
+            object::ready(&log, &candidate, store(1)),
+            Err(Refusal::WrongIdentity { .. })
+        ));
+    }
+}
 
-    h.push(1, 70, &[0, 1, 2, 3, 4], history::device(91));
-    let mut candidate = h.entries.last().unwrap().clone();
-    assert!(object::ready(&log, &candidate, store(1)).unwrap());
-    candidate.author = history::member(0);
-    assert!(matches!(
-        object::ready(&log, &candidate, store(1)),
-        Err(Refusal::WrongIdentity { .. })
-    ));
-
-    candidate.had_read = log.positions();
-    candidate
+/// Seal `entry` as `signer` with key 1 and store it at its path, as a peer
+/// that bypasses its own checks would.
+async fn plant(storage: &MemoryStorage, signer: &Device, entry: &StoreLogEntry) {
+    let mut entry = entry.clone();
+    // Its own log's earlier entries are read implicitly.
+    entry
         .had_read
         .0
-        .retain(|id| id.device != candidate.position.device);
-    assert!(object::ready(&log, &candidate, store(1)).unwrap());
-    candidate.author = history::member(1);
-    assert!(matches!(
-        object::ready(&log, &candidate, store(1)),
-        Err(Refusal::WrongIdentity { .. })
-    ));
+        .retain(|id| id.device != entry.position.device);
+    let ring = signer.custody.read().unwrap().unwrap();
+    let bytes = object::seal(
+        store(1),
+        &entry,
+        coven_format::FormatVersion::CURRENT,
+        ring.store_key(key(1)).unwrap(),
+        &signer.member,
+    )
+    .unwrap();
+    storage
+        .create(&object::path(store(1), entry.position), &bytes)
+        .await
+        .unwrap();
+}
+
+fn registration(id: u64) -> StoreChange {
+    StoreChange::AddDevice {
+        name: format!("Device {id}"),
+        replaces: None,
+    }
 }
 
 #[tokio::test]
-async fn another_member_cannot_claim_an_empty_registered_store_log_folder() {
-    for added_device in [DeviceId(70), DeviceId(90)] {
-        let storage = storage();
-        let mut a = device(storage.clone(), 1, member(1), store(1)).await;
-        let mut b = device(storage.clone(), 2, member(2), store(1)).await;
-        a.create(key(1)).await;
-        a.add(&b.member, MemberRole::Member).await;
-        b.sync().await;
-        for id in [DeviceId(2), DeviceId(70)] {
-            b.sync
-                .make_and_upload_entry(StoreChange::AddDevice {
-                    device: id,
-                    name: "registered".into(),
-                    replaces: None,
-                })
-                .await
-                .unwrap();
-        }
-        a.sync().await;
-        let log = a.log().await;
-        assert_eq!(
-            log.replay.state.devices[&DeviceId(70)].member,
-            b.member.member()
-        );
-        assert!(log
-            .entries
-            .iter()
-            .all(|e| e.entry.position.device != DeviceId(70)));
-        let entry = StoreLogEntry {
-            position: EntryId {
-                device: DeviceId(70),
-                number: 1,
-            },
-            timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(70)).unwrap(),
-            author: a.member.member(),
-            had_read: log.positions(),
-            change: StoreChange::AddDevice {
-                device: added_device,
-                name: "impostor".into(),
-                replaces: None,
-            },
-        };
-        let ring = a.custody.read().unwrap().unwrap();
-        let bytes = object::seal(
-            store(1),
-            &entry,
-            coven_format::FormatVersion::CURRENT,
-            ring.store_key(key(1)).unwrap(),
-            &a.member,
-        )
-        .unwrap();
-        storage
-            .create(&object::path(store(1), entry.position), &bytes)
+async fn another_member_cannot_claim_a_registered_store_log_folder() {
+    let storage = storage();
+    let mut a = device(storage.clone(), 1, member(1), store(1)).await;
+    let mut b = device(storage.clone(), 2, member(2), store(1)).await;
+    let mut laptop = device(storage.clone(), 70, member(2), store(1)).await;
+    a.create(key(1)).await;
+    a.add(&b.member, MemberRole::Member).await;
+    for (installation, id) in [(&mut b, 2), (&mut laptop, 70)] {
+        installation.sync().await;
+        installation
+            .sync
+            .make_and_upload_entry(registration(id))
             .await
             .unwrap();
-        a.sync().await;
-        assert_eq!(
-            a.db.pending::<crate::PendingRecord>().await.unwrap(),
-            vec![crate::PendingRecord::log_refusal(
-                LogRefusal {
-                    object: LogObject::Entry(entry.position),
-                    failure: RefusalCode::WrongIdentity,
-                },
-                a.device().await,
-            )]
-        );
-        assert_eq!(a.log().await, log);
     }
+    a.sync().await;
+    let log = a.log().await;
+    assert_eq!(
+        log.replay.state.devices[&DeviceId(70)].member,
+        b.member.member()
+    );
+    let entry = StoreLogEntry {
+        position: EntryId {
+            device: DeviceId(70),
+            number: 2,
+        },
+        timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(70)).unwrap(),
+        author: a.member.member(),
+        had_read: log.positions(),
+        change: registration(70),
+    };
+    plant(&storage, &a, &entry).await;
+    a.sync().await;
+    assert_eq!(
+        a.db.pending::<crate::PendingRecord>().await.unwrap(),
+        vec![crate::PendingRecord::log_refusal(
+            LogRefusal {
+                object: LogObject::Entry(entry.position),
+                failure: RefusalCode::WrongIdentity,
+            },
+            a.device().await,
+        )]
+    );
+    assert_eq!(a.log().await, log);
+}
+
+/// Only creation and a device addition, each registering its own writer
+/// (§10), come from a device no view has registered yet.
+#[test]
+fn only_registrations_come_from_an_unregistered_writer() {
+    use crate::replay::tests as history;
+    let mut h = history::History::new();
+    h.all(0, 0, history::add(1, MemberRole::Member));
+    h.all(1, 1, history::device(1));
+    assert!(object::ready(&StoreLog::default(), &h.entries[0], store(1)).unwrap());
+    let log = checked_log(&h.entries[..2]);
+    assert!(object::ready(&log, &h.entries[2], store(1)).unwrap());
+    let mut other = h.clone();
+    other.push(1, 90, &[0, 1, 2], history::role(1, MemberRole::Member));
+    let log = checked_log(&h.entries);
+    assert!(matches!(
+        object::ready(&log, other.entries.last().unwrap(), store(1)),
+        Err(Refusal::WrongIdentity { .. })
+    ));
 }
 
 #[tokio::test]
@@ -221,10 +223,12 @@ async fn a_new_device_registers_itself_before_publishing_other_entries() {
         .bootstrap_member(crate::BindingSource::Restore)
         .await
         .unwrap());
-    let unrelated = StoreChange::AddDevice {
-        device: DeviceId(90),
-        name: "another install".into(),
-        replaces: None,
+    let unrelated = StoreChange::SetAccess {
+        member: b.member.member(),
+        access: coven_format::MemberAccess::S3AccessKey {
+            access_key_id: "fixture-access-key".into(),
+            principal: coven_format::S3Principal::Console,
+        },
     };
     assert!(matches!(
         b.sync.make_and_upload_entry(unrelated.clone()).await,
@@ -260,9 +264,10 @@ async fn a_replacement_device_registers_itself_in_its_first_entry() {
     let mut a = device(storage.clone(), 1, member(1), store(1)).await;
     let mut b = device(storage.clone(), 2, member(1), store(1)).await;
     a.create(key(1)).await;
-    a.sync
+    let mut old = device(storage.clone(), 70, member(1), store(1)).await;
+    old.sync().await;
+    old.sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(70),
             name: "old install".into(),
             replaces: None,
         })
@@ -274,7 +279,6 @@ async fn a_replacement_device_registers_itself_in_its_first_entry() {
         .await
         .unwrap());
     let registration = StoreChange::AddDevice {
-        device: DeviceId(2),
         name: "replacement install".into(),
         replaces: Some(DeviceId(70)),
     };
@@ -477,7 +481,6 @@ async fn setup_checks_its_known_creation_before_committing() {
     b.sync().await;
     b.sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "second".into(),
             replaces: None,
         })
@@ -535,45 +538,15 @@ async fn damaged_entries_block_only_their_device_and_retain_each_cause() {
         let mut b = device(storage.clone(), 2, member(1), store(1)).await;
         let mut c = device(storage.clone(), 3, member(1), store(1)).await;
         a.create(key(1)).await;
-        a.sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(3),
-                name: "receiver".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        c.sync().await;
+        c.sync.load_new_device("receiver", None).await.unwrap();
         b.sync().await;
         b.sync.load_new_device("second", None).await.unwrap();
         a.sync().await;
         c.catch_up().await;
-        let broken = a
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(21),
-                name: "one".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
-        let later = a
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(22),
-                name: "two".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
-        let independent = b
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(23),
-                name: "three".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        let broken = a.restate_access().await.unwrap();
+        let later = a.restate_access().await.unwrap();
+        let independent = b.restate_access().await.unwrap();
         let path = object::path(store(1), broken);
         let original = storage.read(&path).await.unwrap();
         let mut bytes = original.clone();
@@ -683,25 +656,9 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
         b.sync().await;
         b.sync.load_new_device("second", None).await.unwrap();
         a.sync().await;
-        let prior = a
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(30),
-                name: "prior".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        let prior = a.restate_access().await.unwrap();
         b.sync().await;
-        let indirect = b
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(31),
-                name: "indirect".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        let indirect = b.restate_access().await.unwrap();
         let mut bad = coven_format::store_log::StoreLogEntry {
             position: EntryId {
                 device: DeviceId(70),
@@ -710,10 +667,12 @@ async fn invalid_causal_past_and_timestamps_are_damaged() {
             timestamp: coven_merge::Timestamp::new(2000, 0, DeviceId(70)).unwrap(),
             author: a.member.member(),
             had_read: coven_format::value::EntryPositions(vec![creation, indirect]),
-            change: StoreChange::AddDevice {
-                device: DeviceId(40),
-                name: "bad".into(),
-                replaces: None,
+            change: StoreChange::SetAccess {
+                member: a.member.member(),
+                access: coven_format::MemberAccess::S3AccessKey {
+                    access_key_id: "fixture-access-key".into(),
+                    principal: coven_format::S3Principal::Console,
+                },
             },
         };
         match defect {
@@ -845,15 +804,7 @@ async fn an_entry_that_cannot_be_read_after_listing_is_not_a_permanent_judgment(
         a.create(key(1)).await;
         let mut b = device(storage.clone(), 2, member(1), store(1)).await;
         b.sync().await;
-        let entry = a
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(3),
-                name: "third".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        let entry = a.restate_access().await.unwrap();
         let path = object::path(store(1), entry);
         let bytes = storage.read(&path).await.unwrap();
         let (listed, waiting) = tokio::sync::oneshot::channel();
@@ -912,15 +863,7 @@ async fn a_waiting_entry_reseals_with_its_recorded_key_after_rotation() {
             ..Faults::none()
         })
         .await;
-    assert!(a
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(20),
-            name: "waiting".into(),
-            replaces: None,
-        })
-        .await
-        .is_err());
+    assert!(a.restate_access().await.is_err());
     let pending = a.db.local_store_log().await.unwrap().upload.unwrap();
     let path = object::path(store(1), pending.entry.position);
     let first = storage.read(&path).await.unwrap();
@@ -954,10 +897,12 @@ async fn changing_custody_cannot_change_a_devices_author() {
         Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(member(2)))).unwrap());
     let result = a
         .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(90),
-            name: "different author".into(),
-            replaces: None,
+        .make_and_upload_entry(StoreChange::SetAccess {
+            member: member(2).member(),
+            access: coven_format::MemberAccess::S3AccessKey {
+                access_key_id: "fixture-access-key".into(),
+                principal: coven_format::S3Principal::Console,
+            },
         })
         .await;
     assert!(matches!(

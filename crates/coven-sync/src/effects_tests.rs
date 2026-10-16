@@ -334,12 +334,17 @@ fn replay_rejections_identify_each_target() {
     ] {
         let mut h = circle_history();
         let current = replay(&h.entries);
+        // Ana's addition of device 1, written from that device, finds Ben's.
+        let writer = match change {
+            StoreChange::AddDevice { .. } => 1,
+            _ => 0,
+        };
         let expected = DropReason::TargetGone(target);
         assert_eq!(
-            crate::effects::validate_change(&current.state, &member(0), &change),
+            crate::effects::validate_change(&current.state, &member(0), DeviceId(writer), &change),
             Err(expected.clone())
         );
-        h.all(0, 0, change);
+        h.all(0, writer, change);
         assert_eq!(
             replay(&h.entries).entries[&h.entries.last().unwrap().position],
             EntryOutcome::Dropped(expected)
@@ -452,17 +457,20 @@ fn removal_and_replacement_leave_a_removed_id_removed() {
     h.every_order(|r| assert_eq!((state(r, 1), state(r, 5)), (Removed, Removed)));
 }
 
-/// Replay that later drops a kept replacement restores the old id, while an
-/// object judged by a recorded past that kept it stays excluded (§9, §10).
+/// Replay that later drops a kept replacement stops treating the old id as
+/// replaced, while an object judged by a recorded past that kept it stays
+/// excluded (§9, §10). One entry ever registers an id, so the replacement's
+/// own registration cannot be contested: its author's concurrent removal
+/// drops it, and the old id ends removed rather than replaced.
 #[test]
-fn a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts() {
+fn a_dropped_replacement_stops_replacing_without_rejudging_recorded_pasts() {
     use coven_database::{
-        DeviceState::{Active, Replaced},
-        DropReason, EntryOutcome,
+        DeviceState::{Removed, Replaced},
+        DropReason, EntryOutcome, EntryTarget,
     };
     let mut h = household(Admin, Member);
-    // Ana registers id 5 for herself; Ben's restored copy, unaware, reuses it.
-    h.push(0, 0, &[0, 1, 2, 3, 4], device(5));
+    // Ana removes Ben while his restored copy, unaware, registers id 5.
+    h.push(0, 0, &[0, 1, 2, 3, 4], remove(1));
     h.push(1, 5, &[0, 1, 2, 3, 4], replace(5, 1));
     h.push(1, 1, &[0, 1, 2, 3, 4, 6], make(3, "Gifts"));
     let before = checked_log(&[&h.entries[..5], &h.entries[6..7]].concat());
@@ -471,12 +479,10 @@ fn a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts() 
     h.every_order(|r| {
         assert_eq!(
             r.entries[&h.entries[6].position],
-            EntryOutcome::Dropped(DropReason::TargetGone(coven_database::EntryTarget::Device(
-                DeviceId(5)
-            )))
+            EntryOutcome::Dropped(DropReason::TargetGone(EntryTarget::Member(member(1))))
         );
-        assert_eq!((state(r, 1), state(r, 5)), (Active, Active));
-        assert_eq!(r.state.devices[&DeviceId(5)].member, member(0));
+        assert_eq!(state(r, 1), Removed);
+        assert!(!r.state.devices.contains_key(&DeviceId(5)));
         assert_eq!(
             r.entries[&h.entries[7].position],
             EntryOutcome::Dropped(DropReason::NotAllowed)
@@ -554,7 +560,7 @@ fn an_addition_of_an_absent_id_needs_keys_no_pair_has_bound() {
         let change = add_with(1, pair);
         let expected = if fresh { Ok(false) } else { refused.clone() };
         assert_eq!(
-            validate_change(&current.state, &member(0), &change),
+            validate_change(&current.state, &member(0), DeviceId(0), &change),
             expected
         );
         h.all(0, 0, change);
@@ -602,7 +608,7 @@ fn an_addition_of_an_absent_id_needs_keys_no_pair_has_bound() {
         let current = replay(&h.entries);
         let expected = if fresh { Ok(false) } else { refused.clone() };
         assert_eq!(
-            validate_change(&current.state, &member(0), &change),
+            validate_change(&current.state, &member(0), DeviceId(0), &change),
             expected
         );
         h.all(0, 0, change);

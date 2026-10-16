@@ -17,8 +17,8 @@ raises remain effective, so reload needs both named prefixes. This model does
 not establish SQL/schema reachability of the replacement publication. -/
 def log : Log
   | 0 => entry 0 0 [] (.create "ana")
-  | 1 => entry 0 0 [0] (.addDevice 0 1)
-  | 2 => entry 0 0 [0, 1] (.addDevice 0 2)
+  | 1 => entry 0 1 [0] (.addDevice 0)
+  | 2 => entry 0 2 [0, 1] (.addDevice 0)
   | 3 => entry 0 0 (List.range 3) (.raiseSchema 2 ⟨.store, 0⟩)
   | 4 => entry 0 1 (List.range 3) (.reset ⟨.store, 1⟩)
   | 5 => entry 0 2 (List.range 3) (.raiseSchema 3 ⟨.store, 2⟩)

@@ -485,14 +485,7 @@ async fn interrupted_and_lost_reply_copies_retry_identical_bytes_after_restart()
         );
         ana.sync.storage = Some(fault.clone());
         ana.catch_up().await;
-        ana.sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(20),
-                name: "Ana phone".into(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+        ana.restate_access().await.unwrap();
         assert_eq!(storage.read(&path).await.unwrap(), fixed.bytes);
         assert_eq!(fault.attempts(), vec![(path, fixed.bytes); 2]);
         assert!(ana.db.key_uploads().await.unwrap().is_empty());

@@ -13,7 +13,7 @@ for its recorded audience. Historical sharing then reserves K1 for Ben. -/
 def history : CurrentReplay.History :=
   ⟨fun e => match e with
     | 0 => ⟨0, 0, [], .create "ana" initialKey.key⟩
-    | 1 => ⟨0, 1, [0], .addDevice 0 1⟩
+    | 1 => ⟨0, 1, [0], .addDevice 0⟩
     | 2 => ⟨0, 0, [0, 1], .addMember 1 .member "ben"⟩
     | 3 => ⟨0, 1, [0, 1], .rotateKey .store key.key⟩
     | _ => ⟨0, 0, [0, 1, 2, 3], .removeMember 1⟩,
@@ -291,7 +291,7 @@ def racing : CurrentReplay.History :=
   ⟨fun e => match e with
     | 0 => ⟨0, 0, [], .create "ana" initialKey.key⟩
     | 1 => ⟨0, 0, [0], .addMember 1 .admin "ben"⟩
-    | 2 => ⟨1, 1, [0, 1], .addDevice 1 1⟩
+    | 2 => ⟨1, 1, [0, 1], .addDevice 1⟩
     | 3 => ⟨0, 0, [0, 1, 2], .removeMember 1⟩
     | _ => ⟨1, 1, [0, 1, 2], .removeMember 0⟩,
    id, fun e => min e 3⟩

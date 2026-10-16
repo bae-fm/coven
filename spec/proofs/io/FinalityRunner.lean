@@ -33,7 +33,7 @@ private def run (j : Json) : Except String Json := do
     let window ← j.getObjValAs? Nat "window"
     if past.size != stored.size then throw "one recorded past per entry required"
     let H : CovenStorelog.Finality.History :=
-      ⟨fun e => ⟨0, e, past[e]!, if e = 0 then .create "root" else .addDevice 0 e⟩,
+      ⟨fun e => ⟨0, e, past[e]!, if e = 0 then .create "root" else .addDevice 0⟩,
         fun e => stored[e]!, fun e => stored[e]!⟩
     let receipts := CovenStorelog.entrySet received
     let complete := through.map fun endpoint =>

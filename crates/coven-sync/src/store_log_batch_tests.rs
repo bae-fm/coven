@@ -10,16 +10,8 @@ async fn ready_entries_commit_one_replay_and_retain_decoded_state() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let mut author = device(storage.clone(), 1, member(1), store(1)).await;
     author.create(key(1)).await;
-    for number in 10..12 {
-        author
-            .sync
-            .make_and_upload_entry(StoreChange::AddDevice {
-                device: DeviceId(number),
-                name: number.to_string(),
-                replaces: None,
-            })
-            .await
-            .unwrap();
+    for _ in 0..2 {
+        author.restate_access().await.unwrap();
     }
     let receiver = device(storage, 2, member(1), store(1)).await;
     let work = WorkCounter::default();
@@ -51,56 +43,41 @@ async fn ready_entries_commit_one_replay_and_retain_decoded_state() {
     );
 }
 
+/// A registration is its device's own entry (§10), so a reader whose listing
+/// hides the new folder learns the writer from a known writer's recorded
+/// past, and applies both entries in the one batch.
 #[tokio::test]
-async fn arriving_registration_extends_discovery_before_the_batch_commits() {
-    use coven_foundation::clock::FixedClock;
+async fn a_recorded_past_extends_discovery_before_the_batch_commits() {
     use coven_storage::{test_utils::Faults, ObjectPrefix, Storage};
     use std::sync::atomic::{AtomicUsize, Ordering};
-    use std::time::{Duration, UNIX_EPOCH};
-    let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
-    let storage = Arc::new(
-        MemoryStorage::builder()
-            .clock(clock.clone())
-            .build()
-            .unwrap(),
-    );
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let mut author = device(storage.clone(), 1, member(1), store(1)).await;
     author.create(key(1)).await;
-    author
+    let mut receiver = device(storage.clone(), 3, member(1), store(1)).await;
+    receiver.sync.step().await.unwrap();
+    let mut second = device(storage.clone(), 2, member(1), store(1)).await;
+    second.sync.step().await.unwrap();
+    let new = second
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "second".into(),
             replaces: None,
         })
         .await
         .unwrap();
-    let mut second = device(storage.clone(), 2, member(1), store(1)).await;
-    second.sync.step().await.unwrap();
-    clock.set(UNIX_EPOCH + Duration::from_secs(10));
-    let new = second
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(10),
-            name: "third".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    author.sync.step().await.unwrap();
+    author.restate_access().await.unwrap();
     storage
         .set_faults(Faults {
-            listing_lag: Some(Duration::from_secs(1)),
+            hide_listings: true,
             ..Faults::none()
         })
         .await;
-    let listed = storage
+    assert!(storage
         .list(&ObjectPrefix::store_logs(store(1)))
         .await
-        .unwrap();
-    assert!(listed
-        .iter()
-        .all(|object| object.path.store_log_position().unwrap().0 == DeviceId(1)));
-    let mut receiver = device(storage, 3, member(1), store(1)).await;
+        .unwrap()
+        .is_empty());
     let decodes = Arc::new(AtomicUsize::new(0));
     receiver.sync.test_track_received_entries(decodes.clone());
     let work = WorkCounter::default();
@@ -108,10 +85,10 @@ async fn arriving_registration_extends_discovery_before_the_batch_commits() {
     receiver.sync.step().await.unwrap();
     let counts = work.take();
     assert_eq!(counts.store_log_commits, 1);
-    assert_eq!(decodes.load(Ordering::Relaxed), 3);
+    assert_eq!(decodes.load(Ordering::Relaxed), 2);
     let log = receiver.log().await;
     assert!(log.replay.entries.contains_key(&new));
-    assert!(log.replay.state.devices.contains_key(&DeviceId(10)));
+    assert!(log.replay.state.devices.contains_key(&DeviceId(2)));
 }
 
 /// An entry opened while its recorded past is missing waits across scans
@@ -124,28 +101,20 @@ async fn a_waiting_entry_is_opened_once() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let mut author = device(storage.clone(), 1, member(1), store(1)).await;
     author.create(key(1)).await;
-    let registration = author
+    let mut second = device(storage.clone(), 2, member(1), store(1)).await;
+    second.sync.step().await.unwrap();
+    let registration = second
         .sync
         .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(2),
             name: "second".into(),
             replaces: None,
         })
         .await
         .unwrap();
-    let mut second = device(storage.clone(), 2, member(1), store(1)).await;
-    second.sync.step().await.unwrap();
-    let waiting = second
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(10),
-            name: "third".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
-    // The receiver finds the second device's entry, but not the
-    // registration it read.
+    author.sync.step().await.unwrap();
+    let waiting = author.restate_access().await.unwrap();
+    // The receiver finds the author's entry, but not the registration it
+    // read.
     let path = crate::store_log_object::path(store(1), registration);
     let bytes = storage.read(&path).await.unwrap();
     storage.delete(&path).await.unwrap();
@@ -229,15 +198,7 @@ async fn a_queued_publication_follows_the_committed_read_only_catch_up() {
     receiver.sync.load_new_device("second", None).await.unwrap();
     author.sync.step().await.unwrap();
     receiver.interrupt_entry(2).await;
-    assert!(receiver
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(20),
-            name: "queued".into(),
-            replaces: None,
-        })
-        .await
-        .is_err());
+    assert!(receiver.restate_access().await.is_err());
     let queued = receiver
         .db
         .local_store_log()
@@ -247,15 +208,7 @@ async fn a_queued_publication_follows_the_committed_read_only_catch_up() {
         .unwrap()
         .entry
         .position;
-    let remote = author
-        .sync
-        .make_and_upload_entry(StoreChange::AddDevice {
-            device: DeviceId(30),
-            name: "remote".into(),
-            replaces: None,
-        })
-        .await
-        .unwrap();
+    let remote = author.restate_access().await.unwrap();
     receiver.sync.storage = Some(storage);
     let work = WorkCounter::default();
     receiver.db.test_track_work(work.clone()).await.unwrap();
@@ -329,9 +282,8 @@ mod waits {
     use crate::store_log_object as object;
     use crate::store_log_sync::tests::{device, find_copy, key, member, storage, store, Device};
     use crate::{PendingReason, PendingRecord, PendingSubject, Prerequisite};
-    use coven_format::store_log::{MemberRole, StoreChange};
+    use coven_format::store_log::MemberRole;
     use coven_format::value::EntryId;
-    use coven_foundation::id_source::DeviceId;
     use coven_merge::Audience;
     use coven_storage::Storage;
 
@@ -350,14 +302,6 @@ mod waits {
             .collect()
     }
 
-    fn add_device(number: u64) -> StoreChange {
-        StoreChange::AddDevice {
-            device: DeviceId(number),
-            name: number.to_string(),
-            replaces: None,
-        }
-    }
-
     #[tokio::test]
     async fn an_entry_without_its_key_waits_for_it_until_the_copy_arrives() {
         let storage = storage();
@@ -367,16 +311,8 @@ mod waits {
         ana.add(&ben.member, MemberRole::Member).await;
         ben.sync().await;
         ana.sync.test_rotate(Audience::Store, key(3)).await;
-        let sealed = ana
-            .sync
-            .make_and_upload_entry(add_device(20))
-            .await
-            .unwrap();
-        let later = ana
-            .sync
-            .make_and_upload_entry(add_device(21))
-            .await
-            .unwrap();
+        let sealed = ana.restate_access().await.unwrap();
+        let later = ana.restate_access().await.unwrap();
         let copy = find_copy(
             storage.as_ref(),
             Audience::Store,
@@ -415,10 +351,10 @@ mod waits {
         let mut a = device(storage.clone(), 1, member(1), store(1)).await;
         let mut b = device(storage.clone(), 2, member(1), store(1)).await;
         a.create(key(1)).await;
-        let read = a.sync.make_and_upload_entry(add_device(20)).await.unwrap();
+        let read = a.restate_access().await.unwrap();
         b.sync().await;
         b.sync.load_new_device("second", None).await.unwrap();
-        let later = b.sync.make_and_upload_entry(add_device(21)).await.unwrap();
+        let later = b.restate_access().await.unwrap();
         let own = EntryId {
             device: later.device,
             number: 1,

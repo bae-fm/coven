@@ -463,9 +463,8 @@ theorem retired_write_boundary_and_restore :
     Retired.writeAllowed [] false { anaWrite with storedAt := month + 1 } = true ∧
     Retired.writeAllowed [removal] true anaWrite = false := by decide
 
-/-- Storage's `full_set_excludes_unstopped_write`: phone 1's write read Ben's
-replacement, which its own view dropped and the full replay keeps. It is
-bounded by that replacement's 30 days like an unread retirement. -/
+/-- A write whose own view keeps no retirement of its device is bounded by a
+kept retirement's 30 days, like an unread one. -/
 def benReplacement : Retired.Retirement := ⟨7, 10, [1]⟩
 
 theorem read_unretired_write_counts :

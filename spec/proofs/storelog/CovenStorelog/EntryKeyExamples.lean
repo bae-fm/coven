@@ -17,7 +17,7 @@ def log : CurrentReplay.Log
   | 1 => entry 0 0 [0] (.addMember 1 .member "ben")
   | 2 => entry 0 0 [0, 1] (.removeMember 1)
   | 3 => entry 0 0 (List.range 3) (.rotateKey .store (key 1))
-  | _ => entry 0 1 (List.range 4) (.addDevice 0 1)
+  | _ => entry 0 1 (List.range 4) (.addDevice 0)
 
 def history : CurrentReplay.History := ⟨log, id, id⟩
 def received (n : Nat) := entrySet (List.range n)

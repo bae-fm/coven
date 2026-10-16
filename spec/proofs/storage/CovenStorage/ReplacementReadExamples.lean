@@ -87,56 +87,30 @@ example : create (create emptyStorage firstWrite.path [42] 10) firstWrite.path [
 /-! Per-object views. Each replay below is a stand-in for store-log replay on
 the entries that matter, set-determined like the real one. -/
 
-def anaAdds5 : Path := .entry 0 9
-def carolRemovesAna : Path := .entry 2 9
+def anaRemovesBen : Path := .entry 0 9
 /-- Ben's restored copy registers id 5, replacing his phone 1. -/
 def benReplaces1 : Registration := ⟨1, 5, 1⟩
 
-/-- coven-sync's `a_dropped_replacement_restores_the_old_id_without_rejudging_recorded_pasts`:
-Ana registers device 5 while Ben's restored copy, unaware, registers 5 too.
-Replay keeps Ana's registration and drops Ben's replacement. -/
+/-- coven-sync's `a_dropped_replacement_stops_replacing_without_rejudging_recorded_pasts`:
+Ana removes Ben while his restored copy, unaware, registers 5 replacing his
+phone 1. Replay keeps the removal and drops Ben's replacement. -/
 def pinnedReplay (es : List Path) : List Registration :=
-  if anaAdds5 ∈ es then [] else if benReplaces1.entry ∈ es then [benReplaces1] else []
+  if anaRemovesBen ∈ es then [] else if benReplaces1.entry ∈ es then [benReplaces1] else []
 
 theorem pinned_set_determined : SetDetermined pinnedReplay := by
   intro a b same r
   simp only [pinnedReplay, same]
 
-/-- Phone 1's entry after reading Ben's replacement, before Ana's registration arrived. -/
+/-- Phone 1's entry after reading Ben's replacement, before Ana's removal arrived. -/
 def afterReading : LogObject := ⟨1, 2, .entries, [benReplaces1.entry]⟩
 
 /-- Its own view kept the replacement, so it is excluded, and stays excluded
-once Ana's registration arrives and the full replay drops the replacement.
+once Ana's removal arrives and the full replay drops the replacement.
 One kept set for all objects would accept it then. -/
 theorem dropped_replacement_keeps_verdict :
     acceptsView id pinnedReplay [benReplaces1.entry] afterReading = false ∧
-    acceptsView id pinnedReplay [benReplaces1.entry, anaAdds5] afterReading = false ∧
-    pinnedReplay [benReplaces1.entry, anaAdds5] = [] ∧
-    accepts (pinnedReplay [benReplaces1.entry, anaAdds5]) afterReading = true := by decide
-
-/-- The other direction: Carol removes Ana concurrently with Ana registering
-device 5, so the full replay drops Ana's registration and keeps Ben's
-replacement. A view without Carol's removal keeps Ana's and drops Ben's. -/
-def removalReplay (es : List Path) : List Registration :=
-  if benReplaces1.entry ∈ es ∧ (anaAdds5 ∉ es ∨ carolRemovesAna ∈ es) then [benReplaces1]
-  else []
-
-theorem removal_set_determined : SetDetermined removalReplay := by
-  intro a b same r
-  simp only [removalReplay, same]
-
-/-- Phone 1's write after reading both registrations, before Carol's removal. -/
-def beforeEffective : LogObject := ⟨1, 3, .writes, [anaAdds5, benReplaces1.entry]⟩
-
-/-- Phone 1's own replay kept no replacement, so it had not stopped, and the
-write counts. One kept set for all objects, the full replay's, would
-exclude this write although its copy could not yet know it was replaced. -/
-theorem full_set_excludes_unstopped_write :
-    removalReplay [anaAdds5, benReplaces1.entry] = [] ∧
-    acceptsView id removalReplay [carolRemovesAna, anaAdds5, benReplaces1.entry]
-      beforeEffective = true ∧
-    removalReplay [carolRemovesAna, anaAdds5, benReplaces1.entry] = [benReplaces1] ∧
-    accepts (removalReplay [carolRemovesAna, anaAdds5, benReplaces1.entry])
-      beforeEffective = false := by decide
+    acceptsView id pinnedReplay [benReplaces1.entry, anaRemovesBen] afterReading = false ∧
+    pinnedReplay [benReplaces1.entry, anaRemovesBen] = [] ∧
+    accepts (pinnedReplay [benReplaces1.entry, anaRemovesBen]) afterReading = true := by decide
 
 end CovenStorage.ReplacementRead.Examples

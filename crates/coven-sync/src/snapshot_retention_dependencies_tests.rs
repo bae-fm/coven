@@ -146,11 +146,9 @@ fn change(entry: &coven_format::store_log::StoreLogEntry, members: &mut Vec<Memb
         StoreChange::CreateStore { .. } => {
             json!(["create", entry.position.device.0, index(entry.author)])
         }
-        StoreChange::AddDevice {
-            device, replaces, ..
-        } => json!([
+        StoreChange::AddDevice { replaces, .. } => json!([
             "addDevice",
-            device.0,
+            entry.position.device.0,
             index(entry.author),
             replaces.map(|d| d.0)
         ]),
@@ -168,10 +166,8 @@ fn named(log: &StoreLog) -> BTreeSet<DeviceId> {
             StoreChange::CreateStore { .. } => {
                 devices.insert(applied.entry.position.device);
             }
-            StoreChange::AddDevice {
-                device, replaces, ..
-            } => {
-                devices.insert(*device);
+            StoreChange::AddDevice { replaces, .. } => {
+                devices.insert(applied.entry.position.device);
                 devices.extend(*replaces);
             }
             StoreChange::RemoveDevice { device } => {

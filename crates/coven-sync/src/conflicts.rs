@@ -87,11 +87,11 @@ fn removes_required(a: &StoreLogEntry, b: &StoreLogEntry, vb: &StoreLogCheck) ->
     }
 }
 
-fn device_target(change: &StoreChange) -> Option<DeviceId> {
-    match change {
-        StoreChange::AddDevice { device, .. } | StoreChange::RemoveDevice { device } => {
-            Some(*device)
-        }
+/// A device addition targets the device that wrote it (§10).
+fn device_target(entry: &StoreLogEntry) -> Option<DeviceId> {
+    match &entry.change {
+        StoreChange::AddDevice { .. } => Some(entry.position.device),
+        StoreChange::RemoveDevice { device } => Some(*device),
         _ => None,
     }
 }
@@ -168,9 +168,6 @@ fn same_meaning(
         ) => m == member && r == s,
         (RemoveMember { member: m }, RemoveMember { member: n }) => m == n,
         (ChangeRole { member: m, role: r }, ChangeRole { member: n, role: s }) => m == n && r == s,
-        (AddDevice { device: d, .. }, AddDevice { device: e, .. }) => {
-            d == e && a.author == b.author
-        }
         (RemoveDevice { device: d }, RemoveDevice { device: e }) => {
             d == e && required_member(a, va) == required_member(b, vb)
         }
@@ -285,7 +282,7 @@ fn contradiction(
     };
     !same_meaning(a, va, b, vb)
         && (same_target(membership_state(&a.change), membership_state(&b.change))
-            || same_target(device_target(&a.change), device_target(&b.change))
+            || same_target(device_target(a), device_target(b))
             || removes_required(a, b, vb)
             || removes_required(b, a, va)
             || access_membership_and_snapshots

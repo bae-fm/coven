@@ -103,7 +103,7 @@ namespace Conforming
 listing still omits the first device, so its recorded read contains creation. -/
 def history : CurrentReplay.History where
   log := fun e => if e = 0 then ListingMarginExamples.history.log 0
-    else ⟨0, e, [0], .addDevice 0 e⟩
+    else ⟨0, e, [0], .addDevice 0⟩
   stored := fun e => if e = 0 then 0 else margin + e
   attempted := fun e => if e = 0 then 0 else margin + e
 

@@ -3,20 +3,16 @@ import CovenStorelog.Invariants
 
 /-! §6 and sync-pass step 2: the writers a device probes. One set serves all
 three logs: every remembered store-log folder, and every device a received
-entry was written from or registers, whether replay keeps or drops that
-entry. Drained writers (§6) leave it. Replay verdicts never shrink it, so a
+entry was written from, whether replay keeps or drops that entry. Drained writers (§6) leave it. Replay verdicts never shrink it, so a
 write that counts is discovered by every reader holding its author's view. -/
 
 namespace CovenIO.Writers
 
 open CovenStorelog (Log EntrySet State lookup)
 
-/-- The devices one entry makes known: its writing device and, for a device
-registration, the device it registers. Creation registers its own writer. -/
-def names (e : CovenStorelog.Entry) : List Nat :=
-  match e.action with
-  | .addDevice _ d => [e.device, d]
-  | _ => [e.device]
+/-- The device one entry makes known: its writer. A registration, creation or
+device addition, registers that same device (§10). -/
+def names (e : CovenStorelog.Entry) : List Nat := [e.device]
 
 /-- Known writers from remembered folder listings and the received entries,
 kept and dropped alike. No replay verdict is an input. -/
