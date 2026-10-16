@@ -650,15 +650,16 @@ impl OperationRun {
                     .map(|(_, record)| record.id);
             }
             // A raise holding the writer slot goes before reloads, unless it
-            // waits on one, including through a write step 6 has to send or
-            // receive: it then yields, so the two never wait on each other
-            // (IO `DriveOrder.no_cycle`).
-            let mut raising_first = false;
-            for (data, record) in &records {
-                if Some(record.id) == writer && data.raises_version() {
-                    raising_first = !self.sync.waits_on_reload(record.id).await?;
-                }
-            }
+            // waits on one, including through a write or a catch-up only
+            // step 6 does: it then yields, so the two never wait on each
+            // other (IO `DriveOrder.no_cycle`). Its condition is read when
+            // each reload is reached, since this drive may have just
+            // recorded it.
+            let raise = records
+                .iter()
+                .find(|(data, record)| Some(record.id) == writer && data.raises_version())
+                .map(|(_, record)| record.id);
+            let mut reload_skipped = false;
             for (snapshot_data, snapshot) in records {
                 // Replay and invite settlement can retire another account's queued work.
                 let Some(record) = self.sync.operation_record(snapshot.id).await? else {
@@ -677,8 +678,13 @@ impl OperationRun {
                 if !self.sync.operation_ready(&record).await? && !self.sync.invite_expired(&data) {
                     continue;
                 }
-                if raising_first && data.is_reload() {
-                    continue;
+                if data.is_reload() {
+                    if let Some(raise) = raise {
+                        if !self.sync.waits_on_reload(raise).await? {
+                            reload_skipped = true;
+                            continue;
+                        }
+                    }
                 }
                 if data.writes_entry()
                     && ((reloading && !data.raises_version() && !data.completing_reset(&record))
@@ -718,6 +724,14 @@ impl OperationRun {
                             let _ = reply.send(Err(error));
                         }
                     }
+                }
+                // A raise that now waits on a reload it went before yields:
+                // drive again, and the reload runs.
+                if Some(record.id) == raise
+                    && reload_skipped
+                    && self.sync.waits_on_reload(record.id).await?
+                {
+                    advanced = true;
                 }
             }
             let requests = self.sync.current_join_requests().await?;

@@ -166,10 +166,10 @@ async fn attempt_after_delay(
 
 /// IO `DriveOrder`: a raise holding the writer slot goes before a pending
 /// reload while it waits on anything else (`raise_keeps_its_place`); once its
-/// recorded condition names the reload or a write, such as its own migration
-/// marker, it yields and the drive runs the reload (`no_cycle`): step 6 sends
-/// and receives writes only once no reload is pending
-/// (`write_waits_on_reload`).
+/// recorded condition names the reload, a write, such as its own migration
+/// marker, or the catch-up its preparation follows, it yields and the drive
+/// runs the reload (`no_cycle`): step 6 sends and receives writes and catches
+/// up on them only once no reload is pending (`step_six_waits_on_reload`).
 #[tokio::test]
 async fn a_raise_waiting_on_a_reload_yields_to_it() {
     use crate::snapshot_data::{ReloadScope, SnapshotJob, SnapshotTask, SnapshotTrigger};
@@ -190,6 +190,7 @@ async fn a_raise_waiting_on_a_reload_yields_to_it() {
             ))),
             true,
         ),
+        (PendingReason::Waits(Prerequisite::CatchUp), true),
     ] {
         let storage = storage();
         let mut a = device(storage, 1, member(1), store(1)).await;
@@ -227,6 +228,9 @@ async fn a_raise_waiting_on_a_reload_yields_to_it() {
             .record_operation_condition(&record, raise_waits.clone())
             .await
             .unwrap();
+        // The drive's decision; a raise waiting on a catch-up is due at once
+        // and, with no capture here, finishes before the reload either way.
+        assert_eq!(a.sync.waits_on_reload(raise).await.unwrap(), reload_runs);
         let untouched = a.operation(reload).await;
         let db = a.db.clone();
         let files = file_owner(&a);

@@ -182,11 +182,12 @@ import CovenIO
 #print axioms CovenIO.PrerequisiteRows.partial_advances_bounded
 #print axioms CovenIO.PrerequisiteRows.partial_advance_counts
 #print axioms CovenIO.PrerequisiteRows.time_only
-#print axioms CovenIO.DriveOrder.write_waits_on_reload
+#print axioms CovenIO.DriveOrder.step_six_waits_on_reload
 #print axioms CovenIO.DriveOrder.no_cycle
 #print axioms CovenIO.DriveOrder.raise_keeps_its_place
 #print axioms CovenIO.DriveOrder.old_cycle
 #print axioms CovenIO.DriveOrder.named_only_cycle
+#print axioms CovenIO.DriveOrder.write_only_cycle
 #print axioms CovenIO.Wakes.initial_covered
 #print axioms CovenIO.Wakes.covered_run
 #print axioms CovenIO.Wakes.write_never_lost

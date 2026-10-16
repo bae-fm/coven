@@ -1529,20 +1529,25 @@ states the restart bound only without one.
 publication waits while a reload is pending, so a raise whose own queued
 entry has not published records a wait on that reload, naming the reload
 operation. A raise snapshot also waits for its own captured prefix, such as
-its migration marker, to be stored; only step 6 sends or receives writes, and
-a pending reload holds step 6 back, so a wait on a write is a wait on the
-reload too (`write_waits_on_reload`). The worker used to skip every reload
-while a raise held the writer slot, so each waited on the other
-(`DriveOrder.old_cycle`); the next rule yielded only to a condition naming the
-reload, and a raise waiting on its write still held the reload back
-(`named_only_cycle`). Now a raise that waits on a reload or on a write yields
-its place, and the reload runs (`no_cycle`); a raise waiting on anything else
-still goes first (`raise_keeps_its_place`).
+its migration marker, to be stored, and in a pass it is prepared only after
+step 6's catch-up. Only step 6 sends or receives writes and catches up on
+them, and a pending reload holds step 6 back, so a wait on a write or a
+catch-up is a wait on the reload too (`step_six_waits_on_reload`). The worker
+used to skip every reload while a raise held the writer slot, so each waited
+on the other (`DriveOrder.old_cycle`); the next rule yielded only to a
+condition naming the reload, so a raise waiting on its write still held the
+reload back (`named_only_cycle`), and the one after it did not yield to a
+raise preparing after the catch-up (`write_only_cycle`). Now a raise that
+waits on a reload, a write or a catch-up yields its place, and the reload runs
+(`no_cycle`); a raise waiting on anything else still goes first
+(`raise_keeps_its_place`). The drive reads the raise's condition when it
+reaches each reload, since the raise may have recorded it in the same drive.
 [`DriveOrder`](io/CovenIO/DriveOrder.lean) models only this choice, not the
 rest of the drive.
 [`a_raise_waiting_on_a_reload_yields_to_it`](../../crates/coven-sync/src/operation_evidence_tests.rs)
 runs the real drive each way: the reload is skipped while the raise waits on
-positions, and runs once the raise's condition names it or a write.
+positions, and runs once the raise's condition names it, a write or a
+catch-up.
 
 **Wakes — proved.** `Wakes.lean` models the sync loop and its write-queue
 observation (`sync_loop.rs`, `Database::sync_changes`). `write_never_lost`:
