@@ -121,6 +121,13 @@ impl Live {
     }
 }
 
+/// Bootstrap retains its loaded provider before its sequence worker is needed.
+enum Connection {
+    Released,
+    Loaded(Arc<StorageConnection>),
+    Active(Live),
+}
+
 pub(crate) struct StorageConnections {
     /// The credential owner while no connection exists.
     codes: RestoreCodes,
@@ -142,7 +149,7 @@ pub(crate) struct StorageConnections {
     /// The latest sign-in, held for this session until setup publishes it.
     authentication: tokio::sync::Mutex<Option<Arc<SessionSignIn>>>,
     /// The connection, if any; held while it changes or works.
-    live: tokio::sync::Mutex<Option<Live>>,
+    live: tokio::sync::Mutex<Connection>,
     /// The connection's loop, for requests that return at once.
     control: std::sync::Mutex<Option<SyncLoop>>,
     /// Whether custody held storage credentials when last observed: start
@@ -164,7 +171,7 @@ pub(crate) struct StorageConnections {
 }
 
 impl StorageConnections {
-    pub(crate) async fn new(
+    pub(crate) fn new(
         database: coven_database::Database,
         files: coven_sync::Files,
         identity: Arc<KeySession<MemberIdentity>>,
@@ -179,10 +186,11 @@ impl StorageConnections {
         clients: Option<OAuthClients>,
         authentication: Option<Arc<SessionSignIn>>,
         storage: Option<Arc<StorageConnection>>,
+        configured: bool,
         device: DeviceId,
         ids: IdSourceRef,
         clock: ClockRef,
-    ) -> Result<Self, SyncError> {
+    ) -> Self {
         let codes = RestoreCodes::new(
             directory.id(),
             database.clone(),
@@ -207,9 +215,12 @@ impl StorageConnections {
             oauth,
             clients,
             authentication: tokio::sync::Mutex::new(authentication),
-            live: tokio::sync::Mutex::new(None),
+            live: tokio::sync::Mutex::new(match storage {
+                Some(storage) => Connection::Loaded(storage),
+                None => Connection::Released,
+            }),
             control: std::sync::Mutex::new(None),
-            configured: AtomicBool::new(false),
+            configured: AtomicBool::new(configured),
             connecting: AtomicBool::new(false),
             epoch: AtomicU64::new(0),
             stopped: tokio::sync::Notify::new(),
@@ -219,12 +230,21 @@ impl StorageConnections {
             clock,
             calls: tokio::sync::Mutex::new(()),
         };
-        // A loaded installation keeps the connection it loaded through.
-        if let Some(storage) = storage {
-            owner.attach(&mut *owner.live.lock().await, storage).await?;
+        owner.publications.publish(if configured {
+            SyncStatus::Stopped
+        } else {
+            SyncStatus::Disconnected
+        });
+        owner
+    }
+
+    /// Initialize a loaded connection when a caller first needs its sequence owner.
+    async fn ready(&self, live: &mut Connection) -> Result<(), SyncError> {
+        if let Connection::Loaded(storage) = &*live {
+            let storage = storage.clone();
+            self.attach(live, storage).await?;
         }
-        owner.publish_released(Ok(()))?;
-        Ok(owner)
+        Ok(())
     }
 
     fn store(&self) -> StoreId {
@@ -278,7 +298,7 @@ impl StorageConnections {
     /// `storage` as this store's connection.
     async fn attach(
         &self,
-        live: &mut Option<Live>,
+        live: &mut Connection,
         storage: Arc<StorageConnection>,
     ) -> Result<(), SyncError> {
         let keys = self
@@ -320,7 +340,7 @@ impl StorageConnections {
         );
         let sync_loop = SyncLoop::new(sync.clone(), Some(codes.clone()));
         *self.control.lock().expect("loop control poisoned") = Some(sync_loop.clone());
-        *live = Some(Live {
+        *live = Connection::Active(Live {
             sync,
             sync_loop,
             codes,
@@ -329,11 +349,11 @@ impl StorageConnections {
     }
 
     /// Release the current connection after its active pass and transfers.
-    async fn release(&self, live: &mut Option<Live>) -> Result<(), SyncError> {
+    async fn release(&self, live: &mut Connection) -> Result<(), SyncError> {
         self.control.lock().expect("loop control poisoned").take();
-        let closed = match live.take() {
-            Some(previous) => previous.close().await,
-            None => Ok(()),
+        let closed = match std::mem::replace(live, Connection::Released) {
+            Connection::Active(previous) => previous.close().await,
+            Connection::Released | Connection::Loaded(_) => Ok(()),
         };
         let released = self
             .files
@@ -346,14 +366,18 @@ impl StorageConnections {
     /// connection, without starting the loop.
     pub(crate) async fn connected(&self) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
-        if live.is_none() {
-            self.connect(&mut live).await?;
+        if let Connection::Active(_) = &*live {
+            return Ok(());
         }
-        Ok(())
+        self.connect(&mut live).await
     }
 
     /// Reach the recorded location with custody's credentials.
-    async fn connect(&self, live: &mut Option<Live>) -> Result<(), SyncError> {
+    async fn connect(&self, live: &mut Connection) -> Result<(), SyncError> {
+        if let Connection::Loaded(storage) = live {
+            let storage = storage.clone();
+            return self.attach(live, storage).await;
+        }
         let data = self.codes.connection().await?.ok_or(SyncError::NoStorage)?;
         let storage = self
             .connector
@@ -532,9 +556,11 @@ impl StorageConnections {
             .await
             .map_err(setup_error)?;
         self.attach(&mut live, storage).await.map_err(setup_error)?;
-        let claimed = match live.as_ref() {
-            Some(candidate) => self.claim_setup(&candidate.sync, access, device_name).await,
-            None => Err(SyncError::NoStorage),
+        let claimed = match &*live {
+            Connection::Active(candidate) => {
+                self.claim_setup(&candidate.sync, access, device_name).await
+            }
+            _ => Err(SyncError::NoStorage),
         };
         if let Err(error) = claimed {
             let released = self.release(&mut live).await;
@@ -554,7 +580,7 @@ impl StorageConnections {
         // code commit now, with no compensation left to keep.
         drop(commit().map_err(setup_error)?);
         self.configured.store(true, Ordering::SeqCst);
-        if let Some(candidate) = live.as_ref() {
+        if let Connection::Active(candidate) = &*live {
             candidate.sync_loop.start().map_err(setup_error)?;
         }
         Ok(StorageSetup {
@@ -665,9 +691,9 @@ impl StorageConnections {
             let mut live = owner.live.lock().await;
             owner.release(&mut live).await.map_err(unlock_error)?;
             owner.connect(&mut live).await.map_err(unlock_error)?;
-            let unlocked = match live.as_ref() {
-                Some(candidate) => candidate.sync.unlock().await,
-                None => Err(SyncError::NoStorage),
+            let unlocked = match &*live {
+                Connection::Active(candidate) => candidate.sync.unlock().await,
+                _ => Err(SyncError::NoStorage),
             };
             if let Err(error) = unlocked {
                 let error = match owner.release(&mut live).await {
@@ -712,7 +738,7 @@ impl StorageConnections {
         }
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         let live = self.live.lock().await;
-        if let Some(connected) = live.as_ref() {
+        if let Connection::Active(connected) = &*live {
             return connected.sync_loop.start();
         }
         // Credentials may have been entered since disconnecting removed them.
@@ -749,7 +775,7 @@ impl StorageConnections {
                     return;
                 }
                 Ok(()) => {
-                    if let Some(connected) = live.as_ref() {
+                    if let Connection::Active(connected) = &*live {
                         if let Err(error) = connected.sync_loop.start() {
                             self.publications.publish(SyncStatus::Failed {
                                 error: error.into(),

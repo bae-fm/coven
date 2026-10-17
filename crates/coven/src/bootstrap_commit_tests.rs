@@ -438,3 +438,80 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     handle.read(|_| Ok(())).await.unwrap();
     handle.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn publication_returns_the_handle_without_rereading_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let id = StoreId(UuidIds.new_id());
+    let keychain = Keychain::in_memory("commit-test").unwrap();
+    let (pending, owners, database) = prepared(
+        &layout,
+        id,
+        keychain.clone(),
+        KeyCustody::InMemory,
+        IdentityCustody::InMemory,
+    )
+    .await;
+    let waits = waits(&database).await;
+    // Publication needs eight keychain operations; the next read fails.
+    keychain.fail_operations_after(&[8]);
+    let result = publish_bootstrap(
+        &pending,
+        code(id),
+        credentials(),
+        None,
+        StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap()),
+        owners,
+        database,
+        waits,
+    )
+    .await;
+    let handle = match result {
+        Ok(handle) | Err(BootstrapError::Published { handle, .. }) => handle,
+        Err(error) => panic!("publication lost its handle: {error}"),
+    };
+    assert_eq!(layout.stores().await.unwrap().len(), 1);
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
+    keychain.fail_operations_after(&[]);
+    handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn publication_with_a_loaded_provider_does_not_suspend() {
+    use std::{future::Future, task::Poll};
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let id = StoreId(UuidIds.new_id());
+    let (pending, mut owners, database) = prepared(
+        &layout,
+        id,
+        Keychain::in_memory("commit-test").unwrap(),
+        KeyCustody::InMemory,
+        IdentityCustody::InMemory,
+    )
+    .await;
+    let provider = coven_storage::test_utils::MemoryStorage::builder()
+        .build()
+        .unwrap();
+    owners.storage = Some(provider.shared_connection());
+    let waits = waits(&database).await;
+    let mut publishing = Box::pin(publish_bootstrap(
+        &pending,
+        code(id),
+        credentials(),
+        None,
+        StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap()),
+        owners,
+        database,
+        waits,
+    ));
+    let first = std::future::poll_fn(|cx| Poll::Ready(publishing.as_mut().poll(cx))).await;
+    let Poll::Ready(result) = first else {
+        panic!("publication suspended before returning its handle");
+    };
+    let handle = result.unwrap();
+    assert_eq!(layout.stores().await.unwrap().len(), 1);
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
+    handle.close().await.unwrap();
+}

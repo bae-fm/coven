@@ -172,33 +172,57 @@ async fn reset_unconnected(
         .ok_or(SyncError::NoStorage)?;
     let directory = pending.directory();
     let database = builder.database(directory.clone())?.open().await?;
-    let published = async {
+    let prepared = async {
         database
             .record_device_reset(reset)
             .await
             .map_err(CovenError::from)?;
+        let waits = Arc::new(
+            coven_sync::RetryWaits::open(database.clone(), builder.clock.clone())
+                .await
+                .map_err(CovenError::from)?,
+        );
+        let owners = builder.owners(directory, keychain.clone())?;
+        Ok::<_, BootstrapError>((owners, waits))
+    }
+    .await;
+    let (owners, waits) = match prepared {
+        Ok(prepared) => prepared,
+        Err(error) => {
+            return combine(
+                Err(error),
+                database
+                    .close()
+                    .await
+                    .map_err(CovenError::from)
+                    .map_err(BootstrapError::from),
+            )
+        }
+    };
+    let published = (|| {
         keychain.set_device_id(reset.new_device)?;
         pending.publish()?;
         Ok::<_, BootstrapError>(())
-    }
-    .await;
-    if let Err(error) = published {
-        return combine(
+    })();
+    match published {
+        Ok(()) => Ok(owners.into_handle(database, waits, false)),
+        Err(
+            source @ BootstrapError::Directory(BootstrapDirectoryError::Create(
+                coven_foundation::files::DirectoryCreationError::Published { .. },
+            )),
+        ) => Err(BootstrapError::Published {
+            handle: owners.into_handle(database, waits, false),
+            source: Box::new(source),
+        }),
+        Err(error) => combine(
             Err(error),
             database
                 .close()
                 .await
                 .map_err(CovenError::from)
                 .map_err(BootstrapError::from),
-        );
+        ),
     }
-    let waits = Arc::new(
-        coven_sync::RetryWaits::open(database.clone(), builder.clock.clone())
-            .await
-            .map_err(CovenError::from)?,
-    );
-    let owners = builder.owners(directory, keychain)?;
-    Ok(owners.handle(database, waits).await?)
 }
 
 #[cfg(test)]

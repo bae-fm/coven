@@ -3,7 +3,7 @@
 //! `NoStorage`; credential reads and disconnected credential changes use the
 //! store's own credential owner.
 
-use super::StorageConnections;
+use super::{Connection, StorageConnections};
 use crate::*;
 use coven_format::admin::StoreChange;
 use std::sync::Arc;
@@ -11,12 +11,12 @@ use std::sync::Arc;
 impl StorageConnections {
     /// Validate, journal and claim one administrative change (§18).
     pub(crate) async fn administer(&self, change: StoreChange) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .administer(change)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.administer(change).await
     }
 
     /// Remove a device, then say how its member signs out of the provider.
@@ -39,44 +39,43 @@ impl StorageConnections {
     }
 
     pub(crate) async fn create_circle(&self, name: String) -> Result<CircleId, SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .create_circle(name)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.create_circle(name).await
     }
 
     /// Snapshot an audience and claim its reset (§19.3).
     pub(crate) async fn reset(&self, audience: Audience) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .reset(audience)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.reset(audience).await
     }
 
     pub(crate) async fn reload_from_snapshot(&self) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .reload_from_snapshot()
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.reload_from_snapshot().await
     }
 
     pub(crate) async fn retry_pending_operation(
         &self,
         operation: OperationId,
     ) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .retry_pending_operation(operation)
-            .await
-            .map(drop)
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.retry_pending_operation(operation).await.map(drop)
     }
 
     pub(crate) async fn delete_access_key(
@@ -84,12 +83,12 @@ impl StorageConnections {
         operation: OperationId,
         admin: Arc<dyn AccessKeyAdmin>,
     ) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .delete_access_key(operation, admin.as_ref())
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.delete_access_key(operation, admin.as_ref()).await
     }
 
     pub(crate) async fn replace_member_access_key(
@@ -97,12 +96,12 @@ impl StorageConnections {
         member: MemberId,
         admin: Arc<dyn AccessKeyAdmin>,
     ) -> Result<AccessKeyReplacement, SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .replace_member_access_key(member, admin)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.replace_member_access_key(member, admin).await
     }
 
     pub(crate) async fn retry_with_admin_access(
@@ -110,12 +109,12 @@ impl StorageConnections {
         operation: OperationId,
         admin: Arc<dyn AccessKeyAdmin>,
     ) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .retry_with_admin_access(operation, admin)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.retry_with_admin_access(operation, admin).await
     }
 
     pub(crate) async fn replace_member_keys_for(
@@ -123,12 +122,12 @@ impl StorageConnections {
         member: MemberId,
         keys: MemberPublicKeys,
     ) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .replace_member_keys_for(member, keys)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.replace_member_keys_for(member, keys).await
     }
 
     pub(crate) async fn create_invite(
@@ -137,45 +136,45 @@ impl StorageConnections {
         access: InviteAccess,
     ) -> Result<Invite, SyncError> {
         self.prepare_invite().await?;
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .create_invite(target, access)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.create_invite(target, access).await
     }
 
     pub(crate) async fn approve_join_request(
         &self,
         request: &JoinRequest,
     ) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .approve_join_request(request)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.approve_join_request(request).await
     }
 
     pub(crate) async fn decline_join_request(
         &self,
         request: &JoinRequest,
     ) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .decline_join_request(request)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.decline_join_request(request).await
     }
 
     pub(crate) async fn cancel_invite(&self, invite: InviteId) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .sync
-            .cancel_invite(invite)
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.sync.cancel_invite(invite).await
     }
 
     /// The restore code for the pair the applied history binds now (§12.1).
@@ -190,10 +189,12 @@ impl StorageConnections {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .codes
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.codes
             .replace_access_key(access_key_id, secret_access_key)
             .await
     }
@@ -204,13 +205,15 @@ impl StorageConnections {
         access_key_id: String,
         secret_access_key: SecretText,
     ) -> Result<(), SyncError> {
-        match self.live.lock().await.as_ref() {
-            Some(live) => {
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        match &*live {
+            Connection::Active(live) => {
                 live.codes
                     .update_credentials(access_key_id, secret_access_key)
                     .await
             }
-            None => {
+            _ => {
                 self.codes
                     .update_credentials(access_key_id, secret_access_key)
                     .await?;
@@ -222,12 +225,12 @@ impl StorageConnections {
 
     /// Replace this member's pair, returning the code for it (§11, E9).
     pub(crate) async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
-        let live = self.live.lock().await;
-        live.as_ref()
-            .ok_or(SyncError::NoStorage)?
-            .codes
-            .replace_member_keys()
-            .await
+        let mut live = self.live.lock().await;
+        self.ready(&mut live).await?;
+        let Connection::Active(live) = &*live else {
+            return Err(SyncError::NoStorage);
+        };
+        live.codes.replace_member_keys().await
     }
 
     /// Whether custody holds storage credentials for the recorded location.

@@ -466,17 +466,30 @@ impl OpeningStore {
                 .await?;
         owners
             .handle(database, waits)
-            .await
             .map_err(|error| CovenError::Database(DbError::SyncStream(Box::new(error))))
     }
 }
 
 impl OpeningOwners {
-    async fn handle(
+    fn handle(
         self,
         database: coven_database::Database,
         waits: Arc<coven_sync::RetryWaits>,
     ) -> Result<CovenHandle, SyncError> {
+        let configured = self
+            .credentials
+            .connection(&coven_storage::StorageSettings::new(self.directory.clone()))?
+            .is_some();
+        Ok(self.into_handle(database, waits, configured))
+    }
+
+    /// Construction after publication performs no fallible work and cannot suspend.
+    fn into_handle(
+        self,
+        database: coven_database::Database,
+        waits: Arc<coven_sync::RetryWaits>,
+        configured: bool,
+    ) -> CovenHandle {
         let files = coven_sync::Files::new(
             coven_database::FileDatabase::new(database.clone()),
             self.directory.clone(),
@@ -503,27 +516,20 @@ impl OpeningOwners {
             self.clients,
             self.authentication,
             self.storage,
+            configured,
             self.device,
             self.ids,
             self.clock,
-        )
-        .await;
-        let storage = match storage {
-            Ok(storage) => Arc::new(storage),
-            Err(error) => {
-                files.close().await;
-                return Err(error);
-            }
-        };
-        Ok(CovenHandle::new(
+        );
+        CovenHandle::new(
             database,
             self.custody,
             files,
-            storage,
+            Arc::new(storage),
             self.directory,
             self.keychain,
             self.device,
-        ))
+        )
     }
 }
 

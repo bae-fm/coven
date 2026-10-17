@@ -465,6 +465,11 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven/src/builder.rs", "CovenBuilder", "owners"),
         ("crates/coven/src/builder.rs", "OpeningOwners", "handle"),
+        (
+            "crates/coven/src/builder.rs",
+            "OpeningOwners",
+            "into_handle",
+        ),
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
         ("crates/coven/src/coven.rs", "<free>", "blocking"),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
@@ -492,6 +497,11 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven/src/storage.rs", "StorageConnections", "call"),
         ("crates/coven/src/storage.rs", "StorageConnections", "new"),
+        (
+            "crates/coven/src/storage.rs",
+            "StorageConnections",
+            "release",
+        ),
         // Setup, unlocking, starting and loading compose a connection's
         // sequence owner, loop and credential owner at runtime.
         (

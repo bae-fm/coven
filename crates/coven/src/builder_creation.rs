@@ -78,10 +78,7 @@ async fn prepare(
         Ok(owners) => owners,
         Err(error) => return Err(close_failed(&database, error).await),
     };
-    let handle = match owners.handle(database.clone(), waits).await {
-        Ok(handle) => handle,
-        Err(error) => return Err(close_failed(&database, error.into()).await),
-    };
+    let handle = owners.into_handle(database, waits, false);
     match publication {
         None => Ok(handle),
         Some(source) => Err(StoreCreationError::Published {

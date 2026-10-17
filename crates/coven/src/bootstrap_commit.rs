@@ -96,10 +96,7 @@ pub(super) async fn publish_bootstrap(
             return Err(error);
         }
     };
-    let handle = owners
-        .handle(database, waits)
-        .await
-        .map_err(BootstrapError::from)?;
+    let handle = owners.into_handle(database, waits, true);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
         .remove()
