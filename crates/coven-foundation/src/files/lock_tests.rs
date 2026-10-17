@@ -86,7 +86,7 @@ fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
 }
 
 #[test]
-fn only_the_matching_lock_can_authorize_open_and_change_the_device() {
+fn only_the_matching_lock_can_authorize_open() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let first = layout
@@ -101,11 +101,6 @@ fn only_the_matching_lock_can_authorize_open_and_change_the_device() {
         second.verify_lock(&lock),
         Err(StoreLockError::WrongDirectory(_))
     ));
-    lock.set_device_id(crate::id_source::DeviceId(42)).unwrap();
-    assert_eq!(
-        first.settings().unwrap().device_id,
-        crate::id_source::DeviceId(42)
-    );
 }
 
 #[test]

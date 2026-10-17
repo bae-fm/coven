@@ -4,7 +4,7 @@ use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
 
 use crate::files::{atomic_file, settings, FileError, SettingsError, StoreSettings};
-use crate::id_source::{DeviceId, StoreId};
+use crate::id_source::StoreId;
 
 use super::lock_registry as registry;
 use registry::LockKind;
@@ -35,13 +35,6 @@ impl StoreLock {
     /// Read the settings while holding the store's writer lock.
     pub fn settings(&self) -> Result<StoreSettings, SettingsError> {
         settings::read(&self.store.directory, self.store.id)
-    }
-
-    /// Replace a restored installation's device id before it can write (§10).
-    pub fn set_device_id(&self, device: DeviceId) -> Result<(), SettingsError> {
-        let mut settings = self.settings()?;
-        settings.device_id = device;
-        settings::write(&self.store.directory, &settings)
     }
 
     pub(crate) fn verify(&self, directory: &Path, id: StoreId) -> Result<(), StoreLockError> {
