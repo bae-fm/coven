@@ -2530,7 +2530,8 @@ loop {
   attempt ([§6](coven.md#settling-a-claim)). Each device has one claim counter
   across writes, admin entries, key copies and announcements, and settles its
   current claim before starting another. If the floor has passed the slot,
-  its snapshot's last included claim number settles it, valid or refused;
+  its snapshot's last included claim number and slot digest settle it, valid or
+  refused, or show another copy of this device id;
   the resulting app or admin state is not evidence that a claim landed.
 - If validation fails, undo the operation's artifacts and return `Rejected`.
   Failed undo reports both causes and keeps the journal for retry.

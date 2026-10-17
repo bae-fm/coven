@@ -56,8 +56,9 @@ A key in a later slot cannot bypass [the block at 41](coven.md#stuck-devices).
 
 - Settle any unsettled claim first, using [§6](coven.md#settling-a-claim).
   On reopening or retrying, read its recorded path and compare its exact bytes.
-- If the floor has passed that slot, its snapshots' per-device last-claim
-  numbers settle every slot kind, valid or refused (§6).
+- If the floor has passed that slot, its snapshots' per-device last claim
+  number and slot digest settle every slot kind, valid or refused, or show
+  another copy of this device id (§6).
 - A new claim at n+1 requires the device to have applied 1 through n.
   No clock deadline expires that progress.
 - For an admin operation, validate, journal its prerequisites, then do the work

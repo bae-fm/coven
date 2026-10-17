@@ -1305,7 +1305,8 @@ An operation keeps this record in its journal; a writes queue keeps it with its 
   forgetting the claim can land an operation twice
   ([`forgetful_lands_twice`](proofs/sequence/CovenSequence/Operation.lean)).
 - Equal bytes mean the claim landed, even if the provider replied `AlreadyExists`.
-  Different bytes mean contention. A failed read leaves the claim unsettled.
+  Different bytes signed by another device mean contention; signed by this
+  device id, they mean another copy uses it (§10). A failed read leaves the claim unsettled.
   Skipping the comparison can duplicate a batch
   ([`no_compare_lands_twice`](proofs/sequence/CovenSequence/Claim.lean)).
 - If the slot is absent and the floor has not passed it, retry the same
@@ -1315,11 +1316,16 @@ An operation keeps this record in its journal; a writes queue keeps it with its 
   ([`claim_floor_check`](proofs/sequence/CovenSequence/Retention.lean)).
   If the floor has passed its slot, recreated bytes cannot confirm it
   ([`stale_create_wins_deleted_slot`](proofs/sequence/CovenSequence/Claim.lean)).
-- When the floor has passed the recorded slot, use an authenticated floor
-  snapshot's last included claim number for this device ([§15](#15-snapshots)).
-  The claim landed exactly when that number reaches its recorded number,
-  whether the slot was valid or refused. This settles every slot kind
-  ([`settle_from_floor`](proofs/sequence/CovenSequence/Settle.lean)).
+- When the floor has passed the recorded slot n, read the authenticated floor
+  snapshot's record for this device: its last included claim number L and that
+  slot's digest ([§15](#15-snapshots)). This settles every slot kind, valid or refused:
+  - L below n: the claim did not land;
+  - L equal to n with the digest of the recorded bytes: it landed;
+  - L above n, or equal with another digest: another copy uses this device id;
+    report `SyncError::DeviceIdInUse` and stop sending.
+- The number alone is not enough: two copies of one id can claim with the same
+  number, and the loser would take the winner's slot for its own
+  ([`settle_correct'`, `settle_from_floor`, `copies_fool_number_only`](proofs/sequence/CovenSequence/Settle.lean)).
 - Settling from the state fails: later writes or admin entries can erase a
   landed claim's effects ([`admin_state_cannot_settle`, `state_alone_cannot_settle`](proofs/sequence/CovenSequence/Settle.lean)).
 - If the number has not reached the claim, read forward and validate again
@@ -2437,8 +2443,9 @@ No removal of Ana enters the sequence.
   Starting from empty storage, with every create recorded and the journal
   retained, the model proves that an unattempted signed slot implies another copy
   ([`foreign_slot_means_copy`](proofs/sequence/CovenSequence/Settle.lean)).
-- Different bytes at an attempted slot are ordinary contention, even when
-  the slot names this device. Settle the claim under [§6](#settling-a-claim).
+- Different bytes at an attempted slot are contention when another device signed
+  them. Signed by this device id, they mean another copy uses it: report
+  `DeviceIdInUse` and stop sending ([§6](#settling-a-claim)).
 - Slot order controls sending ([§6](#6-syncing-writes)); no elapsed-time permission is required.
   A removed device or an installation holding replaced member keys cannot send.
 - Creation and invite-bound join requests have their bootstrap rules (§9, §12).
@@ -3033,10 +3040,11 @@ It holds rows, merge records, losses and the evidence needed for old writes.
 
 - Store snapshots also hold signed admin entries, key copies and announcements.
   They preserve the history needed for membership, keys, schema changes and resets (D7).
-- Each snapshot records, for every device, its last included claim number.
+- Each snapshot records, for every device, its last included claim number and
+  the SHA-256 of that claim's slot bytes.
   Count every slot through coverage: writes, admin entries, key copies and
   announcements, valid or refused, including writes with opaque or reset-ignored parts.
-- A device with no included claim has number zero. These numbers settle every
+- A device with no included claim has number zero and no digest. These numbers settle every
   kind of claim after slot deletion (§6); they do not describe surviving effects
   ([`claims_ge`](proofs/sequence/CovenSequence/Settle.lean)).
 - A snapshot excludes local uploads, journals, pending records, file sources and caches.
