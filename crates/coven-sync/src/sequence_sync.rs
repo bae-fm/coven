@@ -635,6 +635,12 @@ impl History {
                 let effect = match self.validate(&received.header, slot, &change) {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {
+                            if self.state.store.is_some()
+                                && !crate::effects::belongs(&self.state, &Audience::Store, &member)
+                                && crate::effects::belongs(&effect.state, &Audience::Store, &member)
+                            {
+                                effect.reload.push(Audience::Store);
+                            }
                             if let Some(boundary) = &effect.boundary {
                                 if crate::effects::belongs(
                                     &effect.state,

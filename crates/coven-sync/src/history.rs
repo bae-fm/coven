@@ -371,34 +371,6 @@ impl History {
             .ok_or_else(|| SyncError::Rejected(OperationRejection::NotAllowed))
     }
 
-    pub(crate) fn needs_key(&self, audience: &Audience, key: KeyId, member: MemberId) -> bool {
-        if effects::belongs(&self.state, audience, &member) {
-            return true;
-        }
-        let Some(introduction) = self
-            .introductions
-            .iter()
-            .find(|value| &value.audience == audience && value.key == key)
-        else {
-            return false;
-        };
-        if self.belonged(audience, &member, introduction.slot.0) {
-            return true;
-        }
-        match audience {
-            Audience::Store => self.members.get(&member).is_some_and(|changes| {
-                changes
-                    .range(introduction.slot.0..)
-                    .any(|(_, member)| !member.removed)
-            }),
-            Audience::Circle(circle) => self.circles.get(circle).is_some_and(|changes| {
-                changes
-                    .range(introduction.slot.0..)
-                    .any(|(_, circle)| circle.members.contains(&member))
-            }),
-        }
-    }
-
     pub(crate) fn routes(&self, audience: &Audience, key: KeyId) -> Vec<KeyCopyPrefix> {
         self.state
             .members

@@ -506,8 +506,9 @@ fn inner(
     while let Some(coordinate) = layout.next_chunk() {
         let part = &header.parts[coordinate.section as usize - 1];
         if coordinate.index == 0 {
-            let opens = history.accepted(ring, &part.audience, coordinate.key);
-            if !opens && history.needs_key(&part.audience, coordinate.key, me) {
+            let readable = crate::effects::belongs(&history.state, &part.audience, &me);
+            let opens = readable && history.accepted(ring, &part.audience, coordinate.key);
+            if readable && !opens {
                 return Err(SyncError::KeyUnavailable(coordinate.key));
             }
             if opens {
