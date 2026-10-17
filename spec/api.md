@@ -2171,10 +2171,6 @@ pub enum DeviceIdEvidence {
 pub enum DeleteAccessKeyError {
     /// The provider refused or failed the deletion.
     DeleteFailed(StorageError),
-    /// No provider read followed the deletion.
-    ReadMissing,
-    /// The read concerned another key.
-    WrongKey,
     /// The read still found the key.
     StillPresent,
     /// The read failed; a failed read is never absence.

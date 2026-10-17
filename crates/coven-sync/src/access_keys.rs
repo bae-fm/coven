@@ -8,12 +8,6 @@ pub enum DeleteAccessKeyError {
     /// The provider refused or failed the deletion.
     #[error("deleting the S3 key failed")]
     DeleteFailed(#[source] StorageError),
-    /// No read followed the deletion.
-    #[error("no provider read confirmed the S3 key's deletion")]
-    ObservationMissing,
-    /// The read concerned another key.
-    #[error("the provider read concerned another S3 key")]
-    WrongKey,
     /// The read still found the key.
     #[error("the provider still has the S3 key")]
     StillPresent,
