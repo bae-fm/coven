@@ -37,7 +37,7 @@ crates=()
 proof_packages=()
 select_all() {
     crates=(all)
-    proof_packages=(merge storelog storelog-data storage queue io)
+    proof_packages=(merge storelog storelog-data storage queue io sequence)
 }
 select_changed() {
     local files
@@ -75,14 +75,14 @@ print("\n".join(sorted(chosen)))
     # requires one through a lakefile path dependency.
     local package required changed=1
     proof_packages=()
-    for package in merge storelog storelog-data storage queue io; do
+    for package in merge storelog storelog-data storage queue io sequence; do
         if printf '%s\n' "$files" | grep -q "^spec/proofs/$package/"; then
             proof_packages+=("$package")
         fi
     done
     while [ "$changed" = 1 ]; do
         changed=0
-        for package in merge storelog storelog-data storage queue io; do
+        for package in merge storelog storelog-data storage queue io sequence; do
             proof_selected "$package" && continue
             for required in $(grep -A2 '\[\[require\]\]' "spec/proofs/$package/lakefile.toml" | sed -n 's/.*path = "\.\.\/\(.*\)"/\1/p'); do
                 if proof_selected "$required"; then
@@ -266,6 +266,7 @@ proofs() {
     lean_proof "storage identity, files and clocks" spec/proofs/storage CovenStorage covenStorage
     lean_proof "device upload queues" spec/proofs/queue CovenQueue covenQueue
     lean_proof "sync IO and discovery" spec/proofs/io CovenIO covenIO
+    lean_proof "the store sequence" spec/proofs/sequence CovenSequence covenSequence
 
     local runner
     if proof_selected merge || crate_selected coven-merge; then

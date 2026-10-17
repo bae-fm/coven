@@ -1,0 +1,5 @@
+name = "covenSequence"
+defaultTargets = ["CovenSequence"]
+
+[[lean_lib]]
+name = "CovenSequence"
