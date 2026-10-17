@@ -3278,7 +3278,7 @@ the verified cache ranges and one pending record per file (§19.1). A call that
 fails returns its typed cause at once; the pending list records the first unmet
 condition:
 
-| Condition | Error | What happens next |
+| Condition | Pending reason | What happens next |
 |---|---|---|
 | no storage connected | `NoStorage` | |
 | network or provider failure | the provider's `Storage` category | retried by its failure class (§17.7) |
@@ -3488,8 +3488,9 @@ then changes the row to B before A finishes uploading. Finishing A changes no ro
 and can't delete B's source or hashes; retargeting the row can't make A's upload
 forget itself.
 
-Native errors stay available while the process runs. After reopening, pending
-work shows its persisted failure category (§19.1).
+Calls retain native errors while the process runs, except that file integrity
+failures return `FileReadError::Integrity { id }` without a native cause. Pending
+work keeps the precise refusal category, including after reopening (§19.1).
 
 Coven writes file bytes on the device so that a crash never leaves a row naming
 bytes that are gone, and never leaves bytes nobody will delete. Appendix C.3
@@ -3898,11 +3899,16 @@ Sync status is one of: no storage set up, stopped, offline, syncing, synced,
 blocked at a slot with a reason, or failed.
 
 **Refusals and failures.** A *refusal* is permanent: coven downloaded an
-immutable object completely and it failed a check. A failure to download it is
-only a failed read, never a refusal.
+immutable object completely, or a complete independently authenticated file
+chunk, and it failed a check. A failure to download those bytes is only a failed
+read, never a refusal.
 
 - Calls and pending records use the same `Refusal` variant. A call keeps the
-  native error; a durable record keeps its category.
+  native error; a durable record keeps its category. File integrity failures are
+  the exception: the file API returns `FileReadError::Integrity { id }` for failed
+  authentication or content checks, without a native cause. The pending record
+  still distinguishes `Refused(Decryption)` from `Refused(ContentHash)`. This lets
+  the app handle both failures alike while pending work preserves the reason.
 - An applicable coven update permits one recheck of a refused object. Reopening
   the same version doesn't repeat it.
 - A refused slot stops the device under §5.4's rule. No later floor, reset or
@@ -6473,7 +6479,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 |---|---|---|
 | `KeyUnavailable` | a slot, or a row's file, needs a key the device doesn't hold yet | §5.4, §6.2, §17.5 |
 | `UpdateRequired` | a slot needs a newer schema or format | §5.4, §18.3, C.2 |
-| `Refused` (the `Refusal` variant) | a completely downloaded immutable object failed a check; calls and pending records use the same variant | §5.4, §6.2, §19.1 |
+| `Refused` (the `Refusal` variant) | a completely downloaded immutable object or independently authenticated file chunk failed a check; file calls use `Integrity` while pending records keep the refusal category | §5.4, §6.2, §19.1 |
 | `WritesRefused` | writes cut off by a removal or key replacement were consumed; names the deciding entry | §14.1, §19.1 |
 | `SyncError::DeviceIdInUse` | another installation uses this device's id, or a reset replaced it | §5.1, §5.3, §14.1, §19.3 |
 | `MemberKeysReplaced` | this device holds member keys that were replaced, or an old restore code is used | §12.3, §13.1, §14.1 |
