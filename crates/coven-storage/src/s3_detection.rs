@@ -77,8 +77,9 @@ pub(crate) const COPY_CONDITIONS: [S3CopyCondition; 3] = [
 ];
 
 impl S3Detection {
-    /// Derive settings from results. Where no behavior holds, `plain`'s
-    /// value stays and [`Self::check`] names the failure.
+    /// Derive each field by Appendix E.7. Only signer and single-PUT selection
+    /// retain their starting values when neither candidate holds; other fields
+    /// use the listed fallbacks. [`Self::check`] refuses unsupported choices.
     pub(crate) fn derive(
         results: Vec<S3ProbeResult>,
         plain: S3Settings,

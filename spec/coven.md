@@ -5641,7 +5641,10 @@ reporting both verdicts separately. An unknown bucket state can't be certified.
 
 ### E.7 Detection probes
 
-**The probes,** in this order:
+**The probes.** These checks describe the behaviours detection observes, not a
+fixed request order. Results retain the order actually run. Timestamp markers
+bracket multipart initiation and completion; final listings include every
+published probe, including the checksum objects.
 
 1. Both signers, each with a read-only zero-entry listing.
 2. Both single-PUT conditions: the first PUT must be accepted and a second
@@ -5679,17 +5682,22 @@ other probe waits. Pauses use the store's clock.
 
 | Setting | Chosen |
 |---|---|
-| single-PUT condition | the first enforced, in probe order |
-| publication | conditional completion when it is enforced, unfinished uploads are hidden, and multipart times date completion; otherwise the first enforced copy condition in the order `x-goog-if-generation-match`, `If-None-Match`, `cf-copy-destination-if-none-match` |
-| multipart timestamp | as observed |
+| signer | the first accepted: Google HMAC, then AWS SigV4; retain the starting setting if neither is accepted |
+| single-PUT condition | the first enforced: `If-None-Match`, then generation match; retain the starting setting if neither is enforced |
+| publication | conditional completion when it is enforced, unfinished uploads are hidden, and multipart times date completion; otherwise the first enforced copy condition in the order `x-goog-if-generation-match`, `If-None-Match`, `cf-copy-destination-if-none-match`; conditional completion if none holds, which the safety check refuses |
+| multipart timestamp | completion when that probe holds; start otherwise |
 | checksum policy | none when no probe returned one; unstated scope ignored when one arrived without its scope; scope stated otherwise |
-| checksum requests | only when checksum mode is accepted and checksums don't arrive without it |
-| revision and headers | generation revision and Google headers when GCS's headers arrive |
-| listing | V2 when it agrees with V1 |
+| checksum requests | only when checksum mode is accepted, some checksum arrived, and checksums do not arrive without that mode |
+| revision | generation when a generation header arrived; ETag otherwise |
+| headers | Google when generation or hash headers arrived; S3 otherwise |
+| listing | V2 when its probe holds and agrees with V1; V1 otherwise |
 
-Where no behaviour holds, the setting keeps the plain S3 value and the setup
-safety check names the failure. Detection never chooses copy publication for
-every object (E.6).
+Starting settings come from the location, or plain S3 when detection must supply
+them. Only signer and single-PUT selection retain a starting value when neither
+candidate holds. The table specifies every other fallback; it does not certify
+that fallback. For example, if both listings fail, detection chooses V1 and the
+safety check refuses it. Setup reports the first failed safety check in E.8
+order. Detection never chooses copy publication for every object (E.6).
 
 ### E.8 The setup safety check
 
