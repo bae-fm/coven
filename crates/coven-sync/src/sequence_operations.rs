@@ -559,7 +559,7 @@ impl SequenceSync {
             }
             if matches!(step, Step::Preparing) {
                 step = match &request {
-                    Request::Change(change) => match required_copies(&session.history, change, member.member()).into_iter().find(|route|
+                    Request::Change(change) => match required_copies(&session.history, ring, change, member.member()).into_iter().find(|route|
                         !session.history.copies.iter().any(|copy| matches!(&copy.prefix.kind, SlotKind::KeyCopy(copy) if &copy.routing == route))) {
                         Some(route) => Step::Copy(route), None => Step::Claiming,
                     },
@@ -850,6 +850,7 @@ mod route {
 
 fn required_copies(
     history: &History,
+    ring: &StoreKeyring,
     change: &StoreChange,
     author: coven_foundation::id_source::MemberId,
 ) -> Vec<KeyCopyPrefix> {
@@ -878,7 +879,8 @@ fn required_copies(
             .iter()
             .filter(|intro| {
                 intro.audience == Audience::Store
-                    || crate::effects::belongs(&history.state, &intro.audience, member)
+                    || (crate::effects::belongs(&history.state, &intro.audience, member)
+                        && history.accepted(ring, &intro.audience, intro.key))
             })
             .map(|intro| KeyCopyPrefix {
                 audience: intro.audience.clone(),

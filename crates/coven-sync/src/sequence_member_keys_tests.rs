@@ -1,6 +1,41 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 
+/// E9 and §12.2: replacement supplies every store key and only held circle keys.
+#[tokio::test]
+async fn an_admin_outside_the_targets_circle_can_replace_its_pair() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ben.sync.create_circle("Ben's".into()).await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        ana.sync
+            .keys
+            .read()
+            .unwrap()
+            .unwrap()
+            .circle_key_ids(circle)
+            .count(),
+        0
+    );
+    let keys = coven_format::test_utils::keys_from_seed(12).public_keys();
+    ana.sync
+        .replace_member_keys_for(ben.identity.member(), keys)
+        .await
+        .unwrap();
+    let state = ana.database().store_state().await.unwrap();
+    assert_eq!(state.members[&ben.identity.member()].keys, keys);
+    assert!(state.reads_circle(circle, &ben.identity.member()));
+    assert!(!state.reads_circle(circle, &ana.identity.member()));
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_of_the_old_pair() {
     let group = Group::new();

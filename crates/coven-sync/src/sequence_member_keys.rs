@@ -116,7 +116,7 @@ impl SequenceSync {
     }
 
     /// Publish a prepared public pair for another active member, with copies
-    /// of every store key and that member's circle keys first (§9, E9).
+    /// of every store key and held keys of that member's circles first (§9, E9).
     pub async fn replace_member_keys_for(
         self: &Arc<Self>,
         member: MemberId,
