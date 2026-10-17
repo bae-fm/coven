@@ -2314,12 +2314,15 @@ pub enum Retry {
 impl PendingRecord {
     /// Automatic: retryable reads, keys, snapshots, provider work and
     /// unfinished operation/undo work, subject to shared backoff.
+    /// Storage Network/Conflict/RateLimited/NotFound/SessionExpired retry
+    /// automatically. Files and coven-owned operations also retry storage
+    /// QuotaExceeded/File and local database, disk or custody failures.
     /// AfterUpdate: refused immutable objects and unsupported formats/schema.
     /// Never: WritesRefused or this device's removal/replacement.
     /// AppAction: failures a person clears, such as required credentials;
     /// retried on new credentials or connection.
-    /// Files use the same classes; an uploader's missing, changed or
-    /// mismatching source retries automatically.
+    /// Other permanent file or coven-owned operation failures are Never.
+    /// An uploader's missing, changed or mismatching source retries automatically.
     /// A later slot cannot reverse a cut-off or bypass a blocked slot.
     pub fn retry(&self) -> Retry;
 }
@@ -2500,7 +2503,10 @@ let StorageConfig::S3 { profile, .. } = &mut storage else { unreachable!() };
 *profile = Some(S3Profile::Custom(settings));
 
 match handle.setup_s3_storage(storage, device_name, access_key_id, SecretText::new(secret_access_key)).await {
-    Ok(connected) => remember(connected.storage),
+    Ok(setup) => {
+        remember(setup.connection.storage);
+        show_blurred_qr_code(setup.restore_code.as_str());
+    }
     Err(error) => return show_setup_error(error),
 }
 
@@ -2862,7 +2868,7 @@ pub enum FileReadError {
 Example:
 
 ```rust
-let recording = handle.file_ref("attachments", attachment_id.as_str()).await?;
+let recording = handle.file_ref("attachments", attachment_id).await?;
 let stream = handle.open_file_stream(&recording).await?;
 
 // A voice memo: read its header, then seek to where listening resumes.
@@ -2882,7 +2888,8 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - Administrative calls require an online sequence catch-up (§9, E6).
 - A member records their own new storage access; an admin may also record an
   S3 replacement for another member. Authority uses the author's role in the
-  entry's recorded view, independently of who holds provider-admin access.
+  state immediately preceding its slot, independently of who holds
+  provider-admin access.
   `ProviderSignOut::ReplaceAccessKey` directs the person to the admin desktop
   flow in §13, `replace_member_access_key`: create, deliver to remaining
   devices, record for that member, then delete the old key. Each remaining
@@ -3271,8 +3278,9 @@ pub enum ProviderSignOut {
   device name, status callback and cancellation receiver, and
   returns the open `CovenHandle`. Restore also accepts the separately
   supplied S3 credentials. There is no second app-side open.
-  - The builder supplies tables, migrations, custody, clock, id source,
-    provider clients, sign-in presenter and file-transfer limits once. The app
+  - The builder supplies tables, migrations, custody, clock,
+    provider clients, sign-in presenter and file-transfer limits once. Production
+    ids use OS randomness; only tests replace their source (E1). The app
     calls `builder.authenticate(access)` first when `oauth_access` is present;
     bootstrap uses that held sign-in and never opens UI. Session-only `InMemory`
     custody lives with the returned handle. OAuth sign-in tokens move from

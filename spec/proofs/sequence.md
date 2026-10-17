@@ -10,7 +10,7 @@ The Lean package in [`sequence/`](sequence/) backs the normative sequence rules:
 [snapshots and retention (§15)](../coven.md#15-snapshots), and
 [operation journals (§18)](../coven.md#18-operations), in the order described by
 [one sync pass](../sync-pass.md). Each result has the assumptions and limits
-below; unproved parts remain marked in the spec.
+below.
 It uses Lean 4.34.1 and its standard library,
 without additional axioms or unfinished proofs. All named results are audited by
 `CovenSequence/Axioms.lean`, and `scripts/check.sh` builds the package and runs
@@ -526,9 +526,7 @@ sending it and creates only what it recorded, signed with its id.
   device's numbers increase is a hypothesis of `settle_from_floor`, not
   derived from a device's counter.
 - Not modelled:
-  - concrete role authorization or the last-admin condition;
-  - authored `read_through`, implicit write predecessors or the local write queue;
-  - resets and separately announced preparations activated by a raise or reset;
+  - concrete authority policies beyond membership, role changes and store resets;
   - Drive's head file and its compare-and-swap;
   - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;

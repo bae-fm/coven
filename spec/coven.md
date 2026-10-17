@@ -180,19 +180,21 @@ cryptographic and environmental assumptions.
 - Leaving a circle still permits previously authored circle edits (§14.6).
 - **Storage bounds:** snapshot coverage and grace permit deletion without waiting
   for absent devices. Returning devices reload and retain eligible unsent writes (§15).
-- A ready prefix can be reclaimed within U+G+P+D: snapshot service U, grace G,
-  maintenance spacing P and deletion service D.
-- That bound requires coverage for every relevant audience and successful floor updates.
-  An audience without a reader to supply coverage has no deletion deadline.
+- From readiness, a prefix is deleted within U+G+P+D, assuming successful
+  snapshot preparation, upload and announcement within U, grace G, a successful
+  conditional floor update within P after grace, and deletion within D after that
+  update ([`bounded_retention`](proofs/sequence/CovenSequence/Deadline.lean)).
+- Every relevant audience must supply covering snapshots that remain usable
+  through the floor update. Missing coverage prevents the retention gate;
+  an audience without a reader to supply it has no deletion deadline
+  ([`uncovered_has_no_deadline`](proofs/sequence/CovenSequence/Deadline.lean)).
 - The bound does not limit live rows, losses, authentication evidence or an unbounded write rate.
-  [proof pending: bounded snapshot and deletion service bounds retained sequence history without absent-device acknowledgements]
 - **Visible failures:** a blocked slot, operation, file or cleanup names its
   first unmet condition to the local app (§19.1). Eligible local work continues.
 
-The [sequence proof](proofs/sequence.md) covers claims, prefix agreement, cut-offs,
-readers, retention and operation journals under its stated assumptions.
-Unproved parts are marked at their rules. Merge and conversion proofs cover
-their stated inputs; they do not establish the composed storage protocol.
+The [sequence proof](proofs/sequence.md) states each result's assumptions and
+model boundaries. Merge and conversion proofs cover their stated inputs;
+they do not establish the composed storage protocol.
 
 ### 3.1 IO bounds
 
@@ -1197,8 +1199,8 @@ Receiving Ben's note adds its slot read.
   - so every committed write gets uploaded, even after a crash.
 - A write needs no key: the record waits unencrypted and unsigned, and its
   upload encrypts and signs it ([§6](#6-syncing-writes)).
-  - So local writes need no store key, including before storage or identity
-    has been initialized ([E1](api.md#e1-opening)).
+  - So local writes need no store key, including before storage has been
+    set up ([E1](api.md#e1-opening)).
 - A write record, for a write that fixes a note's title and deletes a tag:
 
   ```
@@ -1261,7 +1263,15 @@ The store log means the admin entries in this sequence.
   Each individual plaintext write must fit SQLite's 1 GB value limit; otherwise commit returns `DbError::TooLarge`.
 - Each write records `read_through`: the last applied slot when it was authored.
   Its own earlier writes are implicit reads. Catch-up never changes this record.
-  [proof pending: ordered slot application preserves authored read-through and implicit write predecessors]
+  The model preserves the authored read and every queued original
+  ([`authored_readThrough`, `catchup_preserves_originals`, `own_predecessor_is_read`](proofs/sequence/CovenSequence/Causality.lean)).
+  Given publication after the authored read, own writes published in number order,
+  and nondecreasing authored reads, slot order and within-slot write order consume
+  every published cause first; authored pasts are transitive
+  ([`ordered_application_causal`, `past_transitive`](proofs/sequence/CovenSequence/Causality.lean)).
+  Receivers agreeing on a cause's slot agree whether it is in that past;
+  later publication adds no intervening remote write to it
+  ([`receivers_agree`, `intervening_write_not_read`](proofs/sequence/CovenSequence/Causality.lean)).
 - Before first sending a write, record its format and sealing keys.
   [§11](#11-keys) chooses the keys; [D9](format.md#d9-sealed-objects) fixes its signed inner bytes across retries.
 - Remove queued writes only when their claim is settled and their consumed
@@ -2118,23 +2128,23 @@ Carol's tablet:
 
 - On one device, SQLite refuses a write that repeats a unique value, so two
   rows can claim one value only through concurrent writes.
-- Of two rows claiming one value, the lowest slot keeps it.
+- Among merged live rows claiming one value after the first pass of other
+  removal rules, the lowest counted slot claim keeps it.
   Within one slot, the lower write number wins; within one write, the lower primary key wins.
-- For abstract claims that are never released, starting with no owners, the
-  first counted slot wins and later claims cannot displace it
-  ([`first_slot_wins`, `owner_stays`](proofs/sequence/CovenSequence/Unique.lean)).
-  The model does not select claims from merged live rows or order claims within a slot.
-  [proof pending: unique-value selection composes with merged values, removal, release and within-slot ties]
+- Given merged presence, constraint values, counted input setters and distinct
+  primary-key ranks, the model selects that claim; sound readers of one audience
+  at the same position select the same winner
+  ([`first_live_claim`, `winner_counted_setter`, `within_slot`, `readers_agree`](proofs/sequence/CovenSequence/LiveClaims.lean)).
 - Timestamps choose the cell values before uniqueness is judged.
 - Local writes without slots rank after claimed slots, in local write order.
   A locally created row can therefore lose its unique value before claiming a slot.
 - The other row is taken out, whether its write inserted it or edited it
   to claim the value, and recorded as lost.
   - A change to its own value that ends the conflict clears that reason.
-  - A loser whose value is unchanged comes back only when the winner is
-    deleted, or taken out before unique values are judged.
-  - Unique values are judged after the other removal rules, among the rows
-    they leave ([§8](#8-merge)).
+  - When the winner releases the value, it goes to the earliest surviving
+    live claimant, including an older loser. The first claim after release
+    wins only when no earlier live claimant survives
+    ([`deleted_releases`, `first_after_release`, `older_loser_returns`](proofs/sequence/CovenSequence/LiveClaims.lean)).
 - E.g. note titles are unique, and Ana and Ben, both offline, each add a
   note titled "Groceries".
   - Ana's insert of note 45 claims slot 40; Ben's note 46 claims slot 41,
@@ -2288,10 +2298,12 @@ Carol's tablet:
     Later claims never reselect an established owner. Local unclaimed
     creations are provisional; when a published creation already owns that
     key, queued changes are checked against it before their effects count.
-    Starting with no owners, the model selects the first counted creator slot
-    and preserves it under every later claim
-    ([`first_slot_wins`, `owner_stays`](proofs/sequence/CovenSequence/Unique.lean)).
-    [proof pending: owner selection resolves within-slot ties and preserves creator identity across audience moves]
+    Given the counted generation-zero creations and their authenticated members,
+    the model selects by slot and write number when no creator is retained
+    ([`selected_creation`, `lower_write_number_wins`](proofs/sequence/CovenSequence/Owners.lean)).
+    Later claims and modeled updates, deletion, reinsertion and audience moves
+    preserve that creator and original write
+    ([`later_claim_preserves_creator`, `move_preserves_owner`, `retained_creator`](proofs/sequence/CovenSequence/Owners.lean)).
   - Retain the creating write's authenticated identity through deletion,
     loss dismissal, schema conversion and snapshots. Renaming a table or
     key does not make the migration's author the row's creator.
@@ -2361,9 +2373,8 @@ Carol's tablet:
 - Owner permissions and verified foreign-key consequences are checked on
   every device from the same authenticated inputs, including after a reload.
   [B18](proofs/merge.md#b18-owner-tables-and-row-authenticity) proves their
-  authorization and loss recording at the stated SQL extraction boundary;
-  the selection details marked above remain unproved. Ownership grants no
-  additional schema restrictions.
+  authorization and loss recording at the stated SQL extraction boundary.
+  Ownership grants no additional schema restrictions.
 
 ## 9. Members and roles
 
@@ -2376,9 +2387,11 @@ Carol's tablet:
   ([`valid_prefix`](proofs/sequence/CovenSequence/Converge.lean)).
   Loading a snapshot and applying its suffix establishes that same state.
 - An applied entry is final. Later entries change state from their own slots onward.
-  The model supplies role authorization as a parameter; it does not prove the
-  concrete role rules or the last-admin condition.
-  [proof pending: ordered admin entries preserve authority and at least one admin]
+- With membership and role changes admitted only from an active admin in the
+  preceding state, and effects leaving no admin refused, every prefix after
+  a creation binding containing an admin retains one
+  ([`applied_membership_authorized`, `last_admin_refused`, `every_prefix_has_admin`](proofs/sequence/CovenSequence/Authority.lean)).
+  Other admin actions retain their supplied authority policies in this model.
 - Slot 1 creates the store and registers its first device and admin.
   Its supplied public key verifies the signature; its store id must match the path.
 - The creator holds the first store key and claims its sealed copy next.
@@ -2523,6 +2536,7 @@ No removal of Ana enters the sequence.
 - Private credentials and audience keys stay in custody.
   Keep historical private credentials needed for old boxes, or supply copies to the current credential.
 - Self-replacement keeps the new private pair before claiming it.
+  Failure retains both pairs and the recorded progress for retry.
   It completes custody and the restore code before reporting success (§18).
 
 - Creation initializes the member in the chosen custody (OS keychain by default)
@@ -3031,26 +3045,34 @@ It holds rows, merge records, losses and the evidence needed for old writes.
   It captures applied slots; local writes without slots stay outside the snapshot.
 - To make a snapshot available, journal it, upload its fixed bytes, then claim
   an announcement naming its path, coverage and purpose.
+  A counted preparation announcement has its prepared body already in storage
+  ([`announcement_uploaded`](proofs/sequence/CovenSequence/Preparations.lean)).
 - An unannounced upload supplies no coverage. If its operation cannot finish,
   the journal deletes it and retains any cleanup failure.
 - An announcement's coverage must not decrease that audience's announced coverage.
   Equal coverage selects the later announcement. There is no upload deadline.
 - An ordinary snapshot must cover the last schema raise and reset before its announcement.
   Its schema and reset state must match the audience at that slot.
+  The model proves both conditions for counted ordinary announcements
+  ([`ordinary_covers_boundary`, `ordinary_matches_schema_reset`](proofs/sequence/CovenSequence/Preparations.lean)).
   For raises, the version rule rejects a stale capture that would strand a joiner
   ([`slot4_refused`, `stale_floor_strands_joiner`](proofs/sequence/CovenSequence/ReaderExamples.lean)).
 - A prepared raise or reset snapshot is usable only after its matching admin entry.
   Until then, its announcement cannot authorize retention or ordinary reload.
+  Starting with no preparations, the model requires an earlier matching counted
+  announcement for activation, which makes its coverage usable
+  ([`activation_requires_preparation`, `activated_is_usable`](proofs/sequence/CovenSequence/Preparations.lean)).
 - A raise or reset snapshot must cover at least as much as every earlier
   announcement for that audience. It must also cover the preceding raise and reset slots.
 - After contention, recapture if these coverage conditions no longer hold.
-  For the model's raises, these coverage rules let a sound reader with its key
+  For modeled raises and resets, these coverage rules let a sound reader with its key
   advance and reach the head without a retention hold, assuming honest snapshot
-  bodies and retained raise bodies
+  bodies and retained raise/reset bodies
   ([`read_progress`, `reaches_head`](proofs/sequence/CovenSequence/Reader.lean)).
-  [proof pending: snapshot coverage composes with resets and separately announced raise or reset preparations]
 - Delete an abandoned preparation through its journal. An announcement whose
   preparation never takes effect remains history, but supplies no usable snapshot.
+  The announcement alone changes no rows, schema or reset state
+  ([`preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable`](proofs/sequence/CovenSequence/Preparations.lean)).
 - Select the newest applicable snapshot for the audience's schema and reset.
   A missing key, required update or damaged body waits; do not choose an older snapshot to bypass it.
 - Check the signed prefix before using coverage, then the entire signature
@@ -3093,9 +3115,26 @@ Before a floor exists, the sequence starts at slot 1.
   Failure preserves the previously visible state.
 - Ordinary reload permits local app writes throughout, then applies eligible queued
   writes over the loaded state. Their numbers, timestamps, schema and original reads stay unchanged.
+  Installation uses the queue present at commit, including writes made while loading,
+  and preserves even ineligible originals for publication
+  ([`queued_originals_preserved`, `write_during_reload`](proofs/sequence/CovenSequence/QueueReload.lean)).
+  With unique queued write numbers, each eligible original enters the rebuilding
+  fold exactly once; consumed originals are excluded, and repeating installation
+  rebuilds from the published base
+  ([`queued_exactly_once`, `covered_not_reapplied`, `install_twice`](proofs/sequence/CovenSequence/QueueReload.lean)).
 - Reset, breaking raise and newly readable circle reloads refuse writes into that
   audience with `AudienceReloading`. Other audiences stay locally writable.
-  [proof pending: snapshot reload preserves eligible queued writes while readable audiences change]
+  Ordinary reload admits commits to followed audiences; an affected audience's
+  gate refuses a commit containing its part
+  ([`ordinary_commit_allowed`, `affected_commit_refused`](proofs/sequence/CovenSequence/QueueReload.lean)).
+- For a changed followed set, each audience, including a newly readable circle,
+  must supply its own sound loaded prefix at the common target. Installation
+  then rebuilds each from its eligible queued originals. Eligibility requires an
+  unconsumed write, admission, an audience part and an authored read through its reset
+  ([`reload_sound`, `new_circle_keeps_queue`](proofs/sequence/CovenSequence/QueueReload.lean)).
+  On good storage, with the audiences' keys and a target between every selected
+  floor snapshot's coverage and the head, all those prefixes can be loaded
+  ([`audiences_can_load`](proofs/sequence/CovenSequence/QueueReload.lean)).
 
 On storage satisfying the coverage rules and holding honest snapshot bodies,
 a running device with a fixed set of followed audiences and all their keys can bring every reader to
@@ -3103,7 +3142,6 @@ the head ([`device_reaches_head`](proofs/sequence/CovenSequence/Device.lean)).
 Loading a floor snapshot and its suffix reaches the full-prefix state;
 sound readers at the same position agree
 ([`joiner_reaches_head`, `readers_agree`](proofs/sequence/CovenSequence/Reader.lean)).
-These results model neither the local write queue nor changes to followed audiences.
 
 Ben returns after a year. The floor starts at 501; his next slot was 41.
 He loads the floor's snapshots and resumes from their coverage.
@@ -3135,12 +3173,14 @@ His unsent edits keep their original reads and timestamps; age alone does not re
   Old edits cannot revive a deleted incarnation or turn refused data into an accepted source.
 
 Starting with genuine kept slots, validly announced honest floor snapshots and
-retained raise bodies, the modeled storage steps preserve those properties and
+retained raise/reset bodies, the modeled storage steps preserve those properties and
 every sound reader ([`store_good`, `store_reader`](proofs/sequence/CovenSequence/Retention.lean)).
 Under any interleaving of those steps and device steps, a running device with
 fixed followed audiences and all their keys can still reach the current head's
 full state ([`deletion_keeps_reachable`](proofs/sequence/CovenSequence/Device.lean)).
-Reset and prepared-snapshot activation remain outside these results, as marked above.
+These results load ordinary snapshots from the floor and prepared bodies at
+their matching raise/reset entries. Loading a prepared body directly from the
+floor is not modeled.
 
 ## 16. Files
 
@@ -3286,7 +3326,8 @@ Reset and prepared-snapshot activation remain outside these results, as marked a
     provider's `Storage` category and use §16.5's failure classes and retries;
   - confirmed absence with an active uploader and no local source failure is
     `Waits(Object(path))`; removal, replacement or a source failure on this device
-    is `FileUnavailable(FileMissingReason)`, requiring app action;
+    is `FileUnavailable(FileMissingReason)`. Removal or replacement requires app
+    action; a source failure on its uploader retries under §16.5;
   - a complete chunk failing authentication is `Refused(Decryption)`;
     authenticated bytes disagreeing with the row's content hash are
     `Refused(ContentHash)`. Neither retries the same immutable bytes
@@ -3382,10 +3423,10 @@ Reset and prepared-snapshot activation remain outside these results, as marked a
     and selecting the requested bytes.
 - Uploads retry missing, changed or mismatching sources and disk failures under
   backoff, checking the source before any provider request. Uploads and eager
-  downloads retry storage failures by E5's classes: (a) under backoff, (b) on a
-  credential or connection change without a timer, (c) never, retaining the
-  pending reason. `retry_uploads_now` optionally tries recoverable uploads early;
-  progress never depends on it.
+  downloads retry storage failures by E5's classes: `Automatic` under backoff,
+  `AppAction` on a credential or connection change without a timer, and `Never`
+  without retrying, retaining the pending reason. `retry_uploads_now` optionally
+  tries recoverable uploads early; progress never depends on it.
 - Operations, invites, joining, missing keys and files share automatic delays
   of 1, 2, 4 … 256, then 300 seconds. Before waiting, persist wall-clock deadline T
   and full wait W with the work. Enforce the delay monotonically, unaffected by
@@ -3629,19 +3670,33 @@ Reset and prepared-snapshot activation remain outside these results, as marked a
   over its covered prefix. Announce it, then claim the raise. Each contention
   reads and applies intervening slots; refresh the capture if its coverage
   is behind an earlier announcement. No empty queue is required (§15).
+  In the queue model, capture freezes the prefix through the marker; later
+  writes and their eligibility do not change that prefix's admission
+  ([`captured_prefix`, `later_writes_do_not_delay`](proofs/sequence/CovenSequence/RaiseQueue.lean)).
+  Given successful confirmation, upload, announcement and activation, the
+  captured prefix is published once, the later queue stays waiting until
+  activation, and all original fields and order are preserved
+  ([`confirm_captured`, `confirmation_not_repeated`, `tail_waits`, `raise_without_waiting`, `originals_preserved`](proofs/sequence/CovenSequence/RaiseQueue.lean)).
+  Upload requires confirmation, and activation requires the announcement
+  ([`preparation_waits_for_confirmation`, `activation_waits_for_announcement`](proofs/sequence/CovenSequence/RaiseQueue.lean)).
+  These results impose no storage-service or contention deadline.
 - A later local breaking migration can include writes between its marker and
   the preceding marker in its new capture. Those writes and both markers
   publish before that raise; writes after the latest marker wait. Reopening
   retains the same queued originals, captured version and schema wait.
   Ana queues write 1, migrates with marker 2, writes 3, migrates with marker 4,
   then writes 5: 1–4 can claim one slot, the raise follows, and 5 waits for it.
+  The queue model captures both markers and the intervening originals
+  ([`recapture_includes_waiting`](proofs/sequence/CovenSequence/RaiseQueue.lean)).
 - Before claiming its raise, a migrated device interprets uncovered older-schema
   changes using its local capture's conversion, preserving original records.
   Recapture includes every write already judged. If another device claims
   the version first, load that announced state and interpret uncovered writes
   under the same rule as every receiver; local migration results do not
   become shared losses.
-  [proof pending: schema raise preserves queued originals and admits its captured prefix without waiting for later writes]
+  For an admitted next-slot part unchanged by the reset filter, queue
+  interpretation equals sequence receipt using the original schema and applied version
+  ([`late_original_converted`, `reload_matches_receiver`](proofs/sequence/CovenSequence/RaiseQueue.lean)).
 
 - Conversion is for received late old-schema writes from other devices,
   including already-attempted writes that arrive after the raise. After adopting an
@@ -3912,6 +3967,9 @@ It cannot read Ben's removal at 81 or send queued writes until 80 applies.
 - For example, Ana asks to reset the store from her phone.
 - An admin's device resets the store's rows; a member of a circle resets
   that circle's rows, one reset per audience.
+  Store-reset authority is checked in the preceding slot state
+  ([`store_reset_authorized`](proofs/sequence/CovenSequence/Authority.lean));
+  the model leaves circle-reset authority to its supplied audience policy.
 - A reset is an operation ([§18](#18-operations)):
   1. write a snapshot of what this device has ([§15](#15-snapshots));
   2. claim its snapshot announcement;
@@ -3922,8 +3980,10 @@ It cannot read Ben's removal at 81 or send queued writes until 80 applies.
 - Every later reset or schema raise takes effect in slot order and reloads
   its audience. The preceding entry remains part of history; it never drops.
 
-- A reset replaces that audience with the chosen snapshot. On every
-  device, including its author, only these contents count:
+- A reset replaces that audience with the chosen snapshot.
+  The model's applied reset loads its chosen rows without replaying the
+  pre-reset suffix ([`reset_replaces`](proofs/sequence/CovenSequence/Preparations.lean)).
+  On every device, including its author, only these contents count:
   - the snapshot's rows and merge records;
   - later writes whose `read_through` includes the reset slot.
 - A write outside the snapshot that had not read that entry is ignored
