@@ -3085,6 +3085,12 @@ The rules:
   floor write names, and those a raise or reset still needs. Keep an older body
   until a newer applicable snapshot has passed grace, covers at least as much
   and keeps the needed evidence. Newer announcements do not extend that wait.
+- **Delete only this device's own snapshots.** Whenever a listing shows its own
+  superseded or abandoned snapshots that can never count again, the device
+  deletes them, subject to the protections above. It never takes over another
+  device's snapshot cleanup. An absent device's unused snapshots therefore stay
+  in storage until that device returns; the file cleanup rule in §17.8 does not
+  apply to snapshots.
 - **An audience nobody can snapshot has no deadline.** If no member able to read
   a circle comes online to supply the coverage, that circle's uncovered history
   stays. History it already covers is deleted without waiting for that member.
