@@ -99,6 +99,7 @@ spaces only separate fields for reading. Example times are UTC.
 | Join request | `<store>/join-requests/<invite>` | a would-be member's id, public keys and device name | D8, D9 |
 | Key delivery | `<store>/access-keys/<member>/<attempt>` | an S3 access key sealed to one member | D9 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
+| Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
 
 ### Three layers
 
@@ -122,12 +123,14 @@ writes slot Ana won in §5.1:
 - **Sealed objects** wrap frames in encryption and signatures (D9), at paths
   from D10, using the keys and contexts of D11.
 
-Files and codes are the two exceptions. A file has its own simpler envelope
-(D12); a code is a frame turned into text (D13).
+Files, codes and the bucket marker are the three exceptions. A file has its own
+simpler envelope (D12); a code is a frame turned into text (D13); the bucket
+marker is a store id in plain text, with no envelope at all (D10).
 
 ### Kind numbers
 
-Every object and every frame starts with a kind byte. Format 1 uses these:
+Every object and every frame, except the bucket marker, starts with a kind byte.
+Format 1 uses these:
 
 | Kind | What | Section |
 | --- | --- | --- |
@@ -184,7 +187,8 @@ else rather than guessing.
 **Integers** are big-endian, and signed ones are two's complement. No integer
 has a variable length.
 
-**Every stored object starts in the clear with `kind:u8 | version:u16`.**
+**Every stored object starts in the clear with `kind:u8 | version:u16`,** except
+D10's unsealed bucket marker.
 
 - A reader refuses an unknown kind.
 - A reader that meets a newer version asks for an update instead of calling the
@@ -984,9 +988,10 @@ record.
   captured. Both are positive and odd.
 - A removed row's cells and rules are nonempty.
 - An excluded row keeps the generation of its row change. Inserts and updates
-  keep their new values; deletes keep their old scalar values. Like every frozen
-  value (D5.6), they have empty parent maps. The parents the change named survive
-  in its original row change, which section 5 keeps (D7.3).
+  keep their new scalar values; deletes keep their old scalar values. Like every
+  frozen value (D5.6), they have empty parent maps. The original parent evidence
+  is retained separately: the parents the change named survive in its original
+  row change, which section 5 keeps (D7.3).
 - Dependent and unauthorized values name their own write as setter and have
   empty parent maps. The identity remains for a delete with no old values.
 
@@ -994,8 +999,8 @@ record.
 rows, and for lost values frozen by a breaking migration.
 
 - Active lost values follow merge and removal rules; frozen ones don't.
-- Migration-frozen values have empty parent maps. They keep their written scalar
-  values and names independently of the current schema.
+- All frozen values have empty parent maps, whatever froze them. They keep their
+  written scalar values and names independently of the current schema.
 - Dropping a table or column freezes its affected pending lost values, with their
   original cause, names and setters. A row's lost value keeps its whole value
   map. Freezing doesn't require current schema columns (§18.7).
@@ -1199,13 +1204,18 @@ themselves, not a summary.
 ### D7.7 Last included claims (section 11)
 
 A device whose claim's slot was deleted settles it from the floor's snapshot
-(§5.3). Section 11 makes that possible.
+(§5.3). Section 11 makes that possible. The device compares the claim number it
+recorded with the number section 11 holds for it: a lower number means the claim
+didn't land; an equal number with the digest of its recorded bytes means it
+landed; a higher number, or an equal one with another digest, means another copy
+uses its device id.
 
 - It occurs in every snapshot, once per device known through its coverage.
 - It records that device's last claim: the greatest claim number among the
   covered slots, and the SHA-256 of that slot's complete bytes. When two covered
-  slots hold the same number, the later slot's digest is kept. A device with no
-  such claim has number zero and no digest.
+  slots hold the same number, the later slot's digest is kept; that can happen
+  only when two copies share a device id (§19.3). A device with no such claim
+  has number zero and no digest.
 - A greater number in an earlier slot still wins. A restored copy of Ana's phone
   can land claim 8 in slot 41 after claim 9 landed in slot 40; section 11 records
   claim 9, with slot 40's digest.
@@ -1566,6 +1576,8 @@ context.
 
 **Nonces.** Inner writes and slots derive deterministic nonces, as D11 specifies.
 Other objects keep random nonces, and keep their sealed bytes across retries.
+Each new sealing of a floor draws fresh nonces, so two sealings of the same floor
+differ in their chunks' bytes, and both authenticate.
 
 ### The final signature
 
@@ -1624,12 +1636,13 @@ signature:64 bytes
 
 ## D10 Paths
 
-Every object has exactly one path, and the path is bound into its
-authentication. So the provider can't move one object into another's place, and
-two devices never spell one object two ways.
+Every object has exactly one path, so two devices never spell one object two
+ways. Every encrypted object's path is also bound into its authentication, so the
+provider can't move one object into another's place.
 
 | Path | Holds |
 | --- | --- |
+| `coven-bucket` | Bucket-root create-once ownership marker, only where member keys reach the whole bucket (§20.7) |
 | `<store>/seq/<n>` | One create-once sequence slot |
 | `<store>/floor` | Signed, encrypted snapshot references and the first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
@@ -1647,17 +1660,53 @@ numbered 3 is `5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5/snapshots/store/4242/3`.
 - An audience is `store` or a circle's UUID.
 - Store, member, circle, invite, attempt and file ids are canonical lowercase
   hyphenated UUIDs.
-- A path has only this spelling, and is bound into its object's authentication.
+- A path has only this spelling, and is bound into its encrypted object's
+  authentication.
 
 **Rules.**
 
 - The sequence has no gaps before retention.
 - Snapshot numbers identify objects; they are never discovery cursors.
-- No per-device log or key-copy path exists.
 - Every immutable path is created once, and retries compare exact bytes. Only
   the floor is replaceable.
-- Bootstrap discovers creation at slot 1, or in the floor's store snapshot.
-  There is no separate creation marker.
+- Bootstrap discovers store creation at slot 1, or in the floor's store
+  snapshot. The bucket marker (below) reserves ownership only; it doesn't mark
+  creation.
+
+### The bucket marker
+
+On a service whose member keys reach a whole bucket, such as R2, a member of one
+store could delete another store's objects in the same bucket. So there, every
+store has its own bucket (§20.7). A listing of the bucket's root can't enforce
+that alone: an object stored within the listing margin may be missing from it,
+so two stores set up in one bucket at nearly the same time could both pass. The
+bucket marker closes that gap. It is one object at the bucket's root, created
+once, naming the one store that owns the bucket.
+
+*Example.* Ana sets up Household in the R2 bucket `household`. Its first setup
+creates the object `coven-bucket` at the bucket's root, whose complete bytes are
+Household's store id as text:
+
+```
+35 64 30 63 38 65 32 61 2D 37 62 31 66 2D 34 63 33 65 2D 39 61 36 34 2D 30 66 32 64 38 62 37 31 63 33 65 35
+                              "5d0c8e2a-7b1f-4c3e-9a64-0f2d8b71c3e5": 36 bytes
+```
+
+If someone tries to set up Garden in the same bucket, its create of
+`coven-bucket` finds the name taken, reads these bytes, sees another store's id,
+and is refused with `OwnBucketRequired { reason: Occupied }`. A retry of
+Household's own setup reads equal bytes and proceeds.
+
+**Rules.**
+
+- The marker's complete bytes are the owning store id's canonical lowercase
+  hyphenated UUID: 36 ASCII bytes, with no header, newline, encryption or
+  signature. It has no `kind | version` prefix (D1).
+- Its path has no store prefix.
+- It exists only where member keys reach the whole bucket.
+- First setup alone creates it. Reconnect, restore and join require an exact
+  match of its bytes (§20.7).
+- It is never replaced or deleted, including by local store deletion.
 
 ---
 

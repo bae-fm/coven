@@ -137,7 +137,10 @@ sequence online (§11.1).
 
 Every check a commit makes uses state already applied on the device. Membership,
 audience and row-key checks (§9.2, §15) can refuse a write, but none of them
-asks the network at commit time.
+asks the network, waits for a reload, or looks at the state a reload will
+install. So a write queued during a reload keeps its original bytes, but not
+necessarily its verdict: once the reload installs, the same write can be judged
+differently (§16.5).
 
 A commit can be refused for these local reasons:
 
@@ -209,12 +212,15 @@ authorized members change membership, and at least one admin always remains
 #### 2.5 Revocation
 
 - **Catch up before sending.** A device applies the sequence before it sends, and
-  a first attempt uses the newest key it may use (§12.2, §14.1).
+  a first attempt uses the newest key it may use (§12.2, §14.1). The model
+  proves that, once caught up, a device never picks for a first attempt a key
+  that was copied to a removed member's sealing keys.
 - **A block can't be skipped.** A device stuck at a slot stops there (§5.4), so
   it can't read past the block to a later removal and keep sending as if the
   removal hadn't happened.
-- **No grace period.** Writes that land after their device's or member's removal,
-  or after the member's keys were replaced, have no effect. Every device records
+- **No grace period.** Writes claimed in a slot after their device's or member's
+  removal, or after the signing key they were signed with was replaced, have no
+  effect. Every device records
   the refusal. A late claim gets no extra time (§14.1).
 - **Earlier attempts keep their bytes.** A retry of a write first attempted before
   the removal keeps its original inner bytes and keys (§6.3).
@@ -502,11 +508,15 @@ same claim number 9. A record above 9, or number 9 with a different hash, means
 another copy of her phone is using its identity, for example a restored backup;
 coven stops that copy with `SyncError::DeviceIdInUse` (§19.3).
 
-| Snapshot's last claim L for this device, against the recorded claim n | Meaning |
+The comparison is between claim numbers, never slot numbers: the device compares
+the claim number c it journaled with the snapshot's last claim number L for this
+device.
+
+| Snapshot's last claim L for this device, against the journaled claim number c | Meaning |
 |---|---|
-| L below n | the claim didn't land |
-| L equal to n, hash matches the recorded bytes | it landed |
-| L above n, or L equal to n with another hash | another copy uses this device id |
+| L below c | the claim didn't land |
+| L equal to c, hash matches the recorded bytes | it landed |
+| L above c, or L equal to c with another hash | another copy uses this device id |
 
 The hash matters. Two copies of the same phone can both claim with number 9. The
 one that lost would otherwise see "9" and believe the winner's slot was its own
@@ -741,7 +751,7 @@ Unrelated commits and finished passes don't reset the delay.
 - **Deadlines survive restarts.** Before waiting, coven saves with the work the
   wall-clock deadline T and the full wait W. It measures the delay with a clock
   that wall-clock changes don't move.
-- **Reopening** waits `max(0, min(T − now, W))`, keeping T, W and the backoff step
+- **Reopening** waits `max(0, min(T - now, W))`, keeping T, W and the backoff step
   until the next attempt. Ana restarts with four seconds left of eight and waits
   four. A clock jumped backward allows at most eight; one jumped forward can cut
   it to zero. This bounds waits across restarts, not real-time cooldowns under
@@ -893,7 +903,7 @@ Merging has two layers:
 - **The merged state** comes from the writes alone: each row's generation (§8.3)
   and each cell's winning value (§8.1).
 - **The removal rules** then decide which rows the app sees, from the merged state
-  and the admin history in the sequence (§8.4, §9).
+  and the admin entries the device has applied (§8.4, §9).
 
 This section covers the merged state and how a row is taken out and comes back.
 §9 covers the rules the app's SQL schema adds. Appendix B lists the internal
@@ -1084,7 +1094,7 @@ reason goes away. The reasons are:
   no-action foreign key; or its parent was itself taken out, under any action
   (§9.1).
 - **Its merged values fail a CHECK** (§9.3).
-- **Its circle was deleted** in the admin history (§15.9).
+- **Its circle was deleted** by an admin entry the device has applied (§15.9).
 - **It lost a unique value** to an earlier claim (§9.2).
 - **The same key is present in two audiences** (§15.4): the store's row wins
   over a circle's.
@@ -1162,8 +1172,9 @@ SQLite already ran the foreign key's action for the attachments it knew about.
 Attachment 9 it never saw.
 
 **Parents apply before children.** For changes in different writes, every device
-applies the parent's insert before a change that points at it, through causality
-alone (§7.1):
+consumes the parent's insert before it processes a change that points at it,
+through causality alone (§7.1). When both changes count, it applies them in that
+order:
 
 ```
 Ana's phone    write 5: insert note 43
@@ -1337,14 +1348,16 @@ their inserts are one row, and their cells merge (§8.1).
 Either kind can span several columns. `note_tags(note_id, tag_id)` is a shared
 key: Ana and Ben, both offline, each tag note 42 "urgent", and make one row. An
 independent key over several columns needs a UUID in one of them. Apps bind
-independent keys with `UuidText` ([api.md E3](api.md)); an insert of text that
+independent keys with `UuidText` ([api.md E3](api.md#e3-writing)); an insert of text that
 isn't a canonical lowercase UUIDv4 or UUIDv7 is refused. Opening the database
 never scans rows to check this.
 
 Coven refuses, when the database opens and after migrating:
 
-- a key SQLite picks itself, such as an integer rowid, because two devices would
-  pick the same number for different rows;
+- a key SQLite picks itself, such as an integer rowid alias, because two devices
+  would pick the same number for different rows. An integer key derived from the
+  row's content is not one of these, and is allowed;
+
 - a synced table with no primary key;
 - an independent key with no text column to hold its UUID;
 - a primary-key column that allows NULL. SQLite lets a non-integer key column hold
@@ -1562,7 +1575,8 @@ doesn't, when the database opens and after migrating.
 
 Some changes only make sense on top of data that turned out not to count. A write
 can be refused or partly dropped for several reasons: a change to someone else's
-owned row (§9.6), a write from an old schema version with no converter (§18.6), a
+owned row (§9.6), a write from an old schema version whose migration declared
+`Drop` (§18.6), a
 part ignored by an audience reset (§19.4). A later change can have been built on
 that data.
 
@@ -1943,7 +1957,7 @@ An undo removes everything the journal recorded, and nothing may be left behind.
 | Key rotation, circle creation | keep the new key; claim its copies; claim its introduction (§12.1) |
 | Adding a circle member | supply the circle's earlier keys to them first (§15.7) |
 | Invite | record the fixed target member and the new provider access, then show the code (§13.2) |
-| Replacing one's own keys | pause app writes; confirm the queue; keep the new pair; claim copies, then the replacement (§12.3) |
+| Replacing one's own keys | pause app writes; confirm the writes queued before the replacement; keep the new pair; claim copies, then the replacement; install custody and refresh the restore code before lifting the pause (§12.3) |
 | Schema raise | confirm captured writes and the raise marker; upload and announce the snapshot; claim the raise (§18.5) |
 | Snapshots | §16 covers taking, announcing and keeping them |
 | Reload | stage the data, then commit it at once (§16.5) |
@@ -1993,7 +2007,9 @@ slot's path, so the provider can't move one object to another's place.
 **Who can read what.** Each slot's device and claim number, and which audiences
 a write's parts belong to, are in a header encrypted under the store key. Every
 member can read that header before deciding which parts to open; the provider
-can't.
+can't. So whoever learns a store key reads those headers, the store's data and
+the admin entries' contents under it, but still not a circle's parts or a key
+copy's sealed box: each of those needs its own key.
 
 | Who can read it | What |
 |---|---|
@@ -2060,17 +2076,21 @@ A copy *exposes* its key to its recipient, whether or not the recipient ever ope
 it. A key exposed to someone who has since left the audience, or to a sealing key
 since replaced, can't be used for new data.
 
+Removing one device doesn't retire anything here. A member's key pairs are shared
+by all their devices, so removing Ben's lost phone, without removing Ben or
+replacing his keys, leaves his sealing key current (§14).
+
 A tentative copy's recipient is checked once the later entry that admits them, or
 the key's introduction, applies. A recipient who never ends up admitted still
 received the key; undo can't erase that.
 
 **Choosing a key.** Before a write is first sent, its device picks, for each
-audience, the newest usable key by introduction slot. Usable means:
+audience, the newest usable key by introduction slot. Usable means, judged on the slots this device has applied:
 
-- its introduction is authorised;
+- it has been introduced, and its introduction is authorised;
 - this device holds it in custody;
-- no copy of it is known to have reached someone who has since left the
-  audience, or a sealing key since replaced.
+- no applied copy of it reached someone who has since left the audience, or a
+  sealing key since replaced.
 
 If no key is usable, the device waits for a new key from another member, or
 rotates one itself through an operation (§11). Only a member of the audience can
@@ -2130,6 +2150,16 @@ Ana replaces her own keys:
    key, then the replacement entry.
 5. On success it installs the new pair in custody and returns a new restore code
    (§13.1).
+
+The pause lifts only after step 5, once custody and the restore code are in
+place.
+
+Step 2 is why the pause exists. A write Ana made before the replacement is signed
+with her old signing key. Once the replacement applies, writes under that key are
+cut off (§14.1), and the new key can't vouch for it either, because the write's
+recorded history predates the new key. A queued write that missed step 2 would
+never count
+([`self_replacement_counterexample`, `later_replacement_counterexample`](proofs/sequence/CovenSequence/QueueReloadExamples.lean)).
 
 If it fails, both pairs and the recorded progress are kept for a retry. The pause
 lifts only once the undo is done and the device has confirmed that the keys it
@@ -2216,8 +2246,8 @@ Ana adds Dan to Household on Dropbox:
 4. Ana's phone claims copies of every store key it holds, sealed to Dan's new
    sealing key, then the entry adding him. Every key, not just the newest, so Dan
    can read a late write made under an older one.
-5. Dan's phone opens its keys, loads the store, registers itself, and Dan writes
-   down his own restore code.
+5. Dan's phone opens its keys, loads the store, registers itself with its own
+   "add device" entry, and Dan writes down his own restore code.
 
 The invite only lets Dan ask; Ana's approval lets him in.
 
@@ -2297,8 +2327,14 @@ reuses them, and the same device id.
 **Ending an invite.** Once Ana approves or declines, or the invite expires, Ana's
 phone deletes the request object.
 
+If Ana's phone is reset (§19.3) before the invite ends, the reset carries the
+invite into the new database, and it is ended the same way as on expiry: its
+grant taken back and its request deleted, while access that active members still
+use stays. Without this, a reset would strand the access the invite granted.
+
 Declining, or letting the invite expire, takes back the provider access it
-granted. On S3, Dan's key becomes due for deletion (§14.3), through coven with
+granted.
+ On S3, Dan's key becomes due for deletion (§14.3), through coven with
 admin access or through the provider's console. An invite expires one day after
 it was made, by the inviting device's clock, when that device is next online.
 
@@ -2338,7 +2374,9 @@ everything is encrypted.
 - **Unfinished installations are hidden.** While loading, the installation is
   missing from listings and ordinary opens refuse it. It stays at its permanent
   path throughout. Only after loading does coven commit the final keys and
-  credentials and make it visible, without closing or moving the database.
+  credentials and make it visible, without closing or moving the database. So the
+  app's first commits are made against the installed membership and rows (§2.1).
+
 - **Cancelling.** Cancelling closes the installation and removes its local work.
   Dropping a join that is still waiting for approval keeps its encrypted request,
   so the app can retry it explicitly.
@@ -2482,7 +2520,16 @@ removal has been applied, an admin holding provider access lists those keys
 and queues for deletion each one that is neither recorded in the sequence or the
 store snapshot nor current. Later entries by the removed device can't make such a
 key current. A live device's unrecorded key is protected by its own operation.
-Separately, the orphan scan of the file folders still requires confirmed provider
+
+A failed mint can also leave behind a principal with no key: an IAM user or a GCS
+service account it made, when the rollback failed or the journal was lost. The
+listing includes those too, matched by the same store-and-device naming. Once the
+device's removal has been applied, the reclaim removes them without a deletion
+record, because they grant nothing. A failed removal fails the reclaim call; on
+retry, a principal already gone counts as removed.
+
+Separately,
+ the orphan scan of the file folders still requires confirmed provider
 cut-off, including uploads in flight (§17.8). A device reset carries these
 obligations into its new database (§19.3).
 
@@ -2670,8 +2717,9 @@ Applying such a slot:
 - a missing key for a part the device should read stops the device at that slot
   (§5.4).
 
-A write into a circle the member isn't in, or into a circle that doesn't exist,
-fails on the writing device with `DbError::NotInCircle`.
+A write into a circle the member isn't in, or into a circle absent from the
+membership this device has applied, fails on the writing device with
+`DbError::NotInCircle`.
 
 #### 15.7 Joining a circle
 
@@ -2782,8 +2830,11 @@ announcements needed to know who was a member when, which keys exist, and which
 schema raises and resets happened
 ([format.md D7](format.md#d7-snapshots)).
 
-Every snapshot also records, for each device, the number of the last claim it
+Every snapshot also records, for each device, the greatest claim number it
 includes from that device and the SHA-256 hash of that claim's slot bytes (§5.3).
+Two included slots can carry the same greatest number only when two
+installations share one device id; the snapshot then keeps the hash of the later
+slot.
 Every slot through coverage counts: writes, admin entries, key copies and
 announcements, valid or refused, including writes with parts this device can't
 open and parts a reset ignored. A device with no claim included has number zero
@@ -2877,7 +2928,7 @@ The floor (§5.2) is one signed record at `<store>/floor`. It names the first ke
 slot (`first`) and, for each audience, the snapshot that audience relies on.
 Before any floor exists, the sequence starts at slot 1.
 
-- **Every named snapshot covers at least `first − 1`,** so nothing deleted is
+- **Every named snapshot covers at least `first - 1`,** so nothing deleted is
   lost.
 - **It names every audience whose deleted history still matters:** the store and
   every circle, even one the device writing the floor can't open.
@@ -2920,8 +2971,13 @@ reads slots 521 to 560 for Gifts. It commits all the audiences together, only
 after every one has reached the target, and then reads on from 561.
 
 The target is fixed when loading begins. New writes or announcements don't
-restart it. If deletion removes slots the reload still needs, the device uses the
-newer floor's snapshots instead.
+restart it. If deletion removes slots or a snapshot the reload still needs, the
+device uses the newer floor's snapshots instead, but only a snapshot that
+replaces the one it selected, never an older one. The floor's rules alone don't
+guarantee that. Storage can delete the snapshot a reload selected once a later one
+is announced, while the floor still names an older snapshot; switching to the
+floor's snapshot would then move the reload's coverage backward
+([`unchecked_reselection_goes_backwards`](proofs/sequence/CovenSequence/ReloadExamples.lean)).
 
 **A reload commits all at once:** rows, merge records, lost values, source
 verdicts and the applied slot, in one transaction. A failed reload leaves the old
@@ -2948,6 +3004,21 @@ While one of these runs, writes into that audience are refused with
 about to be replaced. A write touching other audiences only commits normally.
 During an ordinary reload, including one because the floor has passed this
 device's next slot, no audience refuses writes.
+
+Keeping a write's bytes isn't keeping its outcome. The queued writes are kept
+exactly and the eligible ones applied exactly once, yet across one of these three
+reloads a write can still come out differently from the same write made after the
+reload installs:
+
+- **a reset** the write never read ignores it (§19.4);
+- **a breaking migration** can bring in a row whose key the write now conflicts
+  with;
+- **a newly readable circle** brings membership and rows that change whether the
+  write is allowed and which keys it clashes with.
+
+That is why these reloads refuse writes instead of queueing them
+([`reset_counterexample`, `breaking_raise_counterexample`, `newly_readable_counterexample`](proofs/sequence/CovenSequence/QueueReloadExamples.lean)).
+
 
 **Newly reading a circle.** When the set of audiences a device reads changes, for
 example when Ben is added to Gifts, each audience, the new circle included,
@@ -3438,6 +3509,10 @@ device. Its kind, and the converters kept for it, never depend on a device's
 data. Deciding by the rows a device happens to hold makes devices disagree
 ([`row_classification_diverges`](proofs/queue/CovenQueue/ConversionChain.lean)).
 
+The app also declares each migration's kind, and coven refuses a migration whose
+declared kind disagrees with the kind found here (§18.3).
+
+
 #### 18.2 Additions
 
 Writes from devices on older versions still apply everywhere; they just don't set
@@ -3450,25 +3525,45 @@ locally. Once his laptop reaches a slot from the newer version, it stops there
 
 #### 18.3 Breaking changes and the raise
 
-For each breaking change, the app supplies a *migration* in two parts:
+**What the app declares.** Each migration changes the database, for example
+`ALTER TABLE notes RENAME COLUMN title TO name`, and declares its kind,
+`addition` or `breaking` ([api.md E13](api.md#e13-migrations)). A breaking
+migration must also say what happens to late old-version writes, because there is
+no safe default:
 
-- one changes the database, for example
-  `ALTER TABLE notes RENAME COLUMN title TO name`;
-- one, optional, is a *converter*: it turns an eligible row change of a late
-  old-version write received from another device into the new shape, for example
-  "note 43, title: X" into "note 43, name: X". It never changes an upload record.
+- `OldWrites::Convert(f)`: `f` is a *converter*. It turns an eligible row change
+  of a late old-version write received from another device into the new shape,
+  for example "note 43, title: X" into "note 43, name: X".
+- `OldWrites::Drop`: such changes are kept as frozen lost values in their old
+  shape (§18.6).
+
+Neither choice ever changes an upload record.
 
 **Running migrations.** An update runs every pending migration in one
-transaction, then checks the schema rules (§9, Appendix A) against the tables the
-app declares, which describe only the newest version. If a rule fails, nothing
-changes. Migration 1 makes `notes(id)` and migration 2 renames `id` to
-`note_id`: only the final schema has to match `key_columns(["note_id"])`.
+transaction. Coven then checks the final schema against the schema rules (§9,
+Appendix A) and the tables the app declares, which describe only the newest
+version, and checks each migration's declared kind against the kind §18.1 finds.
+A migration that changes only local tables may be declared `addition`. If a rule
+fails, or a declared kind doesn't match, nothing commits; a kind mismatch fails
+with `DbError::MigrationKindMismatch { version }`. Migration 1 makes `notes(id)`
+and migration 2 renames `id` to `note_id`: only the final schema has to match
+`key_columns(["note_id"])`. Reopening the database checks the kinds declared for
+earlier migrations against the kinds they committed with.
+
+Declaring the kind, and the choice for old writes, means late old writes are
+never lost without the app having chosen it: a breaking change the app took for an
+addition would otherwise drop them silently. The model refuses an
+
+undeclared breaking change and a breaking change declared as an addition, and
+commits no part of the run when either happens
+([`undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch`](proofs/queue/CovenQueue/ConversionChain.lean)).
 
 **The raise.** A breaking change raises the store's schema version, which every
 device shares. Whichever device's app updates first makes the raise, whoever's
 device it is.
 
-1. That device runs the migration's database part.
+1. That device runs the migration on its database.
+
 2. It takes a snapshot at the new version of every audience it can read (§16.3).
 3. It announces those snapshots.
 4. It claims the raise: one admin entry per audience it raises to the new
@@ -3582,8 +3677,9 @@ become shared lost values.
 #### 18.6 Late writes in the old shape
 
 Writes made on the old version still arrive afterwards: Ben edited offline before
-updating. With a converter, Ben's late edit converts and applies. Without one, it
-is kept as a lost value in its old shape, so nothing disappears silently.
+updating. If the migration declared `Convert`, Ben's late edit converts and
+applies. If it declared `Drop`, the edit is kept as a lost value in its old shape,
+so nothing disappears silently.
 
 Conversion is for late old-schema writes received from other devices, including
 writes their author had already tried to send that arrive after the raise. Once
@@ -3596,6 +3692,15 @@ Each old-schema write it doesn't cover is converted by the converters of the
 breaking migrations after the write's version, up to the raise's, applied in
 version order. Writes are taken in version order and causal order. Whether the
 write's author had already tried uploading it makes no difference.
+
+If that range holds no breaking migration, no converter is needed: the write's
+eligible changes apply unchanged. So a write made at the newest breaking version
+at or below the raise still applies when every later version only adds tables or
+columns. In the example of §18.5, where version 2 is breaking and version 3 only
+adds `color`, a write made at version 2 applies as it is under the version 3
+raise, while a write made at version 1 still needs version 2's conversion
+([`newest_breaking_write_admitted`, `retained_step_required`](proofs/queue/CovenQueue/ConversionChain.lean)).
+
 
 **Checks before converting.** Coven never calls the converter on a change that
 couldn't count anyway. For each row change, in order:
@@ -3613,12 +3718,13 @@ cause. Unrelated changes in the same write, even in the same part, can convert
 and apply. A write cut off by removal or key replacement (§14.1) stays refused;
 conversion can't rescue it, and changes that build on it follow §9.5.
 
-**Without a converter,** coven keeps each original change as a *frozen* lost
-value: kept in its old shape, outside the merge, naming the breaking version as
-its cause. That includes a delete, which has no values. The write is consumed.
-Lost values already frozen keep their original values and cause through later
-raises. A converter supplied later can't revive them, and no converter rewrites
-any upload, tried or untried.
+**When a migration declares `Drop`.** If any breaking migration in the write's
+range declares `Drop`, coven keeps each original change as a *frozen* lost value:
+kept in its old shape, outside the merge, naming the breaking version as its
+cause. That includes a delete, which has no values. The write is consumed. Lost
+values already frozen keep their original values and cause through later raises.
+A converter supplied later can't revive them, and no converter rewrites any
+upload, tried or untried.
 
 **What doesn't exclude a write.** The writes a write recorded as read, including
 its own device's earlier writes, decide the order it's received in, not whether
@@ -3642,16 +3748,14 @@ old-schema write 9, already tried, arrives after the raise and creates a note.
 
 - With a converter, every device converts 9 on receipt, Ben's included once he
   adopts the raise. The upload's original bytes stay unchanged.
-- If 9 was excluded for lack of a converter, a converter supplied later can't
-  revive it. Ben's old-schema write 10 edits that note and renames an unrelated
+- If `Drop` has already excluded 9, a converter supplied later can't revive it. Ben's old-schema write 10 edits that note and renames an unrelated
   playlist whose generation and replaced cell survive. With a converter for 10,
   its note edit becomes a frozen lost value (its source, 9, was dropped), and its
   playlist rename converts and applies on every device.
 - The same holds if the note's generation survived but the cell value 10
   replaced came from excluded 9. Later changes built on 10's playlist rename
   apply; changes built on its frozen note edit lose.
-- Without a converter for either write, both keep their original changes as lost
-  values. Ben's write 11, made after his reload, uses the announced state; having
+- With `Drop` for both writes, both keep their original changes as lost values. Ben's write 11, made after his reload, uses the announced state; having
   read 9 and 10 doesn't exclude it.
 
 Loading the established snapshot replaces values another device's local
@@ -3837,9 +3941,11 @@ and tells the app what was discarded.
   the reset resumes with that recorded new id, and ordinary opening refuses the
   installation until it finishes. There is no separate recovery journal or
   marker.
-- Only owed `DeleteAccessKey` work carries over: readable records are copied into
-  the new database before it opens. A database too damaged to read supplies none;
-  its orphaned S3 keys are found as §14.3 describes.
+- Only owed provider cleanup carries over: readable `DeleteAccessKey` work, owed
+  revocations of account sharing, and the old installation's open invites, which
+  become owed cleanup. They are copied into the new database, with its reset
+  notice, before it opens. A database too damaged to read supplies none; its
+  orphaned S3 keys are found as §14.3 describes.
 - Coven loads storage under the fresh id, then returns the new handle. It never
   imports unsent rows or files from the damaged directory.
 - Before returning the handle, coven commits a `_coven_device_reset` record, the
@@ -4064,7 +4170,9 @@ explains how coven tells them apart and checks them.
 #### 20.3 Where a store lives
 
 Every object path starts with the store's id: slots, the floor, snapshots, files,
-the setup check's test objects, and S3 detection's probes.
+the setup check's test objects, and S3 detection's probes. The one exception is
+the own-bucket marker `coven-bucket`, at the root of a bucket that a
+bucket-scoped S3 service gives one store (§20.7).
 [format.md D10](format.md#d10-paths) gives each object exactly one spelling.
 
 So several stores can share one Dropbox or OneDrive folder, one CloudKit zone, or
@@ -4073,11 +4181,14 @@ Household and Ben creates Garden in the same folder; their store ids differ, so
 their first entries land at different paths. On an S3 service whose keys reach a
 whole bucket, each store gets its own bucket instead (§20.7).
 
-Setup writes and reads only its own store's prefix. Two reads are wider, and both
-read no other store's data:
+Setup writes and reads only its own store's prefix. Where stores can share a
+prefix-scoped location, other stores and unrelated objects outside this prefix
+don't compete with this store. A few accesses are wider, and none reads another
+store's data:
 
 - creating a store that needs its own bucket lists the bucket's root, to check
-  it is empty (§20.7);
+  it holds nothing else, then creates the bucket marker; later setups read the
+  marker (§20.7);
 - S3's bucket-versioning query has bucket scope, because the owner's setting
   applies to every object (§20.7).
 
@@ -4109,8 +4220,8 @@ Listings are used for files and setup checks, and they follow three rules:
 - **A failed listing proves nothing.** It can't establish that every object was
   found.
 
-Listings may lag behind publication. The *listing margin* is how long after an
-object is stored a listing may still omit it. The measured lag is a fact about the
+Listings may lag behind publication. The *listing margin*, M, is how long after
+an object is stored a listing may still omit it. The measured lag is a fact about the
 provider, recorded at setup, not a rule the sequence depends on. Exact reads and
 status must reflect completed publication. Deleting orphaned files needs a
 complete listing taken after the provider cut-off, independent of ordinary lag
@@ -4131,7 +4242,8 @@ order slots and aren't deadlines for accepting writes or admin entries.
 
 **Resolution.** Providers report times at different precisions: whole seconds on
 S3 and Dropbox, milliseconds on CloudKit, whatever digits OneDrive returns. Coven
-keeps each time with its resolution, compares at that precision, and never rounds
+keeps each time with its resolution δ, compares at that precision, and never rounds
+
 a time or invents an order within an equal time. It stores times as integer
 seconds and nanoseconds, because a platform type such as Windows's 100 ns
 `SystemTime` would drop digits.
@@ -4272,8 +4384,10 @@ profile; the location setup returns and records carries those settings.
 Each member has their own S3 access key, limited as narrowly as the service
 allows:
 
-- **To the store's prefix:** AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity
-  Gateway. Stores on these services can share a bucket and base prefix.
+- **To the store's prefix:** AWS, by IAM `s3:prefix` conditions; GCS, by a
+  managed folder per store; RustFS, SeaweedFS, Ceph RGW and Versity Gateway, by
+  policy `s3:prefix` conditions. Stores on these services can share a bucket and
+  base prefix.
 - **Only to a whole bucket:** R2, whose API tokens are limited to buckets, never
   to a folder inside one. A custom profile says nothing about keys, so it is
   treated the same way.
@@ -4292,15 +4406,36 @@ enforced like this:
   request with `StorageFailure::OwnBucketRequired { reason: Prefix }`.
 - A store's first setup, before any location is recorded, lists the bucket's root
   with delimiter `/`, before detection or any other write. Any object or folder
-  other than the store's own `<store>/` refuses setup with
-  `OwnBucketRequired { reason: Occupied }`. A retried creation that already
-  wrote under `<store>/` passes.
-- Reconnecting, restoring and joining use the recorded location and don't check
-  for objects outside the store's folder.
+  other than the store's own `<store>/` and the bucket marker `coven-bucket`
+  refuses setup with `OwnBucketRequired { reason: Occupied }`. A retried
+  creation that already wrote under `<store>/` passes.
+- Then, after detection and the provider check pass (§20.8), and before
+  publishing any store state or recording the location, first setup claims the
+  bucket: it creates `coven-bucket` at the bucket's root once, with the same
+  create-once request slots use. Its complete bytes are the store id as a
+  lowercase hyphenated UUID, 36 ASCII bytes with no newline
+  ([format.md D10](format.md#the-bucket-marker)).
+- If that create succeeds, setup proceeds. If the name is taken, setup reads the
+  marker exactly: the same bytes mean this is a retry of this store's setup,
+  which proceeds; any other bytes refuse with
+  `OwnBucketRequired { reason: Occupied }`.
+- Reconnecting, restoring and joining use the recorded location. Besides their
+  usual checks they read `coven-bucket` exactly and require it to name this
+  store; a missing, malformed or other store's marker refuses with
+  `OwnBucketRequired { reason: Occupied }`. They neither list the bucket's root
+  nor create a missing marker. A failed read keeps its provider cause.
+- The marker is never replaced or deleted. A failed setup leaves it for the same
+  store's retry. Deleting a store from a device (`delete_store` or
+  `discard_store`, [api.md E1](api.md#e1-opening)) leaves the marker in storage,
+  like the store's other objects.
 
-The listing margin applies to the root listing: an object stored within the
-margin may be missing from it, so two stores created in one bucket within the
-margin of each other can both pass.
+Why both checks? The root listing finds objects stored before setup, but only
+those older than the listing margin: anything stored within the margin may be
+missing from it. Ana and Ben could each start a store in the bucket `household`
+at the same moment, and both listings would look empty. The marker closes that
+gap. Create-once lets only one of them claim `coven-bucket`, so at most one
+store's setup passes per bucket, however far listings lag
+([`at_most_one_store`](proofs/storage/CovenStorage/BucketClaim.lean)).
 
 ##### Detection
 
@@ -4618,7 +4753,7 @@ every migration.
 
 | Feature | Status |
 |---|---|
-| Integer rowid keys (`INTEGER PRIMARY KEY`) | refused (A.1) |
+| Keys SQLite chooses itself (integer rowid aliases) | refused; integer keys derived from the content are allowed (A.1) |
 | Tables without a primary key | refused (A.2) |
 | Primary-key columns that allow NULL | refused (A.3) |
 | Independent keys with no text column for the UUID | refused (A.3) |
@@ -4637,10 +4772,11 @@ every migration.
 
 ### A.1 Integer primary keys
 
-- **Problem:** two offline devices can pick the same id for different rows, and
-  coven would treat them as one row.
-- **Status:** refused. Synced tables use UUIDs or keys derived from the content
-  (§9.2).
+- **Problem:** keys SQLite chooses itself, integer rowid aliases, can collide
+  offline: two devices pick the same id for different rows, and coven would treat
+  them as one row.
+- **Status:** refused. An integer key derived from the row's content is allowed,
+  like any key derived from the content (§9.2).
 
 ### A.2 Tables with no primary key
 
@@ -5325,16 +5461,18 @@ feature. Ceph RGW 20.2.4 fails the versioned races.
   document `cf-copy-destination-if-none-match`. The R2 profile doesn't use that
   extension, because native conditional completion passed. Profile values come
   from the live suite, not a compatibility claim.
-- **RustFS, SeaweedFS and unversioned Ceph RGW** refused occupied names with HTTP
-  412 on PUT and on multipart completion, keeping bytes and times, and their
-  multipart `Last-Modified` fell between the completion markers. So RustFS and
-  Ceph RGW use conditional completion without a copy. That sequential refusal
-  doesn't hold under concurrency on SeaweedFS 4.48: two racing conditional
-  completions of one name both succeed, and in an unversioned bucket a
-  conditional PUT racing a conditional copy of one name both succeed too, while
-  copies racing copies keep one winner. So the SeaweedFS profile publishes every
-  object by copy with `If-None-Match: *`. None of the three returned a checksum,
-  even with checksum mode, so their profiles don't request one.
+- **RustFS and unversioned Ceph RGW** refused occupied names with HTTP 412 on PUT
+  and on multipart completion, keeping bytes and times, and their multipart
+  `Last-Modified` fell between the completion markers. So they use conditional
+  completion without a copy.
+- **SeaweedFS 4.48** refuses occupied names one request at a time too, but not
+  under concurrency: two racing conditional completions of one name both
+  succeed, and in an unversioned bucket a conditional PUT racing a conditional
+  copy of one name both succeed too, while copies racing copies keep one winner.
+  So the SeaweedFS profile publishes every object by copy with `If-None-Match: *`.
+- None of RustFS, SeaweedFS and Ceph RGW returned a checksum, even with checksum
+  mode, so their profiles don't request one.
+
 - **Versity Gateway 1.9.0**, versioned or not, refused occupied names the same
   way, sequentially and in every suite 5 race, so it uses conditional completion
   too. Unlike the others it returns checksums with their scope stated, so its
@@ -5658,12 +5796,12 @@ mutation, never throttling.
 
 ### E.11 Times, revisions and checksums per provider
 
-| Provider | Time field | Resolution | Revision | Checksum |
+| Provider | Time field | Resolution δ | Revision | Checksum |
 |---|---|---|---|---|
-| S3 (HEAD) | `Last-Modified` ([HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)); listings truncated to whole seconds | 1 second | GCS: generation. AWS and R2 replaceable paths: the version id when versioning is on, otherwise a fresh `coven-revision` value stored atomically in the replacement's user metadata. Immutable objects: ETag | the explicitly returned checksum and its scope; GCS's CRC32C is whole-object; R2's unscoped checksum is dropped; RustFS, SeaweedFS and Ceph RGW return none |
-| Dropbox | `server_modified`, never `client_modified` ([format](https://github.com/dropbox/dropbox-api-spec/blob/main/common.stone)) | 1 second | `rev` | its block-based content hash |
-| OneDrive | top-level `lastModifiedDateTime` for publication and replacement, never the client's `fileSystemInfo` times ([driveItem](https://learn.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0)) | the returned `DateTimeOffset` precision: `10^(-p)` seconds for `p` returned fraction digits; none means 1 second, three means 1 ms | `eTag` | SHA-1 or QuickXorHash |
-| CloudKit | the server's creation or modification date ([types](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/Types.html)) | 1 ms, the unit of CloudKit's date representation | `recordChangeTag` | none |
+| S3 (HEAD) | `Last-Modified` ([HeadObject](https://docs.aws.amazon.com/AmazonS3/latest/API/API_HeadObject.html)); listings truncated to whole seconds | `δ = 1 second` | GCS: generation. AWS and R2 replaceable paths: the version id when versioning is on, otherwise a fresh `coven-revision` value stored atomically in the replacement's user metadata. Immutable objects: ETag | the explicitly returned checksum and its scope; GCS's CRC32C is whole-object; R2's unscoped checksum is dropped; RustFS, SeaweedFS and Ceph RGW return none |
+| Dropbox | `server_modified`, never `client_modified` ([format](https://github.com/dropbox/dropbox-api-spec/blob/main/common.stone)) | `δ = 1 second` | `rev` | its block-based content hash |
+| OneDrive | top-level `lastModifiedDateTime` for publication and replacement, never the client's `fileSystemInfo` times ([driveItem](https://learn.microsoft.com/en-us/graph/api/resources/driveitem?view=graph-rest-1.0)) | the returned `DateTimeOffset` precision: `δ = 10^(-p) seconds` for `p` returned fraction digits; none means 1 second, three means 1 ms | `eTag` | SHA-1 or QuickXorHash |
+| CloudKit | the server's creation or modification date ([types](https://developer.apple.com/library/archive/documentation/DataManagement/Conceptual/CloudKitWebServicesReference/Types.html)) | `δ = 1 millisecond`, the unit of CloudKit's date representation | `recordChangeTag` | none |
 
 Notes:
 
@@ -5785,6 +5923,9 @@ that store, with the device the name carries:
   account's HMAC keys;
 - R2: the account's tokens;
 - RustFS: the parent's service accounts.
+
+On IAM services and GCS the listing also returns users and service accounts under
+a store's key names that hold no key, so the reclaim of §14.3 can remove them.
 
 **The member-side check,** before delivery. Using the new key:
 
@@ -6030,8 +6171,8 @@ Write-ups explain each model and state its assumptions:
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
-| Writes into an audience being reloaded are refused until the reload commits | `reloading_blocks_commit` | `proofs/queue/CovenQueue/Verdicts.lean` ([write-up](proofs/queue.md#availability-and-commit-refusals)) | §2.1, §16.5 |
 | One applied prefix of the sequence determines membership and each readable audience's data at a schema version, given deterministic admin, merge and conversion rules | `prefix_determines_state` | `proofs/sequence/CovenSequence/Converge.lean` | §2.2, §8 |
+| Once caught up, a device never picks for a first attempt a key copied to a removed member's sealing keys | `revocation` | `proofs/sequence/CovenSequence/Keys.lean` | §2.5, §12.2 |
 | From the moment a prefix is ready to delete, it is deleted within U + G + P + D, without waiting for absent devices | `bounded_retention` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
 | An audience with no reader to supply coverage has no deletion deadline | `uncovered_has_no_deadline` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sequence.md` | §2.9 |
@@ -6052,7 +6193,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Two copies of one device id fool a check of the claim number alone | `copies_fool_number_only` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | *Body.* Settling from the state alone fails: later writes or admin entries can erase a landed claim's effects | `admin_state_cannot_settle`, `state_alone_cannot_settle` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | With the journal order and the floor's coverage, settling tells apart a claim that landed, one absent from the sequence, and one whose slot is still empty | `settle_correct` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
-| A settled claim, kept or claimed again after it didn't land, ends in exactly one slot (no bound on contention or time) | `lands_once_never_lost` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
+| A settled claim, kept or claimed again after it didn't land (the model's `notLanded`), ends in exactly one slot (no bound on contention or time) | `lands_once_never_lost` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
 | A device already stopped takes no apply or reload step | `stopped_stays` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |
@@ -6096,6 +6237,7 @@ Write-ups explain each model and state its assumptions:
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | An operation occupies at most one slot; a landed one passed validation against the slots before it; a confirmed undo leaves neither slot bytes nor anything it made | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
+| *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 
 ### G.5 Snapshots, the floor and reloads (§16)
@@ -6112,7 +6254,8 @@ Write-ups explain each model and state its assumptions:
 | A running device with fixed audiences and all their keys brings every reader to the end of the sequence | `device_reaches_head` | `proofs/sequence/CovenSequence/Device.lean` | §16.5 |
 | A reload installs the queue as it stands at commit, including writes made while loading, and keeps originals that aren't eligible | `queued_originals_preserved`, `write_during_reload` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Each eligible original is applied over the loaded state exactly once; consumed ones are left out; repeating the step rebuilds from the loaded state | `queued_exactly_once`, `covered_not_reapplied`, `install_twice` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
-| An ordinary reload admits commits; an affected audience's gate refuses a commit with a part in it | `ordinary_commit_allowed`, `affected_commit_refused` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
+| *Body.* Keeping queued writes and applying the eligible ones once doesn't make their outcome equal to writes made after the reload installs: an unread reset ignores them, a breaking migration can bring a conflicting key, a newly readable circle changes authorization and key checks | `reset_counterexample`, `breaking_raise_counterexample`, `newly_readable_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §2.1, §16.5 |
+| *Body.* Without checking that a snapshot replaces the reload's selection, switching to the floor's snapshot after deletion can move coverage backward | `unchecked_reselection_goes_backwards` | `proofs/sequence/CovenSequence/ReloadExamples.lean` | §16.5 |
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
@@ -6145,7 +6288,10 @@ Write-ups explain each model and state its assumptions:
 | Uncovered old-schema changes convert in version and causal order, whether or not their upload was tried | `receive_matches_evaluation`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
 | The converters used are those after the write's version, up to the raise's | `one_step_is_conversion` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
 | Dependent changes stay frozen; independent ones convert and match receivers | `dependent_change_not_converted`, `independent_change_converted`, `converted_change_matches_receiver` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
-| Without a converter, values are kept; frozen stays frozen; a lost value is never converted again | `missing_converter_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
+| With `Drop`, values are kept; frozen stays frozen; a lost value is never converted again | `explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
+| With no breaking migration in a write's range, no converter is needed; older writes still need the conversions they cross | `newest_breaking_write_admitted`, `retained_step_required` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
+| *Body.* An undeclared breaking change, or a breaking change declared as an addition, is refused, and no part of the run commits | `undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.3 |
+
 | Recorded reads don't exclude a write | `recorded_reads_do_not_exclude` | `proofs/queue/CovenQueue/Model.lean` | §18.6 |
 | A later snapshot doesn't revive dropped data; a snapshot's lost values keep their cause | `snapshot_drop_stays_dropped`, `snapshot_loss_preserves_cause` | `proofs/queue/CovenQueue/Verdicts.lean` | §18.6 |
 | Ben's mixed write 10: its note edit stays frozen and its playlist rename converts; a device's own reads don't exclude | `mixed_write`, `own_reads_do_not_exclude` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
@@ -6160,7 +6306,9 @@ Write-ups explain each model and state its assumptions:
 | Claim | Theorems | File | Section |
 |---|---|---|---|
 | *Body.* A copy that checks a free name and then writes it lets two racers both win | `check_then_write_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
+
 | *Body.* A conditional PUT racing a copy can be accepted beside it | `put_racing_copy_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
+| *Body.* At most one store's setup passes per bucket, however far listings lag | `at_most_one_store` | `proofs/storage/CovenStorage/BucketClaim.lean` | §20.7 |
 | With an atomic copy, copy publication is create-once: same effect as a create, temporaries hidden, one winner per race, lost replies settled by the marker, a marker means the session's bytes | `copy_is_create`, `stage_hidden`, `race_one_winner`, `lost_reply_settles`, `marker_settles_bytes` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | When every publication of a name is a conditional copy, at most one is accepted in any order, and none if the name was taken | `every_copy_at_most_one`, `copied_at_most` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
@@ -6189,12 +6337,13 @@ maps them are with each provider in Appendix E.
 | `RollbackFailed` | a rollback failed; every later call on that handle fails until the store is reopened | §4 |
 | `DbError::NotOwner`, `DbError::InvalidForeignKeyEffect` | the author's own check finds a change receivers would refuse under the owner rules | §9.6 |
 | `DbError::ReferenceAudience` | a write or move would leave a row pointing at a row some of its readers can't read | §15.3 |
-| `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one that doesn't exist | §15.6, §15.8 |
+| `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one absent from the membership this device has applied | §15.6, §15.8 |
 | `DeletedCircle` | a new local write into a deleted circle; also the cause named by its rows' lost values | §15.9 |
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |
 | `DbError::StoreSettingsMismatch` | settings supplied when setting up from the store don't match its creation | §10.3 |
 | `DbError::PendingPersistence` | coven can't save pending state; sync and database calls stop | §19.1 |
 | `DbError::DamagedDatabase` | a damaged database fails to open | §19.3 |
+| `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
 | `SchemaError::ForeignKeyNotPrimaryKey` | a synced table's foreign key doesn't reference the parent's whole primary key | §9.1, A.9 |
 | `SchemaError::GeneratedForeignKey` | a synced table's foreign key is one generated column | §9.1 |
@@ -6249,7 +6398,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `StorageFailure::ProviderUnavailable` | CloudKit on a platform other than Apple's | §20.2, E.1 |
 | `ContainerNotFound` | CloudKit's zone is missing | E.1 |
 | `StorageFailure::OwnBucketRequired { reason: Prefix }` | a bucket-scoped service's location has a base prefix | §20.7 |
-| `OwnBucketRequired { reason: Occupied }` | a bucket-scoped store's bucket holds anything besides its own folder at first setup | §20.7 |
+| `OwnBucketRequired { reason: Occupied }` | at first setup, a bucket-scoped store's bucket holds anything besides its own folder and the bucket marker, or the marker `coven-bucket` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.7 |
 | `InvalidConfiguration` | an S3 location contradicts its host, names an IAM endpoint wrongly, or has an unknown host outside setup | §20.7, E.3, E.12 |
 | `StorageSetupError::S3VersioningUnsupported` | a versioned bucket without a versioned certification | §20.7, E.9 |
 | `S3VersioningUnknown` | an uncertified profile can't read the bucket's versioning state | E.9 |
