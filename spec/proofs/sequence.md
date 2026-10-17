@@ -29,6 +29,11 @@ Five results are checked counterexamples, and each one is the reason for a rule:
   it lands an operation twice ([Operations](#operations)).
 - **Undo after every artifact request ends.** Otherwise a late create leaves
   an artifact behind.
+- **Settle from the per-device write number.** Settling a deleted slot's
+  claim from the snapshot's state alone loses or duplicates writes
+  ([Settling a claim](#settling-a-claim-whose-slot-was-deleted)). The same
+  holds for an admin claim settled by whether its change is present; that
+  rule needs a choice.
 
 ## The model
 
@@ -285,6 +290,49 @@ only slots `1..n-1`.
   that cannot be cancelled is covered by the reclaim of keys tagged with their
   device, outside this model.
 
+## Settling a claim whose slot was deleted
+
+[`Settle`](sequence/CovenSequence/Settle.lean). Before each create, the journal
+records the slot and the exact bytes. On reopen, the device reads the slot and
+compares bytes. If the floor has passed the slot, it settles from the floor's
+snapshot instead. Each snapshot records, per device, the number of the last
+write of that device it includes, and a batch's claim landed exactly when that
+number covers the batch. The model abstracts slots to what settlement reads: a
+batch's author, its last write number, an attempt nonce and a value.
+
+`Own` holds what the device knows of its batch `n`. Its batches carry numbers
+up to `n`. Only the recorded attempt can be in the sequence, because every
+earlier attempt was settled as not landed.
+
+- `lastWrite_ge`: the snapshot's record covers number `n` exactly when some
+  batch of the device up to its coverage reaches `n`.
+- `settle_correct`: settlement says `landed` exactly when the batch is in the
+  sequence. `notLanded` means it is nowhere in it, and `retry` means its slot
+  is still empty.
+- `lands_once_never_lost`: a device that claims again exactly when settlement
+  says `notLanded` ends with the batch at exactly one slot. That re-establishes
+  `Own` for its next return.
+- `state_alone_cannot_settle` is a checked counterexample. In one history the
+  device's batch took slot 1 and was then overwritten; in the other, another
+  device took slot 1. The snapshot's state is the same in both, so any rule
+  that settles from the state is wrong in one. It either claims a landed batch
+  again, landing its writes twice, or drops an unlanded one, losing them. The
+  per-device record tells the two apart.
+- `admin_state_cannot_settle` is a checked counterexample to settling an admin
+  claim by whether its change is present. The device's claim adds a member,
+  and a later slot removes the member. If another device's identical entry
+  took the slot instead, the ledger after the removal is the same. Settling
+  by presence says "not landed" in both, so in the first history the device
+  adds the member again, against the removal. An admin claim needs the same
+  per-device number, or another landed-or-not record in the snapshot.
+
+**Another copy using this device id.** Each copy records an attempt before
+sending it and creates only what it recorded, signed with its id.
+
+- `foreign_slot_means_copy`: from empty storage, a slot signed with a copy's id
+  whose bytes that copy's journal never attempted was created by another copy
+  using the same id.
+
 ## Assumptions and what is not modelled
 
 - Snapshot and raise bodies are honest: each is the announcer's state as of its
@@ -300,6 +348,8 @@ only slots `1..n-1`.
   cannot apply a slot stops before it; that stop is not modelled.
 - Circle membership changes are not modelled as a device starting or stopping
   an audience: a device starts following an audience as a joiner of it.
+- `Settle` is not composed with `Model`: its per-device record is computed over
+  its abstract slots, not stored in `Model`'s snapshot bodies.
 - Not modelled:
   - Drive's head file and its compare-and-swap;
   - the grace period, which is a cost setting and not a correctness rule;

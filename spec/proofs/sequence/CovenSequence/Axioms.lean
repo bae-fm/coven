@@ -42,3 +42,11 @@ import CovenSequence
 #print axioms CovenSequence.Operation.operation_outcome
 #print axioms CovenSequence.Operation.forgetful_lands_twice
 #print axioms CovenSequence.Operation.eager_undo_leaks
+
+#print axioms CovenSequence.Settle.lastWrite_ge
+#print axioms CovenSequence.Settle.settle_correct
+#print axioms CovenSequence.Settle.lands_once_never_lost
+#print axioms CovenSequence.Settle.state_alone_cannot_settle
+#print axioms CovenSequence.Settle.admin_state_cannot_settle
+#print axioms CovenSequence.Settle.cstep_signed
+#print axioms CovenSequence.Settle.foreign_slot_means_copy
