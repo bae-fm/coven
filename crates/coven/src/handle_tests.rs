@@ -7,7 +7,7 @@ use std::sync::{
 fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
     app.builder(layout)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::sql(
+        .migrations(vec![Migration::addition(
             1,
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
@@ -571,7 +571,7 @@ async fn migration_failure_precedes_custody_unlock() {
     let identity = Arc::new(Identity::default());
     keys.refuse.store(true, Ordering::SeqCst);
     let error = builder(&app, layout)
-        .migrations(vec![Migration::sql(1, "invalid", "INVALID SQL")])
+        .migrations(vec![Migration::addition(1, "invalid", "INVALID SQL")])
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
         .open(directory.id())

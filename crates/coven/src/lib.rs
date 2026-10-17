@@ -40,10 +40,11 @@ pub use coven_database::{
     ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, FileDecl, FileRef,
     FileSource, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     Lost, LostCell, LostValue, Migration, MigrationChange, MigrationContext, MigrationError,
-    MigrationOutcome, Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
-    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
-    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlContext, SqlReadContext,
-    SyncedTable, ToSql, UnsentWork, UserFile, WriteBatch, WriteId, WriteWait,
+    MigrationOutcome, OldWrites, Params, PreparedUserFile, Provenance, Read,
+    ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row,
+    RowAuthorizationFailure, RowChange, RowIdentity, RowKey, SchemaError, SnapshotError,
+    SqlContext, SqlReadContext, SyncedTable, ToSql, UnsentWork, UserFile, WriteBatch, WriteId,
+    WriteWait,
 };
 /// An admin entry is identified by the slot containing it (§9).
 pub type EntryId = Slot;

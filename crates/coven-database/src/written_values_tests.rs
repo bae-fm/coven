@@ -6,7 +6,7 @@ use coven_foundation::id_source::SequentialIds;
 use coven_merge::{Audience, RowId};
 
 async fn open(store: &TestStore, seconds: u64) -> Database {
-    store.builder(tables(), vec![crate::Migration::run(1,"references",move |sql| {
+    store.builder(tables(), vec![crate::Migration::addition_with(1, "references", move |sql| {
         sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
         Ok(())
     })]).clock(std::sync::Arc::new(coven_foundation::clock::FixedClock::new(std::time::UNIX_EPOCH+std::time::Duration::from_secs(seconds)))).open().await.unwrap()
@@ -143,15 +143,20 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
     let initial = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,guard TEXT REFERENCES parents(id) ON DELETE CASCADE)";
     let migrations = |rename| {
         let sql = initial;
-        let mut migrations = vec![crate::Migration::run(1, "references", move |db| {
-            db.execute_batch(sql)?;
-            Ok(())
-        })];
+        let mut migrations = vec![crate::Migration::addition_with(
+            1,
+            "references",
+            move |db| {
+                db.execute_batch(sql)?;
+                Ok(())
+            },
+        )];
         if rename {
-            migrations.push(crate::Migration::sql(
+            migrations.push(crate::Migration::breaking(
                 2,
                 "rename",
                 "ALTER TABLE children RENAME COLUMN parent TO root",
+                crate::OldWrites::Drop,
             ));
         }
         migrations
@@ -346,10 +351,10 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     assert_eq!(reference(&b, true).await, Some("parent".into()));
     b.close().await.unwrap();
     let b = b_store.builder(tables(), vec![
-        crate::Migration::run(1,"references",move |db| {
+        crate::Migration::addition_with(1, "references", move |db| {
             db.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?; Ok(())
         }),
-        crate::Migration::sql(2,"drop reference","CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children"),
+        crate::Migration::breaking(2, "drop reference", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop),
     ]).open().await.unwrap();
     assert_eq!(reference(&b, true).await, Some("parent".into()));
     b.inspect_writer(|db| {
@@ -373,10 +378,14 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
         store
             .builder(
                 tables(),
-                vec![crate::Migration::run(1, "generated", move |sql| {
-                    sql.execute_batch(schema)?;
-                    Ok(())
-                })],
+                vec![crate::Migration::addition_with(
+                    1,
+                    "generated",
+                    move |sql| {
+                        sql.execute_batch(schema)?;
+                        Ok(())
+                    },
+                )],
             )
             .clock(std::sync::Arc::new(
                 coven_foundation::clock::FixedClock::new(

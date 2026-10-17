@@ -349,10 +349,14 @@ async fn reference_cycle(store: &TestStore, reference: &str) -> crate::Database 
                 SyncedTable::new("nodes", crate::RowIdentity::IndependentUuid)
                     .audience_column("audience"),
             ],
-            vec![Migration::run(1, "reference cycle", move |context| {
-                context.execute_batch(&schema)?;
-                Ok(())
-            })],
+            vec![Migration::addition_with(
+                1,
+                "reference cycle",
+                move |context| {
+                    context.execute_batch(&schema)?;
+                    Ok(())
+                },
+            )],
         )
         .open()
         .await
@@ -462,7 +466,7 @@ async fn restoration_triggers_cannot_leave_invalid_local_references() {
             let db = store
                 .builder(
                     vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
-                    vec![crate::Migration::run(1, "schema", move |c| {
+                    vec![crate::Migration::addition_with(1, "schema", move |c| {
                         c.execute_batch(&schema)?;
                         Ok(())
                     })],
@@ -790,7 +794,7 @@ async fn ordinary_tables_get_no_hook_change_and_retain_column_and_key_precision(
         let db = store
             .builder(
                 vec![],
-                vec![Migration::run(1, "schema", move |sql| {
+                vec![Migration::addition_with(1, "schema", move |sql| {
                     sql.execute_batch(&schema)?;
                     Ok(())
                 })],

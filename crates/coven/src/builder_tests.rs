@@ -17,11 +17,7 @@ fn tables() -> Vec<SyncedTable> {
 }
 
 fn migrations() -> Vec<Migration> {
-    vec![Migration::sql(
-        1,
-        "attachments",
-        "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)",
-    )]
+    vec![Migration::addition(1, "attachments", "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")]
 }
 
 #[tokio::test]
@@ -224,14 +220,12 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
 
     let updated = || {
         let mut result = migrations();
-        result.push(
-            Migration::sql(
-                2,
-                "sizes",
-                "CREATE INDEX attachment_sizes ON attachments(size)",
-            )
-            .writes(|_| Ok(())),
-        );
+        result.push(Migration::breaking(
+            2,
+            "sizes",
+            "CREATE INDEX attachment_sizes ON attachments(size)",
+            crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
+        ));
         result
     };
     // The app migrates offline. Opening again resumes the journal committed
@@ -299,7 +293,7 @@ mod recovery {
         vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
     }
     fn recovery_migrations() -> Vec<Migration> {
-        vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE scratch(value TEXT)")]
+        vec![Migration::addition(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE scratch(value TEXT)")]
     }
 
     #[tokio::test]

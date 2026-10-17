@@ -51,7 +51,7 @@ async fn default_and_custom_file_columns_are_checked_on_the_synced_table() {
         let db = store.schema(table(file.clone()), schema).await.unwrap();
         db.close().await.unwrap();
         for read_only in [false, true] {
-            let builder = store.builder(table(file.clone()), vec![Migration::sql(1, "files", schema)]);
+            let builder = store.builder(table(file.clone()), vec![Migration::addition(1, "files", schema)]);
             if read_only {
                 builder.open_read_only().await.unwrap().close().await.unwrap();
             } else {
@@ -79,7 +79,7 @@ async fn every_missing_file_column_names_its_table_on_open_and_after_migration()
         for read_only in [false, true] {
             let builder = store.builder(
                 table(renamed(role, "missing")),
-                vec![Migration::sql(1, "files", SCHEMA)],
+                vec![Migration::addition(1, "files", SCHEMA)],
             );
             let result = if read_only {
                 builder.open_read_only().await.map(|_| ())
@@ -105,16 +105,18 @@ async fn final_file_columns_validate_after_all_migrations_and_failure_rolls_them
         .unwrap();
     let migrations = || {
         vec![
-            Migration::sql(1, "files", SCHEMA),
-            Migration::sql(
+            Migration::addition(1, "files", SCHEMA),
+            Migration::breaking(
                 2,
                 "rename size",
                 "ALTER TABLE attachments RENAME COLUMN size TO bytes",
+                crate::OldWrites::Drop,
             ),
-            Migration::sql(
+            Migration::breaking(
                 3,
                 "rename hash",
                 "ALTER TABLE attachments RENAME COLUMN hash TO digest",
+                crate::OldWrites::Drop,
             ),
         ]
     };
@@ -169,15 +171,15 @@ async fn hash_and_location_must_allow_null_on_both_opens_and_after_migrating() {
         let ordinary = || vec![SyncedTable::new("attachments", RowIdentity::SharedKey)];
         store.schema(ordinary(), schema).await.unwrap().close().await.unwrap();
         for read_only in [false, true] {
-            let builder = store.builder(table(declaration()), vec![Migration::sql(1, "files", schema)]);
+            let builder = store.builder(table(declaration()), vec![Migration::addition(1, "files", schema)]);
             let result = if read_only {builder.open_read_only().await.map(|_| ())} else {builder.open().await.map(|_| ())};
             assert!(matches!(database_error(result.unwrap_err()), DbError::Schema(SchemaError::FileColumnNotNullable {table,column: actual}) if table=="attachments" && actual==column));
         }
         let fresh = TestStore::new();
         fresh.schema(table(declaration()), SCHEMA).await.unwrap().close().await.unwrap();
         let error = fresh.builder(table(declaration()), vec![
-            Migration::sql(1, "files", SCHEMA),
-            Migration::run(2, "rebuild", move |sql| {sql.execute_batch(&format!("DROP TABLE attachments; {schema}"))?; Ok(())}),
+            Migration::addition(1, "files", SCHEMA),
+            Migration::breaking_with(2, "rebuild", move |sql| {sql.execute_batch(&format!("DROP TABLE attachments; {schema}"))?; Ok(())}, crate::OldWrites::Drop),
         ]).open().await.err().unwrap();
         assert!(matches!(database_error(error), DbError::Schema(SchemaError::FileColumnNotNullable {table,column: actual}) if table=="attachments" && actual==column));
         let db = fresh.schema(table(declaration()), SCHEMA).await.unwrap();
@@ -207,7 +209,7 @@ async fn file_columns_refuse_reference_replacement_on_open_and_after_migrating()
             };
             let migrations = || {
                 let schema = schema.clone();
-                vec![Migration::run(1, "files", move |sql| {
+                vec![Migration::addition_with(1, "files", move |sql| {
                     sql.execute_batch(&schema)?;
                     Ok(())
                 })]
@@ -245,11 +247,16 @@ async fn file_columns_refuse_reference_replacement_on_open_and_after_migrating()
                 .builder(
                     tables(true),
                     vec![
-                        Migration::sql(1, "files", SCHEMA),
-                        Migration::run(2, "file reference", move |sql| {
-                            sql.execute_batch(&format!("DROP TABLE attachments; {migrated}"))?;
-                            Ok(())
-                        }),
+                        Migration::addition(1, "files", SCHEMA),
+                        Migration::breaking_with(
+                            2,
+                            "file reference",
+                            move |sql| {
+                                sql.execute_batch(&format!("DROP TABLE attachments; {migrated}"))?;
+                                Ok(())
+                            },
+                            crate::OldWrites::Drop,
+                        ),
                     ],
                 )
                 .open()

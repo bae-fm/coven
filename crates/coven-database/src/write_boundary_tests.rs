@@ -28,7 +28,7 @@ fn an_established_version_does_not_select_a_later_preparation() {
     assert!(!Boundary::schema_in_place(&state, 3, &later));
 }
 
-/// Breaking version 2 has no converter: an index preserves the notes table,
+/// Breaking version 2 explicitly drops late old writes: an index preserves the notes table,
 /// while a table drop exercises frozen losses without the old app schema.
 pub(crate) async fn version_two(store: &TestStore, notes_table: bool) -> crate::Database {
     let (tables, change) = if notes_table {
@@ -40,8 +40,8 @@ pub(crate) async fn version_two(store: &TestStore, notes_table: bool) -> crate::
         .builder(
             tables,
             vec![
-                crate::Migration::sql(1, "notes", NOTES),
-                crate::Migration::sql(2, "change", change),
+                crate::Migration::addition(1, "notes", NOTES),
+                crate::Migration::breaking(2, "change", change, crate::OldWrites::Drop),
             ],
         )
         .open()
@@ -121,7 +121,7 @@ impl crate::Database {
         })
     }
     /// Cover the consumed prefix with a raise. Later older-schema writes
-    /// are excluded only if they cross a breaking step without a converter.
+    /// are excluded only if they cross a breaking step with an explicit drop choice.
     pub(crate) async fn exclude_later_writes(&self, version: u32) {
         self.install_schema_fixture(Audience::Store, version, self.applied_slot().await.unwrap())
             .await

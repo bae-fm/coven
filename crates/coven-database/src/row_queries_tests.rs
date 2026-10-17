@@ -72,7 +72,13 @@ async fn every_synced_column_and_foreign_key_is_registered_before_any_write_name
         steps[..through]
             .iter()
             .enumerate()
-            .map(|(index, sql)| Migration::sql(index as u32 + 1, "step", sql))
+            .map(|(index, sql)| {
+                if index < 2 {
+                    Migration::addition(index as u32 + 1, "step", sql)
+                } else {
+                    Migration::breaking(index as u32 + 1, "step", sql, crate::OldWrites::Drop)
+                }
+            })
             .collect::<Vec<_>>()
     };
     let tables = |tags: bool| {

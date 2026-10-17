@@ -15,7 +15,7 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
             .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "files", 1 << 30, Provenance::AppProvided, CacheFill::CacheLazy,
             ))])
-            .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+            .migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .open(directory.id()).await.unwrap();
         handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.subscribe_sync_status();
@@ -87,7 +87,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
             .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "files", 1 << 30, Provenance::AppProvided, CacheFill::CacheLazy,
             ))])
-            .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+            .migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .open(directory.id()).await.unwrap();
 
         handle.setup_s3_storage(memory.config(), "Test device", "key".into(), SecretText::new("secret".into())).await.unwrap();
@@ -193,7 +193,7 @@ CREATE TABLE note_tags(note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASC
 fn builder(app: &TestCoven, layout: StoreLayout, ids: IdSourceRef) -> CovenBuilder {
     app.builder(layout)
         .synced_tables(tables())
-        .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
+        .migrations(vec![Migration::addition(1, "initial", SCHEMA)])
         .id_source(ids)
 }
 

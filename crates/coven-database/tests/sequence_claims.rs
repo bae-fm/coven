@@ -14,7 +14,7 @@ fn builder(directory: coven_foundation::files::StoreDir) -> DatabaseBuilder {
             "items",
             coven_database::RowIdentity::SharedKey,
         )])
-        .migrations(vec![coven_database::Migration::sql(
+        .migrations(vec![coven_database::Migration::addition(
             1,
             "items",
             "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY)",

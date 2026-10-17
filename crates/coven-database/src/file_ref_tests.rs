@@ -300,7 +300,7 @@ async fn original_facts_survive_reopen_and_are_not_replaced_by_new_disk_metadata
     let reader = store
         .builder(
             tables(Provenance::UserProvided),
-            vec![Migration::sql(1, "schema", SCHEMA)],
+            vec![Migration::addition(1, "schema", SCHEMA)],
         )
         .open_read_only()
         .await
@@ -405,7 +405,10 @@ async fn custom_columns_and_inherited_audience_are_read_together_with_composite_
         ))
     );
     let reader = store
-        .builder(declarations(), vec![Migration::sql(1, "schema", schema)])
+        .builder(
+            declarations(),
+            vec![Migration::addition(1, "schema", schema)],
+        )
         .open_read_only()
         .await
         .unwrap();

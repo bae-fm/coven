@@ -34,33 +34,47 @@ pub struct MigrationOutcome {
 pub(crate) type MigrationOperation =
     dyn Fn(u32) -> Result<crate::NewOperation, DbError> + Send + Sync;
 
-pub(crate) type WriteConversion =
-    dyn Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync;
+type WriteConversion = dyn Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync;
 
 type MigrationBody = dyn Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync;
 
-/// One numbered change to the app's database.
-/// Clones retain the same callbacks so bootstrap can borrow the app's migration
-/// declarations while its database owns them across asynchronous loading.
+/// What a breaking migration does with received late old-version writes.
+#[derive(Clone)]
+pub enum OldWrites {
+    /// Convert eligible changes without rewriting their original upload records.
+    Convert(Arc<WriteConversion>),
+    /// Keep each original change as a frozen schema loss; never discard its values.
+    Drop,
+}
+
+#[derive(Clone)]
+pub(crate) enum MigrationKind {
+    Addition,
+    Breaking(OldWrites),
+}
+
+/// One numbered change to the app's database, with its declared kind.
+/// Clones retain the same callbacks across bootstrap and database opening.
 #[derive(Clone)]
 pub struct Migration {
     pub(crate) version: u32,
     pub(crate) name: &'static str,
     body: Arc<MigrationBody>,
-    pub(crate) conversion: Option<Arc<WriteConversion>>,
+    pub(crate) kind: MigrationKind,
 }
 
 impl Migration {
-    /// A migration expressed as SQL.
-    pub fn sql(version: u32, name: &'static str, sql: &'static str) -> Self {
-        Self::run(version, name, move |context| {
+    /// SQL that adds tables or columns, or changes only local objects.
+    /// A runtime breaking classification refuses the whole migration batch.
+    pub fn addition(version: u32, name: &'static str, sql: &'static str) -> Self {
+        Self::addition_with(version, name, move |context| {
             context.execute_batch(sql)?;
             Ok(())
         })
     }
 
-    /// A migration expressed as code, including backfills and table rebuilds.
-    pub fn run<F>(version: u32, name: &'static str, f: F) -> Self
+    /// Code that adds tables or columns, or changes only local objects.
+    pub fn addition_with<F>(version: u32, name: &'static str, f: F) -> Self
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static,
     {
@@ -68,20 +82,63 @@ impl Migration {
             version,
             name,
             body: Arc::new(f),
-            conversion: None,
+            kind: MigrationKind::Addition,
         }
     }
 
-    /// Interpret received late old-schema row changes in this version (§17.1).
-    /// Upload records never change; without a converter for a crossed breaking
-    /// step, the received interpretation retains each original change as a
-    /// schema loss. Additions alone need no converter.
-    pub fn writes<F>(mut self, f: F) -> Self
+    /// Breaking SQL with an explicit choice for late old-version writes.
+    /// An addition or local-only classification refuses the whole batch.
+    ///
+    /// A breaking migration cannot omit the old-write choice:
+    /// ```compile_fail
+    /// use coven_database::Migration;
+    /// Migration::breaking(2, "rename", "ALTER TABLE notes RENAME COLUMN title TO name");
+    /// ```
+    pub fn breaking(
+        version: u32,
+        name: &'static str,
+        sql: &'static str,
+        old_writes: OldWrites,
+    ) -> Self {
+        Self::breaking_with(
+            version,
+            name,
+            move |context| {
+                context.execute_batch(sql)?;
+                Ok(())
+            },
+            old_writes,
+        )
+    }
+
+    /// Breaking code, including backfills and rebuilds, with its old-write choice.
+    ///
+    /// ```compile_fail
+    /// use coven_database::Migration;
+    /// Migration::breaking_with(2, "backfill", |context| {
+    ///     context.execute_batch("UPDATE notes SET title=upper(title)")?;
+    ///     Ok(())
+    /// });
+    /// ```
+    pub fn breaking_with<F>(version: u32, name: &'static str, f: F, old_writes: OldWrites) -> Self
     where
-        F: Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync + 'static,
+        F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static,
     {
-        self.conversion = Some(Arc::new(f));
-        self
+        Self {
+            version,
+            name,
+            body: Arc::new(f),
+            kind: MigrationKind::Breaking(old_writes),
+        }
+    }
+
+    pub(crate) fn check_kind(&self, breaking: bool) -> Result<(), DbError> {
+        if matches!(self.kind, MigrationKind::Breaking(_)) != breaking {
+            return Err(DbError::MigrationKindMismatch {
+                version: self.version,
+            });
+        }
+        Ok(())
     }
 
     pub(crate) fn apply(&self, context: &MigrationContext<'_>) -> Result<(), DbError> {
@@ -193,4 +250,4 @@ impl<'connection> MigrationContext<'connection> {
 
 #[cfg(test)]
 #[path = "migration_tests.rs"]
-mod tests;
+pub(crate) mod tests;

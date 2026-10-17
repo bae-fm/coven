@@ -175,7 +175,7 @@ fn crashing_file_writer() {
         .block_on(
             DatabaseBuilder::new(layout.store_dir(&store))
                 .synced_tables(tables(Provenance::AppProvided))
-                .migrations(vec![Migration::sql(1, "files", SCHEMA)])
+                .migrations(vec![Migration::addition(1, "files", SCHEMA)])
                 .open(),
         )
         .unwrap();
@@ -321,7 +321,7 @@ async fn a_reused_id_cannot_claim_or_delete_a_kept_file() {
         store
             .builder(
                 tables(Provenance::AppProvided),
-                vec![Migration::sql(1, "files", SCHEMA)],
+                vec![Migration::addition(1, "files", SCHEMA)],
             )
             .id_source(Arc::new(SequentialIds::new()))
     };

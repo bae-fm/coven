@@ -135,7 +135,7 @@ async fn waiting_writes_keep_their_numbers_and_merge_as_late_writes_on_every_loa
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
     let a = a_store
-        .builder(notes(), vec![crate::Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
         .clock(Arc::new(FixedClock::new(
             UNIX_EPOCH + Duration::from_secs(1),
         )))
@@ -143,7 +143,7 @@ async fn waiting_writes_keep_their_numbers_and_merge_as_late_writes_on_every_loa
         .await
         .unwrap();
     let b = b_store
-        .builder(notes(), vec![crate::Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
         .clock(Arc::new(FixedClock::new(
             UNIX_EPOCH + Duration::from_secs(2),
         )))
@@ -283,10 +283,14 @@ async fn loading_a_parent_snapshot_recomputes_other_audiences_without_rewriting_
             ]
         };
         let migrations = || {
-            vec![crate::Migration::run(1, "references", move |db| {
-                db.execute_batch(&format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,parent TEXT REFERENCES parents(id) ON DELETE {action}); CREATE INDEX child_parent ON children(parent)"))?;
-                Ok(())
-            })]
+            vec![crate::Migration::addition_with(
+                1,
+                "references",
+                move |db| {
+                    db.execute_batch(&format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,parent TEXT REFERENCES parents(id) ON DELETE {action}); CREATE INDEX child_parent ON children(parent)"))?;
+                    Ok(())
+                },
+            )]
         };
         let ids = SequentialIds::new();
         let a_store = TestStore::with_ids(&ids);
@@ -460,8 +464,8 @@ async fn older_snapshots_cross_additions_but_not_breaking_schema_changes() {
         .builder(
             notes(),
             vec![
-                crate::Migration::sql(1, "notes", NOTES),
-                crate::Migration::sql(
+                crate::Migration::addition(1, "notes", NOTES),
+                crate::Migration::addition(
                     2,
                     "color",
                     "ALTER TABLE notes ADD COLUMN color TEXT DEFAULT 'blue'",
@@ -488,13 +492,18 @@ async fn older_snapshots_cross_additions_but_not_breaking_schema_changes() {
         .builder(
             notes(),
             vec![
-                crate::Migration::sql(1, "notes", NOTES),
-                crate::Migration::sql(
+                crate::Migration::addition(1, "notes", NOTES),
+                crate::Migration::addition(
                     2,
                     "color",
                     "ALTER TABLE notes ADD COLUMN color TEXT DEFAULT 'blue'",
                 ),
-                crate::Migration::sql(3, "rename", "ALTER TABLE notes RENAME COLUMN title TO name"),
+                crate::Migration::breaking(
+                    3,
+                    "rename",
+                    "ALTER TABLE notes RENAME COLUMN title TO name",
+                    crate::OldWrites::Drop,
+                ),
             ],
         )
         .open()

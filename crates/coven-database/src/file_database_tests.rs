@@ -722,7 +722,7 @@ async fn another_handles_removals_leave_a_range_being_written() {
     let read_only = store
         .builder(
             tables(Provenance::AppProvided),
-            vec![Migration::sql(1, "schema", SCHEMA)],
+            vec![Migration::addition(1, "schema", SCHEMA)],
         )
         .open_read_only()
         .await
@@ -783,7 +783,7 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     let read_only = store
         .builder(
             tables(Provenance::AppProvided),
-            vec![Migration::sql(1, "schema", SCHEMA)],
+            vec![Migration::addition(1, "schema", SCHEMA)],
         )
         .open_read_only()
         .await

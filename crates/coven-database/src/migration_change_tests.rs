@@ -67,7 +67,7 @@ impl Case {
             .1
             .builder(
                 tables(),
-                vec![Migration::sql(1, "initial", schema), migration],
+                vec![Migration::addition(1, "initial", schema), migration],
             )
             .open()
             .await
@@ -122,18 +122,18 @@ async fn reference_renames_and_column_reordering_keep_original_parent_generation
             "DELETE FROM parents",
             "INSERT INTO parents VALUES('p')",
         ],
-        Migration::sql(
+        Migration::breaking(
             2,
             "parent name",
             "ALTER TABLE children RENAME COLUMN parent TO root",
-        )
-        .writes(|row| {
-            if row.table == "children" {
-                row.rename_column("parent", "root");
-                row.columns.reverse();
-            }
-            Ok(())
-        }),
+            crate::OldWrites::Convert(std::sync::Arc::new(|row| {
+                if row.table == "children" {
+                    row.rename_column("parent", "root");
+                    row.columns.reverse();
+                }
+                Ok(())
+            })),
+        ),
     )
     .await;
     let original = records(&case.source);
@@ -161,43 +161,46 @@ async fn reference_renames_and_column_reordering_keep_original_parent_generation
 #[tokio::test]
 async fn changing_or_adding_a_reference_fails_the_receipt() {
     for variant in 0..5 {
-        let migration = Migration::sql(
+        let migration = Migration::breaking(
             2,
             "bad reference",
             "ALTER TABLE children ADD COLUMN added TEXT REFERENCES parents(id) ON DELETE SET NULL",
-        )
-        .writes(move |row| {
-            if row.table == "children" {
-                if variant == 4 {
-                    let mut added = row
-                        .columns
-                        .iter()
-                        .find(|c| c.name == "parent")
-                        .unwrap()
-                        .clone();
-                    added.name = "added".into();
-                    row.columns.push(added);
-                } else if variant == 2 {
-                    row.columns
-                        .push(ColumnChange::new("added", None, Some(types::Value::Null)));
-                } else if variant == 3 {
-                    row.columns.retain(|c| c.name != "parent");
-                    row.columns.push(ColumnChange::new(
-                        "parent",
-                        None,
-                        Some(types::Value::Text("p".into())),
-                    ));
-                } else {
-                    let parent = row.columns.iter_mut().find(|c| c.name == "parent").unwrap();
-                    parent.new = Some(if variant == 0 {
-                        types::Value::Text("q".into())
+            crate::OldWrites::Convert(std::sync::Arc::new(move |row| {
+                if row.table == "children" {
+                    if variant == 4 {
+                        let mut added = row
+                            .columns
+                            .iter()
+                            .find(|c| c.name == "parent")
+                            .unwrap()
+                            .clone();
+                        added.name = "added".into();
+                        row.columns.push(added);
+                    } else if variant == 2 {
+                        row.columns.push(ColumnChange::new(
+                            "added",
+                            None,
+                            Some(types::Value::Null),
+                        ));
+                    } else if variant == 3 {
+                        row.columns.retain(|c| c.name != "parent");
+                        row.columns.push(ColumnChange::new(
+                            "parent",
+                            None,
+                            Some(types::Value::Text("p".into())),
+                        ));
                     } else {
-                        types::Value::Null
-                    });
+                        let parent = row.columns.iter_mut().find(|c| c.name == "parent").unwrap();
+                        parent.new = Some(if variant == 0 {
+                            types::Value::Text("q".into())
+                        } else {
+                            types::Value::Null
+                        });
+                    }
                 }
-            }
-            Ok(())
-        });
+                Ok(())
+            })),
+        );
         let case = Case::new(
             reference_tables,
             REFERENCES,
@@ -224,12 +227,17 @@ async fn a_null_reference_is_still_a_reference_when_converting() {
         reference_tables,
         REFERENCES,
         &["INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c',NULL,'value')"],
-        Migration::sql(2, "index", "CREATE INDEX refs ON children(parent)").writes(|row| {
-            if let Some(column) = row.columns.iter_mut().find(|c| c.name == "parent") {
-                column.new = Some(types::Value::Text("p".into()));
-            }
-            Ok(())
-        }),
+        Migration::breaking(
+            2,
+            "index",
+            "CREATE INDEX refs ON children(parent)",
+            crate::OldWrites::Convert(std::sync::Arc::new(|row| {
+                if let Some(column) = row.columns.iter_mut().find(|c| c.name == "parent") {
+                    column.new = Some(types::Value::Text("p".into()));
+                }
+                Ok(())
+            })),
+        ),
     )
     .await;
     let original = records(&case.source);
@@ -257,18 +265,13 @@ async fn composite_reference_updates_keep_the_complete_tuple_through_renames() {
             "INSERT INTO parents VALUES('a','b'),('a','c'); INSERT INTO children VALUES('c','a','b')",
             "UPDATE children SET b='c'",
         ],
-        Migration::sql(
-            2,
-            "rename composite",
-            "ALTER TABLE children RENAME COLUMN a TO renamed",
-        )
-        .writes(|row| {
+        Migration::breaking(2, "rename composite", "ALTER TABLE children RENAME COLUMN a TO renamed", crate::OldWrites::Convert(std::sync::Arc::new(|row| {
             if row.table == "children" {
                 row.rename_column("a", "intermediate");
                 row.rename_column("intermediate", "renamed");
             }
             Ok(())
-        }),
+        }))),
     )
     .await;
     case.receive().await.unwrap();
@@ -293,12 +296,12 @@ async fn an_old_insert_cannot_convert_into_a_new_reference_column() {
         reference_tables,
         REFERENCES,
         &["INSERT INTO parents VALUES('p'); INSERT INTO children VALUES('c','p','value')"],
-        Migration::sql(
+        Migration::breaking(
             2,
             "optional reference",
             "ALTER TABLE children ADD COLUMN added TEXT REFERENCES parents(id) ON DELETE SET NULL",
-        )
-        .writes(|_| Ok(())),
+            crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
+        ),
     )
     .await;
     let original = records(&case.source);
@@ -325,17 +328,12 @@ async fn two_references_keep_distinct_primary_key_orders() {
         tables,
         SCHEMA,
         &["INSERT INTO parents VALUES('1','2'),('2','1'); INSERT INTO children VALUES('c','1','2')"],
-        Migration::sql(
-            2,
-            "rename",
-            "ALTER TABLE children RENAME COLUMN parent TO renamed",
-        )
-        .writes(|row| {
+        Migration::breaking(2, "rename", "ALTER TABLE children RENAME COLUMN parent TO renamed", crate::OldWrites::Convert(std::sync::Arc::new(|row| {
             if row.table == "children" {
                 row.rename_column("parent", "renamed");
             }
             Ok(())
-        }),
+        }))),
     )
     .await;
     case.receive().await.unwrap();
@@ -369,7 +367,7 @@ async fn replacing_a_reference_target_cannot_reuse_the_old_parents_generation() 
         tables,
         SCHEMA,
         &["INSERT INTO parents VALUES('1'); INSERT INTO others VALUES('1'); INSERT INTO children VALUES('c','1')"],
-        Migration::sql(2,"retarget","CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES others(id)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children").writes(|_| Ok(())),
+        Migration::breaking(2, "retarget", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES others(id)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(())))),
     )
     .await;
     let original = records(&case.source);
@@ -386,12 +384,7 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
     const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT)";
     for variant in 0..9 {
         let declarations = || vec![SyncedTable::new("notes", RowIdentity::SharedKey)];
-        let migration = Migration::sql(
-            2,
-            "conversion",
-            "CREATE TABLE no_key(id TEXT,title TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX titles ON notes(title)",
-        )
-        .writes(move |row| {
+        let migration = Migration::breaking(2, "conversion", "CREATE TABLE no_key(id TEXT,title TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,title TEXT); CREATE INDEX titles ON notes(title)", crate::OldWrites::Convert(std::sync::Arc::new(move |row| {
             let column = row
                 .columns
                 .iter()
@@ -416,7 +409,7 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
                 _ => unreachable!(),
             }
             Ok(())
-        });
+        })));
         let case = Case::new(
             declarations,
             SCHEMA,
@@ -472,7 +465,7 @@ mod data_sources {
         vec![SyncedTable::new("notes", RowIdentity::SharedKey)]
     }
     fn initial() -> Migration {
-        Migration::sql(1, "notes", NOTES)
+        Migration::addition(1, "notes", NOTES)
     }
     fn rename(
         version: u32,
@@ -482,15 +475,15 @@ mod data_sources {
     ) -> Migration {
         let sql: &'static str =
             Box::leak(format!("ALTER TABLE notes RENAME COLUMN {from} TO {to}").into_boxed_str());
-        let migration = Migration::sql(version, "rename", sql);
-        match calls {
-            Some(calls) => migration.writes(move |row| {
+        let old_writes = match calls {
+            Some(calls) => crate::OldWrites::Convert(Arc::new(move |row| {
                 calls.fetch_add(1, Ordering::SeqCst);
                 row.rename_column(from, to);
                 Ok(())
-            }),
-            None => migration,
-        }
+            })),
+            None => crate::OldWrites::Drop,
+        };
+        Migration::breaking(version, "rename", sql, old_writes)
     }
     async fn open(store: &TestStore, migrations: Vec<Migration>) -> Database {
         store.builder(tables(), migrations).open().await.unwrap()
@@ -515,7 +508,7 @@ mod data_sources {
         }
     }
 
-    /// Ben's 9 creates a note and is excluded before any converter exists;
+    /// Ben's 9 creates a note and is excluded by an explicit drop choice;
     /// his 10 edits that note and renames an unrelated playlist. With the
     /// converter, 10's note edit is a frozen dependency loss naming 9 and its
     /// playlist rename converts and applies; the callback never sees the note.
@@ -676,10 +669,15 @@ async fn a_data_step_run_on_an_empty_table_still_converts_late_writes() {
     let calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let counted = calls.clone();
     let slug = "ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=lower(title)";
-    let migration = Migration::sql(2, "slug", slug).writes(move |_| {
-        counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    });
+    let migration = Migration::breaking(
+        2,
+        "slug",
+        slug,
+        crate::OldWrites::Convert(std::sync::Arc::new(move |_| {
+            counted.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        })),
+    );
     let insert = "INSERT INTO notes(id,title,body) VALUES('n','Title','b')";
     let case = Case::new(notes, NOTES, &[insert], migration).await;
     assert_eq!(

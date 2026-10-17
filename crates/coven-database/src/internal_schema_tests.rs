@@ -10,7 +10,7 @@ fn declarations() -> Vec<SyncedTable> {
 }
 
 fn migrations() -> Vec<Migration> {
-    vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL, number INTEGER NOT NULL, audience TEXT NOT NULL, title TEXT, body BLOB, PRIMARY KEY(id,number))")]
+    vec![Migration::addition(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL, number INTEGER NOT NULL, audience TEXT NOT NULL, title TEXT, body BLOB, PRIMARY KEY(id,number))")]
 }
 
 #[tokio::test]
@@ -25,10 +25,11 @@ async fn migrations_change_present_values_without_a_second_copy() {
     let original = crate::write::tests::records(&db).remove(0);
     db.close().await.unwrap();
     let mut migrations = migrations();
-    migrations.push(Migration::sql(
+    migrations.push(Migration::breaking(
         2,
         "rewrite title",
         "UPDATE notes SET title='migrated'",
+        crate::OldWrites::Drop,
     ));
     let db = store
         .builder(declarations(), migrations)

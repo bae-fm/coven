@@ -118,8 +118,8 @@ fn files_table() -> SyncedTable {
     )
 }
 
-/// Reopen after the app runs breaking version 2, `change`, without a
-/// converter, under a kept raise to 2 covering what was consumed: a later
+/// Reopen after the app runs breaking version 2, `change`, with an explicit
+/// drop choice, under a kept raise to 2 covering what was consumed: a later
 /// version-1 write is excluded (§17.1).
 async fn migrate(
     store: &TestStore,
@@ -132,8 +132,8 @@ async fn migrate(
         .builder(
             tables,
             vec![
-                crate::Migration::sql(1, "schema", FILES),
-                crate::Migration::sql(2, "change", change),
+                crate::Migration::addition(1, "schema", FILES),
+                crate::Migration::breaking(2, "change", change, crate::OldWrites::Drop),
             ],
         )
         .open()
@@ -394,12 +394,17 @@ async fn queued_original_file_references_survive_removing_their_declaration() {
         .builder(
             vec![],
             vec![
-                crate::Migration::sql(
+                crate::Migration::addition(
                     1,
                     "files",
                     "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
                 ),
-                crate::Migration::sql(2, "remove files", "DROP TABLE t"),
+                crate::Migration::breaking(
+                    2,
+                    "remove files",
+                    "DROP TABLE t",
+                    crate::OldWrites::Drop,
+                ),
             ],
         )
         .open()

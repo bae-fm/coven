@@ -15,7 +15,7 @@ fn tables() -> Vec<SyncedTable> {
 }
 
 fn migrations(version: u32, converters: [bool; 2], calls: &Arc<Mutex<Vec<u32>>>) -> Vec<Migration> {
-    let mut steps = vec![Migration::sql(1, "notes", SCHEMA)];
+    let mut steps = vec![Migration::addition(1, "notes", SCHEMA)];
     for (number, statement) in [
         (2, "CREATE INDEX notes_value ON notes(value)"),
         (3, "ALTER TABLE notes ADD COLUMN color TEXT"),
@@ -25,24 +25,30 @@ fn migrations(version: u32, converters: [bool; 2], calls: &Arc<Mutex<Vec<u32>>>)
         if number > version {
             break;
         }
-        let mut migration = Migration::sql(number, "change", statement);
-        if number % 2 == 0 && converters[(number / 2 - 1) as usize] {
-            let calls = calls.clone();
-            migration = migration.writes(move |row| {
-                calls.lock().unwrap().push(number);
-                for column in &mut row.columns {
-                    if column.name == "value" {
-                        for value in column.old.iter_mut().chain(&mut column.new) {
-                            let crate::types::Value::Integer(value) = value else {
-                                panic!("integer fixture value")
-                            };
-                            *value = *value * 10 + i64::from(number);
+        let migration = if number % 2 == 0 {
+            let old_writes = if converters[(number / 2 - 1) as usize] {
+                let calls = calls.clone();
+                crate::OldWrites::Convert(Arc::new(move |row| {
+                    calls.lock().unwrap().push(number);
+                    for column in &mut row.columns {
+                        if column.name == "value" {
+                            for value in column.old.iter_mut().chain(&mut column.new) {
+                                let crate::types::Value::Integer(value) = value else {
+                                    panic!("integer fixture value")
+                                };
+                                *value = *value * 10 + i64::from(number);
+                            }
                         }
                     }
-                }
-                Ok(())
-            });
-        }
+                    Ok(())
+                }))
+            } else {
+                crate::OldWrites::Drop
+            };
+            Migration::breaking(number, "change", statement, old_writes)
+        } else {
+            Migration::addition(number, "change", statement)
+        };
         steps.push(migration);
     }
     steps
@@ -76,7 +82,7 @@ async fn result(db: &Database) -> Value {
 }
 
 async fn compare(runner: Option<&std::ffi::OsStr>) {
-    // Missing and supplied converters below the write do not affect admission.
+    // Drop and convert choices below the write do not affect admission.
     // The final cases also make the order of two retained callbacks observable.
     for (version, raise, converters, expected, expected_calls) in [
         (2, 3, [false, false], Some(5), vec![]),
@@ -163,6 +169,7 @@ async fn compare(runner: Option<&std::ffi::OsStr>) {
             if let Some(runner) = runner {
                 let steps: Vec<_> = (2..=raise).map(|number| json!({
                     "version": number, "breaking": number % 2 == 0,
+                    "declaration": if number % 2 != 0 { "addition" } else if converters[(number / 2 - 1) as usize] { "convert" } else { "drop" },
                     "digit": if number % 2 == 0 && converters[(number / 2 - 1) as usize] { Some(number) } else { None },
                 })).collect();
                 let input =
@@ -197,4 +204,5 @@ async fn additions_after_a_breaking_raise_preserve_admission_and_conversion() {
 async fn conversion_chain_matches_lean() {
     let runner = std::env::var_os("COVEN_CONVERSION_LEAN").expect("built conversionRunner");
     compare(Some(&runner)).await;
+    crate::migration::tests::declarations::compare(Some(&runner)).await;
 }

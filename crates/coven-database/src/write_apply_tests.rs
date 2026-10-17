@@ -45,7 +45,7 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
     for (store, seconds) in [(&a_store, 2), (&b_store, 1)] {
         databases.push(
             store
-                .builder(notes(), vec![crate::Migration::sql(1, "notes", NOTES)])
+                .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
                 .clock(std::sync::Arc::new(
                     coven_foundation::clock::FixedClock::new(
                         std::time::UNIX_EPOCH + std::time::Duration::from_secs(seconds),
@@ -113,7 +113,10 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         CREATE TRIGGER note_delete AFTER DELETE ON notes BEGIN INSERT INTO audit(event) VALUES('delete'); END;";
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
     let source = source_store
-        .builder(tables(), vec![crate::Migration::sql(1, "records", schema)])
+        .builder(
+            tables(),
+            vec![crate::Migration::addition(1, "records", schema)],
+        )
         .clock(clock.clone())
         .open()
         .await
@@ -127,7 +130,10 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         let receiver_store = TestStore::with_ids(&ids);
         let receiver_clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1001)));
         let db = receiver_store
-            .builder(tables(), vec![crate::Migration::sql(1, "records", schema)])
+            .builder(
+                tables(),
+                vec![crate::Migration::addition(1, "records", schema)],
+            )
             .clock(receiver_clock)
             .open()
             .await

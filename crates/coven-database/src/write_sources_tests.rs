@@ -79,7 +79,7 @@ async fn captures_each_actual_setter_and_keeps_empty_delete_sources() {
 
 async fn clocked(store: &TestStore, milliseconds: u64) -> crate::Database {
     store
-        .builder(notes(), vec![crate::Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
         .clock(std::sync::Arc::new(
             coven_foundation::clock::FixedClock::new(
                 std::time::UNIX_EPOCH + std::time::Duration::from_millis(milliseconds),
@@ -269,9 +269,8 @@ async fn schema_renames_preserve_original_sources_and_authored_records() {
     };
     let migrations = || {
         vec![
-        crate::Migration::sql(1,"notes",NOTES),
-        crate::Migration::sql(2,"rename","ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name")
-            .writes(|r| { r.table = "renamed".into(); r.rename_column("title","name"); Ok(()) }),
+        crate::Migration::addition(1, "notes", NOTES),
+        crate::Migration::breaking(2, "rename", "ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name", crate::OldWrites::Convert(std::sync::Arc::new(|r| { r.table = "renamed".into(); r.rename_column("title","name"); Ok(()) }))),
     ]
     };
     let db = store.builder(tables(), migrations()).open().await.unwrap();
@@ -403,8 +402,13 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         .builder(
             tables(),
             vec![
-                crate::Migration::sql(1, "references", schema),
-                crate::Migration::sql(2, "index", "CREATE INDEX c_p ON c(p)"),
+                crate::Migration::addition(1, "references", schema),
+                crate::Migration::breaking(
+                    2,
+                    "index",
+                    "CREATE INDEX c_p ON c(p)",
+                    crate::OldWrites::Drop,
+                ),
             ],
         )
         .open()
@@ -582,11 +586,12 @@ async fn a_schema_default_has_no_setter_until_a_write_sets_the_cell() {
         .builder(
             notes(),
             vec![
-                crate::Migration::sql(1, "notes", NOTES),
-                crate::Migration::sql(
+                crate::Migration::addition(1, "notes", NOTES),
+                crate::Migration::breaking(
                     2,
                     "color",
                     "ALTER TABLE notes ADD COLUMN color TEXT NOT NULL DEFAULT 'blue'",
+                    crate::OldWrites::Drop,
                 ),
             ],
         )

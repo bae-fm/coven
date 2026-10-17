@@ -399,7 +399,7 @@ async fn trigger_targets_remain_protected_in_writes() {
         let store = TestStore::new();
         let declaration = SyncedTable::new("notes", RowIdentity::SharedKey);
         let declaration = if shared { declaration.shared_trigger("effect") } else { declaration };
-        let database = store.builder(vec![declaration], vec![crate::Migration::run(1, "trigger", move |context| {
+        let database = store.builder(vec![declaration], vec![crate::Migration::addition_with(1, "trigger", move |context| {
             context.execute_batch(NOTES)?;
             context.execute_batch(trigger)?;
             Ok(())
@@ -484,7 +484,7 @@ async fn concurrent_calls_share_the_writer_and_allocate_a_gapless_sequence() {
         std::time::UNIX_EPOCH,
     ));
     let database = store
-        .builder(notes(), vec![crate::Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
         .clock(clock)
         .open()
         .await

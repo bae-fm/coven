@@ -1,18 +1,18 @@
 //! Derive received values from the migration's retained schema identities.
 
 use crate::{
-    migration::WriteConversion, migration_names::MigrationMatch, schema::Schema,
-    sqlite::DatabaseConnection, DbError, Migration, RowChange,
+    migration::MigrationKind, migration_names::MigrationMatch, schema::Schema,
+    sqlite::DatabaseConnection, DbError, Migration, OldWrites, RowChange,
 };
 use coven_format::write::WritePart;
 use rusqlite::params;
-use std::{collections::BTreeMap, sync::Arc};
+use std::collections::BTreeMap;
 
 pub(crate) struct ReceivedMigration {
     before: Schema,
     after: Schema,
     names: MigrationMatch,
-    conversion: Option<Arc<WriteConversion>>,
+    old_writes: OldWrites,
 }
 
 pub(crate) fn retain(
@@ -58,13 +58,16 @@ pub(crate) fn read(
                 .iter()
                 .find(|m| m.version == version)
                 .ok_or(DbError::DamagedDatabase)?;
+            let MigrationKind::Breaking(old_writes) = &migration.kind else {
+                return Err(DbError::MigrationKindMismatch { version });
+            };
             Ok((
                 version,
                 ReceivedMigration {
                     before,
                     after,
                     names,
-                    conversion: migration.conversion.clone(),
+                    old_writes: old_writes.clone(),
                 },
             ))
         })
@@ -93,7 +96,7 @@ pub(crate) fn available(steps: &BTreeMap<u32, ReceivedMigration>, from: u32, to:
             std::ops::Bound::Excluded(from),
             std::ops::Bound::Included(to),
         ))
-        .all(|(_, step)| step.conversion.is_some())
+        .all(|(_, step)| matches!(step.old_writes, OldWrites::Convert(_)))
 }
 
 pub(crate) fn convert(
@@ -106,10 +109,9 @@ pub(crate) fn convert(
         std::ops::Bound::Excluded(from),
         std::ops::Bound::Included(to),
     )) {
-        let conversion = step
-            .conversion
-            .as_ref()
-            .expect("admission checked converters");
+        let OldWrites::Convert(conversion) = &step.old_writes else {
+            unreachable!("admission checked old-write policies");
+        };
         for row in &mut part.rows {
             let mut change = RowChange::read(row, &step.before)?;
             conversion(&mut change)?;

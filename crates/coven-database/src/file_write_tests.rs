@@ -49,7 +49,7 @@ async fn size_ten_concurrent_replacements_keep_all_four_columns_from_the_later_w
     let a = a_store
         .builder(
             tables(Provenance::AppProvided),
-            vec![Migration::sql(1, "files", SCHEMA)],
+            vec![Migration::addition(1, "files", SCHEMA)],
         )
         .clock(clock.clone())
         .open()
@@ -58,7 +58,7 @@ async fn size_ten_concurrent_replacements_keep_all_four_columns_from_the_later_w
     let b = b_store
         .builder(
             tables(Provenance::AppProvided),
-            vec![Migration::sql(1, "files", SCHEMA)],
+            vec![Migration::addition(1, "files", SCHEMA)],
         )
         .clock(clock.clone())
         .open()
@@ -536,7 +536,7 @@ async fn shared_triggers_cannot_write_managed_columns_and_allowed_inserts_can_at
         declarations.push(
             SyncedTable::new("commands", RowIdentity::SharedKey).shared_trigger("assign_file"),
         );
-        let db = store.builder(declarations, vec![Migration::run(1,"trigger",move |sql| {
+        let db = store.builder(declarations, vec![Migration::addition_with(1, "trigger", move |sql| {
             sql.execute_batch(&format!("{SCHEMA}; CREATE TABLE commands(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER assign_file AFTER INSERT ON commands WHEN NOT coven_applying() BEGIN {body} END"))?;
             Ok(())
         })]).open().await.unwrap();
@@ -555,7 +555,7 @@ async fn shared_triggers_cannot_write_managed_columns_and_allowed_inserts_can_at
     let mut declarations = tables(Provenance::AppProvided);
     declarations
         .push(SyncedTable::new("commands", RowIdentity::SharedKey).shared_trigger("attach_file"));
-    let db = store.builder(declarations, vec![Migration::run(1,"trigger", |sql| {
+    let db = store.builder(declarations, vec![Migration::addition_with(1, "trigger", |sql| {
         sql.execute_batch(&format!("{SCHEMA}; CREATE TABLE commands(id TEXT NOT NULL PRIMARY KEY); CREATE TRIGGER attach_file AFTER INSERT ON commands WHEN NOT coven_applying() BEGIN INSERT INTO files(id,size) VALUES(new.id,8); END"))?;
         Ok(())
     })]).open().await.unwrap();
@@ -744,7 +744,7 @@ async fn constraint_removal_preserves_bytes_until_the_row_is_restored() {
             store
                 .builder(
                     tables(Provenance::AppProvided),
-                    vec![Migration::sql(1, "files", schema)],
+                    vec![Migration::addition(1, "files", schema)],
                 )
                 .clock(clock.clone())
                 .open()
@@ -840,7 +840,7 @@ async fn a_trigger_cannot_leave_a_new_owned_file_without_its_row() {
     let store = TestStore::new();
     let mut declarations = tables(Provenance::AppProvided);
     declarations[0] = declarations[0].clone().shared_trigger("cancel_file");
-    let db = store.builder(declarations, vec![Migration::run(1, "files", |sql| {
+    let db = store.builder(declarations, vec![Migration::addition_with(1, "files", |sql| {
         sql.execute_batch(&format!("{SCHEMA}; CREATE TRIGGER cancel_file AFTER UPDATE OF hash ON files WHEN NOT coven_applying() BEGIN DELETE FROM files; END"))?;
         Ok(())
     })]).open().await.unwrap();

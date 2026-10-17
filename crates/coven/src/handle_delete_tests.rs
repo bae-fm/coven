@@ -115,11 +115,7 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
     let handle = app
         .builder(layout.clone())
         .synced_tables(vec![SyncedTable::new("parents", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::sql(
-            1,
-            "parents",
-            "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL,value INTEGER NOT NULL)",
-        )])
+        .migrations(vec![Migration::addition(1, "parents", "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL,value INTEGER NOT NULL)")])
         .open(directory.id())
         .await
         .unwrap();

@@ -464,8 +464,8 @@ mod dropped_schema {
         a.close().await.unwrap();
         let migrations = || {
             vec![
-                Migration::sql(1, "tags", TAGS),
-                Migration::sql(2, "drop tags", "DROP TABLE tags"),
+                Migration::addition(1, "tags", TAGS),
+                Migration::breaking(2, "drop tags", "DROP TABLE tags", crate::OldWrites::Drop),
             ]
         };
         let a = stores[0]
@@ -532,17 +532,24 @@ mod dropped_schema {
         a.close().await.unwrap();
         let migrations = |through: u32| {
             [
-                Migration::sql(1, "tags", TAGS),
-                Migration::sql(2, "drop body", "ALTER TABLE notes DROP COLUMN body"),
-                Migration::sql(
+                Migration::addition(1, "tags", TAGS),
+                Migration::breaking(
+                    2,
+                    "drop body",
+                    "ALTER TABLE notes DROP COLUMN body",
+                    crate::OldWrites::Drop,
+                ),
+                Migration::breaking(
                     3,
                     "body again",
                     "ALTER TABLE notes ADD COLUMN body TEXT NOT NULL DEFAULT ''",
+                    crate::OldWrites::Drop,
                 ),
-                Migration::sql(
+                Migration::breaking(
                     4,
                     "rename body",
                     "ALTER TABLE notes RENAME COLUMN body TO content",
+                    crate::OldWrites::Drop,
                 ),
             ]
             .into_iter()
@@ -611,8 +618,13 @@ mod dropped_schema {
             .builder(
                 circle_tables(),
                 vec![
-                    Migration::sql(1, "rows", circle_schema(true)),
-                    Migration::sql(2, "drop c", "ALTER TABLE rows DROP COLUMN c"),
+                    Migration::addition(1, "rows", circle_schema(true)),
+                    Migration::breaking(
+                        2,
+                        "drop c",
+                        "ALTER TABLE rows DROP COLUMN c",
+                        crate::OldWrites::Drop,
+                    ),
                 ],
             )
             .open()

@@ -6,7 +6,7 @@ pub(super) fn tables() -> Vec<SyncedTable> {
 }
 
 pub(super) fn migrations() -> Vec<Migration> {
-    vec![Migration::sql(
+    vec![Migration::addition(
         1,
         "notes",
         "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL, body BLOB NOT NULL)",

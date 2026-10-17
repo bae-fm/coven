@@ -59,7 +59,7 @@ async fn invalid_file_lookups_report_the_declaration_and_key_shape() {
     let db = store
         .builder(
             declarations,
-            vec![Migration::run(1, "tables", move |sql| {
+            vec![Migration::addition_with(1, "tables", move |sql| {
                 sql.execute_batch(&schema)?;
                 Ok(())
             })],

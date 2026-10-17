@@ -270,7 +270,7 @@ fn builder(
     clock: &ClockRef,
     tables: &[SyncedTable],
 ) -> DatabaseBuilder {
-    DatabaseBuilder::new(directory.clone()).id_source(ids.clone()).clock(clock.clone()).synced_tables(tables.to_vec()).migrations(vec![Migration::sql(1,"files","CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+    DatabaseBuilder::new(directory.clone()).id_source(ids.clone()).clock(clock.clone()).synced_tables(tables.to_vec()).migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT); CREATE TABLE other(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
 }
 
 #[tokio::test]

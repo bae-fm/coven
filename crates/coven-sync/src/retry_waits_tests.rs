@@ -35,7 +35,9 @@ impl Fixture {
     async fn open(&self) -> (Database, RetryWaits) {
         let database = coven_database::DatabaseBuilder::new(self.directory.clone())
             .synced_tables(vec![])
-            .migrations(vec![coven_database::Migration::sql(1, "local", "SELECT 1")])
+            .migrations(vec![coven_database::Migration::addition(
+                1, "local", "SELECT 1",
+            )])
             .open()
             .await
             .unwrap();

@@ -295,6 +295,12 @@ pub enum DbError {
     /// A waiting record or its conversion violates the write format (E13).
     #[error(transparent)]
     WriteFormat(coven_format::Error),
+    /// A migration's declared kind disagrees with its runtime classification.
+    #[error("migration {version} declared the wrong kind")]
+    MigrationKindMismatch {
+        /// The refused migration's version.
+        version: u32,
+    },
     /// A conversion changed or introduced a reference whose generation it cannot know (E13).
     #[error("conversion cannot change reference {table}.{column}")]
     MigrationReference {

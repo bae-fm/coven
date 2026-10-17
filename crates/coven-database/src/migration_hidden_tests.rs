@@ -164,8 +164,13 @@ impl FreezeHistory {
 
     fn migrations(&self, through: usize) -> Vec<Migration> {
         let mut migrations = vec![
-            Migration::sql(1, "rows and tags", SCHEMA),
-            Migration::sql(2, "freeze hidden rows", "UPDATE rows SET a=a"),
+            Migration::addition(1, "rows and tags", SCHEMA),
+            Migration::breaking(
+                2,
+                "freeze hidden rows",
+                "UPDATE rows SET a=a",
+                crate::OldWrites::Drop,
+            ),
         ];
         for (i, step) in self.steps[..through].iter().enumerate() {
             let (d, _) = self.names(i);
@@ -184,10 +189,15 @@ impl FreezeHistory {
             // Renaming precedes dropping the renamed column.
             statements.sort_by_key(|s| !s.contains("RENAME"));
             let statements = statements.join("; ");
-            migrations.push(Migration::run(i as u32 + 3, "drop schema", move |sql| {
-                sql.execute_batch(&statements)?;
-                Ok(())
-            }));
+            migrations.push(Migration::breaking_with(
+                i as u32 + 3,
+                "drop schema",
+                move |sql| {
+                    sql.execute_batch(&statements)?;
+                    Ok(())
+                },
+                crate::OldWrites::Drop,
+            ));
         }
         migrations
     }

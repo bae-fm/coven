@@ -177,12 +177,8 @@ fn file_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
                 CacheFill::CacheLazy,
             )),
         ],
-        vec![Migration::sql(
-            1,
-            "records",
-            "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);
-             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, size INTEGER, hash BLOB, location TEXT);",
-        )],
+        vec![Migration::addition(1, "records", "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);
+             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY, size INTEGER, hash BLOB, location TEXT);")],
     )
 }
 

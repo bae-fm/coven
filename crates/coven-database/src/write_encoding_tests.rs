@@ -21,7 +21,7 @@ async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_appli
         UNIX_EPOCH + Duration::from_millis(3_600_000),
     ));
     let database = store
-        .builder(notes(), vec![Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(clock.clone())
         .open()
         .await
@@ -60,7 +60,7 @@ async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_appli
     assert_eq!(records(&database)[2].header.timestamp.counter(), 5);
     database.close().await.unwrap();
     let reopened = store
-        .builder(notes(), vec![Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(clock)
         .open()
         .await
@@ -81,7 +81,7 @@ async fn clock_and_counter_limits_roll_back_without_using_a_number() {
         UNIX_EPOCH + Duration::from_millis(Timestamp::MAX_MILLISECONDS + 1),
     ));
     let database = store
-        .builder(notes(), vec![Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(clock.clone())
         .open()
         .await
@@ -183,7 +183,7 @@ fn other_local_format_errors_panic_naming_the_invariant() {
 
 async fn open(store: &TestStore, clock: &Arc<FixedClock>) -> Database {
     store
-        .builder(notes(), vec![Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(clock.clone())
         .open()
         .await

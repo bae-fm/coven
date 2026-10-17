@@ -173,7 +173,7 @@ mod owner_identity {
         Network::with_schema(
             CloudProvider::S3,
             vec![SyncedTable::new("notes", RowIdentity::SharedKey).owner_only()],
-            vec![Migration::sql(1, "notes", NOTES)],
+            vec![Migration::addition(1, "notes", NOTES)],
         )
         .await
     }

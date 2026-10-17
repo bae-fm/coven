@@ -4,7 +4,7 @@ use std::sync::Arc;
 fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
     app.builder(layout)
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::sql(
+        .migrations(vec![Migration::addition(
             1,
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
@@ -243,7 +243,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
         .await
         .unwrap();
     let first = || {
-        Migration::sql(
+        Migration::addition(
             1,
             "initial",
             "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL)",
@@ -267,18 +267,18 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     handle.close().await.unwrap();
     let converted = Arc::new(std::sync::Mutex::new(Vec::new()));
     let output = converted.clone();
-    let migration = Migration::sql(
+    let migration = Migration::breaking(
         2,
         "rename_attachment_title",
         "ALTER TABLE attachments RENAME COLUMN title TO name",
-    )
-    .writes(move |change| {
-        if change.table == "attachments" {
-            change.rename_column("title", "name");
-        }
-        output.lock().unwrap().push(change.clone());
-        Ok(())
-    });
+        crate::OldWrites::Convert(std::sync::Arc::new(move |change| {
+            if change.table == "attachments" {
+                change.rename_column("title", "name");
+            }
+            output.lock().unwrap().push(change.clone());
+            Ok(())
+        })),
+    );
     let handle = app
         .builder(layout.clone())
         .synced_tables(table())

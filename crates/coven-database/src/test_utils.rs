@@ -40,7 +40,7 @@ pub fn notes_tables() -> Vec<SyncedTable> {
 
 /// The corresponding app migration sequence.
 pub fn notes_migrations() -> Vec<Migration> {
-    vec![Migration::sql(1, "notes", "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '')")]
+    vec![Migration::addition(1, "notes", "CREATE TABLE notes (id TEXT NOT NULL PRIMARY KEY, title TEXT NOT NULL, body TEXT NOT NULL DEFAULT '')")]
 }
 
 /// Authorship of test writes, sealed and hashed with one fixed test key for

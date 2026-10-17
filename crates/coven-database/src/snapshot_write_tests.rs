@@ -498,11 +498,12 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
         .builder(
             notes(),
             vec![
-                crate::Migration::sql(1, "unique notes", UNIQUE_NOTES),
-                crate::Migration::sql(
+                crate::Migration::addition(1, "unique notes", UNIQUE_NOTES),
+                crate::Migration::breaking(
                     2,
                     "rename body",
                     "ALTER TABLE notes RENAME COLUMN body TO content",
+                    crate::OldWrites::Drop,
                 ),
             ],
         )
@@ -564,11 +565,12 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
         .builder(
             notes(),
             vec![
-                crate::Migration::sql(1, "unique notes", UNIQUE_NOTES),
-                crate::Migration::sql(
+                crate::Migration::addition(1, "unique notes", UNIQUE_NOTES),
+                crate::Migration::breaking(
                     2,
                     "rename body",
                     "ALTER TABLE notes RENAME COLUMN body TO content",
+                    crate::OldWrites::Drop,
                 ),
             ],
         )
@@ -610,10 +612,14 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     let a_store = TestStore::with_ids(&ids);
     let b_store = TestStore::with_ids(&ids);
     let migrations = || {
-        vec![crate::Migration::run(1, "references", move |sql| {
-            sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
-            Ok(())
-        })]
+        vec![crate::Migration::addition_with(
+            1,
+            "references",
+            move |sql| {
+                sql.execute_batch("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL)")?;
+                Ok(())
+            },
+        )]
     };
     let tables = || {
         ["parents", "children"]

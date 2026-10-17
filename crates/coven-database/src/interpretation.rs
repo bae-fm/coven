@@ -22,7 +22,7 @@ enum PartAdmission {
     Refused,
     /// A kept reset ignores the part, dismissals included, with no loss.
     Ignored(coven_merge::Slot),
-    /// A breaking change excluded it, and no converter reaches its version:
+    /// A crossed breaking migration explicitly drops old-version writes:
     /// each original change is a frozen schema loss.
     Excluded(u32),
     /// Its changes are judged, then converted to this version if given.

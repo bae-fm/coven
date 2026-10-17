@@ -86,7 +86,7 @@ fn tables() -> Vec<SyncedTable> {
     ]
 }
 fn migrations() -> Vec<Migration> {
-    vec![Migration::sql(1, "records", "
+    vec![Migration::addition(1, "records", "
         CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);
         CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY, parent TEXT NOT NULL REFERENCES parents(id) ON DELETE CASCADE, value INTEGER NOT NULL);
         CREATE TABLE circle_notes(id TEXT NOT NULL PRIMARY KEY, value INTEGER NOT NULL, audience TEXT NOT NULL);
@@ -376,10 +376,11 @@ impl Network {
     }
     async fn raise_schema(&mut self) {
         let mut changed = migrations();
-        changed.push(Migration::sql(
+        changed.push(Migration::breaking(
             2,
             "extra",
             "ALTER TABLE parents ADD COLUMN extra INTEGER NOT NULL DEFAULT 0",
+            crate::OldWrites::Drop,
         ));
         for device in &mut self.devices {
             device.handle.close().await.unwrap();

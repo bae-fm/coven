@@ -683,8 +683,13 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
         .builder(
             tables(),
             vec![
-                crate::Migration::sql(1, "schema", LABELS),
-                crate::Migration::sql(2, "drop note", "ALTER TABLE labels DROP COLUMN note"),
+                crate::Migration::addition(1, "schema", LABELS),
+                crate::Migration::breaking(
+                    2,
+                    "drop note",
+                    "ALTER TABLE labels DROP COLUMN note",
+                    crate::OldWrites::Drop,
+                ),
             ],
         )
         .open()

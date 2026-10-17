@@ -70,7 +70,7 @@ async fn open(owned: bool) -> (tempfile::TempDir, Database) {
     let table = if owned { table.owner_only() } else { table };
     let db = DatabaseBuilder::new(store)
         .synced_tables(vec![table])
-        .migrations(vec![Migration::sql(
+        .migrations(vec![Migration::addition(
             1,
             "items",
             "CREATE TABLE items(id TEXT NOT NULL PRIMARY KEY,value TEXT NOT NULL UNIQUE)",

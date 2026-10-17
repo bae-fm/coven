@@ -17,7 +17,7 @@ async fn rejects(sql: &'static str, tables: Vec<SyncedTable>, expected: SchemaEr
     }
 }
 
-fn shared(name: &str) -> SyncedTable {
+pub(super) fn shared(name: &str) -> SyncedTable {
     SyncedTable::new(name, RowIdentity::SharedKey)
 }
 fn independent(name: &str) -> SyncedTable {
@@ -52,7 +52,7 @@ async fn set_default_is_refused_on_open_and_after_migrating() {
                 let error = store
                     .builder(
                         tables(),
-                        vec![Migration::run(1, "foreign key", move |sql| {
+                        vec![Migration::addition_with(1, "foreign key", move |sql| {
                             sql.execute_batch(&migration_schema)?;
                             Ok(())
                         })],
@@ -105,10 +105,14 @@ async fn a_single_generated_reference_column_is_refused_on_open_and_after_migrat
         let error = store
             .builder(
                 vec![shared("c")],
-                vec![Migration::run(1, "generated reference", move |sql| {
-                    sql.execute_batch(&migration)?;
-                    Ok(())
-                })],
+                vec![Migration::addition_with(
+                    1,
+                    "generated reference",
+                    move |sql| {
+                        sql.execute_batch(&migration)?;
+                        Ok(())
+                    },
+                )],
             )
             .open()
             .await
@@ -139,7 +143,7 @@ async fn a_single_generated_reference_column_is_refused_on_open_and_after_migrat
         TestStore::new()
             .builder(
                 vec![shared("p").key_columns(["x", "y"]), shared("c")],
-                vec![Migration::run(1, "composite", move |sql| {
+                vec![Migration::addition_with(1, "composite", move |sql| {
                     sql.execute_batch(&composite)?;
                     Ok(())
                 })],
@@ -202,11 +206,16 @@ async fn a_set_default_migration_preserves_the_previous_schema_and_rows() {
             .builder(
                 tables(),
                 vec![
-                    Migration::sql(1, "schema", INITIAL),
-                    Migration::run(2, "change reference", move |sql| {
-                        sql.execute_batch(&schema)?;
-                        Ok(())
-                    }),
+                    Migration::addition(1, "schema", INITIAL),
+                    Migration::breaking_with(
+                        2,
+                        "change reference",
+                        move |sql| {
+                            sql.execute_batch(&schema)?;
+                            Ok(())
+                        },
+                        crate::OldWrites::Drop,
+                    ),
                 ],
             )
             .open()
@@ -289,7 +298,10 @@ async fn opening_does_not_validate_existing_uuid_values() {
         .await
         .unwrap();
     store
-        .builder(notes_tables(), vec![Migration::sql(1, "notes", schema)])
+        .builder(
+            notes_tables(),
+            vec![Migration::addition(1, "notes", schema)],
+        )
         .open_read_only()
         .await
         .unwrap()
@@ -542,7 +554,7 @@ async fn impossible_actions_are_refused_in_synced_and_local_tables() {
                 let error = store
                     .builder(
                         tables,
-                        vec![Migration::run(1, "invalid action", move |c| {
+                        vec![Migration::addition_with(1, "invalid action", move |c| {
                             c.execute_batch(&schema)?;
                             Ok(())
                         })],
@@ -593,7 +605,7 @@ async fn nullable_set_null_actions_are_accepted() {
         let db = store
             .builder(
                 vec![],
-                vec![Migration::run(1, "actions", move |c| {
+                vec![Migration::addition_with(1, "actions", move |c| {
                     c.execute_batch(&schema)?;
                     Ok(())
                 })],
@@ -649,7 +661,7 @@ async fn independent_keys_require_text_affinity_on_open_and_after_migrating() {
         let error = store
             .builder(
                 notes_tables(),
-                vec![Migration::run(1, "key type", move |sql| {
+                vec![Migration::addition_with(1, "key type", move |sql| {
                     sql.execute_batch(&migration_schema)?;
                     Ok(())
                 })],
@@ -699,7 +711,7 @@ async fn independent_keys_require_text_affinity_on_open_and_after_migrating() {
         let db = store
             .builder(
                 vec![independent("notes").key_columns(["n", "id"])],
-                vec![Migration::run(1, "key type", move |sql| {
+                vec![Migration::addition_with(1, "key type", move |sql| {
                     sql.execute_batch(&schema)?;
                     Ok(())
                 })],
@@ -746,7 +758,7 @@ async fn nonprimary_references_fail_migration_and_both_open_modes() {
         let error = store
             .builder(
                 vec![shared("CHILD")],
-                vec![Migration::run(1, "reference", move |sql| {
+                vec![Migration::addition_with(1, "reference", move |sql| {
                     sql.execute_batch(&migration_schema)?;
                     Ok(())
                 })],
@@ -804,7 +816,7 @@ async fn primary_references_accept_implicit_reordered_quoted_and_self_targets() 
         let db = store
             .builder(
                 tables(),
-                vec![Migration::run(1, "reference", move |sql| {
+                vec![Migration::addition_with(1, "reference", move |sql| {
                     sql.execute_batch(&schema)?;
                     Ok(())
                 })],
@@ -847,7 +859,7 @@ async fn nonprimary_reference_migration_preserves_the_previous_database() {
     .unwrap();
     let before = crate::tests::contents(&db);
     db.close().await.unwrap();
-    let error = store.builder(tables(), vec![Migration::sql(1, "schema", INITIAL), Migration::sql(2, "nonprimary", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children")]).open().await.err().expect("invalid target refused");
+    let error = store.builder(tables(), vec![Migration::addition(1, "schema", INITIAL), Migration::breaking(2, "nonprimary", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(code)); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop)]).open().await.err().expect("invalid target refused");
     assert!(matches!(
         database_error(error),
         DbError::Schema(SchemaError::ForeignKeyNotPrimaryKey { .. })
@@ -855,142 +867,5 @@ async fn nonprimary_reference_migration_preserves_the_previous_database() {
     let db = store.schema(tables(), INITIAL).await.unwrap();
     assert_eq!(db.schema_version().await.unwrap(), 1);
     assert_eq!(crate::tests::contents(&db), before);
-    db.close().await.unwrap();
-}
-
-async fn refuses_collation(
-    sql: String,
-    tables: Vec<SyncedTable>,
-    table: &str,
-    column: &str,
-    collation: &str,
-) {
-    let store = TestStore::new();
-    let migration = sql.clone();
-    let error = store
-        .builder(
-            tables,
-            vec![Migration::run(1, "schema", move |context| {
-                context.execute_batch(&migration)?;
-                Ok(())
-            })],
-        )
-        .open()
-        .await
-        .err()
-        .unwrap_or_else(|| panic!("{sql} must be refused"));
-    let expected = SchemaError::KeyCollation {
-        table: table.into(),
-        column: column.into(),
-        collation: collation.into(),
-    };
-    match database_error(error) {
-        DbError::Schema(error) => assert_eq!(error, expected, "{sql}"),
-        error => panic!("{sql}: expected {expected:?}, received {error:?}"),
-    }
-}
-
-#[tokio::test]
-async fn key_columns_that_fold_text_are_refused_on_every_key_kind() {
-    for collation in ["NOCASE", "RTRIM"] {
-        let c = collation;
-        for (sql, tables, table, column) in [
-            (format!("CREATE TABLE notes(id TEXT COLLATE {c} NOT NULL PRIMARY KEY)"), vec![shared("notes")], "notes", "id"),
-            (format!("CREATE TABLE notes(id TEXT NOT NULL, PRIMARY KEY(id COLLATE {c})) WITHOUT ROWID"), vec![shared("notes")], "notes", "id"),
-            (format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT COLLATE {c} UNIQUE)"), vec![shared("notes")], "notes", "title"),
-            (format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT, UNIQUE(title COLLATE {c}))"), vec![shared("notes")], "notes", "title"),
-            (format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT); CREATE UNIQUE INDEX titled ON notes(title COLLATE {c})"), vec![shared("notes")], "notes", "title"),
-            (format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT); CREATE UNIQUE INDEX folded ON notes(lower(title) COLLATE {c})"), vec![shared("notes")], "notes", "folded"),
-            // A BINARY index term still refuses the column's own collation, which
-            // SQLite applies to an ordinary `title = ?` comparison.
-            (format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY, title TEXT COLLATE {c}); CREATE UNIQUE INDEX titled ON notes(title COLLATE BINARY)"), vec![shared("notes")], "notes", "title"),
-        ] {
-            refuses_collation(sql, tables, table, column, collation).await;
-        }
-        let references = |child: &str, parent: &str| {
-            format!("CREATE TABLE parents(id TEXT {parent} NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY, parent TEXT {child} REFERENCES parents(id) ON DELETE CASCADE)")
-        };
-        let folded = format!("COLLATE {c}");
-        for (tables, child, parent, table, column) in [
-            (
-                vec![shared("parents"), shared("children")],
-                folded.as_str(),
-                "",
-                "children",
-                "parent",
-            ),
-            (
-                vec![shared("parents")],
-                folded.as_str(),
-                "",
-                "children",
-                "parent",
-            ),
-            (
-                vec![shared("children")],
-                folded.as_str(),
-                "",
-                "children",
-                "parent",
-            ),
-            (
-                vec![shared("children")],
-                "",
-                folded.as_str(),
-                "parents",
-                "id",
-            ),
-        ] {
-            refuses_collation(references(child, parent), tables, table, column, collation).await;
-        }
-    }
-}
-
-/// Coven's connections register no app collation, so a key declared with one
-/// fails SQLite's own open-time integrity check before schema validation, which
-/// refuses every collation other than BINARY by name.
-#[tokio::test]
-async fn an_app_defined_key_collation_is_refused_on_open() {
-    let store = TestStore::new();
-    store
-        .builder(vec![], vec![])
-        .open()
-        .await
-        .unwrap()
-        .close()
-        .await
-        .unwrap();
-    let raw = rusqlite::Connection::open(store.database_path()).unwrap();
-    raw.create_collation("reverse", |a, b| b.cmp(a)).unwrap();
-    raw.execute_batch("CREATE TABLE notes(id TEXT COLLATE reverse NOT NULL PRIMARY KEY)")
-        .unwrap();
-    drop(raw);
-    let error = store
-        .builder(vec![shared("notes")], vec![])
-        .open()
-        .await
-        .err()
-        .expect("custom key collation must be refused");
-    match database_error(error) {
-        DbError::Sqlite(rusqlite::Error::SqliteFailure(_, Some(message))) => {
-            assert_eq!(message, "no such collation sequence: reverse")
-        }
-        error => panic!("expected the unknown collation, received {error:?}"),
-    }
-}
-
-#[tokio::test]
-async fn binary_keys_and_folded_values_outside_keys_are_accepted() {
-    let store = TestStore::new();
-    let db = store
-        .schema(
-            vec![shared("notes"), shared("tags")],
-            "CREATE TABLE notes(id TEXT COLLATE BINARY NOT NULL PRIMARY KEY, title TEXT COLLATE NOCASE, body TEXT COLLATE RTRIM, slug TEXT, UNIQUE(slug COLLATE BINARY));
-             CREATE UNIQUE INDEX lowered ON notes(lower(title));
-             CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY, note TEXT COLLATE BINARY REFERENCES notes(id) ON DELETE CASCADE);
-             CREATE TABLE local_words(word TEXT COLLATE NOCASE PRIMARY KEY, note TEXT REFERENCES local_words(word))",
-        )
-        .await
-        .unwrap();
     db.close().await.unwrap();
 }

@@ -7,7 +7,7 @@ use coven_format::write::WriteDisposition;
 use std::collections::BTreeMap;
 
 fn sequence(extra: Vec<Migration>) -> Vec<Migration> {
-    std::iter::once(Migration::sql(1, "notes", NOTES))
+    std::iter::once(Migration::addition(1, "notes", NOTES))
         .chain(extra)
         .collect()
 }
@@ -27,11 +27,11 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
         sql(&db,"WITH RECURSIVE n(i) AS (VALUES(1) UNION ALL SELECT i+1 FROM n WHERE i<10000) INSERT INTO library SELECT printf('%05d',i),zeroblob(256) FROM n; INSERT INTO local_cache SELECT * FROM library; INSERT INTO notes VALUES('n','Title','body')").await.unwrap();
         db.close().await.unwrap();
         let mut migrations = vec![
-            Migration::sql(1, "initial", SCHEMA),
-            Migration::sql(2, "addition", "ALTER TABLE notes ADD COLUMN color TEXT; ALTER TABLE local_cache RENAME COLUMN body TO payload"),
+            Migration::addition(1, "initial", SCHEMA),
+            Migration::addition(2, "addition", "ALTER TABLE notes ADD COLUMN color TEXT; ALTER TABLE local_cache RENAME COLUMN body TO payload"),
         ];
         if breaking {
-            migrations.push(Migration::sql(3,"rename and backfill","ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=lower(name)"));
+            migrations.push(Migration::breaking(3, "rename and backfill", "ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=lower(name)", crate::OldWrites::Drop));
         }
         let db = fixture.builder(tables(), migrations).open().await.unwrap();
         let loads = db.inspect_writer(|db| db.merge_loads());
@@ -112,9 +112,9 @@ async fn title_setter_survives_while_slug_and_changed_rows_belong_to_one_migrati
     let store = TestStore::new();
     seeded(&store).await.close().await.unwrap();
     let db = store.builder(notes(), sequence(vec![
-        Migration::sql(2, "name and slug", "ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=lower(replace(name,' ','-')); DELETE FROM notes WHERE id='deleted'; INSERT INTO notes VALUES('new','Inserted','','inserted')"),
-        Migration::sql(3, "backfill", "UPDATE notes SET body='changed' WHERE id='n'"),
-        Migration::sql(4, "color", "ALTER TABLE notes ADD COLUMN color TEXT"),
+        Migration::breaking(2, "name and slug", "ALTER TABLE notes RENAME COLUMN title TO name; ALTER TABLE notes ADD COLUMN slug TEXT; UPDATE notes SET slug=lower(replace(name,' ','-')); DELETE FROM notes WHERE id='deleted'; INSERT INTO notes VALUES('new','Inserted','','inserted')", crate::OldWrites::Drop),
+        Migration::breaking(3, "backfill", "UPDATE notes SET body='changed' WHERE id='n'", crate::OldWrites::Drop),
+        Migration::addition(4, "color", "ALTER TABLE notes ADD COLUMN color TEXT"),
     ])).open().await.unwrap();
     let writes = records(&db);
     assert_eq!(writes.len(), 3);
@@ -162,7 +162,7 @@ async fn drops_rebuilds_and_drop_recreate_preserve_only_matching_cells() {
     ] {
         let store = TestStore::new();
         seeded(&store).await.close().await.unwrap();
-        let db = store.builder(notes(), sequence(vec![Migration::sql(2, "change", migration)])).open().await.unwrap();
+        let db = store.builder(notes(), sequence(vec![Migration::breaking(2, "change", migration, crate::OldWrites::Drop)])).open().await.unwrap();
         assert_eq!(setters(&db,"notes","n"), [("id".into(),1),("title".into(),2)].into(), "{migration}");
         assert_eq!(records(&db).last().unwrap().header.disposition, WriteDisposition::Migration);
         assert_eq!(db.inspect_writer(|db| db.query_row("SELECT count(*) FROM _coven_columns WHERE column_name='body'",[],|r|r.get::<_,i64>(0)).unwrap()),0);
@@ -194,7 +194,11 @@ async fn additions_make_no_write_but_updates_make_an_addition_breaking() {
         let db = store
             .builder(
                 notes(),
-                sequence(vec![Migration::sql(2, "change", statement)]),
+                sequence(vec![if change == MigrationChange::Breaking {
+                    Migration::breaking(2, "change", statement, crate::OldWrites::Drop)
+                } else {
+                    Migration::addition(2, "change", statement)
+                }]),
             )
             .open()
             .await
@@ -234,37 +238,42 @@ async fn explicit_rename_chains_override_names_through_every_context_method() {
             .builder(
                 vec![SyncedTable::new("b", RowIdentity::SharedKey)],
                 vec![
-                    Migration::sql(1, "initial", INITIAL),
-                    Migration::run(2, "rename", move |context| {
-                        for statement in [
-                            "DROP TABLE b",
-                            "ALTER TABLE a RENAME TO intermediate",
-                            "ALTER TABLE intermediate RENAME TO b",
-                            "ALTER TABLE b DROP COLUMN y",
-                            "ALTER TABLE b RENAME COLUMN x TO temporary",
-                            "ALTER TABLE b RENAME COLUMN temporary TO y",
-                        ] {
-                            match method {
-                                0 => {
-                                    context.execute(statement, [])?;
-                                }
-                                1 => context.execute_batch(statement)?,
-                                2 => {
-                                    assert!(matches!(
-                                        context.query_row(statement, [], |_| Ok(())),
-                                        Err(rusqlite::Error::QueryReturnedNoRows)
-                                    ));
-                                }
-                                _ => {
-                                    assert!(context
-                                        .query(statement, [], |_| Ok(()))
-                                        .unwrap()
-                                        .is_empty());
+                    Migration::addition(1, "initial", INITIAL),
+                    Migration::breaking_with(
+                        2,
+                        "rename",
+                        move |context| {
+                            for statement in [
+                                "DROP TABLE b",
+                                "ALTER TABLE a RENAME TO intermediate",
+                                "ALTER TABLE intermediate RENAME TO b",
+                                "ALTER TABLE b DROP COLUMN y",
+                                "ALTER TABLE b RENAME COLUMN x TO temporary",
+                                "ALTER TABLE b RENAME COLUMN temporary TO y",
+                            ] {
+                                match method {
+                                    0 => {
+                                        context.execute(statement, [])?;
+                                    }
+                                    1 => context.execute_batch(statement)?,
+                                    2 => {
+                                        assert!(matches!(
+                                            context.query_row(statement, [], |_| Ok(())),
+                                            Err(rusqlite::Error::QueryReturnedNoRows)
+                                        ));
+                                    }
+                                    _ => {
+                                        assert!(context
+                                            .query(statement, [], |_| Ok(()))
+                                            .unwrap()
+                                            .is_empty());
+                                    }
                                 }
                             }
-                        }
-                        Ok(())
-                    }),
+                            Ok(())
+                        },
+                        crate::OldWrites::Drop,
+                    ),
                 ],
             )
             .open()
@@ -302,10 +311,11 @@ async fn a_migration_write_failure_rolls_back_schema_data_and_metadata() {
     let error = store
         .builder(
             notes(),
-            sequence(vec![Migration::sql(
+            sequence(vec![Migration::breaking(
                 2,
                 "backfill",
                 "ALTER TABLE notes RENAME COLUMN title TO name; UPDATE notes SET name='changed'",
+                crate::OldWrites::Drop,
             )]),
         )
         .clock(clock)
@@ -410,7 +420,7 @@ async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() 
     assert_eq!(lost.len(), 1);
     db.close().await.unwrap();
     let migrations = || {
-        vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"drop check","DROP TABLE notes; CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT)")]
+        vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "drop check", "DROP TABLE notes; CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT,body TEXT)", crate::OldWrites::Drop)]
     };
     let db = store.builder(notes(), migrations()).open().await.unwrap();
     // The migration write deletes the hidden row at its generation and keeps
@@ -477,7 +487,7 @@ async fn renames_keep_reference_generations_and_a_migration_insert_uses_the_merg
     .await
     .unwrap();
     db.close().await.unwrap();
-    let db = store.builder(vec![SyncedTable::new("roots",RowIdentity::SharedKey).key_columns(["key"]),SyncedTable::new("children",RowIdentity::SharedKey)], vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"rename","ALTER TABLE parents RENAME TO roots; ALTER TABLE roots RENAME COLUMN id TO key; ALTER TABLE children RENAME COLUMN parent TO root; INSERT INTO children VALUES('new','p')")]).open().await.unwrap();
+    let db = store.builder(vec![SyncedTable::new("roots",RowIdentity::SharedKey).key_columns(["key"]),SyncedTable::new("children",RowIdentity::SharedKey)], vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "rename", "ALTER TABLE parents RENAME TO roots; ALTER TABLE roots RENAME COLUMN id TO key; ALTER TABLE children RENAME COLUMN parent TO root; INSERT INTO children VALUES('new','p')", crate::OldWrites::Drop)]).open().await.unwrap();
     assert_eq!(setters(&db, "children", "c")["root"], 1);
     assert_eq!(setters(&db, "children", "new")["root"], 2);
     assert_eq!(count(&db, "_coven_references"), 2);
@@ -521,7 +531,7 @@ async fn a_new_reference_column_is_set_by_the_migration() {
     .await
     .unwrap();
     db.close().await.unwrap();
-    let db = store.builder(tables(),vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"reference","ALTER TABLE children ADD COLUMN parent TEXT REFERENCES parents(id); UPDATE children SET parent='p'")]).open().await.unwrap();
+    let db = store.builder(tables(),vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "reference", "ALTER TABLE children ADD COLUMN parent TEXT REFERENCES parents(id); UPDATE children SET parent='p'", crate::OldWrites::Drop)]).open().await.unwrap();
     assert_eq!(setters(&db, "children", "c")["parent"], 2);
     assert_eq!(count(&db, "_coven_references"), 1);
     db.close().await.unwrap();
@@ -531,7 +541,7 @@ async fn a_new_reference_column_is_set_by_the_migration() {
 async fn dropping_and_recreating_identical_schema_records_deleted_rows() {
     let store = TestStore::new();
     seeded(&store).await.close().await.unwrap();
-    let db = store.builder(notes(),sequence(vec![Migration::sql(2,"empty","DROP TABLE notes; CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT '')")])).open().await.unwrap();
+    let db = store.builder(notes(),sequence(vec![Migration::breaking(2, "empty", "DROP TABLE notes; CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT '')", crate::OldWrites::Drop)])).open().await.unwrap();
     assert_eq!(
         db.applied_migrations().unwrap()[0].change,
         MigrationChange::Breaking
@@ -545,7 +555,7 @@ async fn dropping_and_recreating_identical_schema_records_deleted_rows() {
 #[tokio::test]
 async fn migration_inserts_obey_the_independent_key_rule() {
     let store = TestStore::new();
-    let error = store.builder(vec![SyncedTable::new("notes",RowIdentity::IndependentUuid)],vec![Migration::sql(1,"invalid key","CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES('not-a-uuid')")]).open().await.err().unwrap();
+    let error = store.builder(vec![SyncedTable::new("notes",RowIdentity::IndependentUuid)],vec![Migration::breaking(1, "invalid key", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY); INSERT INTO notes VALUES('not-a-uuid')", crate::OldWrites::Drop)]).open().await.err().unwrap();
     assert!(matches!(
         crate::tests::database_error(error),
         crate::DbError::KeyNotUuid { .. }
@@ -574,7 +584,7 @@ async fn dropping_a_foreign_key_sets_the_changed_reference() {
     .await
     .unwrap();
     db.close().await.unwrap();
-    let db = store.builder(tables(), vec![Migration::sql(1,"initial",INITIAL), Migration::sql(2,"drop reference","CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children")]).open().await.unwrap();
+    let db = store.builder(tables(), vec![Migration::addition(1, "initial", INITIAL), Migration::breaking(2, "drop reference", "CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop)]).open().await.unwrap();
     assert_eq!(setters(&db, "children", "c")["parent"], 2);
     assert_eq!(count(&db, "_coven_references"), 0);
     sql(&db, "DELETE FROM parents").await.unwrap();
@@ -597,7 +607,7 @@ async fn new_foreign_keys_set_existing_cells_and_name_the_new_parent_generation(
         .await
         .unwrap();
     db.close().await.unwrap();
-    let db = store.builder(tables(),vec![Migration::sql(1,"initial",INITIAL), Migration::sql(2,"add reference", "INSERT INTO parents VALUES('p'); CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children")]).open().await.unwrap();
+    let db = store.builder(tables(),vec![Migration::addition(1, "initial", INITIAL), Migration::breaking(2, "add reference", "INSERT INTO parents VALUES('p'); CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL); INSERT INTO rebuilt SELECT * FROM children; DROP TABLE children; ALTER TABLE rebuilt RENAME TO children", crate::OldWrites::Drop)]).open().await.unwrap();
     for key in ["c", "null"] {
         assert_eq!(
             setters(&db, "children", key),
@@ -623,10 +633,10 @@ async fn rebuilding_the_same_schema_is_breaking_even_when_no_values_change() {
     for (copy, title_setter) in [("title", 2), ("upper(title)", 3)] {
         let store = TestStore::new();
         seeded(&store).await.close().await.unwrap();
-        let db = store.builder(notes(),sequence(vec![Migration::run(2,"rebuild",move |c| {
+        let db = store.builder(notes(),sequence(vec![Migration::breaking_with(2, "rebuild", move |c| {
             c.execute_batch(&format!("CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL,body TEXT NOT NULL DEFAULT ''); INSERT INTO rebuilt SELECT id,{copy},body FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes"))?;
             Ok(())
-        })])).open().await.unwrap();
+        }, crate::OldWrites::Drop)])).open().await.unwrap();
         assert_eq!(
             db.applied_migrations().unwrap()[0].change,
             MigrationChange::Breaking
@@ -641,7 +651,7 @@ async fn rebuilding_the_same_schema_is_breaking_even_when_no_values_change() {
 async fn an_explicit_column_rename_survives_a_subsequent_table_rebuild() {
     let store = TestStore::new();
     seeded(&store).await.close().await.unwrap();
-    let db = store.builder(notes(),sequence(vec![Migration::sql(2,"rename and rebuild","ALTER TABLE notes RENAME COLUMN title TO name; CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,name TEXT NOT NULL,body TEXT); INSERT INTO rebuilt SELECT * FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes")])).open().await.unwrap();
+    let db = store.builder(notes(),sequence(vec![Migration::breaking(2, "rename and rebuild", "ALTER TABLE notes RENAME COLUMN title TO name; CREATE TABLE rebuilt(id TEXT NOT NULL PRIMARY KEY,name TEXT NOT NULL,body TEXT); INSERT INTO rebuilt SELECT * FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes", crate::OldWrites::Drop)])).open().await.unwrap();
     assert_eq!(setters(&db, "notes", "n")["name"], 2);
     db.close().await.unwrap();
 }
@@ -650,7 +660,7 @@ async fn an_explicit_column_rename_survives_a_subsequent_table_rebuild() {
 async fn changing_primary_key_arity_deletes_old_rows_and_inserts_new_ones() {
     let store = TestStore::new();
     seeded(&store).await.close().await.unwrap();
-    let db = store.builder(vec![SyncedTable::new("notes",RowIdentity::SharedKey).key_columns(["id","part"])],sequence(vec![Migration::sql(2,"key","CREATE TABLE rebuilt(id TEXT NOT NULL,part INT NOT NULL,title TEXT NOT NULL,body TEXT,PRIMARY KEY(id,part)); INSERT INTO rebuilt SELECT id,1,title,body FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes")])).open().await.unwrap();
+    let db = store.builder(vec![SyncedTable::new("notes",RowIdentity::SharedKey).key_columns(["id","part"])],sequence(vec![Migration::breaking(2, "key", "CREATE TABLE rebuilt(id TEXT NOT NULL,part INT NOT NULL,title TEXT NOT NULL,body TEXT,PRIMARY KEY(id,part)); INSERT INTO rebuilt SELECT id,1,title,body FROM notes; DROP TABLE notes; ALTER TABLE rebuilt RENAME TO notes", crate::OldWrites::Drop)])).open().await.unwrap();
     assert_eq!(count(&db, "notes"), 2);
     db.inspect_writer(|db| {
         let numbers = db
@@ -683,11 +693,12 @@ async fn renaming_a_composite_reference_keeps_its_shared_setter() {
         .builder(
             tables(),
             vec![
-                Migration::sql(1, "initial", INITIAL),
-                Migration::sql(
+                Migration::addition(1, "initial", INITIAL),
+                Migration::breaking(
                     2,
                     "rename",
                     "ALTER TABLE children RENAME COLUMN a TO renamed",
+                    crate::OldWrites::Drop,
                 ),
             ],
         )
@@ -709,8 +720,13 @@ async fn matching_cells_survive_absence_between_migrations_of_one_run() {
         .builder(
             notes(),
             sequence(vec![
-                Migration::sql(2, "drop", "ALTER TABLE notes DROP COLUMN body"),
-                Migration::sql(
+                Migration::breaking(
+                    2,
+                    "drop",
+                    "ALTER TABLE notes DROP COLUMN body",
+                    crate::OldWrites::Drop,
+                ),
+                Migration::addition(
                     3,
                     "recreate",
                     "ALTER TABLE notes ADD COLUMN body TEXT DEFAULT 'body'",
@@ -758,7 +774,7 @@ async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_lo
     let lost = db.lost_values().await.unwrap();
     assert_eq!(lost.len(), 2);
     db.close().await.unwrap();
-    let db = store.builder(vec![SyncedTable::new("renamed",RowIdentity::SharedKey)],vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"rename","ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name")]).open().await.unwrap();
+    let db = store.builder(vec![SyncedTable::new("renamed",RowIdentity::SharedKey)],vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "rename", "ALTER TABLE notes RENAME TO renamed; ALTER TABLE renamed RENAME COLUMN title TO name", crate::OldWrites::Drop)]).open().await.unwrap();
     let removed = lost
         .iter()
         .find(|loss| matches!(loss.replaced_by, crate::Replacement::Rules(_)))
@@ -824,7 +840,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     });
     let lost = db.lost_values().await.unwrap();
     db.close().await.unwrap();
-    let db = store.builder(notes(),vec![Migration::sql(1,"initial",INITIAL),Migration::sql(2,"replace column","DROP INDEX y_index; ALTER TABLE notes DROP COLUMN y; ALTER TABLE notes RENAME COLUMN x TO y")]).open().await.unwrap();
+    let db = store.builder(notes(),vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "replace column", "DROP INDEX y_index; ALTER TABLE notes DROP COLUMN y; ALTER TABLE notes RENAME COLUMN x TO y", crate::OldWrites::Drop)]).open().await.unwrap();
     // The losing row is deleted at its generation; its frozen loss keeps the
     // old x and y values with their setters (§17.1).
     let migrated = db.lost_values().await.unwrap();
@@ -933,66 +949,4 @@ fn assert_same_loss_values(actual: &[crate::LostValue], expected: &[crate::LostV
             )
         );
     }
-}
-
-#[tokio::test]
-async fn migrations_change_present_values_without_a_second_copy() {
-    use coven_format::value::Value;
-
-    fn declarations() -> Vec<SyncedTable> {
-        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)
-            .key_columns(["id", "number"])
-            .audience_column("audience")]
-    }
-
-    fn migrations() -> Vec<Migration> {
-        vec![Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT NOT NULL, number INTEGER NOT NULL, audience TEXT NOT NULL, title TEXT, body BLOB, PRIMARY KEY(id,number))")]
-    }
-
-    let store = TestStore::new();
-    let db = store
-        .builder(declarations(), migrations())
-        .open()
-        .await
-        .unwrap();
-    crate::write::tests::sql(&db, "INSERT INTO notes VALUES('f47ac10b-58cc-4372-a567-0e02b2c3d479',1,'store','before',x'00ff2a')").await.unwrap();
-    let original = crate::write::tests::records(&db).remove(0);
-    db.close().await.unwrap();
-    let mut migrations = migrations();
-    migrations.push(Migration::sql(
-        2,
-        "rewrite title",
-        "UPDATE notes SET title='migrated'",
-    ));
-    let db = store
-        .builder(declarations(), migrations)
-        .open()
-        .await
-        .unwrap();
-    let migration = crate::write::tests::records(&db).pop().unwrap();
-    db.inspect_writer_schema(|sql, schema| {
-        let visible = crate::write_rows::AppView::after(sql, schema);
-        let merge = crate::merge_store::MergeStore::new(sql, &visible);
-        let state = merge.row(&original.parts[0].rows[0].row).unwrap().state;
-        assert_eq!(
-            state.cells()["title"].value.value,
-            Value::Text("migrated".into())
-        );
-        assert_eq!(state.cells()["title"].write, migration.header.position);
-        assert_eq!(state.cells()["body"].write, original.header.position);
-        assert_eq!(
-            state.cells()["body"].value.value,
-            Value::Blob(vec![0, 255, 42])
-        );
-        assert!(state.lost().is_empty());
-        let cells = sql
-            .query(
-                "SELECT name FROM pragma_table_info('_coven_cells') ORDER BY cid",
-                [],
-                |r| r.get::<_, String>(0),
-            )
-            .unwrap();
-        assert_eq!(cells, ["column_id", "row_id", "write_id"]);
-    });
-    db.close().await.unwrap();
 }

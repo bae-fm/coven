@@ -30,7 +30,10 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
     {
         databases.push(
             store
-                .builder(notes(), vec![crate::Migration::sql(1, "bounds", SCHEMA)])
+                .builder(
+                    notes(),
+                    vec![crate::Migration::addition(1, "bounds", SCHEMA)],
+                )
                 .clock(Arc::new(FixedClock::new(
                     UNIX_EPOCH + Duration::from_millis(millis),
                 )))

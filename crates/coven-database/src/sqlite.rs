@@ -232,6 +232,16 @@ impl DatabaseConnection {
         if current > supported {
             return Err(MigrationError::SchemaTooNew { current, supported }.into());
         }
+        // App declarations are inputs even when their SQL ran on an earlier open.
+        // Every breaking step retained its schema; other committed steps did not.
+        for migration in migrations.iter().filter(|m| m.version <= current) {
+            let breaking = self.query_row(
+                "SELECT EXISTS(SELECT 1 FROM _coven_conversion_schemas WHERE version=?1)",
+                [migration.version],
+                |r| r.get(0),
+            )?;
+            migration.check_kind(breaking)?;
+        }
         if read_only || current == supported {
             let schema = Schema::read(self)?;
             schema.validate(tables)?;

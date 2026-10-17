@@ -32,10 +32,10 @@ pub(crate) async fn connect(db: &Database) {
 }
 
 fn initial() -> Migration {
-    Migration::sql(1, "notes", NOTES)
+    Migration::addition(1, "notes", NOTES)
 }
-fn index(version: u32) -> Migration {
-    Migration::sql(
+fn index(version: u32, old_writes: crate::OldWrites) -> Migration {
+    Migration::breaking(
         version,
         "index",
         if version == 2 {
@@ -43,6 +43,7 @@ fn index(version: u32) -> Migration {
         } else {
             "CREATE INDEX bodies ON notes(body)"
         },
+        old_writes,
     )
 }
 
@@ -109,10 +110,10 @@ async fn attempted_and_untried_records_survive_successive_migrations() {
     let original = queue(&db);
     assert!(original[0].2.is_some() && original[1].2.is_none());
     db.close().await.unwrap();
-    let mut migrations = vec![initial(), index(2)];
+    let mut migrations = vec![initial(), index(2, crate::OldWrites::Drop)];
     for version in [2, 3] {
         if version == 3 {
-            migrations.push(index(3));
+            migrations.push(index(3, crate::OldWrites::Drop));
         }
         let db = store
             .builder(notes(), migrations.clone())
@@ -164,7 +165,7 @@ async fn the_capture_stops_at_the_marker_and_later_app_writes_stay_outside() {
         .unwrap();
     db.close().await.unwrap();
     let db = store
-        .builder(notes(), vec![initial(), index(2)])
+        .builder(notes(), vec![initial(), index(2, crate::OldWrites::Drop)])
         .open()
         .await
         .unwrap();
@@ -217,7 +218,7 @@ async fn the_unconfirmed_prefix_names_each_own_write_through_the_marker() {
         .unwrap();
     db.close().await.unwrap();
     let db = store
-        .builder(notes(), vec![initial(), index(2)])
+        .builder(notes(), vec![initial(), index(2, crate::OldWrites::Drop)])
         .open()
         .await
         .unwrap();
@@ -248,7 +249,7 @@ async fn without_a_store_nothing_is_captured_and_no_raise_is_intended() {
         .unwrap();
     db.close().await.unwrap();
     let db = store
-        .builder(notes(), vec![initial(), index(2)])
+        .builder(notes(), vec![initial(), index(2, crate::OldWrites::Drop)])
         .open()
         .await
         .unwrap();
@@ -283,8 +284,13 @@ async fn a_failed_migration_leaves_no_capture() {
             notes(),
             vec![
                 initial(),
-                index(2),
-                Migration::sql(3, "broken", "CREATE INDEX broken ON missing(x)")
+                index(2, crate::OldWrites::Drop),
+                Migration::breaking(
+                    3,
+                    "broken",
+                    "CREATE INDEX broken ON missing(x)",
+                    crate::OldWrites::Drop
+                )
             ]
         )
         .open()
@@ -298,7 +304,10 @@ async fn a_failed_migration_leaves_no_capture() {
 
 /// Index version 2 with a converter that keeps an old write's changes.
 fn converted_index() -> Migration {
-    index(2).writes(|_| Ok(()))
+    index(
+        2,
+        crate::OldWrites::Convert(std::sync::Arc::new(|_| Ok(()))),
+    )
 }
 
 async fn migrated(store: &TestStore) -> Database {
@@ -418,7 +427,7 @@ async fn an_addition_moves_a_waiting_raise_to_its_version() {
     let db = migrated(&store).await;
     let before = db.raise_captures().await.unwrap().remove(0);
     db.close().await.unwrap();
-    let color = Migration::sql(3, "color", "ALTER TABLE notes ADD COLUMN color TEXT");
+    let color = Migration::addition(3, "color", "ALTER TABLE notes ADD COLUMN color TEXT");
     let three = vec![initial(), converted_index(), color];
     let db = store.builder(notes(), three.clone()).open().await.unwrap();
     let moved = db.raise_captures().await.unwrap();
@@ -438,7 +447,7 @@ async fn an_addition_moves_a_waiting_raise_to_its_version() {
     db.discard_raise_capture(Audience::Store, 3).await.unwrap();
     db.close().await.unwrap();
     let mut four = three;
-    four.push(Migration::sql(
+    four.push(Migration::addition(
         4,
         "size",
         "ALTER TABLE notes ADD COLUMN size INTEGER",
@@ -477,7 +486,14 @@ async fn an_adopted_raise_replaces_an_unpublished_migrations_setters() {
         .await
         .unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
-    let fill = || Migration::sql(2, "fill", "UPDATE notes SET body='migrated'");
+    let fill = || {
+        Migration::breaking(
+            2,
+            "fill",
+            "UPDATE notes SET body='migrated'",
+            crate::OldWrites::Drop,
+        )
+    };
     let mut migrated = Vec::new();
     for (store, db) in [(&a_store, a), (&b_store, b)] {
         db.close().await.unwrap();
@@ -547,7 +563,7 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
     let tables = || {
         vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")]
     };
-    let schema = || Migration::sql(1, "notes", SCHEMA);
+    let schema = || Migration::addition(1, "notes", SCHEMA);
     let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
     let store = TestStore::new();
     let db = store
@@ -565,7 +581,12 @@ async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
     .unwrap();
     let written = records(&db).remove(0);
     db.close().await.unwrap();
-    let index = Migration::sql(2, "index", "CREATE INDEX values_index ON notes(value)");
+    let index = Migration::breaking(
+        2,
+        "index",
+        "CREATE INDEX values_index ON notes(value)",
+        crate::OldWrites::Drop,
+    );
     let db = store
         .builder(tables(), vec![schema(), index])
         .open()

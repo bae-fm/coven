@@ -145,14 +145,19 @@ impl Group {
             ])
             .migrations(
                 [
-                    Migration::sql(
+                    Migration::addition(
                         1,
                         "notes",
                         "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
                          CREATE TABLE pins(id TEXT PRIMARY KEY NOT NULL,audience TEXT NOT NULL,
                            title TEXT NOT NULL)",
                     ),
-                    Migration::sql(2, "titles", "CREATE INDEX titles ON notes(title)"),
+                    Migration::breaking(
+                        2,
+                        "titles",
+                        "CREATE INDEX titles ON notes(title)",
+                        coven_database::OldWrites::Drop,
+                    ),
                 ]
                 .into_iter()
                 .take(self.version.load(std::sync::atomic::Ordering::SeqCst) as usize)

@@ -57,7 +57,7 @@ async fn local_keys_into_values_coven_updates_must_follow_them() {
             store
                 .builder(
                     vec![shared("parents")],
-                    vec![Migration::run(1, "schema", move |sql| {
+                    vec![Migration::addition_with(1, "schema", move |sql| {
                         sql.execute_batch(&migration)?;
                         Ok(())
                     })],
@@ -106,7 +106,7 @@ async fn a_local_key_that_does_not_follow_stops_every_apply() {
             store
                 .builder(
                     vec![shared("parents")],
-                    vec![Migration::sql(1, "schema", PARENTS)]
+                    vec![Migration::addition(1, "schema", PARENTS)]
                 )
                 .open()
                 .await
@@ -127,7 +127,7 @@ async fn an_applied_rename_reaches_every_following_local_key() {
         let db = store
             .builder(
                 vec![shared("parents")],
-                vec![Migration::run(1, "schema", move |sql| {
+                vec![Migration::addition_with(1, "schema", move |sql| {
                     sql.execute_batch(&schema)?;
                     Ok(())
                 })],
@@ -202,7 +202,7 @@ async fn set_default_between_local_tables_remains_sqlites_action() {
     store
         .builder(
             vec![shared("synced")],
-            vec![Migration::sql(1, "schema", SCHEMA)],
+            vec![Migration::addition(1, "schema", SCHEMA)],
         )
         .open_read_only()
         .await

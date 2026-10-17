@@ -296,7 +296,7 @@ fn tables() -> Vec<SyncedTable> {
 }
 
 fn migrations() -> Vec<Migration> {
-    vec![Migration::run(1, "atomic writes", |context| {
+    vec![Migration::addition_with(1, "atomic writes", |context| {
         context.execute_batch(NOTES)?;
         context.execute_batch(
             "CREATE TABLE tags(id TEXT NOT NULL PRIMARY KEY,note TEXT REFERENCES notes(id))",
@@ -735,7 +735,7 @@ fn crashing_removal_writer() {
                     "notes",
                     crate::RowIdentity::SharedKey,
                 )])
-                .migrations(vec![crate::Migration::sql(1, "schema", CRASH_SCHEMA)])
+                .migrations(vec![crate::Migration::addition(1, "schema", CRASH_SCHEMA)])
                 .open(),
         )
         .unwrap();

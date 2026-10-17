@@ -166,7 +166,7 @@ impl TestStore {
         tables: Vec<SyncedTable>,
         sql: &'static str,
     ) -> Result<crate::Database, CovenError> {
-        self.builder(tables, vec![Migration::sql(1, "schema", sql)])
+        self.builder(tables, vec![Migration::addition(1, "schema", sql)])
             .open()
             .await
     }

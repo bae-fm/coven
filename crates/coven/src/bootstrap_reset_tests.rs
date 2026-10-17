@@ -72,7 +72,7 @@ fn builder(
         .clock(clock.clone())
         .storage_connector(storage.clone())
         .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-        .migrations(vec![Migration::sql(
+        .migrations(vec![Migration::addition(
             1,
             "notes",
             "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,body TEXT NOT NULL)",

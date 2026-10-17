@@ -113,6 +113,13 @@ pub(crate) fn run<'a>(
     if declared {
         outcomes[0].change = MigrationChange::Breaking;
     }
+    // Classification needs the final declarations and every rename in the run.
+    // Refuse the first mismatch before retaining conversions or publishing a marker.
+    for (step, outcome) in steps.iter().zip(&outcomes) {
+        *at = step.migration;
+        step.migration
+            .check_kind(outcome.change == MigrationChange::Breaking)?;
+    }
     database.batch(&format!("PRAGMA user_version = {}", supported as i32))?;
     for (index, step) in steps.iter().enumerate() {
         if outcomes[index].change == MigrationChange::Breaking {

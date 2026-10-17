@@ -324,7 +324,7 @@ fn crashing_upload_attempt() {
         .block_on(
             crate::DatabaseBuilder::new(layout.store_dir(&store))
                 .synced_tables(notes())
-                .migrations(vec![crate::Migration::sql(1, "schema", NOTES)])
+                .migrations(vec![crate::Migration::addition(1, "schema", NOTES)])
                 .open(),
         )
         .unwrap();

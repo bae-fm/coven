@@ -10,7 +10,7 @@ use std::{
 
 async fn open(store: &TestStore, schema: &'static str) -> Database {
     store
-        .builder(notes(), vec![Migration::sql(1, "notes", schema)])
+        .builder(notes(), vec![Migration::addition(1, "notes", schema)])
         .clock(Arc::new(FixedClock::new(
             UNIX_EPOCH + Duration::from_secs(1),
         )))

@@ -15,7 +15,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 async fn open(store: &TestStore) -> Database {
     store
-        .builder(notes(), vec![Migration::sql(1, "notes", NOTES)])
+        .builder(notes(), vec![Migration::addition(1, "notes", NOTES)])
         .clock(Arc::new(FixedClock::new(
             UNIX_EPOCH + Duration::from_secs(1),
         )))
@@ -168,11 +168,12 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
         .builder(
             notes(),
             vec![
-                Migration::sql(1, "notes", NOTES),
-                Migration::sql(
+                Migration::addition(1, "notes", NOTES),
+                Migration::breaking(
                     2,
                     "color",
                     "ALTER TABLE notes ADD COLUMN color TEXT NOT NULL DEFAULT 'blue'",
+                    crate::OldWrites::Drop,
                 ),
             ],
         )
@@ -297,10 +298,14 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
             let result = store
                 .builder(
                     tables(),
-                    vec![Migration::run(1, "local descendants", move |sql| {
-                        sql.execute_batch(&base)?;
-                        Ok(())
-                    })],
+                    vec![Migration::addition_with(
+                        1,
+                        "local descendants",
+                        move |sql| {
+                            sql.execute_batch(&base)?;
+                            Ok(())
+                        },
+                    )],
                 )
                 .open()
                 .await;
@@ -321,7 +326,7 @@ async fn local_child_actions_are_checked_transitively_at_open_and_after_migratio
     });
     db.close().await.unwrap();
     for read_only in [false, true] {
-        let builder = store.builder(notes(), vec![Migration::sql(1, "notes", NOTES)]);
+        let builder = store.builder(notes(), vec![Migration::addition(1, "notes", NOTES)]);
         let result = if read_only {
             builder.open_read_only().await.map(|_| ())
         } else {
@@ -345,7 +350,7 @@ async fn reference_db(store: &TestStore) -> Database {
     store
         .builder(
             references(),
-            vec![Migration::sql(1, "references", REFERENCES)],
+            vec![Migration::addition(1, "references", REFERENCES)],
         )
         .clock(Arc::new(FixedClock::new(
             UNIX_EPOCH + Duration::from_secs(1),
@@ -451,7 +456,7 @@ async fn circle_db(store: &TestStore) -> Database {
     store
         .builder(
             circle_tables(),
-            vec![Migration::sql(1, "circles", CIRCLE_SCHEMA)],
+            vec![Migration::addition(1, "circles", CIRCLE_SCHEMA)],
         )
         .clock(Arc::new(FixedClock::new(
             UNIX_EPOCH + Duration::from_secs(1),
@@ -655,8 +660,8 @@ async fn an_invalid_local_child_migration_rolls_back_its_schema_and_version() {
         .builder(
             notes(),
             vec![
-                Migration::sql(1, "notes", NOTES),
-                Migration::sql(
+                Migration::addition(1, "notes", NOTES),
+                Migration::addition(
                     2,
                     "pin",
                     "CREATE TABLE pins(note TEXT REFERENCES notes(id) ON DELETE RESTRICT)",
@@ -693,13 +698,13 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
     let schema = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL UNIQUE,body TEXT NOT NULL DEFAULT '')";
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1)));
     let a = a_store
-        .builder(notes(), vec![Migration::sql(1, "unique", schema)])
+        .builder(notes(), vec![Migration::addition(1, "unique", schema)])
         .clock(clock.clone())
         .open()
         .await
         .unwrap();
     let b = b_store
-        .builder(notes(), vec![Migration::sql(1, "unique", schema)])
+        .builder(notes(), vec![Migration::addition(1, "unique", schema)])
         .clock(clock.clone())
         .open()
         .await
@@ -708,8 +713,13 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
         .builder(
             notes(),
             vec![
-                Migration::sql(1, "unique", schema),
-                Migration::sql(2, "index", "CREATE INDEX notes_body ON notes(body)"),
+                Migration::addition(1, "unique", schema),
+                Migration::breaking(
+                    2,
+                    "index",
+                    "CREATE INDEX notes_body ON notes(body)",
+                    crate::OldWrites::Drop,
+                ),
             ],
         )
         .clock(clock)

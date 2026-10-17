@@ -342,7 +342,7 @@ async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
         store
             .builder(
                 vec![],
-                vec![Migration::run(1, "held", move |_| {
+                vec![Migration::addition_with(1, "held", move |_| {
                     entered.lock().unwrap().take().unwrap().send(()).unwrap();
                     released
                         .lock()
@@ -363,7 +363,7 @@ async fn a_dropped_open_waits_for_its_blocking_migration_before_reopening() {
         store
             .builder(
                 vec![],
-                vec![Migration::run(1, "held", |_| {
+                vec![Migration::addition_with(1, "held", |_| {
                     panic!("committed migration must not run again")
                 })],
             )
@@ -546,7 +546,7 @@ async fn a_panicking_migration_preserves_its_panic_payload() {
         let _ = store
             .builder(
                 vec![],
-                vec![Migration::run(1, "panic", |_| {
+                vec![Migration::addition_with(1, "panic", |_| {
                     std::panic::panic_any(123_u64);
                 })],
             )

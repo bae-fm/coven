@@ -106,7 +106,7 @@ impl Fixture {
         self.app
             .builder(self.layout.clone())
             .synced_tables(tables())
-            .migrations(vec![Migration::sql(1, "records", SCHEMA)])
+            .migrations(vec![Migration::addition(1, "records", SCHEMA)])
             .clock(self.clock.clone())
             .id_source(self.ids.clone())
             .storage_connector(self.storage.clone())
@@ -296,7 +296,7 @@ fn crashing_local_write() {
         let db =
             coven_database::DatabaseBuilder::new(StoreLayout::new(root.into()).store_dir(&store))
                 .synced_tables(tables())
-                .migrations(vec![Migration::sql(1, "records", SCHEMA)])
+                .migrations(vec![Migration::addition(1, "records", SCHEMA)])
                 .clock(Arc::new(FixedClock::new(
                     UNIX_EPOCH + Duration::from_secs(1001),
                 )))

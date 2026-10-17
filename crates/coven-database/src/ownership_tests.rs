@@ -164,8 +164,13 @@ async fn a_table_rename_keeps_the_original_creation() {
         .builder(
             vec![SyncedTable::new("items", RowIdentity::SharedKey).owner_only()],
             vec![
-                crate::Migration::sql(1, "schema", SCHEMA),
-                crate::Migration::sql(2, "rename", "ALTER TABLE rows RENAME TO items"),
+                crate::Migration::addition(1, "schema", SCHEMA),
+                crate::Migration::breaking(
+                    2,
+                    "rename",
+                    "ALTER TABLE rows RENAME TO items",
+                    crate::OldWrites::Drop,
+                ),
             ],
         )
         .open()

@@ -22,7 +22,7 @@ async fn unnamed_check_identity_keeps_the_full_expression() {
             let db = fixture
                 .builder(
                     vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
-                    vec![crate::Migration::run(1, "check", move |sql| {
+                    vec![crate::Migration::addition_with(1, "check", move |sql| {
                         sql.execute_batch(&schema)?;
                         Ok(())
                     })],
@@ -243,7 +243,7 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
         let schema = format!("CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,x INT,y INT,n INT AS(x+y),CHECK( \"n\">0 ),CHECK({second}))");
         let migrations = || {
             let schema = schema.clone();
-            vec![crate::Migration::run(1, "checks", move |sql| {
+            vec![crate::Migration::addition_with(1, "checks", move |sql| {
                 sql.execute_batch(&schema)?;
                 Ok(())
             })]
@@ -373,7 +373,7 @@ async fn unnamed_check_sqlite_differential() {
     let db = fixture
         .builder(
             vec![SyncedTable::new("notes", RowIdentity::SharedKey)],
-            vec![crate::Migration::run(1, "checks", move |sql| {
+            vec![crate::Migration::addition_with(1, "checks", move |sql| {
                 sql.execute_batch(&schema)?;
                 Ok(())
             })],

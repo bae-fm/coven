@@ -102,10 +102,14 @@ async fn deleted_note_43_nulls_link_6_but_takes_out_stale_children() {
         let db = store
             .builder(
                 vec![table("notes"), table("links")],
-                vec![crate::Migration::run(1, "references", move |context| {
-                    context.execute_batch(&schema)?;
-                    Ok(())
-                })],
+                vec![crate::Migration::addition_with(
+                    1,
+                    "references",
+                    move |context| {
+                        context.execute_batch(&schema)?;
+                        Ok(())
+                    },
+                )],
             )
             .open()
             .await
@@ -195,10 +199,14 @@ async fn local_restrict_and_no_action_children_refuse_parent_deletion_atomically
         let db = store
             .builder(
                 vec![table("notes"), table("links")],
-                vec![crate::Migration::run(1, "references", move |context| {
-                    context.execute_batch(&schema)?;
-                    Ok(())
-                })],
+                vec![crate::Migration::addition_with(
+                    1,
+                    "references",
+                    move |context| {
+                        context.execute_batch(&schema)?;
+                        Ok(())
+                    },
+                )],
             )
             .open()
             .await
