@@ -18,12 +18,15 @@ pub trait ObjectBody: Send {
 /// value cancels the response and establishes no completion verdict.
 pub struct ObjectStream<'a> {
     metadata: StoredObject,
-    body: Box<dyn ObjectBody + 'a>,
-    state: StreamState,
+    state: StreamState<'a>,
 }
 
-enum StreamState {
-    Receiving(u64),
+enum StreamState<'a> {
+    Receiving {
+        remaining: u64,
+        body: Box<dyn ObjectBody + 'a>,
+        download: Option<crate::transfer_budget::DownloadLease>,
+    },
     Complete,
     Failed,
 }
@@ -43,8 +46,11 @@ impl<'a> ObjectStream<'a> {
         let remaining = metadata.read_length(&metadata.path, range)?;
         Ok(Self {
             metadata,
-            body: Box::new(body),
-            state: StreamState::Receiving(remaining),
+            state: StreamState::Receiving {
+                remaining,
+                body: Box::new(body),
+                download: None,
+            },
         })
     }
 
@@ -54,8 +60,8 @@ impl<'a> ObjectStream<'a> {
         range: Option<ByteRange>,
     ) -> Result<(), StorageError> {
         let expected = self.metadata.read_length(path, range)?;
-        match self.state {
-            StreamState::Receiving(remaining) if remaining == expected => Ok(()),
+        match &self.state {
+            StreamState::Receiving { remaining, .. } if *remaining == expected => Ok(()),
             _ => Err(StorageFailure::Protocol
                 .with_source("provider returned an already consumed response")),
         }
@@ -66,28 +72,36 @@ impl<'a> ObjectStream<'a> {
         if output.is_empty() {
             return Ok(0);
         }
-        let remaining = match self.state {
-            StreamState::Receiving(remaining) => remaining,
-            StreamState::Complete => return Ok(0),
+        let mut response = std::mem::replace(&mut self.state, StreamState::Failed);
+        let (remaining, body) = match &mut response {
+            StreamState::Receiving {
+                remaining, body, ..
+            } => (remaining, body),
+            StreamState::Complete => {
+                self.state = StreamState::Complete;
+                return Ok(0);
+            }
             StreamState::Failed => {
                 return Err(StorageFailure::Protocol.with_source("response already failed"))
             }
         };
-        self.state = StreamState::Failed;
-        let count = self.body.read(output).await?;
-        if count > output.len() || count as u64 > remaining {
+        // Keep the receiving state intact: its fields drop the native body
+        // before the lease, also when this read future is cancelled.
+        let count = body.read(output).await?;
+        if count > output.len() || count as u64 > *remaining {
             return Err(
                 StorageFailure::Protocol.with_source("response exceeds its declared length")
             );
         }
         if count == 0 {
-            if remaining != 0 {
+            if *remaining != 0 {
                 return Err(StorageFailure::Protocol
                     .with_source("response ended before its declared length"));
             }
             self.state = StreamState::Complete;
         } else {
-            self.state = StreamState::Receiving(remaining - count as u64);
+            *remaining -= count as u64;
+            self.state = response;
         }
         Ok(count)
     }
@@ -95,8 +109,8 @@ impl<'a> ObjectStream<'a> {
     /// Collect only a caller-bounded response. Objects with streamed plaintext
     /// use `read` instead; the bound is checked before allocating their body.
     pub async fn collect(mut self, maximum: u64) -> Result<ObjectRead, StorageError> {
-        let remaining = match self.state {
-            StreamState::Receiving(remaining) => remaining,
+        let remaining = match &self.state {
+            StreamState::Receiving { remaining, .. } => *remaining,
             StreamState::Complete => 0,
             StreamState::Failed => {
                 return Err(StorageFailure::Protocol.with_source("response already failed"))
@@ -145,15 +159,34 @@ impl<F: std::future::Future<Output = Result<(), StorageError>> + Send> ObjectBod
 }
 
 impl<'a> ObjectStream<'a> {
+    /// Retain the store's shared download lease through the checked EOF.
+    pub(crate) fn with_download(mut self, lease: crate::transfer_budget::DownloadLease) -> Self {
+        if let StreamState::Receiving { download, .. } = &mut self.state {
+            *download = Some(lease);
+        }
+        self
+    }
+
     /// Require a provider check after EOF, before completion is observable.
     pub(crate) fn after(
         mut self,
         completion: impl std::future::Future<Output = Result<(), StorageError>> + Send + 'a,
     ) -> Self {
-        self.body = Box::new(CompletingBody {
-            body: self.body,
-            completion: Some(completion),
-        });
+        self.state = match self.state {
+            StreamState::Receiving {
+                remaining,
+                body,
+                download,
+            } => StreamState::Receiving {
+                remaining,
+                body: Box::new(CompletingBody {
+                    body,
+                    completion: Some(completion),
+                }),
+                download,
+            },
+            state => state,
+        };
         self
     }
 }

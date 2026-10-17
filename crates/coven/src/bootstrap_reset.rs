@@ -77,6 +77,7 @@ pub(crate) async fn reset_device(
             Arc::new(crate::storage::NoPublications),
             // The damaged database cannot hold a cooldown for this one probe.
             Arc::new(coven_storage::NoCooldown),
+            builder.transfers.clone(),
         )
         .await
         .map_err(SyncError::from)?

@@ -820,6 +820,7 @@ async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
         provider(&server.url).provider,
         publications,
         cooldown.clone(),
+        Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
     );
     let prefix = crate::ObjectPrefix::all(STORE_ID);
     let rate_limited = |error: StorageError| error.failure() == StorageFailure::RateLimited;

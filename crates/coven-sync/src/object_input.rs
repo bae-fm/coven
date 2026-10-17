@@ -116,6 +116,9 @@ impl ObjectInput {
         let mut stream = input.stream(storage).await;
         if !input.retains_bytes().await? {
             stream.start_with(response);
+        } else {
+            // The missing suffix needs its own response and download capacity.
+            drop(response);
         }
         stream.drain().await?;
         drop(stream);

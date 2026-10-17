@@ -146,12 +146,7 @@ impl FilesInner {
             })
             .map(|(item, _)| item)
             .collect();
-        let limit = self
-            .limits
-            .read()
-            .expect("transfer limits lock poisoned")
-            .uploads
-            .get();
+        let limit = self.transfers.limits().uploads.get();
         let mut attempts = futures_util::stream::iter(eligible)
             .map(|item| self.attempt_upload(item))
             .buffer_unordered(limit);

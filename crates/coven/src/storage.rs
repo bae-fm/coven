@@ -145,6 +145,7 @@ pub(crate) struct StorageConnections {
     /// The recorded location, whose credentials decide `Stopped` or `Disconnected`.
     settings: coven_storage::StorageSettings,
     waits: Arc<coven_sync::RetryWaits>,
+    transfers: Arc<coven_storage::TransferBudget>,
     initial_name: String,
     keys: std::sync::Mutex<Option<Arc<KeySession<StoreKeyring>>>>,
     connector: Arc<dyn StorageConnector>,
@@ -182,6 +183,7 @@ impl StorageConnections {
         publications: Arc<Publications>,
         directory: StoreDir,
         waits: Arc<coven_sync::RetryWaits>,
+        transfers: Arc<coven_storage::TransferBudget>,
         initial_name: String,
         keys: Arc<KeySession<StoreKeyring>>,
         connector: Arc<dyn StorageConnector>,
@@ -212,6 +214,7 @@ impl StorageConnections {
             settings: coven_storage::StorageSettings::new(directory.clone()),
             directory,
             waits,
+            transfers,
             initial_name,
             keys: std::sync::Mutex::new(Some(keys)),
             connector,
@@ -407,6 +410,7 @@ impl StorageConnections {
                 self.codes.provider_auth(data.credentials),
                 self.publications.clone(),
                 self.waits.clone(),
+                self.transfers.clone(),
             )
             .await?;
         self.attach(live, storage).await
@@ -534,6 +538,7 @@ impl StorageConnections {
                 auth,
                 self.publications.clone(),
                 self.waits.clone(),
+                self.transfers.clone(),
             )
             .await?;
         let path = ObjectPath::file(self.store(), self.device, FileId(self.ids.new_id()));

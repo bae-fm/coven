@@ -34,22 +34,8 @@ use std::{
 };
 use tokio::sync::{watch, Notify};
 
-/// Concurrency captured by each file upload drain or pin call (E5).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct TransferLimits {
-    /// Maximum file uploads running together.
-    pub uploads: std::num::NonZeroUsize,
-    /// Maximum file downloads in one pin call.
-    pub downloads: std::num::NonZeroUsize,
-}
-impl Default for TransferLimits {
-    fn default() -> Self {
-        Self {
-            uploads: std::num::NonZeroUsize::MIN,
-            downloads: std::num::NonZeroUsize::MIN,
-        }
-    }
-}
+use coven_storage::TransferBudget;
+pub use coven_storage::TransferLimits;
 
 /// Owns storage, database file operations and the device's file area (§20.2).
 /// Construction starts commit-driven uploads and eager caching; no sync loop or
@@ -80,7 +66,7 @@ struct FilesInner {
     drain: tokio::sync::Mutex<()>,
     cache: tokio::sync::RwLock<()>,
     reads: Mutex<FileReadLocks>,
-    limits: std::sync::RwLock<TransferLimits>,
+    transfers: Arc<TransferBudget>,
     pins: tokio::sync::Mutex<()>,
     closed: AtomicBool,
     /// One eager fill at a time, and none while the connection changes.
@@ -105,7 +91,7 @@ impl Files {
         send: Arc<crate::SyncState>,
         waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
-        limits: TransferLimits,
+        transfers: Arc<TransferBudget>,
     ) -> Self {
         let mut changes = database.queued_work_changes();
         let mut sending = send.subscribe();
@@ -124,7 +110,7 @@ impl Files {
             drain: tokio::sync::Mutex::new(()),
             cache: tokio::sync::RwLock::new(()),
             reads: Mutex::new(BTreeMap::new()),
-            limits: std::sync::RwLock::new(limits),
+            transfers,
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
             eager_fill: tokio::sync::Mutex::new(()),
@@ -184,21 +170,14 @@ impl Files {
             }),
         }
     }
-    /// The limits used by subsequent upload drains and pin calls.
+    /// The limits shared by this handle's transfer consumers.
     pub fn transfer_limits(&self) -> TransferLimits {
-        *self
-            .inner
-            .limits
-            .read()
-            .expect("transfer limits lock poisoned")
+        self.inner.transfers.limits()
     }
-    /// Change future batches; a running batch retains its captured limits.
+    /// Change future upload batches and download admission. Active response
+    /// bodies retain their leases until they finish or are dropped.
     pub fn set_transfer_limits(&self, limits: TransferLimits) {
-        *self
-            .inner
-            .limits
-            .write()
-            .expect("transfer limits lock poisoned") = limits;
+        self.inner.transfers.set_limits(limits);
     }
     /// Stop background work and wait for in-flight database and transfer work.
     pub async fn close(&self) {

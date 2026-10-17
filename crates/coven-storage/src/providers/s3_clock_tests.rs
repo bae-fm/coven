@@ -155,7 +155,12 @@ async fn fixture(
     .unwrap();
     Fixture {
         remote,
-        storage: StorageConnection::with_gate(Arc::new(storage), publications, cooldown),
+        storage: StorageConnection::with_gate(
+            Arc::new(storage),
+            publications,
+            cooldown,
+            Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+        ),
         _server: server,
     }
 }

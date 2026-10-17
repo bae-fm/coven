@@ -3,6 +3,49 @@
 //! any settings, and the S3 new-store bucket check.
 use super::*;
 
+impl MemoryStorage {
+    /// Bind a simulated installation to the real synchronization gate, preserving
+    /// this provider's credentials, durable objects and request observations.
+    pub fn with_publication_gate(&self, publications: Arc<dyn PublicationGate>) -> Self {
+        Self::with_gate(
+            self.provider.clone(),
+            publications,
+            self.cooldown.clone(),
+            self.transfers.clone(),
+        )
+    }
+
+    /// Bind this connection to the store's shared provider cooldown.
+    pub fn with_cooldown(&self, cooldown: Arc<dyn crate::Cooldown>) -> Self {
+        Self::with_gate(
+            self.provider.clone(),
+            self.publications.clone(),
+            cooldown,
+            self.transfers.clone(),
+        )
+    }
+
+    /// Use the handle's transfer budget on this simulated connection.
+    pub fn with_transfers(&self, transfers: Arc<crate::TransferBudget>) -> Self {
+        Self::with_gate(
+            self.provider.clone(),
+            self.publications.clone(),
+            self.cooldown.clone(),
+            transfers,
+        )
+    }
+
+    /// Erase the provider type while retaining this exact connection's credentials.
+    pub fn shared_connection(&self) -> Arc<StorageConnection> {
+        Arc::new(StorageConnection::with_gate(
+            self.provider.clone() as Arc<dyn ProviderOps>,
+            self.publications.clone(),
+            self.cooldown.clone(),
+            self.transfers.clone(),
+        ))
+    }
+}
+
 #[async_trait]
 impl crate::providers::StorageConnector for MemoryStorage {
     async fn prepare_cloudkit(
@@ -24,12 +67,14 @@ impl crate::providers::StorageConnector for MemoryStorage {
         auth: crate::ProviderAuth,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
+        transfers: Arc<crate::TransferBudget>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         Ok(self
             .connect_device(config, auth)
             .await?
             .with_publication_gate(publications)
             .with_cooldown(cooldown)
+            .with_transfers(transfers)
             .shared_connection())
     }
     /// Memory behaves as any settings demand: the detection conforms to the

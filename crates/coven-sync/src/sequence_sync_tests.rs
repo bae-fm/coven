@@ -164,7 +164,9 @@ impl Group {
                 .await
                 .unwrap(),
         );
+        let transfers = Arc::new(coven_storage::TransferBudget::new(TransferLimits::default()));
         let storage = storage
+            .with_transfers(transfers.clone())
             .with_publication_gate(state.clone())
             .with_cooldown(waits.clone());
         let ids: coven_foundation::id_source::IdSourceRef = self.ids.clone();
@@ -175,7 +177,7 @@ impl Group {
             state.clone(),
             waits.clone(),
             ids,
-            TransferLimits::default(),
+            transfers,
         );
         let sync = Arc::new(
             SequenceSync::open(

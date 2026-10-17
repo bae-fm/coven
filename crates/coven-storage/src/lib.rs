@@ -45,6 +45,8 @@ mod storage;
 mod token_custody;
 pub(crate) use token_custody::HeldTokens;
 pub use token_custody::{ProviderAuth, TokenCustody};
+mod transfer_budget;
+pub use transfer_budget::{TransferBudget, TransferLimits};
 mod transfer;
 pub use transfer::{buffered_request_limit, BUFFERED_REQUEST_LIMIT};
 mod web_url;

@@ -10,6 +10,53 @@ use coven_storage::{
 use std::sync::Arc;
 
 #[tokio::test]
+async fn a_partial_response_retries_with_one_download_slot() {
+    use coven_storage::{
+        test_utils::BodyFailure, test_utils::Faults, TransferBudget, TransferLimits,
+    };
+
+    let storage = MemoryStorage::builder()
+        .build()
+        .unwrap()
+        .with_transfers(Arc::new(TransferBudget::new(TransferLimits::default())));
+    let receiver = Fixture::new().await;
+    let path = ObjectPath::slot(store(), 1.try_into().unwrap());
+    storage.create(&path, b"abcdefghij").await.unwrap();
+    let mut faults = Faults::none();
+    faults
+        .body_failures
+        .insert(path.clone(), BodyFailure::Interrupted(2));
+    storage.set_faults(faults).await;
+    let response = storage.stream_object(&path, None).await.unwrap();
+    let result = ObjectInput::receive_response(&receiver.db, &storage, &path, response).await;
+    assert!(
+        matches!(result, Err(SyncError::Storage(error)) if error.failure() == StorageFailure::Network)
+    );
+
+    storage.set_faults(Faults::none()).await;
+    let response = storage.stream_object(&path, None).await.unwrap();
+    let input = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ObjectInput::receive_response(&receiver.db, &storage, &path, response),
+    )
+    .await
+    .expect("the unused whole response releases capacity for the missing suffix")
+    .unwrap();
+    assert!(input.received().await.unwrap());
+    assert_eq!(
+        input
+            .read(&storage, ByteRange::new(0, 10).unwrap())
+            .await
+            .unwrap(),
+        b"abcdefghij"
+    );
+    assert!(storage.request_trace().iter().any(|request| {
+        matches!(request, MemoryRequest::Read(_, Some(range)) if range.start() == 2 && range.end() == 10)
+    }));
+    receiver.db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn overlapping_ranges_reopen_and_changed_native_ids_do_not_fetch_retained_bytes() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let mut receiver = Fixture::new().await;

@@ -388,6 +388,7 @@ async fn prepare_and_load(
                 provider_auth(&data, sign_in.as_ref())?,
                 publications.clone(),
                 waits.clone(),
+                builder.transfers.clone(),
             )
             .await
             .map_err(SyncError::from)?;
@@ -400,7 +401,7 @@ async fn prepare_and_load(
             state.clone(),
             waits.clone(),
             builder.ids.clone(),
-            builder.limits,
+            builder.transfers.clone(),
         );
         let sync = SequenceSync::open(
             database.clone(),

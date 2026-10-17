@@ -68,14 +68,17 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
         .open_read_only()
         .await
         .unwrap();
+    let transfers = Arc::new(coven_storage::TransferBudget::new(
+        crate::TransferLimits::default(),
+    ));
     let files = Files::new(
         FileDatabase::read_only(reader.clone()),
         f.directory.clone(),
-        Some(f.storage.clone()),
+        Some(Arc::new(f.storage.with_transfers(transfers.clone()))),
         f.send.clone(),
         Arc::new(crate::RetryWaits::in_memory(f.clock.clone())),
         f.ids.clone(),
-        crate::TransferLimits::default(),
+        transfers,
     );
     f.storage.set_online(false);
     assert!(
@@ -210,7 +213,11 @@ async fn eager_reader(a: &Fixture, clock: &Arc<FixedClock>) -> Fixture {
 async fn connect(b: &Fixture, a: &Fixture) {
     // Only the explicit fills below download.
     b.files.stop_background_for_counts().await;
-    let storage = Arc::new(a.storage.with_cooldown(b.files.inner.waits.clone()));
+    let storage = Arc::new(
+        a.storage
+            .with_cooldown(b.files.inner.waits.clone())
+            .with_transfers(b.files.inner.transfers.clone()),
+    );
     b.files
         .set_storage(Some(storage), std::future::ready(Ok(())))
         .await
@@ -243,11 +250,13 @@ async fn eager_commit_observation_handles_download_apply() {
     let files = Files::new(
         FileDatabase::new(b.database.clone()),
         b.directory.clone(),
-        Some(a.storage.clone()),
+        Some(Arc::new(
+            a.storage.with_transfers(b.files.inner.transfers.clone()),
+        )),
         b.send.clone(),
         b.files.inner.waits.clone(),
         b.ids.clone(),
-        crate::TransferLimits::default(),
+        b.files.inner.transfers.clone(),
     );
     let mut status = b.database.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
@@ -624,7 +633,9 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
     b.files
         .set_storage(
             Some(Arc::new(
-                a.storage.with_cooldown(b.files.inner.waits.clone()),
+                a.storage
+                    .with_cooldown(b.files.inner.waits.clone())
+                    .with_transfers(b.files.inner.transfers.clone()),
             )),
             std::future::ready(Ok(())),
         )

@@ -78,8 +78,12 @@ impl Fixture {
                 .await
                 .unwrap(),
         );
+        let transfers = Arc::new(coven_storage::TransferBudget::new(
+            crate::TransferLimits::default(),
+        ));
         let storage = Arc::new(
             storage
+                .with_transfers(transfers.clone())
                 .with_publication_gate(send.clone())
                 .with_cooldown(waits.clone()),
         );
@@ -90,7 +94,7 @@ impl Fixture {
             send.clone(),
             waits,
             ids.clone(),
-            crate::TransferLimits::default(),
+            transfers,
         );
         files.set_uploads_paused(true).await.unwrap();
         Self {
@@ -118,8 +122,12 @@ impl Fixture {
                 .await
                 .unwrap(),
         );
+        let transfers = Arc::new(coven_storage::TransferBudget::new(
+            crate::TransferLimits::default(),
+        ));
         self.storage = Arc::new(
             self.storage
+                .with_transfers(transfers.clone())
                 .with_publication_gate(self.send.clone())
                 .with_cooldown(waits.clone()),
         );
@@ -130,7 +138,7 @@ impl Fixture {
             self.send.clone(),
             waits,
             self.ids.clone(),
-            crate::TransferLimits::default(),
+            transfers,
         );
         self.files.set_uploads_paused(true).await.unwrap();
     }
@@ -338,11 +346,14 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     let files = Files::new(
         FileDatabase::new(second.database.clone()),
         second.directory.clone(),
-        Some(f.storage.clone()),
+        Some(Arc::new(
+            f.storage
+                .with_transfers(second.files.inner.transfers.clone()),
+        )),
         second.send.clone(),
         second.files.inner.waits.clone(),
         second.ids.clone(),
-        crate::TransferLimits::default(),
+        second.files.inner.transfers.clone(),
     );
     let ref2 = second.database.file_ref("files", "first").await.unwrap();
     assert_eq!(files.read_file(&ref2).await.unwrap(), bytes);
@@ -560,11 +571,13 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
     let files = Files::new(
         FileDatabase::new(b.database.clone()),
         b.directory.clone(),
-        Some(a.storage.clone()),
+        Some(Arc::new(
+            a.storage.with_transfers(b.files.inner.transfers.clone()),
+        )),
         b.send.clone(),
         b.files.inner.waits.clone(),
         b.ids.clone(),
-        crate::TransferLimits::default(),
+        b.files.inner.transfers.clone(),
     );
     let file = b.database.file_ref("files", "hash").await.unwrap();
     let stream = files.open_file_stream(&file).await.unwrap();
@@ -799,7 +812,12 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
             local
         );
         b.files
-            .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
+            .set_storage(
+                Some(Arc::new(
+                    a.storage.with_transfers(b.files.inner.transfers.clone()),
+                )),
+                std::future::ready(Ok(())),
+            )
             .await
             .unwrap();
         let uploaded = b.database.file_ref("files", "waiting").await.unwrap();

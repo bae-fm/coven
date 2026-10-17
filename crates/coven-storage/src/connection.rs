@@ -9,6 +9,7 @@ pub struct StorageConnection<P: ?Sized = dyn ProviderOps> {
     pub(crate) provider: Arc<P>,
     pub(crate) publications: Arc<dyn PublicationGate>,
     pub(crate) cooldown: Arc<dyn Cooldown>,
+    pub(crate) transfers: Arc<TransferBudget>,
 }
 
 impl<P: ProviderOps + ?Sized> StorageConnection<P> {
@@ -19,6 +20,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
             provider,
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(NoCooldown),
+            Arc::new(TransferBudget::new(TransferLimits::default())),
         )
     }
 
@@ -26,11 +28,13 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         provider: Arc<P>,
         publications: Arc<dyn PublicationGate>,
         cooldown: Arc<dyn Cooldown>,
+        transfers: Arc<TransferBudget>,
     ) -> Self {
         Self {
             provider,
             publications,
             cooldown,
+            transfers,
         }
     }
 
@@ -228,15 +232,15 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         range: Option<ByteRange>,
     ) -> Result<ObjectStream<'_>, StorageError> {
         self.cooling()?;
-        self.observed(
-            async {
-                let stream = self.provider.stream_object(path, range).await?;
-                stream.check(path, range)?;
-                Ok(stream)
-            }
-            .await,
-        )
-        .await
+        let download = self.transfers.download().await;
+        self.cooling()?;
+        // A failed response records its cooldown before another download
+        // can acquire the capacity it releases.
+        let stream = self
+            .observed(self.provider.stream_object(path, range).await)
+            .await?;
+        stream.check(path, range)?;
+        Ok(stream.with_download(download))
     }
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         self.cooling()?;

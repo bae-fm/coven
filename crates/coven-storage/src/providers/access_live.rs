@@ -59,6 +59,7 @@ async fn provider_access_live_dropbox_app_folder() {
             },
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
+            Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
         )
         .await
         .unwrap();
@@ -73,7 +74,9 @@ async fn provider_access_live_dropbox_app_folder() {
         let restored = connector
             .connect(
                 StorageConfig::decode(location.encode().unwrap().as_bytes()).unwrap(),
-                crate::ProviderAuth::OAuth { tokens, custody: Arc::new(crate::test_utils::RefusedRefresh) }, Arc::new(crate::test_utils::UnrestrictedPublications), Arc::new(crate::NoCooldown))
+                crate::ProviderAuth::OAuth { tokens, custody: Arc::new(crate::test_utils::RefusedRefresh) }, Arc::new(crate::test_utils::UnrestrictedPublications), Arc::new(crate::NoCooldown),
+Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
+)
             .await
             .unwrap();
         let after = restored.read_object(&path, None).await.unwrap();

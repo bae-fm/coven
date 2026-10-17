@@ -2,6 +2,69 @@ use crate::*;
 use std::sync::Arc;
 
 #[tokio::test]
+async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
+    use coven_storage::{test_utils::MemoryStorage, Storage};
+    use std::time::Duration;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let root = tempfile::tempdir().unwrap();
+        let app = TestCoven::new();
+        let memory = Arc::new(MemoryStorage::builder().clock(Arc::new(SystemClock)).build().unwrap());
+        let layout = StoreLayout::new(root.path().into());
+        let directory = app.create_closed_store(&layout, "Downloads", Arc::new(UuidIds)).await.unwrap();
+        let handle = app.builder(layout).storage_connector(memory.clone())
+            .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
+                "files", 1 << 30, Provenance::AppProvided, CacheFill::CacheLazy,
+            ))])
+            .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+            .open(directory.id()).await.unwrap();
+        handle.setup_s3_storage(memory.config(), "Device", "key".into(), SecretText::new("secret".into())).await.unwrap();
+        let mut status = handle.subscribe_sync_status();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        handle.stop_sync();
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)).await.unwrap();
+        handle.unlock_store_key().await.unwrap();
+        handle.write_with_files(|batch| {
+            for id in 0..2 {
+                batch.put_file("files", id.to_string(), vec![id as u8; 2048]);
+            }
+            Ok(())
+        }, |sql| {
+            for id in 0..2 { sql.execute("INSERT INTO files(id) VALUES(?1)", [id.to_string()])?; }
+            Ok(())
+        }).await.unwrap();
+        handle.retry_uploads_now().await.unwrap();
+        handle.start_sync().await.unwrap();
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        let first_file = handle.file_ref("files", "0").await.unwrap();
+        let second_file = handle.file_ref("files", "1").await.unwrap();
+        let (entered, entering) = tokio::sync::oneshot::channel();
+        let (resume, resumed) = tokio::sync::oneshot::channel();
+        memory.hold_body_at(ObjectPath::file(directory.id(), first_file.uploader(), first_file.id()), 1, entered, resumed).await;
+        let first = handle.read_file(&first_file);
+        tokio::pin!(first);
+        tokio::select! {
+            result = &mut first => panic!("first response was not held: {result:?}"),
+            result = entering => result.unwrap(),
+        }
+        let reads = memory.reads().await.len();
+        let second = handle.read_file(&second_file);
+        tokio::pin!(second);
+        handle.sync_now();
+        tokio::select! {
+            result = &mut second => panic!("second file bypassed the active download: {:?}", result.map(|bytes| bytes.len())),
+            _ = tokio::time::sleep(Duration::from_millis(100)) => {}
+        }
+        assert_eq!(memory.reads().await.len(), reads, "sequence and file requests both wait for the active response body");
+        resume.send(()).unwrap();
+        let (first, second) = tokio::join!(first, second);
+        assert_eq!(first.unwrap(), vec![0; 2048]);
+        assert_eq!(second.unwrap(), vec![1; 2048]);
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
+        handle.close().await.unwrap();
+    }).await.expect("shared downloads finished");
+}
+
+#[tokio::test]
 async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
     use coven_storage::{
         test_utils::{Faults, MemoryStorage},

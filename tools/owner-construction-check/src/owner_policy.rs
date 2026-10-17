@@ -5,6 +5,8 @@
 use crate::policy::{Capabilities, Capability, Gate, Policy};
 
 const CONNECTION: &str = "crates/coven/src/storage.rs";
+const MEMORY_STORAGE: &str = "crates/coven-storage/src/test_utils.rs";
+const MEMORY_CONNECTOR: &str = "crates/coven-storage/src/memory_connector.rs";
 const CONNECTION_CONTROL: &str = "crates/coven/src/storage_control.rs";
 pub(crate) const POLICY: Policy = Policy {
     crate_order: &[
@@ -31,6 +33,7 @@ pub(crate) const POLICY: Policy = Policy {
     // One list for owner construction, runtime acquisition and task starts.
     // Owner constructors include their private representations; names grant no exemption.
     composition_roots: &[
+        (MEMORY_CONNECTOR, "MemoryStorage", "with_transfers"),
         (
             "crates/coven-crypto/src/custody/key_session.rs",
             "KeySession",
@@ -164,11 +167,7 @@ pub(crate) const POLICY: Policy = Policy {
             "Conformance",
             "new",
         ),
-        (
-            "crates/coven-storage/src/memory_connector.rs",
-            "MemoryStorage",
-            "connect",
-        ),
+        (MEMORY_CONNECTOR, "MemoryStorage", "connect"),
         (
             "crates/coven-storage/src/memory_storage_builder.rs",
             "MemoryStorageBuilder",
@@ -259,46 +258,14 @@ pub(crate) const POLICY: Policy = Policy {
             "StorageSettings",
             "new",
         ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "builder",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "clone",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "connect_device",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "shared_connection",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "with_publication_gate",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "with_cooldown",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "for_device",
-        ),
-        (
-            "crates/coven-storage/src/test_utils.rs",
-            "MemoryStorage",
-            "for_recipient",
-        ),
+        (MEMORY_STORAGE, "MemoryStorage", "builder"),
+        (MEMORY_STORAGE, "MemoryStorage", "clone"),
+        (MEMORY_STORAGE, "MemoryStorage", "connect_device"),
+        (MEMORY_CONNECTOR, "MemoryStorage", "shared_connection"),
+        (MEMORY_CONNECTOR, "MemoryStorage", "with_publication_gate"),
+        (MEMORY_CONNECTOR, "MemoryStorage", "with_cooldown"),
+        (MEMORY_STORAGE, "MemoryStorage", "for_device"),
+        (MEMORY_STORAGE, "MemoryStorage", "for_recipient"),
         (
             "crates/coven-sync/src/file_read.rs",
             "FileStream",

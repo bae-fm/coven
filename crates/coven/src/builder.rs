@@ -25,7 +25,7 @@ pub struct CovenBuilder {
     ids: IdSourceRef,
     clock: ClockRef,
     connector: Option<Arc<dyn StorageConnector>>,
-    limits: TransferLimits,
+    transfers: Arc<coven_storage::TransferBudget>,
     oauth: Option<OAuthClients>,
     presenter: Option<Arc<dyn OAuthPresenter>>,
     /// The latest sign-in, held for this session until bootstrap or setup publishes it.
@@ -59,7 +59,7 @@ impl CovenBuilder {
             #[cfg(any(target_os = "ios", target_os = "android"))]
             presenter: None,
             authentication: None,
-            limits: TransferLimits::default(),
+            transfers: Arc::new(coven_storage::TransferBudget::new(TransferLimits::default())),
             keys: CustodyChoice::Configured(KeyCustody::Keyring),
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
             #[cfg(any(test, feature = "test-utils"))]
@@ -136,13 +136,17 @@ impl CovenBuilder {
     }
 
     /// Limit file uploads running together; defaults to one.
-    pub fn max_concurrent_uploads(mut self, n: std::num::NonZeroUsize) -> Self {
-        self.limits.uploads = n;
+    pub fn max_concurrent_uploads(self, n: std::num::NonZeroUsize) -> Self {
+        let mut limits = self.transfers.limits();
+        limits.uploads = n;
+        self.transfers.set_limits(limits);
         self
     }
-    /// Limit downloads in each pin call; defaults to one.
-    pub fn max_concurrent_downloads(mut self, n: std::num::NonZeroUsize) -> Self {
-        self.limits.downloads = n;
+    /// Limit downloads shared by sequence and file reads; defaults to one.
+    pub fn max_concurrent_downloads(self, n: std::num::NonZeroUsize) -> Self {
+        let mut limits = self.transfers.limits();
+        limits.downloads = n;
+        self.transfers.set_limits(limits);
         self
     }
 
@@ -206,7 +210,7 @@ impl CovenBuilder {
         // A read-only handle cannot persist a cooldown; it holds its own requests.
         let waits = Arc::new(coven_sync::RetryWaits::in_memory(clock.clone()));
         let connector = self.connector();
-        let limits = self.limits;
+        let transfers = self.transfers.clone();
         let database = self.database(directory.clone())?;
         let database = database.open_read_only().await?;
         if let Some(identity) = database.store_state().await?.store {
@@ -231,6 +235,7 @@ impl CovenBuilder {
                         coven_storage::ProviderAuth::new(data.credentials, credentials),
                         Arc::new(crate::storage::NoPublications),
                         waits.clone(),
+                        transfers.clone(),
                     )
                     .await
                     .map_err(SyncError::from)?,
@@ -244,7 +249,7 @@ impl CovenBuilder {
             Arc::new(coven_sync::SyncState::new()),
             waits,
             ids,
-            limits,
+            transfers,
         );
         Ok(CovenReadHandle::new(database, files))
     }
@@ -353,7 +358,7 @@ impl CovenBuilder {
             oauth,
             clients: self.oauth,
             authentication: self.authentication,
-            limits: self.limits,
+            transfers: self.transfers,
             device: settings.device_id,
             initial_name: settings.name,
             keys,
@@ -430,7 +435,7 @@ struct OpeningStore {
 
 struct OpeningOwners {
     initial_name: String,
-    limits: TransferLimits,
+    transfers: Arc<coven_storage::TransferBudget>,
     keychain: Arc<StoreKeychain>,
     credentials: Arc<coven_sync::DeviceCredentials>,
     connector: Arc<dyn StorageConnector>,
@@ -499,7 +504,7 @@ impl OpeningOwners {
             self.state,
             waits.clone(),
             self.ids.clone(),
-            self.limits,
+            self.transfers.clone(),
         );
         let storage = crate::storage::StorageConnections::new(
             database.clone(),
@@ -509,6 +514,7 @@ impl OpeningOwners {
             self.publications,
             self.directory.clone(),
             waits,
+            self.transfers,
             self.initial_name,
             self.keys,
             self.connector,

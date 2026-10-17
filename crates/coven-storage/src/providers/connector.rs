@@ -34,6 +34,7 @@ pub trait StorageConnector: Send + Sync {
         auth: ProviderAuth,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
+        transfers: Arc<crate::TransferBudget>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
     /// Probe an S3 location's service (§4), writing only fresh objects under
     /// the store's `.coven-check` prefix and deleting them, also on failure.
@@ -105,6 +106,7 @@ impl StorageConnector for ProviderConnector {
         auth: ProviderAuth,
         publications: Arc<dyn crate::PublicationGate>,
         cooldown: Arc<dyn crate::Cooldown>,
+        transfers: Arc<crate::TransferBudget>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
         crate::ConnectionCredentials {
             location: config.clone(),
@@ -149,6 +151,7 @@ impl StorageConnector for ProviderConnector {
             provider,
             publications,
             cooldown,
+            transfers,
         )))
     }
     async fn detect_s3(

@@ -179,6 +179,7 @@ impl Clone for MemoryStorage {
             self.provider.clone(),
             self.publications.clone(),
             self.cooldown.clone(),
+            self.transfers.clone(),
         )
     }
 }
@@ -202,17 +203,6 @@ impl PublicationGate for UnrestrictedPublications {
 }
 
 impl MemoryStorage {
-    /// Bind a simulated installation to the real synchronization gate, preserving
-    /// this provider's credentials, durable objects and request observations.
-    pub fn with_publication_gate(&self, publications: Arc<dyn PublicationGate>) -> Self {
-        Self::with_gate(self.provider.clone(), publications, self.cooldown.clone())
-    }
-
-    /// Bind this connection to the store's shared provider cooldown.
-    pub fn with_cooldown(&self, cooldown: Arc<dyn crate::Cooldown>) -> Self {
-        Self::with_gate(self.provider.clone(), self.publications.clone(), cooldown)
-    }
-
     /// An S3 test location at the Unix epoch, with four-MiB single requests
     /// and 64-KiB parts. Override only the choices relevant to the scenario.
     pub fn builder() -> MemoryStorageBuilder {
@@ -288,15 +278,6 @@ impl MemoryStorage {
             crate::ProviderAuth::CloudKit => {}
         }
         Ok(Self::from_provider(Arc::new(connection)))
-    }
-
-    /// Erase the provider type while retaining this exact connection's credentials.
-    pub fn shared_connection(&self) -> Arc<StorageConnection> {
-        Arc::new(StorageConnection::with_gate(
-            self.provider.clone() as Arc<dyn ProviderOps>,
-            self.publications.clone(),
-            self.cooldown.clone(),
-        ))
     }
 
     /// Set this connection's network availability without changing other devices.

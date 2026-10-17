@@ -23,6 +23,7 @@ async fn cloudkit_is_typed_unavailable_without_an_apple_framework() {
             ProviderAuth::CloudKit,
             Arc::new(crate::test_utils::UnrestrictedPublications),
             Arc::new(crate::NoCooldown),
+            Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
         )
         .await;
     assert_eq!(

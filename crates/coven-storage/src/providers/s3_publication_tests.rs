@@ -36,6 +36,7 @@ async fn the_sdk_checks_again_at_transmission_and_preserves_the_local_refusal() 
         raw.provider.clone(),
         gate.clone(),
         Arc::new(crate::NoCooldown),
+        Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
     );
     let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
     assert_eq!(
