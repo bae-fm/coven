@@ -22,12 +22,7 @@ pub(crate) async fn reset_device(
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     let location = StorageSettings::new(directory.clone());
     if location.read().map_err(SyncError::from)?.is_none() {
-        // Without storage only a decided reset or a missing device entry
-        // proceeds: there is nothing to load a damaged database from.
         if recorded.is_none() {
-            if keychain.device_id()? == Some(settings.device_id) {
-                return Err(SyncError::NoStorage.into());
-            }
             record(&builder, &directory, &settings).await?;
         }
         return reset_unconnected(builder, store, &settings.name, keychain).await;

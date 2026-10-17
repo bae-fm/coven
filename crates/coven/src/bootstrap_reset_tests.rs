@@ -377,27 +377,35 @@ async fn an_interrupted_reset_keeps_its_fresh_id_and_stays_unavailable() {
 }
 
 #[tokio::test]
-async fn an_unconnected_store_without_a_decided_reset_keeps_its_files() {
+async fn an_intact_unconnected_store_resets_to_an_empty_database_with_a_fresh_id() {
     let f = Fixture::new().await;
-    f.handle.close().await.unwrap();
-    let database = std::fs::read(f.directory.database_path()).unwrap();
-    // Only storage can supply a replacement for a damaged database (§19.2).
-    assert!(matches!(
-        reopen(&f).reset_device(f.directory.id(), "Phone").await,
-        Err(BootstrapError::Sync(SyncError::NoStorage))
-    ));
-    assert_eq!(
-        std::fs::read(f.directory.database_path()).unwrap(),
-        database
-    );
-    assert_eq!(f.directory.device_reset().unwrap(), None);
-    reopen(&f)
-        .open(f.directory.id())
-        .await
-        .unwrap()
-        .close()
+    f.handle
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('unsent','local')", [])?;
+            Ok(())
+        })
         .await
         .unwrap();
+    f.handle.close().await.unwrap();
+    let old = f.directory.settings().unwrap().device_id;
+    assert_eq!(custody(&f).device_id().unwrap(), Some(old));
+    let before = f.storage.request_count();
+    let handle = reopen(&f)
+        .reset_device(f.directory.id(), "Phone")
+        .await
+        .unwrap();
+    let reset = handle.device_reset().await.unwrap().unwrap();
+    assert_eq!(reset.old_device, old);
+    assert_ne!(reset.new_device, old);
+    assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
+    assert_eq!(custody(&f).device_id().unwrap(), Some(reset.new_device));
+    assert!(notes(&handle).await.is_empty());
+    assert_eq!(f.storage.request_count(), before);
+    handle.close().await.unwrap();
+    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
+    assert!(notes(&handle).await.is_empty());
+    handle.close().await.unwrap();
 }
 
 #[tokio::test]
