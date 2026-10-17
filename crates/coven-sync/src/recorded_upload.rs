@@ -103,6 +103,12 @@ pub(crate) async fn upload<S: UploadSource>(
         },
     };
     source.save(session.clone()).await?;
+    if session.needs_initiation() {
+        if let Err(error) = storage.resume_upload(&mut session).await {
+            return Err(save_failure(source, session, error).await?.into());
+        }
+        source.save(session.clone()).await?;
+    }
     while !session.is_complete() && session.confirmed_bytes() < total {
         if !source.keep_going() {
             return Ok(Uploaded::Paused);
@@ -146,3 +152,7 @@ async fn save_failure<S: UploadSource>(
             .into()),
     }
 }
+
+#[cfg(test)]
+#[path = "recorded_upload_tests.rs"]
+mod tests;

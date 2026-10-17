@@ -325,6 +325,7 @@ impl Conformance {
         let storage = &self.storage;
         let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
         let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+        storage.resume_upload(&mut upload).await.unwrap();
         expire.await;
         let error = storage.resume_upload(&mut upload).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::SessionExpired);
@@ -382,6 +383,7 @@ impl Conformance {
             .await
             .unwrap();
         assert_eq!(upload.part_size(), part_size);
+        storage.resume_upload(&mut upload).await.unwrap();
         let recorded = upload.encode().unwrap();
         let bytes = vec![42; part_size];
         lose.await;
@@ -446,9 +448,13 @@ impl Conformance {
             storage.finish_upload(&mut ready).await.err().unwrap(),
             storage.abort_upload(&pending).await.err().unwrap(),
         ];
-        if storage.config().provider() != CloudProvider::S3 {
-            // S3 names its upload before any request (Appendix E.10).
+        if !matches!(
+            storage.config().provider(),
+            CloudProvider::S3 | CloudProvider::OneDrive
+        ) {
             errors.push(storage.begin_upload(&path, 4).await.err().unwrap());
+        }
+        if storage.config().provider() != CloudProvider::S3 {
             errors.push(storage.grant_access("member").await.err().unwrap());
             errors.push(storage.revoke_access("member").await.err().unwrap());
         }

@@ -88,12 +88,30 @@ private def bucketClaims (requests : Array Json) : Except String Json := do
       ("bytes", toJson ((storage .bucket).map (·.bytes)))]
   pure <| Json.arr results
 
+private def recordings (requests : Array Json) : Except String Json := do
+  let mut world := CopyPublication.Recorded.start
+  let mut results := #[]
+  for request in requests do
+    let id ← request.getObjValAs? Nat "session"
+    let name := CopyPublication.Recorded.Name.attempt id
+    let operation ← match ← request.getObjValAs? String "op" with
+      | "record" => pure (.record name)
+      | "initiate" => pure (.initiate name id)
+      | other => throw s!"unknown recording operation {other}"
+    world := CopyPublication.Recorded.step true world operation
+    results := results.push <| Json.mkObj [
+      ("recorded", toJson (world.recorded.contains name)),
+      ("staged", toJson (world.staging name).isSome)]
+  pure <| Json.arr results
+
 private def run (j : Json) : Except String Json :=
   match j with
   | .arr requests => creates requests
   | _ => match j.getObjVal? "bucket" with
     | .ok requests => do bucketClaims (← requests.getArr?)
-    | .error _ => do ops (← j.getObjValAs? (Array Json) "ops")
+    | .error _ => match j.getObjVal? "recordings" with
+      | .ok requests => do recordings (← requests.getArr?)
+      | .error _ => do ops (← j.getObjValAs? (Array Json) "ops")
 
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd

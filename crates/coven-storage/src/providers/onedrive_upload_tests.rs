@@ -1,6 +1,80 @@
 use super::*;
 
 #[tokio::test]
+async fn temporary_identity_is_recordable_before_any_provider_request() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let upload = storage.begin_upload(&path(), 4).await.unwrap();
+    assert!(state.lock().unwrap().requests.is_empty());
+    let recorded = upload.encode().unwrap();
+    let restored = UploadSession::decode(recorded.as_bytes()).unwrap();
+    assert_eq!(temporary_path(&restored), temporary_path(&upload));
+}
+
+#[tokio::test]
+async fn lost_initiation_reply_keeps_the_recorded_temporary_for_retry() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
+    let recorded = upload.encode().unwrap();
+    let temporary = temporary_path(&upload);
+    state.lock().unwrap().lose_initiation_reply = true;
+    assert_eq!(
+        storage
+            .upload_part(&mut upload, b"data")
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Network
+    );
+    assert_eq!(state.lock().unwrap().session_starts, 1);
+    let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
+    storage.resume_upload(&mut restored).await.unwrap();
+    assert_eq!(temporary_path(&restored), temporary);
+    storage.upload_part(&mut restored, b"data").await.unwrap();
+    storage.finish_upload(&mut restored).await.unwrap();
+    assert_eq!(storage.read(&path()).await.unwrap(), b"data");
+    let state = state.lock().unwrap();
+    assert!(!state.files.contains_key(&temporary));
+    // A lost capability can leave an empty native session until expiry, but
+    // every attempt names the recorded temporary and cannot publish a slot.
+    assert!(state
+        .uploads
+        .values()
+        .all(|(name, bytes)| name == &temporary && bytes.is_empty()));
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_CREATE_LEAN"]
+async fn lean_differential_onedrive_records_before_initiation() {
+    let expected = crate::providers::tests::create_runner(&json!({"recordings": [
+        {"op": "record", "session": 1}, {"op": "initiate", "session": 1}
+    ]}));
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
+    let recorded = upload.encode().unwrap();
+    assert_eq!(expected[0]["recorded"], !recorded.as_bytes().is_empty());
+    assert_eq!(
+        expected[0]["staged"],
+        !state.lock().unwrap().uploads.is_empty()
+    );
+    state.lock().unwrap().lose_initiation_reply = true;
+    assert!(storage.upload_part(&mut upload, b"data").await.is_err());
+    let restored = UploadSession::decode(recorded.as_bytes()).unwrap();
+    let name = temporary_path(&restored);
+    let state = state.lock().unwrap();
+    assert_eq!(expected[1]["staged"], !state.uploads.is_empty());
+    assert_eq!(
+        expected[1]["recorded"],
+        state.uploads.values().all(|(path, _)| path == &name)
+    );
+}
+
+#[tokio::test]
 async fn lost_copy_reply_requires_byte_verification() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
@@ -132,8 +206,15 @@ async fn abandoned_recording_removes_open_and_assembled_temporaries() {
         let abandoned = UploadSession::decode(recorded.as_bytes()).unwrap();
         storage.abort_upload(&abandoned).await.unwrap();
         storage.abort_upload(&abandoned).await.unwrap();
-        assert!(state.lock().unwrap().uploads.is_empty());
         assert!(state.lock().unwrap().files.is_empty());
+        // With only the planned record, the native capability was lost. Its
+        // unfinished session can expire, but its visible temporary is removed.
+        assert!(state
+            .lock()
+            .unwrap()
+            .uploads
+            .values()
+            .all(|(name, _)| { name == &temporary_path(&abandoned) }));
     }
 }
 
@@ -441,6 +522,7 @@ async fn an_invalid_fragment_range_stays_an_error_without_resuming() {
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
     let mut upload = storage.begin_upload(&path(), 4).await.unwrap();
+    storage.resume_upload(&mut upload).await.unwrap();
     state.lock().unwrap().invalid_range = true;
     let before = state.lock().unwrap().requests.len();
     assert_eq!(

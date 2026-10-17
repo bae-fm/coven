@@ -461,6 +461,8 @@ structure World where
 inductive Step where
   /-- The caller commits a record naming `n`: a queued create, or a session. -/
   | record (n : Name)
+  /-- Native initiation reserves the temporary before any part arrives. -/
+  | initiate (n : Name) (marker : Nat)
   /-- Stage bytes under `n` with an attempt's marker (a PUT, or an initiated
   and assembled multipart upload). -/
   | stage (n : Name) (bytes : Bytes) (marker : Nat)
@@ -478,6 +480,10 @@ rule, staging and dropping are unguarded. A crash is a step that never comes: ev
 leaves durable state as it stands. -/
 def step (strict : Bool) (w : World) : Step → World
   | .record n => { w with recorded := n :: w.recorded }
+  | .initiate n marker =>
+      if !strict || n ∈ w.recorded then
+        { w with staging := fun m => if m = n then some ([], marker) else w.staging m }
+      else w
   | .stage n bytes marker =>
       if !strict || n ∈ w.recorded then
         { w with staging := fun m => if m = n then some (bytes, marker) else w.staging m }
@@ -505,6 +511,15 @@ theorem step_covered {w : World} (h : Covered w) (s : Step) : Covered (step true
   | record m =>
       simp only [step] at hn ⊢
       exact List.mem_cons_of_mem _ (h n hn)
+  | initiate m marker =>
+      by_cases hm : m ∈ w.recorded
+      · simp only [step, hm] at hn ⊢
+        simp at hn ⊢
+        by_cases e : n = m
+        · subst e; exact hm
+        · simp only [e, ↓reduceIte] at hn; exact h n hn
+      · simp [step, hm] at hn ⊢
+        exact h n hn
   | stage m bytes marker =>
       by_cases hm : m ∈ w.recorded
       · simp only [step, hm] at hn ⊢
@@ -540,6 +555,21 @@ theorem staged_recorded (steps : List Step) : Covered (run true start steps) := 
   induction steps generalizing w with
   | nil => exact hw
   | cons s ss ih => exact ih _ (step_covered hw s)
+
+/-- Losing initiation's reply keeps the identity needed to remove its temporary;
+the native upload capability need not have reached the caller. -/
+theorem initiation_reply_loss_keeps_identity (id : Nat) :
+    let n := Name.attempt id
+    let after := run true start [.record n, .initiate n id]
+    after.staging n = some ([], id) ∧ n ∈ after.recorded := by
+  simp [run, step, start]
+
+/-- Initiating before recording strands a temporary even with no parts sent. -/
+theorem unrecorded_initiation_strands (id : Nat) :
+    let n := Name.attempt id
+    let after := run false start [.initiate n id]
+    after.staging n = some ([], id) ∧ after.recorded = [] := by
+  simp [run, step, start]
 
 /-- A record's retry removes its temporary: staging again under the same
 name, copying and deleting leave nothing staged there, whatever an earlier,

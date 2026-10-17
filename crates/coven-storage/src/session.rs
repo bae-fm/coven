@@ -20,7 +20,9 @@ pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 /// identifying publication, and the session is recorded before the native
 /// multipart upload exists: the first part initiates it. Abort deletes it even after native multipart completion; failed
 /// copy or cleanup keeps the recording incomplete so it can be retried.
-/// OneDrive records its temporary UUID through receipt, copying, verification
+/// OneDrive returns its planned temporary UUID before any provider request.
+/// After recording it, resume and record the returned native capability before
+/// sending parts. The UUID stays through receipt, copying, verification
 /// and deletion; native transfer completion alone is not publication.
 /// Providers may retain closed session data until their expiry, without publishing it.
 /// When recovery requires complete-byte comparison with a published object,
@@ -121,9 +123,21 @@ pub(crate) struct S3Part {
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum OneDriveUpload {
-    Receiving { url: SecretText },
-    Uploaded { item: String },
-    Copying { monitor: SecretText },
+    /// The temporary identity exists before any native request (§20.6).
+    Planned {
+        /// Only this process can know initiation has never been attempted.
+        #[serde(skip)]
+        unstarted: bool,
+    },
+    Receiving {
+        url: SecretText,
+    },
+    Uploaded {
+        item: String,
+    },
+    Copying {
+        monitor: SecretText,
+    },
     // The copy definitively failed; cleanup may already have removed its source.
     Refused,
     VerifyPublished,
@@ -142,6 +156,17 @@ impl S3Part {
 }
 
 impl UploadSession {
+    /// Whether native initiation must follow recording this identity, before
+    /// any part is sent. Resume it and save the returned session first (§20.6).
+    pub fn needs_initiation(&self) -> bool {
+        matches!(
+            self.state,
+            SessionState::OneDrive {
+                upload: OneDriveUpload::Planned { .. },
+                ..
+            }
+        )
+    }
     /// Whether this recorded transfer belongs to the connected location.
     pub fn is_at(&self, location: &StorageConfig) -> bool {
         &self.location == location
@@ -235,6 +260,11 @@ impl UploadSession {
             SessionState::Dropbox { id } if provider == CloudProvider::Dropbox => nonempty(id)?,
             SessionState::OneDrive { upload, .. } if provider == CloudProvider::OneDrive => {
                 match upload {
+                    OneDriveUpload::Planned { .. } => {
+                        if self.confirmed != 0 {
+                            return Err(StorageFailure::InvalidPart.into());
+                        }
+                    }
                     OneDriveUpload::Receiving { url } => {
                         transfer_url(url)?;
                         if self.confirmed == self.total {

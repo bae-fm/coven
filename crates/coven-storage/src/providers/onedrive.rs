@@ -441,7 +441,8 @@ impl ProviderOps for OneDriveStorage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        self.begin_temporary(publication, path, total).await
+        publication.check()?;
+        Ok(self.plan_temporary(path, total))
     }
     async fn resume_upload(
         &self,

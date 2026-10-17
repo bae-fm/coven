@@ -5373,8 +5373,10 @@ replaced through an upload session instead.
 coven uploads to `<store>/.coven-uploads/<session>` inside the configured folder.
 That reserved place is distinct from every coven path.
 
-- The session's random UUID is recorded with its native upload capability before
-  any part is sent. Retries and resumption derive the same temporary name.
+- The session's random UUID is recorded before native initiation, so a lost
+  initiation reply cannot strand an unnamed temporary. The returned upload
+  capability is then saved in that same session before any part is sent.
+  Retries and resumption derive the same temporary name.
 - After all parts are stored, coven publishes with one server-side Graph `copy`
   to the final parent and name, with `@microsoft.graph.conflictBehavior=fail`. It
   follows the returned monitor URL until the asynchronous copy completes. An
@@ -6375,6 +6377,7 @@ Write-ups explain each model and state its assumptions:
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | An attempt staging over another's sees its own marker, so both answer stored, which equal bytes settle to anyway | `shared_temporary_both_stored` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Temporaries are always recorded; a retry clears them, even after a failed deletion; a fresh name per attempt would strand one | `staged_recorded`, `retry_clears`, `failed_deletion_retry_accepted`, `attempt_naming_strands` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6, E.10 |
+| Recording before native initiation preserves the temporary's identity even when initiation's reply is lost; initiating first can strand it before any part is sent | `initiation_reply_loss_keeps_identity`, `unrecorded_initiation_strands` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6, E.2 |
 | No step of the mint model deletes a provider key, so minting, recording, copying or losing a database never takes a key another copy made. The model has no check step: that a mint checks its key before the secret joins the journal is not modelled, and delivery, claim settlement, undo and key deletion are outside it | `run_keeps_provider` | `proofs/storage/CovenStorage/KeyDelivery.lean` | §20.10 |
 | A mint by a cloned database spares the key this one recorded | `clone_mint_spares_recorded_key` | `proofs/storage/CovenStorage/KeyListing.lean` | §20.10 |
 | For a key replacement, the only case modelled: a failed mint or check releases admin access, after which no key is made until the app supplies it again; a successful check keeps it, to delete the old key, until the replacement ends | `failed_mint_releases`, `failed_check_releases`, `released_makes_nothing`, `check_keeps_admin` | `proofs/storage/CovenStorage/AdminAccess.lean` | §20.10 |

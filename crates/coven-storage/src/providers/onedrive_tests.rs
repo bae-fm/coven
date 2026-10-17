@@ -61,6 +61,7 @@ pub(super) struct Remote {
     lose_redeem_reply: bool,
     single_uploads: usize,
     session_starts: usize,
+    lose_initiation_reply: bool,
     fail_reply: bool,
     copies: usize,
     copied: BTreeSet<String>,
@@ -335,6 +336,9 @@ pub(super) async fn endpoint(
             state.next += 1;
             let id = state.next.to_string();
             state.uploads.insert(id.clone(), (path, Vec::new()));
+            if std::mem::take(&mut state.lose_initiation_reply) {
+                return response(503, "{}");
+            }
             return reply(json!({"uploadUrl":format!("http://{host}/session/{id}")}));
         }
         if method == Method::DELETE {
@@ -571,6 +575,7 @@ async fn resume_accepts_bounded_and_multiple_missing_ranges() {
     let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     for ranges in [json!(["5-9"]), json!(["9-", "5-7"]), json!(["5-"])] {
         let mut upload = storage.begin_upload(&path, 12).await.unwrap();
+        storage.resume_upload(&mut upload).await.unwrap();
         state.lock().unwrap().expected_ranges = Some(ranges);
         storage.resume_upload(&mut upload).await.unwrap();
         assert_eq!(upload.confirmed_bytes(), 5);
@@ -596,6 +601,7 @@ async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
         json!(["18446744073709551616-"]),
     ] {
         let mut upload = storage.begin_upload(&path, 12).await.unwrap();
+        storage.resume_upload(&mut upload).await.unwrap();
         upload.confirmed = 5;
         state.lock().unwrap().expected_ranges = Some(ranges.clone());
         let error = storage.resume_upload(&mut upload).await.unwrap_err();

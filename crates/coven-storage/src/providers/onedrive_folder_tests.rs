@@ -424,13 +424,15 @@ async fn missing_prefix_uses_exact_lookup_and_can_appear_later() {
 }
 
 #[tokio::test]
-async fn warm_upload_begin_reuses_the_reserved_folder() {
+async fn warm_upload_initiation_reuses_the_reserved_folder() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let first = storage.begin_upload(&slot(1), 4).await.unwrap();
+    let mut first = storage.begin_upload(&slot(1), 4).await.unwrap();
+    storage.resume_upload(&mut first).await.unwrap();
     take_requests(&state);
-    let second = storage.begin_upload(&slot(2), 4).await.unwrap();
+    let mut second = storage.begin_upload(&slot(2), 4).await.unwrap();
+    storage.resume_upload(&mut second).await.unwrap();
     let requests = take_requests(&state);
     assert_eq!(requests.len(), 1);
     assert_eq!(requests[0].0, Method::POST);
@@ -489,15 +491,16 @@ async fn disappeared_upload_folders_are_invalidated_before_retry() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let first = storage.begin_upload(&slot(1), 4).await.unwrap();
+    let mut first = storage.begin_upload(&slot(1), 4).await.unwrap();
+    storage.resume_upload(&mut first).await.unwrap();
     storage.abort_upload(&first).await.unwrap();
     remove_folder(&state, &format!("{STORE_ID}/.coven-uploads"));
+    let mut planned = storage.begin_upload(&slot(1), 4).await.unwrap();
     assert_eq!(
         storage
-            .begin_upload(&slot(1), 4)
+            .resume_upload(&mut planned)
             .await
-            .err()
-            .unwrap()
+            .unwrap_err()
             .failure(),
         StorageFailure::NotFound
     );

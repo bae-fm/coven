@@ -116,20 +116,39 @@ impl OneDriveStorage {
         }
         Ok(())
     }
-    pub(super) async fn begin_temporary(
+    pub(super) fn plan_temporary(&self, path: &ObjectPath, total: u64) -> UploadSession {
+        UploadSession {
+            location: self.config(),
+            path: path.clone(),
+            total,
+            confirmed: 0,
+            part_size: crate::session::ONEDRIVE_PART_SIZE,
+            state: SessionState::OneDrive {
+                temporary: self.ids.new_id(),
+                upload: OneDriveUpload::Planned { unstarted: true },
+            },
+        }
+    }
+
+    async fn initiate_temporary(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
-        total: u64,
-    ) -> Result<UploadSession, StorageError> {
-        self.directory(publication, &[&path.store().to_string(), TEMPORARIES])
-            .await?;
-        let temporary = self.ids.new_id();
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        // The caller already recorded this identity (§20.6). Keep it even if
+        // initiation succeeds at Graph but its reply never reaches us.
+        set_upload(session, OneDriveUpload::Planned { unstarted: false })?;
+        self.directory(
+            publication,
+            &[&session.path.store().to_string(), TEMPORARIES],
+        )
+        .await?;
+        let temporary = temporary(session)?;
+        let url = format!(
+            "{}/createUploadSession",
+            self.temporary_url(session.path.store(), temporary)?
+        );
         let started = async {
-            let url = format!(
-                "{}/createUploadSession",
-                self.temporary_url(path.store(), temporary)?
-            );
             let response = self
                 .publish(
                     publication,
@@ -147,29 +166,8 @@ impl OneDriveStorage {
             Ok::<_, StorageError>(SecretText::new(url.into()))
         }
         .await;
-        let url = match self.checked_folder_operation(started).await {
-            Ok(url) => url,
-            Err(error) => {
-                // No parts have been sent and no recording can be returned.
-                // Remove an item even if initiation's response was lost.
-                return with_cleanup(
-                    Err(error),
-                    self.delete_temporary_at(publication, path.store(), temporary)
-                        .await,
-                );
-            }
-        };
-        Ok(UploadSession {
-            location: self.config(),
-            path: path.clone(),
-            total,
-            confirmed: 0,
-            part_size: crate::session::ONEDRIVE_PART_SIZE,
-            state: SessionState::OneDrive {
-                temporary,
-                upload: OneDriveUpload::Receiving { url },
-            },
-        })
+        let url = self.checked_folder_operation(started).await?;
+        set_upload(session, OneDriveUpload::Receiving { url })
     }
 
     pub(super) async fn resume_temporary(
@@ -178,6 +176,17 @@ impl OneDriveStorage {
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
         match upload(session)? {
+            OneDriveUpload::Planned { unstarted } => {
+                if !unstarted {
+                    match self.recover_temporary(publication, session).await {
+                        Err(error) if error.failure() == StorageFailure::SessionExpired => {
+                            tracing::debug!("OneDrive temporary absent; reusing its recorded name");
+                        }
+                        result => return result,
+                    }
+                }
+                self.initiate_temporary(publication, session).await
+            }
             OneDriveUpload::Receiving { url } => {
                 validate_download_url(&self.api, url.as_str())?;
                 let response = self
@@ -281,6 +290,9 @@ impl OneDriveStorage {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
+        if matches!(upload(session)?, OneDriveUpload::Planned { .. }) {
+            self.resume_temporary(publication, session).await?;
+        }
         match upload(session)? {
             OneDriveUpload::VerifyPublished => {
                 if let Err(error) = http::compare_published_part(self, session, bytes, end).await {
@@ -368,9 +380,9 @@ impl OneDriveStorage {
             OneDriveUpload::Copying { .. } | OneDriveUpload::Refused => {
                 return self.finish_copy(publication, session).await
             }
-            OneDriveUpload::VerifyPublished | OneDriveUpload::Receiving { .. } => {
-                return Err(StorageFailure::InvalidPart.into())
-            }
+            OneDriveUpload::Planned { .. }
+            | OneDriveUpload::VerifyPublished
+            | OneDriveUpload::Receiving { .. } => return Err(StorageFailure::InvalidPart.into()),
             OneDriveUpload::Uploaded { .. } => {}
         }
         let OneDriveUpload::Uploaded { item } = upload(session)? else {
