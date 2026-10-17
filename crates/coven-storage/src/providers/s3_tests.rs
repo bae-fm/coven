@@ -827,7 +827,8 @@ async fn multipart_recovery_refuses_incomplete_pages_and_empty_etags_without_adv
 #[tokio::test]
 async fn recovered_parts_cannot_exceed_the_recordings_part_size() {
     let total = 8 * 1024 * 1024 + 1;
-    let server=TestServer::new(Router::new().fallback(move |uri:Uri|async move {
+    // Reading each body first keeps the reply from racing the part's upload.
+    let server=TestServer::new(Router::new().fallback(move |uri:Uri, _body: Bytes|async move {
         if query(&uri).contains_key("uploads") {response(200,"<InitiateMultipartUploadResult><UploadId>session</UploadId></InitiateMultipartUploadResult>")}
         else {response(200,format!("<ListPartsResult><IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><Size>{total}</Size><ETag>etag</ETag></Part></ListPartsResult>"))}
     })).await;
