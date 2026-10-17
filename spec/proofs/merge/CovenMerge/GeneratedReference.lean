@@ -14,10 +14,9 @@ reference that no write named.
   covers it: the foreign key fails on every device.
 * `grouped_cells_share_winner`: when every change sets either all of a group of
   columns or none of them, every cell of that group holds the same write.
-* `accepted_reference_written`: under a schema the check accepts, a key with a
-  generated column spans several columns, so its capture group holds the key
-  columns and every generated column's inputs (§9.1). Every reference a device
-  shows is then the tuple one write set, or a stored column's own value.
+* `grouped_reference_written`: every key groups its columns and generated
+  inputs (§9.1), including a single generated column. Every reference a device
+  shows is then the tuple one write set.
 
 Computing generated inputs from SQL and capturing a group's components are
 outside the model: `Grouped` states the capture rule as a hypothesis, as the
@@ -90,30 +89,22 @@ def setBy (T : Columns Col V) (val : W → Col → V) (x : Option W) (k : List C
     List (Option V) :=
   k.map (T.value fun c => x.map (val · c))
 
-/-- The group Rust captures for key `k` (`removal_schema.rs`): only a key of
-several columns has one, holding its columns and its generated columns' inputs. -/
+/-- Every key groups its columns and its generated columns' stored inputs.
+For a single stored column this is a singleton, requiring nothing extra. -/
 def captureGroup (T : Columns Col V) (k : List Col) (c : Col) : Prop :=
-  1 < k.length ∧ (c ∈ k ∨ ∃ g ∈ k, T.generated g = true ∧ c ∈ T.inputs g)
+  c ∈ k ∨ ∃ g ∈ k, T.generated g = true ∧ c ∈ T.inputs g
 
-/-- The schema check: a single-column key may not be on a generated column. -/
-def accepts (T : Columns Col V) (keys : List (List Col)) : Prop :=
-  ∀ k ∈ keys, ∀ c ∈ k, T.generated c = true → 1 < k.length
-
-/-- **Refusal is safe.** Under an accepted schema whose captures follow §9.1,
-every key's shown reference is the tuple one write set (or none set), or a
-single stored column's own cell. -/
-theorem accepted_reference_written (T : Columns Col V) (val : W → Col → V)
-    {keys : List (List Col)} (hacc : accepts T keys) {k : List Col} (hk : k ∈ keys)
-    (hg : Grouped M (captureGroup T k)) {S : W → Prop} {st : St W Row Col}
-    (h : IsSpec M S st) (r : Row) :
+/-- **Grouping preserves written references.** A key's shown reference is
+one write's tuple, including single generated columns and constant expressions. -/
+theorem grouped_reference_written (T : Columns Col V) (val : W → Col → V)
+    (k : List Col) (hg : Grouped M (captureGroup T k)) {S : W → Prop}
+    {st : St W Row Col} (h : IsSpec M S st) (r : Row) :
     ∃ x, reference T val st r k = setBy T val x k := by
-  by_cases hlen : 1 < k.length
-  · obtain ⟨c₀, hc₀⟩ : ∃ c₀, c₀ ∈ k := by
-      cases k with
-      | nil => simp at hlen
-      | cons c _ => exact ⟨c, List.mem_cons_self⟩
-    have hG₀ : captureGroup T k c₀ := ⟨hlen, Or.inl hc₀⟩
-    have same : ∀ c, captureGroup T k c → shown val st r c =
+  cases k with
+  | nil => exact ⟨none, rfl⟩
+  | cons c₀ cs =>
+    have hG₀ : captureGroup T (c₀ :: cs) c₀ := Or.inl List.mem_cons_self
+    have same : ∀ c, captureGroup T (c₀ :: cs) c → shown val st r c =
         (st.cell r c₀).map (val · c) := fun c hc => by
       unfold shown
       rw [grouped_cells_share_winner hg h r hc hG₀]
@@ -126,32 +117,43 @@ theorem accepted_reference_written (T : Columns Col V) (val : W → Col → V)
     · next hgen =>
       apply T.reads_inputs
       intro i hi
-      exact same i ⟨hlen, Or.inr ⟨c, hc, hgen, hi⟩⟩
-    · exact same c ⟨hlen, Or.inl hc⟩
-  · match k, hk, hlen with
-    | [], _, _ => exact ⟨none, rfl⟩
-    | [c], hk, _ =>
-      have hstored : T.generated c = false := by
-        cases hgen : T.generated c
-        · rfl
-        · exact absurd (hacc [c] hk c List.mem_cons_self hgen) (by simp)
-      refine ⟨st.cell r c, ?_⟩
-      simp [reference, setBy, Columns.value, hstored, shown]
-    | _ :: _ :: _, _, hlen => exact absurd (by simp) hlen
+      exact same i (Or.inr ⟨c, hc, hgen, hi⟩)
+    · exact same c (Or.inl hc)
 
 variable [DecidableEq W]
 
-/-- On a device: every causal order of valid writes shows a written reference
-for every key an accepted schema has. -/
+/-- Every causal order of valid writes shows a written reference for every
+key whose columns and generated inputs are captured together. -/
 theorem device_reference_written (hV : Valid M) (T : Columns Col V) (val : W → Col → V)
-    {keys : List (List Col)} (hacc : accepts T keys) {k : List Col} (hk : k ∈ keys)
-    (hg : Grouped M (captureGroup T k)) {L : List W} (hL : CausalOrder M L) (r : Row) :
+    (k : List Col) (hg : Grouped M (captureGroup T k))
+    {L : List W} (hL : CausalOrder M L) (r : Row) :
     ∃ x, reference T val (L.foldl (step M) St.init) r k = setBy T val x k :=
-  accepted_reference_written T val hacc hk hg (run_isSpec hV hL) r
+  grouped_reference_written T val k hg (run_isSpec hV hL) r
 
 end General
 
-/-! ## The single-column key the check refuses
+/-! ## A generated reference cannot always follow an assignment
+
+Grouping does not make a generated column writable. For `ref AS ('p')`, no
+assignment to stored inputs can produce the NULL required by SET NULL, or the
+new key required by ON UPDATE CASCADE. Here 7 is 'p' and 8 is 'q'. -/
+
+namespace ConstantAction
+
+def columns : Columns Unit Nat where
+  generated _ := true
+  inputs _ := []
+  expr _ _ := some 7
+  reads_inputs := by intros; rfl
+
+/-- Even allowing every stored input to change cannot realize either action. -/
+theorem generated_constant_cannot_follow_actions (σ : Unit → Option Nat) :
+    columns.value σ () ≠ none ∧ columns.value σ () ≠ some 8 := by
+  simp [Columns.value, columns]
+
+end ConstantAction
+
+/-! ## A single-column key without grouped inputs
 
 Row 0 of `c(a, b, ref AS (a || b) REFERENCES p(id))`. Columns: 0 is `a`, 1 is
 `b`, 2 is `ref`. Write 0 inserts `a = 1, b = 2`. Ana's write 1 sets `a = 3`;
@@ -218,7 +220,7 @@ applying everything it had read and then the write itself. -/
 def recorded (w : Nat) : Option (Nat × Nat) :=
   ref (([0, w].eraseDups).foldl (step M) St.init)
 
-/-- **The accepted single-column key is unsafe.** Whether Ana's or Ben's write
+/-- **Ungrouped inputs are unsafe.** Whether Ana's or Ben's write
 arrives first, the device shows `ref = 'qz'` (3, 4), which no write recorded.
 Every author checked its own reference against an existing parent, so with
 exactly those parents the foreign key fails on every device. -/

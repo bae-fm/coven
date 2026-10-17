@@ -88,72 +88,37 @@ async fn set_default_is_refused_on_open_and_after_migrating() {
     }
 }
 
-/// A single-column key on a generated column could merge its inputs into a
-/// reference no write named (§9.1, `unwritten_reference`); a key of several
-/// columns captures the inputs with it, and local tables do not merge.
 #[tokio::test]
-async fn a_single_generated_reference_column_is_refused_on_open_and_after_migrating() {
+async fn generated_references_are_accepted_on_open_and_after_migrating() {
     for kind in ["VIRTUAL", "STORED"] {
-        let parent = "CREATE TABLE p(id TEXT NOT NULL PRIMARY KEY)";
-        let schema = format!("{parent}; CREATE TABLE c(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,ref TEXT AS (a||b) {kind} REFERENCES p(id) ON DELETE CASCADE)");
-        let expected = SchemaError::GeneratedForeignKey {
-            table: "c".into(),
-            key: "(\"ref\") REFERENCES \"p\" (\"id\")".into(),
-        };
-        let store = TestStore::new();
-        let migration = schema.clone();
-        let error = store
-            .builder(
-                vec![shared("c")],
-                vec![Migration::addition_with(
-                    1,
-                    "generated reference",
-                    move |sql| {
-                        sql.execute_batch(&migration)?;
-                        Ok(())
-                    },
-                )],
-            )
-            .open()
-            .await
-            .err()
-            .expect("generated reference refused after migrating");
-        assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
-        let db = store.builder(vec![], vec![]).open().await.unwrap();
-        db.inspect_writer(|writer| writer.batch(&schema).unwrap());
-        db.close().await.unwrap();
-        let error = store
-            .builder(vec![shared("c")], vec![])
-            .open()
-            .await
-            .err()
-            .expect("generated reference refused on open");
-        assert!(matches!(database_error(error), DbError::Schema(found) if found == expected));
-        // Undeclared, the table is local and nothing merges its inputs.
-        store
-            .builder(vec![shared("p")], vec![])
-            .open()
-            .await
-            .unwrap()
-            .close()
-            .await
-            .unwrap();
-
-        let composite = format!("CREATE TABLE p(x TEXT NOT NULL,y TEXT NOT NULL,PRIMARY KEY(x,y)); CREATE TABLE c(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,ref TEXT AS (a||b) {kind},FOREIGN KEY(ref,b) REFERENCES p(x,y))");
-        TestStore::new()
-            .builder(
-                vec![shared("p").key_columns(["x", "y"]), shared("c")],
-                vec![Migration::addition_with(1, "composite", move |sql| {
-                    sql.execute_batch(&composite)?;
+        for expression in ["a||b", "'xy'"] {
+            let schema = format!("CREATE TABLE p(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,ref TEXT AS ({expression}) {kind} REFERENCES p(id) ON DELETE CASCADE)");
+            let store = TestStore::new();
+            let tables = || vec![shared("p"), shared("c")];
+            let migrations = || {
+                let migration = schema.clone();
+                vec![Migration::addition_with(1, "reference", move |sql| {
+                    sql.execute_batch(&migration)?;
                     Ok(())
-                })],
-            )
-            .open()
-            .await
-            .unwrap()
-            .close()
-            .await
-            .unwrap();
+                })]
+            };
+            store
+                .builder(tables(), migrations())
+                .open()
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+            store
+                .builder(tables(), migrations())
+                .open()
+                .await
+                .unwrap()
+                .close()
+                .await
+                .unwrap();
+        }
     }
 }
 
@@ -868,4 +833,83 @@ async fn nonprimary_reference_migration_preserves_the_previous_database() {
     assert_eq!(db.schema_version().await.unwrap(), 1);
     assert_eq!(crate::tests::contents(&db), before);
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn actions_cannot_assign_generated_reference_columns() {
+    for synced in [false, true] {
+        for kind in ["VIRTUAL", "STORED"] {
+            for action in [
+                "ON DELETE SET NULL",
+                "ON DELETE CASCADE ON UPDATE SET NULL",
+                "ON DELETE CASCADE ON UPDATE CASCADE",
+            ] {
+                let store = TestStore::new();
+                let tables = || {
+                    let mut tables = vec![shared("parent")];
+                    if synced {
+                        tables.push(shared("child"));
+                    }
+                    tables
+                };
+                let schema = format!(
+                    "CREATE TABLE parent(id TEXT NOT NULL PRIMARY KEY);
+                    CREATE TABLE child(id TEXT NOT NULL PRIMARY KEY,
+                    ref TEXT AS ('p') {kind} REFERENCES parent(id) {action})"
+                );
+                let migration = schema.clone();
+                let error = store
+                    .builder(
+                        tables(),
+                        vec![Migration::addition_with(
+                            1,
+                            "generated action",
+                            move |sql| {
+                                sql.execute_batch(&migration)?;
+                                Ok(())
+                            },
+                        )],
+                    )
+                    .open()
+                    .await
+                    .err()
+                    .expect("an action cannot assign a generated column");
+                assert!(
+                    matches!(database_error(error), DbError::Schema(SchemaError::GeneratedForeignKeyAction { table, column })
+                        if table == "child" && column == "ref")
+                );
+                let db = store.builder(vec![], vec![]).open().await.unwrap();
+                db.inspect_writer(|db| {
+                    assert_eq!(db.schema_version().unwrap(), 0);
+                    db.batch(&schema).unwrap();
+                    db.batch("INSERT INTO parent VALUES('p'); INSERT INTO child(id) VALUES('c')")
+                        .unwrap();
+                    let sql = if action == "ON DELETE SET NULL" {
+                        "DELETE FROM parent"
+                    } else {
+                        "UPDATE parent SET id='q'"
+                    };
+                    let error = db.batch(sql).unwrap_err();
+                    assert!(
+                        error.to_string().contains("cannot UPDATE generated column"),
+                        "{error}"
+                    );
+                });
+                db.close().await.unwrap();
+                for read_only in [false, true] {
+                    let builder = store.builder(tables(), vec![]);
+                    let result = if read_only {
+                        builder.open_read_only().await.map(|_| ())
+                    } else {
+                        builder.open().await.map(|_| ())
+                    };
+                    assert!(matches!(
+                        database_error(result.expect_err("invalid generated action")),
+                        DbError::Schema(SchemaError::GeneratedForeignKeyAction { table, column })
+                        if table == "child" && column == "ref"
+                    ));
+                }
+            }
+        }
+    }
 }

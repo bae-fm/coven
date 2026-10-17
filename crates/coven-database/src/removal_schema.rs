@@ -197,7 +197,12 @@ impl TableRules {
         let reference_groups = table
             .foreign_keys
             .iter()
-            .filter(|key| key.columns.len() > 1)
+            .filter(|key| {
+                key.columns.len() > 1
+                    || key.columns.iter().any(|column| {
+                        generated.contains_key(crate::write_rows::column_name(table, column))
+                    })
+            })
             .map(|key| {
                 let mut group: std::collections::BTreeSet<String> = key
                     .columns

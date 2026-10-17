@@ -270,22 +270,6 @@ impl Schema {
                     }
                     .into());
                 }
-                // Only a key of several columns captures a generated column's
-                // inputs with it (§9.1); one generated column could merge into a
-                // reference no write named.
-                if let [column] = foreign_key.columns.as_slice() {
-                    if table
-                        .columns
-                        .iter()
-                        .any(|c| c.generated && c.name.eq_ignore_ascii_case(column))
-                    {
-                        return Err(SchemaError::GeneratedForeignKey {
-                            table: table.name.clone(),
-                            key: foreign_key.description(),
-                        }
-                        .into());
-                    }
-                }
             }
             let audience_key = match &declaration.audience {
                 AudienceSource::Both { .. } => {
@@ -438,23 +422,30 @@ impl Schema {
         self.validate_local_updates(&declared)?;
         for table in self.tables.values() {
             for key in &table.foreign_keys {
-                for action in [&key.on_delete, &key.on_update] {
-                    if action != "SET NULL" {
-                        continue;
-                    }
-                    for source in &key.columns {
-                        let column = table
-                            .columns
-                            .iter()
-                            .find(|c| c.name.eq_ignore_ascii_case(source))
-                            .expect("foreign key column");
-                        if column.not_null {
-                            return Err(SchemaError::ImpossibleAction {
-                                table: table.name.clone(),
-                                column: column.name.clone(),
-                            }
-                            .into());
+                for source in &key.columns {
+                    let column = table
+                        .columns
+                        .iter()
+                        .find(|c| c.name.eq_ignore_ascii_case(source))
+                        .expect("foreign key column");
+                    let sets_null = key.on_delete == "SET NULL" || key.on_update == "SET NULL";
+                    let assigns = sets_null
+                        || key.on_delete == "SET DEFAULT"
+                        || key.on_update == "SET DEFAULT"
+                        || key.on_update == "CASCADE";
+                    if column.generated && assigns {
+                        return Err(SchemaError::GeneratedForeignKeyAction {
+                            table: table.name.clone(),
+                            column: column.name.clone(),
                         }
+                        .into());
+                    }
+                    if column.not_null && sets_null {
+                        return Err(SchemaError::ImpossibleAction {
+                            table: table.name.clone(),
+                            column: column.name.clone(),
+                        }
+                        .into());
                     }
                 }
             }

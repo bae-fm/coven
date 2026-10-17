@@ -1,6 +1,7 @@
-use crate::write::tests::sql;
-use crate::{tests::TestStore, RowIdentity, SyncedTable};
-use coven_merge::UniqueConstraint;
+use crate::write::tests::{records, sql};
+use crate::{tests::TestStore, Migration, RowIdentity, SyncedTable};
+use coven_foundation::id_source::SequentialIds;
+use coven_merge::{Audience, Operation, UniqueConstraint};
 
 #[tokio::test]
 async fn unnamed_check_identity_keeps_the_full_expression() {
@@ -443,4 +444,166 @@ async fn unnamed_check_sqlite_differential() {
         }
     });
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn generated_reference_inputs_keep_one_written_parent() {
+    compare_generated_references(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_MERGE_LEAN"]
+async fn generated_reference_differential() {
+    compare_generated_references(true).await;
+}
+
+async fn compare_generated_references(lean: bool) {
+    for kind in ["VIRTUAL", "STORED"] {
+        let ids = SequentialIds::new();
+        let sa = TestStore::with_ids(&ids);
+        let sb = TestStore::with_ids(&ids);
+        let tables = || {
+            ["parents", "children"]
+                .map(|t| SyncedTable::new(t, RowIdentity::SharedKey))
+                .to_vec()
+        };
+        let schema = format!("CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,a TEXT,b TEXT,joined TEXT AS(a||b) {kind},ref TEXT AS(joined) {kind} REFERENCES parents(id) ON DELETE CASCADE)");
+        let migrations = || {
+            let schema = schema.clone();
+            vec![Migration::addition_with(1, "references", move |sql| {
+                sql.execute_batch(&schema)?;
+                Ok(())
+            })]
+        };
+        let a = sa.builder(tables(), migrations()).open().await.unwrap();
+        let b = sb.builder(tables(), migrations()).open().await.unwrap();
+        sql(&a, "INSERT INTO parents VALUES('xy'),('qy'),('xz'); INSERT INTO children(id,a,b) VALUES('c','x','y')").await.unwrap();
+        let initial = records(&a).remove(0);
+        b.receive(initial.clone().into()).await.unwrap();
+        a.receive(initial.clone().into()).await.unwrap();
+        sql(&a, "UPDATE children SET a='q'").await.unwrap();
+        sql(&b, "UPDATE children SET b='z'").await.unwrap();
+        let writes = [
+            initial,
+            records(&a).pop().unwrap(),
+            records(&b).pop().unwrap(),
+        ];
+        for write in &writes[1..] {
+            let change = &write.parts[0].rows[0];
+            let Operation::Update(columns) = &change.change.operation else {
+                panic!("update")
+            };
+            assert_eq!(
+                columns.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["a", "b", "joined", "ref"]
+            );
+            let Operation::Update(step) = &change.execution.steps[0].change.operation else {
+                panic!("update step")
+            };
+            assert_eq!(
+                step.keys().map(String::as_str).collect::<Vec<_>>(),
+                ["a", "b"]
+            );
+        }
+        let winner = if writes[1].header.timestamp > writes[2].header.timestamp {
+            1
+        } else {
+            2
+        };
+        let expected = if winner == 1 { "qy" } else { "xz" };
+        let mut snapshots = Vec::new();
+        for order in [[0, 1, 2], [0, 2, 1]] {
+            let fixture = TestStore::new();
+            let db = fixture
+                .builder(tables(), migrations())
+                .open()
+                .await
+                .unwrap();
+            for i in order {
+                db.receive(writes[i].clone().into()).await.unwrap();
+            }
+            db.read(move |sql| {
+                assert_eq!(
+                    sql.query_row("SELECT ref FROM children", [], |r| r.get::<_, String>(0))?,
+                    expected
+                );
+                Ok(())
+            })
+            .await
+            .unwrap();
+            if lean {
+                compare_generated_reference_lean(&writes, &order, &db);
+            }
+            snapshots.push(crate::tests::data(&db, Audience::Store));
+            db.close().await.unwrap();
+        }
+        assert_eq!(snapshots[0], snapshots[1]);
+        a.close().await.unwrap();
+        b.close().await.unwrap();
+    }
+}
+
+fn compare_generated_reference_lean(
+    writes: &[coven_format::write::WriteRecord],
+    order: &[usize],
+    db: &crate::Database,
+) {
+    use serde_json::json;
+    let names = ["a", "b", "id", "joined", "ref"];
+    let column_id = |column: &str| names.iter().position(|name| *name == column).unwrap();
+    let write_id = |write| {
+        writes
+            .iter()
+            .position(|record| record.header.position == write)
+            .unwrap()
+    };
+    let input_writes: Vec<_> = writes
+        .iter()
+        .enumerate()
+        .map(|(i, write)| {
+            let row = write.parts[0]
+                .rows
+                .iter()
+                .find(|row| row.row.table == "children")
+                .unwrap();
+            let (kind, columns) = match &row.change.operation {
+                Operation::Insert(columns) => (0, columns),
+                Operation::Update(columns) => (1, columns),
+                Operation::Delete => panic!("setter"),
+            };
+            json!({"id":i,"ts":crate::test_utils::tests::stamp(write.header.timestamp).to_string(),
+            "past":if i==0 {vec![]} else {vec![0]},
+            "changes":[{"row":0,"gen":row.change.generation,"kind":kind,
+                "cols":columns.keys().map(|name| column_id(name)).collect::<Vec<_>>()}]})
+        })
+        .collect();
+    let input = json!({"mode":"boolean","columns":names.len(),"writes":input_writes,"order":order,
+        "rows":[{"id":0,"present":true,"refs":[],"check":false,"deleted":false,"claims":[],"rank":0}]});
+    let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+    let actual = crate::test_utils::tests::run_lean(&runner, &input);
+    db.inspect_writer_schema(|writer, schema| {
+        let app = crate::write_rows::AppView::after(writer, schema);
+        let store = crate::merge_store::MergeStore::new(writer, &app);
+        let state = store.row(&writes[1].parts[0].rows[0].row).unwrap().state;
+        let cells: Vec<_> = state
+            .cells()
+            .iter()
+            .map(|(name, cell)| [column_id(name), write_id(cell.write)])
+            .collect();
+        let mut lost: Vec<_> = state
+            .lost()
+            .iter()
+            .map(|(key, loss)| {
+                [
+                    column_id(&key.column),
+                    write_id(key.write),
+                    loss.incarnation as usize,
+                    write_id(loss.replaced_by),
+                ]
+            })
+            .collect();
+        lost.sort();
+        assert_eq!(actual[0]["cells"], json!(cells));
+        assert_eq!(actual[0]["lost"], json!(lost));
+    });
 }
