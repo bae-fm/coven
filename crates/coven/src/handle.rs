@@ -490,6 +490,14 @@ impl CovenHandle {
     pub(crate) async fn store_state(&self) -> coven_database::StoreState {
         self.database.store_state().await.unwrap()
     }
+    #[cfg(test)]
+    pub(crate) async fn test_connection_retry_wait(&self) -> Option<coven_database::RetryWait> {
+        self.database
+            .retry_wait(coven_database::RetrySubject::Sync)
+            .await
+            .unwrap()
+    }
+
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn test_queued_writes(

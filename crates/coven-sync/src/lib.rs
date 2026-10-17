@@ -26,6 +26,8 @@ mod write_object;
 mod write_seal;
 pub use sequence_sync::sync_loop::SyncLoop;
 mod codes;
+mod connection_retry;
+pub use connection_retry::{connection_failure, ConnectionRetry};
 mod credential_custody;
 mod files;
 mod retry_waits;

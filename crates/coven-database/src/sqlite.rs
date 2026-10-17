@@ -37,7 +37,7 @@ use crate::{
 
 pub(crate) struct DatabaseConnection {
     #[cfg(any(test, feature = "test-utils"))]
-    pub(crate) work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
+    work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
     connection: Connection,
     authorization: SqlAuthorization,
     /// The open handle this connection serves: it receives the commits and
@@ -64,6 +64,11 @@ struct WriterObservation {
 }
 
 impl DatabaseConnection {
+    #[cfg(any(test, feature = "test-utils"))]
+    pub(crate) fn test_track_work(&self, counter: crate::test_utils::WorkCounter) {
+        *self.work.borrow_mut() = Some(counter);
+    }
+
     /// The last queued write's record and judgement, also of a refused one.
     #[cfg(test)]
     pub(crate) fn take_judged(

@@ -44,7 +44,8 @@ impl Fixture {
             clients: std::sync::Mutex::new(Vec::new()),
             credentials: std::sync::Mutex::new(Vec::new()),
             providers: std::sync::Mutex::new(Vec::new()),
-            refuse: AtomicBool::new(false),
+            failure: std::sync::Mutex::new(None),
+            attempts: tokio::sync::watch::channel(0).0,
             held: tokio::sync::Mutex::new(None),
         });
         let handle = builder(
@@ -89,7 +90,8 @@ struct TrackingConnector {
     clients: std::sync::Mutex<Vec<std::sync::Weak<StorageConnection>>>,
     credentials: std::sync::Mutex<Vec<StorageCredentials>>,
     providers: std::sync::Mutex<Vec<MemoryStorage>>,
-    refuse: AtomicBool,
+    failure: std::sync::Mutex<Option<StorageError>>,
+    attempts: tokio::sync::watch::Sender<usize>,
     held: tokio::sync::Mutex<
         Option<(
             tokio::sync::oneshot::Sender<()>,
@@ -107,12 +109,13 @@ impl StorageConnector for TrackingConnector {
         publications: Arc<dyn coven_storage::PublicationGate>,
         cooldown: Arc<dyn coven_storage::Cooldown>,
     ) -> Result<Arc<StorageConnection>, StorageError> {
+        self.attempts.send_modify(|attempts| *attempts += 1);
         if let Some((entered, resume)) = self.held.lock().await.take() {
             entered.send(()).unwrap();
             resume.await.unwrap();
         }
-        if self.refuse.swap(false, Ordering::SeqCst) {
-            return Err(StorageError::Failure(StorageFailure::Authentication));
+        if let Some(error) = self.failure.lock().unwrap().take() {
+            return Err(error);
         }
         self.credentials.lock().unwrap().push(auth.credentials());
         let provider = self
@@ -185,11 +188,11 @@ async fn a_failed_first_connection_shows_in_status_and_retries_after_backoff() {
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.stop_sync();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
-    f.connector.refuse.store(true, Ordering::SeqCst);
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
     f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| {
-        matches!(s, SyncStatus::Failed { error: SyncFailure::Storage(error) }
-        if error.failure() == StorageFailure::Authentication)
+        matches!(s, SyncStatus::Failed { error: SyncFailure::Storage(error) } | SyncStatus::Offline { error }
+        if error.failure() == StorageFailure::Network)
     })
     .await;
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_none());
@@ -201,7 +204,14 @@ async fn a_failed_first_connection_shows_in_status_and_retries_after_backoff() {
     f.app.fail_next_keychain_operation();
     f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. })).await;
+    assert!(f.handle.test_connection_retry_wait().await.is_none());
+    let attempts = *f.connector.attempts.borrow();
     f.advance(Duration::from_secs(30));
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(*f.connector.attempts.borrow(), attempts);
+    f.handle.stop_sync();
+    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
+    f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.close().await.unwrap();
 }
@@ -558,10 +568,10 @@ impl StorageConnector for Locations {
     }
 }
 
-/// Stopping ends the connection's own evidence: its backoff and the last
-/// attempt's status. The provider's cooldown is the provider's and holds.
+/// Reconnecting preserves both the failed attempt's ordinary delay and
+/// the provider's independently persisted cooldown.
 #[tokio::test]
-async fn reconnecting_clears_the_connections_backoff_but_not_the_providers_cooldown() {
+async fn reconnecting_preserves_backoff_and_the_providers_cooldown() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
@@ -577,6 +587,9 @@ async fn reconnecting_clears_the_connections_backoff_but_not_the_providers_coold
     f.handle.stop_sync();
     status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
     f.handle.start_sync().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(f.storage.request_count(), before);
+    f.advance(Duration::from_secs(1));
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.storage
         .set_faults(Faults {

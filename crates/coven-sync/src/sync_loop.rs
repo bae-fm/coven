@@ -1,7 +1,6 @@
 //! Event-driven sequence passes with durable backoff and retained app wakes.
 use crate::{SequenceStatus, SequenceSync, SyncError, SyncFailure, SyncStatus};
 use coven_database::{DbError, RetrySubject};
-use coven_storage::StorageFailure;
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
 
@@ -107,14 +106,7 @@ fn failed(sync: &SequenceSync, error: SyncError) -> SyncStatus {
             };
         }
     }
-    match SyncFailure::from(error) {
-        SyncFailure::Storage(error)
-            if error.failure() == StorageFailure::Network && !error.answered() =>
-        {
-            SyncStatus::Offline { error }
-        }
-        error => SyncStatus::Failed { error },
-    }
+    crate::connection_failure(error)
 }
 
 async fn run(
@@ -125,6 +117,18 @@ async fn run(
     let status = &sync.state;
     let mut changes = sync.database.sync_changes();
     let mut rearmed = sync.waits.rearmed();
+    let (mut retry, retained) = match crate::ConnectionRetry::open(&sync.database).await {
+        Ok(retry) => retry,
+        Err(error) => {
+            status.publish(crate::connection_failure(error));
+            (crate::ConnectionRetry::Never, None)
+        }
+    };
+    if !retry.ready(&sync.waits) {
+        if let Some(error) = retained {
+            status.publish(SyncStatus::Failed { error });
+        }
+    }
     let mut started = false;
     let mut pending = false;
     let mut idle = sync.clock.sleep(Duration::from_secs(30));
@@ -157,25 +161,20 @@ async fn run(
                 break;
             }
         };
-        let due = sync.waits.due(RetrySubject::Sync, previous.as_ref());
+        let due = retry.ready(&sync.waits) && sync.waits.due(RetrySubject::Sync, previous.as_ref());
         let cooldown = sync.waits.cooldown_wake();
         tokio::select! {
             biased;
             command = commands.recv() => match command {
                 Some(Command::Start) => {
                     if !started {
-                        // This connection starts its own backoff; the
-                        // provider's cooldown holds across connections.
-                        let ready = async {
-                            sync.waits.clear(RetrySubject::Sync).await?;
-                            sync.files.set_storage(Some(sync.storage.clone()), std::future::ready(Ok(()))).await
-                        };
+                        let ready = sync.files.set_storage(Some(sync.storage.clone()), std::future::ready(Ok(())));
                         match ready.await {
                             Ok(()) => {
                                 started = true;
                                 pending = true;
                                 sync.waits.connection_changed();
-                                status.publish(SyncStatus::Syncing);
+                                if retry.ready(&sync.waits) { status.publish(SyncStatus::Syncing); }
                             }
                             Err(error) => {
                                 status.publish(SyncStatus::Failed { error: error.into() });
@@ -236,8 +235,9 @@ async fn run(
                     break;
                 }
                 status.publish(SyncStatus::Syncing);
+                let connection_version = sync.waits.connection_version();
                 match pass(&sync, codes.as_ref()).await {
-                    Ok(failing) => match sync.waits.clear(RetrySubject::Sync).await {
+                    Ok(failing) => match retry.succeeded(&sync.database, &sync.waits).await {
                         Ok(()) => match failing {
                             None => status.publish(SyncStatus::Synced { finished_at: sync.clock.now() }),
                             Some(record) => {
@@ -256,23 +256,15 @@ async fn run(
                         }
                     },
                     Err(error) => {
-                        if let Err(persist) = sync.waits.fail(RetrySubject::Sync, previous.as_ref()).await {
-                            status.publish(SyncStatus::Failed { error: persist.into() });
+                        let reason = sync.error_reason(&error);
+                        if let Err(persist) = retry.failed(&sync.database, &sync.waits, reason, connection_version, &error).await {
+                            status.publish(SyncStatus::Failed { error: SyncError::Cleanup {
+                                operation: Box::new(error), cleanup: Box::new(persist),
+                            }.into() });
                             started = false;
                         } else {
-                            started = !matches!(error, SyncError::Removed | SyncError::DeviceIdInUse(_));
-                            // Removal blocks the connection for good (E5).
-                            if matches!(error, SyncError::Removed) {
-                                if let Err(error) = sync.database.record_pending(crate::PendingRecord {
-                                    subject: crate::PendingSubject::Connection,
-                                    reason: crate::PendingReason::Removed,
-                                }).await {
-                                    status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
-                                    break;
-                                }
-                            }
                             status.publish(failed(&sync, error));
-                            pending = started;
+                            pending = true;
                         }
                     }
                 }

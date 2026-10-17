@@ -588,6 +588,17 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
     // An earlier answer does not make a later unanswered attempt Failed.
     device.storage.set_faults(Faults::none()).await;
     device.storage.set_online(false);
+    // Permission failures require app action; a new connection permits a retry.
+    let mut status = device.handle.subscribe_sync_status();
+    device.handle.stop_sync();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|s| matches!(s, SyncStatus::Stopped)),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    device.handle.start_sync().await.unwrap();
     attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
     device.storage.set_online(true);
     let mut status = device.handle.subscribe_sync_status();

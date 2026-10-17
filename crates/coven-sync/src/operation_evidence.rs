@@ -239,8 +239,15 @@ impl RetryWaits {
     }
 
     /// The storage connection changed: waits for storage are woken.
-    pub(crate) fn connection_changed(&self) {
+    pub fn connection_changed(&self) {
         self.evidence().connection += 1;
+        self.rearmed
+            .send_modify(|count| *count = count.wrapping_add(1));
+    }
+
+    /// The credential/connection version a connection failure waits to change.
+    pub fn connection_version(&self) -> u64 {
+        self.evidence().connection
     }
 
     /// Wakes for waits not yet woken, when their rows commit.

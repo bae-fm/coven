@@ -7,6 +7,60 @@ use crate::{
 };
 
 impl Database {
+    /// Persist a failed pass's connection condition and retry deadline together.
+    /// A failure already owned by a slot or operation supplies no connection record.
+    pub async fn record_sync_retry<P: crate::PendingValue>(
+        &self,
+        connection: P::Subject,
+        record: Option<P>,
+        wait: Option<RetryWait>,
+    ) -> Result<(), DbError>
+    where
+        P::Subject: Send + 'static,
+    {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.pending_transaction(|db| {
+                    if let Some(record) = record {
+                        crate::pending::save(db, &record)?;
+                    } else {
+                        crate::pending::clear(db, &connection)?;
+                    }
+                    match wait {
+                        Some(wait) => retry::save(db, RetrySubject::Sync, &wait),
+                        None => retry::clear(db, RetrySubject::Sync),
+                    }
+                })
+            })
+        })
+        .await
+    }
+
+    /// A successful pass settles its connection condition and wait atomically.
+    pub async fn clear_sync_retry<S: serde::Serialize + Send + 'static>(
+        &self,
+        connection: S,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            let changed = inner.access.readers.acquire_reader().with_reader(|db| {
+                Ok::<_, DbError>(
+                    retry::find(db, RetrySubject::Sync)?.is_some()
+                        || crate::pending::recorded(db, &connection)?,
+                )
+            })?;
+            if !changed {
+                return Ok(());
+            }
+            inner.access.with_writer(|writer| {
+                writer.pending_transaction(|db| {
+                    retry::clear(db, RetrySubject::Sync)?;
+                    crate::pending::clear(db, &connection)
+                })
+            })
+        })
+        .await
+    }
+
     /// Persist an operation's failure and its automatic retry deadline together.
     pub async fn record_operation_retry<P: crate::PendingValue>(
         &self,

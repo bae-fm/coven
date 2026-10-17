@@ -12,7 +12,7 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                *writer.work.borrow_mut() = Some(counter.clone());
+                writer.test_track_work(counter.clone());
                 Ok::<_, DbError>(())
             })?;
             inner.access.readers.test_track_work(&counter);

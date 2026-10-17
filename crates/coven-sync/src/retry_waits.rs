@@ -156,7 +156,7 @@ impl RetryWaits {
     }
 
     /// Changes whenever a failed attempt arms a new wait.
-    pub(crate) fn rearmed(&self) -> tokio::sync::watch::Receiver<u64> {
+    pub fn rearmed(&self) -> tokio::sync::watch::Receiver<u64> {
         self.rearmed.subscribe()
     }
 
@@ -200,7 +200,7 @@ impl RetryWaits {
     /// An absent row means the work advanced or the app retried it, unless
     /// this session holds the subject because persisting its wait failed.
     /// An operation's wait can also end by evidence (`operation_evidence.rs`).
-    pub(crate) fn due(&self, subject: RetrySubject, persisted: Option<&RetryWait>) -> bool {
+    pub fn due(&self, subject: RetrySubject, persisted: Option<&RetryWait>) -> bool {
         let elapsed = self.clock.elapsed();
         let Some(persisted) = persisted else {
             let mut state = self.lock();
@@ -278,7 +278,7 @@ impl RetryWaits {
     /// after its owner last evaluated it wakes at once; one the owner has
     /// evaluated since wakes nothing until new evidence or a new wait.
     /// `None` when nothing it covers waits on a timer.
-    pub(crate) fn next_wake(&self, matching: impl Fn(&RetrySubject) -> bool) -> Option<Wake> {
+    pub fn next_wake(&self, matching: impl Fn(&RetrySubject) -> bool) -> Option<Wake> {
         let elapsed = self.clock.elapsed();
         let state = self.lock();
         let earliest = state
@@ -305,7 +305,7 @@ impl RetryWaits {
     }
 
     /// Resolves when the live provider cooldown ends.
-    pub(crate) fn cooldown_wake(&self) -> Option<Wake> {
+    pub fn cooldown_wake(&self) -> Option<Wake> {
         let elapsed = self.clock.elapsed();
         let state = self.lock();
         let armed = state

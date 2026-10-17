@@ -15,11 +15,10 @@ impl ReadPool {
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
         for reader in &self.readers {
-            *reader
+            reader
                 .lock()
                 .expect("reader connection lock poisoned")
-                .work
-                .borrow_mut() = Some(counter.clone());
+                .test_track_work(counter.clone());
         }
     }
 

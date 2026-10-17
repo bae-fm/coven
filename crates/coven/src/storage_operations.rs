@@ -217,8 +217,24 @@ impl StorageConnections {
                 self.codes
                     .update_credentials(access_key_id, secret_access_key)
                     .await?;
-                // Kept credentials make the recorded location set up again.
-                self.publish_released(Ok(()))
+                self.waits.connection_changed();
+                // A waiting connector publishes its next attempt; an idle
+                // installation only updates whether storage is configured.
+                self.configured
+                    .store(true, std::sync::atomic::Ordering::SeqCst);
+                if !self
+                    .attempts
+                    .lock()
+                    .expect("connection attempts poisoned")
+                    .as_ref()
+                    .is_some_and(|attempt| {
+                        attempt.epoch == self.epoch.load(std::sync::atomic::Ordering::SeqCst)
+                            && !attempt.task.is_finished()
+                    })
+                {
+                    self.publications.publish(SyncStatus::Stopped);
+                }
+                Ok(())
             }
         }
     }

@@ -177,3 +177,71 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_removed_device_never_retries_on_a_new_connection() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync
+        .administer(coven_format::admin::StoreChange::RemoveDevice {
+            device: ben.sync.device,
+        })
+        .await
+        .unwrap();
+    let mut status = ben.sync.state.subscribe_sync();
+    let worker = SyncLoop::new(ben.sync.clone(), None);
+    worker.start().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        status.wait_for(|s| {
+            matches!(
+                s,
+                SyncStatus::Failed {
+                    error: SyncFailure::Removed
+                }
+            )
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    worker.close().await.unwrap();
+    let ben = group.reopen(ben).await;
+    let requests = ben.storage.request_count();
+    let mut status = ben.sync.state.subscribe_sync();
+    let worker = SyncLoop::new(ben.sync.clone(), None);
+    worker.start().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        status.wait_for(|s| {
+            matches!(
+                s,
+                SyncStatus::Failed {
+                    error: SyncFailure::Removed
+                }
+            )
+        }),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(600));
+    worker.sync_now().unwrap();
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    assert_eq!(ben.storage.request_count(), requests);
+    assert!(ben
+        .database()
+        .retry_wait(coven_database::RetrySubject::Sync)
+        .await
+        .unwrap()
+        .is_none());
+    worker.close().await.unwrap();
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}

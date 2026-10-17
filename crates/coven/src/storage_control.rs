@@ -55,19 +55,80 @@ impl StorageConnections {
     /// backoff until it connects or stopping is requested.
     async fn connect_started(self: Arc<Self>, epoch: u64) {
         let superseded = || self.epoch.load(Ordering::SeqCst) != epoch;
-        let mut failures = 0;
+        let mut rearmed = self.waits.rearmed();
+        let (mut retry, retained) = match coven_sync::ConnectionRetry::open(&self.database).await {
+            Ok(retry) => retry,
+            Err(error) => {
+                self.publications
+                    .publish(coven_sync::connection_failure(error));
+                return;
+            }
+        };
+        if !retry.ready(&self.waits) {
+            if let Some(error) = retained {
+                self.publications.publish(SyncStatus::Failed { error });
+            }
+        }
         loop {
             // Register before I/O: stop may arrive while the request is in flight.
             let stopped = self.stopped.notified();
             tokio::pin!(stopped);
             stopped.as_mut().enable();
+            if superseded() {
+                break;
+            }
+            let previous = match self
+                .database
+                .retry_wait(coven_database::RetrySubject::Sync)
+                .await
+            {
+                Ok(wait) => wait,
+                Err(error) => {
+                    self.publications
+                        .publish(coven_sync::connection_failure(error.into()));
+                    return;
+                }
+            };
+            if !retry.ready(&self.waits)
+                || !self
+                    .waits
+                    .due(coven_database::RetrySubject::Sync, previous.as_ref())
+            {
+                let wake = self
+                    .waits
+                    .next_wake(|subject| *subject == coven_database::RetrySubject::Sync)
+                    .or_else(|| self.waits.cooldown_wake());
+                tokio::select! {
+                    () = async { if let Some(wake) = wake { wake.await } else { std::future::pending().await } } => {}
+                    () = stopped => {}
+                    changed = rearmed.changed() => if changed.is_err() { return },
+                }
+                continue;
+            }
             let mut live = self.live.lock().await;
             if superseded() {
                 break;
             }
-            match self.connect(&mut live).await {
+            self.publications.publish(SyncStatus::Syncing);
+            // Location identifies the provider even if decoding or reading its
+            // credentials fails. A location read itself is a local disk failure.
+            let connection_version = self.waits.connection_version();
+            let result = match self.codes.location().await {
+                Ok(Some(location)) => self.connect(&mut live).await.map_err(|error| {
+                    let reason = error.pending_reason(location.provider());
+                    (error, reason)
+                }),
+                Ok(None) => Err((SyncError::NoStorage, PendingReason::NoStorage)),
+                Err(error) => {
+                    let (failure, source) = error.into_shared();
+                    Err((
+                        SyncError::Failed { failure, source },
+                        PendingReason::Failed(failure),
+                    ))
+                }
+            };
+            match result {
                 Ok(()) if superseded() => {
-                    // Stopping releases the client this attempt built.
                     let released = self.release(&mut live).await;
                     let _ = self.publish_released(released);
                     return;
@@ -75,27 +136,37 @@ impl StorageConnections {
                 Ok(()) => {
                     if let Connection::Active(connected) = &*live {
                         if let Err(error) = connected.sync_loop.start() {
-                            self.publications.publish(SyncStatus::Failed {
-                                error: error.into(),
-                            });
+                            self.publications
+                                .publish(coven_sync::connection_failure(error));
                         }
                     }
                     return;
                 }
-                Err(error) => {
+                Err((error, reason)) => {
+                    if let Err(persist) = retry
+                        .failed(
+                            &self.database,
+                            &self.waits,
+                            reason,
+                            connection_version,
+                            &error,
+                        )
+                        .await
+                    {
+                        self.publications.publish(coven_sync::connection_failure(
+                            SyncError::Cleanup {
+                                operation: Box::new(error),
+                                cleanup: Box::new(persist),
+                            },
+                        ));
+                        return;
+                    }
                     drop(live);
                     if superseded() {
                         break;
                     }
-                    self.publications.publish(SyncStatus::Failed {
-                        error: error.into(),
-                    });
-                    let wait = coven_storage::retry_delay(failures);
-                    failures = failures.saturating_add(1);
-                    tokio::select! {
-                        () = self.clock.sleep(wait) => {}
-                        () = stopped => {}
-                    }
+                    self.publications
+                        .publish(coven_sync::connection_failure(error));
                 }
             }
         }

@@ -4,6 +4,7 @@
 
 use crate::policy::{Capabilities, Capability, Gate, Policy};
 
+const CONNECTION: &str = "crates/coven/src/storage.rs";
 const CONNECTION_CONTROL: &str = "crates/coven/src/storage_control.rs";
 pub(crate) const POLICY: Policy = Policy {
     crate_order: &[
@@ -491,25 +492,13 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven/src/read_handle.rs", "CovenReadHandle", "new"),
         // A completed sign-in becomes this session's custody.
-        (
-            "crates/coven/src/storage.rs",
-            "StorageConnections",
-            "authenticate",
-        ),
-        ("crates/coven/src/storage.rs", "StorageConnections", "call"),
-        ("crates/coven/src/storage.rs", "StorageConnections", "new"),
-        (
-            "crates/coven/src/storage.rs",
-            "StorageConnections",
-            "release",
-        ),
+        (CONNECTION, "StorageConnections", "authenticate"),
+        (CONNECTION, "StorageConnections", "call"),
+        (CONNECTION, "StorageConnections", "new"),
+        (CONNECTION, "StorageConnections", "release"),
         // Setup, unlocking, starting and loading compose a connection's
         // sequence owner, loop and credential owner at runtime.
-        (
-            "crates/coven/src/storage.rs",
-            "StorageConnections",
-            "attach",
-        ),
+        (CONNECTION, "StorageConnections", "attach"),
         // A started loop's connection attempts outlive the start call; close
         // stops and awaits them. Stopping releases the client after the pass.
         (CONNECTION_CONTROL, "StorageConnections", "start"),
@@ -719,6 +708,7 @@ pub(crate) const POLICY: Policy = Policy {
         "SnapshotMetadata",
         // These readers borrow a connection for one committed read or transaction.
         "DatabaseMetadata",
+        "PredicateContext",
         "PreparedBytes",
         "PreparedInputs",
         "PreparedRecords",

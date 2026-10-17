@@ -152,20 +152,16 @@ impl InputDatabase {
     }
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
-        *self
-            .reader
+        self.reader
             .lock()
             .expect("input connection lock poisoned")
             .as_ref()
             .expect("open input reader")
-            .work
-            .borrow_mut() = Some(counter.clone());
-        *self
-            .writer
+            .test_track_work(counter.clone());
+        self.writer
             .lock()
             .expect("input connection lock poisoned")
-            .work
-            .borrow_mut() = Some(counter.clone());
+            .test_track_work(counter.clone());
     }
     pub(crate) fn new(reader: DatabaseConnection, writer: DatabaseConnection) -> Self {
         Self {

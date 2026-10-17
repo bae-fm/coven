@@ -146,6 +146,32 @@ impl From<DbError> for SyncError {
 }
 
 impl SyncError {
+    /// The durable reason for a failed request, without losing its typed cause here.
+    pub fn pending_reason(&self, provider: coven_storage::CloudProvider) -> crate::PendingReason {
+        use crate::PendingReason;
+        use coven_merge::Audience;
+        let error = self;
+        match error {
+            SyncError::Pending(record) => record.reason.clone(),
+            SyncError::Storage(error) => PendingReason::Storage {
+                provider,
+                failure: error.failure(),
+            },
+            SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
+            SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
+            SyncError::Removed => PendingReason::Removed,
+            SyncError::MemberKeysReplaced { member } => {
+                PendingReason::MemberKeysReplaced { member: *member }
+            }
+            SyncError::KeyUnavailable(key) => PendingReason::KeyUnavailable {
+                audience: Audience::Store,
+                key: *key,
+            },
+            SyncError::Cleanup { cleanup, .. } => cleanup.pending_reason(provider),
+            _ => PendingReason::Failed(error.local_failure()),
+        }
+    }
+
     /// A local file, directory or store-lock failure, retaining its cause.
     pub(crate) fn disk(error: impl std::error::Error + Send + Sync + 'static) -> Self {
         Self::Failed {

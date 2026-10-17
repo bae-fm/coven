@@ -78,25 +78,7 @@ impl SequenceSync {
     }
 
     pub(crate) fn error_reason(&self, error: &SyncError) -> PendingReason {
-        match error {
-            SyncError::Pending(record) => record.reason.clone(),
-            SyncError::Storage(error) => PendingReason::Storage {
-                provider: self.storage.config().provider(),
-                failure: error.failure(),
-            },
-            SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
-            SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
-            SyncError::Removed => PendingReason::Removed,
-            SyncError::MemberKeysReplaced { member } => {
-                PendingReason::MemberKeysReplaced { member: *member }
-            }
-            SyncError::KeyUnavailable(key) => PendingReason::KeyUnavailable {
-                audience: Audience::Store,
-                key: *key,
-            },
-            SyncError::Cleanup { cleanup, .. } => self.error_reason(cleanup),
-            _ => PendingReason::Failed(error.local_failure()),
-        }
+        error.pending_reason(self.storage.config().provider())
     }
 
     pub(crate) async fn record_operation_error(
