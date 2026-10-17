@@ -1,4 +1,4 @@
-//! Eager cache fill (§16.4, E8, SP step 7): commit-driven fills, one file's
+//! Eager cache fill (§16.4, E8, SP, Files and waiting): commit-driven fills, one file's
 //! failure as its own pending record, retries under persisted waits and the
 //! provider cooldown (§16.5), and cancellation.
 use super::*;
@@ -667,7 +667,7 @@ async fn a_failed_chunk_publishes_none_of_its_range() {
 }
 
 /// Overlapping readers share one transfer: the second waits for the first
-/// range and reads it from the cache (SP step 7).
+/// range and reads it from the cache (SP, Files and waiting).
 #[tokio::test]
 async fn overlapping_readers_fetch_each_byte_once() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;

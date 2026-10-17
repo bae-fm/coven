@@ -95,8 +95,7 @@ impl SequenceSync {
             .await?
             .into_iter()
             .find(|record| {
-                record.reported_by == device
-                    && record.subject == PendingSubject::Slot(Slot(through.saturating_add(1)))
+                record.subject == PendingSubject::Slot(Slot(through.saturating_add(1)))
                     && !matches!(record.reason, PendingReason::WritesRefused { .. })
             });
         if let Some(record) = &blocked {
@@ -177,7 +176,6 @@ impl SequenceSync {
                         .record_pending(PendingRecord {
                             subject,
                             reason: PendingReason::KeyUnavailable { audience, key },
-                            reported_by: self.device,
                         })
                         .await?;
                 }
@@ -561,7 +559,6 @@ impl SequenceSync {
                         }
                         _ => PendingReason::Waits(Prerequisite::SequenceCatchUp),
                     },
-                    reported_by: self.device,
                 })))
             }
         }
@@ -596,7 +593,6 @@ impl SequenceSync {
         let record = PendingRecord {
             subject: PendingSubject::Slot(slot),
             reason,
-            reported_by: self.device,
         };
         session.blocked = Some(record.clone());
         self.state

@@ -21,8 +21,7 @@ pub struct StoreState {
     /// Every public pair a kept creation, addition or member-key replacement
     /// bound, including pairs of removed members and pairs a later replacement
     /// retired. An addition of an id not active in its view, and every
-    /// replacement, must share no key with these (§9, `Keyed.freshKeys`,
-    /// `Keyed.Additions.authorized_addition_fresh`).
+    /// replacement, must share no key with these (§9).
     pub bound_keys: BTreeSet<MemberPublicKeys>,
     /// Every device added by a kept entry, including removed devices.
     pub devices: BTreeMap<DeviceId, StoreDevice>,

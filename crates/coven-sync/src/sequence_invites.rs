@@ -349,7 +349,6 @@ impl SequenceSync {
                     kind: OperationKind::Invite,
                 },
                 reason,
-                reported_by: self.device,
             }))),
             InviteProgress::Finished => Err(SyncError::InvitationChanged),
         }
@@ -467,7 +466,6 @@ impl SequenceSync {
                             kind: OperationKind::Invite,
                         },
                         reason,
-                        reported_by: self.device,
                     })))
                 }
                 InviteProgress::Shown(_) => (),
@@ -491,7 +489,6 @@ impl SequenceSync {
                         kind: OperationKind::Invite,
                     },
                     reason,
-                    reported_by: self.device,
                 })))
             }
             _ => Ok(()),

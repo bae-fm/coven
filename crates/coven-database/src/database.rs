@@ -356,7 +356,7 @@ impl Database {
     }
     /// Observe new local writes: rows inserted into the outgoing write queue.
     /// Upload confirmation removing a row is this device's own bookkeeping
-    /// and wakes nothing (SP step 9). Register before the first sync to
+    /// and wakes nothing (SP, Waiting without repeated work). Register before the first sync to
     /// include writes committed while a pass is running.
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
         self.table_changes(&["_coven_uploads"], true, true)

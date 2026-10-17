@@ -185,7 +185,6 @@ impl SequenceSync {
                         kind: OperationKind::RetainFiles,
                     },
                     reason,
-                    reported_by: self.device,
                 })))
             }
         }

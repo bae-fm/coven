@@ -236,11 +236,6 @@ impl Database {
     pub async fn record_pending<P: crate::PendingValue>(&self, record: P) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                if record.reported_by() != inner.access.device {
-                    return Err(DbError::Invariant {
-                        what: "a recorded local condition is this device's own",
-                    });
-                }
                 if let Some(id) = record.operation() {
                     if crate::operation::find(writer, id)?.is_none() {
                         return Err(DbError::OperationChanged(id));
@@ -263,16 +258,12 @@ impl Database {
                 .access
                 .readers
                 .acquire_reader()
-                .with_reader(|reader| {
-                    crate::pending::recorded(reader, &subject, inner.access.device)
-                })?;
+                .with_reader(|reader| crate::pending::recorded(reader, &subject))?;
             if !recorded {
                 return Ok(());
             }
             inner.access.with_writer(|writer| {
-                writer.pending_transaction(|db| {
-                    crate::pending::clear(db, &subject, inner.access.device)
-                })
+                writer.pending_transaction(|db| crate::pending::clear(db, &subject))
             })
         })
         .await
@@ -291,13 +282,12 @@ impl Database {
         self.call(move |inner| {
             let mut identities = BTreeSet::new();
             for record in &records {
-                if record.reported_by() != inner.access.device
-                    || record.operation().is_some()
+                if record.operation().is_some()
                     || !scanned(record)
                     || !identities.insert(record.subject())
                 {
                     return Err(DbError::Invariant {
-                        what: "a scan replaces distinct own records it covers",
+                        what: "a scan replaces distinct records it covers",
                     });
                 }
             }
@@ -314,7 +304,7 @@ impl Database {
                 .with_reader(|reader| {
                     let current = crate::pending::retained::<P>(reader)?
                         .into_iter()
-                        .filter(|r| r.reported_by() == inner.access.device && scanned(r))
+                        .filter(|r| scanned(r))
                         .map(|r| encode(&r))
                         .collect::<Result<BTreeSet<_>, _>>()?;
                     Ok::<_, DbError>(current == next)
@@ -325,7 +315,7 @@ impl Database {
             inner.access.with_writer(|writer| {
                 let previous: Vec<_> = crate::pending::retained::<P>(writer)?
                     .into_iter()
-                    .filter(|r| r.reported_by() == inner.access.device && scanned(r))
+                    .filter(|r| scanned(r))
                     .collect();
                 if previous
                     .iter()
@@ -338,7 +328,7 @@ impl Database {
                 writer.pending_transaction(|db| {
                     for record in &previous {
                         if !identities.contains(record.subject()) {
-                            crate::pending::clear(db, record.subject(), inner.access.device)?;
+                            crate::pending::clear(db, record.subject())?;
                         }
                     }
                     for record in &records {
@@ -360,9 +350,9 @@ impl Database {
         P::Subject: Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                crate::pending::retry::<P>(writer, &subject, inner.access.device)
-            })
+            inner
+                .access
+                .with_writer(|writer| crate::pending::retry::<P>(writer, &subject))
         })
         .await
     }

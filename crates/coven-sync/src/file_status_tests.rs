@@ -32,14 +32,14 @@ async fn absence_is_judged_by_the_uploaders_applied_state() {
     let file = a.attach("files", "photo", vec![61; CHUNK + 9]).await;
     let (b, remote) = receiver(&a, &file).await;
     let device = file.uploader();
-    // Confirmed absent, active uploader, no report: still uploading.
+    // Confirmed absent, active uploader, no local source failure: still uploading.
     assert_eq!(
         b.files.file_status(&remote).await.unwrap(),
         FileStatus::Uploading { device }
     );
     assert!(matches!(b.files.read_file(&remote).await,
         Err(FileReadError::Uploading { device: d, .. }) if d == device));
-    // The uploader's state takes precedence over its source report.
+    // The uploader's state takes precedence over a local source failure.
     for (state, reason) in [
         (DeviceState::Removed, FileMissingReason::DeviceRemoved),
         (DeviceState::Replaced, FileMissingReason::DeviceReplaced),
@@ -55,7 +55,7 @@ async fn absence_is_judged_by_the_uploaders_applied_state() {
     assert!(matches!(b.files.file_status(&remote).await,
         Err(FileReadError::Storage(error)) if error.failure() == StorageFailure::Network));
     a.storage.set_online(true);
-    // The complete object wins over an old report and the uploader's state.
+    // The complete object takes precedence over the uploader's state.
     a.drain().await;
     assert_eq!(
         b.files.file_status(&remote).await.unwrap(),
@@ -244,7 +244,7 @@ async fn observe(
     (status, read, ranges)
 }
 
-/// ST `Files.status` over every observation, uploader state and report, and,
+/// ST `Files.status` over every observation, uploader state and local source failure, and,
 /// through the real status call and read, `Files.status` and `Files.fetch`
 /// for absent, failing, complete, longer and truncated objects.
 #[tokio::test]

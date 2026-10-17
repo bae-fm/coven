@@ -29,7 +29,7 @@ inductive Status where
   | missing (device : Nat) (reason : MissingReason)
   deriving DecidableEq, Repr
 
-/-- D8: only authenticated reports by the uploader enter this input. -/
+/-- Applied device states and source failures observed by the local uploader (§16.1). -/
 structure Reports where
   device : Nat → DeviceState
   unavailable : Nat → Nat → Option SourceFailure

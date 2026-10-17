@@ -16,8 +16,7 @@ impl ProviderChanges {
         &self,
         db: &DatabaseConnection,
     ) -> Result<(), DbError> {
-        let device = crate::pending::own_device(db)?;
-        crate::provider_access::adopt::<P>(db, device, &self.accounts)?;
-        crate::operation::record_access_keys::<P>(db, device, &self.keys)
+        crate::provider_access::adopt::<P>(db, &self.accounts)?;
+        crate::operation::record_access_keys::<P>(db, &self.keys)
     }
 }

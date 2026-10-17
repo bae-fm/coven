@@ -370,7 +370,7 @@ impl DatabaseConnection {
             .map_err(|error| self.pending_failure(error))
     }
 
-    pub(crate) fn pending_device(&self) -> Option<DeviceId> {
+    pub(crate) fn local_device(&self) -> Option<DeviceId> {
         self.observation.as_ref().map(|o| o.device)
     }
 

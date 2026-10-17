@@ -165,7 +165,7 @@ impl Files {
                         Err(error) => tracing::error!(?error, "upload queue failed"),
                     }
                     // Outside a pass nothing reports it; the next pass's
-                    // step 7 fills again and fails with it.
+                    // file work tries the fill again and fails with it.
                     if let Err(error) = owner.fill_eager().await {
                         tracing::error!(?error, "eager cache fill failed");
                     }
@@ -228,7 +228,7 @@ impl Files {
         Ok(())
     }
 
-    /// SP step 7: wake the upload worker, and fill the eager cache with new
+    /// SP, Files and waiting: wake the upload worker, and fill the eager cache with new
     /// references and the failed downloads whose retry waits are due.
     pub(crate) async fn sync_files(&self) -> Result<(), SyncError> {
         self.inner.wake.notify_one();

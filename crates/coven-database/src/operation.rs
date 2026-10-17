@@ -171,7 +171,6 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 /// caller's transaction. Open and confirmed keys keep their state (§13).
 pub(crate) fn record_access_keys<P: crate::PendingValue>(
     db: &DatabaseConnection,
-    reporter: coven_foundation::id_source::DeviceId,
     deletions: &[AccessKeyDeletion],
 ) -> Result<(), DbError> {
     for deletion in deletions {
@@ -188,7 +187,7 @@ pub(crate) fn record_access_keys<P: crate::PendingValue>(
             "INSERT INTO _coven_access_keys(access_key_id,operation) VALUES(?1,?2)",
             (&deletion.key.access_key_id, id.0),
         )?;
-        crate::pending::save(db, &P::access_key(id, reporter, deletion.key.clone()))?;
+        crate::pending::save(db, &P::access_key(id, deletion.key.clone()))?;
     }
     Ok(())
 }

@@ -6,7 +6,7 @@ use coven_merge::MergeError;
 use std::{error::Error, fmt, sync::Arc};
 
 /// One vocabulary for refused objects. Native causes survive immediate calls;
-/// persisted and peer reports retain only the variant. Equality ignores causes.
+/// persisted records retain only the variant. Equality ignores causes.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Refusal {
     /// Opening the object or its authenticated path failed.

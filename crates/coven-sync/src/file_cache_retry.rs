@@ -41,15 +41,7 @@ impl FilesInner {
         };
         let recorded = self
             .database
-            .fail_download(
-                move |reported_by| PendingRecord {
-                    subject,
-                    reason,
-                    reported_by,
-                },
-                retry,
-                wait,
-            )
+            .fail_download(PendingRecord { subject, reason }, retry, wait)
             .await;
         if let Err(error) = recorded {
             self.waits.hold(retry);

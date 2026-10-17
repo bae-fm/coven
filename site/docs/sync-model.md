@@ -397,8 +397,9 @@ stops. Intermediate values may be coalesced. `Failed` preserves the typed cause
 of a whole-pass failure; `Synced` carries only the pass's completion time. Live
 queries notify the app when rows change. The handle's `pending()` and
 `subscribe_pending()` expose the same persisted typed conditions, keyed by
-subject and reporting device, including while disconnected. A new reason replaces
-that reporter's previous reason; committed progress clears its condition.
+subject, including while disconnected. Each record describes this installation's
+first unmet condition; a new reason replaces its previous reason and committed
+progress clears it.
 On S3, each key awaiting deletion is a `DeleteAccessKey` record there, cleared
 only by explicit confirmation or coven's verified deletion. Removal, a location taken by another store,
 or a required update stops further passes; other pass failures retry on the idle

@@ -122,7 +122,6 @@ async fn io_differential_retained_ranges_and_refusal_eviction() {
         let object = storage.status(&path).await.unwrap().unwrap();
         let refusal = crate::PendingRecord {
             subject: crate::PendingSubject::Slot(coven_merge::Slot(1)),
-            reported_by: receiver.directory.settings().unwrap().device_id,
             reason: crate::PendingReason::Refused(crate::Refusal::Signature { cause: None }),
         };
         receiver.db.record_pending(refusal.clone()).await.unwrap();

@@ -269,7 +269,6 @@ impl SequenceSync {
                                 kind: OperationKind::ReplaceMemberKeys,
                             },
                             reason: PendingReason::Waits(Prerequisite::SequenceCatchUp),
-                            reported_by: self.device,
                         })));
                     }
                 }

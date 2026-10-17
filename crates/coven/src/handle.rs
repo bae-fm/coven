@@ -155,7 +155,7 @@ impl CovenHandle {
         self.database.subscribe_device_reset()
     }
 
-    /// Current local conditions and authenticated peer reports, including while disconnected.
+    /// Current local conditions, including while disconnected.
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
         self.database.pending().await
     }

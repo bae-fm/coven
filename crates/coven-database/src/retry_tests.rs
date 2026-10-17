@@ -121,7 +121,7 @@ async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_re
     let work = || owner.upload_work::<Record>(|_| Subject::Number(7));
     assert_eq!(work().await.unwrap()[0].1, None);
     owner
-        .fail_upload(id, |device| missing(7, device), Some(wait(1, 1)))
+        .fail_upload(id, missing(7), Some(wait(1, 1)))
         .await
         .unwrap();
     assert_eq!(owner.uploads().await.unwrap()[0].retry, Some(wait(1, 1)));
@@ -130,13 +130,10 @@ async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_re
     let recorded = work().await.unwrap().remove(0).1.unwrap();
     assert_eq!(db.pending::<Record>().await.unwrap(), vec![recorded]);
     // A failure that waits for the app keeps no automatic deadline.
-    owner
-        .fail_upload(id, |device| missing(7, device), None)
-        .await
-        .unwrap();
+    owner.fail_upload(id, missing(7), None).await.unwrap();
     assert_eq!(owner.uploads().await.unwrap()[0].retry, None);
     owner
-        .fail_upload(id, |device| missing(7, device), Some(wait(2, 2)))
+        .fail_upload(id, missing(7), Some(wait(2, 2)))
         .await
         .unwrap();
     // One transaction retires the queue row, its wait and its record.

@@ -65,19 +65,12 @@ impl FilesInner {
         };
         let reason = self.upload_reason(error);
         let needs_connection = reason.clears() == Some(crate::pending::Clears::ByPerson);
-        let timed = PendingRecord {
-            subject: file.clone(),
-            reason: reason.clone(),
-            reported_by: item.file.uploader(),
-        }
-        .retry()
-            == Retry::Automatic
-            && reason != PendingReason::Waits(Prerequisite::SequenceCatchUp);
-        let record = move |reported_by| PendingRecord {
+        let record = PendingRecord {
             subject: file,
             reason,
-            reported_by,
         };
+        let timed = record.retry() == Retry::Automatic
+            && record.reason != PendingReason::Waits(Prerequisite::SequenceCatchUp);
         let retry = if timed {
             match self.waits.next(item.retry.as_ref()) {
                 Ok(wait) => Some(wait),

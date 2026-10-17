@@ -214,7 +214,6 @@ impl SequenceSync {
                     kind: OperationKind::ReplaceAccessKey,
                 },
                 reason,
-                reported_by: self.device,
             })),
             Err(error) => error,
         };

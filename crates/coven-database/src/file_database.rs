@@ -118,7 +118,7 @@ impl FileDatabase {
         }
     }
     /// Pending eager work: changed references and temporary failures awaiting
-    /// their retry wait, from one indexed table (§16.4, SP step 7).
+    /// their retry wait, from one indexed table (§16.4, SP, Files and waiting).
     pub async fn eager_work(&self) -> Result<Vec<FileRef>, DbError> {
         self.read(crate::eager_work::read).await
     }
@@ -148,7 +148,8 @@ impl FileDatabase {
         })
         .await
     }
-    /// The uploader's applied state and its own record about `subject`, read
+    /// The uploader's applied state and, for this device's uploads, its local
+    /// record about `subject`, read
     /// in one committed state: the evidence a confirmed absence is judged
     /// with (§16.1). A device with no registration here has no removal or
     /// replacement either, so it reads as active.
@@ -160,7 +161,7 @@ impl FileDatabase {
     where
         P::Subject: Send,
     {
-        self.run(move |db, _, _, _| {
+        self.run(move |db, _, _, device| {
             db.read_transaction(|| {
                 let state = db
                     .query(
@@ -170,7 +171,12 @@ impl FileDatabase {
                     )?
                     .pop()
                     .unwrap_or(crate::DeviceState::Active);
-                Ok((state, crate::pending::find::<P>(db, &subject, uploader)?))
+                let record = if uploader == device {
+                    crate::pending::find::<P>(db, &subject)?
+                } else {
+                    None
+                };
+                Ok((state, record))
             })
         })
         .await
@@ -181,17 +187,14 @@ impl FileDatabase {
     /// no records.
     pub async fn fail_download<P: crate::PendingValue>(
         &self,
-        record: impl FnOnce(DeviceId) -> P + Send + 'static,
+        record: P,
         subject: crate::RetrySubject,
         wait: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        let device = self.run(|_, _, _, device| Ok::<_, DbError>(device)).await?;
-        database
-            .record_pending_retry(record(device), subject, wait)
-            .await
+        database.record_pending_retry(record, subject, wait).await
     }
     /// Every download's persisted retry wait (§16.5), read without the
     /// writer. A read-only handle persists none.
@@ -235,12 +238,12 @@ impl FileDatabase {
         &self,
         subject: impl Fn(&FileRef) -> P::Subject + Send + 'static,
     ) -> Result<Vec<(FileUpload, Option<P>)>, DbError> {
-        self.run(move |db, _, _, device| {
+        self.run(move |db, _, _, _| {
             db.read_transaction(|| {
                 file_queue::read(db)?
                     .into_iter()
                     .map(|upload| {
-                        let record = crate::pending::find::<P>(db, &subject(&upload.file), device)?;
+                        let record = crate::pending::find::<P>(db, &subject(&upload.file))?;
                         Ok((upload, record))
                     })
                     .collect()
@@ -254,11 +257,11 @@ impl FileDatabase {
     pub async fn fail_upload<P: crate::PendingValue>(
         &self,
         id: i64,
-        record: impl FnOnce(DeviceId) -> P + Send + 'static,
+        record: P,
         retry: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
         self.require_writer()?;
-        self.run(move |db, _, _, device| {
+        self.run(move |db, _, _, _| {
             db.transaction(|db| {
                 if !db.query_row(
                     "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE id=?1)",
@@ -269,7 +272,7 @@ impl FileDatabase {
                         what: "the upload recording progress is queued",
                     });
                 }
-                crate::pending::save(db, &record(device))?;
+                crate::pending::save(db, &record)?;
                 let subject = crate::RetrySubject::Upload(id);
                 match &retry {
                     Some(wait) => crate::retry::save(db, subject, wait),
@@ -343,7 +346,6 @@ impl FileDatabase {
         database
             .call(move |inner| {
                 let (result, chosen) = inner.access.with_writer(|writer| {
-                    let device = inner.access.device;
                     let schema = &inner.access.write_schema;
                     let result = writer.transaction(|db| {
                         let (reference, pinned) = file_queue::complete(db, id)?;
@@ -351,7 +353,7 @@ impl FileDatabase {
                             cache::request_pin(db, &reference)?;
                         }
                         crate::eager_work::uploaded(db, schema, &reference)?;
-                        crate::pending::clear(db, &subject, device)
+                        crate::pending::clear(db, &subject)
                     });
                     Ok::<_, DbError>((result, super::released(writer, &inner.staging)))
                 })?;

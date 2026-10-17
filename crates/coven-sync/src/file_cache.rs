@@ -82,7 +82,7 @@ impl Files {
     }
 }
 impl FilesInner {
-    /// SP step 7. One file's failure is that file's pending record; a failure
+    /// SP, Files and waiting. One file's failure is that file's pending record; a failure
     /// no file subject holds, such as reading the work, fails the fill.
     pub(crate) async fn fill_eager(self: &Arc<Self>) -> Result<(), crate::SyncError> {
         let _fill = self.eager_fill.lock().await;

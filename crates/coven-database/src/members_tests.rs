@@ -27,7 +27,7 @@ fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMe
 /// removed and a replaced device, and removed member 3; circle 7 holds 1 and
 /// 2, and deleted circle 8 held 1.
 async fn fixture(db: &crate::Database) {
-    let own = db.inspect_writer(|sql| sql.pending_device()).unwrap();
+    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
     let mut state = db.store_state().await.unwrap();
     state.members = [
         store_member(1, MemberRole::Admin, false),
@@ -87,7 +87,7 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
     // Before this device's registration replays, nothing is listed as self.
     assert!(db.members().await.unwrap().is_empty());
     fixture(&db).await;
-    let own = db.inspect_writer(|sql| sql.pending_device()).unwrap();
+    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
     let members = db.members().await.unwrap();
     let mut expected = vec![
         MemberInfo {

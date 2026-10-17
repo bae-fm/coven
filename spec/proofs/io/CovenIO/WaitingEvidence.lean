@@ -1,6 +1,6 @@
 import CovenIO.Waiting
 
-/-! Evidence-triggered attempts (§3.1 Waiting, SP step 5 and "Waiting without
+/-! Evidence-triggered attempts (§3.1 Waiting, SP, "Waiting without
 repeated work"), as `retry_waits.rs` and `operation_evidence.rs` run them: an
 operation's wait names the prerequisite its attempt ended on, and is due when
 its monotonic deadline passes, or when a commit changing that prerequisite

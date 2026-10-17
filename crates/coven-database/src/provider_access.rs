@@ -2,7 +2,6 @@
 
 use crate::{sqlite::DatabaseConnection, DbError, NewOperation, OperationId, PendingValue};
 use coven_crypto::SecretBytes;
-use coven_foundation::id_source::DeviceId;
 
 /// One account's intention derived from membership and this device's invitations.
 pub struct ProviderAccessChange {
@@ -69,7 +68,6 @@ pub(crate) fn finish(
 /// Called inside the same transaction as membership or an invitation change.
 pub(crate) fn adopt<P: PendingValue>(
     db: &DatabaseConnection,
-    reporter: DeviceId,
     changes: &[ProviderAccessChange],
 ) -> Result<(), DbError> {
     for change in changes {
@@ -132,13 +130,7 @@ pub(crate) fn adopt<P: PendingValue>(
         };
         crate::pending::save(
             db,
-            &P::provider_access(
-                id,
-                reporter,
-                change.account.clone(),
-                change.intended,
-                change.owner,
-            ),
+            &P::provider_access(id, change.account.clone(), change.intended, change.owner),
         )?;
     }
     Ok(())

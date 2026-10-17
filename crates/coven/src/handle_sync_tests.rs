@@ -1,6 +1,6 @@
 //! Wakes coalesce: a local write racing a pass retains one more pass, the
 //! pass's own bookkeeping retains none, and a stopped or closed loop runs
-//! nothing (SP step 9, waiting). File uploads run beside passes, sharing
+//! nothing (SP, Waiting without repeated work). File uploads run beside passes, sharing
 //! their connection's lifetime and cooldown.
 
 use crate::tests::Network;

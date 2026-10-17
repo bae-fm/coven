@@ -149,7 +149,6 @@ impl SequenceSync {
                     kind: OperationKind::RevokeAccess,
                 },
                 reason,
-                reported_by: self.device,
             };
             if !session.history.owns_storage(member.member()) {
                 return Err(SyncError::Pending(Box::new(condition(

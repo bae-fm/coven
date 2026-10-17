@@ -98,7 +98,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("counting before a queue overlay visits the entire staged merge projection"),
 ("migration_run.rs", "INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen", "temp._coven_migration_frozen") =>
     Some("the marker retains every loss frozen by this migration"),
-("pending.rs", "SELECT subject,reporter,value,operation,object,coven_version FROM _coven_pending", "_coven_pending") =>
+("pending.rs", "SELECT subject,value,operation,object,coven_version FROM _coven_pending", "_coven_pending") =>
     Some("pending returns every retained condition"),
 ("pending.rs", "DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys k WHERE k.operation=p.operation) AND NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)", "p") =>
     Some("reset visits every condition; provider-obligation lookups remain indexed"),

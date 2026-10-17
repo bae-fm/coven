@@ -1,5 +1,5 @@
 //! Eager-fill work from changed file references, kept in the transaction
-//! that changes them, so no pass rescans every eager row (§16.4, SP step 7).
+//! that changes them, so no pass rescans every eager row (§16.4, SP, Files and waiting).
 
 use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_rows::AppKey,

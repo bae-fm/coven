@@ -8,7 +8,7 @@ pub(crate) fn require_reload<P: PendingValue>(
     db: &DatabaseConnection,
     audience: &Audience,
 ) -> Result<(), DbError> {
-    let record = P::reload(audience.clone(), crate::pending::own_device(db)?);
+    let record = P::reload(audience.clone());
     let subject = serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)?;
     db.internal_execute(
         "INSERT INTO _coven_data_reloads(audience,subject) VALUES(?1,?2)
@@ -22,9 +22,8 @@ pub(crate) fn require_reload<P: PendingValue>(
 /// selected data has committed, so writes into it may proceed, or this device
 /// no longer reads it.
 pub(crate) fn clear_reload(db: &DatabaseConnection, audience: &Audience) -> Result<(), DbError> {
-    let own = crate::pending::own_device(db)?;
     db.pending_change(|| {
-        db.internal_execute("DELETE FROM _coven_pending WHERE reporter=?1 AND subject IN (SELECT subject FROM _coven_data_reloads WHERE audience=?2)", params![own.0.to_be_bytes().as_slice(), audience_text(audience)])?;
+        db.internal_execute("DELETE FROM _coven_pending WHERE subject IN (SELECT subject FROM _coven_data_reloads WHERE audience=?1)", [audience_text(audience)])?;
         db.internal_execute(
             "DELETE FROM _coven_data_reloads WHERE audience=?1",
             [audience_text(audience)],

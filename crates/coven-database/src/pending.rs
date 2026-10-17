@@ -1,7 +1,6 @@
 //! Typed persistence for sync-owned pending values, without depending on providers.
 
 use crate::{sqlite::DatabaseConnection, DbError, OperationId};
-use coven_foundation::id_source::DeviceId;
 use serde::{de::DeserializeOwned, Serialize};
 
 /// Sync supplies its complete typed record; the database owns its atomic lifetime.
@@ -12,30 +11,17 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
         slot: coven_merge::Slot,
         cutoff: coven_merge::Slot,
         cause: crate::WriteCutoff,
-        reporter: DeviceId,
     ) -> Self;
     /// Report an audience whose selected boundary has no committed data input.
-    fn reload(audience: coven_merge::Audience, reporter: DeviceId) -> Self;
+    fn reload(audience: coven_merge::Audience) -> Self;
     /// Report an S3 key awaiting deletion on its journal operation (§13).
-    fn access_key(
-        operation: OperationId,
-        reporter: DeviceId,
-        key: crate::AccessKeyToDelete,
-    ) -> Self;
+    fn access_key(operation: OperationId, key: crate::AccessKeyToDelete) -> Self;
     /// Report one account's unresolved intended sharing change.
-    fn provider_access(
-        operation: OperationId,
-        reporter: DeviceId,
-        account: String,
-        grant: bool,
-        owner: bool,
-    ) -> Self;
+    fn provider_access(operation: OperationId, account: String, grant: bool, owner: bool) -> Self;
     /// Stable identity, ordered as the app presents it.
     type Subject: Serialize + Ord;
     /// The work that cannot advance.
     fn subject(&self) -> &Self::Subject;
-    /// The authenticated observer, including the local device.
-    fn reported_by(&self) -> DeviceId;
     /// The journal row, if this record describes an operation.
     fn operation(&self) -> Option<OperationId>;
     /// Sequence slot whose progress clears this observation.
@@ -48,12 +34,10 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn can_retry(&self, recorded_coven_version: &str, schema_version: u32) -> bool;
 }
 
-const SELECT: &str =
-    "SELECT subject,reporter,value,operation,object,coven_version FROM _coven_pending";
+const SELECT: &str = "SELECT subject,value,operation,object,coven_version FROM _coven_pending";
 
 struct StoredRecord {
     subject: Vec<u8>,
-    reporter: [u8; 8],
     value: Vec<u8>,
     operation: Option<i64>,
     object: Option<Vec<u8>>,
@@ -63,17 +47,15 @@ impl StoredRecord {
     fn read(row: &rusqlite::Row<'_>) -> rusqlite::Result<Self> {
         Ok(Self {
             subject: row.get(0)?,
-            reporter: row.get(1)?,
-            value: row.get(2)?,
-            operation: row.get(3)?,
-            object: row.get(4)?,
-            coven_version: row.get(5)?,
+            value: row.get(1)?,
+            operation: row.get(2)?,
+            object: row.get(3)?,
+            coven_version: row.get(4)?,
         })
     }
     fn decode<P: PendingValue>(&self) -> Result<P, DbError> {
         let record: P = serde_json::from_slice(&self.value).map_err(DbError::PendingEncoding)?;
         if serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)? != self.subject
-            || record.reported_by().0.to_be_bytes() != self.reporter
             || record.operation().map(|id| id.0) != self.operation
             || stored_object(&record) != self.object
         {
@@ -97,7 +79,7 @@ fn read_query<P: PendingValue>(db: &DatabaseConnection, sql: &str) -> Result<Vec
         .iter()
         .map(StoredRecord::decode::<P>)
         .collect::<Result<Vec<_>, _>>()?;
-    records.sort_by(|a, b| (a.subject(), a.reported_by()).cmp(&(b.subject(), b.reported_by())));
+    records.sort_by(|a, b| a.subject().cmp(b.subject()));
     Ok(records)
 }
 
@@ -106,27 +88,20 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
         let subject = serde_json::to_vec(record.subject()).map_err(DbError::PendingEncoding)?;
         let value = serde_json::to_vec(record).map_err(DbError::PendingEncoding)?;
         db.internal_execute(
-            "INSERT INTO _coven_pending(subject,reporter,value,operation,object,coven_version) VALUES(?1,?2,?3,?4,?5,?6)
-             ON CONFLICT(subject,reporter) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,coven_version=excluded.coven_version
+            "INSERT INTO _coven_pending(subject,value,operation,object,coven_version) VALUES(?1,?2,?3,?4,?5)
+             ON CONFLICT(subject) DO UPDATE SET value=excluded.value,operation=excluded.operation,object=excluded.object,coven_version=excluded.coven_version
              WHERE value!=excluded.value OR coven_version!=excluded.coven_version",
-            (subject, record.reported_by().0.to_be_bytes().as_slice(), value, record.operation().map(|id| id.0), stored_object(record), env!("CARGO_PKG_VERSION")),
+            (subject, value, record.operation().map(|id| id.0), stored_object(record), env!("CARGO_PKG_VERSION")),
         )?;
         Ok(())
     })
 }
 
-pub(crate) fn clear<S: Serialize>(
-    db: &DatabaseConnection,
-    subject: &S,
-    reporter: DeviceId,
-) -> Result<(), DbError> {
+pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Result<(), DbError> {
     db.pending_change(|| {
         db.internal_execute(
-            "DELETE FROM _coven_pending WHERE subject=?1 AND reporter=?2",
-            (
-                serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
-                reporter.0.to_be_bytes().as_slice(),
-            ),
+            "DELETE FROM _coven_pending WHERE subject=?1",
+            [serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?],
         )?;
         Ok(())
     })
@@ -156,34 +131,26 @@ pub(crate) fn operation<P: PendingValue>(
     .transpose()
 }
 
-/// Whether one reporter keeps any record for a subject.
+/// Whether a subject has a local record.
 pub(crate) fn recorded<S: Serialize>(
     db: &DatabaseConnection,
     subject: &S,
-    reporter: DeviceId,
 ) -> Result<bool, DbError> {
     db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE subject=?1 AND reporter=?2)",
-        (
-            serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
-            reporter.0.to_be_bytes().as_slice(),
-        ),
+        "SELECT EXISTS(SELECT 1 FROM _coven_pending WHERE subject=?1)",
+        [serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?],
         |r| r.get(0),
     )
 }
 
-/// The current record one reporter keeps for one subject, if any.
+/// The current local record for a subject, if any.
 pub(crate) fn find<P: PendingValue>(
     db: &DatabaseConnection,
     subject: &P::Subject,
-    reporter: DeviceId,
 ) -> Result<Option<P>, DbError> {
     db.query(
-        &format!("{SELECT} WHERE subject=?1 AND reporter=?2"),
-        (
-            serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
-            reporter.0.to_be_bytes().as_slice(),
-        ),
+        &format!("{SELECT} WHERE subject=?1"),
+        [serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?],
         StoredRecord::read,
     )?
     .pop()
@@ -194,15 +161,11 @@ pub(crate) fn find<P: PendingValue>(
 pub(crate) fn retry<P: PendingValue>(
     db: &DatabaseConnection,
     subject: &P::Subject,
-    reporter: DeviceId,
 ) -> Result<bool, DbError> {
     let record = db
         .query(
-            &format!("{SELECT} WHERE subject=?1 AND reporter=?2"),
-            (
-                serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
-                reporter.0.to_be_bytes().as_slice(),
-            ),
+            &format!("{SELECT} WHERE subject=?1"),
+            [serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?],
             StoredRecord::read,
         )?
         .pop();
@@ -238,17 +201,11 @@ pub(crate) fn clear_slot(
     db: &DatabaseConnection,
     object: coven_merge::Slot,
 ) -> Result<(), DbError> {
-    let Some(device) = db.pending_device() else {
-        return Ok(());
-    };
     db.pending_change(|| {
         for covered in [false, true] {
             db.internal_execute(
-                "DELETE FROM _coven_pending WHERE object=?1 AND reporter=?2",
-                (
-                    object_key(object, covered),
-                    device.0.to_be_bytes().as_slice(),
-                ),
+                "DELETE FROM _coven_pending WHERE object=?1",
+                [object_key(object, covered)],
             )?;
         }
         Ok(())
@@ -258,17 +215,9 @@ pub(crate) fn clear_slot(
 /// Snapshot coverage that passes a waiting write ends that
 /// wait in the same transaction. Verdicts on a write's bytes remain (§19.1).
 pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError> {
-    let Some(device) = db.pending_device() else {
-        return Ok(());
-    };
-    let reporter = device.0.to_be_bytes();
     let waiting = db.query(
-        "SELECT object FROM _coven_pending WHERE object>=?1 AND object<?2 AND reporter=?3",
-        (
-            [COVERED_SLOT].as_slice(),
-            [COVERED_SLOT + 1].as_slice(),
-            reporter.as_slice(),
-        ),
+        "SELECT object FROM _coven_pending WHERE object>=?1 AND object<?2",
+        ([COVERED_SLOT].as_slice(), [COVERED_SLOT + 1].as_slice()),
         |row| row.get::<_, Vec<u8>>(0),
     )?;
     if waiting.is_empty() {
@@ -279,10 +228,7 @@ pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError
         for object in waiting {
             let slot = u64::from_be_bytes(object[1..].try_into().expect("eight-byte slot"));
             if slot <= applied {
-                db.internal_execute(
-                    "DELETE FROM _coven_pending WHERE object=?1 AND reporter=?2",
-                    (object, reporter.as_slice()),
-                )?;
+                db.internal_execute("DELETE FROM _coven_pending WHERE object=?1", [object])?;
             }
         }
         Ok(())
@@ -292,10 +238,3 @@ pub(crate) fn clear_covered_slots(db: &DatabaseConnection) -> Result<(), DbError
 #[cfg(test)]
 #[path = "pending_tests.rs"]
 pub(crate) mod tests;
-
-/// This device, which every writer connection observes for pending state.
-pub(crate) fn own_device(db: &DatabaseConnection) -> Result<DeviceId, DbError> {
-    db.pending_device().ok_or(DbError::Invariant {
-        what: "a writer connection observes this device",
-    })
-}

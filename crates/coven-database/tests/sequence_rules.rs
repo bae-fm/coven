@@ -16,16 +16,12 @@ use std::{collections::BTreeMap, io::Cursor};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Pending {
     subject: u64,
-    by: DeviceId,
     cutoff: Option<(u64, String)>,
 }
 impl PendingValue for Pending {
     type Subject = u64;
     fn subject(&self) -> &u64 {
         &self.subject
-    }
-    fn reported_by(&self) -> DeviceId {
-        self.by
     }
     fn operation(&self) -> Option<OperationId> {
         None
@@ -39,31 +35,27 @@ impl PendingValue for Pending {
     fn can_retry(&self, _: &str, _: u32) -> bool {
         false
     }
-    fn reload(_: Audience, by: DeviceId) -> Self {
+    fn reload(_: Audience) -> Self {
         Self {
             subject: 0,
-            by,
             cutoff: None,
         }
     }
-    fn access_key(id: OperationId, by: DeviceId, _: AccessKeyToDelete) -> Self {
+    fn access_key(id: OperationId, _: AccessKeyToDelete) -> Self {
         Self {
             subject: id.0 as u64,
-            by,
             cutoff: None,
         }
     }
-    fn provider_access(id: OperationId, by: DeviceId, _: String, _: bool, _: bool) -> Self {
+    fn provider_access(id: OperationId, _: String, _: bool, _: bool) -> Self {
         Self {
             subject: id.0 as u64,
-            by,
             cutoff: None,
         }
     }
-    fn writes_refused(slot: Slot, cutoff: Slot, cause: WriteCutoff, by: DeviceId) -> Self {
+    fn writes_refused(slot: Slot, cutoff: Slot, cause: WriteCutoff) -> Self {
         Self {
             subject: slot.0,
-            by,
             cutoff: Some((cutoff.0, format!("{cause:?}"))),
         }
     }

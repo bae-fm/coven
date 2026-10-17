@@ -65,8 +65,7 @@ async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, Sy
         .await?
         .into_iter()
         .find(|record| {
-            record.reported_by == sync.device
-                && matches!(record.subject, crate::PendingSubject::Operation { kind, .. } if kind.coven_owned())
+            matches!(record.subject, crate::PendingSubject::Operation { kind, .. } if kind.coven_owned())
                 && matches!(
                     record.reason,
                     crate::PendingReason::Storage { .. }
@@ -267,7 +266,6 @@ async fn run(
                                 if let Err(error) = sync.database.record_pending(crate::PendingRecord {
                                     subject: crate::PendingSubject::Connection,
                                     reason: crate::PendingReason::Removed,
-                                    reported_by: sync.device,
                                 }).await {
                                     status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
                                     break;

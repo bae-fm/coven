@@ -68,21 +68,21 @@ def pending : State → Option Reason
 def pinned : State → Bool | .complete _ pin => pin | _ => false
 def completed : State → Bool | .complete _ _ => true | _ => false
 
-/-- A map has exactly one current record per fixed subject and reporter.
+/-- A local map has exactly one current record per fixed subject (§19.1, E5).
 There is no parallel progress or pending state in the eager worker. -/
-abbrev Database := Subject → Nat → State
-def pendingAt (db : Database) (s : Subject) (reporter : Nat) : Option Reason := pending (db s reporter)
+abbrev Database := Subject → State
+def pendingAt (db : Database) (s : Subject) : Option Reason := pending (db s)
 
 theorem one_pending (rs : List Range) (reason : Reason) :
     ∃ r, pending (.unfinished rs reason) = some r ∧
       ∀ other, pending (.unfinished rs reason) = some other → other = r := by
   exact ⟨reason, rfl, fun r eq => (Option.some.inj eq).symm⟩
 
-def publish (db : Database) (subject : Subject) (reporter : Nat) (state : State) : Database :=
-  fun s r => if s = subject ∧ r = reporter then state else db s r
+def publish (db : Database) (subject : Subject) (state : State) : Database :=
+  fun s => if s = subject then state else db s
 
-theorem pending_replaced (db : Database) (subject : Subject) (reporter : Nat) (state : State) :
-    pendingAt (publish db subject reporter state) subject reporter = pending state := by
+theorem pending_replaced (db : Database) (subject : Subject) (state : State) :
+    pendingAt (publish db subject state) subject = pending state := by
   simp [pendingAt, publish]
 
 /-- These outcomes come from the real provider, cryptographic reader and

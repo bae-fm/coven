@@ -653,7 +653,7 @@ async fn journal_lookups_read_current_steps_and_keep_failed_rows_in_order() {
     })
     .await
     .unwrap();
-    db.record_pending(crate::pending::tests::operation_record(&db, ids[1]).await)
+    db.record_pending(crate::pending::tests::operation_record(ids[1]))
         .await
         .unwrap();
     let first = db

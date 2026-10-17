@@ -417,7 +417,6 @@ impl SequenceSync {
                                 reason: crate::PendingReason::Waits(crate::Prerequisite::Reload(
                                     audience.clone(),
                                 )),
-                                reported_by: self.device,
                             })))
                         }
                     }
@@ -468,7 +467,6 @@ impl SequenceSync {
             return Err(SyncError::Pending(Box::new(crate::PendingRecord {
                 subject: crate::PendingSubject::Slot(slot),
                 reason: crate::PendingReason::Waits(crate::Prerequisite::SequenceCatchUp),
-                reported_by: self.device,
             })));
         }
         Ok(())

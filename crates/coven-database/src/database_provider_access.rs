@@ -26,7 +26,7 @@ impl crate::Database {
             inner.access.with_writer(|db| {
                 db.transaction(|db| {
                     let id = crate::operation::insert(db, &operation)?;
-                    adopt::<P>(db, inner.access.device, &changes)?;
+                    adopt::<P>(db, &changes)?;
                     Ok(id)
                 })
             })
@@ -44,7 +44,7 @@ impl crate::Database {
             inner.access.with_writer(|db| {
                 db.transaction(|db| {
                     crate::operation::advance(db, &update)?;
-                    adopt::<P>(db, inner.access.device, &changes)
+                    adopt::<P>(db, &changes)
                 })
             })
         })
@@ -65,7 +65,7 @@ impl crate::Database {
                     }
                     crate::pending::clear_operation(db, id)?;
                     db.internal_execute("DELETE FROM _coven_operations WHERE id=?1", [id.0])?;
-                    adopt::<P>(db, inner.access.device, &changes)
+                    adopt::<P>(db, &changes)
                 })
             })
         })
@@ -89,7 +89,7 @@ impl crate::Database {
             db.internal_execute("UPDATE _coven_provider_access SET granted=NULL,invitation=NULL,target=intended WHERE account=?1", [&account])?;
             db.internal_execute("UPDATE _coven_operations SET last_step=1 WHERE id=?1", [id.0])?;
             crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-            crate::pending::save(db,&P::provider_access(id,inner.access.device,account,state.intended,true))?;
+            crate::pending::save(db,&P::provider_access(id,account,state.intended,true))?;
             Ok(state.intended)
         }))).await
     }
@@ -107,7 +107,6 @@ impl crate::Database {
                     let state = read(db, &account)?.ok_or(DbError::OperationChanged(update.id))?;
                     if state.request.as_ref().map(|r| r.operation) != Some(update.id)
                         || pending.operation() != Some(update.id)
-                        || pending.reported_by() != inner.access.device
                     {
                         return Err(DbError::Invariant {
                             what: "a provider request's condition names its own operation",
@@ -157,10 +156,7 @@ impl crate::Database {
                     };
                     // An app retry overrides the ordinary backoff (§16.5).
                     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-                    crate::pending::save(
-                        db,
-                        &P::provider_access(id, inner.access.device, account, target, owner),
-                    )
+                    crate::pending::save(db, &P::provider_access(id, account, target, owner))
                 })
             })
         })
@@ -186,7 +182,7 @@ impl crate::Database {
             } else {
                 db.internal_execute("UPDATE _coven_operations SET last_step=0 WHERE id=?1", [id.0])?;
                 crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-                crate::pending::save(db,&P::provider_access(id,inner.access.device,account,state.intended,true))?;
+                crate::pending::save(db,&P::provider_access(id,account,state.intended,true))?;
                 Ok(false)
             }
         }))).await

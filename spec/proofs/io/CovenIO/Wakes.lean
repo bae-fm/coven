@@ -1,4 +1,4 @@
-/-! The sync loop's wakes (SP step 9 and "Waiting without repeated work", E5
+/-! The sync loop's wakes (SP, "Waiting without repeated work", E5
 `sync_now`), as `sync_loop.rs` and `Database::sync_changes` run them.
 
 The loop observes commits to the outgoing write queue, counting insertions

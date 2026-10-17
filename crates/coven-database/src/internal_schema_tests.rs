@@ -233,8 +233,8 @@ mod fixture {
      INSERT INTO _coven_operations(id,kind,last_step,data,started_by)
        SELECT i,'kind_' || (i%32),1,x'00','app' FROM fixture;
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
-     INSERT INTO _coven_pending(subject,reporter,value,operation,object,coven_version)
-       SELECT key,device,x'00',CASE WHEN i%2=0 THEN i END,
+     INSERT INTO _coven_pending(subject,value,operation,object,coven_version)
+       SELECT key,x'00',CASE WHEN i%2=0 THEN i END,
               CAST(x'00' || n AS BLOB),'1' FROM fixture;
      INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
      INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;

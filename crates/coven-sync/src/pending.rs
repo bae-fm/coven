@@ -35,15 +35,13 @@ pub enum FileSourceFailure {
     Integrity,
 }
 
-/// One first unmet condition, identified by its subject and reporting device.
+/// One local first unmet condition, identified by its subject (§19.1, E5).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PendingRecord {
     /// The work that cannot advance.
     pub subject: PendingSubject,
     /// The first condition in its processing order.
     pub reason: PendingReason,
-    /// This device for a local observation, or the authenticated peer.
-    pub reported_by: DeviceId,
 }
 
 /// Stable identities of work, independent of attempts and wall-clock time.
@@ -254,9 +252,9 @@ impl PendingRecord {
     pub fn retry(&self) -> Retry {
         match (&self.subject, &self.reason) {
             (
-                PendingSubject::File { device, .. },
+                PendingSubject::File { .. },
                 PendingReason::FileUnavailable(FileMissingReason::Source(_)),
-            ) if *device == self.reported_by => Retry::Automatic,
+            ) => Retry::Automatic,
             (subject, reason)
                 if matches!(subject, PendingSubject::File { .. })
                     || matches!(subject, PendingSubject::Operation { kind, .. } if kind.coven_owned()) =>
@@ -352,13 +350,7 @@ impl PendingReason {
 }
 
 impl PendingValue for PendingRecord {
-    fn provider_access(
-        id: OperationId,
-        reported_by: DeviceId,
-        account: String,
-        grant: bool,
-        owner: bool,
-    ) -> Self {
+    fn provider_access(id: OperationId, account: String, grant: bool, owner: bool) -> Self {
         Self {
             subject: PendingSubject::Operation {
                 id,
@@ -376,44 +368,32 @@ impl PendingValue for PendingRecord {
             } else {
                 PendingReason::PendingOwner { account }
             },
-            reported_by,
         }
     }
-    fn reload(audience: Audience, reported_by: DeviceId) -> Self {
+    fn reload(audience: Audience) -> Self {
         Self {
             subject: PendingSubject::Audience(audience.clone()),
             reason: PendingReason::Waits(Prerequisite::Reload(audience)),
-            reported_by,
         }
     }
-    fn access_key(id: OperationId, reported_by: DeviceId, key: crate::AccessKeyToDelete) -> Self {
+    fn access_key(id: OperationId, key: crate::AccessKeyToDelete) -> Self {
         Self {
             subject: PendingSubject::Operation {
                 id,
                 kind: crate::OperationKind::DeleteAccessKey,
             },
             reason: PendingReason::DeleteAccessKey(key),
-            reported_by,
         }
     }
-    fn writes_refused(
-        slot: Slot,
-        cutoff: Slot,
-        cause: coven_database::WriteCutoff,
-        reporter: DeviceId,
-    ) -> Self {
+    fn writes_refused(slot: Slot, cutoff: Slot, cause: coven_database::WriteCutoff) -> Self {
         Self {
             subject: PendingSubject::Slot(slot),
             reason: PendingReason::WritesRefused { cutoff, cause },
-            reported_by: reporter,
         }
     }
     type Subject = PendingSubject;
     fn subject(&self) -> &PendingSubject {
         &self.subject
-    }
-    fn reported_by(&self) -> DeviceId {
-        self.reported_by
     }
     fn operation(&self) -> Option<OperationId> {
         match self.subject {

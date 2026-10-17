@@ -95,11 +95,9 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                if pending.operation() != Some(update.id)
-                    || pending.reported_by() != inner.access.device
-                {
+                if pending.operation() != Some(update.id) {
                     return Err(DbError::Invariant {
-                        what: "an operation's own condition names it and this device",
+                        what: "an operation's condition names its journal row",
                     });
                 }
                 writer.transaction(|db| {
@@ -136,7 +134,7 @@ impl Database {
                     if let Some(update) = &update {
                         crate::operation::advance(db, update)?;
                     }
-                    crate::operation::record_access_keys::<P>(db, inner.access.device, &deletions)
+                    crate::operation::record_access_keys::<P>(db, &deletions)
                 })
             })
         })

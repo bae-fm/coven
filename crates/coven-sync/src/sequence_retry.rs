@@ -111,7 +111,6 @@ impl SequenceSync {
             .run(async {
                 let pending = PendingRecord {
                     subject: PendingSubject::Operation { id, kind },
-                    reported_by: self.device,
                     reason: self.error_reason(error),
                 };
                 let subject = RetrySubject::Operation(id);

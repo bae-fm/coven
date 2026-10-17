@@ -39,7 +39,6 @@ async fn storage_metadata_and_snapshot_subjects_are_available_through_the_facade
     let record = PendingRecord {
         subject: PendingSubject::Snapshot(snapshot),
         reason: PendingReason::Missing { path },
-        reported_by: device,
     };
     assert_eq!(record.retry(), Retry::Automatic);
 }
@@ -863,12 +862,6 @@ mod pending_records {
         let record = PendingRecord {
             subject: PendingSubject::Slot(Slot(slot)),
             reason: PendingReason::Refused(Refusal::Signature { cause: None }),
-            reported_by: network.devices[1]
-                .layout
-                .store_dir(&network.devices[1].store)
-                .settings()
-                .unwrap()
-                .device_id,
         };
         assert_eq!(received.next().await.unwrap(), vec![record.clone()]);
         let reads = || async {

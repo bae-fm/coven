@@ -152,10 +152,7 @@ pub(crate) fn stage_writes<P: crate::PendingValue>(
         if let Some((cutoff, cause)) = cutoff {
             db.internal_execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
                 rusqlite::params![slot.0.to_be_bytes(), cutoff.0.to_be_bytes()])?;
-            crate::pending::save(
-                db,
-                &P::writes_refused(slot, cutoff, cause, crate::pending::own_device(db)?),
-            )?;
+            crate::pending::save(db, &P::writes_refused(slot, cutoff, cause))?;
         }
         if let Some(coverage) = coverage {
             for audience in write.unopened_audiences() {

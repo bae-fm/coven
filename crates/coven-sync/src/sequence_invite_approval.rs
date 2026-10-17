@@ -22,7 +22,6 @@ impl SequenceSync {
                         kind: OperationKind::Invite,
                     },
                     reason: reason.clone(),
-                    reported_by: self.device,
                 })))
             }
             _ => None,

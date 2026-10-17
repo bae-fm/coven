@@ -1,5 +1,5 @@
 //! Remote file availability, derived from one storage observation and the
-//! uploader's replayed state and signed reports; never written to a row (§16.1).
+//! uploader's applied state and locally observed source failures; never written to a row (§16.1).
 
 use crate::FileSourceFailure;
 use crate::{
@@ -16,7 +16,7 @@ use coven_storage::{ObjectPath, StoredObject};
 pub enum FileStatus {
     /// Storage holds the complete file at its fixed path.
     Available,
-    /// Confirmed absent; this active uploader has not reported it undeliverable.
+    /// Confirmed absent, with an active uploader and no local source failure.
     Uploading {
         /// The device responsible for uploading it.
         device: DeviceId,
@@ -31,7 +31,7 @@ pub enum FileStatus {
 }
 
 /// Why an absent file cannot arrive, if it cannot. The uploader's state comes
-/// before its source report.
+/// before a locally observed source failure.
 fn missing_reason(
     state: DeviceState,
     report: Option<FileSourceFailure>,
@@ -66,8 +66,8 @@ pub(crate) fn status<E>(
 
 impl Files {
     /// Make one fresh single-object status call for the file's fixed path,
-    /// then combine it with the uploader's current state and its signed
-    /// undeliverable-file report. Checks the reference against its row first.
+    /// then combine it with the uploader's current state and locally observed
+    /// source failure. Checks the reference against its row first.
     /// Network failures and denied access are errors, not absence.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.inner.check_open()?;
@@ -90,7 +90,7 @@ impl Files {
 }
 
 impl FilesInner {
-    /// The uploader's replayed state and its own undeliverable-file report.
+    /// The uploader's applied state and, on its own installation, source failure.
     async fn evidence(
         &self,
         file: &FileRef,

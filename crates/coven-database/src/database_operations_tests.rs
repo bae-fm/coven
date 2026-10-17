@@ -43,10 +43,7 @@ impl Database {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
-                    db.internal_execute(
-                        "UPDATE _coven_pending SET coven_version=?1 WHERE reporter=?2",
-                        (version, inner.access.device.0.to_be_bytes().as_slice()),
-                    )?;
+                    db.internal_execute("UPDATE _coven_pending SET coven_version=?1", [version])?;
                     Ok(())
                 })
             })

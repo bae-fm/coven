@@ -8,7 +8,6 @@ fn conditional_conflicts_retry_without_becoming_throttling() {
             provider: CloudProvider::S3,
             failure: StorageFailure::Conflict,
         },
-        reported_by: DeviceId(1),
     };
     assert_eq!(record.retry(), Retry::Automatic);
 }
@@ -17,11 +16,7 @@ fn conditional_conflicts_retry_without_becoming_throttling() {
 /// backoff, after a person acts, or never (E5).
 #[test]
 fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() {
-    let record = |subject, reason| PendingRecord {
-        subject,
-        reason,
-        reported_by: DeviceId(1),
-    };
+    let record = |subject, reason| PendingRecord { subject, reason };
     let operation = |kind| PendingSubject::Operation {
         id: OperationId(1),
         kind,

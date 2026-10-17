@@ -1,11 +1,11 @@
 use super::*;
-use crate::{tests::TestStore, CovenError, Database, NewOperation, OperationUpdate};
+use crate::{tests::TestStore, CovenError, NewOperation, OperationUpdate};
+use coven_foundation::id_source::DeviceId;
 use serde::Deserialize;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub(crate) struct Record {
     subject: Subject,
-    reported_by: DeviceId,
     reason: Reason,
     operation: Option<OperationId>,
 }
@@ -37,40 +37,26 @@ impl Record {
     }
 }
 impl PendingValue for Record {
-    fn provider_access(
-        id: OperationId,
-        reported_by: DeviceId,
-        _account: String,
-        _grant: bool,
-        _owner: bool,
-    ) -> Self {
-        reported_operation(reported_by, id)
+    fn provider_access(id: OperationId, _account: String, _grant: bool, _owner: bool) -> Self {
+        operation_record(id)
     }
-    fn reload(audience: coven_merge::Audience, reported_by: DeviceId) -> Self {
+    fn reload(audience: coven_merge::Audience) -> Self {
         Self {
             subject: Subject::Audience(crate::write_encoding::audience_text(&audience)),
-            reported_by,
             reason: Reason::Missing,
             operation: None,
         }
     }
-    fn access_key(id: OperationId, reported_by: DeviceId, key: crate::AccessKeyToDelete) -> Self {
+    fn access_key(id: OperationId, key: crate::AccessKeyToDelete) -> Self {
         Self {
             subject: Subject::Number(id.0 as u64),
-            reported_by,
             reason: Reason::AccessKey(key.access_key_id),
             operation: Some(id),
         }
     }
-    fn writes_refused(
-        slot: crate::Slot,
-        _cutoff: crate::Slot,
-        _cause: crate::WriteCutoff,
-        reported_by: DeviceId,
-    ) -> Self {
+    fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, _cause: crate::WriteCutoff) -> Self {
         Self {
             subject: Subject::Slot(slot.0),
-            reported_by,
             reason: Reason::WritesRefused,
             operation: None,
         }
@@ -78,9 +64,6 @@ impl PendingValue for Record {
     type Subject = Subject;
     fn subject(&self) -> &Subject {
         &self.subject
-    }
-    fn reported_by(&self) -> DeviceId {
-        self.reported_by
     }
     fn operation(&self) -> Option<OperationId> {
         self.operation
@@ -104,33 +87,24 @@ impl PendingValue for Record {
         }
     }
 }
-pub(crate) async fn operation_record(db: &Database, id: OperationId) -> Record {
-    reported_operation(own(db).await, id)
-}
 /// A missing-object record about a numbered subject with no operation.
-pub(crate) fn missing(subject: u64, reported_by: DeviceId) -> Record {
+pub(crate) fn missing(subject: u64) -> Record {
     Record {
         subject: subject.into(),
-        reported_by,
         reason: Reason::Missing,
         operation: None,
     }
 }
-pub(crate) fn reported_operation(reported_by: DeviceId, id: OperationId) -> Record {
+pub(crate) fn operation_record(id: OperationId) -> Record {
     Record {
         subject: Subject::Number(id.0.try_into().unwrap()),
-        reported_by,
         reason: Reason::Missing,
         operation: Some(id),
     }
 }
-async fn own(db: &Database) -> DeviceId {
-    db.local_device().unwrap()
-}
-async fn record(db: &Database, subject: u64) -> Record {
+fn record(subject: u64) -> Record {
     Record {
         subject: subject.into(),
-        reported_by: own(db).await,
         reason: Reason::Refused,
         operation: None,
     }
@@ -140,7 +114,7 @@ async fn record(db: &Database, subject: u64) -> Record {
 async fn reopening_preserves_conditions_and_a_version_change_rearms_without_erasing_them() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let pending = record(&db, 1).await;
+    let pending = record(1);
     db.record_pending(pending.clone()).await.unwrap();
     assert!(!db.pending_can_retry::<Record>(1.into()).await.unwrap());
     db.close().await.unwrap();
@@ -175,7 +149,7 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
         })
         .await
         .unwrap();
-    let first = operation_record(&db, id).await;
+    let first = operation_record(id);
     db.record_pending(first.clone()).await.unwrap();
     let mut live = db.subscribe_pending::<Record>();
     assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&first));
@@ -220,9 +194,7 @@ async fn completed_steps_replace_or_clear_the_condition_in_the_same_commit() {
     .unwrap();
     assert!(live.next().await.unwrap().is_empty());
     assert_eq!(db.operation(id).await.unwrap().unwrap().last_step, 2);
-    db.record_pending(operation_record(&db, id).await)
-        .await
-        .unwrap();
+    db.record_pending(operation_record(id)).await.unwrap();
     db.finish_operation(id).await.unwrap();
     assert!(db.pending::<Record>().await.unwrap().is_empty());
     assert!(db.operation(id).await.unwrap().is_none());
@@ -247,7 +219,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
     for statement in ["INSERT", "DELETE", "COMMIT"] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        let pending = record(&db, 1).await;
+        let pending = record(1);
         db.record_pending(pending.clone()).await.unwrap();
         let mut live = db.subscribe_pending::<Record>();
         assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&pending));
@@ -303,7 +275,7 @@ async fn losing_a_pending_update_fails_all_calls_and_subscriptions_until_reopen(
 async fn losing_a_pending_update_fails_an_already_running_subscription() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let pending = record(&db, 1).await;
+    let pending = record(1);
     db.inspect_writer(|sql| {
         sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE INSERT ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap();
     });
@@ -385,7 +357,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
         operation: None,
         authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
     };
-    db.record_pending(record(&db, 1).await).await.unwrap();
+    db.record_pending(record(1)).await.unwrap();
     assert!(db
         .load_snapshots::<crate::pending::tests::Record, _, _>(reload(Vec::new()))
         .await
@@ -397,7 +369,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     .await
     .unwrap();
     assert!(db.pending::<Record>().await.unwrap().is_empty());
-    db.record_pending(record(&db, 1).await).await.unwrap();
+    db.record_pending(record(1)).await.unwrap();
     db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![
         crate::SnapshotSource::Empty(coven_merge::Audience::Store),
     ]))
@@ -420,7 +392,7 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
             })
             .await
             .unwrap();
-        let original = operation_record(&db, id).await;
+        let original = operation_record(id);
         db.record_pending(original.clone()).await.unwrap();
         db.inspect_writer(|sql| sql.batch(&format!("CREATE TEMP TRIGGER fail_pending BEFORE {statement} ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;")).unwrap());
         let update = OperationUpdate {
@@ -456,10 +428,8 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
 async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remains() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let reported_by = own(&db).await;
     let observed = |number, reason| Record {
         subject: Subject::Slot(number),
-        reported_by,
         reason,
         operation: None,
     };
@@ -490,15 +460,13 @@ async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remai
 async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let reported_by = own(&db).await;
     let audience = |name: &str, reason| Record {
         subject: Subject::Audience(name.into()),
-        reported_by,
         reason,
         operation: None,
     };
     let scanned = |record: &Record| matches!(record.subject, Subject::Audience(_));
-    let other = record(&db, 1).await;
+    let other = record(1);
     db.record_pending(other.clone()).await.unwrap();
     let mut live = db.subscribe_pending::<Record>();
     assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&other));
@@ -511,7 +479,7 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
         .unwrap();
     let mut expected = first.clone();
     expected.push(other.clone());
-    expected.sort_by_key(|r| (r.subject.clone(), r.reported_by));
+    expected.sort_by_key(|r| r.subject.clone());
     assert_eq!(live.next().await.unwrap(), expected);
     // An unchanged scan commits nothing.
     db.replace_local_pending(scanned, first).await.unwrap();
@@ -522,18 +490,18 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
         .unwrap();
     let mut expected = next.clone();
     expected.push(other.clone());
-    expected.sort_by_key(|r| (r.subject.clone(), r.reported_by));
+    expected.sort_by_key(|r| r.subject.clone());
     assert_eq!(live.next().await.unwrap(), expected);
-    // Records outside the scanned class, or reported by peers, are refused.
+    // Records outside the scanned class and duplicate subjects are refused.
     assert!(db
         .replace_local_pending(scanned, vec![other.clone()])
         .await
         .is_err());
-    let peer = Record {
-        reported_by: DeviceId(reported_by.0.wrapping_add(1)),
-        ..audience("c", Reason::Missing)
-    };
-    assert!(db.replace_local_pending(scanned, vec![peer]).await.is_err());
+    let duplicate = audience("c", Reason::Missing);
+    assert!(db
+        .replace_local_pending(scanned, vec![duplicate.clone(), duplicate])
+        .await
+        .is_err());
     db.replace_local_pending(scanned, Vec::new()).await.unwrap();
     assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&other));
 }
@@ -544,7 +512,7 @@ async fn a_download_wait_lives_with_its_pending_record() {
     use std::time::{Duration, UNIX_EPOCH};
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let local = record(&db, 7).await;
+    let local = record(7);
     let subject = RetrySubject::Download {
         uploader: DeviceId(2),
         file: coven_foundation::id_source::FileId(uuid::Uuid::from_u128(9)),
@@ -576,5 +544,34 @@ async fn a_download_wait_lives_with_its_pending_record() {
     assert!(db.download_retry_waits().await.unwrap().is_empty());
     assert!(db.record_retry(subject, wait).await.is_err());
     assert!(db.retry_waits().await.unwrap().is_empty());
+    db.close().await.unwrap();
+}
+
+/// §19.1 and E5: a pending subject alone identifies its local record.
+#[tokio::test]
+async fn a_pending_subject_accepts_one_local_record_without_an_observer_identity() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let pending = record(7);
+    db.commit_writer(|sql| {
+        let subject = serde_json::to_vec(pending.subject()).unwrap();
+        let value = serde_json::to_vec(&pending).unwrap();
+        for _ in 0..2 {
+            sql.internal_execute(
+                "INSERT INTO _coven_pending(subject,value,coven_version) VALUES(?1,?2,?3)
+                 ON CONFLICT(subject) DO UPDATE SET value=excluded.value",
+                (&subject, &value, env!("CARGO_PKG_VERSION")),
+            )
+            .unwrap();
+        }
+    });
+    db.close().await.unwrap();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    assert_eq!(
+        db.pending::<Record>().await.unwrap(),
+        std::slice::from_ref(&pending)
+    );
+    db.clear_pending(pending.subject).await.unwrap();
+    assert!(db.pending::<Record>().await.unwrap().is_empty());
     db.close().await.unwrap();
 }

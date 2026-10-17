@@ -222,7 +222,7 @@ impl Fixture {
             .await
             .unwrap()
             .into_iter()
-            .find(|record| record.subject == subject && record.reported_by == file.uploader())
+            .find(|record| record.subject == subject)
             .map(|record| record.reason)
     }
     fn path(&self, file: &FileRef) -> coven_storage::ObjectPath {

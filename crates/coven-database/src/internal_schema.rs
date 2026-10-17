@@ -45,14 +45,13 @@ macro_rules! coven_tables {
         $visit!(_coven_pending, "
             CREATE TABLE _coven_pending (
                 subject BLOB NOT NULL,
-                reporter BLOB NOT NULL CHECK(length(reporter)=8),
                 value BLOB NOT NULL,
                 operation INTEGER REFERENCES _coven_operations(id),
                 object BLOB CHECK(object IS NULL OR length(object)=9),
                 coven_version TEXT NOT NULL,
-                PRIMARY KEY(subject,reporter)
+                PRIMARY KEY(subject)
             ) STRICT, WITHOUT ROWID;
-            CREATE INDEX _coven_pending_object ON _coven_pending(object,reporter);
+            CREATE INDEX _coven_pending_object ON _coven_pending(object);
             CREATE UNIQUE INDEX _coven_pending_operation ON _coven_pending(operation) WHERE operation IS NOT NULL;
         ");
         $visit!(_coven_data_reloads, "
@@ -615,15 +614,13 @@ macro_rules! coven_tables {
                 upload INTEGER UNIQUE REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
                 download BLOB UNIQUE CHECK(download IS NULL OR length(download)=24),
                 pending_subject BLOB,
-                pending_reporter BLOB,
                 failures INTEGER NOT NULL CHECK(failures>=0),
                 not_before BLOB NOT NULL CHECK(length(not_before)=13),
                 wait INTEGER NOT NULL CHECK(wait>=0),
-                UNIQUE(pending_subject,pending_reporter),
-                FOREIGN KEY(pending_subject,pending_reporter)
-                    REFERENCES _coven_pending(subject,reporter) ON DELETE CASCADE,
-                CHECK((download IS NULL)=(pending_subject IS NULL)
-                    AND (download IS NULL)=(pending_reporter IS NULL)),
+                UNIQUE(pending_subject),
+                FOREIGN KEY(pending_subject)
+                    REFERENCES _coven_pending(subject) ON DELETE CASCADE,
+                CHECK((download IS NULL)=(pending_subject IS NULL)),
                 CHECK((scope IS NOT NULL)+(operation IS NOT NULL)+(upload IS NOT NULL)
                     +(download IS NOT NULL)=1)
             ) STRICT;

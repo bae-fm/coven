@@ -660,7 +660,9 @@ pub(crate) fn forget_own_migration(
     version: u32,
     carried: &std::collections::BTreeSet<(WriteId, String, Vec<u8>)>,
 ) -> Result<(), DbError> {
-    let own = crate::pending::own_device(db)?;
+    let own = db.local_device().ok_or(DbError::Invariant {
+        what: "a writer connection observes this device",
+    })?;
     let audience = audience_text(audience);
     let first = merge_fields::encode_write_id(&WriteId {
         device: own,

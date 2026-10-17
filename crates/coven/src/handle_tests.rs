@@ -645,7 +645,6 @@ fn retry(reason: PendingReason) -> Retry {
     PendingRecord {
         subject: PendingSubject::Connection,
         reason,
-        reported_by: DeviceId(1),
     }
     .retry()
 }
@@ -836,7 +835,6 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
                 cutoff: Slot(5),
                 cause,
             },
-            reported_by: DeviceId(1),
         };
         assert_eq!(record.retry(), Retry::Never, "{record:?}");
     }
@@ -852,7 +850,6 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
                 kind,
             },
             reason: PendingReason::Failed(LocalFailure::Operation),
-            reported_by: DeviceId(1),
         };
         assert_eq!(record.retry(), expected, "{record:?}");
     }

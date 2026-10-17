@@ -3,7 +3,7 @@ use crate::*;
 
 impl CovenHandle {
     /// Calls single-object status, then checks the uploader's current state
-    /// and its signed undeliverable-file report (§16.1). Checks the reference
+    /// and any source failure observed by this installation (§16.1). Checks the reference
     /// against its row. Network failures and denied access are errors, not Missing.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.files.file_status(file).await

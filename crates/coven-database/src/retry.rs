@@ -249,7 +249,7 @@ pub(crate) fn save(
 pub(crate) fn save_download(
     db: &DatabaseConnection,
     subject: RetrySubject,
-    pending: (&[u8], DeviceId),
+    pending: &[u8],
     wait: &RetryWait,
 ) -> Result<(), DbError> {
     let key @ Key::Download(_) = key(subject) else {
@@ -259,12 +259,11 @@ pub(crate) fn save_download(
     };
     clear(db, subject)?;
     db.internal_execute(
-        "INSERT INTO _coven_retries(download,pending_subject,pending_reporter,failures,not_before,wait)
-         VALUES(?1,?2,?3,?4,?5,?6)",
+        "INSERT INTO _coven_retries(download,pending_subject,failures,not_before,wait)
+         VALUES(?1,?2,?3,?4,?5)",
         rusqlite::params![
             key.value(),
-            pending.0,
-            pending.1 .0.to_be_bytes().as_slice(),
+            pending,
             i64::from(wait.failures),
             crate::user_file::encode_time(wait.not_before),
             millis(wait)?,

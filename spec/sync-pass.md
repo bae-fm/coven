@@ -23,7 +23,7 @@ A pass reads slots, applies them, claims waiting work, then performs effects.
 - A new device starts from the floor, or slot 1 before a floor exists.
   Opening its first key uses [§12](coven.md#12-joining-and-restore)'s bootstrap rules.
 
-<a id="4-observe-keys-and-peers"></a>
+<a id="apply-in-order"></a>
 
 ## 2. Apply in order
 
@@ -82,7 +82,7 @@ A key in a later slot cannot bypass [the block at 41](coven.md#stuck-devices).
 Ana and Ben try 41. Ana reads her bytes there and checks the floor.
 Ben reads different bytes, applies 41, and tries 42 if his action is still allowed.
 
-<a id="9-post-changed-positions-and-finish"></a>
+<a id="effects-after-applying"></a>
 
 ## 4. Effects after applying
 

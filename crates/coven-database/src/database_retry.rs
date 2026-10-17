@@ -17,11 +17,6 @@ impl Database {
             let id = record.operation().ok_or(DbError::Invariant {
                 what: "an operation retry names its journal row",
             })?;
-            if record.reported_by() != inner.access.device {
-                return Err(DbError::Invariant {
-                    what: "an operation retry is this device's own",
-                });
-            }
             inner.access.with_writer(|writer| {
                 writer.pending_transaction(|db| {
                     crate::pending::save(db, &record)?;
@@ -98,9 +93,9 @@ impl Database {
     ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                if record.reported_by() != inner.access.device || record.operation().is_some() {
+                if record.operation().is_some() {
                     return Err(DbError::Invariant {
-                        what: "a retried subject's record is this device's own",
+                        what: "a download retry has no operation",
                     });
                 }
                 writer.pending_transaction(|db| {
@@ -109,12 +104,7 @@ impl Database {
                         Some(wait) => {
                             let pending = serde_json::to_vec(record.subject())
                                 .map_err(DbError::PendingEncoding)?;
-                            retry::save_download(
-                                db,
-                                subject,
-                                (&pending, record.reported_by()),
-                                wait,
-                            )
+                            retry::save_download(db, subject, &pending, wait)
                         }
                         None => retry::clear(db, subject),
                     }
