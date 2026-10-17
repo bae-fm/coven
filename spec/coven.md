@@ -2912,10 +2912,13 @@ The rules:
 - **An ordinary snapshot must cover the latest raise and reset** before its
   announcement, and its schema version and reset must match the audience's at
   its coverage.
-- **A prepared snapshot counts only once its admin entry applies.** A raise or
-  reset snapshot is announced first and then named by the raise or reset entry.
-  Until that entry applies, its announcement can't support deleting history or an
-  ordinary reload. An entry can name only a snapshot already announced.
+- **A prepared snapshot supports an ordinary reload only after its admin entry
+  applies.** A raise or reset snapshot is announced first and then named by the
+  raise or reset entry. An entry can name only a snapshot already announced.
+  A prepared snapshot never supports the floor. After activation, an ordinary
+  snapshot must cover the activating entry before the floor can advance past it.
+  That ordinary snapshot includes the activation's effects, so a floor reader
+  need not recover a deleted activating entry.
 - **A prepared snapshot must cover at least as much as every earlier
   announcement** for its audience, and must cover the slots of the raise and
   reset before it.
@@ -3051,9 +3054,9 @@ coverage and the end of the sequence.
 Ana snapshots every Household audience daily. After seven days, the first
 snapshots can advance the floor; newer announcements must not restart grace.
 
-For each introduced audience, choose the newest announced snapshot that applies
-(§16.2, §16.3) and has passed grace. Advance `first` to their least coverage plus
-one. A device with deletion permission:
+For each introduced audience, choose the newest announced ordinary snapshot that
+applies (§16.2, §16.3) and has passed grace. Advance `first` to their least coverage
+plus one. A device with deletion permission:
 
 1. journals the new floor and the deletions it plans;
 2. writes the new floor, naming the new `first` and each audience's snapshot
@@ -3068,6 +3071,9 @@ The rules:
 
 - **Every introduced audience needs checked coverage** (§16.4), even one with
   no parts in the deleted writes. Missing coverage waits; absent devices do not.
+  The ordinary snapshot must cover the latest raise and reset. An activated
+  preparation is not enough: retention waits for an ordinary snapshot covering
+  its activating entry.
 - **A lost race changes nothing.** If the floor changed, the conditional write
   fails. The device reads the current floor and decides again. It never moves
   `first`, or any audience's coverage, backward.
@@ -4749,6 +4755,8 @@ What the models cover:
   operations, causality, authority, unique values, owners, the cut-off,
   snapshots, reloads and schema raises.
 - **The merge,** and conversion of old writes.
+- **Snapshot starts:** ordinary snapshots from the floor, and prepared snapshots
+  at their raise or reset entries, as §16.3 requires.
 - **Pieces of storage behaviour,** such as copy publication, that an S3 key
   mint deletes no key, and how long a key replacement holds admin access.
 
@@ -4767,10 +4775,6 @@ What they don't cover:
   doesn't prove the listing margin.
 - **The composition.** The merge and conversion proofs cover their stated inputs;
   they don't establish the whole storage protocol built from them.
-- **Prepared snapshots loaded from the floor.** The models load ordinary
-  snapshots from the floor and prepared snapshots (§16.3) at their raise or reset
-  entries. A device loading a prepared snapshot directly from the floor is not
-  modeled.
 - **What a stopped device sends.** The model proves a stopped device takes no
   apply or reload step (§5.4). That it sends nothing, and how it recovers once the
   cause clears, are outside the model.
@@ -6357,7 +6361,7 @@ Write-ups explain each model and state its assumptions:
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | Under any interleaving of storage and device steps, a device can still reach the full state at the end of the sequence | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |
-| Model limit: prepared snapshots are loaded at their raise or reset entries; loading one directly from the floor is not modeled | (none) | — | §22 |
+| Model premise: the floor names ordinary snapshots; prepared snapshots load at their raise or reset entries | (model premise) | `proofs/sequence/CovenSequence/Retention.lean` | §16.3, §16.6 |
 | Choosing the newest snapshot before checking grace starves under daily announcements; choosing the newest mature applicable snapshot advances on day seven | `fresh_head_starves`, `daily_announcements_starve`, `daily_announcements_advance` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | Chosen snapshots have passed grace, and a qualifying snapshot cannot be hidden by newer announcements; immature replacements keep the old body | `chosen_mature`, `chosen_newest`, `choose_dominates`, `chosen_has_no_mature_replacement`, `immature_replacements_keep_body` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 
