@@ -128,7 +128,7 @@ impl SequenceSync {
         Ok(())
     }
 
-    async fn apply_access(
+    pub(crate) async fn apply_access(
         &self,
         session: &mut Session,
         ring: &mut StoreKeyring,

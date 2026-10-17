@@ -166,8 +166,9 @@ impl SyncError {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn into_shared(
+    /// The local category and one shared cause, for a status and a waiting
+    /// caller failed by the same error.
+    pub fn into_shared(
         self,
     ) -> (
         crate::LocalFailure,

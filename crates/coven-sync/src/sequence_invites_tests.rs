@@ -371,3 +371,76 @@ async fn an_explicit_retry_reads_a_request_before_its_backoff_is_due() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// A grant the provider refuses answers the call at once with that refusal,
+/// and the invite takes back what it intended (T296).
+#[tokio::test]
+async fn a_refused_grant_answers_the_invite_call_and_settles_the_invite() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let result = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
+            InviteAccess::ProviderAccount {
+                email: "owner@example.test".into(),
+            },
+        )
+        .await;
+    assert!(
+        matches!(&result, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::InviteeIsStoreOwner),
+        "{:?}",
+        result.err()
+    );
+    assert!(ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.kind != "invite"));
+    let access = ana
+        .sync
+        .database
+        .provider_access("owner@example.test".into())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(!access.intended);
+    ana.sync.database.close().await.unwrap();
+}
+
+/// The owner's checked requests reach the app's subscription without a call.
+#[tokio::test]
+async fn a_pass_publishes_checked_join_requests_to_the_subscription() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let requests = ana.sync.state.subscribe_join_requests();
+    let invite = invite(&ana).await;
+    assert!(requests.borrow().is_empty());
+    let carol = join(&group, &invite.code, "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    let shown = requests.borrow().clone();
+    assert_eq!(shown.len(), 1);
+    assert_eq!(shown, ana.sync.join_requests().await.unwrap());
+    ana.sync.decline_join_request(&shown[0]).await.unwrap();
+    assert!(requests.borrow().is_empty());
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}

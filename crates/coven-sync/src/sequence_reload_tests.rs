@@ -410,3 +410,61 @@ async fn a_preparation_covered_by_a_later_announcement_is_recaptured() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// A breaking migration journals its raise with the schema; passes publish
+/// it for every audience it captured, and a member that migrated later
+/// takes the published raise instead of raising again (§17.1).
+#[tokio::test]
+async fn a_breaking_migration_raises_its_captured_audiences_through_passes() {
+    let group = Group::new();
+    group
+        .raises
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "before the raise").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (ana, ben) = (group.reopen(ana).await, group.reopen(ben).await);
+    assert!(ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .any(|record| record.kind == "schema-raise"));
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    for device in [&ana, &ben] {
+        let state = device.sync.database.store_state().await.unwrap();
+        assert_eq!(state.schema[&Audience::Store].number, 2);
+        assert!(device
+            .sync
+            .database
+            .raise_captures()
+            .await
+            .unwrap()
+            .is_empty());
+        assert!(device
+            .sync
+            .database
+            .operations()
+            .await
+            .unwrap()
+            .iter()
+            .all(|record| record.kind != "schema-raise"));
+    }
+    assert_eq!(
+        rows(&ana.sync.database).await,
+        rows(&ben.sync.database).await
+    );
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

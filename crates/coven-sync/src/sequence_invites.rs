@@ -291,12 +291,50 @@ impl SequenceSync {
                 .expect("admin access poisoned")
                 .insert(operation, admin);
         }
-        self.resume_access(&mut session, &mut ring, &member).await?;
+        if let Some(account) = work.account() {
+            // The call answers with its grant's outcome: a failed grant takes
+            // back what the invite intended and fails the call.
+            let grant = self
+                .database
+                .operations()
+                .await?
+                .into_iter()
+                .filter(|record| {
+                    record.kind == "provider-access"
+                        && serde_json::from_slice::<String>(&record.data)
+                            .is_ok_and(|recorded| recorded == account)
+                })
+                .map(|record| record.id)
+                .next_back()
+                .ok_or(coven_database::DbError::DamagedDatabase)?;
+            if let Err(error) = self
+                .apply_access(&mut session, &mut ring, &member, grant)
+                .await
+            {
+                let record = self
+                    .database
+                    .operation(operation)
+                    .await?
+                    .ok_or(coven_database::DbError::OperationChanged(operation))?;
+                let mut work = InviteWork::read(&record)?;
+                work.state = InviteState::Revoking;
+                self.database
+                    .advance_operation(work.update(&record)?)
+                    .await?;
+                self.advance_invite(&mut session, &mut ring, &member, operation)
+                    .await?;
+                return Err(error);
+            }
+        }
         match self
             .advance_invite(&mut session, &mut ring, &member, operation)
             .await?
         {
-            InviteProgress::Shown(invite) => Ok(invite),
+            InviteProgress::Shown(invite) => {
+                // The next pass polls for the request, then backs off.
+                self.state.request_pass();
+                Ok(invite)
+            }
             InviteProgress::Waiting(reason) => Err(SyncError::Pending(Box::new(PendingRecord {
                 subject: PendingSubject::Operation {
                     id: operation,
@@ -328,6 +366,12 @@ impl SequenceSync {
         Ok(requests)
     }
 
+    /// Show the app the requests now waiting for this device's decision.
+    pub(crate) async fn publish_join_requests(&self) -> Result<(), SyncError> {
+        self.state.set_join_requests(self.join_requests().await?);
+        Ok(())
+    }
+
     /// Approve exactly this checked request: claim copies of every store key
     /// and the held circle keys for its pair, then bind the pair (§12.2).
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
@@ -345,6 +389,17 @@ impl SequenceSync {
     }
 
     async fn decide(
+        &self,
+        invite: InviteId,
+        request: Option<&JoinRequest>,
+        approve: bool,
+    ) -> Result<(), SyncError> {
+        let result = self.decide_locked(invite, request, approve).await;
+        self.publish_join_requests().await?;
+        result
+    }
+
+    async fn decide_locked(
         &self,
         invite: InviteId,
         request: Option<&JoinRequest>,
@@ -473,7 +528,7 @@ impl SequenceSync {
                 .await?;
             self.state.check()?;
         }
-        Ok(())
+        self.publish_join_requests().await
     }
 
     async fn advance_invite(

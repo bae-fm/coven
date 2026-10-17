@@ -1,31 +1,20 @@
 //! Event-driven sequence passes with durable backoff and retained app wakes.
-use crate::{SequenceSync, SyncError, SyncFailure};
+use crate::{SequenceStatus, SequenceSync, SyncError, SyncFailure, SyncStatus};
 use coven_database::{DbError, RetrySubject};
+use coven_storage::StorageFailure;
 use std::{sync::Arc, time::Duration};
-use tokio::sync::{mpsc, oneshot, watch};
+use tokio::sync::{mpsc, oneshot};
 
-/// Activity of the automatic pass owner; slot progress belongs to `SyncState`.
-#[derive(Clone, Debug)]
-pub enum LoopStatus {
-    /// No automatic pass is requested.
-    Stopped,
-    /// A pass owns the connection.
-    Running,
-    /// Waiting for app work, an operation prerequisite, or the idle timer.
-    Waiting,
-    /// The last attempt failed, with its retained cause.
-    Failed(SyncFailure),
-}
 #[derive(Clone)]
 /// Control of one serialized pass loop. Commands survive caller cancellation.
+/// It publishes its activity to the owner's `SyncState`.
 pub struct SyncLoop {
     commands: mpsc::UnboundedSender<Command>,
-    status: watch::Receiver<LoopStatus>,
 }
 enum Command {
     Start,
     Now,
-    Stop(oneshot::Sender<Result<(), SyncError>>),
+    Stop,
     Close(oneshot::Sender<Result<(), SyncError>>),
 }
 impl SyncLoop {
@@ -33,12 +22,9 @@ impl SyncLoop {
     /// `codes` installs a delivered S3 key on this device after each pass (§13).
     pub fn new(sync: Arc<SequenceSync>, codes: Option<crate::RestoreCodes>) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
-        let (status, subscription) = watch::channel(LoopStatus::Stopped);
-        tokio::spawn(run(sync, codes, receiver, status));
-        Self {
-            commands,
-            status: subscription,
-        }
+        sync.state.publish(SyncStatus::Stopped);
+        tokio::spawn(run(sync, codes, receiver));
+        Self { commands }
     }
     /// Start and request an immediate pass.
     pub fn start(&self) -> Result<(), SyncError> {
@@ -52,19 +38,15 @@ impl SyncLoop {
             .send(Command::Now)
             .map_err(|_| DbError::StoreClosed.into())
     }
-    /// Observe automatic activity and failures.
-    pub fn subscribe(&self) -> watch::Receiver<LoopStatus> {
-        self.status.clone()
-    }
-    /// Finish the active pass and transfers before stopping automatic work.
-    pub async fn stop(&self) -> Result<(), SyncError> {
-        let (send, receive) = oneshot::channel();
+    /// Queue stopping after the active pass and this connection's transfers.
+    /// Completion publishes `Stopped`; a release failure publishes `Failed`.
+    pub fn stop(&self) -> Result<(), SyncError> {
         self.commands
-            .send(Command::Stop(send))
-            .map_err(|_| DbError::StoreClosed)?;
-        receive.await.map_err(|_| DbError::StoreClosed)?
+            .send(Command::Stop)
+            .map_err(|_| DbError::StoreClosed.into())
     }
-    /// Finish active work and end this loop before closing its database.
+    /// Finish active work and this connection's transfers, then end this
+    /// loop. The store's owner closes its transfers and database.
     pub async fn close(&self) -> Result<(), SyncError> {
         let (send, receive) = oneshot::channel();
         self.commands
@@ -75,7 +57,30 @@ impl SyncLoop {
 }
 /// A pass, then the delivered S3 key this member's applied history records,
 /// unless this device already uses it (§13).
-async fn pass(sync: &SequenceSync, codes: Option<&crate::RestoreCodes>) -> Result<(), SyncError> {
+/// Coven's own operation whose last attempt failed, if any: it retries under
+/// its own backoff, but the pass that left it is not `Synced` (E5).
+async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, SyncError> {
+    Ok(sync
+        .database
+        .pending::<crate::PendingRecord>()
+        .await?
+        .into_iter()
+        .find(|record| {
+            record.reported_by == sync.device
+                && matches!(record.subject, crate::PendingSubject::Operation { kind, .. } if kind.coven_owned())
+                && matches!(
+                    record.reason,
+                    crate::PendingReason::Storage { .. }
+                        | crate::PendingReason::Refused(_)
+                        | crate::PendingReason::Failed(_)
+                )
+        }))
+}
+
+async fn pass(
+    sync: &SequenceSync,
+    codes: Option<&crate::RestoreCodes>,
+) -> Result<Option<crate::PendingRecord>, SyncError> {
     sync.pass().await?;
     if let Some(codes) = codes {
         let held = match codes.connection().await? {
@@ -89,16 +94,38 @@ async fn pass(sync: &SequenceSync, codes: Option<&crate::RestoreCodes>) -> Resul
             codes.adopt_delivered_key(key).await?;
         }
     }
-    Ok(())
+    failing(sync).await
+}
+
+/// What a failed pass shows: a blocked slot, an attempt that received no
+/// provider response, or the failure itself (E5).
+fn failed(sync: &SequenceSync, error: SyncError) -> SyncStatus {
+    if let SequenceStatus::Blocked(record) = &*sync.state.subscribe().borrow() {
+        if let crate::PendingSubject::Slot(slot) = record.subject {
+            return SyncStatus::Blocked {
+                slot,
+                reason: record.reason.clone(),
+            };
+        }
+    }
+    match SyncFailure::from(error) {
+        SyncFailure::Storage(error)
+            if error.failure() == StorageFailure::Network && !error.answered() =>
+        {
+            SyncStatus::Offline { error }
+        }
+        error => SyncStatus::Failed { error },
+    }
 }
 
 async fn run(
     sync: Arc<SequenceSync>,
     codes: Option<crate::RestoreCodes>,
     mut commands: mpsc::UnboundedReceiver<Command>,
-    status: watch::Sender<LoopStatus>,
 ) {
+    let status = &sync.state;
     let mut changes = sync.database.sync_changes();
+    let mut rearmed = sync.waits.rearmed();
     let mut started = false;
     let mut pending = false;
     let mut idle = sync.clock.sleep(Duration::from_secs(30));
@@ -117,7 +144,9 @@ async fn run(
         let previous = match sync.database.retry_wait(RetrySubject::Sync).await {
             Ok(wait) => wait,
             Err(error) => {
-                status.send_replace(LoopStatus::Failed(SyncError::from(error).into()));
+                status.publish(SyncStatus::Failed {
+                    error: SyncError::from(error).into(),
+                });
                 break;
             }
         };
@@ -133,28 +162,41 @@ async fn run(
                                 started = true;
                                 pending = true;
                                 sync.waits.connection_changed();
+                                status.publish(SyncStatus::Syncing);
                             }
                             Err(error) => {
-                                status.send_replace(LoopStatus::Failed(error.into()));
+                                status.publish(SyncStatus::Failed { error: error.into() });
                             }
                         }
                     }
                 }
                 Some(Command::Now) => pending |= started,
-                Some(Command::Stop(reply)) => {
+                Some(Command::Stop) => {
                     started = false;
                     pending = false;
-                    let result = sync.files.set_storage(None, std::future::ready(Ok(()))).await;
-                    status.send_replace(LoopStatus::Stopped);
-                    let _ = reply.send(result);
+                    // No caller waits for stopping; the status carries a failure.
+                    status.publish(
+                        match sync.files.set_storage(None, std::future::ready(Ok(()))).await {
+                            Ok(()) => SyncStatus::Stopped,
+                            Err(error) => SyncStatus::Failed { error: error.into() },
+                        },
+                    );
                 }
+                // Transfers outlive this connection's loop; the store's
+                // owner closes them. This connection's transfers finish first.
                 Some(Command::Close(reply)) => {
-                    sync.files.close().await;
-                    let _ = reply.send(Ok(()));
+                    let result = if started {
+                        sync.files.set_storage(None, std::future::ready(Ok(()))).await
+                    } else {
+                        Ok(())
+                    };
+                    let _ = reply.send(result);
                     break;
                 }
                 None => {
-                    sync.files.close().await;
+                    if started {
+                        let _ = sync.files.set_storage(None, std::future::ready(Ok(()))).await;
+                    }
                     break;
                 }
             },
@@ -162,39 +204,64 @@ async fn run(
                 Ok(()) => pending = true,
                 Err(DbError::StoreClosed) => break,
                 Err(error) => {
-                    status.send_replace(LoopStatus::Failed(SyncError::from(error).into()));
+                    status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
                     started = false;
                 }
             },
             _ = &mut idle, if started && !pending => pending = true,
-            _ = work_wake, if started => pending = true,
+            _ = sync.state.pass_requested(), if started && !pending => pending = true,
+            // A wait armed outside this loop changes the schedule to wake on.
+            changed = rearmed.changed(), if started => if changed.is_err() { break },
+            // A requested pass evaluates every due wait; waking for one
+            // again would starve it.
+            _ = work_wake, if started && !pending => pending = true,
             _ = async {
                 if let Some(wake) = cooldown { wake.await } else { std::future::pending::<()>().await }
             }, if started && pending && !due => {}
             _ = std::future::ready(()), if started && pending && due => {
                 pending = false;
                 if let Err(error) = changes.take_changed() {
-                    status.send_replace(LoopStatus::Failed(SyncError::from(error).into()));
+                    status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
                     break;
                 }
-                status.send_replace(LoopStatus::Running);
+                status.publish(SyncStatus::Syncing);
                 match pass(&sync, codes.as_ref()).await {
-                    Ok(_) => match sync.waits.clear(RetrySubject::Sync).await {
-                        Ok(()) => {
-                            status.send_replace(LoopStatus::Waiting);
-                        }
+                    Ok(failing) => match sync.waits.clear(RetrySubject::Sync).await {
+                        Ok(()) => match failing {
+                            None => status.publish(SyncStatus::Synced { finished_at: sync.clock.now() }),
+                            Some(record) => {
+                                // Work that never clears stops sync until a
+                                // person resets it (E5).
+                                started = record.retry() != crate::Retry::Never;
+                                pending = false;
+                                status.publish(SyncStatus::Failed {
+                                    error: SyncFailure::Operation(Box::new(record)),
+                                });
+                            }
+                        },
                         Err(error) => {
-                            status.send_replace(LoopStatus::Failed(error.into()));
+                            status.publish(SyncStatus::Failed { error: error.into() });
                             started = false;
                         }
                     },
                     Err(error) => {
                         if let Err(persist) = sync.waits.fail(RetrySubject::Sync, previous.as_ref()).await {
-                            status.send_replace(LoopStatus::Failed(persist.into()));
+                            status.publish(SyncStatus::Failed { error: persist.into() });
                             started = false;
                         } else {
                             started = !matches!(error, SyncError::Removed | SyncError::DeviceIdInUse(_));
-                            status.send_replace(LoopStatus::Failed(error.into()));
+                            // Removal blocks the connection for good (E5).
+                            if matches!(error, SyncError::Removed) {
+                                if let Err(error) = sync.database.record_pending(crate::PendingRecord {
+                                    subject: crate::PendingSubject::Connection,
+                                    reason: crate::PendingReason::Removed,
+                                    reported_by: sync.device,
+                                }).await {
+                                    status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
+                                    break;
+                                }
+                            }
+                            status.publish(failed(&sync, error));
                             pending = started;
                         }
                     }

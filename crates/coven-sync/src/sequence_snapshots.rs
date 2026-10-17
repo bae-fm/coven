@@ -11,7 +11,96 @@ use coven_format::sequence::Purpose;
 use coven_merge::Audience;
 use std::collections::BTreeSet;
 
+/// The journal kind a breaking migration commits with its schema (§17.1).
+const SCHEMA_RAISE: &str = "schema-raise";
+
 impl SequenceSync {
+    /// Supply to `DatabaseBuilder::migration_operation` at the composition
+    /// root: the breaking migration's version commits with its schema, and
+    /// passes raise each audience it captured to that version (§17.1).
+    pub fn migration_operation(
+        version: u32,
+    ) -> Result<coven_database::NewOperation, coven_database::DbError> {
+        Ok(coven_database::NewOperation {
+            kind: SCHEMA_RAISE.into(),
+            data: serde_json::to_vec(&version)
+                .map_err(|error| coven_database::DbError::SyncStream(Box::new(error)))?,
+            started_by: "coven".into(),
+            pauses_writes: false,
+        })
+    }
+
+    /// Raise every captured audience to its migration's version through the
+    /// operation path, then finish the migration's journal. An audience
+    /// another device already raised to that version keeps no capture.
+    pub(crate) async fn publish_raises(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        let records: Vec<_> = self
+            .database
+            .operations()
+            .await?
+            .into_iter()
+            .filter(|record| record.kind == SCHEMA_RAISE)
+            .collect();
+        if records.is_empty() || !self.registered(session) {
+            return Ok(());
+        }
+        let pending: BTreeSet<_> = self
+            .database
+            .operations()
+            .await?
+            .into_iter()
+            .filter(|record| record.kind == "sequence")
+            .map(|record| serde_json::from_slice::<SequenceOperation>(&record.data))
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
+            .filter_map(|work| match work.request {
+                Request::Snapshot(request) if matches!(request.purpose, Purpose::Raise(_)) => {
+                    Some(request.audience)
+                }
+                _ => None,
+            })
+            .collect();
+        for capture in self.database.raise_captures().await? {
+            if session
+                .history
+                .state
+                .schema
+                .get(&capture.audience)
+                .is_some_and(|current| current.number >= capture.version)
+            {
+                self.database
+                    .discard_raise_capture(capture.audience, capture.version)
+                    .await?;
+                continue;
+            }
+            if pending.contains(&capture.audience) {
+                continue;
+            }
+            self.start_request(
+                session,
+                ring,
+                member,
+                Request::Snapshot(SnapshotRequest {
+                    audience: capture.audience,
+                    purpose: Purpose::Raise(capture.version),
+                }),
+                "coven",
+            )
+            .await?;
+        }
+        if self.database.raise_captures().await?.is_empty() {
+            for record in records {
+                self.database.finish_operation(record.id).await?;
+            }
+        }
+        Ok(())
+    }
+
     pub(crate) async fn request_snapshots(
         &self,
         session: &mut Session,

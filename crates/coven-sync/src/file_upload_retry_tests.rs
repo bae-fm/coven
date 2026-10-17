@@ -239,7 +239,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
     f.files.set_uploads_paused(false).await.unwrap();
     observed.await.unwrap();
-    f.send.set(crate::SyncStatus::Opening);
+    f.send.set(crate::SequenceStatus::Opening);
     resume.send(()).unwrap();
     // The second file waits for the next catch-up; that wait is its record.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -258,8 +258,8 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     let second = f.database.file_ref("files", "second").await.unwrap();
     assert!(!f.queued(&first).await);
     assert!(f.queued(&second).await);
-    f.send.set(crate::SyncStatus::Opening);
-    f.send.set(crate::SyncStatus::Synced { through: 0 });
+    f.send.set(crate::SequenceStatus::Opening);
+    f.send.set(crate::SequenceStatus::Synced { through: 0 });
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             uploads.next().await.unwrap();
@@ -308,10 +308,10 @@ impl StepStorage {
     }
     /// A completed catch-up: its phase begins now and completes a second later.
     fn catch_up(&self, send: &crate::SyncState) {
-        send.set(crate::SyncStatus::Opening);
+        send.set(crate::SequenceStatus::Opening);
         self.note(serde_json::json!({"op":"begin","time":self.seconds()}));
         self.clock.set(self.clock.now() + Duration::from_secs(1));
-        send.set(crate::SyncStatus::Synced { through: 0 });
+        send.set(crate::SequenceStatus::Synced { through: 0 });
         self.note(
             serde_json::json!({"op":"checked","time":self.seconds(),"send":true,"retired":false}),
         );
@@ -551,7 +551,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
         DrainOutcome::Paused
     ));
     // Reconnecting forgets the catch-up: nothing is sent until a new one.
-    f.send.set(crate::SyncStatus::Opening);
+    f.send.set(crate::SequenceStatus::Opening);
     let reconnected = StepStorage::new(&f, &clock, 0);
     f.files
         .set_storage(Some(reconnected.clone()), std::future::ready(Ok(())))

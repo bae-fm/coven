@@ -1,7 +1,7 @@
 //! Operation waits use their own prerequisites and persisted retry deadlines.
 use crate::{
-    sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry, SyncError,
-    SyncStatus,
+    sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry,
+    SequenceStatus, SyncError,
 };
 use coven_crypto::StoreKeyring;
 use coven_database::{OperationId, OperationRecord, RetrySubject};
@@ -11,7 +11,10 @@ impl SequenceSync {
     /// Make an operation's retry or undo due now, from its recorded progress.
     /// It cannot resurrect an invalidated action or bypass provider cooldown
     /// or the stuck-device rule (E6).
-    pub async fn retry_pending_operation(&self, id: OperationId) -> Result<SyncStatus, SyncError> {
+    pub async fn retry_pending_operation(
+        &self,
+        id: OperationId,
+    ) -> Result<SequenceStatus, SyncError> {
         if self.database.operation(id).await?.is_none() {
             return Err(SyncError::NotPending(id));
         }

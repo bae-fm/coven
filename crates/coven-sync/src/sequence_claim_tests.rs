@@ -198,7 +198,7 @@ async fn equal_claim_numbers_from_two_copies_at_one_slot_are_not_contention() {
     );
     assert!(matches!(
         &*ana.sync.state.subscribe().borrow(),
-        SyncStatus::Stopped(SyncFailure::DeviceIdInUse(_))
+        SequenceStatus::Stopped(SyncFailure::DeviceIdInUse(_))
     ));
     for device in [&ana, &copy] {
         device.sync.database.close().await.unwrap();

@@ -35,23 +35,48 @@ pub(crate) enum MemberBinding {
 
 impl SequenceSync {
     /// Custody's keyring, or the store keys this member's own copies supply
-    /// when custody holds none (§12.1). Nothing enters custody here: a slot
-    /// persists the keys it applies with.
+    /// when custody holds none (§12.1). A new installation's keys enter
+    /// custody with the slots that apply them. An installation that applied
+    /// history before custody lost its keys reconstructs that history with
+    /// the copies' keys; authenticating it admits them to custody (§11).
     pub(crate) async fn ring(
         &self,
         session: &mut Session,
         member: &MemberIdentity,
     ) -> Result<StoreKeyring, SyncError> {
-        if let Some(ring) = self.keys.read()? {
-            return Ok(ring);
+        let mut ring = match self.keys.read()? {
+            Some(ring) => ring,
+            None => match self.bootstrap_keys(session, member).await? {
+                Bootstrap::Keys(ring) => ring,
+                Bootstrap::Missing(key) => return Err(SyncError::KeyUnavailable(key)),
+                Bootstrap::Empty => {
+                    return Err(StorageFailure::NotFound
+                        .with_source("the store has neither a floor nor a first slot")
+                        .into())
+                }
+            },
+        };
+        if session.locked {
+            let originals = self.database.original_slots().await?;
+            session.history = super::History::restore(&originals, self.store(), &mut ring, member)?;
+            self.keys.persist(&ring)?;
+            session.locked = false;
         }
-        match self.bootstrap_keys(session, member).await? {
-            Bootstrap::Keys(ring) => Ok(ring),
-            Bootstrap::Missing(key) => Err(SyncError::KeyUnavailable(key)),
-            Bootstrap::Empty => Err(StorageFailure::NotFound
-                .with_source("the store has neither a floor nor a first slot")
-                .into()),
-        }
+        Ok(ring)
+    }
+
+    /// Open this member's store keys from their copies in storage, keep them
+    /// in custody and read forward, without sending (§11, E5).
+    pub async fn unlock(&self) -> Result<(), SyncError> {
+        let mut session = self.session.lock().await;
+        let member = self
+            .member
+            .read()?
+            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.ring(&mut session, &member).await?;
+        self.read_forward(&mut session, &mut ring, &member).await?;
+        self.keys.persist(&ring)?;
+        Ok(())
     }
 
     /// Start the key scan after `slot`: a joiner's copies follow its invite.

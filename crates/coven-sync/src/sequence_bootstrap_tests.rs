@@ -16,7 +16,7 @@ async fn a_restored_device_opens_its_copy_loads_the_sequence_and_registers() {
     assert!(laptop.sync.keys.read().unwrap().is_none());
     assert!(matches!(
         laptop.sync.pass().await.unwrap(),
-        SyncStatus::Synced { through: 3 }
+        SequenceStatus::Synced { through: 3 }
     ));
     assert_eq!(
         rows(&laptop.sync.database).await,
@@ -159,4 +159,32 @@ async fn a_newcomer_without_a_copy_reports_the_key_it_lacks() {
     for device in [&ana, &device] {
         device.sync.database.close().await.unwrap();
     }
+}
+
+/// Custody that lost its store keys after this installation applied history
+/// opens them again from this member's copies, then keeps them (§11).
+#[tokio::test]
+async fn an_installation_whose_custody_lost_its_keys_unlocks_from_its_copies() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(&ana.sync.database, "a", "kept").await;
+    ana.sync.pass().await.unwrap();
+    let applied = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync.database.close().await.unwrap();
+    let identity = ana.identity.clone();
+    let locked = group
+        .open_with(ana._temp, identity, None, group.storage.for_device())
+        .await;
+    assert!(locked.sync.keys.read().unwrap().is_none());
+    locked.sync.unlock().await.unwrap();
+    assert!(locked.sync.keys.read().unwrap().is_some());
+    assert_eq!(locked.sync.database.applied_slot().await.unwrap(), applied);
+    insert(&locked.sync.database, "b", "after unlocking").await;
+    locked.sync.pass().await.unwrap();
+    assert_eq!(
+        locked.sync.database.applied_slot().await.unwrap(),
+        applied + 1
+    );
+    locked.sync.database.close().await.unwrap();
 }

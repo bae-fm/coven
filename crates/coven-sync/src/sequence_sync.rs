@@ -7,7 +7,7 @@ use crate::{
     object_input::ObjectInput,
     slot_object::{self, ReceivedSlot, SlotBody},
     snapshot_object, PendingReason, PendingRecord, PendingSubject, Prerequisite, Refusal,
-    SyncError, SyncState, SyncStatus,
+    SequenceStatus, SyncError, SyncState,
 };
 use coven_crypto::{custody::KeySession, MemberIdentity, StoreKeyring};
 use coven_database::{Database, IncomingSlot, SlotContent};
@@ -30,6 +30,9 @@ pub(crate) struct Session {
     scanned: u64,
     /// The retired devices whose keys the last stray-key listing judged.
     swept: Option<std::collections::BTreeSet<DeviceId>>,
+    /// Committed originals wait for store keys before their history is
+    /// reconstructed: custody held none when this owner opened.
+    locked: bool,
 }
 
 /// Owns sequence progress. App commits use the database independently; every
@@ -77,11 +80,14 @@ impl SequenceSync {
         let identity = member
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        // An installation still loading its first keys has applied nothing.
-        let history = match keys.read()? {
-            Some(mut ring) => History::restore(&originals, directory.id(), &mut ring, &identity)?,
-            None if originals.is_empty() => History::default(),
-            None => return Err(coven_storage::StorageFailure::MemberKeysMissing.into()),
+        // Without store keys in custody, history waits for this member's
+        // copies in storage (§11).
+        let (history, locked) = match keys.read()? {
+            Some(mut ring) => (
+                History::restore(&originals, directory.id(), &mut ring, &identity)?,
+                false,
+            ),
+            None => (History::default(), !originals.is_empty()),
         };
         let blocked = database
             .pending::<PendingRecord>()
@@ -93,9 +99,9 @@ impl SequenceSync {
                     && !matches!(record.reason, PendingReason::WritesRefused { .. })
             });
         if let Some(record) = &blocked {
-            state.set(SyncStatus::Blocked(Box::new(record.clone())));
+            state.set(SequenceStatus::Blocked(Box::new(record.clone())));
         }
-        Ok(Self {
+        let sync = Self {
             database,
             storage,
             keys,
@@ -114,9 +120,12 @@ impl SequenceSync {
                 blocked,
                 scanned: 1,
                 swept: None,
+                locked,
             }),
             admin_access: std::sync::Mutex::new(std::collections::BTreeMap::new()),
-        })
+        };
+        sync.publish_join_requests().await?;
+        Ok(sync)
     }
 
     pub(crate) fn store(&self) -> StoreId {
@@ -131,7 +140,7 @@ impl SequenceSync {
 
     /// Reach the current read end, publish this pass's captured eligible queue,
     /// then perform the effects of its applied administrative state.
-    pub async fn pass(&self) -> Result<SyncStatus, SyncError> {
+    pub async fn pass(&self) -> Result<SequenceStatus, SyncError> {
         let mut session = self.session.lock().await;
         let waiting = self.database.waiting_snapshot_headers().await?;
         let first = waiting.first().map(|write| write.header.position);
@@ -185,6 +194,8 @@ impl SequenceSync {
             self.resume_member_keys(&mut session, &mut ring).await?;
             self.rotate_exposed(&mut session, &mut ring, &member)
                 .await?;
+            self.publish_raises(&mut session, &mut ring, &member)
+                .await?;
             self.retain_sequence(&mut session, &mut ring, &member)
                 .await?;
             self.retain_snapshots(&session).await?;
@@ -194,7 +205,7 @@ impl SequenceSync {
             self.retain_files(&session, &ring, &member).await?;
             self.files.sync_files().await?;
         }
-        let status = SyncStatus::Synced {
+        let status = SequenceStatus::Synced {
             through: session.through,
         };
         self.state.set(status.clone());
@@ -258,7 +269,7 @@ impl SequenceSync {
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        if let SyncStatus::Stopped(_) = &*self.state.subscribe().borrow() {
+        if let SequenceStatus::Stopped(_) = &*self.state.subscribe().borrow() {
             return self.state.check();
         }
         if let Some(record) = &session.blocked {
@@ -401,7 +412,7 @@ impl SequenceSync {
             }
             session.blocked = None;
             self.check_binding(session, member)?;
-            self.state.set(SyncStatus::Synced {
+            self.state.set(SequenceStatus::Synced {
                 through: session.through,
             });
             return Ok(());
@@ -438,7 +449,7 @@ impl SequenceSync {
             match device.state {
                 coven_database::DeviceState::Removed => {
                     self.state
-                        .set(SyncStatus::Stopped(crate::SyncFailure::Removed));
+                        .set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
                     return Err(SyncError::Removed);
                 }
                 coven_database::DeviceState::Replaced => {
@@ -544,7 +555,7 @@ impl SequenceSync {
         }
         if matches!(error, SyncError::Removed) {
             self.state
-                .set(SyncStatus::Stopped(crate::SyncFailure::Removed));
+                .set(SequenceStatus::Stopped(crate::SyncFailure::Removed));
             return error;
         }
         let reason = match &error {
@@ -571,7 +582,7 @@ impl SequenceSync {
         };
         session.blocked = Some(record.clone());
         self.state
-            .set(SyncStatus::Blocked(Box::new(record.clone())));
+            .set(SequenceStatus::Blocked(Box::new(record.clone())));
         match self.database.record_pending(record).await {
             Ok(()) => error,
             Err(cleanup) => SyncError::Cleanup {

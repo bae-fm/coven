@@ -103,7 +103,7 @@ async fn abandoned_preparation_deletion_preserves_reader_progress() {
     );
     assert!(carol.sync.database.applied_slot().await.unwrap() > announced.0);
     assert!(
-        matches!(&*carol.sync.state.subscribe().borrow(),SyncStatus::Synced {through} if *through > announced.0)
+        matches!(&*carol.sync.state.subscribe().borrow(),SequenceStatus::Synced {through} if *through > announced.0)
     );
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();

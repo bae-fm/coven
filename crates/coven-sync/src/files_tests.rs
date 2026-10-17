@@ -814,6 +814,6 @@ impl Files {
 fn ready_state() -> Arc<crate::SyncState> {
     let state = Arc::new(crate::SyncState::new());
     state.registered(true);
-    state.set(crate::SyncStatus::Synced { through: 0 });
+    state.set(crate::SequenceStatus::Synced { through: 0 });
     state
 }

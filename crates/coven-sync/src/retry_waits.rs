@@ -46,6 +46,9 @@ pub struct RetryWaits {
     state: Mutex<State>,
     /// What each waiting operation's wait names, and whether it changed.
     evidence: Mutex<operation_evidence::Evidence>,
+    /// Bumped whenever a failed attempt arms a new wait, so an owner waiting
+    /// on the earlier schedule plans again.
+    rearmed: tokio::sync::watch::Sender<u64>,
 }
 
 #[derive(Default)]
@@ -82,6 +85,7 @@ impl RetryWaits {
             database: Some(database),
             state: Mutex::new(State::default()),
             evidence: Mutex::default(),
+            rearmed: tokio::sync::watch::channel(0).0,
         };
         for (subject, wait) in waits {
             owner.arm_for(
@@ -101,6 +105,7 @@ impl RetryWaits {
             database: None,
             state: Mutex::new(State::default()),
             evidence: Mutex::default(),
+            rearmed: tokio::sync::watch::channel(0).0,
         }
     }
 
@@ -134,6 +139,8 @@ impl RetryWaits {
     /// Enforce a persisted wait monotonically from now.
     pub(crate) fn arm(&self, subject: RetrySubject, wait: &RetryWait) {
         self.arm_for(subject, wait.not_before, wait.wait);
+        self.rearmed
+            .send_modify(|count| *count = count.wrapping_add(1));
     }
 
     fn arm_for(&self, subject: RetrySubject, not_before: SystemTime, wait: Duration) {
@@ -146,6 +153,11 @@ impl RetryWaits {
                 seen: false,
             },
         );
+    }
+
+    /// Changes whenever a failed attempt arms a new wait.
+    pub(crate) fn rearmed(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.rearmed.subscribe()
     }
 
     /// A wait that could not be persisted holds until the app retries; it is

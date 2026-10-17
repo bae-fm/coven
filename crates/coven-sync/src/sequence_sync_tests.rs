@@ -28,6 +28,8 @@ pub(crate) struct Group {
     pub(crate) clock: Arc<coven_foundation::clock::FixedClock>,
     /// The app schema version installations open at.
     pub(crate) version: std::sync::atomic::AtomicU32,
+    /// Whether a breaking migration journals the raises passes publish.
+    pub(crate) raises: std::sync::atomic::AtomicBool,
 }
 impl Group {
     pub(crate) fn new() -> Self {
@@ -47,6 +49,7 @@ impl Group {
                 .unwrap(),
             clock,
             version: 1.into(),
+            raises: false.into(),
         }
     }
     pub(crate) async fn device(&self, seed: u8) -> Device {
@@ -121,7 +124,11 @@ impl Group {
         storage: MemoryStorage,
     ) -> Device {
         let directory = StoreLayout::new(temp.path().into()).store_dir(&self.store);
-        let database = DatabaseBuilder::new(directory.clone())
+        let mut database = DatabaseBuilder::new(directory.clone());
+        if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
+            database = database.migration_operation(SequenceSync::migration_operation);
+        }
+        let database = database
             .synced_tables(vec![
                 SyncedTable::new("notes", RowIdentity::SharedKey),
                 SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
@@ -321,7 +328,7 @@ async fn idle_pass_reads_only_the_next_slot_and_floor() {
     let count = ana.storage.request_count();
     assert!(matches!(
         ana.sync.pass().await.unwrap(),
-        SyncStatus::Synced { through: 2 }
+        SequenceStatus::Synced { through: 2 }
     ));
     assert_eq!(ana.storage.request_count() - count, 2);
     assert!(ana.sync.database.current_claim().await.unwrap().is_none());
@@ -372,7 +379,7 @@ async fn a_blocked_slot_stops_reads_and_sends_but_preserves_app_writes() {
     assert_eq!(ana.sync.database.applied_slot().await.unwrap(), blocked - 1);
     assert!(matches!(
         &*ana.sync.state.subscribe().borrow(),
-        SyncStatus::Blocked(_)
+        SequenceStatus::Blocked(_)
     ));
     insert(&ana.sync.database, "local", "retained").await;
     let count = ana.storage.request_count();
@@ -500,7 +507,7 @@ async fn writes_claimed_after_their_device_removal_are_consumed_and_refused() {
         .unwrap()
         .is_some());
     assert!(
-        matches!(ana.sync.pass().await.unwrap(), SyncStatus::Synced {through} if through == removal + 1)
+        matches!(ana.sync.pass().await.unwrap(), SequenceStatus::Synced {through} if through == removal + 1)
     );
     assert_eq!(
         rows(&ana.sync.database).await,
@@ -542,7 +549,7 @@ async fn a_slot_this_copy_never_attempted_shows_another_copy_of_its_device_id() 
     );
     assert!(matches!(
         &*copy.sync.state.subscribe().borrow(),
-        SyncStatus::Stopped(SyncFailure::DeviceIdInUse(_))
+        SequenceStatus::Stopped(SyncFailure::DeviceIdInUse(_))
     ));
     assert_eq!(copy.sync.database.applied_slot().await.unwrap(), applied);
     let count = copy.storage.request_count();
