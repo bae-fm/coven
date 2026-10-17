@@ -213,7 +213,7 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
         let device = directory.settings().unwrap().device_id;
         let database = DatabaseBuilder::new(directory)
             .synced_tables(vec![])
-            .migrations(vec![Migration::sql(
+            .migrations(vec![Migration::addition(
                 1,
                 "local",
                 "CREATE TABLE local(value TEXT)",

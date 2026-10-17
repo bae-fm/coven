@@ -403,10 +403,11 @@ async fn open_migrated(
             SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
         ])
         .migrations(vec![
-            Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
+            Migration::addition(1, "notes", "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
                 CREATE TABLE pins(id TEXT PRIMARY KEY NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL)"),
-            Migration::sql(2, "titles", "CREATE INDEX titles ON notes(title);
-                INSERT INTO notes SELECT 'derived',title FROM notes WHERE id='source'").writes(|_| Ok(())),
+            Migration::breaking(2, "titles", "CREATE INDEX titles ON notes(title);
+                INSERT INTO notes SELECT 'derived',title FROM notes WHERE id='source'",
+                coven_database::OldWrites::Convert(std::sync::Arc::new(|_| Ok(())))),
         ])
         .open().await.unwrap();
     group
@@ -509,7 +510,7 @@ async fn circle_device(group: &Group, seed: u8) -> Device {
                 .key_columns(["audience", "id"])
                 .audience_column("audience"),
         ])
-        .migrations(vec![Migration::sql(
+        .migrations(vec![Migration::addition(
             1,
             "shared circle keys",
             "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
