@@ -31,11 +31,11 @@ pub trait ProviderOps: Send + Sync {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError>;
-    /// Replace a checked positions or clock path in one request.
+    /// Replace the observed object conditionally in one request.
     async fn replace(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError>;
     /// Exact native lookup; only a confirmed missing object returns None.
@@ -61,18 +61,13 @@ pub trait ProviderOps: Send + Sync {
     }
     /// Consume native pages into the connection's checked listing.
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError>;
-    /// List immediate store-log writer folders across every page, never the
-    /// log contents. CloudKit selects permanent entry-one records in its zone.
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError>;
+
     /// Delete, accepting an already absent object.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
     /// Grant account access, or return S3's console instructions.
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError>;
-    /// Accept native sharing material. The connection checks location and lists
-    /// the store afterwards to verify readability.
+    /// Accept native sharing material. The connection checks location and reads
+    /// the exact floor status afterwards to verify readability.
     async fn join(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
         if !matches!(
             invitation.acceptance,

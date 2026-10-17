@@ -457,9 +457,8 @@ pub(crate) async fn compare_create_model(storage: &dyn crate::Storage, copy: boo
         serde_json::from_value(create_runner(&serde_json::Value::from(attempts.clone()))).unwrap();
     assert_eq!(expected.len(), attempts.len());
     for (attempt, expected) in attempts.iter().zip(&expected) {
-        let path = ObjectPath::device_log(
+        let path = ObjectPath::slot(
             STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
             std::num::NonZeroU64::new(attempt["path"].as_u64().unwrap()).unwrap(),
         );
         let bytes: Vec<u8> = serde_json::from_value(attempt["bytes"].clone()).unwrap();

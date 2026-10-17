@@ -22,18 +22,14 @@ pub(super) mod live_zone;
 mod race;
 
 fn path() -> ObjectPath {
-    ObjectPath::device_log(
-        StoreId(uuid::Uuid::from_u128(1)),
-        DeviceId(7),
-        NonZeroU64::MIN,
-    )
+    ObjectPath::slot(StoreId(uuid::Uuid::from_u128(1)), NonZeroU64::MIN)
 }
 
 #[test]
 fn listing_uses_equality_for_directories_longer_than_cloudkits_prefix_limit() {
-    let prefix = ObjectPrefix::device_log(path().store(), DeviceId(7));
+    let prefix = ObjectPrefix::device_files(path().store(), DeviceId(7));
     assert!(prefix.as_str().len() > 30);
-    let predicate = query::Selection::Objects(prefix)
+    let predicate = query::Selection(prefix)
         .predicate()
         .predicateFormat()
         .to_string();
@@ -59,17 +55,17 @@ fn record_names_preserve_canonical_paths_and_reserve_uploads() {
 
 #[test]
 fn prefix_conversion_rejects_another_writer_or_store() {
-    let path = path();
-    let prefix = ObjectPrefix::device_log(path.store(), DeviceId(7));
+    let path = ObjectPath::file(
+        path().store(),
+        DeviceId(7),
+        FileId(uuid::Uuid::from_u128(1)),
+    );
+    let prefix = ObjectPrefix::device_files(path.store(), DeviceId(7));
     check_prefix(&prefix, &path).unwrap();
     for other in [
-        ObjectPath::device_log(path.store(), DeviceId(8), NonZeroU64::MIN),
-        ObjectPath::device_log(
-            StoreId(uuid::Uuid::from_u128(2)),
-            DeviceId(7),
-            NonZeroU64::MIN,
-        ),
-        ObjectPath::positions(path.store(), DeviceId(7)),
+        ObjectPath::slot(path.store(), NonZeroU64::MIN),
+        ObjectPath::slot(StoreId(uuid::Uuid::from_u128(2)), NonZeroU64::MIN),
+        ObjectPath::floor(path.store()),
     ] {
         assert_eq!(
             check_prefix(&prefix, &other).unwrap_err().failure(),
@@ -82,8 +78,8 @@ fn prefix_conversion_rejects_another_writer_or_store() {
 fn metadata_uses_publication_and_replacement_dates() {
     for (path, expected) in [
         (path(), 20),
-        (ObjectPath::positions(path().store(), DeviceId(7)), 30),
-        (ObjectPath::clock(path().store(), DeviceId(7)), 30),
+        (ObjectPath::floor(path().store()), 30),
+        (ObjectPath::floor(path().store()), 30),
     ] {
         let object = publication_metadata(
             path.as_str(),
@@ -110,8 +106,8 @@ fn metadata_uses_publication_and_replacement_dates() {
 #[test]
 fn replacements_retain_change_tags_even_with_equal_sizes_and_dates() {
     for path in [
-        ObjectPath::positions(path().store(), DeviceId(7)),
-        ObjectPath::clock(path().store(), DeviceId(7)),
+        ObjectPath::floor(path().store()),
+        ObjectPath::floor(path().store()),
     ] {
         let observed = ["first-change-tag", "second-change-tag"].map(|tag| {
             publication_metadata(
@@ -141,7 +137,7 @@ fn replacements_retain_change_tags_even_with_equal_sizes_and_dates() {
 #[test]
 fn dates_land_on_whole_milliseconds() {
     use coven_format::value::StorageTime;
-    let path = ObjectPath::clock(path().store(), DeviceId(7));
+    let path = ObjectPath::floor(path().store());
     for (seconds, expected) in [
         (
             1_760_400_000.123,
@@ -185,8 +181,8 @@ fn dates_land_on_whole_milliseconds() {
 fn metadata_requires_the_date_for_the_object_kind() {
     for path in [
         path(),
-        ObjectPath::positions(path().store(), DeviceId(7)),
-        ObjectPath::clock(path().store(), DeviceId(7)),
+        ObjectPath::floor(path().store()),
+        ObjectPath::floor(path().store()),
     ] {
         let (created, modified) = if path.is_replaceable() {
             (Some(20.0), None)
@@ -286,7 +282,7 @@ async fn cloudkit_live() {
     let config = native.config();
     let storage = StorageConnection::from_provider(native.clone());
     let first = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
-    let positions = ObjectPath::positions(store, DeviceId(7));
+    let positions = ObjectPath::floor(store);
     assert!(storage.status(&first).await.unwrap().is_none());
     storage.create(&first, b"encrypted bytes").await.unwrap();
     // Exact status must see publication immediately, independently of query indexing.
@@ -325,14 +321,14 @@ async fn cloudkit_live() {
             .unwrap(),
         b"crypt"
     );
-    storage.replace(&positions, b"one").await.unwrap();
+    storage.create(&positions, b"one").await.unwrap();
     let prior = storage.status(&positions).await.unwrap().unwrap();
-    storage.replace(&positions, b"one").await.unwrap();
+    storage.replace(&prior, b"one").await.unwrap();
     let replaced = storage.status(&positions).await.unwrap().unwrap();
     assert_ne!(replaced.revision, prior.revision);
     assert_eq!(replaced.object_id, prior.object_id);
     assert!(replaced.stored_at >= prior.stored_at);
-    storage.replace(&positions, b"two").await.unwrap();
+    storage.replace(&replaced, b"two").await.unwrap();
     let changed = storage.read_object(&positions, None).await.unwrap();
     assert_eq!(changed.bytes, b"two");
     assert_eq!(changed.metadata.size, replaced.size);
@@ -341,17 +337,6 @@ async fn cloudkit_live() {
         storage.status(&positions).await.unwrap().unwrap(),
         changed.metadata
     );
-    let clock = ObjectPath::clock(store, DeviceId(7));
-    storage.replace(&clock, b"one").await.unwrap();
-    let prior_clock = storage.status(&clock).await.unwrap().unwrap();
-    storage.replace(&clock, b"two").await.unwrap();
-    let changed_clock = storage.read_object(&clock, None).await.unwrap();
-    assert_eq!(changed_clock.bytes, b"two");
-    assert_eq!(changed_clock.metadata.size, prior_clock.size);
-    assert_eq!(changed_clock.metadata.object_id, prior_clock.object_id);
-    assert_ne!(changed_clock.metadata.revision, prior_clock.revision);
-    assert!(changed_clock.metadata.stored_at >= prior_clock.stored_at);
-
     let large = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
     let mut session = storage
         .begin_upload(&large, PART_SIZE as u64 + 3)
@@ -374,7 +359,7 @@ async fn cloudkit_live() {
     restarted.upload_part(&mut resumed, b"end").await.unwrap();
     let before_publish = resumed.encode().unwrap();
     storage
-        .replace(&positions, b"publication clock")
+        .replace(&changed.metadata, b"publication time")
         .await
         .unwrap();
     let positions_metadata = native
@@ -420,13 +405,12 @@ async fn cloudkit_live() {
 
     let mut pages = Vec::new();
     for number in 1..=native::QUERY_PAGE_SIZE + 1 {
-        let path =
-            ObjectPath::store_log(store, DeviceId(7), NonZeroU64::new(number as u64).unwrap());
+        let path = ObjectPath::slot(store, NonZeroU64::new(number as u64).unwrap());
         storage.create(&path, b"page").await.unwrap();
         pages.push(path);
     }
-    let other = ObjectPath::positions(StoreId(native.ids.new_id()), DeviceId(7));
-    storage.replace(&other, b"another store").await.unwrap();
+    let other = ObjectPath::floor(StoreId(native.ids.new_id()));
+    storage.create(&other, b"another store").await.unwrap();
 
     let discovery = Discovery::prepare(&native, store).await;
     // Queries are complete only beyond the common one-hour listing margin.
@@ -434,7 +418,7 @@ async fn cloudkit_live() {
     clear_pages(&native);
     let listed = storage.list(&ObjectPrefix::all(store)).await.unwrap();
     check_pages(&native, &["path", "size"], listed.len());
-    assert_eq!(listed.len(), pages.len() + 4 + discovery.objects().len());
+    assert_eq!(listed.len(), pages.len() + 3 + discovery.objects().len());
     for object in discovery.objects() {
         assert_eq!(
             listed
@@ -463,11 +447,7 @@ async fn cloudkit_live() {
             .unwrap(),
         &positions_metadata
     );
-    assert_eq!(
-        listed.iter().find(|object| object.path == clock).unwrap(),
-        &changed_clock.metadata
-    );
-    for path in [&first, &positions, &clock, &large] {
+    for path in [&first, &positions, &large] {
         storage.delete(path).await.unwrap();
         storage.delete(path).await.unwrap();
         assert!(storage.status(path).await.unwrap().is_none());
@@ -648,29 +628,22 @@ fn atomic_destination_conflicts_differ_from_session_conflicts() {
 
 pub(super) struct Discovery {
     objects: Vec<StoredObject>,
-    writers: Vec<DeviceId>,
     pending: Vec<UploadSession>,
     other_zone: CloudKitStorage,
-    history_store: StoreId,
 }
 
 impl Discovery {
     pub(super) async fn prepare(native: &Arc<CloudKitStorage>, store: StoreId) -> Self {
         let storage = StorageConnection::from_provider(native.clone());
         let mut paths = Vec::new();
-        let mut writers = vec![DeviceId(7)];
         for device in 100..100 + native::QUERY_PAGE_SIZE as u64 {
-            let device = DeviceId(device);
-            let path = ObjectPath::store_log(store, device, NonZeroU64::MIN);
-            storage.create(&path, b"writer").await.unwrap();
+            let path = ObjectPath::file(store, DeviceId(device), FileId(native.ids.new_id()));
+            storage.create(&path, b"file").await.unwrap();
             paths.push(path);
-            writers.push(device);
         }
         let circle = Audience::Circle(CircleId(native.ids.new_id()));
         for device in [DeviceId(7), DeviceId(70)] {
             for path in [
-                ObjectPath::device_log(store, device, NonZeroU64::MIN),
-                ObjectPath::key_copy(store, device, NonZeroU64::MIN),
                 ObjectPath::snapshot(store, Audience::Store, device, NonZeroU64::MIN),
                 ObjectPath::snapshot(store, circle.clone(), device, NonZeroU64::MIN),
                 ObjectPath::file(store, device, FileId(native.ids.new_id())),
@@ -679,22 +652,14 @@ impl Discovery {
                 paths.push(path);
             }
         }
-        // A later entry, positions and other log kinds cannot stand in for entry one.
-        let no_first = ObjectPath::store_log(store, DeviceId(70), NonZeroU64::new(2).unwrap());
-        storage.create(&no_first, b"no first entry").await.unwrap();
-        paths.push(no_first);
-        let positions = ObjectPath::positions(store, DeviceId(70));
-        storage.replace(&positions, b"positions").await.unwrap();
-        paths.push(positions);
         let join = ObjectPath::join_request(store, InviteId(native.ids.new_id()));
         storage.create(&join, b"join").await.unwrap();
         paths.push(join);
 
-        // Store-log entries are published in one request, so an unfinished
-        // upload by a would-be writer can only be another object family.
+        // Unpublished slots and file uploads remain outside object listings.
         let mut pending = Vec::new();
         for path in [
-            ObjectPath::device_log(store, DeviceId(71), NonZeroU64::MIN),
+            ObjectPath::slot(store, NonZeroU64::new(1000).unwrap()),
             ObjectPath::file(store, DeviceId(71), FileId(native.ids.new_id())),
         ] {
             let mut session = storage
@@ -709,23 +674,13 @@ impl Discovery {
             pending.push(session);
         }
 
-        // Another store has more than a page of history but exactly one writer.
-        let history_store = StoreId(native.ids.new_id());
-        for number in 1..=native::QUERY_PAGE_SIZE + 1 {
-            let path = ObjectPath::store_log(
-                history_store,
-                DeviceId(900),
-                NonZeroU64::new(number as u64).unwrap(),
-            );
-            storage.create(&path, b"other store history").await.unwrap();
-        }
         let other_store = StoreId(native.ids.new_id());
         let other_zone = live_zone::prepare(other_store, "cloudkit_live", native.ids.clone())
             .await
             .unwrap();
-        // Same store id and an extra writer in another zone must stay invisible.
-        let entry = ObjectPath::store_log(store, DeviceId(901), NonZeroU64::MIN);
-        let positions = ObjectPath::positions(store, DeviceId(7));
+        // Same store id and an extra object in another zone must stay invisible.
+        let entry = ObjectPath::slot(store, NonZeroU64::MIN);
+        let positions = ObjectPath::floor(store);
         let fixture_request = |path| {
             PublicationRequest::new(Arc::new(crate::test_utils::UnrestrictedPublications), path)
         };
@@ -734,7 +689,7 @@ impl Discovery {
             .await
             .unwrap();
         other_zone
-            .replace(
+            .create(
                 &fixture_request(positions.clone()),
                 &positions,
                 b"other zone revision",
@@ -748,10 +703,8 @@ impl Discovery {
         }
         Self {
             objects,
-            writers,
             pending,
             other_zone,
-            history_store,
         }
     }
 
@@ -766,25 +719,9 @@ impl Discovery {
         all: &[StoredObject],
     ) {
         let storage = StorageConnection::from_provider(native.clone());
-        let circle = self
-            .objects
-            .iter()
-            .find_map(|object| match object.path.snapshot_id() {
-                Some(id) if matches!(id.audience, Audience::Circle(_)) => Some(id.audience),
-                _ => None,
-            })
-            .unwrap();
         for prefix in [
-            ObjectPrefix::device_logs(store),
-            ObjectPrefix::device_log(store, DeviceId(7)),
-            ObjectPrefix::store_logs(store),
-            ObjectPrefix::store_log(store, DeviceId(7)),
-            ObjectPrefix::snapshots(store),
-            ObjectPrefix::audience_snapshots(store, &Audience::Store),
-            ObjectPrefix::audience_snapshots(store, &circle),
             ObjectPrefix::files(store),
-            ObjectPrefix::keys(store),
-            ObjectPrefix::positions(store),
+            ObjectPrefix::device_files(store, DeviceId(7)),
             ObjectPrefix::join_requests(store),
         ] {
             clear_pages(native);
@@ -797,28 +734,6 @@ impl Discovery {
             assert_eq!(listed, expected, "{}", prefix.as_str());
             check_pages(native, &["path", "size"], listed.len());
         }
-        clear_pages(native);
-        assert_eq!(storage.list_writers(store).await.unwrap(), self.writers);
-        check_pages(native, &["path"], self.writers.len());
-        clear_pages(native);
-        assert_eq!(
-            storage.list_writers(self.history_store).await.unwrap(),
-            [DeviceId(900)]
-        );
-        check_pages(native, &["path"], 1);
-        assert_eq!(
-            native.query_pages.lock().unwrap().len(),
-            1,
-            "discovery must not page through history"
-        );
-        clear_pages(native);
-        assert!(storage
-            .list_writers(StoreId(native.ids.new_id()))
-            .await
-            .unwrap()
-            .is_empty());
-        check_pages(native, &["path"], 0);
-        assert_eq!(native.query_pages.lock().unwrap().len(), 1);
         for session in &self.pending {
             assert!(storage.status(session.path()).await.unwrap().is_none());
             storage.abort_upload(session).await.unwrap();

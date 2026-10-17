@@ -9,7 +9,7 @@ use crate::{
 /// Cleanup runs even after a lost create reply; a preexisting path is left intact.
 /// The caller must await cleanup even if its app waiter is cancelled.
 pub async fn check_provider(
-    storage: &dyn Storage,
+    storage: &crate::StorageConnection<impl crate::ProviderOps + ?Sized>,
     path: &ObjectPath,
     encrypted_bytes: &[u8],
 ) -> Result<(), StorageSetupError> {
@@ -52,6 +52,29 @@ pub async fn check_provider(
         check = StorageCheck::ReadRange;
         if storage.read_range(path, range).await? != encrypted_bytes[1..end] {
             return Err(StorageFailure::Protocol.with_source("range read disagrees with upload"));
+        }
+        check = StorageCheck::ConditionalReplace;
+        let previous = storage
+            .status(path)
+            .await?
+            .ok_or(StorageFailure::NotFound)?;
+        let replacement = encrypted_bytes
+            .iter()
+            .map(|byte| byte ^ 0x80)
+            .collect::<Vec<_>>();
+        storage.replace_object(&previous, &replacement).await?;
+        match storage.replace_object(&previous, encrypted_bytes).await {
+            Err(error) if error.failure() == StorageFailure::Conflict => {}
+            Err(error) => return Err(error),
+            Ok(()) => {
+                return Err(
+                    StorageFailure::Protocol.with_source("provider accepted a stale replacement")
+                )
+            }
+        }
+        if storage.read(path).await? != replacement {
+            return Err(StorageFailure::Protocol
+                .with_source("conditional replacement changed the wrong bytes"));
         }
         check = StorageCheck::List;
         if storage

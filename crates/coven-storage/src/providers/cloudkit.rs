@@ -15,7 +15,7 @@ mod upload;
 #[path = "cloudkit_zone.rs"]
 mod zone;
 use crate::*;
-use coven_foundation::id_source::{DeviceId, IdSourceRef, StoreId};
+use coven_foundation::id_source::IdSourceRef;
 use objc2::{rc::Retained, AnyThread};
 use objc2_cloud_kit::{CKContainer, CKDatabase, CKRecordID, CKRecordSavePolicy, CKRecordZoneID};
 use objc2_foundation::NSString;
@@ -110,17 +110,14 @@ impl CloudKitStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-        policy: CKRecordSavePolicy,
     ) -> Result<StoredObject, StorageError> {
         let mut record = self.object(path, bytes.len() as u64);
         let asset = record.set_asset(&self.files, bytes)?;
         publication.check()?;
-        native::modify(
-            &self.database,
-            vec![record],
-            &[],
-            policy,
-            Some(path.as_str()),
+        native::conditional_object(
+            |operation| unsafe { self.database.addOperation(operation) },
+            record,
+            path,
             vec![asset],
         )
         .wait()
@@ -158,24 +155,37 @@ impl ProviderOps for CloudKitStorage {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError> {
-        self.save_bytes(
-            publication,
-            path,
-            bytes,
-            CKRecordSavePolicy::IfServerRecordUnchanged,
-        )
-        .await
-        .map(Some)
+        self.save_bytes(publication, path, bytes).await.map(Some)
     }
     async fn replace(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.save_bytes(publication, path, bytes, CKRecordSavePolicy::AllKeys)
-            .await
-            .map(drop)
+        let path = &previous.path;
+        let mut record = self
+            .fetch(path.as_str(), record::OBJECT_KEYS)
+            .wait()
+            .await?;
+        let current = record.metadata()?;
+        current.check(path)?;
+        if current.replace_token != previous.replace_token {
+            return Err(StorageFailure::Conflict.into());
+        }
+        record.set_object_fields(path, bytes.len() as u64);
+        let asset = record.set_asset(&self.files, bytes)?;
+        publication.check()?;
+        native::conditional_object(
+            |operation| unsafe { self.database.addOperation(operation) },
+            record,
+            path,
+            vec![asset],
+        )
+        .wait()
+        .await
+        .map(drop)
+        .map_err(StorageError::replacement)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self
@@ -206,7 +216,7 @@ impl ProviderOps for CloudKitStorage {
             let request = native::query(
                 &self.database,
                 &self.zone_id(),
-                query::Selection::Objects(prefix.clone()),
+                query::Selection(prefix.clone()),
                 cursor,
                 move |record| record.listed(&prefix),
                 #[cfg(test)]
@@ -222,31 +232,7 @@ impl ProviderOps for CloudKitStorage {
             }
         }
     }
-    async fn list_writers(&self, store: StoreId) -> Result<Vec<DeviceId>, StorageError> {
-        let mut writers = std::collections::BTreeSet::new();
-        let mut cursor = None;
-        loop {
-            let request = native::query(
-                &self.database,
-                &self.zone_id(),
-                query::Selection::Writers(store),
-                cursor,
-                move |record| record.writer(store),
-                #[cfg(test)]
-                self.query_pages.clone(),
-            );
-            let (page, next) = request.wait().await?;
-            for writer in page {
-                if !writers.insert(writer) {
-                    return Err(StorageFailure::Protocol.with_source("CloudKit repeated a writer"));
-                }
-            }
-            match next {
-                Some(next) => cursor = Some(next),
-                None => return Ok(writers.into_iter().collect()),
-            }
-        }
-    }
+
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         // Parts belong to the published record via native deleteSelf references.
         let request = native::modify(

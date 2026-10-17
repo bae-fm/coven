@@ -116,7 +116,7 @@ struct Live<'a> {
 }
 impl Live<'_> {
     fn path(&self, number: u64) -> ObjectPath {
-        ObjectPath::device_log(self.store, DeviceId(31), number.try_into().unwrap())
+        ObjectPath::slot(self.store, number.try_into().unwrap())
     }
     async fn observed(&self, path: &ObjectPath) -> StoredObject {
         self.storage

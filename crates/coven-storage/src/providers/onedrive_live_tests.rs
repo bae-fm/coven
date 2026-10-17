@@ -4,7 +4,6 @@
 
 use super::*;
 use crate::providers::{
-    pagination::Pagination,
     tests::listing_lag::{observe, report, TRIALS},
     OAuthClients,
 };
@@ -263,14 +262,21 @@ fn onedrive_live_unfinished_upload_is_absent() {
 #[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV and a live personal OneDrive"]
 fn onedrive_live_replacement_revision() {
     run(async |live| {
-        let path = ObjectPath::positions(live.store, DeviceId(31));
+        let path = ObjectPath::floor(live.store);
         let mut etags = Vec::new();
         for (label, bytes) in [
             ("initial", b"first"),
             ("equal", b"first"),
             ("different_same_size", b"other"),
         ] {
-            live.storage.replace(&path, bytes).await.unwrap();
+            if label == "initial" {
+                live.storage.create(&path, bytes).await.unwrap();
+            } else {
+                live.storage
+                    .replace(&live.storage.status(&path).await.unwrap().unwrap(), bytes)
+                    .await
+                    .unwrap();
+            }
             let native = live.storage.provider.metadata(&path).await.unwrap();
             let etag = http::string(&native, "eTag").unwrap().to_owned();
             let ctag = http::string(&native, "cTag").unwrap().to_owned();
@@ -359,48 +365,20 @@ async fn created(live: &Live<'_>, path: &ObjectPath) -> (Monotonic, Value) {
     (replied, native)
 }
 
-async fn child_listed(
-    provider: &OneDriveStorage,
-    parent: &str,
-    child: &str,
-) -> Result<bool, StorageError> {
-    let mut url = provider.item(parent, &["children"])?;
-    let mut pages = Pagination::new();
-    loop {
-        pages.check(&url)?;
-        http::same_origin(&provider.api, &url)?;
-        let value = http::json(
-            PROVIDER,
-            provider.send(Method::GET, &url, Body::Empty).await?,
-        )
-        .await?;
-        for item in http::array(&value, "value")? {
-            if http::string(item, "id")? == child {
-                assert!(item["folder"].is_object());
-                return Ok(true);
-            }
-        }
-        match value.get("@odata.nextLink") {
-            Some(_) => url = http::string(&value, "@odata.nextLink")?.to_owned(),
-            None => return Ok(false),
-        }
-    }
-}
-
 #[test]
 #[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV; creates and deletes live objects"]
 fn onedrive_live_listing_lag() {
     run(async |live| {
-        let path = |number| {
-            ObjectPath::store_log(
+        let path = |number: u64| {
+            ObjectPath::file(
                 live.store,
                 DeviceId(31),
-                std::num::NonZeroU64::new(number).unwrap(),
+                coven_foundation::id_source::FileId(uuid::Uuid::from_u128(number.into())),
             )
         };
         let seed = path(1);
         let (replied, native) = created(live, &seed).await;
-        let prefix = ObjectPrefix::store_log(live.store, DeviceId(31));
+        let prefix = ObjectPrefix::device_files(live.store, DeviceId(31));
         let warm = observe(
             "OneDrive_setup",
             0,
@@ -436,84 +414,6 @@ fn onedrive_live_listing_lag() {
             live.storage.delete(&path).await.unwrap();
         }
         report("OneDrive_object", &samples);
-        let provider = &live.storage.provider;
-        let root = provider.item(&provider.folder, &[]).unwrap();
-        let parent_url = format!("{root}:/{}/store-log:", live.store);
-        let parent = http::json(
-            PROVIDER,
-            provider
-                .send(Method::GET, &parent_url, Body::Empty)
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let parent_id = http::string(&parent, "id").unwrap();
-        let native_folder = http::json(
-            PROVIDER,
-            provider
-                .send(
-                    Method::POST,
-                    &provider.item(parent_id, &["children"]).unwrap(),
-                    Body::Json(
-                        json!({"name":"32","folder":{},"@microsoft.graph.conflictBehavior":"fail"}),
-                    ),
-                )
-                .await
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-        let folder_reply = Monotonic::now();
-        let folder_time = http::timestamp(&native_folder, "createdDateTime").unwrap();
-        let folder = http::string(&native_folder, "id").unwrap();
-        let path = ObjectPath::store_log(live.store, DeviceId(32), std::num::NonZeroU64::MIN);
-        let all = ObjectPrefix::store_logs(live.store);
-        let (folder_sample, (object, discovery)) = tokio::join!(
-            observe(
-                "OneDrive_new_device_folder",
-                1,
-                folder_reply,
-                folder_time,
-                || async { child_listed(provider, parent_id, folder).await }
-            ),
-            async {
-                let (replied, native) = created(live, &path).await;
-                let stored_at = http::timestamp(&native, "lastModifiedDateTime").unwrap();
-                assert_eq!(
-                    http::string(&native["parentReference"], "id").unwrap(),
-                    folder
-                );
-                // Both observations start after entry 1's create reply. Folder
-                // discovery is independent of the recursive object listing.
-                tokio::join!(
-                    observe(
-                        "OneDrive_new_device_object",
-                        1,
-                        replied,
-                        stored_at,
-                        || async {
-                            Ok(live
-                                .storage
-                                .list(&all)
-                                .await?
-                                .iter()
-                                .any(|object| object.path == path))
-                        }
-                    ),
-                    observe(
-                        "OneDrive_device_discovery_after_entry",
-                        1,
-                        replied,
-                        stored_at,
-                        || async { child_listed(provider, parent_id, folder).await }
-                    ),
-                )
-            },
-        );
-        report("OneDrive_new_device_folder", &[folder_sample]);
-        report("OneDrive_new_device_object", &[object]);
-        report("OneDrive_device_discovery_after_entry", &[discovery]);
     });
 }
 
@@ -798,16 +698,21 @@ fn onedrive_live_conditional_copy() {
 #[ignore = "requires COVEN_LIVE_ONEDRIVE_ENV; creates and deletes live objects"]
 fn onedrive_live_cached_folders_and_scoped_listing() {
     run(async |live| {
-        let first = live.path(1);
-        let second = live.path(2);
+        let first = ObjectPath::file(
+            live.store,
+            DeviceId(31),
+            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(1)),
+        );
+        let second = ObjectPath::file(
+            live.store,
+            DeviceId(31),
+            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(2)),
+        );
         live.storage.create(&first, b"first").await.unwrap();
         live.storage.create(&second, b"second").await.unwrap();
-        let positions = ObjectPath::positions(live.store, DeviceId(31));
-        live.storage
-            .replace(&positions, b"unrelated")
-            .await
-            .unwrap();
-        let prefix = ObjectPrefix::device_log(live.store, DeviceId(31));
+        let floor = ObjectPath::floor(live.store);
+        live.storage.create(&floor, b"unrelated").await.unwrap();
+        let prefix = ObjectPrefix::device_files(live.store, DeviceId(31));
         let listed = live.storage.list(&prefix).await.unwrap();
         assert!(listed.iter().all(|object| prefix.contains(&object.path)));
         assert_eq!(live.storage.read(&second).await.unwrap(), b"second");
@@ -834,7 +739,7 @@ fn onedrive_live_cached_folders_and_scoped_listing() {
         assert!(live.storage.list(&prefix).await.unwrap().is_empty());
         live.storage.create(&first, b"recreated").await.unwrap();
         assert_eq!(live.storage.read(&first).await.unwrap(), b"recreated");
-        assert_eq!(live.storage.read(&positions).await.unwrap(), b"unrelated");
-        println!("onedrive_live folders: scoped listing; warm create/read; disappeared folder refused; retry resolved and recreated parent; unrelated positions retained");
+        assert_eq!(live.storage.read(&floor).await.unwrap(), b"unrelated");
+        println!("onedrive_live folders: scoped listing; warm create/read; disappeared folder refused; retry resolved and recreated parent; unrelated floor retained");
     });
 }

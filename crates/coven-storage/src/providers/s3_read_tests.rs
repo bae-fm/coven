@@ -22,11 +22,7 @@ async fn s3_delivers_bytes_before_eof_and_keeps_body_failures() {
             &format!("http://{address}"),
             profile::PLAIN,
         );
-        let path = ObjectPath::device_log(
-            crate::test_utils::STORE_ID,
-            coven_foundation::id_source::DeviceId(1),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
         let receive = async {
             let mut body = storage.stream_object(&path, None).await.unwrap();
             let mut first = [0; 3];

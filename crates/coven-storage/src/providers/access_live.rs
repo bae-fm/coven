@@ -7,7 +7,7 @@ use super::{
 use crate::*;
 use coven_foundation::{
     clock::{ClockRef, SystemClock},
-    id_source::{DeviceId, IdSource, StoreId, UuidIds},
+    id_source::{IdSource, StoreId, UuidIds},
 };
 use reqwest::Method;
 use serde_json::json;
@@ -64,7 +64,7 @@ async fn provider_access_live_dropbox_app_folder() {
         .unwrap();
     let store = StoreId(UuidIds.new_id());
     let result = tokio::spawn(async move {
-        let path = ObjectPath::device_log(store, DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::slot(store, std::num::NonZeroU64::MIN);
         assert!(storage.status(&path).await.unwrap().is_none());
         assert!(storage.list(&ObjectPrefix::all(store)).await.unwrap().is_empty());
         storage.create(&path, b"app folder bytes").await.unwrap();

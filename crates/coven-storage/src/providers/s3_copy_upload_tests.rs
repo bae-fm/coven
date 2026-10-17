@@ -54,11 +54,7 @@ async fn lean_differential_s3_create() {
 /// in a chosen order: compared with `CopyPublication.run` (`race_one_winner`).
 async fn compare_copy_race(storage: &StorageConnection<S3Storage>, state: &Arc<Mutex<Remote>>) {
     for (number, order) in [(5u64, [1usize, 0, 2]), (6, [2, 1, 0])] {
-        let path = ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::new(number).unwrap(),
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::new(number).unwrap());
         let payloads: Vec<Vec<u8>> = (0..3u8).map(|i| vec![10 * i + 1; 4]).collect();
         let mut sessions = Vec::new();
         let mut ops = Vec::new();
@@ -133,18 +129,14 @@ async fn gcs_create_preserves_an_occupied_path() {
     }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = gcs_provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     let result = storage.create(&path, b"replacement").await;
     assert!(matches!(result, Err(error) if error.failure() == StorageFailure::AlreadyExists));
     assert_eq!(storage.read(&path).await.unwrap(), b"original");
     check_provider(
         &storage,
-        &ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(32)),
+        &ObjectPath::floor(STORE_ID),
         b"sealed check bytes",
     )
     .await
@@ -180,11 +172,7 @@ async fn gcs_precondition_status_is_already_exists_without_an_error_code() {
         let server =
             TestServer::new(Router::new().fallback(move || async move { response(412, body) }))
                 .await;
-        let path = ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let error = gcs_provider(&server.url)
             .create(&path, b"bytes")
             .await
@@ -205,11 +193,7 @@ async fn gcs_multipart_copy_preserves_occupied_bytes_and_removes_temporaries() {
     Arc::get_mut(&mut storage.provider)
         .unwrap()
         .single_request_limit = 3;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     let result = storage.create(&path, b"replacement").await;
     assert!(matches!(result, Err(error) if error.failure() == StorageFailure::AlreadyExists));
@@ -241,11 +225,7 @@ async fn gcs_resume_reuses_its_temporary_after_assembly_copy_or_delete_reply_los
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = gcs_provider(&server.url);
-        let path = ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = session.encode().unwrap();
         let temporary = storage.provider.session_key(&session).unwrap();
@@ -294,11 +274,7 @@ async fn gcs_abandoned_recording_cleans_assembled_temporary_after_a_crash() {
     }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = gcs_provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     for assembled in [false, true] {
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = session.encode().unwrap();
@@ -332,11 +308,7 @@ async fn gcs_definitive_copy_refusal_deletes_its_temporary() {
     }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = gcs_provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut session = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut session, b"data").await.unwrap();
     assert_eq!(
@@ -361,11 +333,7 @@ async fn gcs_refused_copy_retains_both_failures_and_retry_cleans_the_temporary()
     }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = gcs_provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     let mut session = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut session, b"else").await.unwrap();
@@ -398,11 +366,7 @@ async fn an_occupied_create_does_not_hide_failed_temporary_cleanup() {
     Arc::get_mut(&mut storage.provider)
         .unwrap()
         .single_request_limit = 3;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     state.lock().unwrap().refuse_temporary_delete = true;
     // A failed cleanup is never a plain occupied path a caller may compare.
@@ -425,11 +389,7 @@ async fn s3_copy_profiles_refuse_uploads_above_the_single_copy_limit() {
         let server =
             TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
         let storage = profile_provider(&server.url, profile.settings);
-        let path = ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let result = storage.begin_upload(&path, limit + 1).await;
         let limited = matches!(
             profile.settings.copy_publication.multipart(),
@@ -479,11 +439,7 @@ fn temporaries(state: &Mutex<Remote>) -> usize {
 #[tokio::test]
 async fn every_object_copy_publishes_single_request_creates_by_conditional_copy() {
     let (_server, state, storage) = every_object_provider().await;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     assert_eq!(state.lock().unwrap().copies, 1);
     for bytes in [&b"replacement"[..], b"original"] {
@@ -496,18 +452,16 @@ async fn every_object_copy_publishes_single_request_creates_by_conditional_copy(
     assert_eq!(storage.read(&path).await.unwrap(), b"original");
     assert_eq!(temporaries(&state), 0);
     assert!(state.lock().unwrap().uploads.is_empty());
-    // Store-log entries publish in one request, here one copy too.
-    let entry = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    // Bounded slots use the same create-once copy condition.
+    let entry = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
     storage.create(&entry, b"entry").await.unwrap();
     assert_eq!(state.lock().unwrap().copies, 4);
-    // Replacements stay unconditional PUTs of a device's own objects.
-    let positions = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
-    storage.replace(&positions, b"positions").await.unwrap();
-    assert_eq!(state.lock().unwrap().copies, 4);
+    // Floor creation also copies; replacements use conditional PUTs.
+    let positions = ObjectPath::floor(STORE_ID);
+    storage.create(&positions, b"floor").await.unwrap();
+    let previous = storage.status(&positions).await.unwrap().unwrap();
+    storage.replace(&previous, b"next floor").await.unwrap();
+    assert_eq!(state.lock().unwrap().copies, 5);
     assert_eq!(temporaries(&state), 0);
     let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     assert_eq!(listed.len(), 3);
@@ -518,11 +472,7 @@ async fn every_object_copy_publishes_single_request_creates_by_conditional_copy(
 #[tokio::test]
 async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
     let (_server, state, storage) = every_object_provider().await;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     state.lock().unwrap().fail_copy_reply = true;
     storage.create(&path, b"landed").await.unwrap();
     assert_eq!(state.lock().unwrap().copies, 1);
@@ -537,11 +487,7 @@ async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
 #[tokio::test]
 async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary() {
     let (_server, state, storage) = every_object_provider().await;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let temporary = storage
         .provider
         .create_temporary_key(&path, b"bytes")
@@ -568,11 +514,7 @@ async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary()
 #[tokio::test]
 async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
     let (_server, state, storage) = every_object_provider().await;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let temporary = storage
         .provider
         .create_temporary_key(&path, b"bytes")
@@ -603,11 +545,7 @@ async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
 async fn a_planned_session_aborts_an_initiation_whose_reply_was_lost() {
     for abandon in [false, true] {
         let (_server, state, storage) = every_object_provider().await;
-        let path = ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = session.encode().unwrap();
         assert!(
@@ -672,11 +610,7 @@ pub(super) async fn hold_copy(state: &Mutex<Remote>, headers: &HeaderMap) {
 async fn every_object_copy_settles_a_copy_whose_shared_temporary_is_gone() {
     for second_publishes in [true, false] {
         let (_server, state, storage) = every_object_provider().await;
-        let path = ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let (arrived, arrival) = tokio::sync::oneshot::channel();
         let (release, released) = tokio::sync::oneshot::channel();
         state.lock().unwrap().held_copy = Some(HeldCopy {
@@ -714,10 +648,7 @@ async fn every_object_copy_settles_a_copy_whose_shared_temporary_is_gone() {
     }
 }
 
-// Every S3 session is recorded before its native upload exists: the first
-// part initiates it, and resuming or aborting a recording made before an
-// initiation's reply arrived aborts every native upload at its name (§4).
-// Here on the plain profile, whose upload's name is the destination.
+// A restored shared-path session without its native ID cannot claim any upload.
 
 const PLANNED_PART: usize = 8 * 1024 * 1024;
 
@@ -729,75 +660,83 @@ async fn planned_fixture() -> (TestServer, StorageConnection<S3Storage>, Arc<Mut
 }
 
 fn planned_path() -> ObjectPath {
-    ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    )
+    ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)
 }
 
-/// A crash after the first part initiated the upload, before the caller
-/// recorded its id, leaves nothing behind: the recording aborts the upload
-/// at its name and starts over.
 #[tokio::test]
-async fn an_initiation_the_recording_missed_is_aborted_not_stranded() {
+async fn missing_native_identity_retains_both_claimants_uploads_and_refuses_reinitiation() {
     for lost in ["initiation", "part"] {
         let (_server, storage, state) = planned_fixture().await;
-        let bytes = vec![5; PLANNED_PART + 1];
-        let mut upload = storage
-            .begin_upload(&planned_path(), bytes.len() as u64)
-            .await
-            .unwrap();
-        assert!(
-            state.lock().unwrap().uploads.is_empty(),
-            "begin sends nothing"
-        );
+        let path = planned_path();
+        let mut other = storage.begin_upload(&path, 4).await.unwrap();
+        storage.upload_part(&mut other, b"rival").await.unwrap_err();
+        storage.upload_part(&mut other, b"peer").await.unwrap();
+        let mut upload = storage.begin_upload(&path, 4).await.unwrap();
         let recorded = upload.encode().unwrap();
-        match lost {
-            "initiation" => state.lock().unwrap().lose_initiation_reply = true,
-            _ => state.lock().unwrap().fail_part_reply = true,
+        if lost == "initiation" {
+            state.lock().unwrap().lose_initiation_reply = true;
+        } else {
+            state.lock().unwrap().fail_part_reply = true;
         }
         assert_eq!(
             storage
-                .upload_part(&mut upload, &bytes[..PLANNED_PART])
+                .upload_part(&mut upload, b"ours")
                 .await
                 .unwrap_err()
                 .failure(),
             StorageFailure::Network
         );
+        let mut restored = UploadSession::decode(recorded.as_bytes()).unwrap();
+        let before = state.lock().unwrap().requests.len();
+        assert_eq!(
+            storage.abort_upload(&restored).await.unwrap_err().failure(),
+            StorageFailure::SessionIdentityUnknown
+        );
+        assert_eq!(
+            storage
+                .upload_part(&mut restored, b"ours")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::SessionIdentityUnknown
+        );
+        assert_eq!(state.lock().unwrap().requests.len(), before);
+        assert_eq!(
+            storage
+                .resume_upload(&mut restored)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::SessionIdentityUnknown
+        );
+        assert_eq!(restored.encode().unwrap().as_bytes(), recorded.as_bytes());
+        assert_eq!(state.lock().unwrap().uploads.len(), 2);
+        storage.finish_upload(&mut other).await.unwrap();
+        assert_eq!(storage.read(&path).await.unwrap(), b"peer");
+        assert_eq!(
+            storage
+                .resume_upload(&mut restored)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::SessionIdentityUnknown
+        );
         assert_eq!(state.lock().unwrap().uploads.len(), 1);
-        let mut upload = UploadSession::decode(recorded.as_bytes()).unwrap();
-        storage.resume_upload(&mut upload).await.unwrap();
-        assert!(state.lock().unwrap().uploads.is_empty());
-        assert_eq!(upload.confirmed_bytes(), 0);
-        for part in bytes.chunks(upload.part_size()) {
-            storage.upload_part(&mut upload, part).await.unwrap();
-        }
-        storage.finish_upload(&mut upload).await.unwrap();
-        assert_eq!(storage.read(&planned_path()).await.unwrap(), bytes);
-        assert!(state.lock().unwrap().uploads.is_empty());
     }
 }
 
-/// Aborting that recording aborts the upload and leaves the destination,
-/// which is the upload's own name, alone.
 #[tokio::test]
-async fn aborting_a_recording_before_initiation_keeps_the_destination() {
+async fn restored_planned_session_can_confirm_its_completed_publication() {
     let (_server, storage, state) = planned_fixture().await;
-    storage.create(&planned_path(), b"published").await.unwrap();
-    let mut upload = storage
-        .begin_upload(&planned_path(), PLANNED_PART as u64 + 1)
-        .await
-        .unwrap();
-    let recorded = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
-    state.lock().unwrap().lose_initiation_reply = true;
-    storage
-        .upload_part(&mut upload, &vec![1; PLANNED_PART])
-        .await
-        .unwrap_err();
-    storage.abort_upload(&recorded).await.unwrap();
+    let path = planned_path();
+    let mut upload = storage.begin_upload(&path, 4).await.unwrap();
+    let recording = upload.encode().unwrap();
+    storage.upload_part(&mut upload, b"ours").await.unwrap();
+    storage.finish_upload(&mut upload).await.unwrap();
+    let mut restored = UploadSession::decode(recording.as_bytes()).unwrap();
+    storage.resume_upload(&mut restored).await.unwrap();
+    assert!(restored.is_complete());
     assert!(state.lock().unwrap().uploads.is_empty());
-    assert_eq!(storage.read(&planned_path()).await.unwrap(), b"published");
 }
 
 /// A recording with its native id whose upload is gone, and whose destination

@@ -100,11 +100,7 @@ async fn archived_object_is_a_refusal_with_its_native_archive_state() {
     let server = TestServer::new(Router::new().fallback(|| async {
         response(403, "<Error><Code>InvalidObjectState</Code><Message>credential-echo</Message><StorageClass>DEEP_ARCHIVE</StorageClass><AccessTier>ARCHIVE_ACCESS</AccessTier></Error>")
     })).await;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let error = provider(&server.url).read(&path).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Refused);
     assert!(!error.retryable());

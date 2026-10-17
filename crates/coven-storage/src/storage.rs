@@ -124,14 +124,14 @@ pub trait Storage: Send + Sync {
     }
     /// This provider's nonsecret location settings.
     fn config(&self) -> StorageConfig;
-    /// The signed-in sharing account, for the member's store-log access entry.
+    /// The signed-in sharing account, for the member's admin access entry.
     /// S3 uses its supplied access key id instead of an account lookup.
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
     /// Largest complete encrypted body sent in one request, in bytes. Larger
-    /// create-once objects use resumable or multipart uploads. Store-log entries
-    /// always use one request and reject an oversized body.
+    /// create-once objects use resumable or multipart uploads. Floor replacements
+    /// use one request and reject an oversized body.
     /// Callers retaining sessions across crashes use `begin_upload` and record them.
     /// S3 uses 5 GiB, Dropbox 150 MiB and OneDrive 250,000,000 bytes.
     /// CloudKit uses bounded 8 MiB assets.
@@ -145,7 +145,7 @@ pub trait Storage: Send + Sync {
     /// [`StorageFailure::AlreadyExists`]. Occupation alone proves nothing: a
     /// retry compares the occupant's complete bytes itself (§10).
     /// Bodies above [`Self::single_request_limit`] use a session for immutable
-    /// paths other than store-log entries, whose bodies must fit one request.
+    /// paths; a writes slot can contain multiple writes in one object.
     /// A failed transfer aborts the session;
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
     /// Returns the object's metadata when the provider's one-request reply
@@ -155,9 +155,10 @@ pub trait Storage: Send + Sync {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError>;
-    /// Replace a device's posted positions or clock object; immutable paths are refused.
+    /// Replace the floor only if its observed native revision still matches.
+    /// A stale observation returns `Conflict` without changing the object.
     /// Always one request; an oversized body returns [`StorageFailure::SingleRequestTooLarge`].
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError>;
+    async fn replace(&self, previous: &StoredObject, bytes: &[u8]) -> Result<(), StorageError>;
     /// Exact lookup. None means confirmed absence; failed lookups remain errors.
     /// Pending multipart assets must not be reported as complete objects.
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError>;
@@ -196,13 +197,7 @@ pub trait Storage: Send + Sync {
     /// List every object under the prefix, across all pages.
     /// Missing or malformed metadata fails the call.
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
-    /// Discover store-log writers across every native page without reading history.
-    /// Completeness has the same one-hour margin as object listings, measured
-    /// from each writer's permanent entry one. Errors never mean an empty set.
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError>;
+
     /// Delete an object. An already absent object succeeds, making operation retries safe.
     /// Sync chooses the deleting device under §15; storage exposes no deletion-rights
     /// query. A provider refusal retains its cause, including a refused owned-object deletion.
@@ -242,7 +237,7 @@ pub trait Storage: Send + Sync {
                 StorageFailure::InvalidConfiguration.with_source("provider acceptance required")
             );
         }
-        self.list_writers(store).await?;
+        self.status(&ObjectPath::floor(store)).await?;
         Ok(())
     }
     /// Unshare through the owner's account. S3 key deletion uses AccessKeyAdmin.
@@ -256,7 +251,7 @@ pub trait Storage: Send + Sync {
     /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
-    /// Store-log entries, positions and clocks are refused: all require one request.
+    /// The replaceable floor is refused; its conditional write uses one request.
     async fn begin_upload(
         &self,
         path: &ObjectPath,

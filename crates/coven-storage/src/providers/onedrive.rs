@@ -299,21 +299,28 @@ impl ProviderOps for OneDriveStorage {
     async fn replace(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.parents(publication, path).await?;
+        let path = &previous.path;
+        let body = Body::Bytes(bytes.to_vec());
+        let mut headers = body_headers(&body);
+        headers.push(("If-Match", previous.replace_token.clone()));
         let result = http::checked(
             PROVIDER,
-            self.publish(
-                publication,
-                Method::PUT,
-                &self.by_path(path, "/content")?,
-                Body::Bytes(bytes.to_vec()),
-            )
-            .await?,
+            self.session
+                .publish(
+                    publication,
+                    Method::PUT,
+                    &self.by_path(path, "/content")?,
+                    &headers,
+                    body,
+                    true,
+                )
+                .await?,
         )
-        .await;
+        .await
+        .map_err(StorageError::replacement);
         self.checked_folder_operation(result).await?;
         Ok(())
     }
@@ -334,12 +341,7 @@ impl ProviderOps for OneDriveStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         self.list_folders(listing).await
     }
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
-        self.writer_folders(store).await
-    }
+
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         let response = self
             .send(Method::DELETE, &self.by_path(path, "")?, Body::Empty)

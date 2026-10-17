@@ -1,12 +1,11 @@
 use super::*;
 use crate::{test_utils::MemoryStorage, Storage};
-use coven_foundation::id_source::DeviceId;
 
 #[tokio::test]
 async fn observations_reject_wrong_identity_and_inconsistent_body_lengths() {
     let storage = MemoryStorage::builder().build().unwrap();
-    let path = ObjectPath::positions(crate::test_utils::STORE_ID, DeviceId(1));
-    storage.replace(&path, b"data").await.unwrap();
+    let path = ObjectPath::floor(crate::test_utils::STORE_ID);
+    storage.create(&path, b"data").await.unwrap();
     let read = storage.read_object(&path, None).await.unwrap();
     read.check(&path, None).unwrap();
     for change in [0, 1, 2, 3, 4] {
@@ -16,7 +15,8 @@ async fn observations_reject_wrong_identity_and_inconsistent_body_lengths() {
             1 => invalid.metadata.revision.clear(),
             2 => invalid.metadata.time_resolution = Duration::ZERO,
             3 => {
-                invalid.metadata.path = ObjectPath::clock(crate::test_utils::STORE_ID, DeviceId(1))
+                invalid.metadata.path =
+                    ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN)
             }
             4 => invalid.metadata.size += 1,
             _ => unreachable!(),

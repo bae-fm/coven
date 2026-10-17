@@ -51,8 +51,8 @@ async fn scope_policy_controls_head_and_get_without_inferring_a_checksum() {
                 ..PLAIN
             },
         );
-        let target = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
-        storage.replace(&target, b"bytes").await.unwrap();
+        let target = ObjectPath::floor(STORE_ID);
+        storage.create(&target, b"bytes").await.unwrap();
         let head = storage.status(&target).await;
         let get = storage.read_object(&target, None).await;
         if expected {
@@ -69,14 +69,7 @@ async fn scope_policy_controls_head_and_get_without_inferring_a_checksum() {
 
 #[tokio::test]
 async fn listing_profile_selects_v1_and_follows_key_markers() {
-    let keys = [1, 2].map(|n| {
-        ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            n.try_into().unwrap(),
-        )
-        .under("")
-    });
+    let keys = [1, 2].map(|n| ObjectPath::slot(STORE_ID, n.try_into().unwrap()).under(""));
     let server = TestServer::new(Router::new().fallback(move |uri: Uri| {
         let keys = keys.clone();
         async move {
@@ -117,8 +110,8 @@ async fn unstated_scope_skips_checksum_parsing_but_keeps_required_metadata() {
             ..PLAIN
         },
     );
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
-    storage.replace(&path, b"data").await.unwrap();
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"data").await.unwrap();
     assert_eq!(storage.status(&path).await.unwrap().unwrap().checksum, None);
     let read = storage.read_object(&path, None).await.unwrap();
     assert_eq!(read.metadata.checksum, None);
@@ -149,11 +142,7 @@ async fn unstated_scope_skips_checksum_parsing_but_keeps_required_metadata() {
         .unwrap()
         .response_headers
         .insert("etag".into(), String::new());
-    let immutable = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let immutable = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&immutable, b"data").await.unwrap();
     assert_eq!(
         storage.status(&immutable).await.unwrap_err().failure(),
@@ -224,8 +213,8 @@ async fn r2_endpoint_ignores_unscoped_checksums_on_status_and_reads() {
             .build(),
     );
     let storage = StorageConnection::from_provider(Arc::new(storage));
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
-    storage.replace(&path, b"bytes").await.unwrap();
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"bytes").await.unwrap();
     let status = storage.status(&path).await.unwrap().unwrap();
     assert_eq!(status.checksum, None);
     for (range, expected) in [
@@ -338,11 +327,7 @@ async fn explicit_gcs_name_drives_the_adapter_at_an_uncatalogued_endpoint() {
         storage.provider.settings,
         CataloguedProfile::named(S3ProfileName::Gcs).settings
     );
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"original").await.unwrap();
     assert_eq!(
         storage
@@ -402,8 +387,8 @@ async fn absent_policy_reads_without_a_checksum_and_refuses_any_returned_one() {
             ..PLAIN
         },
     );
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
-    storage.replace(&path, b"bytes").await.unwrap();
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"bytes").await.unwrap();
     assert_eq!(storage.status(&path).await.unwrap().unwrap().checksum, None);
     let read = storage.read_object(&path, None).await.unwrap();
     assert_eq!(read.metadata.checksum, None);

@@ -1,5 +1,6 @@
 use crate::*;
-use coven_foundation::id_source::{DeviceId, StoreId};
+use coven_foundation::id_source::{DeviceId, FileId, StoreId};
+use std::num::NonZeroU64;
 use std::sync::Arc;
 
 /// Run identical object, range, prefix and immutable-create checks on any provider.
@@ -24,8 +25,8 @@ impl Conformance {
     /// Two stores may publish the same device and number in one provider location.
     pub async fn shared_location(&self, other: StoreId) {
         assert_ne!(self.store, other);
-        let first = ObjectPath::store_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
-        let second = ObjectPath::store_log(other, DeviceId(31), std::num::NonZeroU64::MIN);
+        let first = ObjectPath::slot(self.store, NonZeroU64::MIN);
+        let second = ObjectPath::slot(other, NonZeroU64::MIN);
         let (left, right) = tokio::join!(
             self.storage.create(&first, b"first"),
             self.storage.create(&second, b"second")
@@ -48,8 +49,8 @@ impl Conformance {
     /// Exercise the real provider operations, returning the first violated contract.
     pub async fn run(&self) -> Result<(), StorageError> {
         use coven_foundation::id_source::DeviceId;
-        let path = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
-        let other = ObjectPath::device_log(self.store, DeviceId(32), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
+        let other = ObjectPath::file(self.store, DeviceId(32), FileId(uuid::Uuid::from_u128(1)));
         let data = b"encrypted bytes";
         if self.storage.status(&path).await?.is_some() {
             return Err(StorageFailure::Protocol.with_source("absent exact status"));
@@ -105,7 +106,7 @@ impl Conformance {
         }
         let listed = self
             .storage
-            .list(&ObjectPrefix::device_log(self.store, DeviceId(31)))
+            .list(&ObjectPrefix::device_files(self.store, DeviceId(31)))
             .await?
             .into_iter()
             .map(|object| {
@@ -143,17 +144,14 @@ impl Conformance {
             return Err(StorageFailure::Protocol.with_source("deleted object read"));
         }
         if !matches!(
-            self.storage.replace(&path, data).await,
+            self.storage.replace(&first, data).await,
             Err(error) if error.failure() == StorageFailure::InvalidPath
         ) {
             return Err(
                 StorageFailure::Protocol.with_source("immutable object accepted replacement")
             );
         }
-        for path in [
-            ObjectPath::positions(self.store, DeviceId(31)),
-            ObjectPath::clock(self.store, DeviceId(31)),
-        ] {
+        for path in [ObjectPath::floor(self.store)] {
             if !matches!(
                 self.storage.begin_upload(&path, 1).await,
                 Err(error) if error.failure() == StorageFailure::InvalidPath
@@ -161,14 +159,14 @@ impl Conformance {
                 return Err(StorageFailure::Protocol
                     .with_source("replaceable object accepted a recorded upload"));
             }
-            self.storage.replace(&path, b"last record").await?;
+            self.storage.create(&path, b"last record").await?;
             let mut previous = self
                 .storage
                 .status(&path)
                 .await?
                 .ok_or(StorageFailure::NotFound)?;
             for bytes in [b"next record", b"last record"] {
-                self.storage.replace(&path, bytes).await?;
+                self.storage.replace(&previous, bytes).await?;
                 let next = self
                     .storage
                     .status(&path)
@@ -178,6 +176,11 @@ impl Conformance {
                     return Err(
                         StorageFailure::Protocol.with_source("replacement did not change revision")
                     );
+                }
+                if !matches!(self.storage.replace(&previous, b"stale floor").await, Err(error) if error.failure() == StorageFailure::Conflict)
+                {
+                    return Err(StorageFailure::Protocol
+                        .with_source("stale floor replacement was accepted"));
                 }
                 previous = next;
             }
@@ -243,15 +246,15 @@ impl Conformance {
         Ok(())
     }
 
-    /// Setups of one store race for its creation marker (§10, D10): of three
+    /// Setups of one store race for its first sequence slot (§10, D10): of three
     /// concurrent creates, one per claimant connection, exactly one wins and
     /// keeps its bytes, and the others are refused as occupied. The winner's
-    /// connection deletes the marker afterwards.
+    /// connection deletes the slot afterwards.
     pub async fn creation_race(
         &self,
         claimants: [Arc<dyn Storage>; 3],
     ) -> Result<(), StorageError> {
-        let marker = ObjectPath::created(self.store);
+        let marker = ObjectPath::slot(self.store, NonZeroU64::MIN);
         let claims: [&[u8]; 3] = [b"claim 1", b"claim 2", b"claim 3"];
         let (first, second, third) = tokio::join!(
             claimants[0].create(&marker, claims[0]),
@@ -288,12 +291,12 @@ impl Conformance {
         advance: impl std::future::Future<Output = ()>,
     ) {
         let storage = &self.storage;
-        let first = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
-        let second = ObjectPath::device_log(self.store, DeviceId(32), std::num::NonZeroU64::MIN);
+        let first = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
+        let second = ObjectPath::file(self.store, DeviceId(32), FileId(uuid::Uuid::from_u128(1)));
         storage.create(&first, b"first").await.unwrap();
         storage.create(&second, b"second").await.unwrap();
         let expected = storage
-            .list(&ObjectPrefix::device_logs(self.store))
+            .list(&ObjectPrefix::files(self.store))
             .await
             .unwrap();
         assert_eq!(
@@ -320,7 +323,7 @@ impl Conformance {
         expire: impl std::future::Future<Output = ()>,
     ) -> StorageError {
         let storage = &self.storage;
-        let path = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
         let mut upload = storage.begin_upload(&path, 4).await.unwrap();
         expire.await;
         let error = storage.resume_upload(&mut upload).await.unwrap_err();
@@ -373,7 +376,7 @@ impl Conformance {
         lose: impl std::future::Future<Output = ()>,
     ) {
         let storage = &self.storage;
-        let path = ObjectPath::device_log(self.store, DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::file(self.store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
         let mut upload = storage
             .begin_upload(&path, part_size as u64 + 1)
             .await
@@ -409,20 +412,22 @@ impl Conformance {
         deny: impl std::future::Future<Output = ()>,
     ) -> Vec<StorageError> {
         let storage = &self.storage;
-        let path = ObjectPath::device_log(
-            self.store,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
-        let positions =
-            ObjectPath::positions(self.store, coven_foundation::id_source::DeviceId(31));
-        let mut pending = storage.begin_upload(&path, 4).await.unwrap();
+        let path = ObjectPath::slot(self.store, NonZeroU64::MIN);
+        let floor = ObjectPath::floor(self.store);
+        storage.create(&floor, b"previous floor").await.unwrap();
+        let previous = storage.status(&floor).await.unwrap().unwrap();
         let mut ready = storage.begin_upload(&path, 4).await.unwrap();
+        let part = vec![1; ready.part_size()];
+        let mut pending = storage
+            .begin_upload(&path, part.len() as u64 + 1)
+            .await
+            .unwrap();
+        storage.upload_part(&mut pending, &part).await.unwrap();
         storage.upload_part(&mut ready, b"data").await.unwrap();
         deny.await;
         let mut errors = vec![
             storage.create(&path, b"data").await.err().unwrap(),
-            storage.replace(&positions, b"data").await.err().unwrap(),
+            storage.replace(&previous, b"data").await.err().unwrap(),
             storage.read(&path).await.err().unwrap(),
             storage.status(&path).await.err().unwrap(),
             storage
@@ -437,11 +442,7 @@ impl Conformance {
                 .unwrap(),
             storage.delete(&path).await.err().unwrap(),
             storage.resume_upload(&mut pending).await.err().unwrap(),
-            storage
-                .upload_part(&mut pending, b"data")
-                .await
-                .err()
-                .unwrap(),
+            storage.upload_part(&mut pending, b"z").await.err().unwrap(),
             storage.finish_upload(&mut ready).await.err().unwrap(),
             storage.abort_upload(&pending).await.err().unwrap(),
         ];

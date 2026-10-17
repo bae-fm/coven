@@ -143,7 +143,7 @@ fn dropbox_live_unfinished_upload_is_invisible() {
 // step is printed for the record and only different bytes must change revision.
 fn dropbox_live_replacement_revision() {
     run(async |live, storage| {
-        let path = ObjectPath::positions(live.store, DeviceId(31));
+        let path = ObjectPath::floor(live.store);
         let mut native_revisions = Vec::new();
         let mut adapter_revisions = Vec::new();
         let mut replacements = Vec::new();
@@ -152,7 +152,13 @@ fn dropbox_live_replacement_revision() {
             ("equal", b"same"),
             ("different_same_size", b"else"),
         ] {
-            let replacement = storage.replace(&path, bytes).await;
+            let replacement = if step == "initial" {
+                storage.create(&path, bytes).await.map(drop)
+            } else {
+                storage
+                    .replace(&storage.status(&path).await.unwrap().unwrap(), bytes)
+                    .await
+            };
             let native = metadata(&storage, &path).await;
             let object = listed(&storage, &path).await;
             let status = storage.status(&path).await.unwrap().unwrap();

@@ -15,10 +15,10 @@ use tokio::sync::Mutex;
 #[path = "memory_reads.rs"]
 mod memory_reads;
 pub use memory_reads::BodyFailure;
+#[path = "memory_listing.rs"]
+mod memory_listing;
 #[path = "memory_requests.rs"]
 mod memory_requests;
-#[path = "memory_writers.rs"]
-mod memory_writers;
 pub use memory_requests::MemoryRequest;
 #[path = "memory_key_admin.rs"]
 mod memory_key_admin;
@@ -43,6 +43,7 @@ impl Object {
             time_resolution,
             object_id: path.as_str().into(),
             revision: self.revision.to_string(),
+            replace_token: self.revision.to_string(),
             checksum: None,
         }
     }
@@ -619,12 +620,20 @@ impl ProviderOps for MemoryProvider {
     async fn replace(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
+        let path = &previous.path;
         publication.check()?;
         self.before(MemoryRequest::Replace(path.clone())).await?;
         let mut state = self.state.lock().await;
+        if state
+            .objects
+            .get(path)
+            .is_none_or(|object| object.revision.to_string() != previous.replace_token)
+        {
+            return Err(StorageFailure::Conflict.into());
+        }
         let revision = state.next_id()?;
         state.objects.insert(
             path.clone(),
@@ -635,6 +644,9 @@ impl ProviderOps for MemoryProvider {
                 stored_at: self.storage_time()?,
             },
         );
+        if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
+            return Err(StorageFailure::Network.into());
+        }
         Ok(())
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
@@ -656,12 +668,6 @@ impl ProviderOps for MemoryProvider {
         self.stream_recorded(path, range).await
     }
 
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
-        self.writer_folders(store).await
-    }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix();
         self.before(MemoryRequest::List(prefix.clone())).await?;

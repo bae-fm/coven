@@ -8,17 +8,10 @@ async fn gcs_listing_and_exact_status_keep_the_same_publication_time() {
     }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
     let storage = super::gcs_provider(&server.url);
-    let path = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     storage.create(&path, b"immutable entry").await.unwrap();
     let exact = storage.status(&path).await.unwrap().unwrap();
-    let listed = storage
-        .list(&ObjectPrefix::store_logs(STORE_ID))
-        .await
-        .unwrap();
+    let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     assert_eq!(listed, std::slice::from_ref(&exact));
     assert_eq!(
         storage.read_object(&path, None).await.unwrap().metadata,
@@ -49,8 +42,8 @@ async fn gcs_checksum_reads_repeated_hash_headers() {
     ))
     .await;
     let storage = super::gcs_provider(&server.url);
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
-    storage.replace(&path, b"first").await.unwrap();
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"first").await.unwrap();
     assert_eq!(
         storage.status(&path).await.unwrap().unwrap().checksum,
         Some(ObjectChecksum::FullObject(ChecksumValue::Crc32cBase64(
@@ -64,12 +57,12 @@ async fn native_metadata_keeps_revision_checksum_and_time_separate() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    let path = ObjectPath::floor(STORE_ID);
     storage.create(&path, b"first").await.unwrap();
     let mut first = storage.status(&path).await.unwrap().unwrap();
     assert_eq!(first.checksum, None, "ETag is not a content checksum");
     for bytes in [b"other", b"other"] {
-        storage.replace(&path, bytes).await.unwrap();
+        storage.replace(&first, bytes).await.unwrap();
         let next = storage.read_object(&path, None).await.unwrap();
         assert_eq!(next.bytes, bytes);
         assert_eq!(next.metadata.size, first.size);
@@ -135,7 +128,7 @@ async fn exact_status_distinguishes_absence_from_failed_lookup_and_missing_bucke
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    let path = ObjectPath::floor(STORE_ID);
     assert_eq!(storage.status(&path).await.unwrap(), None);
     for (code, status, expected) in [
         ("AccessDenied", 403, StorageFailure::PermissionDenied),
@@ -149,11 +142,7 @@ async fn exact_status_distinguishes_absence_from_failed_lookup_and_missing_bucke
 
 #[tokio::test]
 async fn every_profile_checks_missing_objects_with_a_prefix_scoped_listing() {
-    let path = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let settings = profile::PROFILES
         .iter()
         .map(|profile| profile.settings)
@@ -231,11 +220,11 @@ async fn gcs_generation_changes_for_equal_bytes_and_hash_has_full_object_scope()
     }));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = super::gcs_provider(&server.url);
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    let path = ObjectPath::floor(STORE_ID);
     assert_eq!(storage.status(&path).await.unwrap(), None);
-    storage.replace(&path, b"first").await.unwrap();
+    storage.create(&path, b"first").await.unwrap();
     let first = storage.status(&path).await.unwrap().unwrap();
-    storage.replace(&path, b"first").await.unwrap();
+    storage.replace(&first, b"first").await.unwrap();
     state
         .lock()
         .unwrap()

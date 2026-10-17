@@ -607,15 +607,13 @@ async fn read_response(
     range: Option<ByteRange>,
 ) -> Result<Vec<u8>, StorageError> {
     let metadata = crate::StoredObject {
-        path: crate::ObjectPath::positions(
-            crate::test_utils::STORE_ID,
-            coven_foundation::id_source::DeviceId(1),
-        ),
+        path: crate::ObjectPath::floor(crate::test_utils::STORE_ID),
         size: 8,
         stored_at: coven_format::value::StorageTime::new(0, 0).unwrap(),
         time_resolution: std::time::Duration::from_secs(1),
         object_id: "object".into(),
         revision: "1".into(),
+        replace_token: "1".into(),
         checksum: None,
     };
     Ok(
@@ -661,10 +659,7 @@ async fn publication_is_rechecked_after_waiting_for_tokens() {
     )));
     let publication = crate::PublicationRequest::new(
         gate.clone(),
-        crate::ObjectPath::positions(
-            crate::test_utils::STORE_ID,
-            coven_foundation::id_source::DeviceId(1),
-        ),
+        crate::ObjectPath::floor(crate::test_utils::STORE_ID),
     );
     let tokens = session.tokens.hold().await;
     let mut request = Box::pin(session.publish(

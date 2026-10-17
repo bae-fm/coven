@@ -59,6 +59,7 @@ struct Remote {
     lose_temporary_delete_reply: bool,
     objects: BTreeMap<String, Vec<u8>>,
     revisions: BTreeMap<String, String>,
+    etags: BTreeMap<String, String>,
     generation: u64,
     uploads: BTreeMap<String, PendingUpload>,
     next_upload: u64,
@@ -213,6 +214,9 @@ fn respond(
             }
             let upload = state.uploads.remove(id).unwrap();
             state.metadata.insert(key.clone(), upload.token);
+            state.generation += 1;
+            let generation = state.generation.to_string();
+            state.revisions.insert(key.clone(), generation);
             state
                 .objects
                 .insert(key, upload.parts.into_values().flatten().collect());
@@ -248,7 +252,20 @@ fn respond(
         }
         let token = state.metadata[source].clone();
         state.objects.insert(key.clone(), bytes);
-        state.metadata.insert(key, token);
+        state.metadata.insert(key.clone(), token);
+        state.generation += 1;
+        let revision = if state.gcs {
+            state.generation.to_string()
+        } else {
+            state
+                .revisions
+                .get(source)
+                .cloned()
+                .unwrap_or_else(|| "immutable".into())
+        };
+        let etag = format!("etag-{}", state.generation);
+        state.etags.insert(key.clone(), etag);
+        state.revisions.insert(key, revision);
         if std::mem::replace(&mut state.fail_copy_reply, false) {
             return response(503, "<Error><Code>ServiceUnavailable</Code></Error>");
         }
@@ -279,7 +296,7 @@ fn respond(
             .first()
             .map(|key| {
                 let size = state.objects[*key].len() + usize::from(state.broken_check == Some(StorageCheck::List));
-                format!("<Contents><Key>{key}</Key><Size>{size}</Size><LastModified>{listed_time}</LastModified><ETag>etag</ETag></Contents>")
+                format!("<Contents><Key>{key}</Key><Size>{size}</Size><LastModified>{listed_time}</LastModified><ETag>{}</ETag></Contents>", state.etags.get(*key).map(String::as_str).unwrap_or("etag"))
             })
             .unwrap_or_default();
         return response(
@@ -305,7 +322,30 @@ fn respond(
             {
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
+            if !create && !key.contains("/.coven-uploads/") {
+                let expected = headers
+                    .get(if state.gcs {
+                        "x-goog-if-generation-match"
+                    } else {
+                        "if-match"
+                    })
+                    .expect("conditional replacement")
+                    .to_str()
+                    .unwrap();
+                let current = if state.gcs {
+                    state.revisions.get(&key)
+                } else {
+                    state.etags.get(&key)
+                };
+                if current.map(String::as_str) != Some(expected)
+                    && state.broken_check != Some(StorageCheck::ConditionalReplace)
+                {
+                    return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
+                }
+            }
             state.generation += 1;
+            let etag = format!("etag-{}", state.generation);
+            state.etags.insert(key.clone(), etag);
             let revision = if state.gcs {
                 state.generation.to_string()
             } else {
@@ -393,7 +433,16 @@ fn respond(
             "last-modified",
             "Tue, 06 Oct 2026 00:00:00 GMT".parse().unwrap(),
         );
-        result.headers_mut().insert("etag", "etag".parse().unwrap());
+        result.headers_mut().insert(
+            "etag",
+            state
+                .etags
+                .get(&key)
+                .map(String::as_str)
+                .unwrap_or("etag")
+                .parse()
+                .unwrap(),
+        );
         if let Some(revision) = state.revisions.get(&key) {
             result.headers_mut().insert(
                 if state.gcs {
@@ -532,11 +581,7 @@ async fn abort_retries_and_preserves_an_object_after_a_lost_completion_reply() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.abort_upload(&upload).await.unwrap();
     storage.abort_upload(&upload).await.unwrap();
@@ -554,11 +599,7 @@ async fn provider_check_cleans_up_after_a_lost_create_reply_and_retains_both_fai
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     state.lock().unwrap().lose_create_reply = true;
     assert!(
         matches!(check_provider(&storage, &path, b"sealed test bytes")
@@ -617,11 +658,7 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
 #[tokio::test]
 async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() {
     use std::sync::atomic::{AtomicUsize, Ordering};
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     for (size, expected_requests) in [(4, 2), (5, 1)] {
         let requests = Arc::new(AtomicUsize::new(0));
         let received = requests.clone();
@@ -658,11 +695,7 @@ async fn multipart_publication_and_abort_are_bound_to_the_native_session() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut first = storage.begin_upload(&path, 4).await.unwrap();
     let mut other = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut first, b"data").await.unwrap();
@@ -706,11 +739,7 @@ async fn interrupted_ranged_body_retains_the_sdk_cause() {
         socket.shutdown().await.unwrap();
     });
     let storage = provider(&format!("http://{address}"));
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let error = storage
         .read_range(&path, ByteRange::new(3, 7).unwrap())
         .await
@@ -785,7 +814,7 @@ async fn multipart_recovery_refuses_incomplete_pages_and_empty_etags_without_adv
             else {response(200,format!("<ListPartsResult>{tail}</ListPartsResult>"))}
         })).await;
         let storage=provider(&server.url);
-        let path=ObjectPath::device_log(STORE_ID, coven_foundation::id_source::DeviceId(31),std::num::NonZeroU64::MIN);
+        let path=ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut upload=storage.begin_upload(&path,4).await.unwrap();
         assert_eq!(storage.upload_part(&mut upload,b"data").await.unwrap_err().failure(),StorageFailure::Protocol);
         assert_eq!(upload.confirmed_bytes(),0);
@@ -803,12 +832,16 @@ async fn recovered_parts_cannot_exceed_the_recordings_part_size() {
         else {response(200,format!("<ListPartsResult><IsTruncated>false</IsTruncated><Part><PartNumber>1</PartNumber><Size>{total}</Size><ETag>etag</ETag></Part></ListPartsResult>"))}
     })).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, total).await.unwrap();
+    assert_eq!(
+        storage
+            .upload_part(&mut upload, &vec![1; 8 * 1024 * 1024])
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Protocol
+    );
     assert_eq!(
         storage
             .resume_upload(&mut upload)
@@ -861,6 +894,7 @@ async fn provider_check_names_each_failed_operation_and_removes_its_object() {
         StorageCheck::Read,
         StorageCheck::ReadRange,
         StorageCheck::List,
+        StorageCheck::ConditionalReplace,
         StorageCheck::Delete,
     ] {
         let state = Arc::new(Mutex::new(Remote::default()));

@@ -71,7 +71,7 @@ async fn folder_pages_keep_the_selected_root() {
             }
         };
         let store = StoreId(uuid::Uuid::from_bytes([0xab; 16]));
-        let path = ObjectPath::store_log(store, DeviceId(31), 1.try_into().unwrap());
+        let path = ObjectPath::file(store, DeviceId(31), FileId(uuid::Uuid::from_u128(1)));
         let item = file_metadata(&path.absolute(), b"entry", &Remote::default());
         let requests = Arc::new(Mutex::new(Vec::new()));
         let received = requests.clone();
@@ -90,7 +90,7 @@ async fn folder_pages_keep_the_selected_root() {
                 ));
                 if uri.path() == "/2/files/list_folder" {
                     reply(json!({
-                        "entries":[{".tag":"folder","path_lower":format!("/{store}/store-log/31")}],
+                        "entries":[{".tag":"folder","path_lower":format!("/{store}/files/31")}],
                         "has_more":true,
                         "cursor":"opaque",
                     }))
@@ -107,16 +107,13 @@ async fn folder_pages_keep_the_selected_root() {
         .unwrap();
         storage.api = format!("{}/2", server.url);
         let storage = StorageConnection::from_provider(Arc::new(storage));
-        let listed = storage
-            .list(&ObjectPrefix::store_logs(store))
-            .await
-            .unwrap();
+        let listed = storage.list(&ObjectPrefix::files(store)).await.unwrap();
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].path, path);
         assert_eq!(
             *requests.lock().unwrap(),
             [
-                list_request(&format!("/{store}/store-log")),
+                list_request(&format!("/{store}/files")),
                 (
                     "/2/files/list_folder/continue".into(),
                     json!({"cursor":"opaque"})
@@ -132,17 +129,13 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
     let other = DeviceId(32);
     let circle = Audience::Circle(CircleId(uuid::Uuid::from_bytes([0xcc; 16])));
     let paths = [
-        ObjectPath::device_log(STORE_ID, device, 1.try_into().unwrap()),
-        ObjectPath::device_log(STORE_ID, other, 1.try_into().unwrap()),
-        ObjectPath::store_log(STORE_ID, device, 1.try_into().unwrap()),
-        ObjectPath::store_log(STORE_ID, other, 1.try_into().unwrap()),
+        ObjectPath::slot(STORE_ID, 1.try_into().unwrap()),
         ObjectPath::snapshot(STORE_ID, Audience::Store, device, 1.try_into().unwrap()),
-        ObjectPath::snapshot(STORE_ID, Audience::Store, other, 1.try_into().unwrap()),
-        ObjectPath::snapshot(STORE_ID, circle.clone(), device, 1.try_into().unwrap()),
-        ObjectPath::positions(STORE_ID, device),
-        ObjectPath::key_copy(STORE_ID, device, 1.try_into().unwrap()),
-        ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_bytes([0xff; 16]))),
-        ObjectPath::join_request(STORE_ID, InviteId(uuid::Uuid::from_bytes([0xaa; 16]))),
+        ObjectPath::snapshot(STORE_ID, circle, other, 1.try_into().unwrap()),
+        ObjectPath::floor(STORE_ID),
+        ObjectPath::file(STORE_ID, device, FileId(uuid::Uuid::from_u128(1))),
+        ObjectPath::file(STORE_ID, other, FileId(uuid::Uuid::from_u128(1))),
+        ObjectPath::join_request(STORE_ID, InviteId(uuid::Uuid::from_u128(1))),
     ];
     let remote = Arc::new(Mutex::new(Remote::default()));
     for path in &paths {
@@ -156,16 +149,8 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
     let storage = provider(&server.server.url);
     for prefix in [
         ObjectPrefix::all(STORE_ID),
-        ObjectPrefix::device_logs(STORE_ID),
-        ObjectPrefix::device_log(STORE_ID, device),
-        ObjectPrefix::store_logs(STORE_ID),
-        ObjectPrefix::store_log(STORE_ID, device),
-        ObjectPrefix::snapshots(STORE_ID),
-        ObjectPrefix::audience_snapshots(STORE_ID, &Audience::Store),
-        ObjectPrefix::audience_snapshots(STORE_ID, &circle),
-        ObjectPrefix::positions(STORE_ID),
-        ObjectPrefix::keys(STORE_ID),
         ObjectPrefix::files(STORE_ID),
+        ObjectPrefix::device_files(STORE_ID, device),
         ObjectPrefix::join_requests(STORE_ID),
     ] {
         let listed = storage.list(&prefix).await.unwrap();
@@ -197,61 +182,20 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
 }
 
 #[tokio::test]
-async fn store_log_listing_never_enumerates_unrelated_file_history() {
-    let remote = Arc::new(Mutex::new(Remote::default()));
-    let entry = ObjectPath::store_log(STORE_ID, DeviceId(31), 1.try_into().unwrap());
-    remote
-        .lock()
-        .unwrap()
-        .objects
-        .insert(entry.absolute(), b"entry".to_vec());
-    let server = ListingServer::new(remote.clone()).await;
-    let storage = provider(&server.server.url);
-    for count in [0, 2001] {
-        {
-            let mut state = remote.lock().unwrap();
-            for index in 0..count {
-                let path =
-                    ObjectPath::file(STORE_ID, DeviceId(31), FileId(uuid::Uuid::from_u128(index)));
-                state.objects.insert(path.absolute(), b"file".to_vec());
-            }
-            state.objects.insert(
-                format!(
-                    "/{}/positions/9",
-                    StoreId(uuid::Uuid::from_bytes([0xbb; 16]))
-                ),
-                b"other store".to_vec(),
-            );
-            state.folders.insert("/unrelated".into());
-        }
-        let listed = storage
-            .list(&ObjectPrefix::store_logs(STORE_ID))
-            .await
-            .unwrap();
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].path, entry);
-        assert_eq!(
-            server.take_requests(),
-            [list_request(&format!("/{STORE_ID}/store-log"))]
-        );
-    }
-}
-
-#[tokio::test]
 async fn absent_requested_folder_checks_namespace_without_listing_siblings() {
     let remote = Arc::new(Mutex::new(Remote::default()));
     remote.lock().unwrap().objects.insert(
-        ObjectPath::positions(STORE_ID, DeviceId(31)).absolute(),
+        ObjectPath::floor(STORE_ID).absolute(),
         b"positions".to_vec(),
     );
     let server = ListingServer::new(remote.clone()).await;
     let storage = provider(&server.server.url);
-    let prefix = ObjectPrefix::store_log(STORE_ID, DeviceId(31));
+    let prefix = ObjectPrefix::device_files(STORE_ID, DeviceId(31));
     assert!(storage.list(&prefix).await.unwrap().is_empty());
     assert_eq!(
         server.take_requests(),
         [
-            list_request(&format!("/{STORE_ID}/store-log/31")),
+            list_request(&format!("/{STORE_ID}/files/31")),
             (
                 "/2/sharing/get_folder_metadata".into(),
                 json!({"shared_folder_id":"namespace"})
@@ -267,7 +211,7 @@ async fn absent_requested_folder_checks_namespace_without_listing_siblings() {
 
 #[tokio::test]
 async fn scoped_listing_refuses_an_object_outside_the_requested_folder() {
-    let path = ObjectPath::positions(STORE_ID, DeviceId(31));
+    let path = ObjectPath::floor(STORE_ID);
     let item = file_metadata(&path.absolute(), b"positions", &Remote::default());
     let server = TestServer::new(Router::new().fallback(move || {
         let item = item.clone();
@@ -276,7 +220,7 @@ async fn scoped_listing_refuses_an_object_outside_the_requested_folder() {
     .await;
     assert_eq!(
         provider(&server.url)
-            .list(&ObjectPrefix::store_logs(STORE_ID))
+            .list(&ObjectPrefix::files(STORE_ID))
             .await
             .unwrap_err()
             .failure(),
@@ -300,13 +244,13 @@ async fn empty_folder_succeeds_without_a_namespace_lookup() {
     }))
     .await;
     assert!(provider(&server.url)
-        .list(&ObjectPrefix::positions(STORE_ID))
+        .list(&ObjectPrefix::join_requests(STORE_ID))
         .await
         .unwrap()
         .is_empty());
     assert_eq!(
         *requests.lock().unwrap(),
-        [list_request(&format!("/{STORE_ID}/positions"))]
+        [list_request(&format!("/{STORE_ID}/join-requests"))]
     );
 }
 
@@ -325,7 +269,7 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
         ),
         (503, json!({}), StorageFailure::Network),
     ] {
-        let path = ObjectPath::positions(STORE_ID, DeviceId(31));
+        let path = ObjectPath::join_request(STORE_ID, InviteId(uuid::Uuid::from_u128(1)));
         let item = file_metadata(&path.absolute(), b"positions", &Remote::default());
         let replies = Arc::new(Mutex::new(VecDeque::from([
             (
@@ -356,7 +300,7 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
         }))
         .await;
         let storage = provider(&server.url);
-        let prefix = ObjectPrefix::positions(STORE_ID);
+        let prefix = ObjectPrefix::join_requests(STORE_ID);
         let error = storage.list(&prefix).await.unwrap_err();
         assert_eq!(error.failure(), failure);
         let StorageError::Provider { source, .. } = error else {
@@ -375,34 +319,15 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
         assert_eq!(
             *requests.lock().unwrap(),
             [
-                list_request(&format!("/{STORE_ID}/positions")),
+                list_request(&format!("/{STORE_ID}/join-requests")),
                 (
                     "/2/files/list_folder/continue".into(),
                     json!({"cursor":"next"})
                 ),
-                list_request(&format!("/{STORE_ID}/positions")),
+                list_request(&format!("/{STORE_ID}/join-requests")),
             ]
         );
     }
-}
-
-#[tokio::test]
-async fn writer_discovery_reads_only_immediate_folders_and_all_pages() {
-    let server = TestServer::new(Router::new().fallback(|uri: Uri, body: Bytes| async move {
-        let request: Value = serde_json::from_slice(&body).unwrap();
-        if uri.path().ends_with("/continue") {
-            assert_eq!(request, json!({"cursor":"next"}));
-            reply(json!({"entries":[{".tag":"folder","path_lower":format!("/{STORE_ID}/store-log/32")}],"has_more":false}))
-        } else {
-            assert_eq!(request["path"], format!("/{STORE_ID}/store-log"));
-            assert_eq!(request["recursive"], false);
-            reply(json!({"entries":[{".tag":"folder","path_lower":format!("/{STORE_ID}/store-log/31")}],"has_more":true,"cursor":"next"}))
-        }
-    })).await;
-    assert_eq!(
-        provider(&server.url).list_writers(STORE_ID).await.unwrap(),
-        [DeviceId(31), DeviceId(32)]
-    );
 }
 
 #[tokio::test]
@@ -427,8 +352,8 @@ async fn listings_skip_stray_files_and_folders_beside_shared_stores() {
         .await;
     // Stray files and folders, including names close to a coven path, are
     // no objects or writers (D10); the store's own objects still list.
-    let write = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
-    let entry = ObjectPath::store_log(STORE_ID, DeviceId(32), std::num::NonZeroU64::MIN);
+    let write = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    let entry = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
     storage.create(&write, b"write").await.unwrap();
     storage.create(&entry, b"entry").await.unwrap();
     {
@@ -453,10 +378,6 @@ async fn listings_skip_stray_files_and_folders_beside_shared_stores() {
         listed.iter().map(|object| &object.path).collect::<Vec<_>>(),
         [&write, &entry]
     );
-    assert_eq!(
-        storage.list_writers(STORE_ID).await.unwrap(),
-        [DeviceId(32)]
-    );
 }
 
 #[tokio::test]
@@ -470,10 +391,6 @@ async fn a_failed_page_fails_the_listing_rather_than_ending_it() {
     }))
     .await;
     let storage = provider(&server.url);
-    for result in [
-        storage.list(&ObjectPrefix::all(STORE_ID)).await.map(|_| ()),
-        storage.list_writers(STORE_ID).await.map(|_| ()),
-    ] {
-        assert_eq!(result.unwrap_err().failure(), StorageFailure::Network);
-    }
+    let result = storage.list(&ObjectPrefix::all(STORE_ID)).await;
+    assert_eq!(result.unwrap_err().failure(), StorageFailure::Network);
 }

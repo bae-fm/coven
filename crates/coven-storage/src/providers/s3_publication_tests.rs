@@ -2,7 +2,6 @@ use crate::providers::tests::{response, TestServer};
 use crate::{
     ObjectPath, PublicationGate, Storage, StorageConnection, StorageError, StorageFailure,
 };
-use coven_foundation::id_source::DeviceId;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
@@ -38,11 +37,7 @@ async fn the_sdk_checks_again_at_transmission_and_preserves_the_local_refusal() 
         gate.clone(),
         Arc::new(crate::NoCooldown),
     );
-    let path = ObjectPath::store_log(
-        crate::test_utils::STORE_ID,
-        DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
     assert_eq!(
         storage.create(&path, b"entry").await.unwrap_err().failure(),
         StorageFailure::CatchUpRequired
@@ -64,11 +59,7 @@ async fn the_sdk_does_not_repeat_a_failed_publication() {
         &server.url,
         crate::providers::s3::profile::PLAIN,
     );
-    let path = ObjectPath::store_log(
-        crate::test_utils::STORE_ID,
-        DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
     assert!(storage.create(&path, b"entry").await.is_err());
     assert_eq!(requests.load(Ordering::SeqCst), 1);
 }

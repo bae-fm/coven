@@ -148,7 +148,7 @@ impl DropboxStorage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-        mode: &str,
+        mode: Value,
     ) -> Result<Value, StorageError> {
         let response = self.content("files/upload",json!({"path":path.absolute(),"mode":mode,"autorename":false,"strict_conflict":true,"mute":true}),bytes.to_vec(),None, Some(publication)).await?;
         let value = http::json(PROVIDER, response).await?;
@@ -321,18 +321,24 @@ impl ProviderOps for DropboxStorage {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError> {
-        let item = self.write(publication, path, bytes, "add").await?;
+        let item = self.write(publication, path, bytes, json!("add")).await?;
         super::object_metadata::dropbox(path, &item).map(Some)
     }
     async fn replace(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.write(publication, path, bytes, "overwrite")
-            .await
-            .map(drop)
+        let path = &previous.path;
+        self.write(
+            publication,
+            path,
+            bytes,
+            json!({".tag":"update", "update":previous.replace_token}),
+        )
+        .await
+        .map(drop)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self
@@ -382,12 +388,7 @@ impl ProviderOps for DropboxStorage {
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         self.list_objects(listing).await
     }
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
-        self.writer_folders(store).await
-    }
+
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         match self
             .rpc("files/delete_v2", json!({"path":path.absolute()}))

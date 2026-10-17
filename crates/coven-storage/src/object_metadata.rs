@@ -24,6 +24,10 @@ pub struct StoredObject {
     /// listings use the ETag; replaceable paths use exact status to obtain the
     /// generation or Coven's atomically stored replacement token.
     pub revision: String,
+    /// Opaque native condition from the same observation: ETag on S3/OneDrive,
+    /// generation on GCS, revision on Dropbox, record change tag on CloudKit.
+    /// This is separate from revision identity: an S3 version is not an ETag.
+    pub replace_token: String,
     /// Provider checksum, when returned. ETags are never inferred to be checksums.
     pub checksum: Option<ObjectChecksum>,
 }
@@ -46,6 +50,7 @@ impl StoredObject {
         if &self.path != path
             || self.object_id.is_empty()
             || self.revision.is_empty()
+            || self.replace_token.is_empty()
             || self.time_resolution.is_zero()
         {
             return Err(StorageFailure::Protocol.with_source("invalid object metadata"));

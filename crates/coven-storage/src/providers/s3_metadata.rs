@@ -111,6 +111,12 @@ macro_rules! observation {
                 response.version_id(),
                 response.metadata(),
             )?,
+            replace_token: match $storage.settings.revision {
+                S3Revision::ETag => required(response.e_tag(), "S3 omitted ETag")?.into(),
+                S3Revision::Generation => {
+                    required(response.version_id(), "GCS omitted generation")?.into()
+                }
+            },
             checksum: checksum(
                 $storage.settings.checksums,
                 response.checksum_type(),

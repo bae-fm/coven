@@ -3,15 +3,14 @@ use crate::{
     test_utils::{BodyFailure, Faults, MemoryStorage},
     Storage,
 };
-use coven_foundation::id_source::DeviceId;
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
     Arc,
 };
 
 async fn object(storage: &MemoryStorage) -> (ObjectPath, StoredObject) {
-    let path = ObjectPath::positions(crate::test_utils::STORE_ID, DeviceId(1));
-    storage.replace(&path, b"abcdef").await.unwrap();
+    let path = ObjectPath::floor(crate::test_utils::STORE_ID);
+    storage.create(&path, b"abcdef").await.unwrap();
     let metadata = storage.status(&path).await.unwrap().unwrap();
     (path, metadata)
 }

@@ -106,20 +106,6 @@ impl Record {
         for (field, directory) in super::query::directories(path) {
             self.set_text(field, directory);
         }
-        if let Some((_, number)) = path.store_log_position() {
-            self.set_number("number", number.get());
-        }
-    }
-    pub(super) fn writer(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<coven_foundation::id_source::DeviceId, StorageError> {
-        if unsafe { self.0.recordType() }.to_string() != "CovenObject" {
-            return Err(
-                StorageFailure::Protocol.with_source("CloudKit returned an unpublished writer")
-            );
-        }
-        super::query::writer_id(&self.name(), &self.text("path")?, store)
     }
     pub(super) fn metadata(&self) -> Result<StoredObject, StorageError> {
         objc2::rc::autoreleasepool(|_| unsafe {
@@ -249,6 +235,7 @@ pub(super) fn publication_metadata(
         time_resolution: Duration::from_millis(1),
         object_id: name.to_owned(),
         revision: revision.to_owned(),
+        replace_token: revision.to_owned(),
         // CloudKit exposes no asset checksum through CKRecord/CKAsset.
         checksum: None,
     })

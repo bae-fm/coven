@@ -27,6 +27,7 @@ pub(super) fn onedrive(path: &ObjectPath, item: &Value) -> Result<StoredObject, 
         time_resolution: resolution(http::string(item, field)?)?,
         object_id: http::string(item, "id")?.into(),
         revision: http::string(item, "eTag")?.into(),
+        replace_token: http::string(item, "eTag")?.into(),
         checksum,
     })
 }
@@ -44,6 +45,7 @@ pub(super) fn dropbox(path: &ObjectPath, item: &Value) -> Result<StoredObject, S
         time_resolution: Duration::from_secs(1),
         object_id: http::string(item, "id")?.into(),
         revision: http::string(item, "rev")?.into(),
+        replace_token: http::string(item, "rev")?.into(),
         checksum: checksum(item, "content_hash", ChecksumValue::DropboxContentHash)?,
     })
 }

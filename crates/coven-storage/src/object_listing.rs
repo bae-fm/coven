@@ -1,5 +1,4 @@
 use crate::{CloudProvider, ObjectPath, ObjectPrefix, StorageError, StorageFailure, StoredObject};
-use coven_foundation::id_source::{DeviceId, StoreId};
 use std::collections::BTreeMap;
 
 /// The connection's listing result. Native providers add entries while consuming
@@ -101,19 +100,6 @@ impl ObjectListing {
         }
         self.objects.into_values().collect()
     }
-}
-
-/// The writer named by a native folder listed directly under a store's
-/// `store-log/`, or `None` for a folder whose name is not a device id (D10),
-/// which holds no store-log entries.
-pub(crate) fn writer_folder(store: StoreId, name: &str) -> Option<DeviceId> {
-    let writer = ObjectPath::parse(&format!("{store}/store-log/{name}/1"))
-        .ok()
-        .and_then(|path| path.device());
-    if writer.is_none() {
-        tracing::debug!(%store, "writer discovery skipped a folder outside the store layout");
-    }
-    writer
 }
 
 #[cfg(test)]

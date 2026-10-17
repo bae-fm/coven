@@ -158,6 +158,42 @@ pub(super) fn modify(
     create_name: Option<&str>,
     assets: Vec<coven_foundation::files::AssetFile>,
 ) -> CloudKitRequest<Vec<Record>> {
+    modify_with(
+        |operation| unsafe { database.addOperation(operation) },
+        records,
+        deletes,
+        policy,
+        create_name,
+        assets,
+    )
+}
+
+/// Build and submit one conditional object save. The fetched record remains
+/// intact, including its native change tag, while its payload fields change.
+pub(super) fn conditional_object(
+    enqueue: impl FnOnce(&CKModifyRecordsOperation),
+    record: Record,
+    path: &crate::ObjectPath,
+    assets: Vec<coven_foundation::files::AssetFile>,
+) -> CloudKitRequest<Vec<Record>> {
+    modify_with(
+        enqueue,
+        vec![record],
+        &[],
+        CKRecordSavePolicy::IfServerRecordUnchanged,
+        Some(path.as_str()),
+        assets,
+    )
+}
+
+fn modify_with(
+    enqueue: impl FnOnce(&CKModifyRecordsOperation),
+    records: Vec<Record>,
+    deletes: &[Retained<CKRecordID>],
+    policy: CKRecordSavePolicy,
+    create_name: Option<&str>,
+    assets: Vec<coven_foundation::files::AssetFile>,
+) -> CloudKitRequest<Vec<Record>> {
     let (complete, result) = completion();
     let expected_saves = records.len();
     let expected_deletes = deletes.len();
@@ -216,7 +252,7 @@ pub(super) fn modify(
             },
         );
         operation.setModifyRecordsCompletionBlock(Some(&block));
-        database.addOperation(&operation);
+        enqueue(&operation);
         operation.into_super().into_super().into_super()
     });
     CloudKitRequest { operation, result }
@@ -310,3 +346,7 @@ pub(super) fn check_available() -> Result<(), StorageError> {
             .with_source("CloudKit zone sharing is unavailable on this OS version"))
     }
 }
+
+#[cfg(test)]
+#[path = "cloudkit_native_tests.rs"]
+mod tests;

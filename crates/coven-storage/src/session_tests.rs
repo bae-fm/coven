@@ -10,11 +10,7 @@ fn upload_sessions_encode_without_capacity_growth() {
                 namespace_id: "namespace".into(),
             },
         },
-        path: ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(1),
-            std::num::NonZeroU64::MIN,
-        ),
+        path: ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN),
         total: 42,
         confirmed: 0,
         part_size: 8 * 1024 * 1024,
@@ -33,7 +29,7 @@ fn upload_sessions_encode_without_capacity_growth() {
 }
 
 #[test]
-fn recorded_upload_refuses_positions_even_when_complete() {
+fn recorded_upload_refuses_floor_even_when_complete() {
     for state in [
         SessionState::Dropbox {
             id: SecretText::new("upload".into()),
@@ -46,7 +42,7 @@ fn recorded_upload_refuses_positions_even_when_complete() {
                     namespace_id: "namespace".into(),
                 },
             },
-            path: ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(1)),
+            path: ObjectPath::floor(STORE_ID),
             total: 1,
             confirmed: 1,
             part_size: 8 * 1024 * 1024,
@@ -63,11 +59,7 @@ fn recorded_upload_refuses_positions_even_when_complete() {
 fn recording(location: StorageConfig, state: SessionState, part_size: usize) -> UploadSession {
     UploadSession {
         location,
-        path: ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        ),
+        path: ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN),
         total: 16 * 1024 * 1024 + 1,
         confirmed: 0,
         part_size,
@@ -111,7 +103,7 @@ fn assert_invalid_recording(session: &UploadSession) {
 #[test]
 fn direct_deserialization_cannot_bypass_session_validation() {
     let mut session = s3_recording();
-    session.path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    session.path = ObjectPath::floor(STORE_ID);
     let bytes = serde_json::to_vec(&session).unwrap();
     assert!(serde_json::from_slice::<UploadSession>(&bytes).is_err());
 }

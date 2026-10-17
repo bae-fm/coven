@@ -1,6 +1,6 @@
 use super::*;
 use crate::providers::cloudkit::tests::live_zone;
-use coven_foundation::id_source::{DeviceId, IdSourceRef, StoreId, UuidIds};
+use coven_foundation::id_source::{IdSourceRef, StoreId, UuidIds};
 use std::io::BufRead;
 
 // Stderr prompts are the interactive test protocol, not diagnostic logs.
@@ -25,8 +25,8 @@ async fn cloudkit_live_sharing() {
                     .unwrap(),
             );
             let storage = StorageConnection::from_provider(native.clone());
-            let object = ObjectPath::positions(store, DeviceId(7));
-            storage.replace(&object, b"owner").await.unwrap();
+            let object = ObjectPath::floor(store);
+            storage.create(&object, b"owner").await.unwrap();
             let AccessGrant::Granted { invitation } = storage.grant_access(&email).await.unwrap()
             else {
                 panic!("CloudKit must grant an account");
@@ -65,9 +65,15 @@ async fn cloudkit_live_sharing() {
                 .await
                 .unwrap()
                 .eq_ignore_ascii_case(&email));
-            let object = ObjectPath::positions(store, DeviceId(7));
+            let object = ObjectPath::floor(store);
             assert_eq!(storage.read(&object).await.unwrap(), b"owner");
-            storage.replace(&object, b"recipient").await.unwrap();
+            storage
+                .replace(
+                    &storage.status(&object).await.unwrap().unwrap(),
+                    b"recipient",
+                )
+                .await
+                .unwrap();
             eprintln!("Tell the owner to enter accepted. Enter revoked after the owner saves access removal.");
             assert_eq!(
                 std::io::stdin().lock().lines().next().unwrap().unwrap(),

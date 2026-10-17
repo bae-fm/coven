@@ -17,7 +17,7 @@ impl MemoryStorageBuilder {
             config: location(CloudProvider::S3),
             clock: Arc::new(FixedClock::new(std::time::UNIX_EPOCH)),
             time_resolution: Duration::from_nanos(1),
-            single_limit: coven_format::store_log::MAX_STORE_LOG_OBJECT as u64,
+            single_limit: 4 * 1024 * 1024,
             part_size: 64 * 1024,
             listing_page: usize::MAX,
         }

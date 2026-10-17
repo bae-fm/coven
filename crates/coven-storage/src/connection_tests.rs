@@ -1,7 +1,6 @@
 use super::*;
 use crate::test_utils::MemoryStorage;
 use crate::test_utils::STORE_ID;
-use coven_foundation::id_source::DeviceId;
 
 #[tokio::test]
 async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
@@ -16,7 +15,7 @@ async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
             .location(StorageConfig::Dropbox { location })
             .build()
             .unwrap();
-        let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         storage.create(&path, b"retained").await.unwrap();
         for access in [
             OAuthAccess::Dropbox(DropboxAccess::AppFolder),
@@ -45,62 +44,18 @@ async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
 }
 
 #[tokio::test]
-async fn writer_discovery_never_reads_history() {
-    let storage = MemoryStorage::builder().build().unwrap();
-    let path = ObjectPath::store_log(STORE_ID, DeviceId(7), std::num::NonZeroU64::MIN);
-    storage.create(&path, b"entry").await.unwrap();
-    let before = storage.request_count();
-    assert_eq!(storage.list_writers(STORE_ID).await.unwrap(), [DeviceId(7)]);
-    assert_eq!(storage.request_count(), before + 1);
-    assert!(matches!(
-        storage.request_trace().last(),
-        Some(crate::test_utils::MemoryRequest::Other("list_writers"))
-    ));
-}
-
-#[tokio::test]
-async fn store_log_entries_never_use_recorded_sessions() {
+async fn floor_replacement_guards_preserve_the_previous_object() {
     let storage = MemoryStorage::builder()
         .transfer_limits(16, 4)
         .build()
         .unwrap();
-    let path = ObjectPath::store_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
-    assert!(matches!(
-        storage.begin_upload(&path, 4).await,
-        Err(error) if error.failure() == StorageFailure::InvalidPath
-    ));
-    assert_eq!(storage.request_count(), 0);
-    assert!(matches!(
-        storage.create(&path, &[1; 17]).await,
-        Err(error) if error.failure() == StorageFailure::SingleRequestTooLarge { size: 17, limit: 16 }
-    ));
-    assert_eq!(storage.request_count(), 0);
-    storage.create(&path, &[1; 16]).await.unwrap();
-    assert_eq!(storage.request_count(), 1);
-    let other = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
-    let session = storage.begin_upload(&other, 4).await.unwrap();
-    let mut recorded: serde_json::Value =
-        serde_json::from_slice(session.encode().unwrap().as_bytes()).unwrap();
-    recorded["path"] = serde_json::Value::String(path.as_str().to_owned());
-    assert!(matches!(
-        UploadSession::decode(&serde_json::to_vec(&recorded).unwrap()),
-        Err(error) if error.failure() == StorageFailure::InvalidPath
-    ));
-    storage.abort_upload(&session).await.unwrap();
-}
-
-#[tokio::test]
-async fn clock_replacement_guards_preserve_the_previous_object() {
-    let storage = MemoryStorage::builder()
-        .transfer_limits(16, 4)
-        .build()
-        .unwrap();
-    let path = ObjectPath::clock(STORE_ID, DeviceId(31));
-    storage.replace(&path, b"clock").await.unwrap();
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"floor").await.unwrap();
+    let previous = storage.status(&path).await.unwrap().unwrap();
     let before = storage.request_count();
     assert_eq!(
         storage
-            .replace(&path, &[0; 17])
+            .replace(&previous, &[0; 17])
             .await
             .unwrap_err()
             .failure(),
@@ -114,8 +69,8 @@ async fn clock_replacement_guards_preserve_the_previous_object() {
         Err(error) if error.failure() == StorageFailure::InvalidPath
     ));
     assert_eq!(storage.request_count(), before);
-    assert_eq!(storage.read(&path).await.unwrap(), b"clock");
-    let immutable = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+    assert_eq!(storage.read(&path).await.unwrap(), b"floor");
+    let immutable = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let session = storage.begin_upload(&immutable, 4).await.unwrap();
     let mut recorded: serde_json::Value =
         serde_json::from_slice(session.encode().unwrap().as_bytes()).unwrap();
@@ -165,7 +120,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         ),
     ] {
         let storage = MemoryStorage::builder().location(config).build().unwrap();
-        let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         session.location = StorageConfig::Dropbox {
             location: crate::DropboxLocation::SharedFolder {
@@ -192,24 +147,29 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
         .transfer_limits(16, 4)
         .build()
         .unwrap();
-    let path = ObjectPath::device_log(STORE_ID, DeviceId(31), std::num::NonZeroU64::MIN);
-    let positions = ObjectPath::positions(STORE_ID, DeviceId(31));
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    storage.create(&path, b"old slot").await.unwrap();
+    let previous = storage.status(&path).await.unwrap().unwrap();
+    let floor = ObjectPath::floor(STORE_ID);
+    storage.create(&floor, b"old floor").await.unwrap();
+    let floor_state = storage.status(&floor).await.unwrap().unwrap();
+    storage.delete(&path).await.unwrap();
     let mut session = storage.begin_upload(&path, 4).await.unwrap();
     let before = storage.request_count();
     for (error, expected) in [
         (
-            storage.replace(&path, &[0; 17]).await.err().unwrap(),
+            storage.replace(&previous, &[0; 17]).await.err().unwrap(),
             StorageFailure::InvalidPath,
         ),
         (
-            storage.replace(&positions, &[0; 17]).await.err().unwrap(),
+            storage.replace(&floor_state, &[0; 17]).await.err().unwrap(),
             StorageFailure::SingleRequestTooLarge {
                 size: 17,
                 limit: 16,
             },
         ),
         (
-            storage.begin_upload(&positions, 4).await.err().unwrap(),
+            storage.begin_upload(&floor, 4).await.err().unwrap(),
             StorageFailure::InvalidPath,
         ),
         (
@@ -243,7 +203,7 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
         assert_eq!(error.failure(), StorageFailure::SessionMismatch);
     }
     assert_eq!(storage.request_count(), before);
-    storage.replace(&positions, &[0; 16]).await.unwrap();
+    storage.replace(&floor_state, &[0; 16]).await.unwrap();
     assert_eq!(storage.request_count(), before + 1);
     storage.upload_part(&mut session, b"data").await.unwrap();
     storage.finish_upload(&mut session).await.unwrap();

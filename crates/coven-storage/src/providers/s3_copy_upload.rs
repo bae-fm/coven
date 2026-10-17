@@ -35,7 +35,7 @@ impl S3Storage {
         let token = match &session.state {
             SessionState::S3 { token, .. }
             | SessionState::S3Restart { token, .. }
-            | SessionState::S3Planned { token } => token,
+            | SessionState::S3Planned { token, .. } => token,
             _ => return Err(StorageFailure::SessionMismatch.into()),
         };
         self.upload_key(&session.path, token)
@@ -90,14 +90,16 @@ impl S3Storage {
     }
 
     /// Abort every native upload at a planned session's name: one its
-    /// initiation started before the reply was lost. A copy temporary's name
-    /// is the recording's own; a destination is the writing device's own
-    /// path, where only its earlier sessions for the same write upload (§4).
+    /// initiation started before the reply was lost. Only a private staging
+    /// name proves ownership; a shared destination does not (§4).
     pub(super) async fn abort_initiated(
         &self,
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
+        if self.settings.copy_publication.multipart().is_none() {
+            return Err(StorageFailure::SessionIdentityUnknown.into());
+        }
         let key = self.session_key(session)?;
         let mut markers: Option<(String, String)> = None;
         let mut seen = Pagination::new();
@@ -163,15 +165,7 @@ impl S3Storage {
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
         if self.settings.copy_publication.multipart().is_none() {
-            return match (self.completed(session).await, &session.state) {
-                // A planned session that never published starts over.
-                (Err(error), SessionState::S3Planned { .. })
-                    if error.failure() == StorageFailure::SessionExpired =>
-                {
-                    Ok(())
-                }
-                (result, _) => result,
-            };
+            return self.completed(session).await;
         }
         // NoSuchUpload leaves exactly one unknown: did assembly create the
         // temporary? If not, only this session's already-published object counts.
@@ -187,7 +181,7 @@ impl S3Storage {
             .map_err(s3_error)
         {
             Ok(response) => {
-                let (SessionState::S3 { token, .. } | SessionState::S3Planned { token }) =
+                let (SessionState::S3 { token, .. } | SessionState::S3Planned { token, .. }) =
                     &session.state
                 else {
                     return Err(StorageFailure::SessionMismatch.into());
@@ -326,13 +320,17 @@ impl S3Storage {
         let token = SecretText::new(self.ids.new_id().to_string());
         let temporary = self.create_temporary_key(path, bytes)?;
         let published = async {
-            self.client
+            let mut put = self
+                .client
                 .put_object()
                 .bucket(&self.bucket)
                 .key(&temporary)
                 .body(ByteStream::from(bytes.to_vec()))
-                .metadata("coven-upload", token.as_str())
-                .customize()
+                .metadata("coven-upload", token.as_str());
+            if path.is_replaceable() {
+                put = put.metadata("coven-revision", token.as_str());
+            }
+            put.customize()
                 .interceptor(publication.clone())
                 .send()
                 .await

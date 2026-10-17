@@ -34,7 +34,7 @@ async fn s3_member_key_lifecycle() {
     let scope = MintScope::new(store, "live-member", DeviceId(91), UuidIds.new_id());
     let owner = live.connect(None);
     // Another store's object, which the member key must not read.
-    let foreign = ObjectPath::device_log(other, DeviceId(92), NonZeroU64::MIN);
+    let foreign = ObjectPath::slot(other, NonZeroU64::MIN);
     owner
         .create(&foreign, b"another store's object")
         .await
@@ -184,7 +184,7 @@ async fn lifecycle(
     let checked = versioning::check(endpoint.as_ref(), profile.as_ref(), &versioning);
     println!("setup_versioning_check passed={}", checked.is_ok());
     checked.map_err(|error| StorageFailure::PermissionDenied.with_source(error))?;
-    let elsewhere = ObjectPath::device_log(other, DeviceId(93), NonZeroU64::MIN);
+    let elsewhere = ObjectPath::slot(other, NonZeroU64::MIN);
     refused(
         "write_other_store",
         member

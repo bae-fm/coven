@@ -8,7 +8,7 @@ pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 
 /// A create-once provider upload recorded by the caller's operation (§16.5, §18).
-/// Store-log entries, posted positions and clocks cannot have recorded sessions.
+/// The floor uses conditional replacement and cannot have a create-once session.
 ///
 /// Record it before sending parts and after each call, including failed calls:
 /// a publication conflict invalidates the native session even if abort fails.
@@ -84,6 +84,10 @@ pub(crate) enum SessionState {
     /// name (§4).
     S3Planned {
         token: SecretText,
+        /// True only while this process knows no initiation was attempted.
+        /// A restored journal cannot establish that fact.
+        #[serde(skip)]
+        unstarted: bool,
     },
     Dropbox {
         id: SecretText,
@@ -175,8 +179,7 @@ impl UploadSession {
     }
     /// Read a recording only if its provider, destination, state and progress agree.
     /// Validation covers the location, state variant, nonempty identifiers, part
-    /// counts and sizes, and confirmed byte offset; store-log entries and
-    /// replaceable paths are refused.
+    /// counts and sizes, and confirmed byte offset; replaceable paths are refused.
     /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let value: RecordedUploadSession = serde_json::from_slice(bytes)
@@ -185,7 +188,7 @@ impl UploadSession {
     }
     fn validate(&self) -> Result<(), StorageError> {
         self.location.validate()?;
-        if self.path.is_replaceable() || self.path.store_log_position().is_some() {
+        if self.path.is_replaceable() {
             return Err(StorageFailure::InvalidPath.into());
         }
         if self.part_size == 0
@@ -223,7 +226,7 @@ impl UploadSession {
                     return Err(StorageFailure::InvalidPart.into());
                 }
             }
-            SessionState::S3Planned { token } if provider == CloudProvider::S3 => {
+            SessionState::S3Planned { token, .. } if provider == CloudProvider::S3 => {
                 nonempty(token)?;
                 if self.confirmed != 0 {
                     return Err(StorageFailure::InvalidPart.into());

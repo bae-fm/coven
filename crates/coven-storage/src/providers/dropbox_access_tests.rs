@@ -409,11 +409,7 @@ mod app_folder_tests {
             .run()
             .await
             .unwrap();
-        let path = ObjectPath::device_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         assert!(storage.status(&path).await.unwrap().is_none());
         let mut upload = storage.begin_upload(&path, 4).await.unwrap();
         storage.upload_part(&mut upload, b"data").await.unwrap();
@@ -445,4 +441,117 @@ mod app_folder_tests {
         );
         assert_eq!(state.lock().unwrap().requests, 0);
     }
+}
+
+#[tokio::test]
+async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let storage = provider(&server.url);
+    storage.grant_access("member").await.unwrap();
+    for (failed, expected) in [
+        (
+            json!({".tag":"no_permission"}),
+            StorageFailure::PermissionDenied,
+        ),
+        (
+            json!({".tag":"access_error","access_error":{".tag":"not_a_member"}}),
+            StorageFailure::PermissionDenied,
+        ),
+        (json!({".tag":"team_folder"}), StorageFailure::Refused),
+    ] {
+        let body = json!({".tag":"failed","failed":failed});
+        state.lock().unwrap().removal_job = Some(RemovalJob {
+            member: "member".into(),
+            statuses: [body.clone()].into(),
+        });
+        let error = storage.revoke_access("member").await.err().unwrap();
+        assert_eq!(error.failure(), expected);
+        let StorageError::Provider { source, .. } = error else {
+            panic!("native removal failure discarded")
+        };
+        let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
+        assert_eq!(response.status(), 200);
+        assert_eq!(
+            serde_json::from_slice::<Value>(response.body()).unwrap(),
+            body
+        );
+        assert!(state.lock().unwrap().members.contains_key("member"));
+    }
+}
+
+#[derive(Default)]
+struct RemovalClock(Mutex<Vec<std::time::Duration>>);
+
+impl coven_foundation::clock::Clock for RemovalClock {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::SystemTime::UNIX_EPOCH
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.0.lock().unwrap().iter().sum()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.0.lock().unwrap().push(duration);
+        Box::pin(std::future::ready(()))
+    }
+}
+
+#[tokio::test]
+async fn asynchronous_removal_waits_for_publication_and_retries_after_completion() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let clock = Arc::new(RemovalClock::default());
+    let mut storage = provider(&server.url);
+    Arc::get_mut(&mut storage.provider).unwrap().session =
+        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
+    storage.grant_access("member").await.unwrap();
+    state.lock().unwrap().removal_job = Some(RemovalJob {
+        member: "member".into(),
+        statuses: [json!({".tag":"in_progress"}), json!({".tag":"complete"})].into(),
+    });
+    storage.revoke_access("member").await.unwrap();
+    storage.revoke_access("member").await.unwrap();
+    assert!(!state.lock().unwrap().members.contains_key("member"));
+    assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
+    assert_eq!(
+        *clock.0.lock().unwrap(),
+        [std::time::Duration::from_millis(1)]
+    );
+}
+
+#[tokio::test]
+async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+    let clock = Arc::new(RemovalClock::default());
+    let mut storage = provider(&server.url);
+    Arc::get_mut(&mut storage.provider).unwrap().session =
+        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
+    storage.grant_access("member").await.unwrap();
+    state.lock().unwrap().removal_job = Some(RemovalJob {
+        member: "member".into(),
+        statuses: [json!({".tag":"in_progress"})].into(),
+    });
+    let error = storage.revoke_access("member").await.err().unwrap();
+    assert_eq!(error.failure(), StorageFailure::Network);
+    let StorageError::Provider { source, .. } = error else {
+        panic!("timeout cause discarded")
+    };
+    assert_eq!(
+        source.downcast_ref::<std::io::Error>().unwrap().kind(),
+        std::io::ErrorKind::TimedOut
+    );
+    assert!(state.lock().unwrap().members.contains_key("member"));
+    // Status checks back off; one unit is a millisecond here.
+    assert_eq!(
+        *clock.0.lock().unwrap(),
+        [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_millis)
+    );
+    state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
+        [json!({".tag":"complete"})].into();
+    storage.revoke_access("member").await.unwrap();
+    assert!(!state.lock().unwrap().members.contains_key("member"));
 }

@@ -87,11 +87,7 @@ async fn fixture(
 }
 
 fn path() -> ObjectPath {
-    ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    )
+    ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)
 }
 
 fn conflict_code(gcs: bool) -> &'static str {
@@ -388,5 +384,81 @@ async fn single_put_conflict_remains_retryable_without_becoming_throttling() {
         storage.create(&path(), b"data").await.unwrap();
         assert_eq!(storage.read(&path()).await.unwrap(), b"data");
         assert_eq!(remote.lock().unwrap().next_upload, 0);
+    }
+}
+
+mod sequence {
+    use super::*;
+
+    #[tokio::test]
+    async fn floor_replacement_conflicts_and_lost_reply_preserve_the_accepted_revision() {
+        for profile in profile::PROFILES {
+            let state = Arc::new(Mutex::new(Remote {
+                gcs: profile.settings.signing == S3Signing::GoogleHmac,
+                ..Remote::default()
+            }));
+            let server =
+                TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+            let storage = profile_provider(&server.url, profile.settings);
+            let path = ObjectPath::floor(crate::test_utils::STORE_ID);
+            storage.create(&path, b"floor one").await.unwrap();
+            let first = storage.status(&path).await.unwrap().unwrap();
+            storage.replace(&first, b"floor two").await.unwrap();
+            assert_eq!(
+                storage
+                    .replace(&first, b"stale floor")
+                    .await
+                    .unwrap_err()
+                    .failure(),
+                StorageFailure::Conflict
+            );
+            assert_eq!(storage.read(&path).await.unwrap(), b"floor two");
+            let second = storage.status(&path).await.unwrap().unwrap();
+            state.lock().unwrap().lose_create_reply = true;
+            assert_eq!(
+                storage
+                    .replace(&second, b"floor three")
+                    .await
+                    .unwrap_err()
+                    .failure(),
+                StorageFailure::Network
+            );
+            assert_eq!(
+                storage
+                    .replace(&second, b"stale retry")
+                    .await
+                    .unwrap_err()
+                    .failure(),
+                StorageFailure::Conflict
+            );
+            let third = storage.read_object(&path, None).await.unwrap();
+            assert_eq!(third.bytes, b"floor three");
+            assert_ne!(second.revision, third.metadata.revision);
+            assert_ne!(second.replace_token, third.metadata.replace_token);
+        }
+    }
+
+    #[tokio::test]
+    async fn slot_create_once_refuses_equal_and_different_bytes_without_replacement() {
+        for profile in profile::PROFILES {
+            let state = Arc::new(Mutex::new(Remote {
+                gcs: profile.settings.signing == S3Signing::GoogleHmac,
+                ..Remote::default()
+            }));
+            let server =
+                TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+            let storage = profile_provider(&server.url, profile.settings);
+            let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
+            storage.create(&path, b"claim one").await.unwrap();
+            let first = storage.status(&path).await.unwrap().unwrap();
+            for bytes in [b"claim one", b"claim two"] {
+                assert_eq!(
+                    storage.create(&path, bytes).await.unwrap_err().failure(),
+                    StorageFailure::AlreadyExists
+                );
+                assert_eq!(storage.read(&path).await.unwrap(), b"claim one");
+                assert_eq!(storage.status(&path).await.unwrap().unwrap(), first);
+            }
+        }
     }
 }

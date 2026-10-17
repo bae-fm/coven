@@ -137,10 +137,23 @@ pub(super) async fn endpoint(
             if arg["mode"] == "add" && state.objects.contains_key(&path) {
                 return error("path/conflict/file/...");
             }
+            if arg["mode"][".tag"] == "update" {
+                let current = state.revisions.get(&path).map(u64::to_string);
+                if !state.objects.contains_key(&path)
+                    || current.as_deref() != arg["mode"]["update"].as_str()
+                {
+                    return error("path/conflict/file/...");
+                }
+            } else {
+                assert_eq!(arg["mode"], "add");
+            }
             assert_eq!(arg["autorename"], false);
             assert_eq!(arg["strict_conflict"], true);
             *state.revisions.entry(path.clone()).or_insert(0) += 1;
             state.objects.insert(path.clone(), body.to_vec());
+            if std::mem::take(&mut state.fail_reply) {
+                return response(503, "{}");
+            }
             reply(file_metadata(&path, &body, &state))
         }
         "/2/files/download" => {
@@ -517,11 +530,7 @@ async fn abort_retries_a_lost_close_and_accepts_an_expired_session() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().fail_reply = true;
     assert_eq!(
@@ -540,11 +549,7 @@ async fn abort_uses_the_remote_offset_after_a_lost_part_reply() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     state.lock().unwrap().fail_reply = true;
     assert_eq!(
@@ -568,11 +573,7 @@ async fn abort_does_not_remove_an_upload_published_before_a_lost_reply() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     state.lock().unwrap().fail_reply = true;
@@ -586,11 +587,7 @@ async fn create_uploads_an_oversized_write_in_parts() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let mut storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     assert_eq!(storage.single_request_limit(), 150 * 1024 * 1024);
     Arc::get_mut(&mut storage.provider)
         .unwrap()
@@ -622,119 +619,6 @@ async fn listing_retains_server_time_and_size_across_pages_and_retries() {
         .await;
 }
 
-#[tokio::test]
-async fn asynchronous_removal_keeps_the_native_failure_and_previous_access() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let storage = provider(&server.url);
-    storage.grant_access("member").await.unwrap();
-    for (failed, expected) in [
-        (
-            json!({".tag":"no_permission"}),
-            StorageFailure::PermissionDenied,
-        ),
-        (
-            json!({".tag":"access_error","access_error":{".tag":"not_a_member"}}),
-            StorageFailure::PermissionDenied,
-        ),
-        (json!({".tag":"team_folder"}), StorageFailure::Refused),
-    ] {
-        let body = json!({".tag":"failed","failed":failed});
-        state.lock().unwrap().removal_job = Some(RemovalJob {
-            member: "member".into(),
-            statuses: [body.clone()].into(),
-        });
-        let error = storage.revoke_access("member").await.err().unwrap();
-        assert_eq!(error.failure(), expected);
-        let StorageError::Provider { source, .. } = error else {
-            panic!("native removal failure discarded")
-        };
-        let response = source.downcast_ref::<http::ProviderResponse>().unwrap();
-        assert_eq!(response.status(), 200);
-        assert_eq!(
-            serde_json::from_slice::<Value>(response.body()).unwrap(),
-            body
-        );
-        assert!(state.lock().unwrap().members.contains_key("member"));
-    }
-}
-
-#[derive(Default)]
-struct RemovalClock(Mutex<Vec<std::time::Duration>>);
-
-impl coven_foundation::clock::Clock for RemovalClock {
-    fn now(&self) -> std::time::SystemTime {
-        std::time::SystemTime::UNIX_EPOCH
-    }
-    fn elapsed(&self) -> std::time::Duration {
-        self.0.lock().unwrap().iter().sum()
-    }
-    fn sleep(
-        &self,
-        duration: std::time::Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        self.0.lock().unwrap().push(duration);
-        Box::pin(std::future::ready(()))
-    }
-}
-
-#[tokio::test]
-async fn asynchronous_removal_waits_for_publication_and_retries_after_completion() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let clock = Arc::new(RemovalClock::default());
-    let mut storage = provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().session =
-        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
-    storage.grant_access("member").await.unwrap();
-    state.lock().unwrap().removal_job = Some(RemovalJob {
-        member: "member".into(),
-        statuses: [json!({".tag":"in_progress"}), json!({".tag":"complete"})].into(),
-    });
-    storage.revoke_access("member").await.unwrap();
-    storage.revoke_access("member").await.unwrap();
-    assert!(!state.lock().unwrap().members.contains_key("member"));
-    assert_eq!(state.lock().unwrap().sharing_mutations, ["add", "remove"]);
-    assert_eq!(
-        *clock.0.lock().unwrap(),
-        [std::time::Duration::from_millis(1)]
-    );
-}
-
-#[tokio::test]
-async fn asynchronous_removal_times_out_without_hiding_remaining_access() {
-    let state = Arc::new(Mutex::new(Remote::default()));
-    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
-    let clock = Arc::new(RemovalClock::default());
-    let mut storage = provider(&server.url);
-    Arc::get_mut(&mut storage.provider).unwrap().session =
-        crate::providers::tests::session_with_clock(PROVIDER, clock.clone());
-    storage.grant_access("member").await.unwrap();
-    state.lock().unwrap().removal_job = Some(RemovalJob {
-        member: "member".into(),
-        statuses: [json!({".tag":"in_progress"})].into(),
-    });
-    let error = storage.revoke_access("member").await.err().unwrap();
-    assert_eq!(error.failure(), StorageFailure::Network);
-    let StorageError::Provider { source, .. } = error else {
-        panic!("timeout cause discarded")
-    };
-    assert_eq!(
-        source.downcast_ref::<std::io::Error>().unwrap().kind(),
-        std::io::ErrorKind::TimedOut
-    );
-    assert!(state.lock().unwrap().members.contains_key("member"));
-    // Status checks back off; one unit is a millisecond here.
-    assert_eq!(
-        *clock.0.lock().unwrap(),
-        [1, 2, 4, 8, 16, 32].map(std::time::Duration::from_millis)
-    );
-    state.lock().unwrap().removal_job.as_mut().unwrap().statuses =
-        [json!({".tag":"complete"})].into();
-    storage.revoke_access("member").await.unwrap();
-    assert!(!state.lock().unwrap().members.contains_key("member"));
-}
-
 #[path = "dropbox_access_tests.rs"]
 mod access_tests;
 
@@ -743,11 +627,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let owner = provider(&server.url);
-    let path = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     owner.create(&path, b"first").await.unwrap();
     let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
         panic!()
@@ -848,11 +728,7 @@ async fn missing_namespace_and_revoked_membership_keep_the_native_cause() {
         }))
         .await;
         let storage = provider(&server.url);
-        let path = ObjectPath::store_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         for error in [
             storage
                 .list(&ObjectPrefix::all(STORE_ID))
@@ -907,16 +783,8 @@ async fn stale_abort_cannot_close_another_native_session() {
     let state = Arc::new(Mutex::new(Remote::default()));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let first = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let second = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(32),
-        std::num::NonZeroU64::MIN,
-    );
+    let first = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    let second = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
     let mut old = storage.begin_upload(&first, 4).await.unwrap();
     let mut next = storage.begin_upload(&second, 4).await.unwrap();
     assert_ne!(
@@ -963,4 +831,70 @@ async fn throttling_is_one_request_then_a_cooldown_for_the_whole_connection() {
     );
     assert!(rate_limited(storage.list(&prefix).await.unwrap_err()));
     assert_eq!(hits.load(SeqCst), 1);
+}
+
+mod sequence {
+    use super::*;
+
+    #[tokio::test]
+    async fn floor_replacement_conflicts_and_lost_reply_preserve_the_accepted_revision() {
+        let state = Arc::new(Mutex::new(Remote::default()));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = provider(&server.url);
+        let path = ObjectPath::floor(crate::test_utils::STORE_ID);
+        storage.create(&path, b"floor one").await.unwrap();
+        let first = storage.status(&path).await.unwrap().unwrap();
+        storage.replace(&first, b"floor two").await.unwrap();
+        assert_eq!(
+            storage
+                .replace(&first, b"stale floor")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Conflict
+        );
+        assert_eq!(storage.read(&path).await.unwrap(), b"floor two");
+        let second = storage.status(&path).await.unwrap().unwrap();
+        state.lock().unwrap().fail_reply = true;
+        assert_eq!(
+            storage
+                .replace(&second, b"floor three")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Network
+        );
+        assert_eq!(
+            storage
+                .replace(&second, b"stale retry")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Conflict
+        );
+        let third = storage.read_object(&path, None).await.unwrap();
+        assert_eq!(third.bytes, b"floor three");
+        assert_ne!(second.revision, third.metadata.revision);
+        assert_ne!(second.replace_token, third.metadata.replace_token);
+    }
+
+    #[tokio::test]
+    async fn slot_create_once_refuses_equal_and_different_bytes_without_replacement() {
+        let state = Arc::new(Mutex::new(Remote::default()));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = provider(&server.url);
+        let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
+        storage.create(&path, b"claim one").await.unwrap();
+        let first = storage.status(&path).await.unwrap().unwrap();
+        for bytes in [b"claim one", b"claim two"] {
+            assert_eq!(
+                storage.create(&path, bytes).await.unwrap_err().failure(),
+                StorageFailure::AlreadyExists
+            );
+            assert_eq!(storage.read(&path).await.unwrap(), b"claim one");
+            assert_eq!(storage.status(&path).await.unwrap().unwrap(), first);
+        }
+    }
 }

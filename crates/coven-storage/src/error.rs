@@ -38,8 +38,8 @@ pub enum StorageFailure {
     RegionMismatch,
     /// A member key coven made could list beyond its store's prefix (§4).
     KeyBeyondStore,
-    /// Setting up a store that never had storage found another device's
-    /// creation marker: another installation of the store claimed this
+    /// Setting up a store that never had storage found another installation's
+    /// creation slot: another installation of the store claimed this
     /// location first (§10). Restore or join it instead.
     StoreExists,
     /// S3 rejected the device clock after one retry with the offset its
@@ -77,9 +77,11 @@ pub enum StorageFailure {
     SessionMismatch,
     /// The recorded upload expired or a publication conflict invalidated it.
     SessionExpired,
+    /// The native id of an unresolved S3 initiation cannot be proven to belong to this session.
+    SessionIdentityUnknown,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
-    /// A posted-positions replacement exceeds this provider's single-request limit.
+    /// A floor replacement exceeds this provider's single-request limit.
     SingleRequestTooLarge {
         /// Encrypted body length in bytes.
         size: u64,
@@ -149,6 +151,21 @@ pub enum StorageError {
 }
 
 impl StorageError {
+    /// Native destination conflicts mean a failed condition during replacement.
+    pub(crate) fn replacement(mut self) -> Self {
+        match &mut self {
+            Self::Failure(failure)
+            | Self::Caused { failure, .. }
+            | Self::Provider { failure, .. }
+                if *failure == StorageFailure::AlreadyExists =>
+            {
+                *failure = StorageFailure::Conflict
+            }
+            _ => {}
+        }
+        self
+    }
+
     /// What the app can do about this failure.
     pub fn failure(&self) -> StorageFailure {
         match self {
@@ -211,6 +228,8 @@ pub enum StorageCheck {
     Create,
     /// Refuse a second create at the same path.
     CreateOnce,
+    /// Replace the observed object and refuse its stale revision without changing bytes.
+    ConditionalReplace,
     /// Read the original bytes in full.
     Read,
     /// Read exactly an interior byte range.

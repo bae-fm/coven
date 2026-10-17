@@ -83,12 +83,28 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         Ok(listing.finish())
     }
 
+    pub(crate) async fn replace_object(
+        &self,
+        previous: &StoredObject,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        self.cooling()?;
+        previous.check(&previous.path)?;
+        crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
+        let result = self
+            .provider
+            .replace(&self.publication(&previous.path)?, previous, bytes)
+            .await;
+        self.observed(result.map_err(StorageError::replacement))
+            .await
+    }
+
     pub(crate) async fn begin_upload_checked(
         &self,
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() || path.store_log_position().is_some() {
+        if path.is_replaceable() {
             return Err(StorageFailure::InvalidPath.into());
         }
         if total == 0 {
@@ -186,19 +202,11 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         .await;
         self.observed(created).await
     }
-    async fn replace(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
-        self.cooling()?;
-        let result = async {
-            if !path.is_replaceable() {
-                return Err(StorageFailure::InvalidPath.into());
-            }
-            crate::transfer::check_single_request(bytes.len() as u64, self.single_request_limit())?;
-            self.provider
-                .replace(&self.publication(path)?, path, bytes)
-                .await
+    async fn replace(&self, previous: &StoredObject, bytes: &[u8]) -> Result<(), StorageError> {
+        if !previous.path.is_replaceable() {
+            return Err(StorageFailure::InvalidPath.into());
         }
-        .await;
-        self.observed(result).await
+        self.replace_object(previous, bytes).await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         self.cooling()?;
@@ -234,13 +242,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         self.cooling()?;
         self.observed(self.list_checked(prefix).await).await
     }
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
-        self.cooling()?;
-        self.observed(self.provider.list_writers(store).await).await
-    }
+
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.cooling()?;
         self.observed(self.provider.delete(path).await).await
@@ -277,7 +279,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         let result = async {
             invitation.check(&self.config())?;
             self.provider.join(invitation).await?;
-            self.list_writers(store).await?;
+            self.status(&ObjectPath::floor(store)).await?;
             Ok(())
         }
         .await;

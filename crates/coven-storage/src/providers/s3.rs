@@ -204,7 +204,7 @@ impl S3Storage {
         publication: &PublicationRequest,
         path: &ObjectPath,
         bytes: &[u8],
-        create: bool,
+        expected: Option<&str>,
     ) -> Result<(), StorageError> {
         let mut request = self
             .client
@@ -215,14 +215,25 @@ impl S3Storage {
         if path.is_replaceable() && self.settings.revision == S3Revision::ETag {
             request = request.metadata("coven-revision", self.ids.new_id().to_string());
         }
-        let condition = self.settings.single_put;
+        let condition = match expected {
+            None => {
+                let (name, value) = self.settings.single_put.header();
+                (name, value.to_owned())
+            }
+            Some(token) => (
+                match self.settings.revision {
+                    S3Revision::ETag => "if-match",
+                    S3Revision::Generation => "x-goog-if-generation-match",
+                },
+                token.to_owned(),
+            ),
+        };
         request
             .customize()
             .mutate_request(move |request| {
-                if create {
-                    let (name, value) = condition.header();
-                    request.headers_mut().insert(name, value);
-                }
+                request
+                    .headers_mut()
+                    .insert(condition.0, condition.1.clone());
             })
             .interceptor(publication.clone())
             .send()
@@ -243,7 +254,8 @@ impl S3Storage {
         Ok(())
     }
     async fn confirm_published(&self, session: &UploadSession) -> Result<(), StorageError> {
-        let (SessionState::S3 { token, .. } | SessionState::S3Planned { token }) = &session.state
+        let (SessionState::S3 { token, .. } | SessionState::S3Planned { token, .. }) =
+            &session.state
         else {
             return Err(StorageFailure::SessionMismatch.into());
         };
@@ -346,17 +358,20 @@ impl ProviderOps for S3Storage {
                 self.create_by_copy(publication, path, bytes, condition)
                     .await?
             }
-            None => self.put(publication, path, bytes, true).await?,
+            None => self.put(publication, path, bytes, None).await?,
         }
         Ok(None)
     }
     async fn replace(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        self.put(publication, path, bytes, false).await
+        let path = &previous.path;
+        self.put(publication, path, bytes, Some(&previous.replace_token))
+            .await
+            .map_err(StorageError::replacement)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         let mut request = self
@@ -439,7 +454,7 @@ impl ProviderOps for S3Storage {
                 let stored_at = crate::providers::http::storage_time(
                     aws_sdk_s3::primitives::DateTime::from_secs(stored_at.secs()),
                 )?;
-                if path.is_replaceable() {
+                if path.is_replaceable() || self.settings.revision == S3Revision::Generation {
                     // ListObjectsV2 has neither native versions nor user metadata.
                     // Exact status supplies the replacement revision; an intervening
                     // deletion is absence, while a failed lookup fails the listing.
@@ -455,6 +470,8 @@ impl ProviderOps for S3Storage {
                     listing.insert(StoredObject {
                         object_id: key.into(),
                         revision: metadata::required(object.e_tag(), "S3 omitted ETag")?.into(),
+                        replace_token: metadata::required(object.e_tag(), "S3 omitted ETag")?
+                            .into(),
                         path,
                         size,
                         stored_at,
@@ -471,12 +488,7 @@ impl ProviderOps for S3Storage {
         }
         Ok(())
     }
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, StorageError> {
-        self.writer_folders(store).await
-    }
+
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
         self.delete_key(&path.under(&self.prefix)).await
     }
@@ -508,7 +520,10 @@ impl ProviderOps for S3Storage {
             total,
             confirmed: 0,
             part_size,
-            state: SessionState::S3Planned { token },
+            state: SessionState::S3Planned {
+                token,
+                unstarted: true,
+            },
         })
     }
     async fn resume_upload(
@@ -521,12 +536,27 @@ impl ProviderOps for S3Storage {
                 .require_restart(publication, session, StorageFailure::SessionExpired.into())
                 .await;
         }
-        if matches!(session.state, SessionState::S3Planned { .. }) {
-            // An upload initiated under the recording's name, whose reply
-            // and later recordings were lost, is aborted; a temporary it
-            // assembled still publishes, as a completed upload's does.
+        if let SessionState::S3Planned { unstarted, .. } = &session.state {
+            if *unstarted {
+                return Ok(());
+            }
+            if self.settings.copy_publication.multipart().is_none() {
+                return self
+                    .completed(session)
+                    .await
+                    .map_err(|error| match error.failure() {
+                        StorageFailure::SessionExpired | StorageFailure::AlreadyExists => {
+                            StorageFailure::SessionIdentityUnknown.with_source(error)
+                        }
+                        _ => error,
+                    });
+            }
             self.abort_initiated(publication, session).await?;
-            return self.recover_completed_upload(publication, session).await;
+            self.recover_completed_upload(publication, session).await?;
+            if let SessionState::S3Planned { unstarted, .. } = &mut session.state {
+                *unstarted = true;
+            }
+            return Ok(());
         }
         let id = SecretText::new(self.upload_id(session)?.to_owned());
         let mut marker = None;
@@ -607,7 +637,11 @@ impl ProviderOps for S3Storage {
         if matches!(session.state, SessionState::S3Restart { .. }) {
             return Err(StorageFailure::SessionExpired.into());
         }
-        if let SessionState::S3Planned { token } = &session.state {
+        if let SessionState::S3Planned { token, unstarted } = &mut session.state {
+            if !*unstarted {
+                return Err(StorageFailure::SessionIdentityUnknown.into());
+            }
+            *unstarted = false;
             let token = token.clone();
             let id = self
                 .initiate(publication, &self.session_key(session)?, &token)
@@ -730,7 +764,10 @@ impl ProviderOps for S3Storage {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        if matches!(session.state, SessionState::S3Planned { .. }) {
+        if let SessionState::S3Planned { unstarted, .. } = &session.state {
+            if *unstarted {
+                return Ok(());
+            }
             let aborted = self.abort_initiated(publication, session).await;
             // Without a copy the upload's name is the destination itself.
             if self.settings.copy_publication.multipart().is_none() {

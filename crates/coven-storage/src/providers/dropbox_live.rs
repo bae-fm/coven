@@ -18,7 +18,7 @@ use crate::*;
 use coven_format::value::StorageTime;
 use coven_foundation::{
     clock::{ClockRef, SystemClock},
-    id_source::{DeviceId, IdSource, StoreId, UuidIds},
+    id_source::{IdSource, StoreId, UuidIds},
 };
 use reqwest::Method;
 use serde_json::{json, Value};
@@ -231,7 +231,7 @@ impl Live {
     }
 
     fn path(&self, number: u64) -> ObjectPath {
-        ObjectPath::device_log(self.store, DeviceId(31), number.try_into().unwrap())
+        ObjectPath::slot(self.store, number.try_into().unwrap())
     }
 }
 

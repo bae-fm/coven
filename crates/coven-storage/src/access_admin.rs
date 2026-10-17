@@ -1,6 +1,6 @@
 //! Making and deleting members' S3 keys with the storage account's admin
 //! access (§4, §13). Admin credentials live in memory for one operation; they
-//! are never logged, stored, or put in the store log or invites.
+//! are never logged, stored, or put in the sequence or invites.
 
 use crate::{S3Credentials, StorageError};
 use async_trait::async_trait;

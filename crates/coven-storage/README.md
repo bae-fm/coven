@@ -2,8 +2,8 @@
 
 Encrypted object storage for S3, Dropbox, OneDrive and native
 CloudKit on Apple platforms. This crate owns provider requests, transfer sessions, account
-sharing and recipient acceptance. Sync owns writers, member/invite accounting,
-retention eligibility and adjacent-chunk grouping.
+sharing and recipient acceptance. Sync owns sequence claims, member/invite accounting, retention eligibility
+and adjacent-chunk grouping.
 Credentials and session recordings are supplied by owners; this crate does not
 commit key custody or database state.
 
@@ -13,12 +13,12 @@ Every path and listing prefix begins with the canonical store UUID. Stores can
 share a provider location without sharing object names, except on an S3
 service whose member keys reach a whole bucket (R2, and every custom or
 detected profile): there a store has the bucket to itself, at an empty base
-prefix, and creating it refuses a bucket holding anything else (§4). Every path has one writer. `create` refuses an occupied path with
+prefix, and creating it refuses a bucket holding anything else (§4). Writers compete for shared sequence slots. `create` refuses an occupied path with
 `AlreadyExists`; the caller counts a retry as stored only after comparing the
-occupant's complete bytes (§10). Only posted
-positions and per-device clock objects can be replaced. Files use foundation
-`FileId` UUIDs. Prefixes include
-all device logs and all store-log entries. A range is half-open and must fit
+occupant's complete bytes (§6). Only `<store>/floor` can be replaced, conditioned
+on the fetched native revision; a stale condition returns `Conflict`. Slots use
+`<store>/seq/<n>` and exact reads. Files use foundation `FileId` UUIDs. Listings
+serve file scans and provider setup, not sequence discovery. A range is half-open and must fit
 inside the complete object; callers may combine neighbouring encrypted chunks
 in a request up to 1 MiB.
 
@@ -30,8 +30,9 @@ adapter routing thresholds, not live measurements of server enforcement.
 Larger creates use
 resumable or multipart transfer for every object family, including writes and
 snapshots. Transfer failure aborts the unfinished session; `StorageError::Cleanup`
-retains both causes if abort fails too. Positions and clock objects use one request; an
-oversized replacement returns `SingleRequestTooLarge`.
+retains both causes if abort fails too. Floor replacements use one conditional request; an oversized replacement
+returns `SingleRequestTooLarge` before any mutation. This is a provider transfer
+limit, not a format bound.
 For crash continuation, callers begin a session, commit its secret
 recording, and retain the bytes. Resume asks the provider for confirmed progress;
 `restart_upload` begins a new session at the same destination and total length
@@ -39,9 +40,12 @@ after expiry, with zero confirmed bytes; a completed session cannot restart.
 Decoding validates the provider, location, state variant, nonempty identifiers,
 part counts/sizes and confirmed offset. A session for another location is
 refused before a request.
-Sessions cannot target positions or clock objects. Lost completion replies are checked against
+Sessions cannot target the floor. Lost completion replies are checked against
 the immutable destination or the provider's publication identity. Abort accepts
-already closed or absent sessions and preserves published objects.
+already closed or absent sessions and preserves published objects. An S3
+recording without its native upload ID can recover or abort only its own private
+staging path; at a shared destination it returns `SessionIdentityUnknown` and
+retains the recording. It never aborts another claimant’s upload.
 OneDrive records a temporary UUID under `<store>/.coven-uploads/`, uploads there,
 then publishes with a conflict-refusing server-side copy and waits for its monitor.
 Successful and definitively refused copies delete the temporary; failed deletion
@@ -55,12 +59,13 @@ the top-level `lastModifiedDateTime`, CloudKit the publication record's server
 time, and S3 `LastModified`. OneDrive copy preserves the temporary's creation
 time, so its modification time records publication. AWS's native multipart
 timestamp records initiation and remains a publication-time limitation (§4).
-Writes are at most 1 GB (§6), below S3's 5 GiB single-request limit, so their
-retention age does not depend on multipart completion time.
+Writes slots can exceed the single-request limit; a provider profile must supply
+complete-publication time through conditional completion or conditional copy.
 [AWS metadata documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html).
 
-Setup reconnects using the store's known creation-entry path and authenticates
-its contents before committing the connection. Other stores and unrelated root
+Bootstrap reads slot 1 or the floor's authenticated store snapshot before
+committing the connection. The storage join checks exact floor status without
+listing a device directory; the floor may be absent before retention. Other stores and unrelated root
 content are outside the store's namespace. Provider folders inside that namespace
 must be ancestors in coven's layout; empty layout folders left by interrupted
 uploads contain no stored objects. The provider check removes its test object
@@ -72,11 +77,13 @@ device under §15. A refusal retains its native cause.
 ## Provider operations and test evidence
 
 Each provider has a sibling `_tests.rs` suite. HTTP providers use local servers;
-CloudKit tests its real naming, metadata and NSError conversions, with ignored
+CloudKit tests its native conditional operation construction, payloads, completion
+callbacks, naming, metadata and NSError conversions, with ignored
 [signed-host conformance tests](cloudkit-live.md) for framework operations. The shared conformance suite exercises
-creation and identical retries, immutable replacement refusal, positions and clocks,
+slot creation and identical retries, immutable replacement refusal, floor
+conditional updates and stale revisions,
 whole and range reads, prefix listing, repeated deletion, and independent stores
-using the same device and entry numbers in one location.
+using the same slot numbers in one location.
 Provider-specific suites exercise recorded sessions, lost replies, expiry,
 sharing authority and error causes. Passing a stub does not prove a provider's
 server-side guarantee.
@@ -95,10 +102,10 @@ environment.
 
 | Provider | Objects and listing | Recorded uploads | Sharing and recipient access |
 | --- | --- | --- | --- |
-| [S3](src/providers/s3.rs) | Profile-selected conditional PUT, unconditional positions/clock PUT, `GetObject`/Range, paged listing V2 or V1, `DeleteObject`. R2 ignores checksums without stated scope. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion (AWS/R2) or conditional copy from a recorded temporary (GCS), and HEAD recovery. | Explicit member access key; grant/sign-out return console instructions; deletion uses pending key subjects. With admin access the profile's minter makes and deletes member keys ([`s3_minting.rs`](src/providers/s3_minting.rs); AWS and SeaweedFS IAM in [`s3_iam.rs`](src/providers/s3_iam.rs), GCS service accounts in [`s3_gcs_keys.rs`](src/providers/s3_gcs_keys.rs), R2 account tokens in [`s3_r2_keys.rs`](src/providers/s3_r2_keys.rs), RustFS service accounts in [`s3_rustfs_keys.rs`](src/providers/s3_rustfs_keys.rs)). No credential discovery. |
-| [Dropbox](src/providers/dropbox.rs) | App-folder-relative or namespace-scoped strict add or overwrite, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | App folders reject sharing. Shared namespaces use owner checks, direct/inherited member pages, viewer updates and asynchronous removal. Recipient mounts the invited shared folder. |
-| [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, positions/clock PUT, preauthenticated download/Range without bearer, recursive paged children excluding temporaries, delete. | Recorded temporary UUID and native upload URL, bounded/multiple missing ranges, conditional copy and monitor, immutable-byte recovery verification; cancellation and temporary deletion. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
-| [CloudKit](src/providers/cloudkit.rs) | Canonical paths as record names in a custom zone; create-once and replacement save policies, bounded CKAsset reads, paged prefix queries and server publication dates. | Recorded session UUID and 8 MiB asset parts; each part and confirmed boundary saved atomically; destination creation and session publication saved atomically. | Current account compared with zone owner; private read/write zone CKShare, participant removal, share metadata validation and native acceptance. |
+| [S3](src/providers/s3.rs) | Profile-selected conditional PUT, floor PUT with the observed ETag or generation, `GetObject`/Range, paged listing V2 or V1, `DeleteObject`. R2 ignores checksums without stated scope. | Native multipart ID, part ETags and unique publication metadata; paged `ListParts`, conditional completion (AWS/R2) or conditional copy from a recorded temporary (GCS), and HEAD recovery. | Explicit member access key; grant/sign-out return console instructions; deletion uses pending key subjects. With admin access the profile's minter makes and deletes member keys ([`s3_minting.rs`](src/providers/s3_minting.rs); AWS and SeaweedFS IAM in [`s3_iam.rs`](src/providers/s3_iam.rs), GCS service accounts in [`s3_gcs_keys.rs`](src/providers/s3_gcs_keys.rs), R2 account tokens in [`s3_r2_keys.rs`](src/providers/s3_r2_keys.rs), RustFS service accounts in [`s3_rustfs_keys.rs`](src/providers/s3_rustfs_keys.rs)). No credential discovery. |
+| [Dropbox](src/providers/dropbox.rs) | App-folder-relative or namespace-scoped strict add or revision-conditioned update, download/Range, recursive paged listing, delete. | Start/append/finish, offset recovery, immutable-byte completion verification; close for cancellation. | App folders reject sharing. Shared namespaces use owner checks, direct/inherited member pages, viewer updates and asynchronous removal. Recipient mounts the invited shared folder. |
+| [OneDrive](src/providers/onedrive.rs) | Path parents, conflict-refusing content PUT, floor PUT with If-Match, preauthenticated download/Range without bearer, recursive paged children excluding temporaries, delete. | Recorded temporary UUID and native upload URL, bounded/multiple missing ranges, conditional copy and monitor, immutable-byte recovery verification; cancellation and temporary deletion. | Account-drive ownership check, permission pages and account identity resolution; only exclusive target-account permissions deleted. Invite carries native share token for recipient redemption. |
+| [CloudKit](src/providers/cloudkit.rs) | Canonical paths as record names in a custom zone; create-once and retained-change-tag replacement, bounded CKAsset reads, paged prefix queries and server publication dates. | Recorded session UUID and 8 MiB asset parts; each part and confirmed boundary saved atomically; destination creation and session publication saved atomically. | Current account compared with zone owner; private read/write zone CKShare, participant removal, share metadata validation and native acceptance. |
 
 OAuth uses each device's account and one presenter-based flow. The presenter
 opens an authorization URL and returns the complete redirect or cancellation;

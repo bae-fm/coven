@@ -2,9 +2,8 @@
 
 The ignored `providers::cloudkit::tests::cloudkit_live` test calls the real adapter.
 It creates an isolated custom zone in `iCloud.fm.bae.desktop`, exercises create-once,
-exact status, publication metadata, position and clock replacement revisions,
-ranges, recorded multipart continuation, paginated directory queries, writer
-discovery and deletion. It keeps incomplete uploads pending while checking
+exact status, publication metadata, conditional floor replacement revisions,
+ranges, recorded multipart continuation, paginated directory queries and deletion. It keeps incomplete uploads pending while checking
 listings, puts unrelated objects in the same zone and a second zone, waits one
 hour before checking completeness, and deletes both test zones after success.
 It is never part of an ordinary cargo test run.
@@ -93,13 +92,13 @@ These are instructions for a later live run; preparation does not execute them.
 
 The selected container's Development schema must allow these record types and
 fields. CloudKit creates types/fields while saving in Development; use CloudKit
-Console to make the directory and log-number fields below queryable before
+Console to make the directory fields below queryable before
 the listing assertions.
 The adapter cannot create indexes through the record framework API.
 
 | Record type | Fields |
 | --- | --- |
-| `CovenObject` | `path: String`, `size: String`, `data: Asset`, `upload: String`, `directory1: String` (queryable), `directory2: String` (queryable), `directory3: String` (queryable), `directory4: String` (queryable), `number: String` (queryable) |
+| `CovenObject` | `path: String`, `size: String`, `data: Asset`, `upload: String`, `directory1: String` (queryable), `directory2: String` (queryable), `directory3: String` (queryable), `directory4: String` (queryable) |
 | `CovenUpload` | `path: String`, `total: String`, `confirmed: String`, `state: String`, `owner: Reference` |
 | `CovenAsset` | `data: Asset`, `owner: Reference` |
 | `CovenLiveTestZone` | `test: String` (live tests only) |
@@ -109,10 +108,8 @@ without a trailing slash. For `<store>/snapshots/store/7/2` these are `<store>`,
 `<store>/snapshots`, `<store>/snapshots/store`, and `<store>/snapshots/store/7`.
 Shallower objects omit nonexistent ancestors. Each prefix chooses its depth's
 field and compares the entire directory with `==`; no prefix filter is used.
-Store-log records additionally set `number` to the decimal entry number. Writer
-discovery uses `directory2 == "<store>/store-log" AND number == "1"`, returning
-only `path`. Metadata listings return `path` and `size`, alongside the native
-record id, dates and change tag. Neither query requests assets.
+Metadata listings return `path` and `size`, alongside the native
+record id, dates and change tag. Queries do not request assets.
 
 `size`, `total`, and `confirmed` contain decimal unsigned byte counts. A published
 object has either one asset or an upload id. Multipart records use reserved names;
@@ -121,9 +118,8 @@ that same schema and indexes deployed to Production through CloudKit Console.
 
 The conformance assertions count each submitted `CKQueryOperation`, including
 every cursor continuation, and count its matched records independently of the
-logical listing call. Discovery of one writer stays one native query even with
-more than a page of that writer's history; a store with more than 100 writers
-requires cursor pages. The observations retain each native operation id for
+logical listing call. Listings with more than 100 matching objects require
+cursor pages. Slots and the floor use exact record IDs and require no query. The observations retain each native operation id for
 correlation with CloudKit Console server logs. These are native operation counts,
 not measurements of the framework's private network traffic or metadata byte
 encoding; server logs are still needed to account for requests hidden inside an

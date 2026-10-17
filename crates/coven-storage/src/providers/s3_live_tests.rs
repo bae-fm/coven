@@ -19,7 +19,7 @@ pub(super) const SUITE_VERSION: u32 = 5;
 mod races;
 
 fn path(store: StoreId, number: u64) -> ObjectPath {
-    ObjectPath::device_log(store, DeviceId(91), number.try_into().unwrap())
+    ObjectPath::slot(store, number.try_into().unwrap())
 }
 fn require(ok: bool, reason: &'static str) -> Result<(), StorageError> {
     if ok {
@@ -37,25 +37,6 @@ async fn head(s: &S3Storage, key: &str) -> Result<HeadObjectOutput, StorageError
         .await
         .map_err(s3_error)
 }
-async fn folders(s: &S3Storage, prefix: &str) -> Result<Vec<String>, StorageError> {
-    let mut folders = Vec::new();
-    let mut marker = None;
-    let mut pages = Pagination::new();
-    loop {
-        let page = s
-            .list_page(s.settings.listing, prefix, Some("/"), marker, Some(1))
-            .await?;
-        for folder in page.folders {
-            folders.push(metadata::required(folder.prefix(), "missing folder")?.into());
-        }
-        let Some(next) = page.next else {
-            return Ok(folders);
-        };
-        pages.check(&next)?;
-        marker = Some(next);
-    }
-}
-
 /// Print every observation, the derived settings, the setup safety verdict
 /// for an uncatalogued location, and the catalogued entries they reproduce.
 fn report(detection: &crate::S3Detection, config: &StorageConfig) {
@@ -118,12 +99,12 @@ async fn s3_detection() {
     report(&detection, &settings.config);
 }
 
-/// Three installations' setups of one store claim its creation marker at once
+/// Three installations' setups of one store claim its first slot at once
 /// (§10, D10), each through its own connection: one claim wins and the others
 /// are refused, in each of 20 fresh stores.
 #[tokio::test]
-#[ignore = "COVEN_LIVE_S3_ENV; creates and deletes live creation markers"]
-async fn s3_creation_marker_race() {
+#[ignore = "COVEN_LIVE_S3_ENV; creates and deletes live first slots"]
+async fn s3_first_slot_race() {
     let settings = live::LiveS3::load();
     let StorageConfig::S3 {
         endpoint, profile, ..
@@ -144,7 +125,7 @@ async fn s3_creation_marker_race() {
         ];
         let raced = case(
             &settings,
-            &["creation_marker_race"],
+            &["first_slot_race"],
             selected,
             |s, store| async move {
                 let [second, third] = rivals;
@@ -154,7 +135,7 @@ async fn s3_creation_marker_race() {
             },
         )
         .await;
-        assert!(raced.is_some(), "creation marker race failed");
+        assert!(raced.is_some(), "first slot race failed");
     }
 }
 
@@ -238,7 +219,8 @@ async fn publication(
     s: Arc<StorageConnection<S3Storage>>,
     store: StoreId,
 ) -> Result<(), StorageError> {
-    let marker = ObjectPath::clock(store, DeviceId(91));
+    let marker = ObjectPath::floor(store);
+    s.create(&marker, b"initial").await?;
     for multipart in [false, true] {
         let target = path(store, if multipart { 2 } else { 1 });
         let mut pending = if multipart {
@@ -250,14 +232,18 @@ async fn publication(
             s.upload_part(upload, b"data").await?;
             tokio::time::sleep(Duration::from_secs(2)).await;
         }
-        s.replace(&marker, b"before").await?;
+        s.replace(
+            &s.status(&marker).await?.ok_or(StorageFailure::NotFound)?,
+            b"before",
+        )
+        .await?;
         let before = s.status(&marker).await?.ok_or(StorageFailure::NotFound)?;
         if let Some(upload) = &mut pending {
             s.finish_upload(upload).await?;
         } else {
             s.create(&target, b"data").await?;
         }
-        s.replace(&marker, b"after").await?;
+        s.replace(&before, b"after").await?;
         let after = s.status(&marker).await?.ok_or(StorageFailure::NotFound)?;
         let published = s.status(&target).await?.ok_or(StorageFailure::NotFound)?;
         println!(
@@ -275,14 +261,11 @@ async fn replacements(
     s: Arc<StorageConnection<S3Storage>>,
     store: StoreId,
 ) -> Result<(), StorageError> {
-    for target in [
-        ObjectPath::positions(store, DeviceId(91)),
-        ObjectPath::clock(store, DeviceId(91)),
-    ] {
-        s.replace(&target, b"first").await?;
+    for target in [ObjectPath::floor(store)] {
+        s.create(&target, b"first").await?;
         let mut previous = s.status(&target).await?.ok_or(StorageFailure::NotFound)?;
         for data in [b"other", b"first"] {
-            s.replace(&target, data).await?;
+            s.replace(&previous, data).await?;
             let next = s.read_object(&target, None).await?;
             let changed = next.metadata.revision != previous.revision;
             println!(
@@ -307,29 +290,22 @@ async fn listing_lag(
     use tokio::time::Instant;
     let mut samples = Vec::new();
     for trial in 1..=TRIALS {
-        let target = ObjectPath::store_log(store, DeviceId(trial), std::num::NonZeroU64::MIN);
+        let target = ObjectPath::file(
+            store,
+            DeviceId(31),
+            coven_foundation::id_source::FileId(uuid::Uuid::from_u128(trial.into())),
+        );
         s.create(&target, b"listing visibility").await?;
         let replied = Instant::now();
         let stored_at = detect::time(&head(&s.provider, &target.under(&s.provider.prefix)).await?)?;
-        let all = ObjectPrefix::store_logs(store);
-        let full = all.under(&s.provider.prefix);
-        let folder = ObjectPrefix::store_log(store, DeviceId(trial)).under(&s.provider.prefix);
-        let (object, discovery) = tokio::join!(
-            observe("S3_object", trial, replied, stored_at, || async {
-                Ok(s.list(&all)
-                    .await?
-                    .iter()
-                    .any(|object| object.path == target))
-            }),
-            observe(
-                "S3_new_device_folder",
-                trial,
-                replied,
-                stored_at,
-                || async { Ok(folders(&s.provider, &full).await?.contains(&folder)) }
-            ),
-        );
-        report("S3_new_device_folder", &[discovery]);
+        let all = ObjectPrefix::files(store);
+        let object = observe("S3_object", trial, replied, stored_at, || async {
+            Ok(s.list(&all)
+                .await?
+                .iter()
+                .any(|object| object.path == target))
+        })
+        .await;
         samples.push(object);
         if trial > 1 {
             s.delete(&target).await?;
@@ -352,12 +328,20 @@ async fn run_race(
     let mut successes = 0;
     for trial in 1..=trials {
         let target = if matches!(race, Race::Replace) {
-            ObjectPath::positions(store, DeviceId(trial))
+            ObjectPath::floor(store)
         } else {
             path(store, trial)
         };
         let replacement = if matches!(race, Race::Replace) {
-            s.replace(&target, b"initial revision").await?;
+            if trial == 1 {
+                s.create(&target, b"initial revision").await?;
+            } else {
+                s.replace(
+                    &s.status(&target).await?.ok_or(StorageFailure::NotFound)?,
+                    b"initial revision",
+                )
+                .await?;
+            }
             let head = head(&s.provider, &target.under(&s.provider.prefix)).await?;
             Some(match s.provider.settings.revision {
                 S3Revision::ETag => (
@@ -567,14 +551,9 @@ async fn s3_certification() {
     )
     .await
     .is_some();
-    passed &= case(
-        &settings,
-        &["listing_lag", "immediate_device_folders"],
-        profile,
-        listing_lag,
-    )
-    .await
-    .is_some();
+    passed &= case(&settings, &["listing_lag"], profile, listing_lag)
+        .await
+        .is_some();
     let after = settings
         .connect(Some(profile))
         .provider
@@ -671,22 +650,14 @@ pub(super) async fn conformance(connected: Arc<StorageConnection<S3Storage>>, st
         .run()
         .await
         .unwrap();
-    let path = ObjectPath::device_log(
-        store,
-        coven_foundation::id_source::DeviceId(41),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(store, std::num::NonZeroU64::MIN);
     check_provider(connected.as_ref(), &path, b"sealed live provider check")
         .await
         .unwrap();
 }
 
 pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, store: StoreId) {
-    let path = ObjectPath::device_log(
-        store,
-        coven_foundation::id_source::DeviceId(41),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(store, std::num::NonZeroU64::MIN);
     // Cross both the lowered one-request limit and the native multipart
     // minimum part size. The adapter uses two parts: 8 MiB and one byte.
     let bytes = vec![42; 8 * 1024 * 1024 + 1];
@@ -729,17 +700,32 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         StorageFailure::NotFound
     );
     let mut resumed = UploadSession::decode(recording.as_bytes()).unwrap();
-    connected.resume_upload(&mut resumed).await.unwrap();
     let copy = connected
         .provider
         .settings
         .copy_publication
         .multipart()
         .is_some();
-    // Every session is recorded before its upload exists, so a recording
-    // older than its first part aborts that upload and starts over (§4).
-    assert_eq!(resumed.confirmed_bytes(), 0);
-    for part in bytes.chunks(part_size) {
+    if copy {
+        // A private staging name identifies the initiation this journal owns.
+        connected.resume_upload(&mut resumed).await.unwrap();
+        assert_eq!(resumed.confirmed_bytes(), 0);
+    } else {
+        // A shared slot cannot identify which unfinished initiation is ours.
+        assert_eq!(
+            connected
+                .resume_upload(&mut resumed)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::SessionIdentityUnknown
+        );
+        resumed = UploadSession::decode(session.encode().unwrap().as_bytes()).unwrap();
+        connected.resume_upload(&mut resumed).await.unwrap();
+        assert_eq!(resumed.confirmed_bytes(), part_size as u64);
+    }
+    let confirmed = resumed.confirmed_bytes() as usize;
+    for part in bytes[confirmed..].chunks(part_size) {
         connected.upload_part(&mut resumed, part).await.unwrap();
     }
     if copy {
@@ -820,9 +806,9 @@ pub(super) async fn multipart(connected: Arc<StorageConnection<S3Storage>>, stor
         assert!(stale.is_complete());
     } else {
         tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        let marker = ObjectPath::clock(store, coven_foundation::id_source::DeviceId(41));
+        let marker = ObjectPath::floor(store);
         connected
-            .replace(&marker, b"before completion")
+            .create(&marker, b"before completion")
             .await
             .unwrap();
         let before = connected.status(&marker).await.unwrap().unwrap();

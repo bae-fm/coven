@@ -20,11 +20,7 @@ async fn completed_parts_wait_for_publication_and_temporaries_are_not_listed() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     assert!(!upload.is_complete());
@@ -356,8 +352,24 @@ pub(super) async fn endpoint(
                     );
                 }
             }
+            if let Some(expected) = headers.get("if-match") {
+                let current = state.revisions.get(&path).map(u64::to_string);
+                if !state.files.contains_key(&path)
+                    || current.as_deref() != Some(expected.to_str().unwrap())
+                {
+                    return response(
+                        412,
+                        json!({"error":{"code":"preconditionFailed"}}).to_string(),
+                    );
+                }
+            } else {
+                assert!(headers.contains_key("if-none-match"));
+            }
             *state.revisions.entry(path.clone()).or_insert(0) += 1;
             state.files.insert(path.clone(), body.to_vec());
+            if std::mem::take(&mut state.fail_reply) {
+                return response(503, "{}");
+            }
             return reply(file(&path, &body, host, &state));
         }
         if let Some((id, _)) = state.dirs.iter().find(|(_, p)| *p == &path) {
@@ -479,16 +491,17 @@ async fn content_uploads_declare_their_length_including_empty_objects() {
     ))
     .await;
     let storage = provider(&server.url);
-    let immutable = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
-    let mutable = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    let immutable = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
+    let mutable = ObjectPath::floor(STORE_ID);
+    storage.create(&mutable, b"initial").await.unwrap();
+    lengths.lock().unwrap().clear();
     for bytes in [b"".as_slice(), b"data"] {
         storage.create(&immutable, bytes).await.unwrap();
         storage.delete(&immutable).await.unwrap();
-        storage.replace(&mutable, bytes).await.unwrap();
+        storage
+            .replace(&storage.status(&mutable).await.unwrap().unwrap(), bytes)
+            .await
+            .unwrap();
     }
     let lengths = lengths.lock().unwrap();
     assert_eq!(lengths.len(), 4);
@@ -541,11 +554,7 @@ async fn resume_accepts_bounded_and_multiple_missing_ranges() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     for ranges in [json!(["5-9"]), json!(["9-", "5-7"]), json!(["5-"])] {
         let mut upload = storage.begin_upload(&path, 12).await.unwrap();
         state.lock().unwrap().expected_ranges = Some(ranges);
@@ -560,11 +569,7 @@ async fn malformed_missing_ranges_keep_the_response_and_recorded_progress() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     for ranges in [
         json!([]),
         json!("5-"),
@@ -599,11 +604,7 @@ async fn abort_retries_after_cancellation_and_preserves_published_objects() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let upload = storage.begin_upload(&path, 4).await.unwrap();
     storage.abort_upload(&upload).await.unwrap();
     storage.abort_upload(&upload).await.unwrap();
@@ -627,11 +628,7 @@ async fn create_switches_to_a_session_above_the_content_limit() {
     Arc::get_mut(&mut storage.provider)
         .unwrap()
         .single_request_limit = 4;
-    let path = ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let mut bytes = vec![7; storage.single_request_limit() as usize];
     storage.create(&path, &bytes).await.unwrap();
     assert_eq!(state.lock().unwrap().single_uploads, 1);
@@ -709,11 +706,7 @@ async fn recipient_join_redeems_only_the_invited_destination_and_keeps_native_re
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let owner = provider(&server.url);
-    let path = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     owner.create(&path, b"first").await.unwrap();
     let AccessGrant::Granted { invitation } = owner.grant_access("member").await.unwrap() else {
         panic!()
@@ -794,11 +787,7 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
         }))
         .await;
         let storage = provider(&server.url);
-        let path = ObjectPath::store_log(
-            STORE_ID,
-            coven_foundation::id_source::DeviceId(31),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         for error in [
             storage
                 .list(&ObjectPrefix::all(STORE_ID))
@@ -824,11 +813,7 @@ async fn missing_container_is_not_an_empty_store_or_a_missing_object() {
     }))
     .await;
     let storage = provider(&server.url);
-    let path = ObjectPath::store_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    );
+    let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     assert_eq!(
         storage.read(&path).await.unwrap_err().failure(),
         StorageFailure::NotFound
@@ -891,9 +876,9 @@ async fn listing_refuses_hostile_links_repeated_pages_and_folder_cycles() {
             let page=match variant {
                 0=>json!({"value":[],"@odata.nextLink":"https://another-account.invalid/list"}),
                 1=>json!({"value":[],"@odata.nextLink":format!("http://{}/graph/drives/drive/items/root/children",headers["host"].to_str().unwrap())}),
-                2=>json!({"value":[{"id":"root","name":"devices","folder":{}}]}),
-                3=>json!({"value":[{"id":"both","name":"devices","folder":{},"file":{}}]}),
-                _=>json!({"value":[{"id":"malformed","name":"devices","folder":true}]}),
+                2=>json!({"value":[{"id":"root","name":"files","folder":{}}]}),
+                3=>json!({"value":[{"id":"both","name":"files","folder":{},"file":{}}]}),
+                _=>json!({"value":[{"id":"malformed","name":"files","folder":true}]}),
             };
             reply(page)
         })).await;
@@ -918,7 +903,7 @@ async fn listing_skips_native_items_that_are_not_object_files() {
         }
     }))
     .await;
-    let prefix = ObjectPrefix::device_log(STORE_ID, coven_foundation::id_source::DeviceId(31));
+    let prefix = ObjectPrefix::device_files(STORE_ID, coven_foundation::id_source::DeviceId(31));
     assert!(provider(&server.url)
         .list(&prefix)
         .await
@@ -931,8 +916,8 @@ async fn replacement_during_download_does_not_return_mismatched_metadata() {
     let state = remote();
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    let path = ObjectPath::positions(STORE_ID, coven_foundation::id_source::DeviceId(31));
-    storage.replace(&path, b"first").await.unwrap();
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"first").await.unwrap();
     state.lock().unwrap().replace_during_read = true;
     assert_eq!(
         storage

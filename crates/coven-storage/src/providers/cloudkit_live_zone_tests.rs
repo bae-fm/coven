@@ -31,21 +31,11 @@ fn a_zone_holding_only_store_records_is_kept() {
     let file = ObjectPath::file(store, DeviceId(7), FileId(uuid::Uuid::from_u128(2)));
     let upload = upload_name(&file, &uuid::Uuid::from_u128(3).to_string()).unwrap();
     let mut zone: BTreeMap<String, Record> = [
+        ("CovenObject", ObjectPath::floor(store).as_str().to_owned()),
+        ("CovenObject", ObjectPath::floor(store).as_str().to_owned()),
         (
             "CovenObject",
-            ObjectPath::positions(store, DeviceId(7))
-                .as_str()
-                .to_owned(),
-        ),
-        (
-            "CovenObject",
-            ObjectPath::clock(store, DeviceId(7)).as_str().to_owned(),
-        ),
-        (
-            "CovenObject",
-            ObjectPath::store_log(store, DeviceId(7), NonZeroU64::MIN)
-                .as_str()
-                .to_owned(),
+            ObjectPath::slot(store, NonZeroU64::MIN).as_str().to_owned(),
         ),
         ("CovenObject", file.as_str().to_owned()),
         ("CovenUpload", upload.clone()),

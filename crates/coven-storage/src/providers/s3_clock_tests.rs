@@ -165,11 +165,7 @@ fn path() -> ObjectPath {
 }
 
 fn numbered(number: u64) -> ObjectPath {
-    ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(1),
-        std::num::NonZeroU64::new(number).unwrap(),
-    )
+    ObjectPath::slot(STORE_ID, std::num::NonZeroU64::new(number).unwrap())
 }
 
 fn open() -> Arc<dyn PublicationGate> {

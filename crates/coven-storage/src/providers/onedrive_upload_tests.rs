@@ -32,11 +32,7 @@ async fn lost_copy_reply_requires_byte_verification() {
 }
 
 fn path() -> ObjectPath {
-    ObjectPath::device_log(
-        STORE_ID,
-        coven_foundation::id_source::DeviceId(31),
-        std::num::NonZeroU64::MIN,
-    )
+    ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN)
 }
 fn temporary_path(upload: &UploadSession) -> String {
     let SessionState::OneDrive { temporary, .. } = &upload.state else {
@@ -479,4 +475,70 @@ async fn a_locked_copy_waits_for_a_retry_and_keeps_its_temporary() {
     storage.finish_upload(&mut upload).await.unwrap();
     assert!(upload.is_complete());
     assert_eq!(storage.read(&path()).await.unwrap(), b"data");
+}
+
+mod sequence {
+    use super::*;
+
+    #[tokio::test]
+    async fn floor_replacement_conflicts_and_lost_reply_preserve_the_accepted_revision() {
+        let state = remote();
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = provider(&server.url);
+        let path = ObjectPath::floor(crate::test_utils::STORE_ID);
+        storage.create(&path, b"floor one").await.unwrap();
+        let first = storage.status(&path).await.unwrap().unwrap();
+        storage.replace(&first, b"floor two").await.unwrap();
+        assert_eq!(
+            storage
+                .replace(&first, b"stale floor")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Conflict
+        );
+        assert_eq!(storage.read(&path).await.unwrap(), b"floor two");
+        let second = storage.status(&path).await.unwrap().unwrap();
+        state.lock().unwrap().fail_reply = true;
+        assert_eq!(
+            storage
+                .replace(&second, b"floor three")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Network
+        );
+        assert_eq!(
+            storage
+                .replace(&second, b"stale retry")
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Conflict
+        );
+        let third = storage.read_object(&path, None).await.unwrap();
+        assert_eq!(third.bytes, b"floor three");
+        assert_ne!(second.revision, third.metadata.revision);
+        assert_ne!(second.replace_token, third.metadata.replace_token);
+    }
+
+    #[tokio::test]
+    async fn slot_create_once_refuses_equal_and_different_bytes_without_replacement() {
+        let state = remote();
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        let storage = provider(&server.url);
+        let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
+        storage.create(&path, b"claim one").await.unwrap();
+        let first = storage.status(&path).await.unwrap().unwrap();
+        for bytes in [b"claim one", b"claim two"] {
+            assert_eq!(
+                storage.create(&path, bytes).await.unwrap_err().failure(),
+                StorageFailure::AlreadyExists
+            );
+            assert_eq!(storage.read(&path).await.unwrap(), b"claim one");
+            assert_eq!(storage.status(&path).await.unwrap().unwrap(), first);
+        }
+    }
 }

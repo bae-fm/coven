@@ -784,11 +784,7 @@ async fn minted_copy_profile_keys_abort_a_session_whose_initiation_reply_was_los
             std::sync::Arc::new(crate::NoCooldown),
         )
         .unwrap();
-        let path = ObjectPath::device_log(
-            scope.store,
-            coven_foundation::id_source::DeviceId(4),
-            std::num::NonZeroU64::MIN,
-        );
+        let path = ObjectPath::slot(scope.store, std::num::NonZeroU64::MIN);
         let publication = crate::PublicationRequest::new(
             Arc::new(crate::test_utils::UnrestrictedPublications),
             path.clone(),
