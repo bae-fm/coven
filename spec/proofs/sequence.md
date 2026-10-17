@@ -692,6 +692,27 @@ key waits, prepared-body loads and snapshot contents are outside this case.
 
 Answer: `{"reload":false,"apply":[2,3]}`.
 
+**`reselect`** calls `Reload.reselect`, the decision a reload makes after
+deletion forces it to change its journaled selection (`Reload.lean`).
+`old_target` is the journaled common target, `floor_at` the floor's
+authentication prefix, and `covers` the starting coverage of every audience
+already chosen. `missing` is the selection whose body was not found, as
+`{slot,audience,covers}`, or `null` when the reload's slots fell below the
+floor. `floor` lists the floor's announcements in the same shape, at most one
+per audience. Every selection's `slot` is positive and above its `covers`.
+When `missing` is `null`, or a floor announcement for the same audience is
+later and covers at least as much, the answer is the new common target: the
+largest of `old_target`, `floor_at` and `covers`. Otherwise it is `null`: no
+floor announcement replaces the missing one. Authentication, and the reason the
+caller is reselecting, are supplied by the caller.
+
+```json
+{"kind":"reselect","old_target":4,"floor_at":6,"covers":[5],"missing":{"slot":4,"audience":0,"covers":3},"floor":[{"slot":6,"audience":0,"covers":5}]}
+```
+
+Answer: `6`. With the floor's announcement at slot 6 covering only 2, the answer
+is `null`.
+
 **`apply`** evaluates `ledgerAt`, `audAt` and `rowsAt` at every prefix, using
 `Authority.withRoles` and `LiveClaims.winner`. The initial membership must
 contain an admin; initial devices refer to active members. Each audience gives
@@ -803,6 +824,31 @@ current audience member. It rejects reuse of an introduced or tentatively
 copied key. Output contains the exact copy/introduction `slots`, final
 `through`, and the key observations `after`. Membership is fixed across this
 plan; interleaved membership changes require another prefix and selection.
+
+**`queueReload`** takes only `scenario`, one of `reset`, `breakingRaise`,
+`newlyReadable` and `selfReplacement`, and reads no other input. Each answer is
+computed from the fixed histories in
+[`QueueReloadExamples`](sequence/CovenSequence/QueueReloadExamples.lean) that the
+four counterexample theorems use. So a Rust test that sends it compares its own
+reload with these fixed values; the model never runs on Rust's inputs.
+
+- `reset` answers `retained`, the queued originals the reset reload keeps;
+  `replayed`, how many of them are eligible to apply over the loaded rows; and
+  `after_replayed`, how many are when the same write is made after the reload:
+  `{"retained":1,"replayed":0,"after_replayed":1}`.
+- `breakingRaise` answers whether the queued write's new key passes the commit
+  check before the raise loads (`before_allowed`) and after (`after_allowed`),
+  and whether every queued original is at the raised version (`new_schema`):
+  `{"before_allowed":true,"after_allowed":false,"new_schema":true}`.
+- `newlyReadable` answers whether a fresh key may be written to the circle
+  before its membership entry loads and after, and, after it, whether key 7
+  passes against empty rows and against the loaded rows:
+  `{"before_allowed":false,"after_allowed":true,"empty_key_allowed":true,"loaded_key_allowed":false}`.
+- `selfReplacement` answers whether the old and new signing keys authenticate
+  the queued original's authored prefix, whether each still counts after the
+  replacement, whether a write made after it can be sent, and whether the new key
+  still counts after a further replacement:
+  `{"old_authenticates":true,"new_authenticates":false,"old_counts":false,"new_counts":true,"after_send":true,"later_counts":false}`.
 
 ## Rust comparisons
 
