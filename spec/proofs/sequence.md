@@ -956,8 +956,11 @@ they do not replace the separate byte-format, merge or queue tests.
   matching entries. Direct floor loading of a prepared body is not modelled.
 - Admin slots and key copies are readable by every member device. So are a
   slot's device, claim number and each part's audience: they are sealed under
-  the store key, which every member holds, and the provider sees only the slot
-  kind and key-copy routing.
+  the store key, which every member holds. Public observations include slot
+  kinds and store-key ids, key-copy routing with exact public sealing keys,
+  S3 delivery recipients, public sealing keys and authors, and object kinds,
+  format versions and framing (format.md D9). These are fixed public inputs
+  to the model's encryption observations.
 - Unique values and owner rows are per audience; uniqueness across audiences is
   not modelled.
 - Ordinary receive parts at a version above their audience's are refused.

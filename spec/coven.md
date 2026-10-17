@@ -194,8 +194,9 @@ applied. This relies on SQLite's transactions being atomic.
 
 Neither the provider nor an outsider can read encrypted contents. Only members'
 devices hold the store key, and only a circle's members hold its key. The
-provider sees each slot's kind, a key copy's routing, object framing, and the
-sizes, counts, timing and accounts §3 lists; §12 says exactly who can read what.
+provider sees each slot's kind and store-key id, key-copy and S3 delivery routing,
+object framing, and the sizes, counts, timing and accounts §3 lists. §12 says
+exactly who can read what.
 Names, values, key commitments and operation contents stay encrypted.
 
 #### 2.4 Authorization
@@ -1976,7 +1977,7 @@ deleted.
 
 ### 12. Keys and encryption
 
-The provider holds every byte of the store and must read none of it. Members must
+Encryption keeps the store's contents hidden from the provider. Members must
 read everything they're entitled to, including on a new device or after joining
 late. And once Ben is removed, new data must stop reaching him. This section
 covers which keys exist, how a key reaches a member, how a device chooses which
@@ -2010,12 +2011,17 @@ can't. So whoever learns a store key reads those headers, the store's data and
 the admin entries' contents under it, but still not a circle's parts or a key
 copy's sealed box: each of those needs its own key.
 
+Ana creates Gifts. Carol belongs to Household but not Gifts: she can read the
+circle's admin name, introduced key commitment and membership operations under
+the store key. She cannot open Gifts' row parts or test guessed rows against
+their keyed authorship roots. Circle administration is shared so every member
+can apply the same sequence; circle row values remain separately encrypted.
+
 | Who can read it | What |
 |---|---|
-| The provider (in the clear) | each slot's kind (writes, admin entry, key copy, announcement); a key copy's routing (its audience, key id and recipient member, §12.1), so circle ids are already visible; object framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
-| Every member (sealed under the store key) | a slot's device, its claim number (§5.1), and which audience each part belongs to |
+| The provider (in the clear) | each slot's kind and the id of the store key sealing its body; a key copy's audience, copied key id, recipient member and exact public sealing key (§12.1); an S3 delivery's recipient member, exact public sealing key and author; object kinds, format versions, framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
+| Holders of the store key | store row values, slot headers and all admin contents, including circle names, key commitments and membership operations |
 | A circle's members (sealed under its key) | the contents of that circle's parts |
-| Members of the audience only | names, values, key commitments, operation contents |
 
 **Authorship roots are keyed.** A write's signatures cover, for each of its
 parts, an *authorship root*: a hash over that part's row changes
@@ -5213,15 +5219,22 @@ collisions.
 
 ### D.5 Key introductions and routing
 
+Every object below reveals its kind, format version, framing and size
+([format.md D9](format.md#d9-sealed-objects)). A slot's clear prefix also gives
+its slot kind and the id of the store key sealing its body. These public
+identifiers let a reader choose the key before opening the encrypted contents.
+
 | Object | In the clear | Encrypted |
 |---|---|---|
-| Key introduction (inside an admin entry) | nothing beyond the slot's kind | the key's random id and the SHA-256 of its 32 bytes |
-| Key copy (its own slot) | audience, key id, recipient member, the exact sealing key, and the sealed box itself | the key, inside a box sealed to the recipient alone; the box also authenticates the clear routing. No store key wraps the box. The slot's body, only an acknowledgement, is under an accepted store key |
-| Any slot | its kind | its device and claim number, under the store key |
-| Writes slot | the kind | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
-| S3 key delivery, `<store>/access-keys/<member>/<attempt>` | the path | the access key, sealed to the member |
+| Key introduction (inside an admin entry) | the common slot prefix above | the introduced key's random id and the SHA-256 of its 32 bytes |
+| Key copy (its own slot) | the common slot prefix; audience, copied key id, recipient member, the exact public sealing key, and the sealed box itself | the key, inside a box sealed to the recipient alone; the box also authenticates the clear routing. No store key wraps the box. The slot's body, only an acknowledgement, is under an accepted store key |
+| Any slot | the common slot prefix | its device and claim number, under the store key |
+| Writes slot | the common slot prefix | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
+| S3 key delivery, `<store>/access-keys/<member>/<attempt>` | the path, recipient member, exact public sealing key and author member | the access key, sealed to the member |
 | Join request, `<store>/join-requests/<invite id>` | the path | everything, under a key derived from the invite secret; signed with the new member key |
 
+An introduced store key may seal its own introduction (§12.1). In that case its
+id is also the clear slot selector; its key bytes and commitment stay encrypted.
 The floor also carries key copies with their routing in the clear (§16.4).
 
 ### D.6 Where secrets live
@@ -6282,6 +6295,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
 | A replacement waits until due; a due delivery can finish, and its claim's rejection reaches its undo | `not_due_unchanged`, `due_delivery_finishes`, `claim_rejection_reaches_undo` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §11.4 |
 | A failed undo keeps its rejection and cleanup failure; without admin access it stays owed, and only successful cleanup ends it | `failed_undo_keeps_both_causes`, `reopened_undo_needs_admin`, `undo_finishes_only_after_success` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
+| In the ideal encryption model, a store-key holder reads all store metadata, including circle administration; changing separately sealed content under an unknown key reveals no additional value | `exposed_header_view`, `metadata_reveals_no_protected_content` | `proofs/sequence/CovenSequence/Keys.lean` | §12 |
 | Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
 | After a rejected self-replacement's child claim is undone, an unheld binding keeps the pause; a current candidate is installed, and undo may release the pause only under the held active pair | `unheld_keeps_pause`, `candidate_installs`, `undo_requires_active` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
