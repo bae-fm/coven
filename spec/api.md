@@ -6,7 +6,8 @@
 - Long parameter lists are abbreviated: `/* … */` marks parameters left out,
   and the comment beside it names them.
 - Calls on `handle` are on the `CovenHandle` that opening a store returns.
-- Every call that reaches storage or the database is `async`.
+- App-facing calls reaching storage or the database are `async`;
+  transaction callbacks (`SqlContext`, `MigrationContext`) are synchronous.
 - A row is named by its table and its *key*: the values of its primary key
   columns, in order ([§8.5](coven.md#85-keys-and-uniqueness)).
 
