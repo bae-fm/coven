@@ -30,6 +30,15 @@ pub struct ConnectedStorage {
     pub key_state: StoreKeyState,
 }
 
+/// Storage setup's committed connection and this member's restore code.
+#[derive(Clone, Debug)]
+pub struct StorageSetup {
+    /// The location and availability of its store keys.
+    pub connection: ConnectedStorage,
+    /// The code for restoring this member on another installation.
+    pub restore_code: SecretText,
+}
+
 pub(crate) struct StorageConnections {
     codes: coven_sync::RestoreCodes,
     initial_name: String,
@@ -162,7 +171,7 @@ impl StorageConnections {
         self: &Arc<Self>,
         storage: StorageConfig,
         device_name: &str,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
+    ) -> Result<StorageSetup, StorageSetupError> {
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
             let provider = storage.provider();
@@ -205,7 +214,7 @@ impl StorageConnections {
         self: &Arc<Self>,
         container: &str,
         device_name: &str,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
+    ) -> Result<StorageSetup, StorageSetupError> {
         let container = container.to_owned();
         let device_name = device_name.to_owned();
         self.call(move |owner| async move {
@@ -244,7 +253,7 @@ impl StorageConnections {
         device_name: &str,
         auth: ProviderAuth,
         sign_in: Option<Arc<SessionSignIn>>,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
+    ) -> Result<StorageSetup, StorageSetupError> {
         let credentials = auth.credentials();
         let storage = self
             .connector
@@ -272,7 +281,8 @@ impl StorageConnections {
             },
             _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
         };
-        self.sync
+        let restore_code = self
+            .sync
             .setup(
                 storage,
                 access,
@@ -286,9 +296,12 @@ impl StorageConnections {
             )
             .await
             .map_err(setup_error)?;
-        Ok(ConnectedStorage {
-            storage: config,
-            key_state: StoreKeyState::Available,
+        Ok(StorageSetup {
+            connection: ConnectedStorage {
+                storage: config,
+                key_state: StoreKeyState::Available,
+            },
+            restore_code,
         })
     }
 

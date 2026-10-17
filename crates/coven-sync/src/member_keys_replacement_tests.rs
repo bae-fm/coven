@@ -143,7 +143,10 @@ async fn self_replacement_confirms_the_queue_and_installs_the_kept_pair() {
     let candidate = held.candidate().unwrap().public_keys();
     assert_eq!(held.keys().public_keys(), public(&c.member));
     assert_eq!(own_entries(&c).await, 1);
-    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    assert!(
+        matches!(settle(&mut c, operation).await, Ok(Output::MemberKeysReplaced(identity))
+        if identity.keys().public_keys() == candidate)
+    );
     // The kept binding installed the candidate; the old pair stays held.
     let installed = c.identity.read().unwrap().unwrap();
     assert_eq!(installed.keys().public_keys(), candidate);
@@ -188,7 +191,10 @@ async fn positions_held_across_self_replacement_stay_readable() {
     c.sync().await;
     assert!(c.writes.post_positions().await.unwrap());
     let operation = begin(&mut c, Command::ReplaceOwnKeys).await;
-    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    assert!(matches!(
+        settle(&mut c, operation).await,
+        Ok(Output::MemberKeysReplaced(_))
+    ));
     write_note(&c, "held").await.unwrap();
     c.sync().await;
     let device = c.device().await;
@@ -250,7 +256,10 @@ async fn a_positions_attempt_signed_before_self_replacement_is_signed_again() {
         assert!(c.writes.post_positions().await.is_err());
     }
     let operation = begin(&mut c, Command::ReplaceOwnKeys).await;
-    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    assert!(matches!(
+        settle(&mut c, operation).await,
+        Ok(Output::MemberKeysReplaced(_))
+    ));
     c.sync().await;
     c.writes.post_positions().await.unwrap();
     a.sync().await;

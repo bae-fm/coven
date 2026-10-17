@@ -52,8 +52,9 @@ async fn member_keys_are_replaced_through_the_public_calls() {
             .public_keys()
     };
     assert_eq!(synced(), old.member_keys.public_keys());
-    handle.replace_member_keys().await.unwrap();
-    let code = coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
+    let returned = handle.replace_member_keys().await.unwrap();
+    assert_eq!(returned.as_str(), handle.restore_code().await.unwrap());
+    let code = coven_sync::read_restore_code(returned.as_str()).unwrap();
     assert_eq!(code.member, carol);
     let replaced = code.member_keys.public_keys();
     assert_ne!(replaced, old.member_keys.public_keys());
@@ -357,4 +358,26 @@ mod owner_identity {
         refused_naming(rename(&network.devices[0].handle, "ana's").await, carol);
         network.close().await;
     }
+}
+
+#[tokio::test]
+async fn concurrent_replacements_return_their_own_codes() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(30), async {
+        tokio::join!(
+            owner.handle.replace_member_keys(),
+            owner.handle.replace_member_keys()
+        )
+    })
+    .await
+    .unwrap();
+    let first = first.unwrap();
+    let second = second.unwrap();
+    let a = coven_sync::read_restore_code(first.as_str()).unwrap();
+    let b = coven_sync::read_restore_code(second.as_str()).unwrap();
+    assert_eq!(a.member, b.member);
+    assert_ne!(a.member_keys.public_keys(), b.member_keys.public_keys());
+    let current = owner.handle.restore_code().await.unwrap();
+    assert!(current == first.as_str() || current == second.as_str());
+    owner.close().await;
 }

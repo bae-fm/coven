@@ -1618,11 +1618,10 @@ while let Ok(values) = lost.next().await {
   feature; its documented, refused API is recorded as `Unavailable`. Naming
   R2 at another endpoint does not establish that exception. No setup changes
   bucket versioning or commits credentials after a versioning refusal.
-- Setup commits the storage credentials, keys, location and restore code only
-  once the connection is ready. Failure preserves their previous values and
-  the previous connection. The fixed first-entry or access-update attempt stays
-  reserved for an identical retry: its number, plaintext, sealing key ids and
-  prerequisite sealed-key bytes cannot change (§6, §18).
+- Setup returns the restore code with the committed connection. Credentials,
+  keys, location and code commit once the connection is ready; failure retains
+  their previous values and connection. A reserved first entry or access update
+  retains its number, plaintext, sealing key ids and sealed-key bytes for retry (§6, §18).
 - Setup takes the first device's name, as joining and restore do (§10, §12).
   Reconnecting an existing device keeps its registered name. Changed provider
   access is published as `Set access` before committing the new credentials.
@@ -2419,16 +2418,15 @@ pub enum DropReason {
 }
 
 impl CovenHandle {
-    /// Sets up storage on S3 with this member's access key (§4), after the
-    /// safety check. `ConnectedStorage::storage` is the recorded location,
-    /// carrying detected settings when the endpoint needed them.
+    /// Checks S3 and returns its committed location, key state and restore code.
+    /// The location includes any detected settings (§4).
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
         device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
-    ) -> Result<ConnectedStorage, StorageSetupError>;
+    ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Probes the S3 service at this location with this member's key (§4),
     /// writing only fresh objects under the store's `.coven-check` prefix and
@@ -2452,7 +2450,7 @@ impl CovenHandle {
         &self,
         storage: StorageConfig,
         device_name: &str,
-    ) -> Result<ConnectedStorage, StorageSetupError>;
+    ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Sets up iCloud through the built-in adapter; other platforms return ProviderUnavailable.
     /// Coven obtains the current owner and creates the store's custom zone.
@@ -2460,7 +2458,7 @@ impl CovenHandle {
         &self,
         container: &str,
         device_name: &str,
-    ) -> Result<ConnectedStorage, StorageSetupError>;
+    ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Opens store keys from their copies sealed to this member in storage
     /// (§11), keeps them in custody, and connects without starting sync.
@@ -2544,6 +2542,12 @@ pub enum SyncStatus {
 pub struct ConnectedStorage {
     pub storage: StorageConfig,
     pub key_state: StoreKeyState,
+}
+
+/// Setup returns the committed connection and code, including on reconnection.
+pub struct StorageSetup {
+    pub connection: ConnectedStorage,
+    pub restore_code: SecretText,
 }
 
 pub enum StoreKeyState {
@@ -3025,17 +3029,13 @@ impl CovenHandle {
     /// The same internal query, live (E4).
     pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>>;
 
-    /// Replaces this member's signing and sealing keys (§9, §11).
-    /// Pauses local app writes and confirms this installation's queued writes
-    /// and entries first; attempted app writes return DbError::MemberKeysChanging.
-    /// Keeps a fresh private pair durably before sending
-    /// prerequisite key copies and the entry signed by the current pair.
-    /// Failures retain both pairs and recorded progress for idempotent retry;
-    /// no local writes resume under an uncommitted binding or failed custody.
-    /// Returns once the binding is kept and custody and restore code refreshed.
-    /// The app asks the person to keep the new restore code. Other devices
-    /// holding old credentials report MemberKeysReplaced and need current keys.
-    pub async fn replace_member_keys(&self) -> Result<(), SyncError>;
+    /// Replaces this member's pair and returns its restore code (§9, §11).
+    /// Refuses app writes with MemberKeysChanging while confirming queued writes and entries, then
+    /// keeps the candidate before publishing its copies and binding.
+    /// Success follows replay acceptance, custody and synced-code refresh.
+    /// Failure retains both pairs and progress; other devices holding the
+    /// old pair report MemberKeysReplaced.
+    pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError>;
 
     /// Publishes a prepared public pair for an active member under §9's
     /// authority rules. The target retains its private pair before this call;
@@ -3505,12 +3505,9 @@ impl OAuthRedirectError {
 }
 
 impl CovenHandle {
-    /// This member's restore code: their stable id and current private pair, the store's id and
-    /// name, and storage location only. It never carries storage credentials.
-    /// Selects the pair current in checked replay; absent current credentials
-    /// return MemberKeysReplaced rather than exporting a retired pair.
-    /// The app shows it as a QR code, blurred until the person taps it,
-    /// and asks them to write it down at setup.
+    /// Shows this member's code again: stable id, current private pair, store
+    /// id/name and location; no storage credentials. Missing current keys
+    /// report MemberKeysReplaced; a retired pair is never exported.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
     /// Fixes a fresh member id or an existing active replacement target, as

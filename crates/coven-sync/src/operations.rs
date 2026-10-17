@@ -90,6 +90,7 @@ pub(crate) enum Output {
     CircleId(CircleId),
     Invite(Invite),
     AccessKeyReplaced(AccessKeyReplacement),
+    MemberKeysReplaced(coven_crypto::MemberIdentity),
     DeliveredKey(Option<coven_format::access_key_delivery::DeliveredKey>),
     Failing(Option<PendingRecord>),
 }
@@ -347,8 +348,11 @@ impl Operations {
     /// pair and the synced restore code is refreshed before writes resume.
     /// Publication and custody failures keep the attempt and both pairs for
     /// an idempotent retry; a replay rejection is reported, never reattempted.
-    pub async fn replace_member_keys(&self) -> Result<(), SyncError> {
-        self.unit(Command::ReplaceOwnKeys).await
+    pub async fn replace_member_keys(&self) -> Result<coven_crypto::MemberIdentity, SyncError> {
+        match self.call(Command::ReplaceOwnKeys).await? {
+            Output::MemberKeysReplaced(identity) => Ok(identity),
+            _ => unreachable!("member replacement result"),
+        }
     }
     /// Publish a prepared public pair for another active member, under the
     /// recorded authority of an admin (§9). The call changes no private

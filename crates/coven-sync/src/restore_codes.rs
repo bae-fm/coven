@@ -77,6 +77,33 @@ impl RestoreCodes {
         Ok(owner.code().await?.to_text()?.to_string())
     }
 
+    /// Replace this member's pair and return the code for that exact result.
+    /// Credential changes and close wait for this owned operation.
+    pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
+        let inner = self.inner.clone();
+        crate::files::join(tokio::spawn(async move {
+            let guard = inner.lock().await;
+            let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+            let local = owner.database.local_store_log().await?;
+            let store = local.log.replay.state.store.ok_or(SyncError::NoStorage)?;
+            let location = owner
+                .settings
+                .read()?
+                .ok_or(SyncError::NoStorage)?
+                .encode()?;
+            let identity = owner.operations.replace_member_keys().await?;
+            let code = RestoreCode {
+                store: store.id,
+                name: store.name,
+                member: identity.member(),
+                member_keys: identity.keys().clone(),
+                storage: location,
+            };
+            Ok(SecretText::new(code.to_text()?.to_string()))
+        }))
+        .await
+    }
+
     /// Install a manually supplied S3 key and publish its id; the code stays unchanged.
     /// Requires connected storage. Credentials remain committed if publication
     /// fails: the remote entry may already exist. Retry with the same key to
@@ -215,7 +242,7 @@ impl RestoreCodes {
         data: ConnectionCredentials,
         sign_in: Option<Arc<SessionSignIn>>,
         initial_name: String,
-    ) -> Result<crate::StorageCommit, SyncError> {
+    ) -> Result<(crate::StorageCommit, SecretText), SyncError> {
         data.validate()?;
         let guard = self.inner.clone().lock_owned().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
@@ -237,38 +264,42 @@ impl RestoreCodes {
             member_keys: identity.keys().clone(),
             storage: data.location.encode()?,
         };
+        let text = SecretText::new(code.to_text()?.to_string());
         let previous_location = owner.settings.read()?;
-        Ok(Box::new(move || {
-            let owner = guard.as_ref().expect("reserved credential owner");
-            let previous = match &sign_in {
-                Some(session) => session.publish(&owner.credentials, |keychain, tokens| {
-                    commit_credentials(
-                        keychain,
-                        &StorageCredentials::OAuth(tokens.clone()),
-                        Some(&code),
-                    )
-                })?,
-                None => owner.credentials.write(|keychain| {
-                    commit_credentials(keychain, &data.credentials, Some(&code))
-                })?,
-            };
-            let rollback = move |owner: &RestoreCodesInner, previous| {
-                let result = owner.restore_connection(previous_location, previous);
-                if let Some(session) = &sign_in {
-                    session.unpublish();
+        Ok((
+            Box::new(move || {
+                let owner = guard.as_ref().expect("reserved credential owner");
+                let previous = match &sign_in {
+                    Some(session) => session.publish(&owner.credentials, |keychain, tokens| {
+                        commit_credentials(
+                            keychain,
+                            &StorageCredentials::OAuth(tokens.clone()),
+                            Some(&code),
+                        )
+                    })?,
+                    None => owner.credentials.write(|keychain| {
+                        commit_credentials(keychain, &data.credentials, Some(&code))
+                    })?,
+                };
+                let rollback = move |owner: &RestoreCodesInner, previous| {
+                    let result = owner.restore_connection(previous_location, previous);
+                    if let Some(session) = &sign_in {
+                        session.unpublish();
+                    }
+                    result
+                };
+                if let Err(error) = owner.settings.commit(&data.location) {
+                    return Err(match rollback(owner, previous) {
+                        Ok(()) => error.into(),
+                        Err(cleanup) => cleanup_error(error.into(), cleanup),
+                    });
                 }
-                result
-            };
-            if let Err(error) = owner.settings.commit(&data.location) {
-                return Err(match rollback(owner, previous) {
-                    Ok(()) => error.into(),
-                    Err(cleanup) => cleanup_error(error.into(), cleanup),
-                });
-            }
-            Ok(Box::new(move || {
-                rollback(guard.as_ref().expect("reserved credential owner"), previous)
-            }))
-        }))
+                Ok(Box::new(move || {
+                    rollback(guard.as_ref().expect("reserved credential owner"), previous)
+                }))
+            }),
+            text,
+        ))
     }
 
     /// Finish the current update, then release custody and connection owners.

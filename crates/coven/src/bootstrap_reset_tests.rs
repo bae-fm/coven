@@ -49,7 +49,7 @@ impl Fixture {
         }
     }
 
-    async fn setup(&self) -> Result<ConnectedStorage, StorageSetupError> {
+    async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
         self.handle
             .setup_s3_storage(
                 self.storage.config(),

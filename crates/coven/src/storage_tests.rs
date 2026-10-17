@@ -67,7 +67,7 @@ impl Fixture {
         }
     }
 
-    async fn setup(&self) -> Result<ConnectedStorage, StorageSetupError> {
+    async fn setup(&self) -> Result<StorageSetup, StorageSetupError> {
         self.handle
             .setup_s3_storage(
                 self.storage.config(),
@@ -367,7 +367,7 @@ async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
     ));
     assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
     let connected = f.setup().await.unwrap();
-    assert_eq!(connected.key_state, StoreKeyState::Available);
+    assert_eq!(connected.connection.key_state, StoreKeyState::Available);
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.advance(Duration::from_secs(1));
     let written = f.clock.now();

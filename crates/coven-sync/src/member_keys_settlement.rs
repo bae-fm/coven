@@ -14,13 +14,16 @@ use coven_database::{EntryOutcome, OperationRecord};
 impl StoreLogSync {
     /// Make the kept binding's pair the active one, keeping the previous
     /// pair for copies that name it (§11). Repeating it changes nothing.
-    pub(super) fn install_member_keys(&self, work: &MemberKeysWork) -> Result<(), SyncError> {
+    pub(super) fn install_member_keys(
+        &self,
+        work: &MemberKeysWork,
+    ) -> Result<coven_crypto::MemberIdentity, SyncError> {
         let keys = work.keys.ok_or(coven_database::DbError::Invariant {
             what: "a kept self-replacement names its candidate",
         })?;
         let identity = self.operation_member()?;
         if identity.keys().public_keys() == keys && identity.candidate().is_none() {
-            return Ok(());
+            return Ok(identity);
         }
         let installed = identity
             .activate(&keys)
@@ -28,7 +31,7 @@ impl StoreLogSync {
                 member: work.member,
             })?;
         self.member_keys.persist(&installed)?;
-        Ok(())
+        Ok(installed)
     }
 
     /// A dropped replacement ends with its replay reason; nothing publishes
@@ -55,12 +58,15 @@ impl StoreLogSync {
         record: &OperationRecord,
         work: &MemberKeysWork,
     ) -> Result<Progress, SyncError> {
-        if work.own {
-            self.install_member_keys(work)?;
+        let output = if work.own {
+            let identity = self.install_member_keys(work)?;
             self.refresh_restore_code().await?;
-        }
+            Output::MemberKeysReplaced(identity)
+        } else {
+            Output::Unit
+        };
         self.database.finish_operation(record.id).await?;
-        Ok(Progress::Finished(Output::Unit))
+        Ok(Progress::Finished(output))
     }
 
     async fn refresh_restore_code(&self) -> Result<(), SyncError> {

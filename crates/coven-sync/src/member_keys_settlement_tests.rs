@@ -185,7 +185,10 @@ async fn self_replacement_resumes_the_same_attempt_after_each_failure() {
     // with once installed; until then it is no replaced installation.
     c.sync.sync_store_log().await.unwrap();
     custody.refuse.store(false, Ordering::SeqCst);
-    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    assert!(matches!(
+        settle(&mut c, operation).await,
+        Ok(Output::MemberKeysReplaced(_))
+    ));
     assert_eq!(own_entries(&c).await, next);
     assert_eq!(
         custody
@@ -361,7 +364,10 @@ async fn self_replacement_and_snapshots_never_strand_a_file_signed_by_a_retired_
         Progress::Waiting(PendingReason::Waits(Prerequisite::Object(waiting)))
             if waiting == crate::store_log_object::path(store(1), entry)
     ));
-    assert!(matches!(settle(&mut c, operation).await, Ok(Output::Unit)));
+    assert!(matches!(
+        settle(&mut c, operation).await,
+        Ok(Output::MemberKeysReplaced(_))
+    ));
     // The kept replacement exposed the store key to Carol's old credential;
     // she rotates it, then the snapshot seals under her installed pair.
     c.catch_up().await;

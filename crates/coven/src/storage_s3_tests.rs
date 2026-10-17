@@ -184,7 +184,7 @@ async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
 async fn setup(
     handle: &CovenHandle,
     location: StorageConfig,
-) -> Result<ConnectedStorage, StorageSetupError> {
+) -> Result<StorageSetup, StorageSetupError> {
     handle
         .setup_s3_storage(
             location,
@@ -216,7 +216,7 @@ async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settin
         .unwrap();
     assert_eq!(detection.settings, DETECTED_S3_SETTINGS);
     let connected = setup(&opened.handle, uncatalogued(None)).await.unwrap();
-    assert_eq!(connected.storage, detected);
+    assert_eq!(connected.connection.storage, detected);
     assert_eq!(
         StorageSettings::new(opened.directory.clone())
             .read()
@@ -227,7 +227,15 @@ async fn an_uncatalogued_endpoint_is_set_up_and_reconnected_with_detected_settin
     // recorded settings rather than refusing a location change.
     opened.handle.disconnect_storage().await.unwrap();
     let reconnected = setup(&opened.handle, uncatalogued(None)).await.unwrap();
-    assert_eq!(reconnected.storage, detected);
+    assert_eq!(reconnected.connection.storage, detected);
+    assert_eq!(
+        reconnected.restore_code.as_str(),
+        connected.restore_code.as_str()
+    );
+    assert_eq!(
+        reconnected.restore_code.as_str(),
+        opened.handle.restore_code().await.unwrap()
+    );
     opened.handle.close().await.unwrap();
 }
 

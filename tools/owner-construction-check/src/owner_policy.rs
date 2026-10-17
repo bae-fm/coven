@@ -338,6 +338,11 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-sync/src/restore_codes.rs",
             "RestoreCodes",
+            "replace_member_keys",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
             "new",
         ),
         (

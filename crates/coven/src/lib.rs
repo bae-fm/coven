@@ -106,7 +106,7 @@ mod storage;
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::providers::StorageConnector;
 pub use coven_storage::{StorageCheck, StorageSetupError};
-pub use storage::{ConnectedStorage, StoreKeyState};
+pub use storage::{ConnectedStorage, StorageSetup, StoreKeyState};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

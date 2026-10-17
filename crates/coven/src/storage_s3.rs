@@ -12,7 +12,7 @@ impl StorageConnections {
         device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
+    ) -> Result<StorageSetup, StorageSetupError> {
         if storage.provider() != CloudProvider::S3 {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("expected S3 storage")

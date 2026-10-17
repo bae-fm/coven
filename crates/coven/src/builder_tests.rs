@@ -347,7 +347,7 @@ mod recovery {
             };
             let handle = builder().open(directory.id()).await.unwrap();
 
-            match config.provider() {
+            let setup = match config.provider() {
                 CloudProvider::S3 => handle
                     .setup_s3_storage(
                         config.clone(),
@@ -372,6 +372,16 @@ mod recovery {
                         .unwrap()
                 }
             };
+            assert_eq!(
+                setup.restore_code.as_str(),
+                handle.restore_code().await.unwrap()
+            );
+            let code = coven_sync::read_restore_code(setup.restore_code.as_str()).unwrap();
+            assert_eq!(code.store, directory.id());
+            assert_eq!(
+                StorageConfig::decode(code.storage.as_bytes()).unwrap(),
+                config
+            );
             let mut status = handle.subscribe_sync_status();
             handle.stop_sync();
             status

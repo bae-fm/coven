@@ -4008,15 +4008,11 @@ Carol's tablet:
   publishes the same entry, and if replay drops it or it lands too late, the
   load fails with its reason and only a new restore or join, with a fresh
   id, registers this installation.
-- The person writes the code down when they create or join a store, as
-  part of setup.
-- On Apple platforms, coven writes the code to iCloud Keychain whenever it
-  changes, including when the person creates or joins a store or replaces
-  member keys. Member-key replacement refreshes private custody and the
-  written restore code; the app asks the person to keep the new code. Changing an
-  S3 key updates the separately held credentials; it does not change the
-  restore code or require the person to write it down again
-  ([E9](api.md#e9-members-and-devices)).
+- Setup and member-key replacement return the restore code; `restore_code()`
+  shows it again. Keeping or confirming it is app UX, with no pending record.
+- On Apple, coven refreshes the iCloud Keychain code after setup, join or
+  member-key replacement. S3 key changes update separate custody without
+  changing the code ([E9](api.md#e9-members-and-devices)).
 
 ### 12.2 Adding a person
 

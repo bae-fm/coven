@@ -96,7 +96,7 @@ impl CovenHandle {
         device_name: &str,
         access_key_id: String,
         secret_access_key: SecretText,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
+    ) -> Result<StorageSetup, StorageSetupError> {
         self.storage
             .setup_s3(storage, device_name, access_key_id, secret_access_key)
             .await
@@ -125,7 +125,7 @@ impl CovenHandle {
         &self,
         storage: StorageConfig,
         device_name: &str,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
+    ) -> Result<StorageSetup, StorageSetupError> {
         self.storage.setup_oauth(storage, device_name).await
     }
     /// Set up native iCloud storage in the entitled container. Coven obtains the
@@ -135,7 +135,7 @@ impl CovenHandle {
         &self,
         container: &str,
         device_name: &str,
-    ) -> Result<ConnectedStorage, StorageSetupError> {
+    ) -> Result<StorageSetup, StorageSetupError> {
         self.storage.setup_cloudkit(container, device_name).await
     }
     /// Open this member's sealed keys and connect without starting the loop.

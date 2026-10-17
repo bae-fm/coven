@@ -56,7 +56,7 @@ enum SyncCommand {
         connection: coven_storage::ConnectionCredentials,
         sign_in: Option<Arc<crate::SessionSignIn>>,
         store_name: String,
-        reply: Reply,
+        reply: oneshot::Sender<Result<coven_crypto::SecretText, SyncError>>,
     },
     Unlock {
         storage: Arc<StorageConnection>,
@@ -150,7 +150,7 @@ impl SyncLoop {
         connection: coven_storage::ConnectionCredentials,
         sign_in: Option<Arc<crate::SessionSignIn>>,
         store_name: String,
-    ) -> Result<(), SyncError> {
+    ) -> Result<coven_crypto::SecretText, SyncError> {
         let (reply, result) = oneshot::channel();
         self.commands
             .send(SyncCommand::Setup {
@@ -283,15 +283,16 @@ impl SyncRun {
                 });
                 Ok(())
             }
-            Err(error) => {
-                // The status and the waiting call share one cause.
-                let (failure, source) = error.into_shared();
-                self.status.send_replace(SyncStatus::Failed {
-                    error: SyncFailure::Other(source.clone()),
-                });
-                Err(SyncError::Failed { failure, source })
-            }
+            Err(error) => Err(self.publish_failure(error)),
         }
+    }
+
+    fn publish_failure(&self, error: SyncError) -> SyncError {
+        let (failure, source) = error.into_shared();
+        self.status.send_replace(SyncStatus::Failed {
+            error: SyncFailure::Other(source.clone()),
+        });
+        SyncError::Failed { failure, source }
     }
 
     async fn setup(
@@ -302,7 +303,7 @@ impl SyncRun {
         connection: coven_storage::ConnectionCredentials,
         sign_in: Option<Arc<crate::SessionSignIn>>,
         store_name: String,
-    ) -> Result<(), SyncError> {
+    ) -> Result<coven_crypto::SecretText, SyncError> {
         // Relocation needs the old provider even when stop has released it.
         let reconnect = self.configured
             && self.connection.is_none()
@@ -317,28 +318,32 @@ impl SyncRun {
             self.connect().await?;
         }
         let result = async {
-            let commit = self
+            let (commit, code) = self
                 .codes
                 .prepare_setup(connection, sign_in, store_name)
                 .await?;
             self.operations
                 .setup_storage(storage, access, device_name, commit)
-                .await
+                .await?;
+            Ok::<_, SyncError>(code)
         }
         .await;
-        if let Err(operation) = result {
-            if reconnect {
-                if let Err(cleanup) = self.release_connection().await {
-                    return self.publish_stopped(Err(SyncError::Cleanup {
-                        operation: Box::new(operation),
-                        cleanup: Box::new(cleanup),
-                    }));
+        match result {
+            Ok(code) => Ok(code),
+            Err(mut operation) => {
+                if reconnect {
+                    if let Err(cleanup) = self.release_connection().await {
+                        operation = SyncError::Cleanup {
+                            operation: Box::new(operation),
+                            cleanup: Box::new(cleanup),
+                        };
+                        return Err(self.publish_failure(operation));
+                    }
                 }
+                self.send.invalidate();
+                Err(operation)
             }
-            self.send.invalidate();
-            return Err(operation);
         }
-        Ok(())
     }
 
     async fn start(&mut self) -> Result<(), SyncError> {
