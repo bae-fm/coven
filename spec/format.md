@@ -476,8 +476,9 @@
 - These records preserve historical bindings, key introductions, exposure and announcements.
   Derive admin state from them in order; retained later slots supply newer bindings.
 - Section 11 occurs in every snapshot, once per device known through its coverage.
-  It records that device's last claim number in the covered slots and the SHA-256
-  of that slot's complete bytes, or zero and no digest without one.
+  It records that device's greatest claim number in the covered slots and the SHA-256
+  of that slot's complete bytes, or zero and no digest without one. On a tie,
+  possible only with cloned device ids, keep the later slot's digest.
 - Include every slot kind, valid or refused, including writes whose parts were
   unreadable or reset-ignored. This number settles every claim after slot deletion
   ([§6](coven.md#settling-a-claim)).

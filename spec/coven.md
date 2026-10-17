@@ -1317,12 +1317,12 @@ An operation keeps this record in its journal; a writes queue keeps it with its 
   ([`claim_floor_check`](proofs/sequence/CovenSequence/Retention.lean)).
   If the floor has passed its slot, recreated bytes cannot confirm it
   ([`stale_create_wins_deleted_slot`](proofs/sequence/CovenSequence/Claim.lean)).
-- When the floor has passed the recorded slot n, read the authenticated floor
-  snapshot's record for this device: its last included claim number L and that
+- When the floor has passed the recorded slot, compare its recorded claim number c
+  with the authenticated floor snapshot's last included claim number L and that
   slot's digest ([§15](#15-snapshots)). This settles every slot kind, valid or refused:
-  - L below n: the claim did not land;
-  - L equal to n with the digest of the recorded bytes: it landed;
-  - L above n, or equal with another digest: another copy uses this device id;
+  - L below c: the claim did not land;
+  - L equal to c with the digest of the recorded bytes: it landed;
+  - L above c, or equal with another digest: another copy uses this device id;
     report `SyncError::DeviceIdInUse` and stop sending.
 - The number alone is not enough: two copies of one id can claim with the same
   number, and the loser would take the winner's slot for its own
@@ -3043,8 +3043,9 @@ It holds rows, merge records, losses and the evidence needed for old writes.
 
 - Store snapshots also hold signed admin entries, key copies and announcements.
   They preserve the history needed for membership, keys, schema changes and resets (D7).
-- Each snapshot records, for every device, its last included claim number and
-  the SHA-256 of that claim's slot bytes.
+- Each snapshot records, for every device, its greatest included claim number and
+  the SHA-256 of that claim's slot bytes. On a tie, possible only with cloned device
+  ids, keep the later slot's digest.
   Count every slot through coverage: writes, admin entries, key copies and
   announcements, valid or refused, including writes with opaque or reset-ignored parts.
 - A device with no included claim has number zero and no digest. These numbers settle every
