@@ -234,10 +234,7 @@ fn schema_zero_and_u64_stream_lengths_are_representable() {
         .clone();
     for version in [0, u32::MAX] {
         header.header.schema_version = version;
-        header.header.store_log_read = crate::value::EntryPositions(vec![crate::value::EntryId {
-            device: header.header.position.device,
-            number: u64::MAX,
-        }]);
+        header.header.read_through = u64::MAX;
         header.parts[0].plaintext_length = u64::MAX;
         header.parts[0].record_count = u64::MAX / FRAME_PREFIX_LEN as u64;
         assert_eq!(

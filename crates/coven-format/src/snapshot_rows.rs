@@ -1,7 +1,7 @@
 //! Snapshot rows carry app values and merge generations; losses travel separately.
 
 use crate::error::{require, Error, Rule as FormatRule};
-use crate::value::{positive, row, EntryId, Value, WritePositions};
+use crate::value::{positive, row, Slot, Value};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use coven_merge::{ColumnValue, RowId, RowState, Timestamp, WriteId, WriteOracle};
 use std::collections::BTreeMap;
@@ -38,12 +38,14 @@ impl SyncedRow {
 pub struct AppliedWrite {
     /// The applied write.
     pub id: WriteId,
+    /// Slot containing this published write.
+    pub slot: Slot,
     /// Its timestamp.
     pub timestamp: Timestamp,
-    /// Other devices' read positions; its own earlier writes are implicit.
-    pub had_read: WritePositions,
+    /// Last applied slot when authored; own earlier writes are implicit.
+    pub read_through: u64,
 }
-wire_struct!(AppliedWrite, id, timestamp, had_read);
+wire_struct!(AppliedWrite, id, slot, timestamp, read_through);
 impl AppliedWrite {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         positive(self.id.number)?;
@@ -52,7 +54,11 @@ impl AppliedWrite {
             "applied write timestamp",
             FormatRule::TimestampDevice,
         )?;
-        self.had_read.without_own_device(self.id.device)
+        require(
+            self.read_through < self.slot.0,
+            "applied write read-through",
+            FormatRule::Coverage,
+        )
     }
 }
 
@@ -102,7 +108,7 @@ impl MergeRow {
 
 /// How a device interpreted one original row change (§8, §10, §17.1, §19.3).
 /// It decides whether the change survives as a source for later changes,
-/// independently of dismissible losses and consumed positions.
+/// independently of dismissible losses and consumed slots.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangeVerdict {
     /// Never interpreted here: a loaded snapshot already carries its effects.
@@ -111,12 +117,12 @@ pub enum ChangeVerdict {
     Applied,
     /// A breaking change to this schema version excluded its part (§17.1).
     Excluded(u32),
-    /// Its write landed outside a retirement window and has no effects.
-    Dropped,
+    /// An earlier removal or credential replacement cut off this write.
+    Refused,
     /// It used data that does not survive: these sources, in role order.
     Dependent(Vec<crate::write_sources::ChangeId>),
     /// A kept reset ignored its part: it had not read that entry (§19.3).
-    Ignored(EntryId),
+    Ignored(Slot),
     /// It lacked permission: it directly changed another member's owned row,
     /// or was not the exact foreign-key effect of authorized changes (§8.8).
     NotAuthorized(crate::loss::AuthorizationFailure),
@@ -133,12 +139,12 @@ impl ChangeVerdict {
                 "breaking schema version",
                 FormatRule::Required,
             ),
-            Self::Ignored(entry) => positive(entry.number),
+            Self::Ignored(entry) => positive(entry.0),
             Self::Dependent(sources) | Self::Derived(sources) => {
                 require(!sources.is_empty(), "verdict sources", FormatRule::Required)?;
                 sources.iter().try_for_each(|s| positive(s.write.number))
             }
-            Self::Unjudged | Self::Applied | Self::Dropped | Self::NotAuthorized(_) => Ok(()),
+            Self::Unjudged | Self::Applied | Self::Refused | Self::NotAuthorized(_) => Ok(()),
         }
     }
 
@@ -156,7 +162,7 @@ impl Wire for ChangeVerdict {
                 2u8.put(out)?;
                 version.put(out)
             }
-            Self::Dropped => 3u8.put(out),
+            Self::Refused => 3u8.put(out),
             Self::Dependent(sources) => {
                 4u8.put(out)?;
                 sources.put(out)
@@ -180,7 +186,7 @@ impl Wire for ChangeVerdict {
             0 => Ok(Self::Unjudged),
             1 => Ok(Self::Applied),
             2 => Ok(Self::Excluded(Wire::get(input)?)),
-            3 => Ok(Self::Dropped),
+            3 => Ok(Self::Refused),
             4 => Ok(Self::Dependent(Wire::get(input)?)),
             5 => Ok(Self::Ignored(Wire::get(input)?)),
             6 => Ok(Self::NotAuthorized(Wire::get(input)?)),

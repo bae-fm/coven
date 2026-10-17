@@ -6,11 +6,9 @@ a directory argument it writes them there instead, which is how
 `lib_tests::every_object_and_snapshot_section_has_pinned_bytes` compares this
 generator's output with the checked-in bytes.
 
-The member-bearing plaintext frames (store-log entries, the join request, the
-clock and the pending-report grammar) and both codes are encoded here from D2,
-D6, D8 and D13. The write, snapshot and posted-positions frames carry no member
-data and come from the checked-in `v1.hex`. Sealed objects, key boxes and
-signatures are calculated here for every fixture.
+Admin frames and codes are independently encoded from D2/D6/D13. Write and
+snapshot plaintext frames come from v1.hex. Every sealed object, anonymous
+box and signature is calculated here, including the outer writes slot and floor.
 
 Ana's stable id is 0x4d repeated. Her original pair has signing and sealing
 seeds 0x33, her replacement pair 0x34; Ben (0x42 repeated) has seeds 0x35.
@@ -77,16 +75,12 @@ def collection(items):
     return u32(len(items)) + b"".join(items)
 
 
-def entry_id(device, number):
+def write_id(device, number):
     return u64(device) + u64(number)
 
 
 def timestamp(ms, counter, device):
     return ms.to_bytes(6, "big") + u16(counter) + u64(device)
-
-
-def storage_time(seconds, nanos):
-    return u64(seconds) + u32(nanos)
 
 
 def store_audience():
@@ -144,9 +138,9 @@ def pair(sodium, seed):
 
 
 def key_copy(sodium, path, audience, key_id, plaintext, seed, ephemeral_seed, nonce):
-    """A kind-37 copy to Ana's credential whose seeds are `seed` (D9, D11)."""
+    """A copy slot addressed to Ana's exact credential (D9, D11)."""
     recipient = sealing_public(sodium, seed)
-    prefix = bytes([37, 0, 1]) + audience + key_id + ANA + recipient
+    prefix = bytes([33, 0, 1, 2]) + bytes([1]) * 16 + b"\x01" + audience + key_id + ANA + recipient
     ephemeral = bytes([ephemeral_seed]) * 32
     sender = sealing_public(sodium, ephemeral_seed)
     shared = c.create_string_buffer(32)
@@ -163,7 +157,10 @@ def key_copy(sodium, path, audience, key_id, plaintext, seed, ephemeral_seed, no
         box_context, len(box_context), None, nonce, key,
     ))
     assert length.value == len(ciphertext)
-    return prefix + sender + nonce + ciphertext.raw
+    prefix += sender + nonce + u32(len(plaintext)) + ciphertext.raw
+    slot_number = int(path.rsplit(b"/", 1)[1])
+    plaintext = slot_header(slot_number, slot_number) + frame(16, b"")
+    return signed(sodium, path, prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext))
 
 
 def signature(sodium, message, seed):
@@ -185,7 +182,7 @@ def signed(sodium, path, body, seed=0x33):
 
 
 def single_chunk(sodium, kind, key_id, key, path, plaintext, nonce, seed):
-    """A one-chunk object (D9): kinds 35/39 name their key; a join request has none."""
+    """A join request with a fixed test nonce (D9)."""
     prefix = bytes([kind, 0, 1]) + key_id
     return signed(sodium, path, prefix + sealed_chunk(
         sodium, key, path, prefix, 0, 0, plaintext, bytes([nonce]) * 24), seed)
@@ -360,8 +357,7 @@ def part_lengths(header):
     r = Reader(header)
     assert r.int(1) == 1 and r.int(2) == 1
     r.take(4 + 32)
-    for _ in range(2):
-        r.take(16 * r.int(4))
+    r.take(8)
     r.take(4 + 1)
     lengths = []
     for _ in range(r.int(4)):
@@ -371,10 +367,16 @@ def part_lengths(header):
     return lengths
 
 
-# D6 store-log entries.
-def entry(change, number=1, stamp=(6, 3, 1), author=ANA):
-    payload = entry_id(1, number) + timestamp(*stamp) + author + collection([]) + change
-    return frame(4, payload)
+# D6 admin frames and D9 slot header.
+def slot_header(slot, claim):
+    return frame(14, u64(1) + u64(claim) + ANA + u64(slot - 1))
+
+
+def bounded_slot(sodium, slot, kind, plaintext, claim=None):
+    path = STORE_TEXT + b"seq/" + str(slot).encode()
+    prefix = bytes([33, 0, 1, kind]) + bytes([1]) * 16 + b"\x00"
+    body = slot_header(slot, slot if claim is None else claim) + plaintext
+    return signed(sodium, path, prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, body))
 
 
 def changes(sodium):
@@ -394,14 +396,13 @@ def changes(sodium):
         b"\x08" + CIRCLE,
         b"\x09" + CIRCLE + ANA,
         b"\x0a" + CIRCLE + ANA,
-        b"\x0b" + u32(2) + snapshot_id(store_audience(), 1, 1)
-        + storage_time(1_700_000_000, 5),
-        b"\x0d" + snapshot_id(circle_audience(CIRCLE), 1, 1),
+        b"\x0b" + u32(2) + u64(7),
+        b"\x0d" + u64(8),
         b"\x0e" + ANA + b"\x01" + text(b"replacement-key") + b"\x01" + text(b"coven-member")
         + b"\x00" + text(b"coven-store"),
         b"\x0f" + store_audience() + bytes([3]) * 16 + bytes([0x91]) * 32,
         b"\x0f" + circle_audience(CIRCLE) + bytes([4]) * 16 + bytes([0xA2]) * 32,
-        b"\x10" + ANA + pair(sodium, 0x34),
+        b"\x10" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34),
     ]
 
 
@@ -410,69 +411,8 @@ def join_request(sodium):
     return frame(9, bytes([0x55]) * 16 + ANA + pair(sodium, 0x34) + text(b"D"))
 
 
-def creation_marker():
-    """D9's creation marker (kind 41): store, then device 1. Unsealed."""
-    return bytes([41]) + u16(1) + STORE + u64(1)
-
-
-def clock():
-    return frame(12, u64(1) + collection([entry_id(1, 2)]))
-
-
-def objects(sodium, positions):
-    """`test_utils::objects`: creation, removal, a raise, the join request,
-    posted positions, the other changes, then the clock."""
-    every = changes(sodium)
-    frames = [
-        entry(every[0]),
-        entry(every[2], number=2, stamp=(7, 0, 1)),
-        entry(b"\x0b" + u32(3) + snapshot_id(circle_audience((7).to_bytes(16, "big")), 9, 11)
-              + storage_time(1_700_000_100, 0)),
-        join_request(sodium),
-        positions,
-    ]
-    frames += [entry(change) for index, change in enumerate(every) if index not in (0, 2, 11)]
-    frames.append(clock())
-    return frames
-
-
-# D8 pending reports.
-def path_text(path):
-    return text(STORE_TEXT + path)
-
-
-def pending_reports(sodium):
-    """The grammar fixture `pinned_pending_frame_covers_the_complete_report_grammar`."""
-    key4 = (4).to_bytes(16, "big")
-    reports = []
-    for failure in range(7):
-        reports.append(b"\x00" + entry_id(2, failure + 1) + b"\x00" + u8(failure))
-    for index, reason in enumerate([
-        b"\x01" + path_text(b"devices/2/3"),
-        b"\x02\x00" + path_text(b"store-log/3/1"),
-        b"\x02\x01" + u64(3),
-        b"\x03" + store_audience() + key4,
-        b"\x04\x00" + u32(3),
-        b"\x04\x01" + u32(0xFFFF),
-    ]):
-        reports.append(b"\x00" + entry_id(2, index + 8) + reason)
-    reports.append(b"\x01" + entry_id(2, 3) + b"\x00\x04")
-    # Ana's original and replacement credentials are distinct subjects,
-    # ordered by sealing key after audience, key and member.
-    subject_length = 1 + 1 + 16 + 16 + 32
-    copies = [
-        b"\x02" + store_audience() + key4 + ANA + sealing_public(sodium, 0x33) + b"\x00\x00",
-        b"\x02" + store_audience() + key4 + ANA + sealing_public(sodium, 0x34)
-        + b"\x03" + store_audience() + key4,
-    ]
-    reports += sorted(copies, key=lambda report: report[:subject_length])
-    for index, reason in enumerate([b"\x00\x07", b"\x05\x00", b"\x05\x01", b"\x05\x02"]):
-        reports.append(b"\x03" + u64(1) + (index + 1).to_bytes(16, "big") + reason)
-    circle6 = circle_audience((6).to_bytes(16, "big"))
-    reports.append(b"\x04" + snapshot_id(circle6, 2, 3) + b"\x03" + circle6 + key4)
-    reports.append(b"\x05" + u64(2) + b"\x06\x01")
-    payload = u64(1) + collection([]) + collection([]) + u32(1) + collection([])
-    return frame(8, payload + collection(reports))
+def objects(sodium):
+    return [frame(4, change) for change in changes(sodium)] + [join_request(sodium)]
 
 
 # D13 codes.
@@ -506,7 +446,7 @@ def invite_code():
                  + bytes([1]) * 16 + u64(1) + u64(12) + text(b"\x44"))
 
 
-def main():
+def load_sodium():
     library = ctypes.util.find_library("sodium")
     # On macOS ctypes searches /usr/local/lib but not Apple-silicon Homebrew's
     # /opt/homebrew/lib, so only Homebrew's own Python finds libsodium there.
@@ -528,20 +468,30 @@ def main():
     sodium.crypto_scalarmult_base.argtypes = [pointer, pointer]
     sodium.crypto_scalarmult.argtypes = [pointer, pointer, pointer]
 
+    return sodium
+
+
+def copies(sodium):
+    store_key_id = bytes([1]) * 16
+    store = key_copy(sodium, STORE_TEXT + b"seq/2", b"\x00", store_key_id,
+                     store_key_id + bytes([17]) * 32, 0x33, 0x55, 0x44)
+    circle_key_id = bytes([3]) * 16
+    circle = key_copy(sodium, STORE_TEXT + b"seq/8", b"\x01" + CIRCLE, circle_key_id,
+                      CIRCLE + circle_key_id + bytes([18]) * 32, 0x34, 0x56, 0x45)
+    return store, circle
+
+
+def main():
+    sodium = load_sodium()
     directory = Path(__file__).resolve().parent
     out = Path(sys.argv[1]) if len(sys.argv) > 1 else directory
     pinned = [bytes.fromhex(line) for line in (directory / "v1.hex").read_text().splitlines()]
     # The object frames come first; the write header (kind 1) starts the rest.
     rest_at = next(i for i, frame_ in enumerate(pinned) if frame_[0] == 1)
-    positions = [frame_ for frame_ in pinned[:rest_at] if frame_[0] == 8]
-    assert len(positions) == 1
-    frames = objects(sodium, positions[0]) + pinned[rest_at:]
+    frames = objects(sodium) + pinned[rest_at:]
     (out / "v1.hex").write_text("".join(frame_.hex() + "\n" for frame_ in frames))
-    (out / "clock.hex").write_text(clock().hex() + "\n")
-    (out / "creation-marker.hex").write_text(creation_marker().hex() + "\n")
-    (out / "pending-reports.hex").write_text(pending_reports(sodium).hex() + "\n")
 
-    path = STORE_TEXT + b"devices/1/3"
+    path = b"coven/write/" + STORE_TEXT + b"1/3"
     # The write prefix (kind 32) follows the plaintext frames; its header and
     # part chunks follow it, then the snapshot prefix (kind 34) and its chunks.
     write_at = next(i for i, frame_ in enumerate(frames) if frame_[0] == 32)
@@ -568,12 +518,22 @@ def main():
             body += chunk(sodium, encryption_key(key), path, prefix, section, index, frame_)
     write = signed(sodium, path, body)
 
-    # Creation is verified with the admin pair it supplies (seeds 0x33).
-    path = STORE_TEXT + b"store-log/1/1"
-    prefix = bytes([33, 0, 1]) + bytes([1]) * 16
-    assert frames[0][0] == 4
-    body = prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, frames[0])
-    entry_object = signed(sodium, path, body)
+    path = b"coven/write/" + STORE_TEXT + b"1/4"
+    prefix = bytes([32, 0, 1]) + bytes([1]) * 16 + collection([])
+    header = frame(1, write_id(1, 4) + timestamp(8, 0, 1) + u64(5) + u32(2) + b"\x02" + collection([]))
+    header_chunk = chunk(sodium, encryption_key(17), path, prefix, 0, 0, header)
+    tail = signature(sodium, context(b"coven/write-header-signature/v1", path, prefix, header_chunk, b""), 0x33)
+    migration = signed(sodium, path, prefix + header_chunk + tail)
+
+    entry_object = bounded_slot(sodium, 1, 0, frames[0])
+    # The inner object remains fixed when the batch claims another slot.
+    path = STORE_TEXT + b"seq/6"
+    prefix = bytes([33, 0, 1, 1]) + bytes([1]) * 16 + b"\x00"
+    plaintext = slot_header(6, 5) + u64(2) + u64(len(write)) + write + u64(len(migration)) + migration
+    body = prefix
+    for index, start in enumerate(range(0, len(plaintext), 65536)):
+        body += chunk(sodium, encryption_key(17), path, prefix, 0, index, plaintext[start:start + 65536])
+    writes_slot = signed(sodium, path, body)
 
     # Snapshot chunks use random nonces; these fixed ones are public test data.
     path = STORE_TEXT + b"snapshots/store/1/1"
@@ -585,32 +545,58 @@ def main():
                              bytes([0x60 + index]) * 24)
     snapshot = signed(sodium, path, body)
 
-    # Positions, clock and join request use random nonces; these are fixed.
-    store_key_id = bytes([1]) * 16
-    positions_object = single_chunk(sodium, 35, store_key_id, encryption_key(17),
-                                    STORE_TEXT + b"positions/1", positions[0], 0x51, 0x33)
-    clock_object = single_chunk(sodium, 39, store_key_id, encryption_key(17),
-                                STORE_TEXT + b"clock/1", clock(), 0x39, 0x33)
+    # A second audience has its own coverage and the same active app schema.
+    path = STORE_TEXT + b"snapshots/02020202-0202-0202-0202-020202020202/1/1"
+    prefix = bytes([34, 0, 1]) + circle_audience(CIRCLE) + bytes([3]) * 16 + u64(8) + b"\x00"
+    plaintext = frame(5, snapshot_id(circle_audience(CIRCLE), 1, 1) + u32(2) + u64(0) * 11 + u64(2))
+    plaintext += frame(6, b"\x0b" + u64(1) + u64(7)) + frame(6, b"\x0b" + u64(2) + u64(1)) + frame(7, b"")
+    body = prefix + signature(sodium, context(b"coven/prefix-signature/v1", path, prefix), 0x33)
+    body += sealed_chunk(sodium, encryption_key(18), path, prefix, 0, 0, plaintext, bytes([0x69]) * 24)
+    circle_snapshot = signed(sodium, path, body)
+
     # The request is sealed with the invite secret's key and signed by the pair it requests.
     join_object = single_chunk(
         sodium, 36, b"", derive(bytes([0x66]) * 32, b"coven/join-request/v1"),
         STORE_TEXT + b"join-requests/55555555-5555-5555-5555-555555555555",
         join_request(sodium), 0x52, 0x34)
 
-    # Key copies use random ephemeral keys and nonces; these fixed ones are public.
-    # Both go to Ana's one id: the store key to her original credential and the
-    # circle key to her replacement.
-    store_key = key_copy(sodium, STORE_TEXT + b"keys/7/9", b"\x00", store_key_id,
-                         store_key_id + bytes([17]) * 32, 0x33, 0x55, 0x44)
-    circle_key_id = bytes([3]) * 16
-    circle_key = key_copy(sodium, STORE_TEXT + b"keys/7/10", b"\x01" + CIRCLE, circle_key_id,
-                          CIRCLE + circle_key_id + bytes([18]) * 32, 0x34, 0x56, 0x45)
+    store_key, circle_key = copies(sodium)
+    # The floor carries original copies and announcement bytes, each at its old path.
+    announcement = bounded_slot(sodium, 10, 3, frame(15,
+        snapshot_id(store_audience(), 1, 1) + u64(9) + b"\x01" + u32(2) + hashlib.sha256(snapshot).digest()), claim=9)
+    circle_announcement = bounded_slot(sodium, 9, 3, frame(15,
+        snapshot_id(circle_audience(CIRCLE), 1, 1) + u64(8) + b"\x00" + hashlib.sha256(circle_snapshot).digest()), claim=8)
+    path = STORE_TEXT + b"floor"
+    prefix = bytes([39, 0, 1]) + bytes([1]) * 16 + collection([u64(2) + text(store_key), u64(8) + text(circle_key)])
+    plaintext = frame(12, u64(1) + u64(11) + u64(6) + collection([u64(10), u64(9)]))
+    plaintext += frame(6, u64(10) + text(announcement)) + frame(6, u64(9) + text(circle_announcement)) + frame(7, b"")
+    body = prefix
+    for index, start in enumerate(range(0, len(plaintext), 65536)):
+        body += sealed_chunk(sodium, encryption_key(17), path, prefix, 0, index,
+                             plaintext[start:start + 65536], bytes([0x70 + index]) * 24)
+    floor = signed(sodium, path, body)
+    # Refused and reset-ignored parts still carry the device's included claim.
+    authored = next(piece for piece in frames[:write_at] if piece[0] == 6 and piece[7] == 5)
+    assert authored[-1] == 1  # Applied verdict in the source record.
+    claim_snapshots = []
+    for number, verdict in [(8, b"\x03"), (9, b"\x05" + u64(2))]:
+        counts = [0] * 12
+        counts[5], counts[11] = 1, 2
+        body = frame(5, snapshot_id(store_audience(), 1, number) + u32(2) + b"".join(u64(n) for n in counts))
+        body += frame(6, authored[7:-1] + verdict)
+        body += frame(6, b"\x0b" + u64(1) + u64(number)) + frame(6, b"\x0b" + u64(2) + u64(1)) + frame(7, b"")
+        claim_snapshots.append(body)
+    (out / "snapshot-claims.hex").write_text("".join(body.hex() + "\n" for body in claim_snapshots))
     for name, data in [
         ("sealed-write.hex", write),
-        ("sealed-store-log.hex", entry_object),
+        ("sealed-migration-write.hex", migration),
+        ("sealed-circle-snapshot.hex", circle_snapshot),
+        ("sealed-announcement.hex", announcement),
+        ("sealed-circle-announcement.hex", circle_announcement),
+        ("sealed-admin.hex", entry_object),
         ("sealed-snapshot.hex", snapshot),
-        ("sealed-positions.hex", positions_object),
-        ("sealed-clock.hex", clock_object),
+        ("sealed-writes-slot.hex", writes_slot),
+        ("sealed-floor.hex", floor),
         ("sealed-join-request.hex", join_object),
         ("sealed-store-key.hex", store_key),
         ("sealed-circle-key.hex", circle_key),

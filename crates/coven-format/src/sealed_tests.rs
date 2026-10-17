@@ -1,10 +1,10 @@
 use super::*;
 use crate::sealed_single::SingleChunkObject;
-use crate::sealed_snapshot::{SnapshotObjectLayout, SnapshotObjectPrefix};
+use crate::sealed_snapshot::SnapshotObjectPrefix;
+use crate::sealed_stream::StreamObjectLayout;
 use crate::sealed_write::{ObjectChunk, WriteObjectLayout, WriteObjectPrefix};
 use crate::snapshot::SnapshotRecord;
 use crate::snapshot_stream::SnapshotChunkDecoder;
-use crate::store_log::StoreChange;
 use crate::tests::mutations;
 use crate::write_stream::{PartDecoder, WriteEncoder, WriteHeaderFrame};
 use crate::{test_utils, tests::hex, Object};
@@ -12,7 +12,7 @@ use coven_crypto::{CircleKey, ObjectHasher, Signature, StoreKey};
 use coven_foundation::id_source::{CircleId, KeyId};
 use uuid::Uuid;
 
-const WRITE_PATH: &str = "10101010-1010-1010-1010-101010101010/devices/1/3";
+const WRITE_PATH: &str = "coven/write/10101010-1010-1010-1010-101010101010/1/3";
 const SNAPSHOT_PATH: &str = "10101010-1010-1010-1010-101010101010/snapshots/store/1/1";
 
 fn store_key() -> StoreKey {
@@ -84,8 +84,8 @@ fn walk_snapshot(
     let prefix = SnapshotObjectPrefix::decode(prefix_bytes)?;
     assert_eq!(prefix.encode()?, prefix_bytes);
     let prefix_signature = crate::sealed::signature(take(&mut bytes, 64)?)?;
-    let mut layout = SnapshotObjectLayout::new();
-    let mut writer = SnapshotObjectLayout::new();
+    let mut layout = StreamObjectLayout::new();
+    let mut writer = StreamObjectLayout::new();
     while bytes.len() > 64 {
         let length = layout.chunk_length(bytes)?;
         let index = layout.index();
@@ -233,7 +233,7 @@ fn sealed_write_fixture_opens_both_parts_and_reseals_identically() {
     assert!(store_key()
         .derive()
         .open_object_chunk(
-            "10101010-1010-1010-1010-101010101010/devices/1/4",
+            "coven/write/10101010-1010-1010-1010-101010101010/1/4",
             prefix_bytes,
             0,
             0,
@@ -246,7 +246,7 @@ fn sealed_write_fixture_opens_both_parts_and_reseals_identically() {
 }
 
 #[test]
-fn snapshot_fixture_binds_positions_and_requires_its_plaintext_end_marker() {
+fn snapshot_fixture_binds_coverage_and_requires_its_plaintext_end_marker() {
     let bytes = hex(include_str!("../fixtures/sealed-snapshot.hex"));
     let prefix_length = SnapshotObjectPrefix::length(&bytes).unwrap();
     let prefix_bytes = &bytes[..prefix_length];
@@ -260,7 +260,7 @@ fn snapshot_fixture_binds_positions_and_requires_its_plaintext_end_marker() {
     let mut oracle = test_utils::TestOracle {
         writes: Default::default(),
     };
-    let mut writer = SnapshotObjectLayout::new();
+    let mut writer = StreamObjectLayout::new();
     let mut encoded = prefix.encode().unwrap();
     encoded.extend_from_slice(prefix_signature.as_bytes());
     let mut plaintext = Vec::new();
@@ -293,8 +293,7 @@ fn snapshot_fixture_binds_positions_and_requires_its_plaintext_end_marker() {
         .unwrap();
     encoded.extend_from_slice(signature.as_bytes());
     reader.finish().unwrap();
-    assert_eq!(reader.header().unwrap().writes, prefix.writes);
-    assert_eq!(reader.header().unwrap().store_log, prefix.store_log);
+    assert_eq!(reader.header().unwrap().covers, prefix.covers);
     assert_eq!(count, test_utils::snapshot_records().len());
     assert_eq!(plaintext, test_utils::chunked_snapshot_frames().concat());
     assert_eq!(encoded, bytes);
@@ -304,99 +303,33 @@ fn snapshot_fixture_binds_positions_and_requires_its_plaintext_end_marker() {
 }
 
 #[test]
-fn single_chunk_fixtures_open_with_their_own_keys_and_authors() {
-    for (text, path, kind) in [
-        (
-            include_str!("../fixtures/sealed-store-log.hex"),
-            "10101010-1010-1010-1010-101010101010/store-log/1/1",
-            33,
-        ),
-        (
-            include_str!("../fixtures/sealed-positions.hex"),
-            "10101010-1010-1010-1010-101010101010/positions/1",
-            35,
-        ),
-        (
-            include_str!("../fixtures/sealed-clock.hex"),
-            "10101010-1010-1010-1010-101010101010/clock/1",
-            39,
-        ),
-        (
-            include_str!("../fixtures/sealed-join-request.hex"),
-            "10101010-1010-1010-1010-101010101010/join-requests/55555555-5555-5555-5555-555555555555",
-            36,
-        ),
-    ] {
-        let bytes = hex(text);
-        let object = SingleChunkObject::decode(&bytes).unwrap();
-        assert_eq!(bytes[0], kind);
-        assert_eq!(object.encode().unwrap(), bytes);
-        let prefix = object.prefix().encode().unwrap();
-        let plain = match &object {
-            SingleChunkObject::JoinRequest { .. } => test_utils::invite()
-                .secret
-                .join_request_key()
-                .open_object_chunk(path, &prefix, 0, 0, object.chunk())
-                .unwrap(),
-            SingleChunkObject::StoreLog { key, .. }
-            | SingleChunkObject::PostedPositions { key, .. }
-            | SingleChunkObject::ClockObservation { key, .. } => {
-                assert_eq!(*key, store_key().id());
-                store_key()
-                    .derive()
-                    .open_object_chunk(path, &prefix, 0, 0, object.chunk())
-                    .unwrap()
-            }
-        };
-        let frame = Object::decode(&plain).unwrap();
-        assert_eq!(frame.encode().unwrap(), plain);
-        let author = match frame {
-            Object::StoreLog(entry) => {
-                assert_eq!(kind, 33);
-                assert_eq!(prefix.len(), 19);
-                assert_eq!(entry, test_utils::store_log());
-                assert_eq!(
-                    store_key()
-                        .derive()
-                        .reseal_object_chunk(path, &prefix, 0, 0, &plain),
-                    object.chunk(),
-                );
-                // Creation verifies with its supplied initial pair, not its id.
-                assert_eq!(entry.author, test_utils::member_id());
-                let StoreChange::CreateStore { admin, .. } = entry.change else {
-                    panic!("fixture is the creation entry")
-                };
-                admin.signing
-            }
-            Object::JoinRequest(request) => {
-                assert_eq!(kind, 36);
-                assert_eq!(request, test_utils::join_request());
-                // The requested replacement pair signs a re-binding request.
-                request.keys.signing
-            }
-            Object::PostedPositions(_) => {
-                assert_eq!(kind, 35);
-                test_utils::member().signing
-            }
-            Object::ClockObservation(clock) => {
-                assert_eq!(kind, 39);
-                assert_eq!(clock, test_utils::clock());
-                test_utils::member().signing
-            }
-        };
-        {
-            let mut hash = ObjectHasher::new();
-            hash.update(&bytes[..bytes.len() - 64]);
-            author
-                .verify_object(path, &hash.finish(), object.signature())
-                .unwrap();
+fn join_fixture_opens_with_the_invite_key_and_requested_signer() {
+    let bytes = hex(include_str!("../fixtures/sealed-join-request.hex"));
+    let path =
+        "10101010-1010-1010-1010-101010101010/join-requests/55555555-5555-5555-5555-555555555555";
+    let object = SingleChunkObject::decode(&bytes).unwrap();
+    let prefix = object.prefix().encode().unwrap();
+    let plain = test_utils::invite()
+        .secret
+        .join_request_key()
+        .open_object_chunk(path, &prefix, 0, 0, object.chunk())
+        .unwrap();
+    assert_eq!(
+        Object::decode(&plain).unwrap(),
+        Object::JoinRequest(test_utils::join_request())
+    );
+    let mut hash = ObjectHasher::new();
+    hash.update(&object.signed_bytes().unwrap());
+    test_utils::replacement()
+        .signing
+        .verify_object(path, &hash.finish(), object.signature())
+        .unwrap();
+    assert_eq!(object.encode().unwrap(), bytes);
+    mutations(&bytes, |changed| {
+        if let Ok(object) = SingleChunkObject::decode(changed) {
+            assert_eq!(object.encode().unwrap(), changed);
         }
-        mutations(&bytes, |changed| {
-            if let Ok(object) = SingleChunkObject::decode(changed) {
-                assert_eq!(object.encode().unwrap(), changed);
-            }
-        });
-    }
+    });
 }
 
 #[test]
@@ -460,35 +393,6 @@ fn snapshot_fixture_signatures_reject_truncation_and_every_changed_bit() {
 }
 
 #[test]
-fn positions_fixture_rejects_every_truncation_and_bit_change() {
-    let bytes = hex(include_str!("../fixtures/sealed-positions.hex"));
-    let author = test_utils::member().signing;
-    let verify = |bytes: &[u8]| -> Result<(), Box<dyn std::error::Error>> {
-        let object = SingleChunkObject::decode(bytes)?;
-        let mut hash = ObjectHasher::new();
-        hash.update(&object.signed_bytes()?);
-        author.verify_object(
-            "10101010-1010-1010-1010-101010101010/positions/1",
-            &hash.finish(),
-            object.signature(),
-        )?;
-        Ok(())
-    };
-    verify(&bytes).unwrap();
-    mutations(&bytes, |changed| assert!(verify(changed).is_err()));
-    let object = SingleChunkObject::decode(&bytes).unwrap();
-    let mut hash = ObjectHasher::new();
-    hash.update(&object.signed_bytes().unwrap());
-    assert!(author
-        .verify_object(
-            "10101010-1010-1010-1010-101010101010/positions/2",
-            &hash.finish(),
-            object.signature()
-        )
-        .is_err());
-}
-
-#[test]
 fn opaque_write_layout_uses_supplied_frame_lengths() {
     let record = test_utils::chunked_write();
     let encoder = WriteEncoder::new(&record).unwrap();
@@ -507,4 +411,301 @@ fn opaque_write_layout_uses_supplied_frame_lengths() {
     // the sealed layer has no knowledge of that codec's tags or field ordering.
     let opaque_header = vec![0x99; encoder.header_frame().len()];
     assert!(WriteObjectLayout::new(prefix, &opaque_header, lengths).is_ok());
+}
+
+mod sequence {
+    use crate::{
+        chunks::FrameDecoder,
+        floor::FloorFrames,
+        sealed_floor::FloorPrefixDecoder,
+        sealed_slot::{SlotKind, SlotObjectPrefix},
+        sealed_stream::StreamObjectLayout,
+        test_utils as f,
+        tests::hex,
+        writes_slot::{BatchPiece, WritesSlotDecoder},
+    };
+    use coven_crypto::ObjectHasher;
+
+    fn open_stream(
+        bytes: &[u8],
+        prefix_length: usize,
+        path: &str,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        open_stream_parts(
+            bytes,
+            prefix_length,
+            prefix_length,
+            path,
+            &f::store_key().derive(),
+        )
+    }
+
+    fn open_stream_parts(
+        bytes: &[u8],
+        prefix_length: usize,
+        body_start: usize,
+        path: &str,
+        keys: &coven_crypto::DerivedKeys,
+    ) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let prefix = bytes.get(..prefix_length).ok_or(crate::Error::Truncated)?;
+        let mut input = &bytes[body_start..];
+        let mut layout = StreamObjectLayout::new();
+        let mut plain = Vec::new();
+        while input.len() > 64 {
+            let length = layout.chunk_length(input)?;
+            let piece = input.get(..length).ok_or(crate::Error::Truncated)?;
+            let index = layout.index();
+            let sealed = layout.decode_chunk(piece)?;
+            plain.extend(keys.open_object_chunk(path, prefix, 0, index, sealed)?);
+            input = &input[length..];
+        }
+        let signature = layout.read_signature(input)?;
+        let mut hash = ObjectHasher::new();
+        hash.update(&bytes[..bytes.len() - 64]);
+        f::member()
+            .signing
+            .verify_object(path, &hash.finish(), &signature)?;
+        Ok(plain)
+    }
+
+    #[test]
+    fn floor_fixture_authenticates_original_copies_announcements_and_coverage() {
+        let bytes = hex(include_str!("../fixtures/sealed-floor.hex"));
+        let mut routing =
+            FloorPrefixDecoder::start(&bytes[..FloorPrefixDecoder::HEADER_LENGTH]).unwrap();
+        assert_eq!(routing.key, f::store_key().id());
+        let mut prefix_length = FloorPrefixDecoder::HEADER_LENGTH;
+        let mut copies = Vec::new();
+        while routing.remaining() != 0 {
+            let length = routing.copy_length(&bytes[prefix_length..]).unwrap();
+            copies.push(
+                routing
+                    .copy(&bytes[prefix_length..prefix_length + length])
+                    .unwrap(),
+            );
+            prefix_length += length;
+        }
+        routing.finish().unwrap();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(copies[1].slot.0, 8);
+        assert_eq!(
+            copies[1].object,
+            hex(include_str!("../fixtures/sealed-circle-key.hex"))
+        );
+        assert_eq!(copies[0].slot.0, 2);
+        assert_eq!(
+            copies[0].object,
+            hex(include_str!("../fixtures/sealed-store-key.hex"))
+        );
+        let path = crate::path::ObjectPath::floor(f::STORE_ID);
+        let plain = open_stream(&bytes, prefix_length, path.as_str()).unwrap();
+        let mut input = plain.as_slice();
+        let mut frames = FrameDecoder::new(None);
+        let mut floor =
+            FloorFrames::decode_header(&frames.next(&mut input).unwrap().unwrap()).unwrap();
+        assert_eq!(floor.header().first.0, 6);
+        assert_eq!(floor.header().at, 11);
+        let mut originals = Vec::new();
+        while let Some(frame) = frames.next(&mut input).unwrap() {
+            if let Some(original) = floor.frame(&frame).unwrap() {
+                originals.push(original);
+            }
+        }
+        frames.finish().unwrap();
+        floor.finish().unwrap();
+        assert_eq!(originals.len(), 2);
+        for (original, snapshot, sealed_announcement, coverage, claims, key) in [
+            (
+                &originals[0],
+                hex(include_str!("../fixtures/sealed-snapshot.hex")),
+                hex(include_str!("../fixtures/sealed-announcement.hex")),
+                9,
+                vec![(1, 8), (2, 1)],
+                f::store_key().derive(),
+            ),
+            (
+                &originals[1],
+                hex(include_str!("../fixtures/sealed-circle-snapshot.hex")),
+                hex(include_str!("../fixtures/sealed-circle-announcement.hex")),
+                8,
+                vec![(1, 7), (2, 1)],
+                coven_crypto::CircleKey::from_bytes(
+                    coven_crypto::CircleId(uuid::Uuid::from_bytes([2; 16])),
+                    coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([3; 16])),
+                    [18; 32],
+                )
+                .derive(),
+            ),
+        ] {
+            assert_eq!(original.object, sealed_announcement);
+            let original_prefix = SlotObjectPrefix::length(&original.object).unwrap();
+            let path = f::slot_path(original.slot.0);
+            let original_plain =
+                open_stream(&original.object, original_prefix, path.as_str()).unwrap();
+            let (_, crate::sequence::SlotFrame::Announcement(announcement)) =
+                crate::sequence::SlotFrame::decode(&original_plain, &path).unwrap()
+            else {
+                panic!("announcement")
+            };
+            let length = crate::sealed_snapshot::SnapshotObjectPrefix::length(&snapshot).unwrap();
+            let (prefix, signature) = crate::sealed_snapshot::SnapshotObjectPrefix::decode_signed(
+                &snapshot[..length + 64],
+            )
+            .unwrap();
+            assert_eq!(announcement.covers, coverage);
+            assert_eq!(announcement.covers, prefix.covers);
+            assert_eq!(announcement.purpose, prefix.purpose);
+            let mut digest = ObjectHasher::new();
+            digest.update(&snapshot);
+            assert_eq!(&announcement.digest, digest.finish().as_bytes());
+            let id = &announcement.snapshot;
+            let path = crate::path::ObjectPath::snapshot(
+                f::STORE_ID,
+                id.audience.clone(),
+                id.device,
+                id.number.try_into().unwrap(),
+            );
+            f::member()
+                .signing
+                .verify_prefix(path.as_str(), &snapshot[..length], &signature)
+                .unwrap();
+            let plain =
+                open_stream_parts(&snapshot, length, length + 64, path.as_str(), &key).unwrap();
+            let mut decoder = crate::snapshot_stream::SnapshotChunkDecoder::new(prefix);
+            let mut oracle = f::TestOracle {
+                writes: Default::default(),
+            };
+            let mut included = Vec::new();
+            for chunk in plain.chunks(65536) {
+                let mut input = chunk;
+                while let Some(record) = decoder.next_record(&mut input, &oracle).unwrap() {
+                    match record {
+                        crate::snapshot::SnapshotRecord::Write(write) => {
+                            oracle.writes.insert(write.id, write);
+                        }
+                        crate::snapshot::SnapshotRecord::Claim(claim) => {
+                            included.push((claim.device.0, claim.number))
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            decoder.finish().unwrap();
+            assert_eq!(decoder.header().unwrap().schema_version, 2);
+            assert_eq!(included, claims);
+            assert!(coverage >= floor.header().first.0 - 1);
+        }
+        // A stored slot below the advanced floor can still exist until deletion finishes.
+        assert!(copies[0].slot < floor.header().first);
+        assert!(open_stream(&bytes, prefix_length, f::slot_path(9).as_str()).is_err());
+        for index in 0..bytes.len() {
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
+            assert!(
+                open_stream(&changed, prefix_length, path.as_str()).is_err(),
+                "byte {index}"
+            );
+        }
+    }
+
+    #[test]
+    fn writes_slot_fixture_preserves_the_exact_inner_object_across_outer_chunks() {
+        let bytes = hex(include_str!("../fixtures/sealed-writes-slot.hex"));
+        let prefix_length = SlotObjectPrefix::length(&bytes).unwrap();
+        let prefix = SlotObjectPrefix::decode(&bytes[..prefix_length]).unwrap();
+        assert_eq!(prefix.kind, SlotKind::Writes);
+        let path = f::slot_path(6);
+        let plain = open_stream(&bytes, prefix_length, path.as_str()).unwrap();
+        let mut decoder = WritesSlotDecoder::new(path.clone());
+        let mut inner = Vec::new();
+        let expected = [
+            hex(include_str!("../fixtures/sealed-write.hex")),
+            hex(include_str!("../fixtures/sealed-migration-write.hex")),
+        ];
+        let headers = [f::chunked_write().header, migration_header()];
+        let mut count = 0;
+        for chunk in plain.chunks(65536) {
+            let mut input = chunk;
+            while let Some(piece) = decoder.next(&mut input).unwrap() {
+                match piece {
+                    BatchPiece::Header(header) => assert_eq!(header, f::slot_header(6, 5)),
+                    BatchPiece::Write { length } => {
+                        assert_eq!(length, expected[count].len() as u64);
+                        decoder.check_header(&headers[count]).unwrap();
+                    }
+                    BatchPiece::Bytes(bytes) => inner.extend_from_slice(bytes),
+                    BatchPiece::EndWrite => {
+                        assert_eq!(inner, expected[count]);
+                        inner.clear();
+                        count += 1;
+                    }
+                }
+            }
+        }
+        decoder.finish().unwrap();
+        assert_eq!(count, 2);
+        assert!(open_stream(&bytes, prefix_length, f::slot_path(7).as_str()).is_err());
+        for index in [
+            0,
+            prefix_length,
+            bytes.len() / 2,
+            bytes.len() - 65,
+            bytes.len() - 1,
+        ] {
+            let mut changed = bytes.clone();
+            changed[index] ^= 1;
+            assert!(open_stream(&changed, prefix_length, path.as_str()).is_err());
+        }
+    }
+
+    fn migration_header() -> crate::write::WriteHeader {
+        use crate::sealed_write::{WriteObjectLayout, WriteObjectPrefix};
+        let bytes = hex(include_str!("../fixtures/sealed-migration-write.hex"));
+        let prefix_length = WriteObjectPrefix::length(&bytes).unwrap();
+        let prefix_bytes = &bytes[..prefix_length];
+        let prefix = WriteObjectPrefix::decode(prefix_bytes).unwrap();
+        let length = WriteObjectPrefix::header_chunk_length(&bytes[prefix_length..]).unwrap();
+        let header_piece = &bytes[prefix_length..prefix_length + length];
+        let sealed = WriteObjectPrefix::header_chunk(header_piece).unwrap();
+        let id = coven_merge::WriteId {
+            device: coven_foundation::id_source::DeviceId(1),
+            number: 4,
+        };
+        let path = crate::writes_slot::identity(f::STORE_ID, id).unwrap();
+        let plain = f::store_key()
+            .derive()
+            .open_object_chunk(&path, prefix_bytes, 0, 0, sealed)
+            .unwrap();
+        let header = crate::write_stream::WriteHeaderFrame::decode(&plain).unwrap();
+        assert_eq!(header.header.position, id);
+        assert_eq!(header.header.read_through, 5);
+        assert_eq!(
+            header.header.disposition,
+            crate::write::WriteDisposition::Migration
+        );
+        assert!(header.parts.is_empty());
+        let tail_at = prefix_length + length;
+        let tail = prefix.decode_tail(&bytes[tail_at..tail_at + 64]).unwrap();
+        f::member()
+            .signing
+            .verify_write_header(
+                &path,
+                prefix_bytes,
+                header_piece,
+                &tail.roots,
+                &tail.signature,
+            )
+            .unwrap();
+        let mut layout = WriteObjectLayout::new(prefix, &plain, vec![]).unwrap();
+        layout.decode_chunk(header_piece).unwrap();
+        layout.tail(&tail).unwrap();
+        let signature = layout.read_signature(&bytes[tail_at + 64..]).unwrap();
+        let mut hash = ObjectHasher::new();
+        hash.update(&bytes[..bytes.len() - 64]);
+        f::member()
+            .signing
+            .verify_object(&path, &hash.finish(), &signature)
+            .unwrap();
+        header.header
+    }
 }

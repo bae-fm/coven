@@ -1,4 +1,4 @@
-use crate::{Audience, EntryId, MergeError, Parent, RowId, Timestamp};
+use crate::{Audience, MergeError, Parent, RowId, Slot, Timestamp};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// The foreign key's ON DELETE action (§8.4).
@@ -85,8 +85,8 @@ pub enum RemovalRow {
         started: Timestamp,
         /// Foreign-key names and their merged references.
         references: BTreeMap<crate::ForeignKey, Reference>,
-        /// The kept store-log entry deleting this row's circle, if any.
-        deleted_circle: Option<EntryId>,
+        /// The slot deleting this row's circle, if any.
+        deleted_circle: Option<Slot>,
     },
 }
 
@@ -146,7 +146,7 @@ pub enum Group {
 }
 
 /// Abstract database view for the removal rules. All answers are functions of
-/// the merged state and store log, independent of which rows are removed.
+/// the merged state and applied admin slots, independent of which rows are removed.
 /// An adapter can prepare this view in memory; the merge itself performs no I/O.
 pub trait RemovalView {
     /// Query failure, including the merge invariant errors checked here.
@@ -185,7 +185,7 @@ pub enum Rule {
     /// The named CHECK fails on merged values.
     Check(String),
     /// The kept entry deleting the row's circle.
-    DeletedCircle(EntryId),
+    DeletedCircle(Slot),
     /// The same key won in another audience.
     OtherAudience,
     /// The named unique constraint lost its value to an earlier claim.
@@ -227,7 +227,7 @@ pub fn removals<V: RemovalView>(view: &V) -> Result<RemovalResult, V::Error> {
 /// when a claim/reference changes. The region is closed under parents and
 /// rivals, so Appendix B, B9 (`Audience.lean`, `removal_local`) gives exactly
 /// the full recomputation's answer there. Outside it no input or dependency
-/// changed. The caller must include store-log changes' rows among `touched`.
+/// changed. The caller must include admin changes' rows among `touched`.
 /// No global row enumeration is performed by this function. Each competition
 /// group is expanded at most once in each view, so rivals are visited by group
 /// membership rather than by every pair of competing rows.

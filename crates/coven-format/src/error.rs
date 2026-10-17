@@ -7,8 +7,6 @@ pub enum Rule {
     Kind,
     /// Base32 length or unused trailing bits are not canonical.
     CodePadding,
-    /// An invite's key-copy number leaves no representable next copy.
-    CodeCursor,
     /// A required name, collection or number was empty or zero.
     Required,
     /// A set was not in strictly increasing order, or repeated an identity.
@@ -17,8 +15,8 @@ pub enum Rule {
     Generation,
     /// A timestamp named a different device than its write or entry.
     TimestampDevice,
-    /// A had-read set included an invalid position for its own device.
-    OwnPosition,
+    /// A write names a different device than its containing slot.
+    WriteDevice,
     /// A device registration replaces the same id it adds.
     DeviceReplacement,
     /// A part, row or removal rule named an audience it cannot contain or describe.
@@ -35,7 +33,7 @@ pub enum Rule {
     NullKey,
     /// A key has a noncanonical numeric or escaped byte representation.
     KeyEncoding,
-    /// A snapshot record or dismissal names a write outside its covered or read positions.
+    /// A snapshot record or dismissal names a write outside its covered or read-through slot.
     Coverage,
     /// Snapshot sections, counts or their end marker did not match the header.
     SnapshotSequence,

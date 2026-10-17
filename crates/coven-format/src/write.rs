@@ -4,23 +4,21 @@
 //! `write_stream::WriteEncoder` emits the header and per-audience frame streams.
 
 use crate::error::{require, Error, Rule};
-use crate::value::{name, positive, row, EntryPositions, Value, WritePositions};
+use crate::value::{name, positive, row, Value};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 use crate::write_sources::ChangeId;
 use coven_merge::{Audience, Change, Operation, RowId, Timestamp, WriteId};
 use std::collections::BTreeMap;
 
-/// Identity, timestamp, causal positions and schema of a transaction.
+/// Identity, timestamp, read-through slot and schema of a transaction.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteHeader {
-    /// Which device wrote it, and its number in that device's log.
+    /// Which device wrote it and its original local write number.
     pub position: WriteId,
     /// The author's timestamp, whose device matches the write identity.
     pub timestamp: Timestamp,
-    /// Other devices' read positions; its own earlier writes are implicit.
-    pub had_read: WritePositions,
-    /// Applied store-log positions, including this device's entries (§7.1, D5).
-    pub store_log_read: EntryPositions,
+    /// Last applied slot when authored; own earlier writes are implicit reads.
+    pub read_through: u64,
     /// The app schema version (§17.1).
     pub schema_version: u32,
     /// Whether to apply rows, retain them as lost, or consume a migration write.
@@ -30,8 +28,7 @@ wire_struct!(
     WriteHeader,
     position,
     timestamp,
-    had_read,
-    store_log_read,
+    read_through,
     schema_version,
     disposition
 );
@@ -43,8 +40,7 @@ impl WriteHeader {
             "write timestamp",
             Rule::TimestampDevice,
         )?;
-        self.had_read.without_own_device(self.position.device)?;
-        self.store_log_read.validate()
+        Ok(())
     }
 }
 
@@ -222,16 +218,13 @@ impl RowChange {
         self.execution.validate(&self.row)
     }
 
-    /// Source identities must have been read, including implicit own predecessors.
-    pub(crate) fn validate_past(&self, header: &WriteHeader) -> Result<(), Error> {
-        self.sources.validate_past(header)?;
-        self.execution.sources.validate_past(header)?;
+    /// Check source reads against the consumer's resolved authored past.
+    pub fn validate_past(&self, past: &impl coven_merge::WritePast) -> Result<(), Error> {
+        self.sources.validate_past(past)?;
+        self.execution.sources.validate_past(past)?;
         if let Some(creator) = &self.creator {
             require(
-                coven_merge::WritePast::contains(
-                    &header.had_read.causal_past(header.position),
-                    &creator.write,
-                ),
+                past.contains(&creator.write),
                 "copied creation read",
                 Rule::Coverage,
             )?;
@@ -597,15 +590,6 @@ impl WriteRecord {
         )?;
         for part in &self.parts {
             part.validate()?;
-            for row in &part.rows {
-                row.validate_past(&self.header)?;
-            }
-            for execution in &part.executions {
-                execution.execution.sources.validate_past(&self.header)?;
-            }
-            for dismissal in &part.dismissals {
-                dismissal.validate_past(&self.header)?;
-            }
         }
         Ok(())
     }

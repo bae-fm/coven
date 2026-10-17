@@ -2,9 +2,9 @@
 
 use crate::error::{bound, require, Error, Rule};
 use crate::wire::{get_blob, put_blob, wire_struct, Decoder, Encoder, Wire};
-use coven_crypto::{Fingerprint, SealingKey, SigningKey};
+use coven_crypto::{SealingKey, SigningKey};
 use coven_foundation::id_source::{CircleId, DeviceId, FileId, InviteId, KeyId, MemberId, StoreId};
-pub use coven_merge::EntryId;
+pub use coven_merge::Slot;
 use coven_merge::{Audience, RowId, Timestamp, WriteId};
 use uuid::Uuid;
 
@@ -39,14 +39,6 @@ impl Wire for SigningKey {
 }
 wire_struct!(coven_crypto::MemberPublicKeys, signing, sealing);
 impl Wire for SealingKey {
-    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
-        self.as_bytes().put(out)
-    }
-    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        Ok(Self::from_bytes(Wire::get(input)?))
-    }
-}
-impl Wire for Fingerprint {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.as_bytes().put(out)
     }
@@ -89,7 +81,17 @@ impl Wire for Audience {
     }
 }
 wire_struct!(WriteId, device, number);
-wire_struct!(EntryId, device, number);
+impl Wire for Slot {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        positive(self.0)?;
+        self.0.put(out)
+    }
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        let slot = Self(u64::get(input)?);
+        positive(slot.0)?;
+        Ok(slot)
+    }
+}
 
 /// A provider storage time: Unix seconds and a nanosecond fraction (D2, §4).
 /// It keeps every returned digit on every platform, unlike `SystemTime`,
@@ -123,9 +125,6 @@ impl StorageTime {
         seconds: 0,
         nanos: 0,
     };
-
-    /// One storage day, the upload allowance after a snapshot's catch-up (§15).
-    pub const DAY_SECONDS: u64 = 24 * 60 * 60;
 
     /// A sample whose fraction is below one second.
     pub fn new(seconds: u64, nanos: u32) -> Result<Self, Error> {
@@ -186,15 +185,6 @@ impl StorageTime {
     pub fn nanos(self) -> u32 {
         self.nanos
     }
-
-    /// Whether `landed` is at most one storage day after this sample. A
-    /// deadline past the representable range admits every representable time.
-    pub fn within_day(self, landed: Self) -> bool {
-        match self.seconds.checked_add(Self::DAY_SECONDS) {
-            Some(seconds) => landed <= Self { seconds, ..self },
-            None => true,
-        }
-    }
 }
 
 /// Panics past the representable range, as `SystemTime` does; use
@@ -232,100 +222,8 @@ impl Wire for StorageTime {
     }
 }
 
-macro_rules! positions {
-    ($ty:ident, $id:ty, $doc:literal) => {
-        #[doc = $doc]
-        #[derive(Clone, Debug, PartialEq, Eq)]
-        pub struct $ty(
-            /// Positive positions, strictly increasing by device, without duplicates.
-            pub Vec<$id>,
-        );
-        impl $ty {
-            pub(crate) fn validate(&self) -> Result<(), Error> {
-                bound(self.0.len(), crate::wire::MAX_ITEMS, "collection")?;
-                ordered(&self.0, |p| p.device, "positions")?;
-                for p in &self.0 {
-                    positive(p.number)?;
-                }
-                Ok(())
-            }
-            /// Whether this set covers the named position.
-            pub fn covers(&self, position: $id) -> bool {
-                self.0
-                    .iter()
-                    .any(|p| p.device == position.device && p.number >= position.number)
-            }
-            pub(crate) fn without_own_device(&self, device: DeviceId) -> Result<(), Error> {
-                self.validate()?;
-                require(
-                    self.0.iter().all(|p| p.device != device),
-                    "had-read own device",
-                    Rule::OwnPosition,
-                )
-            }
-        }
-        byte_id!($ty);
-    };
-}
-positions!(
-    WritePositions,
-    WriteId,
-    "How far each device's write log has been read (§7.1)."
-);
-impl WritePositions {
-    /// The author's causal past, including its implicit earlier own writes.
-    /// These positions must name only other devices, as in a write header or
-    /// applied-write record. The frontier retains their order, then the author's
-    /// preceding write, without copying or expanding the positions.
-    pub fn causal_past(&self, author: WriteId) -> impl coven_merge::WritePast + '_ {
-        CausalPast {
-            others: self,
-            author,
-            previous: (author.number > 1).then(|| WriteId {
-                number: author.number - 1,
-                ..author
-            }),
-        }
-    }
-}
-
-struct CausalPast<'a> {
-    others: &'a WritePositions,
-    author: WriteId,
-    previous: Option<WriteId>,
-}
-
-impl coven_merge::WritePast for CausalPast<'_> {
-    fn contains(&self, write: &WriteId) -> bool {
-        if write.device == self.author.device {
-            write.number < self.author.number
-        } else {
-            self.others.covers(*write)
-        }
-    }
-
-    fn frontier(&self) -> impl Iterator<Item = &WriteId> {
-        self.others.0.iter().chain(self.previous.as_ref())
-    }
-}
-
-impl coven_merge::WritePast for WritePositions {
-    fn contains(&self, write: &WriteId) -> bool {
-        self.covers(*write)
-    }
-    fn frontier(&self) -> impl Iterator<Item = &WriteId> {
-        self.0.iter()
-    }
-}
-
-positions!(
-    EntryPositions,
-    EntryId,
-    "How far each device's store log has been read (§9)."
-);
-
 pub(crate) fn positive(number: u64) -> Result<(), Error> {
-    require(number > 0, "log number", Rule::Required)
+    require(number > 0, "positive number", Rule::Required)
 }
 
 /// A SQLite value. Real numbers use IEEE 754 bits; NaNs and negative zero are
@@ -418,18 +316,6 @@ pub(crate) fn name(value: &str) -> Result<(), Error> {
         !value.is_empty() && !value.contains('\0'),
         "name",
         Rule::Required,
-    )
-}
-
-pub(crate) fn ordered<T, K: Ord>(
-    items: &[T],
-    key: impl Fn(&T) -> K,
-    field: &'static str,
-) -> Result<(), Error> {
-    require(
-        items.windows(2).all(|pair| key(&pair[0]) < key(&pair[1])),
-        field,
-        Rule::Order,
     )
 }
 

@@ -514,10 +514,7 @@ pub(crate) fn generated_view(
             }
             if let RemovalRow::Present { deleted_circle, .. } = view.data.get_mut(r).unwrap() {
                 *deleted_circle = (r.audience == circle(0, 2).audience && seed.is_multiple_of(7))
-                    .then_some(EntryId {
-                        device: DeviceId(2),
-                        number: 1,
-                    });
+                    .then_some(Slot(1));
             }
         }
     }
@@ -581,11 +578,8 @@ mod differential {
             Rule::Unique(_) => 4,
         }
     }
-    fn entry_id(number: u64) -> EntryId {
-        EntryId {
-            device: DeviceId(number % 2 + 1),
-            number: number / 2 + 1,
-        }
+    fn slot(number: u64) -> Slot {
+        Slot(number + 1)
     }
 
     struct Comparison {
@@ -605,7 +599,7 @@ mod differential {
         if let Some(entries) = entries {
             for (r, data) in &mut view.data {
                 if let RemovalRow::Present { deleted_circle, .. } = data {
-                    *deleted_circle = entries.get(&r.audience).copied().map(entry_id);
+                    *deleted_circle = entries.get(&r.audience).copied().map(slot);
                 }
             }
             // Keep absent reference targets, but omit unrelated, never-written rows.
@@ -630,7 +624,7 @@ mod differential {
         let entry_ids: BTreeMap<_, _> = entries
             .into_iter()
             .flat_map(|entries| entries.values())
-            .map(|number| (entry_id(*number), *number))
+            .map(|number| (slot(*number), *number))
             .collect();
         let rows: Vec<_> = view.data.keys().cloned().collect();
         let row_ids: BTreeMap<_, _> = rows

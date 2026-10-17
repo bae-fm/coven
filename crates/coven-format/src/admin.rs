@@ -1,27 +1,11 @@
-//! Changes to the store itself, carrying causal positions and replay timestamps (§9).
-//!
-//! Decoding checks one frame's fields. Sync checks causal closure before replay;
-//! replay determines authority, conflicts, version effects and deleted circles
-//! from the entry set. Key commitments bind introductions to their key bytes.
+//! Admin changes in sequence slots (D6). The enclosing slot supplies identity and author.
 
 use crate::error::{require, Error, Rule};
-use crate::value::{name, positive, EntryId, EntryPositions, StorageTime};
+use crate::value::{name, positive, Slot};
 use crate::wire::{wire_struct, Decoder, Encoder, Wire};
 pub use coven_crypto::MemberPublicKeys;
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, MemberId, StoreId};
-use coven_merge::{Audience, Timestamp};
-
-/// Complete encrypted store-log object limit, including routing and signature.
-/// Every provider must publish these single-chunk objects in one request (§9).
-pub const MAX_STORE_LOG_OBJECT: usize = 4 * 1024 * 1024;
-
-pub(crate) fn check_frame_length(length: usize) -> Result<(), Error> {
-    crate::error::bound(
-        length + 19 + 4 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD + 64,
-        MAX_STORE_LOG_OBJECT,
-        "store-log object",
-    )
-}
+use coven_merge::Audience;
 
 /// A member's role in the store (§9).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -60,7 +44,7 @@ pub struct SnapshotId {
 }
 wire_struct!(SnapshotId, audience, device, number);
 
-/// Every kind of store-log change listed in §9, including the first entry.
+/// Every admin operation listed in §9, including store creation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreChange {
     /// Create a store, name its first admin and register the writing device.
@@ -119,7 +103,7 @@ pub enum StoreChange {
         /// The device's name.
         name: String,
         /// The older install of the same member being replaced, if any (§10).
-        /// Must differ from the writing device; replacement carries no log ends.
+        /// Must differ from the writing device.
         replaces: Option<DeviceId>,
     },
     /// Remove a device's access.
@@ -145,7 +129,7 @@ pub enum StoreChange {
         /// Its new name.
         name: String,
     },
-    /// Remove a circle from the store log (§14.7).
+    /// Delete a circle (§14.7).
     DeleteCircle {
         /// The deleted circle.
         circle: CircleId,
@@ -177,22 +161,21 @@ pub enum StoreChange {
     RaiseSchema {
         /// The new schema version.
         version: u32,
-        /// The snapshot whose audience is raised to that schema.
-        snapshot: SnapshotId,
-        /// That snapshot's signed catch-up storage time `T_c`: replay keeps
-        /// the entry only if it lands at most one day after it (§9, §15).
-        caught_at: StorageTime,
+        /// The earlier announcement of the prepared snapshot.
+        announcement: Slot,
     },
     /// Reset the store's or a circle's rows to a snapshot (§19.3).
     Reset {
-        /// The snapshot and the audience being reset.
-        snapshot: SnapshotId,
+        /// The earlier announcement of the prepared reset snapshot.
+        announcement: Slot,
     },
     /// Replace an active member's public pair, keeping their id, role, access,
     /// circles and devices (§9). It carries no audience keys.
     ReplaceMemberKeys {
         /// The member whose keys change.
         member: MemberId,
+        /// The binding which must still be current before this slot.
+        expected: MemberPublicKeys,
         /// The member's new public pair.
         keys: MemberPublicKeys,
     },
@@ -213,12 +196,14 @@ impl StoreChange {
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
             Self::RaiseSchema {
-                version, snapshot, ..
+                version,
+                announcement,
+                ..
             } => {
                 require(*version > 0, "schema version", Rule::Required)?;
-                positive(snapshot.number)
+                positive(announcement.0)
             }
-            Self::Reset { snapshot } => positive(snapshot.number),
+            Self::Reset { announcement } => positive(announcement.0),
             Self::RemoveMember { .. }
             | Self::RotateKey { .. }
             | Self::SetAccess { .. }
@@ -263,55 +248,31 @@ store_changes!(
     8 => DeleteCircle { circle },
     9 => AddCircleMember { circle, member },
     10 => RemoveCircleMember { circle, member },
-    11 => RaiseSchema { version, snapshot, caught_at },
-    13 => Reset { snapshot },
+    11 => RaiseSchema { version, announcement },
+    13 => Reset { announcement },
     14 => SetAccess { member, access },
     15 => RotateKey { audience, key, key_hash },
-    16 => ReplaceMemberKeys { member, keys },
+    16 => ReplaceMemberKeys { member, expected, keys },
 );
 
-/// One store-log entry. Its eventual signature establishes who authored it (§9).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct StoreLogEntry {
-    /// The writing device and its store-log number.
-    pub position: EntryId,
-    /// The timestamp used to replay entries and break concurrent ties.
-    pub timestamp: Timestamp,
-    /// The stable id of the member whose current signing key in the recorded
-    /// view, or creation's supplied pair, must verify the entry (§9).
-    pub author: MemberId,
-    /// Other devices’ store-log positions; the author’s own earlier entries are implicit.
-    pub had_read: EntryPositions,
-    /// The change to the store.
-    pub change: StoreChange,
-}
-wire_struct!(StoreLogEntry, position, timestamp, author, had_read, change);
-impl StoreLogEntry {
-    pub(crate) fn validate(&self) -> Result<(), Error> {
-        positive(self.position.number)?;
-        require(
-            self.timestamp.device() == self.position.device,
-            "store-log timestamp",
-            Rule::TimestampDevice,
-        )?;
-        self.had_read.without_own_device(self.position.device)?;
-        match &self.change {
-            StoreChange::CreateStore { .. } => require(
-                self.position.number == 1 && self.had_read.0.is_empty(),
-                "first store entry",
-                Rule::OwnPosition,
-            )?,
-            StoreChange::AddDevice { replaces, .. } => require(
-                *replaces != Some(self.position.device),
-                "replacement device",
-                Rule::DeviceReplacement,
-            )?,
-            _ => {}
-        }
-        self.change.validate()
+impl StoreChange {
+    /// Encode the one bounded kind-4 admin frame (D6).
+    pub fn encode(&self) -> Result<Vec<u8>, Error> {
+        self.validate()?;
+        crate::encode_frame(4, self)
+    }
+
+    /// Decode exactly one admin frame. Slot-dependent authorization is separate.
+    pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        let (kind, mut input) = crate::wire::decode_frame(bytes)?;
+        require(kind == 4, "admin frame", Rule::Kind)?;
+        let change = Self::get(&mut input)?;
+        input.finish()?;
+        change.validate()?;
+        Ok(change)
     }
 }
 
 #[cfg(test)]
-#[path = "store_log_tests.rs"]
+#[path = "admin_tests.rs"]
 mod tests;

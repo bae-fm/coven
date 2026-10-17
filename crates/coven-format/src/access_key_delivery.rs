@@ -129,7 +129,7 @@ pub fn routing(bytes: &[u8]) -> Result<DeliveryRouting, Error> {
 }
 
 /// Verify the signature with `author`, the routing author's current signing
-/// key that the caller resolved from the store log, then open the box for
+/// key that the caller resolved from applied admin slots, then open the box for
 /// this member. The caller decides whether the author may deliver this
 /// member's key.
 pub fn open(

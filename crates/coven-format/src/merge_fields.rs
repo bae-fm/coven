@@ -6,11 +6,7 @@
 //! fields; relationships between fields and writes remain merge's responsibility.
 
 use crate::wire::{Decoder, Encoder, Wire};
-use crate::{
-    merge_wire,
-    value::{Value, WritePositions},
-    Error,
-};
+use crate::{merge_wire, value::Value, Error};
 use coven_merge::{ColumnValue, Parent, Rule, Timestamp, WriteId};
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -81,32 +77,6 @@ pub fn encode_multiproof(value: &crate::authorship::Multiproof) -> Result<Vec<u8
 /// Decode a retained authorship opening.
 pub fn decode_multiproof(bytes: &[u8]) -> Result<crate::authorship::Multiproof, Error> {
     decode(bytes)
-}
-
-/// Encode a had-read set using its snapshot field bytes.
-pub fn encode_write_positions(value: &WritePositions) -> Result<Vec<u8>, Error> {
-    value.validate()?;
-    encode(value)
-}
-
-/// Decode exactly one snapshot field containing a had-read set.
-pub fn decode_write_positions(bytes: &[u8]) -> Result<WritePositions, Error> {
-    let value: WritePositions = decode(bytes)?;
-    value.validate()?;
-    Ok(value)
-}
-
-/// Encode store-log positions using their snapshot prefix bytes.
-pub fn encode_entry_positions(value: &crate::value::EntryPositions) -> Result<Vec<u8>, Error> {
-    value.validate()?;
-    encode(value)
-}
-
-/// Decode exactly one field containing store-log positions.
-pub fn decode_entry_positions(bytes: &[u8]) -> Result<crate::value::EntryPositions, Error> {
-    let value: crate::value::EntryPositions = decode(bytes)?;
-    value.validate()?;
-    Ok(value)
 }
 
 /// Encode a foreign key's stable identity using its snapshot field bytes.

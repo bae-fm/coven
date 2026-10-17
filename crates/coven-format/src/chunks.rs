@@ -6,7 +6,7 @@ use crate::{frame_length, FRAME_PREFIX_LEN};
 /// Plaintext bytes in a full file, write-part or snapshot chunk.
 pub const CHUNK_SIZE: usize = 64 * 1024;
 
-/// Cut a sequence of frames into fixed-size chunks, retaining at most one frame
+/// Cut a sequence of bounded byte pieces into fixed-size chunks, retaining at most one frame
 /// and one output chunk. Only the last chunk may be shorter than [`CHUNK_SIZE`].
 pub struct PlaintextChunks<I> {
     frames: I,
@@ -16,7 +16,7 @@ pub struct PlaintextChunks<I> {
 }
 
 impl<I: Iterator<Item = Result<Vec<u8>, Error>>> PlaintextChunks<I> {
-    /// The frames come from a write-row or snapshot encoder, in stream order.
+    /// The pieces come from a write, snapshot or slot encoder, in stream order.
     pub fn new(frames: I) -> Self {
         Self {
             frames,
@@ -36,11 +36,6 @@ impl<I: Iterator<Item = Result<Vec<u8>, Error>>> PlaintextChunks<I> {
                 match self.frames.next() {
                     Some(frame) => {
                         self.frame = frame?;
-                        require(
-                            frame_length(&self.frame)? == self.frame.len(),
-                            "chunk frame",
-                            Rule::Chunk,
-                        )?;
                         self.offset = 0;
                     }
                     None => {

@@ -98,7 +98,8 @@ fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
             },
             ..dismissal("x")
         }];
-        let encoded = test_utils::write_plaintext(&record);
+        let encoded =
+            test_utils::write_plaintext(&record).and_then(|_| test_utils::check_past(&record));
         assert_eq!(encoded.is_ok(), accepted);
         // Preserve the part length while replacing a covered identity in a valid stream.
         let mut covered = original.clone();
@@ -107,7 +108,10 @@ fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
         let end = bytes.len();
         bytes[end - 16..end - 8].copy_from_slice(&device.to_be_bytes());
         bytes[end - 8..].copy_from_slice(&number.to_be_bytes());
-        let decoded = decode_plaintext(&bytes);
+        let decoded = decode_plaintext(&bytes).and_then(|record| {
+            test_utils::check_past(&record)?;
+            Ok(record)
+        });
         if accepted {
             assert_eq!(decoded.unwrap(), record);
         } else {

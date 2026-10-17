@@ -2,15 +2,6 @@ use super::*;
 use crate::error::Rule;
 use zeroize::Zeroizing;
 
-#[test]
-fn clock_frame_contains_its_device_and_store_log_view() {
-    let bytes = hex(include_str!("../fixtures/clock.hex"));
-    assert_eq!(frame_length(&bytes).unwrap(), 35);
-    let clock = Object::ClockObservation(test_utils::clock());
-    assert_eq!(Object::decode(&bytes).unwrap(), clock);
-    assert_eq!(clock.encode().unwrap(), bytes);
-}
-
 pub(super) fn hex(text: &str) -> Vec<u8> {
     let bytes = text.trim().as_bytes();
     assert_eq!(bytes.len() % 2, 0);
@@ -40,21 +31,23 @@ fn every_object_and_snapshot_section_has_pinned_bytes() {
 
 /// Every fixture `fixtures/generate-deterministic.py` writes.
 #[cfg(not(windows))]
-const GENERATED_FIXTURES: [&str; 15] = [
-    "clock.hex",
+const GENERATED_FIXTURES: [&str; 17] = [
+    "sealed-migration-write.hex",
+    "sealed-circle-snapshot.hex",
+    "sealed-announcement.hex",
+    "sealed-circle-announcement.hex",
+    "snapshot-claims.hex",
     "codes.txt",
-    "creation-marker.hex",
     "invite-code.hex",
-    "pending-reports.hex",
     "restore-code.hex",
     "sealed-circle-key.hex",
-    "sealed-clock.hex",
     "sealed-join-request.hex",
-    "sealed-positions.hex",
     "sealed-snapshot.hex",
     "sealed-store-key.hex",
-    "sealed-store-log.hex",
+    "sealed-admin.hex",
     "sealed-write.hex",
+    "sealed-writes-slot.hex",
+    "sealed-floor.hex",
     "v1.hex",
 ];
 
@@ -307,12 +300,12 @@ fn prefix_limits_versions_and_trailing_bytes_are_typed_errors() {
 
 #[test]
 fn hostile_nested_lengths_do_not_drive_unbounded_allocations() {
-    // A valid write prefix/header up to had-read, followed by a hostile count.
+    // A valid write header up to the part count, followed by a hostile count.
     let mut bytes = crate::write_stream::WriteEncoder::new(&test_utils::write())
         .unwrap()
         .header_frame()
         .to_vec();
-    bytes[39..43].copy_from_slice(&u32::MAX.to_be_bytes());
+    bytes[52..56].copy_from_slice(&u32::MAX.to_be_bytes());
     assert!(matches!(
         crate::write_stream::WriteHeaderFrame::decode(&bytes),
         Err(Error::Limit {

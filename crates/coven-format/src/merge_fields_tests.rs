@@ -2,7 +2,7 @@ use super::*;
 use crate::error::Rule as FormatRule;
 use crate::snapshot::{SnapshotEncoder, SnapshotRecord};
 use crate::test_utils as fixture;
-use crate::value::EntryId;
+use crate::value::Slot;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{RowId, RowState};
 
@@ -47,7 +47,7 @@ fn metadata_fields_are_the_bytes_in_snapshot_merge_records() {
     )
     .unwrap();
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 1, 0, 0, 0, 0];
+    header.counts = [0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, _) = SnapshotEncoder::start(header).unwrap();
     let frame = encoder
         .record(SnapshotRecord::Merge(merged.clone()))
@@ -98,18 +98,14 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
         match record {
             SnapshotRecord::Write(write) => {
                 take_field(&mut input, &write.id, encode_write_id, decode_write_id);
+                assert_eq!(Slot::get(&mut input).unwrap(), write.slot);
                 take_field(
                     &mut input,
                     &write.timestamp,
                     encode_timestamp,
                     decode_timestamp,
                 );
-                take_field(
-                    &mut input,
-                    &write.had_read,
-                    encode_write_positions,
-                    decode_write_positions,
-                );
+                assert_eq!(u64::get(&mut input).unwrap(), write.read_through);
                 input.finish().unwrap();
             }
             SnapshotRecord::Loss(loss) => {
@@ -135,7 +131,11 @@ fn applied_write_and_loss_fields_match_snapshot_records() {
             SnapshotRecord::Column(_)
             | SnapshotRecord::Merge(_)
             | SnapshotRecord::Creation(_)
-            | SnapshotRecord::Evidence(_) => {}
+            | SnapshotRecord::Evidence(_)
+            | SnapshotRecord::Admin(_)
+            | SnapshotRecord::KeyCopy(_)
+            | SnapshotRecord::Announcement(_)
+            | SnapshotRecord::Claim(_) => {}
         }
     }
     encoder.finish().unwrap();
@@ -209,18 +209,11 @@ fn field_codecs_refuse_invalid_values_and_noncanonical_bytes() {
         assert_eq!(
             error,
             Error::Invalid {
-                field: "log number",
+                field: "positive number",
                 rule: FormatRule::Required
             }
         );
     }
-    assert_eq!(
-        encode_write_positions(&WritePositions(vec![fixture::position(); 2])),
-        Err(Error::Invalid {
-            field: "positions",
-            rule: FormatRule::Order
-        })
-    );
     assert_eq!(
         encode_parents(&BTreeMap::from([(
             coven_merge::ForeignKey::new(["fk"], "t", ["id"]),
@@ -409,10 +402,7 @@ fn schema_loss_uses_a_positive_u32_while_reset_ignores_retain_their_entry() {
         assert_eq!(decode_change_verdict(&bytes).unwrap(), verdict);
     }
     // Resets create no losses; an ignored change keeps the reset's entry.
-    let entry = EntryId {
-        device: DeviceId(u64::MAX),
-        number: u64::MAX,
-    };
+    let entry = Slot(u64::MAX);
     let bytes = encode_change_verdict(&ChangeVerdict::Ignored(entry)).unwrap();
     assert_eq!(bytes[0], 5);
     assert_eq!(
@@ -507,20 +497,7 @@ fn constraint_order_is_logical_with_absent_predicates_first() {
 
 #[test]
 fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
-    let entries = [
-        EntryId {
-            device: DeviceId(1),
-            number: 1,
-        },
-        EntryId {
-            device: DeviceId(1),
-            number: u64::MAX,
-        },
-        EntryId {
-            device: DeviceId(u64::MAX),
-            number: 1,
-        },
-    ];
+    let entries = [Slot(1), Slot(u64::MAX), Slot(u64::MAX - 1)];
     let rules = entries.map(Rule::DeletedCircle);
     let expected = BTreeSet::from(rules.clone());
     assert_eq!(
@@ -539,18 +516,15 @@ fn deleted_circle_rules_keep_canonical_entry_identities_and_refuse_zero() {
             })
         );
     }
-    let invalid = BTreeSet::from([Rule::DeletedCircle(EntryId {
-        device: DeviceId(1),
-        number: 0,
-    })]);
+    let invalid = BTreeSet::from([Rule::DeletedCircle(Slot(0))]);
     for error in [
         encode_rules(&invalid).unwrap_err(),
-        decode_rules(&encode(&invalid).unwrap()).unwrap_err(),
+        decode_rules(&[0, 0, 0, 1, 2, 0, 0, 0, 0, 0, 0, 0, 0]).unwrap_err(),
     ] {
         assert_eq!(
             error,
             Error::Invalid {
-                field: "log number",
+                field: "positive number",
                 rule: FormatRule::Required
             }
         );
@@ -575,7 +549,7 @@ fn unnamed_check_rules_retain_full_expressions_in_loss_fields() {
     let bytes = encode_loss(&loss).unwrap();
     assert_eq!(decode_loss(&bytes).unwrap(), loss);
     let mut header = fixture::snapshot_header();
-    header.counts = [0, 0, 0, 0, 1, 0, 0, 0];
+    header.counts = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, start) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         crate::snapshot::SnapshotDecoder::start(&start, &fixture::snapshot_prefix(&header))

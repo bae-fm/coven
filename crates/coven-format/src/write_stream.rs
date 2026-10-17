@@ -39,7 +39,7 @@ impl PartHeader {
 /// The kind-1 header frame; changes and dismissals are separate kind-2 and kind-3 frames.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteHeaderFrame {
-    /// Identity, causal positions, timestamp and schema.
+    /// Identity, last consumed slot, timestamp and schema.
     pub header: WriteHeader,
     /// Descriptors in strictly increasing audience order. Empty only for a migration.
     pub parts: Vec<PartHeader>,

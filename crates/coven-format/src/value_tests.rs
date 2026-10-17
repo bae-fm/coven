@@ -69,80 +69,6 @@ fn timestamps_use_merges_checked_type_and_sort_like_its_fields() {
         max
     );
 }
-#[test]
-fn positions_are_unique_by_device_and_do_not_sort_by_number() {
-    let valid = WritePositions(vec![
-        WriteId {
-            device: DeviceId(1),
-            number: 100,
-        },
-        WriteId {
-            device: DeviceId(2),
-            number: 1,
-        },
-    ]);
-    valid.validate().unwrap();
-    assert!(valid.covers(WriteId {
-        device: DeviceId(1),
-        number: 99
-    }));
-    assert!(!valid.covers(WriteId {
-        device: DeviceId(3),
-        number: 1
-    }));
-    let mut unordered = valid.clone();
-    unordered.0.reverse();
-    assert!(unordered.validate().is_err());
-    assert!(WritePositions(vec![valid.0[0], valid.0[0]])
-        .validate()
-        .is_err());
-    assert!(WritePositions(vec![WriteId {
-        device: DeviceId(1),
-        number: 0
-    }])
-    .validate()
-    .is_err());
-    let entries = EntryPositions(vec![
-        EntryId {
-            device: DeviceId(1),
-            number: 100,
-        },
-        EntryId {
-            device: DeviceId(2),
-            number: 1,
-        },
-    ]);
-    entries.validate().unwrap();
-    assert_eq!(bytes(&entries), bytes(&valid));
-}
-
-#[test]
-fn causal_past_includes_own_history_without_changing_encoded_positions() {
-    use coven_merge::WritePast;
-    let id = |device, number| WriteId {
-        device: DeviceId(device),
-        number,
-    };
-    let positions = WritePositions(vec![id(1, 3), id(3, 7)]);
-    let encoded = bytes(&positions);
-    for (number, frontier) in [
-        (1, vec![id(1, 3), id(3, 7)]),
-        (2, vec![id(1, 3), id(3, 7), id(2, 1)]),
-        (u64::MAX, vec![id(1, 3), id(3, 7), id(2, u64::MAX - 1)]),
-    ] {
-        let past = positions.causal_past(id(2, number));
-        assert_eq!(past.frontier().copied().collect::<Vec<_>>(), frontier);
-        assert_eq!(past.contains(&id(2, 1)), number > 1);
-        assert!(!past.contains(&id(2, number)));
-        assert!(!past.contains(&id(2, u64::MAX)));
-        assert!(past.contains(&id(1, 2)));
-        assert!(past.contains(&id(1, 3)));
-        assert!(!past.contains(&id(1, 4)));
-        assert!(past.contains(&id(3, 7)));
-        assert!(!past.contains(&id(4, 1)));
-    }
-    assert_eq!(bytes(&positions), encoded);
-}
 
 #[test]
 fn sqlite_values_keep_their_storage_classes_outside_keys() {
@@ -203,9 +129,11 @@ fn signing_keys_are_validated_by_crypto_in_every_wire_context() {
             Object::decode(&join),
             Err(Error::InvalidSigningKey)
         ));
-        let mut entry = Object::StoreLog(test_utils::store_log()).encode().unwrap();
+        let mut entry = Object::Admin(test_utils::creation_change())
+            .encode()
+            .unwrap();
         // Creation's admin pair follows the header, tag, store id and name "S".
-        entry[81..113].copy_from_slice(&raw);
+        entry[29..61].copy_from_slice(&raw);
         assert!(matches!(
             Object::decode(&entry),
             Err(Error::InvalidSigningKey)
@@ -228,4 +156,17 @@ fn value_tags_preserve_equal_integer_and_real_storage_classes() {
         assert_eq!(Value::get(&mut input).unwrap(), value);
         input.finish().unwrap();
     }
+}
+
+#[test]
+fn slots_are_positive_unsigned_numbers() {
+    for n in [1, u64::MAX] {
+        let slot = Slot(n);
+        assert_eq!(bytes(&slot), n.to_be_bytes());
+        assert_eq!(
+            Slot::get(&mut Decoder::new(&bytes(&slot)).unwrap()).unwrap(),
+            slot
+        );
+    }
+    assert!(Slot::get(&mut Decoder::new(&[0; 8]).unwrap()).is_err());
 }

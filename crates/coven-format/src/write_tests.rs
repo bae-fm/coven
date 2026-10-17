@@ -40,8 +40,8 @@ fn raw(write: &WriteRecord) -> Vec<u8> {
 }
 fn refuses(write: WriteRecord, expected: Error) {
     for result in [
-        test_utils::write_plaintext(&write).map(|_| ()),
-        decode_plaintext(&raw(&write)).map(|_| ()),
+        test_utils::write_plaintext(&write).and_then(|_| test_utils::check_past(&write)),
+        decode_plaintext(&raw(&write)).and_then(|decoded| test_utils::check_past(&decoded)),
     ] {
         assert_eq!(result.as_ref().map(|_| ()), Err(&expected));
     }
@@ -178,7 +178,7 @@ fn duplicate_rows_and_parts_are_refused() {
     );
 }
 #[test]
-fn timestamp_had_read_and_parent_generation_are_checked() {
+fn timestamp_and_parent_generation_are_checked() {
     let mut write = test_utils::write();
     write.header.timestamp = Timestamp::new(2, 3, DeviceId(2)).unwrap();
     refuses(
@@ -186,15 +186,6 @@ fn timestamp_had_read_and_parent_generation_are_checked() {
         Error::Invalid {
             field: "write timestamp",
             rule: Rule::TimestampDevice,
-        },
-    );
-    let mut write = test_utils::write();
-    write.header.had_read = WritePositions(vec![write.header.position]);
-    refuses(
-        write,
-        Error::Invalid {
-            field: "had-read own device",
-            rule: Rule::OwnPosition,
         },
     );
     let mut write = test_utils::write();
@@ -206,15 +197,8 @@ fn a_lost_disposition_is_never_transmitted() {
     // Tag 1 is unused: exclusion is a received interpretation (D5).
     let write = test_utils::write();
     let mut bytes = test_utils::write_plaintext(&write).unwrap();
-    // Frame prefix, position, timestamp, both counted position lists, then
-    // the schema version precede the disposition byte.
-    let at = crate::FRAME_PREFIX_LEN
-        + 32
-        + 4
-        + 16 * write.header.had_read.0.len()
-        + 4
-        + 16 * write.header.store_log_read.0.len()
-        + 4;
+    // Frame prefix, write identity, timestamp, read-through and schema.
+    let at = crate::FRAME_PREFIX_LEN + 32 + 8 + 4;
     assert_eq!(bytes[at], 0);
     bytes[at] = 1;
     assert!(matches!(

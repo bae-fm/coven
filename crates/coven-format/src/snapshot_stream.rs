@@ -3,7 +3,7 @@
 use crate::chunks::FrameDecoder;
 use crate::error::Error;
 use crate::sealed_snapshot::SnapshotObjectPrefix;
-use crate::snapshot::{SnapshotDecoder, SnapshotHeader, SnapshotRecord};
+use crate::snapshot::{SnapshotDecoder, SnapshotHeader, SnapshotRecord, WriteSlots};
 use coven_merge::WriteOracle;
 
 /// Incrementally reconstruct frames and check the snapshot's end marker.
@@ -15,7 +15,7 @@ pub struct SnapshotChunkDecoder {
     snapshot: Option<SnapshotDecoder>,
 }
 impl SnapshotChunkDecoder {
-    /// Supply the authenticated prefix, including the snapshot’s coverage positions.
+    /// Supply the authenticated prefix, including the snapshot’s coverage.
     pub fn new(prefix: SnapshotObjectPrefix) -> Self {
         Self {
             prefix,
@@ -35,7 +35,7 @@ impl SnapshotChunkDecoder {
     pub fn next_record(
         &mut self,
         bytes: &mut &[u8],
-        oracle: &impl WriteOracle,
+        oracle: &(impl WriteOracle + WriteSlots),
     ) -> Result<Option<SnapshotRecord>, Error> {
         while let Some(frame) = self.frames.next(bytes)? {
             if let Some(snapshot) = &mut self.snapshot {

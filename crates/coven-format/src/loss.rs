@@ -1,7 +1,7 @@
 //! One loss record for displaced cells, removed rows and excluded writes.
 
 use crate::error::{require, Error, Rule as FormatRule};
-use crate::value::{name, positive, row, Value, WritePositions};
+use crate::value::{name, positive, row, Value};
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::write_sources::ChangeId;
 use coven_foundation::id_source::MemberId;
@@ -409,18 +409,18 @@ impl Loss {
         }
     }
 
-    pub(crate) fn covered(&self, positions: &WritePositions) -> bool {
+    pub(crate) fn covered(&self, covered: impl Fn(WriteId) -> bool) -> bool {
         let values = match &self.values {
-            LossValues::Cell { cell, .. } => positions.covers(cell.write),
-            LossValues::Row(cells) => cells.values().all(|cell| positions.covers(cell.write)),
+            LossValues::Cell { cell, .. } => covered(cell.write),
+            LossValues::Row(cells) => cells.values().all(|cell| covered(cell.write)),
         };
         values
             && match self.cause {
                 LossCause::Write(write)
                 | LossCause::Excluded { write, .. }
-                | LossCause::NotAuthorized { write, .. } => positions.covers(write),
+                | LossCause::NotAuthorized { write, .. } => covered(write),
                 LossCause::Dependency { write, ref sources } => {
-                    positions.covers(write) && sources.iter().all(|s| positions.covers(s.write))
+                    covered(write) && sources.iter().all(|s| covered(s.write))
                 }
                 _ => true,
             }

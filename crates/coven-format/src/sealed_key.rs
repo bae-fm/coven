@@ -1,181 +1,123 @@
-//! Public routing and recipient-checked anonymous key copies (D9/D11).
+//! Anonymous key boxes embedded in the clear routing prefix of a slot (D9/D11).
 
-use crate::wire::{Decoder, Encoder, Wire};
-use crate::Error;
+use crate::error::{require, Error, Rule};
+use crate::wire::{put_blob, wire_struct, Decoder, Encoder, Wire};
 use coven_crypto::{CircleKey, CryptoError, MemberIdentity, MemberKeys, SealingKey, StoreKey};
 use coven_foundation::id_source::{KeyId, MemberId};
 use coven_merge::Audience;
 
-/// Routing visible to every reader, including readers without the recipient's keys.
-/// These facts can indicate exposure; only the recipient can authenticate the box.
+/// Routing authenticated by the anonymous box and the enclosing slot signature.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct KeyCopyPrefix {
-    /// The audience whose key this copy claims to carry.
+    /// The copied key's audience.
     pub audience: Audience,
-    /// The identity named by the key's introduction.
+    /// The introduced key's identity.
     pub key: KeyId,
-    /// The member to whom this copy is addressed.
+    /// The recipient's stable identity.
     pub member: MemberId,
-    /// The member's exact sealing key the box is sealed to. A copy to another
-    /// of the member's credentials is a different copy.
+    /// The exact historical sealing credential used for this copy.
     pub sealing: SealingKey,
 }
-
+wire_struct!(KeyCopyPrefix, audience, key, member, sealing);
 impl KeyCopyPrefix {
-    /// Encode the exact clear prefix bound into both key derivation and authentication.
-    pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut out = Encoder::new();
-        37u8.put(&mut out)?;
-        crate::FORMAT_VERSION.put(&mut out)?;
-        self.audience.put(&mut out)?;
-        self.key.put(&mut out)?;
-        self.member.put(&mut out)?;
-        self.sealing.put(&mut out)?;
-        Ok(out.bytes)
-    }
-
-    /// Whether this copy names exactly this recipient: its member id and the
-    /// sealing key it is sealed to. Matching needs no box opening (§12.2).
+    /// Whether this box is addressed to exactly this member and credential.
     pub fn addressed_to(&self, member: &MemberId, sealing: &SealingKey) -> bool {
         self.member == *member && self.sealing == *sealing
     }
-
-    /// Whether `member` holds the private credential this copy names: its
-    /// stable id and exact sealing key (§11).
+    /// Whether a held historical private credential can open the box.
     pub fn held_by(&self, member: &MemberIdentity) -> bool {
         self.member == member.member() && member.credential(&self.sealing).is_some()
     }
-
-    /// Frame the box produced by crypto with this prefix. Its original random
-    /// bytes must be reserved with the copy number and retained for every retry.
-    pub fn encode_box(&self, sealed: &[u8]) -> Result<Vec<u8>, Error> {
-        exact_length(sealed.len(), self.box_length())?;
-        let mut bytes = self.encode()?;
-        bytes
-            .try_reserve_exact(sealed.len())
-            .map_err(|_| Error::Allocation)?;
-        bytes.extend_from_slice(sealed);
-        Ok(bytes)
-    }
-
-    fn length(&self) -> usize {
+    pub(crate) fn material_length(&self) -> usize {
         match self.audience {
-            Audience::Store => 68,
-            Audience::Circle(_) => CIRCLE_PREFIX,
+            Audience::Store => 48,
+            Audience::Circle(_) => 64,
         }
     }
-
-    fn box_length(&self) -> usize {
-        BOX_OVERHEAD
-            + match self.audience {
-                Audience::Store => 48,
-                Audience::Circle(_) => CIRCLE_MATERIAL,
-            }
-    }
 }
 
-const CIRCLE_PREFIX: usize = 84;
-/// A circle key's identified material: its circle, key id and secret.
-const CIRCLE_MATERIAL: usize = 64;
-/// The box's ephemeral key, nonce and authentication tag.
-const BOX_OVERHEAD: usize = 32 + coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD;
-
-/// The longest copy, a circle key's. Every copy has an exact length, so a
-/// longer object is no copy and readers never receive past this bound.
-pub const MAX_KEY_COPY_OBJECT: usize = CIRCLE_PREFIX + BOX_OVERHEAD + CIRCLE_MATERIAL;
-
-/// A complete kind-37 copy, borrowing the exact prefix and randomized box bytes.
-#[derive(Debug)]
-pub struct SealedKey<'a> {
-    prefix: KeyCopyPrefix,
-    bytes: &'a [u8],
+/// An original anonymous box, retaining its random bytes across retries.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CopyBox {
+    /// Visible audience, key and recipient routing.
+    pub routing: KeyCopyPrefix,
+    /// Crypto's ephemeral key, nonce, ciphertext and tag, without wire lengths.
+    pub sealed: Vec<u8>,
 }
-
-impl<'a> SealedKey<'a> {
-    /// Check the kind, version, routing and exact bounded length without decrypting.
-    pub fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
-        crate::sealed::prefix(bytes, 37)?;
-        let mut input = Decoder::new(&bytes[3..])?;
-        let prefix = KeyCopyPrefix {
-            audience: Audience::get(&mut input)?,
-            key: KeyId::get(&mut input)?,
-            member: MemberId::get(&mut input)?,
-            sealing: SealingKey::get(&mut input)?,
-        };
-        input.take(prefix.box_length())?;
-        input.finish()?;
-        Ok(Self { prefix, bytes })
+impl Wire for CopyBox {
+    fn put(&self, out: &mut Encoder) -> Result<(), Error> {
+        self.validate()?;
+        self.routing.put(out)?;
+        out.bytes(&self.sealed[..56])?;
+        put_blob(&self.sealed[56..self.sealed.len() - 16], out)?;
+        out.bytes(&self.sealed[self.sealed.len() - 16..])
     }
-
-    /// Inspect public routing. This does not authenticate the box or its sender.
-    pub fn prefix(&self) -> &KeyCopyPrefix {
-        &self.prefix
+    fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
+        let routing = KeyCopyPrefix::get(input)?;
+        let mut sealed = input.take(56)?.to_vec();
+        let length = u32::get(input)? as usize;
+        require(
+            length == routing.material_length(),
+            "key box ciphertext",
+            Rule::StreamLength,
+        )?;
+        sealed.extend_from_slice(input.take(length)?);
+        sealed.extend_from_slice(input.take(16)?);
+        Ok(Self { routing, sealed })
     }
-
-    /// Preserve the original prefix, ephemeral key, nonce, ciphertext and tag.
-    pub fn encode(&self) -> Vec<u8> {
-        self.bytes.to_vec()
+}
+impl CopyBox {
+    pub(crate) fn validate(&self) -> Result<(), Error> {
+        require(
+            self.sealed.len() == 72 + self.routing.material_length(),
+            "key box length",
+            Rule::StreamLength,
+        )
     }
-
-    /// Open a tentative store key and require the addressed member, its sealing key
-    /// and the payload identity.
-    /// Before accepting it, check its hash against the authorized introduction with
-    /// [`StoreKey::check_hash`]. A candidate may open its own introduction for validation.
+    /// Open tentatively using the complete slot prefix through `sealing` as
+    /// context. The caller verifies the slot signature and key introduction.
     pub fn open_store_key(
         &self,
         member: &MemberIdentity,
         path: &str,
+        prefix: &[u8],
     ) -> Result<StoreKey, CryptoError> {
-        let credential = self.credential(member)?;
-        if self.prefix.audience != Audience::Store {
+        if self.routing.audience != Audience::Store {
             return Err(CryptoError::KeyIdentity);
         }
-        let (prefix, sealed) = self.bytes.split_at(self.prefix.length());
-        let key = credential.open_store_key(path, prefix, sealed)?;
-        if key.id() != self.prefix.key {
+        let key = self
+            .credential(member)?
+            .open_store_key(path, prefix, &self.sealed)?;
+        if key.id() != self.routing.key {
             return Err(CryptoError::KeyIdentity);
         }
         Ok(key)
     }
-
-    /// Open a tentative circle key and require the addressed member, its sealing key
-    /// and the payload identity.
-    /// Before accepting it, check its hash against the authorized introduction with
-    /// [`CircleKey::check_hash`]. Decryption alone does not authorize a key.
+    /// Open a circle box with its exact historical recipient credential.
     pub fn open_circle_key(
         &self,
         member: &MemberIdentity,
         path: &str,
+        prefix: &[u8],
     ) -> Result<CircleKey, CryptoError> {
-        let credential = self.credential(member)?;
-        let Audience::Circle(circle) = self.prefix.audience else {
+        let Audience::Circle(circle) = self.routing.audience else {
             return Err(CryptoError::KeyIdentity);
         };
-        let (prefix, sealed) = self.bytes.split_at(self.prefix.length());
-        let key = credential.open_circle_key(path, prefix, sealed)?;
-        if key.circle() != circle || key.id() != self.prefix.key {
+        let key = self
+            .credential(member)?
+            .open_circle_key(path, prefix, &self.sealed)?;
+        if key.circle() != circle || key.id() != self.routing.key {
             return Err(CryptoError::KeyIdentity);
         }
         Ok(key)
     }
-
-    /// The member's held private credential this copy names; a copy to the
-    /// member's other credential, or to another member, is not theirs to open.
     fn credential<'m>(&self, member: &'m MemberIdentity) -> Result<&'m MemberKeys, CryptoError> {
-        if self.prefix.member != member.member() {
+        if self.routing.member != member.member() {
             return Err(CryptoError::Authentication);
         }
         member
-            .credential(&self.prefix.sealing)
+            .credential(&self.routing.sealing)
             .ok_or(CryptoError::Authentication)
-    }
-}
-
-fn exact_length(actual: usize, expected: usize) -> Result<(), Error> {
-    match actual.cmp(&expected) {
-        std::cmp::Ordering::Less => Err(Error::Truncated),
-        std::cmp::Ordering::Greater => Err(Error::TrailingBytes),
-        std::cmp::Ordering::Equal => Ok(()),
     }
 }
 

@@ -90,10 +90,10 @@ pub struct InviteCode {
     pub secret: InviteSecret,
     /// The store key introduced by the creation entry, even after rotations.
     pub initial_key: KeyId,
-    /// The device whose permanent key-copy log supplies approval evidence.
+    /// The device whose claimed approval supplies binding evidence.
     pub inviting_writer: DeviceId,
-    /// Its last published copy number; zero means it has published no copies.
-    pub key_copy_number: u64,
+    /// The inviting device's last applied slot.
+    pub read_through: u64,
     /// Storage settings, including any credentials for the recipient.
     pub storage: SecretBytes,
 }
@@ -101,7 +101,6 @@ impl InviteCode {
     /// Encode a bounded frame into a buffer erased on drop, allocated once.
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();
-        invite_cursor(self.key_copy_number)?;
         encode_code(
             11,
             self.store,
@@ -112,7 +111,7 @@ impl InviteCode {
                 secret.as_bytes(),
                 self.initial_key.0.as_bytes(),
                 &self.inviting_writer.0.to_be_bytes(),
-                &self.key_copy_number.to_be_bytes(),
+                &self.read_through.to_be_bytes(),
             ],
             &self.storage,
         )
@@ -131,8 +130,7 @@ impl InviteCode {
         let secret = InviteSecret::from_bytes(*secret);
         let initial_key = Wire::get(&mut input)?;
         let inviting_writer = Wire::get(&mut input)?;
-        let key_copy_number = u64::get(&mut input)?;
-        invite_cursor(key_copy_number)?;
+        let read_through = u64::get(&mut input)?;
         let storage = storage(&mut input)?;
         input.finish()?;
         Ok(Self {
@@ -143,7 +141,7 @@ impl InviteCode {
             secret,
             initial_key,
             inviting_writer,
-            key_copy_number,
+            read_through,
             storage,
         })
     }
@@ -155,14 +153,6 @@ impl InviteCode {
     pub fn from_text(text: &str) -> Result<Self, Error> {
         Self::from_bytes(&text_decode("CVI1-", text)?)
     }
-}
-
-fn invite_cursor(number: u64) -> Result<(), Error> {
-    require(
-        number < u64::MAX,
-        "invite key-copy number",
-        Rule::CodeCursor,
-    )
 }
 
 fn storage(input: &mut Decoder<'_>) -> Result<SecretBytes, Error> {

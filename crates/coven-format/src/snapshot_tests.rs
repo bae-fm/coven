@@ -11,7 +11,7 @@ fn raw(record: &SnapshotRecord) -> Vec<u8> {
 }
 fn single_header(section: usize, audience: Audience, count: u64) -> SnapshotHeader {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 8];
+    header.counts = [0; 12];
     header.counts[section] = count;
     header.id.audience = audience;
     header
@@ -111,7 +111,8 @@ fn duplicate_identity_and_uncovered_writes_are_rejected() {
                 number,
             },
             timestamp: Timestamp::new(number, 0, DeviceId(1)).unwrap(),
-            had_read: WritePositions(vec![]),
+            slot: Slot(number * 3),
+            read_through: 0,
         })
     };
     reader
@@ -153,7 +154,7 @@ fn a_snapshot_larger_than_the_frame_bound_is_streamed_in_key_order() {
 #[test]
 fn empty_snapshot_requires_an_exact_end_frame() {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0; 8];
+    header.counts = [0; 12];
     let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -188,7 +189,7 @@ fn eof_before_the_end_marker_is_truncation_at_every_record_boundary() {
     assert_eq!(reader.finish(), Ok(()));
 
     let mut empty = header;
-    empty.counts = [0; 8];
+    empty.counts = [0; 12];
     let (mut writer, first) = SnapshotEncoder::start(empty).unwrap();
     let mut reader =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
@@ -364,56 +365,15 @@ fn snapshot_fixture_classifies_every_consumed_write_once() {
         }
     }
     reader.finish().unwrap();
-    for position in &reader.header().writes.0 {
-        for number in 1..=position.number {
-            assert!(classified.contains(&WriteId {
-                device: position.device,
-                number
-            }));
-        }
-    }
-}
-
-#[test]
-fn snapshot_positions_are_bounded_in_the_prefix_independently_of_the_frame() {
-    use coven_foundation::id_source::DeviceId;
-    let mut header = test_utils::snapshot_header();
-    header.counts = [0; 8];
-    header.writes.0 = (0..crate::wire::MAX_ITEMS)
-        .map(|device| coven_merge::WriteId {
-            device: DeviceId(device as u64),
-            number: 1,
-        })
-        .collect();
-    header.store_log.0 = header
-        .writes
-        .0
-        .iter()
-        .map(|write| crate::value::EntryId {
-            device: write.device,
-            number: write.number,
-        })
-        .collect();
-    let prefix = test_utils::snapshot_prefix(&header);
-    let (_, frame) = SnapshotEncoder::start(header.clone()).unwrap();
-    // Kind, version and length; the identity; the schema; eight counts.
-    assert_eq!(frame.len(), 7 + 17 + 4 + 8 * 8);
-    let prefix =
-        crate::sealed_snapshot::SnapshotObjectPrefix::decode(&prefix.encode().unwrap()).unwrap();
     assert_eq!(
-        crate::snapshot::SnapshotDecoder::start(&frame, &prefix)
-            .unwrap()
-            .header(),
-        &header
-    );
-    header.writes.0.push(coven_merge::WriteId {
-        device: DeviceId(crate::wire::MAX_ITEMS as u64),
-        number: 1,
-    });
-    assert!(SnapshotEncoder::start(header.clone()).is_err());
-    assert!(
-        crate::snapshot::SnapshotDecoder::start(&frame, &test_utils::snapshot_prefix(&header))
-            .is_err()
+        classified,
+        test_utils::snapshot_records()
+            .into_iter()
+            .filter_map(|record| match record {
+                SnapshotRecord::Write(write) => Some(write.id),
+                _ => None,
+            })
+            .collect()
     );
 }
 
@@ -428,8 +388,8 @@ fn applied_write_identity_timestamp_and_past_are_checked() {
     invalid.timestamp = Timestamp::new(1, 0, DeviceId(9)).unwrap();
     cases.push((invalid, Rule::TimestampDevice));
     let mut invalid = write;
-    invalid.had_read.0.push(invalid.id);
-    cases.push((invalid, Rule::OwnPosition));
+    invalid.read_through = invalid.slot.0;
+    cases.push((invalid, Rule::Coverage));
     for (write, rule) in cases {
         let (mut writer, first) =
             SnapshotEncoder::start(single_header(1, Audience::Store, 1)).unwrap();
@@ -455,7 +415,11 @@ fn creations_name_their_own_insert_or_a_copy_from_another_audience() {
     );
     let refused = |creation: crate::authorship::Creation| {
         let (mut writer, _) = SnapshotEncoder::start(single_header(6, Audience::Store, 1)).unwrap();
-        assert!(writer.record(SnapshotRecord::Creation(creation)).is_err());
+        let record = SnapshotRecord::Creation(creation);
+        assert!(writer
+            .record(record.clone())
+            .and_then(|_| record.validate_coverage(writer.header().covers, &test_utils::oracle()))
+            .is_err());
     };
     // A copy names a creation in another audience, by an earlier write.
     let mut copy = test_utils::creation();
@@ -471,7 +435,7 @@ fn creations_name_their_own_insert_or_a_copy_from_another_audience() {
     let mut other_key = copy.clone();
     other_key.creator.row.key = crate::key::encode_key(&[Value::Integer(3)]).unwrap();
     refused(other_key);
-    // Its writes are within the snapshot's positions.
+    // Its referenced writes must be within snapshot coverage.
     let mut uncovered = copy;
     uncovered.creator.write = coven_merge::WriteId {
         device: DeviceId(3),
@@ -488,7 +452,11 @@ fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
     );
     let refused = |evidence: crate::authorship::WriteEvidence| {
         let (mut writer, _) = SnapshotEncoder::start(single_header(7, Audience::Store, 1)).unwrap();
-        assert!(writer.record(SnapshotRecord::Evidence(evidence)).is_err());
+        let record = SnapshotRecord::Evidence(evidence);
+        assert!(writer
+            .record(record.clone())
+            .and_then(|_| record.validate_coverage(writer.header().covers, &test_utils::oracle()))
+            .is_err());
     };
     let mut roots = test_utils::write_evidence();
     roots.roots.push([0; 32]);
@@ -505,4 +473,105 @@ fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
     let mut uncovered = test_utils::write_evidence();
     uncovered.write.device = DeviceId(3);
     refused(uncovered);
+}
+
+#[test]
+fn last_claims_preserve_zero_and_exhausted_counters_and_refuse_duplicate_devices() {
+    for number in [0, 1, u64::MAX] {
+        round_trip(
+            SnapshotRecord::Claim(LastClaim {
+                device: DeviceId(1),
+                number,
+            }),
+            Audience::Store,
+        );
+    }
+    let (mut writer, first) =
+        SnapshotEncoder::start(single_header(11, Audience::Store, 2)).unwrap();
+    let mut reader =
+        SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
+    let record = SnapshotRecord::Claim(LastClaim {
+        device: DeviceId(2),
+        number: 8,
+    });
+    let frame = writer.record(record.clone()).unwrap();
+    reader.frame(&frame, &test_utils::oracle()).unwrap();
+    for device in [1, 2] {
+        let invalid = SnapshotRecord::Claim(LastClaim {
+            device: DeviceId(device),
+            number: 9,
+        });
+        assert!(writer.record(invalid.clone()).is_err());
+        assert!(reader.frame(&raw(&invalid), &test_utils::oracle()).is_err());
+    }
+    assert!(writer.finish().is_err());
+    assert!(reader.finish().is_err());
+}
+
+#[test]
+fn original_slot_sections_refuse_other_audiences_and_future_slots() {
+    for record in test_utils::snapshot_records().into_iter().filter(|record| {
+        matches!(
+            record,
+            SnapshotRecord::Admin(_) | SnapshotRecord::KeyCopy(_) | SnapshotRecord::Announcement(_)
+        )
+    }) {
+        for header in [
+            single_header(
+                record.section() as usize,
+                Audience::Circle(CircleId(Uuid::from_u128(1))),
+                1,
+            ),
+            SnapshotHeader {
+                covers: 0,
+                ..single_header(record.section() as usize, Audience::Store, 1)
+            },
+        ] {
+            let (mut writer, first) = SnapshotEncoder::start(header).unwrap();
+            let mut reader =
+                SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header()))
+                    .unwrap();
+            assert!(writer.record(record.clone()).is_err());
+            assert!(reader.frame(&raw(&record), &test_utils::oracle()).is_err());
+        }
+    }
+}
+
+#[test]
+fn pinned_refused_and_reset_ignored_parts_preserve_claim_numbers() {
+    for (bytes, verdict, last_claim) in include_str!("../fixtures/snapshot-claims.hex")
+        .lines()
+        .map(crate::tests::hex)
+        .zip([ChangeVerdict::Refused, ChangeVerdict::Ignored(Slot(2))])
+        .zip([8, 9])
+        .map(|((bytes, verdict), claim)| (bytes, verdict, claim))
+    {
+        let mut frames = crate::chunks::FrameDecoder::new(None);
+        let mut input = bytes.as_slice();
+        let first = frames.next(&mut input).unwrap().unwrap();
+        let mut prefix = test_utils::snapshot_prefix(&test_utils::snapshot_header());
+        prefix.covers = 10;
+        let mut reader = SnapshotDecoder::start(&first, &prefix).unwrap();
+        let (mut writer, mut encoded) = SnapshotEncoder::start(reader.header().clone()).unwrap();
+        let mut claims = Vec::new();
+        let mut authored = 0;
+        while let Some(frame) = frames.next(&mut input).unwrap() {
+            if let Some(record) = reader.frame(&frame, &test_utils::oracle()).unwrap() {
+                match &record {
+                    SnapshotRecord::Authored(change) => {
+                        assert_eq!(change.verdict, verdict);
+                        authored += 1;
+                    }
+                    SnapshotRecord::Claim(claim) => claims.push((claim.device, claim.number)),
+                    _ => panic!("unexpected fixture section"),
+                }
+                encoded.extend(writer.record(record).unwrap());
+            }
+        }
+        reader.finish().unwrap();
+        encoded.extend(writer.finish().unwrap());
+        assert_eq!(encoded, bytes);
+        assert_eq!(authored, 1);
+        assert_eq!(claims, [(DeviceId(1), last_claim), (DeviceId(2), 1)]);
+    }
 }

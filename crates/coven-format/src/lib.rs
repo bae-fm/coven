@@ -6,37 +6,40 @@
 //! Appendix D of `spec/format.md` specifies stored bytes.
 
 pub mod access_key_delivery;
+pub mod admin;
 pub mod authorship;
 pub mod chunks;
-pub mod clock;
 pub mod codes;
-pub mod creation_marker;
 pub mod dismissal;
 pub mod error;
 pub mod file;
 pub mod file_reference;
+pub mod floor;
 pub mod key;
 pub mod loss;
 pub mod merge_fields;
 mod merge_wire;
 pub mod objects;
 pub mod path;
-pub mod pending;
 mod sealed;
+pub mod sealed_floor;
 pub mod sealed_key;
 pub mod sealed_single;
+pub mod sealed_slot;
 pub mod sealed_snapshot;
+pub mod sealed_stream;
 pub mod sealed_write;
+pub mod sequence;
 pub mod snapshot;
 pub mod snapshot_rows;
 pub mod snapshot_stream;
-pub mod store_log;
 pub mod value;
 mod version;
 mod wire;
 pub mod write;
 pub mod write_sources;
 pub mod write_stream;
+pub mod writes_slot;
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;
@@ -44,9 +47,9 @@ pub mod test_utils;
 pub use error::Error;
 pub use version::FormatVersion;
 
+use admin::StoreChange;
 use error::bound;
-use objects::{ClockObservation, JoinRequest, PostedPositions};
-use store_log::StoreLogEntry;
+use objects::JoinRequest;
 use wire::{decode_frame, Encoder, Wire, MAX_OBJECT};
 
 /// The object format written and read by coven (Appendix D).
@@ -60,13 +63,9 @@ pub const FRAME_PREFIX_LEN: usize = 7;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Object {
     /// One membership, device, circle, version or reset entry (§9).
-    StoreLog(StoreLogEntry),
+    Admin(StoreChange),
     /// A new person's public keys and device name (§12.2).
     JoinRequest(JoinRequest),
-    /// A device's positions and keyed fingerprints (§6, §19.1).
-    PostedPositions(PostedPositions),
-    /// A device's storage-time probe, carrying only its device id (§9).
-    ClockObservation(ClockObservation),
 }
 
 impl Object {
@@ -80,14 +79,11 @@ impl Object {
         self.validate()?;
         let FormatVersion::V1 = format;
         match self {
-            Self::StoreLog(v) => {
+            Self::Admin(v) => {
                 let bytes = encode_frame_in(4, format, |out| v.put(out))?;
-                store_log::check_frame_length(bytes.len())?;
                 Ok(bytes)
             }
             Self::JoinRequest(v) => encode_frame_in(9, format, |out| v.put(out)),
-            Self::PostedPositions(v) => encode_frame_in(8, format, |out| v.put(out)),
-            Self::ClockObservation(v) => encode_frame_in(12, format, |out| v.put(out)),
         }
     }
     /// Decodes exactly one bounded frame, refusing unknown tags/versions, trailing
@@ -95,14 +91,9 @@ impl Object {
     /// and checks requiring other writes or a database belong to their owners.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
-        if kind == 4 {
-            store_log::check_frame_length(bytes.len())?;
-        }
         let object = match kind {
-            4 => Self::StoreLog(Wire::get(&mut input)?),
+            4 => Self::Admin(Wire::get(&mut input)?),
             9 => Self::JoinRequest(Wire::get(&mut input)?),
-            8 => Self::PostedPositions(Wire::get(&mut input)?),
-            12 => Self::ClockObservation(Wire::get(&mut input)?),
             tag => {
                 return Err(Error::UnknownTag {
                     field: "object kind",
@@ -116,10 +107,8 @@ impl Object {
     }
     fn validate(&self) -> Result<(), Error> {
         match self {
-            Self::StoreLog(v) => v.validate(),
+            Self::Admin(v) => v.validate(),
             Self::JoinRequest(v) => v.validate(),
-            Self::PostedPositions(v) => v.validate(),
-            Self::ClockObservation(v) => v.validate(),
         }
     }
 }
@@ -129,7 +118,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..3).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=13) {
+    if !matches!(bytes[0], 1..=7 | 9..=16) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],

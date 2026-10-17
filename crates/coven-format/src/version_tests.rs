@@ -1,5 +1,9 @@
 use super::*;
-use crate::{sealed_single::SingleChunkPrefix, sealed_write::WriteObjectPrefix, Object};
+use crate::{
+    sealed_slot::{SlotKind, SlotObjectPrefix},
+    sealed_write::WriteObjectPrefix,
+    Object,
+};
 
 #[test]
 fn recorded_write_format_round_trips_the_fixture_prefix() {
@@ -12,8 +16,8 @@ fn recorded_write_format_round_trips_the_fixture_prefix() {
 
 #[test]
 fn recorded_entry_format_encodes_both_its_frame_and_envelope() {
-    let entry = crate::test_utils::store_log();
-    let object = Object::StoreLog(entry.clone());
+    let entry = crate::test_utils::creation_change();
+    let object = Object::Admin(entry.clone());
     let frame = object.encode_in(FormatVersion::V1).unwrap();
     let format = FormatVersion::decode(&frame).unwrap();
     assert_eq!(format.number(), 1);
@@ -21,29 +25,28 @@ fn recorded_entry_format_encodes_both_its_frame_and_envelope() {
         Object::decode(&frame).unwrap().encode_in(format).unwrap(),
         frame
     );
-    let prefix = SingleChunkPrefix::StoreLog {
+    let prefix = SlotObjectPrefix {
+        format,
+        kind: SlotKind::Admin,
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
     };
-    let bytes = crate::tests::hex(include_str!("../fixtures/sealed-store-log.hex"));
-    let encoded = prefix.encode_in(format).unwrap();
+    let bytes = crate::tests::hex(include_str!("../fixtures/sealed-admin.hex"));
+    let encoded = prefix.encode().unwrap();
     assert_eq!(encoded, bytes[..encoded.len()]);
 }
 
 #[test]
 fn unsupported_formats_are_reported_before_version_specific_fields() {
     type Decode = fn(&[u8]) -> Result<(), Error>;
-    let decoders: [(u8, Decode); 9] = [
+    let decoders: [(u8, Decode); 8] = [
         (4, |bytes| Object::decode(bytes).map(|_| ())),
         (12, |bytes| Object::decode(bytes).map(|_| ())),
         (32, |bytes| WriteObjectPrefix::decode(bytes).map(|_| ())),
         (33, |bytes| {
-            crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())
+            crate::sealed_slot::SlotObjectPrefix::decode(bytes).map(|_| ())
         }),
         (34, |bytes| {
             crate::sealed_snapshot::SnapshotObjectPrefix::decode(bytes).map(|_| ())
-        }),
-        (35, |bytes| {
-            crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())
         }),
         (36, |bytes| {
             crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())
@@ -52,7 +55,7 @@ fn unsupported_formats_are_reported_before_version_specific_fields() {
             crate::file::FileHeader::decode(bytes).map(|_| ())
         }),
         (39, |bytes| {
-            crate::sealed_single::SingleChunkObject::decode(bytes).map(|_| ())
+            crate::sealed_floor::FloorPrefixDecoder::start(bytes).map(|_| ())
         }),
     ];
     for version in [2, u16::MAX, 0] {

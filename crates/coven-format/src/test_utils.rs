@@ -4,12 +4,12 @@
 pub const STORE_ID: coven_foundation::id_source::StoreId =
     coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
 
+use crate::admin::*;
 use crate::codes::{InviteCode, RestoreCode};
 use crate::key::encode_key;
 use crate::objects::*;
 use crate::snapshot::{SnapshotEncoder, SnapshotHeader, SnapshotRecord};
 use crate::snapshot_rows::*;
-use crate::store_log::*;
 use crate::value::*;
 use crate::write::*;
 use crate::Object;
@@ -19,11 +19,11 @@ use coven_merge::{
     Audience, Cell, Change, ColumnValue, LostKey, LostValue, MergeError, Operation, Parent, RowId,
     RowState, Timestamp, WriteId, WriteOracle,
 };
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
-/// A write in device one's log.
+/// An original write by device one.
 pub fn position() -> WriteId {
     WriteId {
         device: DeviceId(1),
@@ -104,13 +104,9 @@ pub fn write() -> WriteRecord {
     );
     WriteRecord {
         header: WriteHeader {
-            store_log_read: crate::value::EntryPositions(Vec::new()),
+            read_through: 5,
             position: position(),
             timestamp: timestamp(),
-            had_read: WritePositions(vec![WriteId {
-                device: DeviceId(2),
-                number: 1,
-            }]),
             schema_version: 1,
             disposition: WriteDisposition::Apply,
         },
@@ -207,54 +203,82 @@ pub fn transient_execution(audience: Audience) -> RowExecution {
 pub fn store_key() -> coven_crypto::StoreKey {
     coven_crypto::StoreKey::from_bytes(KeyId(Uuid::from_bytes([1; 16])), [17; 32])
 }
-/// A signed clock object for device one, with public fixture key and nonce material.
-pub fn sealed_clock() -> Vec<u8> {
-    hex::decode(include_str!("../fixtures/sealed-clock.hex").trim()).unwrap()
-}
-/// The first store-log entry.
-pub fn store_log() -> StoreLogEntry {
-    StoreLogEntry {
-        position: EntryId {
-            device: DeviceId(1),
-            number: 1,
+/// The first admin change, carried by slot one.
+pub fn creation_change() -> StoreChange {
+    StoreChange::CreateStore {
+        access: crate::MemberAccess::S3AccessKey {
+            access_key_id: "fixture-access-key".into(),
+            principal: crate::S3Principal::Console,
         },
-        timestamp: timestamp(),
-        author: member_id(),
-        had_read: EntryPositions(vec![]),
-        change: StoreChange::CreateStore {
-            access: crate::MemberAccess::S3AccessKey {
-                access_key_id: "fixture-access-key".into(),
-                principal: crate::S3Principal::Console,
-            },
-            store: StoreId(Uuid::from_bytes([0x10; 16])),
-            name: "S".into(),
-            admin: member(),
-            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
-            key_hash: store_key().hash(),
-            device_name: "D".into(),
-        },
+        store: STORE_ID,
+        name: "S".into(),
+        admin: member(),
+        key: store_key().id(),
+        key_hash: store_key().hash(),
+        device_name: "D".into(),
     }
 }
-/// A member removal deleting circles left empty in its author's view.
-pub fn member_removal() -> StoreLogEntry {
-    StoreLogEntry {
-        position: EntryId {
-            device: DeviceId(1),
-            number: 2,
-        },
-        timestamp: Timestamp::new(7, 0, DeviceId(1)).unwrap(),
-        author: member_id(),
-        had_read: EntryPositions(vec![]),
-        change: StoreChange::RemoveMember {
-            member: other_member_id(),
-        },
+/// A member-removal admin change.
+pub fn member_removal() -> StoreChange {
+    StoreChange::RemoveMember {
+        member: other_member_id(),
     }
 }
-/// A reset after the fixture's create-store entry.
-pub fn loss_entry() -> EntryId {
-    EntryId {
+/// A reset's slot used by loss examples.
+pub fn loss_entry() -> Slot {
+    Slot(2)
+}
+/// A canonical path for one positive slot number.
+pub fn slot_path(number: u64) -> crate::path::ObjectPath {
+    crate::path::ObjectPath::slot(STORE_ID, number.try_into().unwrap())
+}
+/// The deterministic header of a device-one claim.
+pub fn slot_header(slot: u64, claim: u64) -> crate::sequence::SlotHeader {
+    crate::sequence::SlotHeader {
         device: DeviceId(1),
-        number: 2,
+        claim,
+        author: member_id(),
+        after: slot - 1,
+    }
+}
+/// Seal and sign a bounded slot with public test keys and deterministic nonces.
+pub fn bounded_slot(
+    slot: u64,
+    claim: u64,
+    kind: crate::sealed_slot::SlotKind,
+    frame: crate::sequence::SlotFrame,
+) -> Vec<u8> {
+    let path = slot_path(slot);
+    let prefix = crate::sealed_slot::SlotObjectPrefix {
+        format: crate::FormatVersion::CURRENT,
+        key: store_key().id(),
+        kind,
+    };
+    let plain = frame.encode(&slot_header(slot, claim), &path).unwrap();
+    let chunk = store_key().derive().reseal_object_chunk(
+        path.as_str(),
+        &prefix.encode().unwrap(),
+        0,
+        0,
+        &plain,
+    );
+    let mut bytes = prefix.encode_chunk(&chunk).unwrap();
+    let mut hash = coven_crypto::ObjectHasher::new();
+    hash.update(&bytes);
+    bytes.extend_from_slice(
+        member_keys()
+            .sign_object(path.as_str(), &hash.finish())
+            .as_bytes(),
+    );
+    bytes
+}
+/// An earlier snapshot announcement preserved by the fixture snapshot.
+pub fn announcement() -> crate::sequence::SnapshotAnnouncement {
+    crate::sequence::SnapshotAnnouncement {
+        snapshot: snapshot_header().id,
+        covers: 6,
+        purpose: crate::sequence::Purpose::Ordinary,
+        digest: [0x99; 32],
     }
 }
 /// An oracle of applied metadata that tests may populate from streamed records.
@@ -277,8 +301,13 @@ impl WriteOracle for TestOracle {
         }
         Ok(
             (reader.device == earlier.device && earlier.number < reader.number)
-                || write.had_read.covers(earlier),
+                || self.writes[&earlier].slot.0 <= write.read_through,
         )
+    }
+}
+impl crate::snapshot::WriteSlots for TestOracle {
+    fn slot(&self, write: WriteId) -> Option<Slot> {
+        self.writes.get(&write).map(|write| write.slot)
     }
 }
 /// Three applied writes, including two concurrent setters of the fixture row.
@@ -299,18 +328,27 @@ pub fn oracle() -> TestOracle {
         writes: [
             AppliedWrite {
                 id: first,
+                slot: Slot(3),
                 timestamp: Timestamp::new(1, 0, first.device).unwrap(),
-                had_read: WritePositions(vec![]),
+                read_through: 0,
             },
             AppliedWrite {
                 id: winner,
+                slot: Slot(5),
                 timestamp: Timestamp::new(4, 0, winner.device).unwrap(),
-                had_read: WritePositions(vec![]),
+                read_through: 0,
             },
             AppliedWrite {
                 id: loser,
+                slot: Slot(4),
                 timestamp: Timestamp::new(3, 0, loser.device).unwrap(),
-                had_read: WritePositions(vec![first]),
+                read_through: 3,
+            },
+            AppliedWrite {
+                id: position(),
+                slot: Slot(6),
+                timestamp: timestamp(),
+                read_through: 5,
             },
         ]
         .into_iter()
@@ -345,7 +383,7 @@ pub fn merge_row() -> MergeRow {
     .unwrap();
     MergeRow { state }
 }
-/// The header for the fixture's five snapshot sections.
+/// The header for the fixture's twelve snapshot sections.
 pub fn snapshot_header() -> SnapshotHeader {
     SnapshotHeader {
         id: SnapshotId {
@@ -354,30 +392,17 @@ pub fn snapshot_header() -> SnapshotHeader {
             audience: Audience::Store,
         },
         schema_version: 2,
-        writes: WritePositions(vec![
-            position(),
-            WriteId {
-                device: DeviceId(2),
-                number: 1,
-            },
-        ]),
-        store_log: EntryPositions(vec![loss_entry()]),
-        counts: [1, 4, 1, 1, 4, 1, 1, 1],
+        covers: 9,
+        counts: [1, 4, 1, 1, 4, 1, 1, 1, 1, 1, 1, 2],
     }
-}
-/// The fixture's catch-up storage time, with a subsecond fraction.
-pub fn caught_at() -> crate::value::StorageTime {
-    crate::value::StorageTime::new(1_760_400_000, 123_456_789).unwrap()
 }
 /// The sealed prefix carrying a snapshot's coverage, with a fixed test key.
 pub fn snapshot_prefix(header: &SnapshotHeader) -> crate::sealed_snapshot::SnapshotObjectPrefix {
     crate::sealed_snapshot::SnapshotObjectPrefix {
         audience: header.id.audience.clone(),
         key: KeyId(Uuid::from_bytes([1; 16])),
-        caught_at: caught_at(),
-        raise: std::num::NonZeroU32::new(header.schema_version),
-        writes: header.writes.clone(),
-        store_log: header.store_log.clone(),
+        covers: header.covers,
+        purpose: crate::sequence::Purpose::Raise(header.schema_version),
     }
 }
 /// Records in their canonical section and identity order.
@@ -393,7 +418,8 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
         AppliedWrite {
             id: header.position,
             timestamp: header.timestamp,
-            had_read: header.had_read,
+            slot: Slot(6),
+            read_through: header.read_through,
         },
     );
     records.extend(writes.into_values().map(SnapshotRecord::Write));
@@ -411,6 +437,36 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
     records.push(SnapshotRecord::Authored(authored_change()));
     records.push(SnapshotRecord::Creation(creation()));
     records.push(SnapshotRecord::Evidence(write_evidence()));
+    records.push(SnapshotRecord::Admin(crate::floor::OriginalSlot {
+        slot: Slot(1),
+        object: bounded_slot(
+            1,
+            1,
+            crate::sealed_slot::SlotKind::Admin,
+            crate::sequence::SlotFrame::Admin(creation_change()),
+        ),
+    }));
+    records.push(SnapshotRecord::KeyCopy(crate::floor::OriginalSlot {
+        slot: Slot(2),
+        object: hex::decode(include_str!("../fixtures/sealed-store-key.hex").trim()).unwrap(),
+    }));
+    records.push(SnapshotRecord::Announcement(crate::floor::OriginalSlot {
+        slot: Slot(7),
+        object: bounded_slot(
+            7,
+            6,
+            crate::sealed_slot::SlotKind::Announcement,
+            crate::sequence::SlotFrame::Announcement(announcement()),
+        ),
+    }));
+    records.push(SnapshotRecord::Claim(crate::snapshot::LastClaim {
+        device: DeviceId(1),
+        number: 8,
+    }));
+    records.push(SnapshotRecord::Claim(crate::snapshot::LastClaim {
+        device: DeviceId(2),
+        number: 1,
+    }));
     records
 }
 /// The fixture row's selected creation, by device one's first write.
@@ -573,24 +629,23 @@ pub fn invite() -> InviteCode {
         secret: InviteSecret::from_bytes([0x66; 32]),
         initial_key: store_key().id(),
         inviting_writer: DeviceId(1),
-        key_copy_number: 12,
+        read_through: 12,
         storage: SecretBytes::new(vec![0x44]),
     }
 }
-/// Each store-log change in its canonical tag order.
+/// Each admin operation in its canonical tag order.
 pub fn store_changes() -> Vec<StoreChange> {
     let c = CircleId(uuid::Uuid::from_bytes([2; 16]));
     let m = member_id();
-    let snapshot = snapshot_header().id;
     vec![
-        store_log().change,
+        creation_change(),
         StoreChange::AddMember {
             member: other_member_id(),
             access: crate::MemberAccess::ProviderAccount("member@example.test".into()),
             keys: other_member(),
             role: MemberRole::Member,
         },
-        member_removal().change,
+        member_removal(),
         StoreChange::ChangeRole {
             member: m,
             role: MemberRole::Admin,
@@ -623,14 +678,10 @@ pub fn store_changes() -> Vec<StoreChange> {
         },
         StoreChange::RaiseSchema {
             version: 2,
-            snapshot: snapshot.clone(),
-            caught_at: crate::value::StorageTime::new(1_700_000_000, 5).expect("a valid time"),
+            announcement: Slot(7),
         },
         StoreChange::Reset {
-            snapshot: SnapshotId {
-                audience: Audience::Circle(c),
-                ..snapshot.clone()
-            },
+            announcement: Slot(8),
         },
         StoreChange::SetAccess {
             member: m,
@@ -656,76 +707,18 @@ pub fn store_changes() -> Vec<StoreChange> {
         },
         StoreChange::ReplaceMemberKeys {
             member: m,
+            expected: member(),
             keys: replacement(),
         },
     ]
 }
 /// Every independently decoded ordinary object kind.
 pub fn objects() -> Vec<Object> {
-    let mut objects = vec![
-        Object::StoreLog(store_log()),
-        Object::StoreLog(member_removal()),
-        Object::StoreLog(StoreLogEntry {
-            change: StoreChange::RaiseSchema {
-                version: 3,
-                snapshot: SnapshotId {
-                    audience: Audience::Circle(CircleId(Uuid::from_u128(7))),
-                    device: DeviceId(9),
-                    number: 11,
-                },
-                caught_at: crate::value::StorageTime::new(1_700_000_100, 0).expect("a valid time"),
-            },
-            ..store_log()
-        }),
-        Object::JoinRequest(join_request()),
-        Object::PostedPositions(PostedPositions {
-            pending: vec![
-                crate::pending::PendingReport {
-                    subject: crate::pending::PendingSubject::Write(WriteId {
-                        device: DeviceId(2),
-                        number: 4,
-                    }),
-                    reason: crate::pending::PendingReason::Refused(
-                        crate::pending::RefusalCode::InvalidWrite,
-                    ),
-                },
-                crate::pending::PendingReport {
-                    subject: crate::pending::PendingSubject::Entry(EntryId {
-                        device: DeviceId(3),
-                        number: 2,
-                    }),
-                    reason: crate::pending::PendingReason::Refused(
-                        crate::pending::RefusalCode::Signature,
-                    ),
-                },
-            ],
-            schema_version: 1,
-            device: DeviceId(1),
-            writes: WritePositions(vec![position()]),
-            store_log: EntryPositions(vec![]),
-            fingerprints: vec![Fingerprint {
-                audience: Audience::Store,
-                key: coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
-                bytes: coven_crypto::Fingerprint::from_bytes([0x88; 32]),
-            }],
-        }),
-    ];
-    objects.extend(
-        store_changes()
-            .into_iter()
-            .enumerate()
-            .filter_map(|(index, change)| {
-                if matches!(index, 0 | 2 | 11) {
-                    return None;
-                }
-                Some(Object::StoreLog(StoreLogEntry {
-                    change,
-                    ..store_log()
-                }))
-            }),
-    );
-    objects.push(Object::ClockObservation(clock()));
-    objects
+    store_changes()
+        .into_iter()
+        .map(Object::Admin)
+        .chain([Object::JoinRequest(join_request())])
+        .collect()
 }
 /// Ana's request answering the re-binding invite with her replacement pair,
 /// which signs it (D8, D13).
@@ -735,16 +728,6 @@ pub fn join_request() -> JoinRequest {
         member: member_id(),
         keys: replacement(),
         device_name: "D".into(),
-    }
-}
-/// Device one's clock frame, with the store log it had read (D8).
-pub fn clock() -> ClockObservation {
-    ClockObservation {
-        device: DeviceId(1),
-        store_log_read: EntryPositions(vec![EntryId {
-            device: DeviceId(1),
-            number: 2,
-        }]),
     }
 }
 /// A two-audience write with a row frame spanning three chunks.
@@ -835,20 +818,37 @@ pub fn encoded_examples() -> Vec<Zeroizing<Vec<u8>>> {
         );
     }
     pieces.push(Zeroizing::new(
-        crate::sealed_snapshot::SnapshotObjectPrefix {
-            audience: Audience::Store,
-            key: KeyId(Uuid::from_bytes([1; 16])),
-            caught_at: caught_at(),
-            raise: std::num::NonZeroU32::new(crate::test_utils::snapshot_header().schema_version),
-            writes: crate::test_utils::snapshot_header().writes,
-            store_log: crate::test_utils::snapshot_header().store_log,
-        }
-        .encode()
-        .unwrap(),
+        snapshot_prefix(&snapshot_header()).encode().unwrap(),
     ));
     pieces.extend(
         crate::chunks::PlaintextChunks::new(chunked_snapshot_frames().into_iter().map(Ok))
             .map(|v| Zeroizing::new(v.unwrap())),
     );
     pieces
+}
+
+/// The fixture author has read these original writes.
+pub fn past() -> BTreeSet<WriteId> {
+    [(1, 1), (1, 2), (2, 1)]
+        .map(|(device, number)| WriteId {
+            device: DeviceId(device),
+            number,
+        })
+        .into()
+}
+/// Validate the fixture write against its explicitly supplied past.
+pub fn check_past(record: &WriteRecord) -> Result<(), crate::Error> {
+    let past = past();
+    for part in &record.parts {
+        for row in &part.rows {
+            row.validate_past(&past)?;
+        }
+        for execution in &part.executions {
+            execution.execution.sources.validate_past(&past)?;
+        }
+        for dismissal in &part.dismissals {
+            dismissal.validate_past(&past)?;
+        }
+    }
+    Ok(())
 }

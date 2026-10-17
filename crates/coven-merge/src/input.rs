@@ -65,24 +65,13 @@ impl ForeignKey {
 pub struct WriteId {
     /// The install's 64-bit device id.
     pub device: DeviceId,
-    /// The write's number in that device's log.
+    /// The device's original write number.
     pub number: u64,
 }
 
-/// One device's numbered store-log entry (§9), distinct from a merge write.
-///
-/// ```compile_fail
-/// use coven_merge::{EntryId, WriteId};
-/// use coven_foundation::id_source::DeviceId;
-/// let entry: EntryId = WriteId { device: DeviceId(1), number: 1 };
-/// ```
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub struct EntryId {
-    /// The device whose store log contains the entry.
-    pub device: DeviceId,
-    /// The entry's number, starting at one.
-    pub number: u64,
-}
+/// A positive position in the store's shared sequence (§6).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct Slot(pub u64);
 
 /// Every synced row reaches the store or one circle (§14).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]

@@ -1,82 +1,30 @@
 use super::*;
 use crate::test_utils::STORE_ID;
 use crate::{test_utils, Object};
-use coven_crypto::{ObjectHasher, StoreKey};
+use coven_crypto::ObjectHasher;
 
 #[test]
 fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
-    let key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]);
-    for object in test_utils::objects() {
-        let (prefix, path) = match &object {
-            Object::StoreLog(entry) => (
-                SingleChunkPrefix::StoreLog { key: key.id() },
-                crate::path::ObjectPath::store_log(
-                    STORE_ID,
-                    entry.position.device,
-                    entry.position.number.try_into().unwrap(),
-                ),
-            ),
-            Object::PostedPositions(positions) => (
-                SingleChunkPrefix::PostedPositions(key.id()),
-                crate::path::ObjectPath::positions(STORE_ID, positions.device),
-            ),
-            Object::JoinRequest(request) => (
-                SingleChunkPrefix::JoinRequest,
-                crate::path::ObjectPath::join_request(STORE_ID, request.invite),
-            ),
-            Object::ClockObservation(clock) => (
-                SingleChunkPrefix::ClockObservation(key.id()),
-                crate::path::ObjectPath::clock(STORE_ID, clock.device),
-            ),
-        };
+    for object in [Object::JoinRequest(test_utils::join_request())] {
+        let prefix = SingleChunkPrefix::JoinRequest;
+        let path =
+            crate::path::ObjectPath::join_request(STORE_ID, test_utils::join_request().invite);
         let path = path.as_str();
         let plain = object.encode().unwrap();
         let aad = prefix.encode().unwrap();
-        if matches!(prefix, SingleChunkPrefix::StoreLog { .. }) {
-            assert_eq!(aad.len(), 19, "every store-log entry has the D9 prefix");
-            assert_eq!(&aad[..3], &[33, 0, 1]);
-            assert_eq!(&aad[3..], key.id().0.as_bytes());
-        }
-        let seal = |plain: &[u8]| match &prefix {
-            SingleChunkPrefix::JoinRequest => test_utils::invite()
-                .secret
-                .join_request_key()
-                .seal_object_chunk(path, &aad, 0, 0, plain),
-            _ => key.derive().seal_object_chunk(path, &aad, 0, 0, plain),
-        };
-        let open = |path: &str, aad: &[u8], chunk: &[u8]| match &prefix {
-            SingleChunkPrefix::JoinRequest => test_utils::invite()
-                .secret
-                .join_request_key()
-                .open_object_chunk(path, aad, 0, 0, chunk),
-            _ => key.derive().open_object_chunk(path, aad, 0, 0, chunk),
-        };
+        let key = test_utils::invite().secret.join_request_key();
+        let seal = |plain: &[u8]| key.seal_object_chunk(path, &aad, 0, 0, plain);
+        let open =
+            |path: &str, aad: &[u8], chunk: &[u8]| key.open_object_chunk(path, aad, 0, 0, chunk);
         let chunk = seal(&plain).unwrap();
         let before_signature = prefix.encode_chunk(&chunk).unwrap();
         let mut hash = ObjectHasher::new();
         hash.update(&before_signature);
         let digest = hash.finish();
         let signature = test_utils::member_keys().sign_object(path, &digest);
-        let object = match &prefix {
-            SingleChunkPrefix::StoreLog { key } => SingleChunkObject::StoreLog {
-                key: *key,
-                chunk: &chunk,
-                signature,
-            },
-            SingleChunkPrefix::PostedPositions(key) => SingleChunkObject::PostedPositions {
-                key: *key,
-                chunk: &chunk,
-                signature,
-            },
-            SingleChunkPrefix::JoinRequest => SingleChunkObject::JoinRequest {
-                chunk: &chunk,
-                signature,
-            },
-            SingleChunkPrefix::ClockObservation(key) => SingleChunkObject::ClockObservation {
-                key: *key,
-                chunk: &chunk,
-                signature,
-            },
+        let object = SingleChunkObject::JoinRequest {
+            chunk: &chunk,
+            signature,
         };
         let bytes = object.encode().unwrap();
         let decoded = SingleChunkObject::decode(&bytes).unwrap();
@@ -84,19 +32,10 @@ fn each_single_frame_envelope_authenticates_its_routing_and_signature() {
         assert_eq!(decoded.prefix(), prefix);
         assert_eq!(decoded.signed_bytes().unwrap(), before_signature);
         assert_eq!(open(path, &aad, decoded.chunk()).unwrap(), plain);
-        assert!(matches!(
-            (&prefix, Object::decode(&plain).unwrap()),
-            (SingleChunkPrefix::StoreLog { .. }, Object::StoreLog(_))
-                | (
-                    SingleChunkPrefix::PostedPositions(_),
-                    Object::PostedPositions(_)
-                )
-                | (SingleChunkPrefix::JoinRequest, Object::JoinRequest(_))
-                | (
-                    SingleChunkPrefix::ClockObservation(_),
-                    Object::ClockObservation(_)
-                )
-        ));
+        assert_eq!(
+            Object::decode(&plain).unwrap(),
+            Object::JoinRequest(test_utils::join_request())
+        );
         test_utils::member()
             .signing
             .verify_object(path, &digest, decoded.signature())
@@ -146,12 +85,12 @@ fn a_chunk_holds_one_bounded_frame() {
             .is_err());
     }
     for length in [crate::FRAME_PREFIX_LEN, MAX_OBJECT] {
-        let mut bytes = SingleChunkPrefix::PostedPositions(KeyId(uuid::Uuid::nil()))
+        let mut bytes = SingleChunkPrefix::JoinRequest
             .encode_chunk(&vec![0; length + SEALED_OBJECT_CHUNK_OVERHEAD])
             .unwrap();
         bytes.extend_from_slice(&[0; 64]);
         assert!(SingleChunkObject::decode(&bytes).is_ok());
-        assert_eq!(bytes.len(), 19 + length + 44 + 64);
+        assert_eq!(bytes.len(), 3 + length + 44 + 64);
         if length == MAX_OBJECT {
             assert_eq!(bytes.len(), MAX_SINGLE_CHUNK_OBJECT);
         }

@@ -35,12 +35,9 @@ impl Dismissal {
     }
 
     /// A dismissal can acknowledge only a value its author had read.
-    pub fn validate_past(&self, header: &crate::write::WriteHeader) -> Result<(), Error> {
+    pub fn validate_past(&self, past: &impl WritePast) -> Result<(), Error> {
         require(
-            header
-                .had_read
-                .causal_past(header.position)
-                .contains(&self.write),
+            past.contains(&self.write),
             "dismissed write",
             Rule::Coverage,
         )

@@ -26,7 +26,7 @@ fn sealed_write_has_its_own_kind_outside_the_plaintext_frames() {
     }
 }
 
-const PATH: &str = "10101010-1010-1010-1010-101010101010/devices/1/3";
+const PATH: &str = "coven/write/10101010-1010-1010-1010-101010101010/1/3";
 
 /// Each part's authorship root under its own audience key.
 fn roots(record: &crate::write::WriteRecord) -> Vec<[u8; 32]> {
@@ -67,7 +67,7 @@ fn object() -> Vec<Vec<u8>> {
     let sealed = key(1)
         .derive()
         .seal_object_chunk(
-            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            "coven/write/10101010-1010-1010-1010-101010101010/1/3",
             &prefix,
             0,
             0,
@@ -85,7 +85,7 @@ fn object() -> Vec<Vec<u8>> {
             let sealed = key(part as u8 + 1)
                 .derive()
                 .seal_object_chunk(
-                    "10101010-1010-1010-1010-101010101010/devices/1/3",
+                    "coven/write/10101010-1010-1010-1010-101010101010/1/3",
                     &prefix,
                     coordinate.section,
                     coordinate.index,
@@ -100,7 +100,7 @@ fn object() -> Vec<Vec<u8>> {
         hash.update(piece);
     }
     let signature = test_utils::member_keys().sign_object(
-        "10101010-1010-1010-1010-101010101010/devices/1/3",
+        "coven/write/10101010-1010-1010-1010-101010101010/1/3",
         &hash.finish(),
     );
     pieces.push(layout.signature(&signature).unwrap().to_vec());
@@ -134,7 +134,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         pieces[1].len()
     );
     let header = key(1).derive().open_object_chunk(
-        "10101010-1010-1010-1010-101010101010/devices/1/3",
+        "coven/write/10101010-1010-1010-1010-101010101010/1/3",
         &pieces[0],
         0,
         0,
@@ -167,7 +167,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
         let (coordinate, sealed) = layout.decode_chunk(piece)?;
         if coordinate.key == key(1).id() {
             let plain = key(1).derive().open_object_chunk(
-                "10101010-1010-1010-1010-101010101010/devices/1/3",
+                "coven/write/10101010-1010-1010-1010-101010101010/1/3",
                 &pieces[0],
                 coordinate.section,
                 coordinate.index,
@@ -216,7 +216,7 @@ fn read(pieces: &[Vec<u8>]) -> Result<(), Box<dyn std::error::Error>> {
     let signature = layout.read_signature(pieces.last().unwrap())?;
     layout.finish(&[])?;
     test_utils::member().signing.verify_object(
-        "10101010-1010-1010-1010-101010101010/devices/1/3",
+        "coven/write/10101010-1010-1010-1010-101010101010/1/3",
         &hash.finish(),
         &signature,
     )?;
@@ -391,7 +391,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let sealed = key(1)
         .derive()
         .seal_object_chunk(
-            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            "coven/write/10101010-1010-1010-1010-101010101010/1/3",
             &prefix,
             0,
             0,
@@ -413,8 +413,10 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     hash.update(&chunk);
     hash.update(&tail);
     let digest = hash.finish();
-    let signature = test_utils::member_keys()
-        .sign_object("10101010-1010-1010-1010-101010101010/devices/1/3", &digest);
+    let signature = test_utils::member_keys().sign_object(
+        "coven/write/10101010-1010-1010-1010-101010101010/1/3",
+        &digest,
+    );
     let signature = layout.signature(&signature).unwrap();
     layout.finish(&[]).unwrap();
     assert_eq!(
@@ -424,7 +426,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     let opened = key(1)
         .derive()
         .open_object_chunk(
-            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            "coven/write/10101010-1010-1010-1010-101010101010/1/3",
             &prefix,
             0,
             0,
@@ -449,7 +451,7 @@ fn migration_object_authenticates_a_header_followed_directly_by_its_signature() 
     test_utils::member()
         .signing
         .verify_object(
-            "10101010-1010-1010-1010-101010101010/devices/1/3",
+            "coven/write/10101010-1010-1010-1010-101010101010/1/3",
             &digest,
             &signature,
         )
@@ -489,7 +491,7 @@ fn stored_length_refuses_invalid_boundaries_and_overflow_without_allocating() {
 #[test]
 fn changing_only_source_evidence_changes_the_authenticated_object() {
     let pieces = object();
-    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let path = "coven/write/10101010-1010-1010-1010-101010101010/1/3";
     let signature = Signature::from_bytes(pieces.last().unwrap().as_slice().try_into().unwrap());
     let mut altered = test_utils::chunked_write();
     // Keep frame lengths and scalar values identical; change only the original setter.

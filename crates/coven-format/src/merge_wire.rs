@@ -103,7 +103,7 @@ pub(crate) fn rules(values: &BTreeSet<Rule>) -> Result<(), Error> {
             Rule::ForeignKey(n) => foreign_key(n)?,
             Rule::Unique(n) => unique_constraint(n)?,
             Rule::Check(n) => crate::error::bound(n.len(), crate::wire::MAX_BYTES, "text")?,
-            Rule::DeletedCircle(entry) => positive(entry.number)?,
+            Rule::DeletedCircle(entry) => positive(entry.0)?,
             Rule::OtherAudience => {}
         }
     }

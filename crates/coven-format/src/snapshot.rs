@@ -1,12 +1,12 @@
-//! Snapshots stream a header, eight ordered sections and an end marker (§15).
+//! Snapshots stream a header, twelve ordered sections and an end marker (§15).
 //! The caller stages records and supplies the applied write metadata to merge.
 
+use crate::admin::SnapshotId;
 use crate::encode_frame_with;
 use crate::error::{require, Error, Rule};
 use crate::loss::{Loss, LossCause, LossIdentity};
 use crate::snapshot_rows::*;
-use crate::store_log::SnapshotId;
-use crate::value::{name, positive, EntryPositions, WritePositions};
+use crate::value::{name, positive, Slot};
 use crate::wire::{decode_frame, Decoder, Encoder, Wire};
 use coven_merge::{RowId, WriteId, WriteOracle};
 
@@ -17,16 +17,15 @@ pub struct SnapshotHeader {
     pub id: SnapshotId,
     /// The app schema version.
     pub schema_version: u32,
-    /// Consumed device writes from the sealed prefix, including recorded lost writes.
-    pub writes: WritePositions,
-    /// Consumed store-log positions from the sealed prefix.
-    pub store_log: EntryPositions,
+    /// Last included slot from the signed sealed prefix.
+    pub covers: u64,
     /// Counts: synced rows, applied writes, columns, merged rows, losses,
-    /// authored changes, creations and write evidence.
+    /// authored changes, creations, write evidence, three original-slot sections
+    /// and per-device last included claims.
     pub counts: [u64; SECTIONS],
 }
 /// The number of record sections (D7).
-pub const SECTIONS: usize = 8;
+pub const SECTIONS: usize = 12;
 impl Wire for [u64; SECTIONS] {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         for n in self {
@@ -45,8 +44,7 @@ impl Wire for [u64; SECTIONS] {
 impl SnapshotHeader {
     pub(crate) fn validate(&self) -> Result<(), Error> {
         positive(self.id.number)?;
-        self.writes.validate()?;
-        self.store_log.validate()
+        Ok(())
     }
 }
 
@@ -69,6 +67,30 @@ pub enum SnapshotRecord {
     Creation(crate::authorship::Creation),
     /// Another member's write header, roots and openings in this audience.
     Evidence(crate::authorship::WriteEvidence),
+    /// Original signed admin slots, including creation; store snapshots only.
+    Admin(crate::floor::OriginalSlot),
+    /// Original signed key-copy slots; store snapshots only.
+    KeyCopy(crate::floor::OriginalSlot),
+    /// Original signed announcement slots; store snapshots only.
+    Announcement(crate::floor::OriginalSlot),
+    /// Last claim included for each known device, including refused claims.
+    Claim(LastClaim),
+}
+
+/// A device's last included claim number; zero means none through coverage.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LastClaim {
+    /// The known device.
+    pub device: coven_foundation::id_source::DeviceId,
+    /// Last included claim across all slot kinds.
+    pub number: u64,
+}
+crate::wire::wire_struct!(LastClaim, device, number);
+
+/// Published-write locations from the snapshot's staged metadata and history.
+pub trait WriteSlots {
+    /// Containing slot, or absence when no authenticated metadata establishes it.
+    fn slot(&self, write: WriteId) -> Option<Slot>;
 }
 impl SnapshotRecord {
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
@@ -82,6 +104,8 @@ impl SnapshotRecord {
             Self::Authored(v) => v.put(out),
             Self::Creation(v) => v.put(out),
             Self::Evidence(v) => v.put(out),
+            Self::Admin(v) | Self::KeyCopy(v) | Self::Announcement(v) => v.put(out),
+            Self::Claim(v) => v.put(out),
         }
     }
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
@@ -94,6 +118,10 @@ impl SnapshotRecord {
             5 => Ok(Self::Authored(Wire::get(input)?)),
             6 => Ok(Self::Creation(Wire::get(input)?)),
             7 => Ok(Self::Evidence(Wire::get(input)?)),
+            8 => Ok(Self::Admin(Wire::get(input)?)),
+            9 => Ok(Self::KeyCopy(Wire::get(input)?)),
+            10 => Ok(Self::Announcement(Wire::get(input)?)),
+            11 => Ok(Self::Claim(Wire::get(input)?)),
             tag => Err(Error::UnknownTag {
                 field: "snapshot section",
                 tag,
@@ -113,6 +141,10 @@ impl SnapshotRecord {
             Self::Authored(v) => v.validate(),
             Self::Creation(v) => v.validate(),
             Self::Evidence(v) => v.validate(),
+            Self::Admin(v) => v.validate_kind(0),
+            Self::KeyCopy(v) => v.validate_kind(2),
+            Self::Announcement(v) => v.validate_kind(3),
+            Self::Claim(_) => Ok(()),
         }
     }
     fn section(&self) -> u8 {
@@ -125,6 +157,10 @@ impl SnapshotRecord {
             Self::Authored(_) => 5,
             Self::Creation(_) => 6,
             Self::Evidence(_) => 7,
+            Self::Admin(_) => 8,
+            Self::KeyCopy(_) => 9,
+            Self::Announcement(_) => 10,
+            Self::Claim(_) => 11,
         }
     }
     fn key(&self) -> RecordKey {
@@ -137,10 +173,11 @@ impl SnapshotRecord {
             Self::Authored(v) => RecordKey::Change(v.id()),
             Self::Creation(v) => RecordKey::Row(v.row.clone()),
             Self::Evidence(v) => RecordKey::Write(v.write),
+            Self::Admin(v) | Self::KeyCopy(v) | Self::Announcement(v) => RecordKey::Slot(v.slot),
+            Self::Claim(v) => RecordKey::Device(v.device),
         }
     }
     fn check_header(&self, h: &SnapshotHeader) -> Result<(), Error> {
-        let covered = |p: WriteId| require(h.writes.covers(p), "snapshot write", Rule::Coverage);
         let audience = |r: &RowId| {
             require(
                 r.audience == h.id.audience,
@@ -150,51 +187,31 @@ impl SnapshotRecord {
         };
         match self {
             Self::Synced(v) => audience(&v.row),
-            Self::Write(v) => {
-                covered(v.id)?;
-                for p in &v.had_read.0 {
-                    covered(*p)?;
-                }
-                Ok(())
-            }
-            Self::Column(_) => Ok(()),
+            Self::Write(v) => require(v.slot.0 <= h.covers, "snapshot write slot", Rule::Coverage),
+            Self::Column(_) | Self::Evidence(_) | Self::Claim(_) => Ok(()),
             Self::Loss(v) => {
                 audience(&v.row)?;
-                require(v.covered(&h.writes), "loss writes", Rule::Coverage)?;
                 if let LossCause::Excluded { version, .. } = v.cause {
                     require(version <= h.schema_version, "loss cause", Rule::Coverage)?;
                 }
                 if let LossCause::Rules(rules) = &v.cause {
                     for rule in rules {
                         if let coven_merge::Rule::DeletedCircle(entry) = rule {
-                            require(h.store_log.covers(*entry), "loss cause", Rule::Coverage)?;
+                            require(entry.0 <= h.covers, "loss cause", Rule::Coverage)?;
                         }
                     }
                 }
                 Ok(())
             }
-            Self::Merge(v) => {
-                audience(v.state.row())?;
-                for p in v.state.generations().values() {
-                    covered(*p)?;
-                }
-                for cell in v.state.cells().values() {
-                    covered(cell.write)?;
-                }
-                Ok(())
-            }
-            Self::Creation(v) => {
-                audience(&v.row)?;
-                covered(v.write)?;
-                covered(v.creator.write)
-            }
-            Self::Evidence(v) => covered(v.write),
+            Self::Merge(v) => audience(v.state.row()),
+            Self::Creation(v) => audience(&v.row),
             Self::Authored(v) => {
                 audience(v.change.row())?;
-                covered(v.header.position)?;
-                for source in v.change.sources() {
-                    covered(source.write)?;
-                }
+                require(
+                    v.header.read_through <= h.covers,
+                    "authored read-through",
+                    Rule::Coverage,
+                )?;
                 match &v.verdict {
                     ChangeVerdict::Excluded(version) => require(
                         *version <= h.schema_version,
@@ -202,18 +219,54 @@ impl SnapshotRecord {
                         Rule::Coverage,
                     ),
                     ChangeVerdict::Ignored(entry) => {
-                        require(h.store_log.covers(*entry), "change verdict", Rule::Coverage)
-                    }
-                    ChangeVerdict::Dependent(sources) => {
-                        for source in sources {
-                            covered(source.write)?;
-                        }
-                        Ok(())
+                        require(entry.0 <= h.covers, "change verdict", Rule::Coverage)
                     }
                     _ => Ok(()),
                 }
             }
+            Self::Admin(v) | Self::KeyCopy(v) | Self::Announcement(v) => require(
+                h.id.audience == coven_merge::Audience::Store && v.slot.0 <= h.covers,
+                "snapshot historical slot",
+                Rule::Coverage,
+            ),
         }
+    }
+
+    /// Check references against authenticated published-write locations. Callers
+    /// populate these from section 1; unknown evidence cannot establish coverage.
+    pub fn validate_coverage(&self, covers: u64, slots: &impl WriteSlots) -> Result<(), Error> {
+        let covered = |write| {
+            slots
+                .slot(write)
+                .is_some_and(|slot| slot.0 > 0 && slot.0 <= covers)
+        };
+        let valid = match self {
+            Self::Synced(_)
+            | Self::Column(_)
+            | Self::Write(_)
+            | Self::Admin(_)
+            | Self::KeyCopy(_)
+            | Self::Announcement(_)
+            | Self::Claim(_) => true,
+            Self::Loss(v) => v.covered(covered),
+            Self::Merge(v) => {
+                v.state.generations().values().all(|write| covered(*write))
+                    && v.state.cells().values().all(|cell| covered(cell.write))
+            }
+            Self::Creation(v) => covered(v.write) && covered(v.creator.write),
+            Self::Evidence(v) => covered(v.write),
+            Self::Authored(v) => {
+                covered(v.header.position)
+                    && v.change.sources().all(|source| covered(source.write))
+                    && match &v.verdict {
+                        ChangeVerdict::Dependent(sources) | ChangeVerdict::Derived(sources) => {
+                            sources.iter().all(|source| covered(source.write))
+                        }
+                        _ => true,
+                    }
+            }
+        };
+        require(valid, "snapshot write coverage", Rule::Coverage)
     }
 }
 
@@ -224,6 +277,8 @@ enum RecordKey {
     Column(SyncedColumn),
     Loss((RowId, u64, LossIdentity, bool, u8, Option<WriteId>)),
     Change(crate::write_sources::ChangeId),
+    Slot(Slot),
+    Device(coven_foundation::id_source::DeviceId),
 }
 struct StreamState {
     header: SnapshotHeader,
@@ -313,7 +368,7 @@ impl SnapshotEncoder {
 /// merge's removal computation checks which removal rules actually hold.
 pub struct SnapshotDecoder(StreamState);
 impl SnapshotDecoder {
-    /// Read the initial header frame using positions from the authenticated sealed prefix.
+    /// Read the initial header frame using coverage from the authenticated sealed prefix.
     pub fn start(
         frame: &[u8],
         prefix: &crate::sealed_snapshot::SnapshotObjectPrefix,
@@ -324,8 +379,7 @@ impl SnapshotDecoder {
             id: Wire::get(&mut input)?,
             schema_version: Wire::get(&mut input)?,
             counts: Wire::get(&mut input)?,
-            writes: prefix.writes.clone(),
-            store_log: prefix.store_log.clone(),
+            covers: prefix.covers,
         };
         require(
             header.id.audience == prefix.audience,
@@ -333,9 +387,10 @@ impl SnapshotDecoder {
             Rule::Audience,
         )?;
         require(
-            prefix
-                .raise
-                .is_none_or(|version| version.get() == header.schema_version),
+            match prefix.purpose {
+                crate::sequence::Purpose::Raise(version) => version == header.schema_version,
+                _ => true,
+            },
             "snapshot raise version",
             Rule::RaiseVersion,
         )?;
@@ -343,7 +398,7 @@ impl SnapshotDecoder {
         header.validate()?;
         Ok(Self(StreamState::new(header)))
     }
-    /// Identity, schema and positions of this snapshot.
+    /// Identity, schema and coverage of this snapshot.
     pub fn header(&self) -> &SnapshotHeader {
         &self.0.header
     }
@@ -352,7 +407,7 @@ impl SnapshotDecoder {
     pub fn frame(
         &mut self,
         bytes: &[u8],
-        oracle: &impl WriteOracle,
+        oracle: &(impl WriteOracle + WriteSlots),
     ) -> Result<Option<SnapshotRecord>, Error> {
         let (kind, mut input) = decode_frame(bytes)?;
         if kind == 7 {
@@ -364,6 +419,7 @@ impl SnapshotDecoder {
         let record = SnapshotRecord::get(&mut input, oracle)?;
         input.finish()?;
         record.validate()?;
+        record.validate_coverage(self.0.header.covers, oracle)?;
         self.0.accept(&record)?;
         Ok(Some(record))
     }

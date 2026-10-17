@@ -66,8 +66,7 @@ impl WriteSources {
 
     /// Source identities must have been read, including implicit own predecessors.
     /// Timestamps and original row/cell evidence are checked by the database.
-    pub fn validate_past(&self, header: &crate::write::WriteHeader) -> Result<(), Error> {
-        let past = header.had_read.causal_past(header.position);
+    pub fn validate_past(&self, past: &impl WritePast) -> Result<(), Error> {
         require(
             self.changes().all(|s| past.contains(&s.write)),
             "source read",

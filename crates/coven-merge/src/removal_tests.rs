@@ -1,6 +1,5 @@
 use crate::ForeignKey;
 use crate::{tests::*, *};
-use coven_foundation::id_source::DeviceId;
 use std::collections::{BTreeMap, BTreeSet};
 
 fn rules(result: &RemovalResult, r: &RowId) -> BTreeSet<Rule> {
@@ -585,20 +584,7 @@ fn deleted_circle_entries_hide_existing_and_arriving_rows_without_deleting_them(
     let states = agree(&writes, &[&[0, 1]]);
     let original = MemoryView::from_states(&states, &History::new(writes).unwrap());
     let mut before = original.clone();
-    for entry in [
-        EntryId {
-            device: DeviceId(2),
-            number: 1,
-        },
-        EntryId {
-            device: DeviceId(2),
-            number: 2,
-        },
-        EntryId {
-            device: DeviceId(3),
-            number: 1,
-        },
-    ] {
+    for entry in [Slot(1), Slot(2), Slot(3)] {
         let mut view = original.clone();
         for facts in view.data.values_mut() {
             if let RemovalRow::Present { deleted_circle, .. } = facts {

@@ -6,7 +6,7 @@ use coven_merge::{Audience, Parent};
 
 fn encoder(count: u64) -> (SnapshotEncoder, SnapshotDecoder) {
     let mut header = test_utils::snapshot_header();
-    header.counts = [0, 0, 0, 0, count, 0, 0, 0];
+    header.counts = [0, 0, 0, 0, count, 0, 0, 0, 0, 0, 0, 0];
     let (encoder, frame) = SnapshotEncoder::start(header.clone()).unwrap();
     (
         encoder,
@@ -23,9 +23,7 @@ fn raw(loss: &Loss) -> Vec<u8> {
 
 #[test]
 fn every_loss_uses_one_section_without_write_headers_or_merge_metadata() {
-    let empty = test_utils::TestOracle {
-        writes: BTreeMap::new(),
-    };
+    let empty = test_utils::oracle();
     let mut losses = test_utils::retained_losses();
     losses.extend([test_utils::concurrent_loss(), test_utils::excluded_loss()]);
     for version in [1, 2] {
@@ -135,7 +133,10 @@ fn invalid_losses_leave_order_and_counts_unchanged() {
     let (mut encoder, mut decoder) = encoder(2);
     for loss in invalid {
         assert!(
-            encoder.record(SnapshotRecord::Loss(loss.clone())).is_err(),
+            SnapshotRecord::Loss(loss.clone())
+                .validate_coverage(9, &test_utils::oracle())
+                .and_then(|_| encoder.record(SnapshotRecord::Loss(loss.clone())))
+                .is_err(),
             "{loss:?}"
         );
         assert!(
@@ -198,7 +199,7 @@ fn circle_losses_keep_every_original_removal_reason() {
     ]);
     let mut header = test_utils::snapshot_header();
     header.id.audience = loss.row.audience.clone();
-    header.counts = [0, 0, 0, 0, 1, 0, 0, 0];
+    header.counts = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(encoder.header())).unwrap();
@@ -226,20 +227,13 @@ fn circle_loss_requires_its_entry_in_snapshot_coverage() {
     loss.cause = LossCause::Rules([Rule::DeletedCircle(entry)].into());
     let mut header = test_utils::snapshot_header();
     header.id.audience = loss.row.audience.clone();
-    header.counts = [0, 0, 0, 0, 1, 0, 0, 0];
+    header.counts = [0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0];
     let (mut encoder, first) = SnapshotEncoder::start(header.clone()).unwrap();
     let mut decoder =
         SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(&header)).unwrap();
     for invalid in [
-        crate::value::EntryId { number: 0, ..entry },
-        crate::value::EntryId {
-            number: entry.number + 1,
-            ..entry
-        },
-        crate::value::EntryId {
-            device: DeviceId(2),
-            ..entry
-        },
+        crate::value::Slot(header.covers + 1),
+        crate::value::Slot(u64::MAX),
     ] {
         let mut refused = loss.clone();
         refused.cause = LossCause::Rules([Rule::DeletedCircle(invalid)].into());
@@ -268,12 +262,10 @@ fn circle_loss_requires_its_entry_in_snapshot_coverage() {
 
 /// A dependent change's loss keeps its write and failed sources in role
 /// order with repeats, even as an empty delete; the sources must name the
-/// same row, be present and be covered by the snapshot's positions.
+/// same row, be present and be covered by the snapshot's covered slot.
 #[test]
 fn dependency_losses_round_trip_with_their_sources() {
-    let empty = test_utils::TestOracle {
-        writes: BTreeMap::new(),
-    };
+    let empty = test_utils::oracle();
     let mut loss = test_utils::excluded_loss();
     let write = test_utils::write().header.position;
     let other = coven_merge::RowId {
@@ -336,9 +328,7 @@ fn dependency_losses_round_trip_with_their_sources() {
 /// snapshot section, frozen with its own write as setter (§8.8, D7).
 #[test]
 fn unauthorized_losses_round_trip_with_their_reason() {
-    let empty = test_utils::TestOracle {
-        writes: BTreeMap::new(),
-    };
+    let empty = test_utils::oracle();
     let mut loss = test_utils::excluded_loss();
     let write = test_utils::write().header.position;
     let (mut encoder, mut decoder) = encoder(2);
