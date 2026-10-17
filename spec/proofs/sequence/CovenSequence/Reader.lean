@@ -404,25 +404,36 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
     apply plain
     intro _ _ _ _ he; rw [hs] at he; cases he
 
-/-- **Every reader with its key reaches the head.** -/
-theorem reaches_head {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) (A : S.Aud) :
-    ∀ (d : Reader S), ReaderOk R st seq A d →
-      ∃ d', ReadSteps R A true st d d' ∧ d'.pos = st.head ∧ ReaderOk R st seq A d' := by
+/-- **A fixed target is reachable.** Later slots do not extend the reload
+work, provided the target includes the selected floor's coverage. -/
+theorem reaches_target {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) (A : S.Aud)
+    (target : Nat) (head : target ≤ st.head) (floor : st.floor.covers A ≤ target) :
+    ∀ (d : Reader S), ReaderOk R st seq A d → d.pos ≤ target →
+      ∃ d', ReadSteps R A true st d d' ∧ d'.pos = target ∧ ReaderOk R st seq A d' := by
   intro d
-  generalize hn : st.head - d.pos = n
+  generalize hn : target - d.pos = n
   induction n using Nat.strongRecOn generalizing d with
   | ind n ih =>
-    intro hd
-    by_cases heq : d.pos = st.head
+    intro hd bound
+    by_cases heq : d.pos = target
     · exact ⟨d, ReadSteps.refl d, heq, hd⟩
-    · have hlt : d.pos < st.head := by have := hd.le_head; omega
+    · have hlt : d.pos < st.head := by omega
       obtain ⟨lo, k, d', hs, hpos⟩ := read_progress R g hd hlt
       have run1 := fetch_run R A true st d lo k
       have hd1 := reads_ok R g hd run1
       have hd' := read_ok R g hd1 hs
       have hpos' : d.pos < d'.pos := by simpa [fetched] using hpos
-      obtain ⟨d'', run, hp, hok⟩ := ih (st.head - d'.pos) (by have := hd'.le_head; omega) d' rfl hd'
+      have bound' : d'.pos ≤ target := by
+        cases hs <;> simp only [fetched_pos] at * <;> omega
+      obtain ⟨d'', run, hp, hok⟩ := ih (target - d'.pos) (by omega) d' rfl hd' bound'
       exact ⟨d'', ReadSteps.trans R run1 (ReadSteps.step hs run), hp, hok⟩
+
+/-- **Every reader with its key reaches the head.** -/
+theorem reaches_head {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) (A : S.Aud) :
+    ∀ (d : Reader S), ReaderOk R st seq A d →
+      ∃ d', ReadSteps R A true st d d' ∧ d'.pos = st.head ∧ ReaderOk R st seq A d' := by
+  intro d hd
+  exact reaches_target R g A st.head (Nat.le_refl _) (g.covers_le A) d hd hd.le_head
 
 /-- **A joiner reaches every device's state.** A joiner of `A` that loads the
 snapshot the floor names for `A` and then follows storage reaches the state of

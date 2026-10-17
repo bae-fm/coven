@@ -348,6 +348,53 @@ has no key for it, the device stops entirely.
 
   Deleting covered slots never changes any device's reachable state.
 
+## Queued writes during reload and raises
+
+[`QueueReload`](sequence/CovenSequence/QueueReload.lean) keeps published rows
+separate from the local queue of full originals. A successful reload installs
+all followed audiences at one target and rebuilds from the queue present at
+installation, including local commits made while loading.
+
+- `queued_originals_preserved`, `write_during_reload`: installation preserves
+  every original field and includes writes committed during loading with their
+  original applied slot. Ineligible originals stay queued for publication.
+- `queued_exactly_once`, `no_queued_duplicate`, `covered_not_reapplied`: each
+  eligible original enters the rebuilding fold once by write number; consumed
+  writes are excluded. `commit_numbered` and `during_numbered` preserve the
+  counter invariant that establishes unique numbers.
+- `install_twice`: repeating installation rebuilds from the published base;
+  it cannot apply the queue over its previous local effects.
+- `reload_sound`, `new_circle_keeps_queue`, `audiences_can_load`: every followed
+  audience supplies its own sound loaded prefix, including newly readable
+  circles; each retains eligible unclaimed originals. `reaches_target` in
+  `Reader` proves loading can stop at a fixed target below the current head.
+- `ordinary_commit_allowed`, `affected_commit_refused`: ordinary reload admits
+  local commits; reset, breaking-raise and newly-readable reloads block writes
+  into the affected audience. `during_preserves_queue` proves admitted commits
+  only extend the queue and preserve the previously visible applied slot.
+
+[`RaiseQueue`](sequence/CovenSequence/RaiseQueue.lean) represents capture,
+confirmation, body upload, preparation announcement and raise activation as
+separate persisted states. Confirmation means the captured writes slot has
+landed under the existing claim protocol; it precedes the raise slot (§17.1).
+
+- `captured_prefix`, `later_writes_do_not_delay`, `confirm_captured`: publication
+  selects the frozen prefix through the marker, regardless of later appends or
+  their eligibility, then removes exactly that prefix from the local queue.
+- `preparation_waits_for_confirmation`, `activation_waits_for_announcement`:
+  preparation upload requires confirmed originals, and activation requires the
+  uploaded body's announcement. `raise_without_waiting` reaches activation
+  with any later queue; `tail_waits` keeps that queue waiting in between.
+- `originals_preserved`, `confirmation_not_repeated`: the combined published
+  and queued originals retain their order and all fields through the protocol,
+  and confirmation cannot publish the prefix twice.
+- `recapture_includes_waiting`: a later breaking migration captures intervening
+  writes and both markers, leaving only writes after its marker waiting.
+- `late_original_converted`, `reload_matches_receiver`, `conversion_agreement`:
+  interpretation uses the original schema and the applied version. Queue
+  replay agrees with the actual next sequence writes slot under the same
+  admission/reset gates; conversion never rewrites the publication queue.
+
 ## Operations
 
 [`Operation`](sequence/CovenSequence/Operation.lean) models one admin operation
@@ -452,15 +499,21 @@ sending it and creates only what it recorded, signed with its id.
   kind and key-copy routing.
 - Unique values and owner rows are per audience; uniqueness across audiences is
   not modelled.
-- A part at a version above its audience's is refused. A device whose app
+- Ordinary receive parts at a version above their audience's are refused.
+  Captured publication and migration effects are separate in `RaiseQueue`;
+  batch decoding into individual original writes is not modelled. A device whose app
   cannot apply a slot stops before it; that stop is not modelled.
-- Circle membership changes are not modelled as a device starting or stopping
-  an audience: a device starts following an audience as a joiner of it.
+- Reload models changed readable audiences and their local write gates.
+  Key delivery, circle invitation and the policy choosing the followed set
+  remain abstract; a newly readable audience must load its own prefix.
 - `Model` takes each slot's claim number as given (`Rules.number`); that a
   device's numbers increase is a hypothesis of `settle_from_floor`, not
   derived from a device's counter.
 - Not modelled:
   - Drive's head file and its compare-and-swap;
-  - unannounced snapshot bodies and orphaned batch objects;
+  - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;
-  - the merge's internals, which the merge package covers.
+  - the merge's internals, source-verdict calculation and converter callbacks,
+    which the merge and queue packages cover. `Inputs` extracts merged
+    uniqueness setters; queue admission and the core batch reset filter are
+    parameters. The local queue makes the authored-read reset gate explicit.
