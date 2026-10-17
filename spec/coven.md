@@ -4208,10 +4208,9 @@ merge later.
 
 ### A.1 Integer primary keys
 
-- Problem: two offline devices can pick the same id for different rows,
-  and coven would treat them as one row.
-- Status: refused; synced tables use UUIDs or keys derived from the
-  content ([§8.5](#85-keys-and-uniqueness)).
+- Problem: SQLite-chosen keys (integer rowid aliases) can collide offline.
+- Status: refused; content-derived integer keys are allowed
+  ([§8.5](#85-keys-and-uniqueness)).
 
 ### A.2 Tables with no primary key
 
