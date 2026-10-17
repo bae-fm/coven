@@ -1,4 +1,4 @@
-//! Cryptographic primitives for native S3 request authentication (§4).
+//! Cryptographic primitives for native S3 request authentication (§20.7).
 //! Request canonicalization belongs to the storage adapter.
 
 use hmac::{Hmac, KeyInit, Mac};

@@ -1,4 +1,4 @@
-//! Where tests live (§20.3): a source's tests live beside it in
+//! Where tests live (Appendix F.5): a source's tests live beside it in
 //! `<name>_tests.rs`, declared from the source as
 //! `#[cfg(test)] #[path = "<name>_tests.rs"] mod tests;`, and a crate's
 //! integration tests in its `tests/` directory.

@@ -53,7 +53,7 @@ impl S3Storage {
     /// itself: its destination and bytes. Every attempt of one create, a
     /// retry after a crash or a failed deletion included, stages and deletes
     /// this same name, so the caller's record of the create, which it keeps
-    /// until the create settles, records the temporary too (§4).
+    /// until the create settles, records the temporary too (Appendix E.10).
     pub(super) fn create_temporary_key<'a>(
         &self,
         path: impl Into<Destination<'a>>,
@@ -100,7 +100,7 @@ impl S3Storage {
 
     /// Abort every native upload at a planned session's name: one its
     /// initiation started before the reply was lost. Only a private staging
-    /// name proves ownership; a shared destination does not (§4).
+    /// name proves ownership; a shared destination does not (Appendix E.10).
     pub(super) async fn abort_initiated(
         &self,
         publication: &PublicationRequest,
@@ -271,7 +271,7 @@ impl S3Storage {
             )
             .await;
         let result = match result.map_err(s3_error) {
-            // A concurrent mutation, under any service's code (§4).
+            // A concurrent mutation, under any service's code (Appendix E.10).
             Err(error) if error.failure() == StorageFailure::Conflict => {
                 return self
                     .require_restart(
@@ -337,7 +337,7 @@ impl S3Storage {
     }
 
     /// A single-request create on a profile publishing every object by copy
-    /// (§4): stage the bytes at the create's temporary carrying this
+    /// (Appendix E.10): stage the bytes at the create's temporary carrying this
     /// attempt's fresh marker, then copy it with the destination condition.
     /// A refused copy, or one whose reply was lost, settles as stored when
     /// the destination carries its marker (this attempt's staged bytes, which

@@ -237,7 +237,7 @@ pub(super) fn check_prefix(prefix: &ObjectPrefix, path: &str) -> Result<(), Stor
     }
     Ok(())
 }
-/// CloudKit dates count whole milliseconds (§4), but `NSDate` reports them
+/// CloudKit dates count whole milliseconds (Appendix E.11), but `NSDate` reports them
 /// as floating-point seconds, which rarely land exactly on a millisecond.
 /// Round to the nearest one so the time sits on the provider's tick. A
 /// non-finite date or one before the epoch is a protocol error.
@@ -456,7 +456,7 @@ fn answered(error: &NSError) -> bool {
 }
 
 /// `CKErrorRetryAfterKey`'s seconds on the error or any partial-failure item;
-/// the longest governs, since every item's wait must pass (SP waiting).
+/// the longest governs, since every item's wait must pass (§6.7).
 fn retry_after(error: &NSError) -> Option<Duration> {
     let own = unsafe { error.userInfo().objectForKey(CKErrorRetryAfterKey) }
         .and_then(|value| value.downcast::<NSNumber>().ok())

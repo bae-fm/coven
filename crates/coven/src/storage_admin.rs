@@ -1,10 +1,10 @@
-//! Admin access and guided console steps for S3 member keys (§4).
+//! Admin access and guided console steps for S3 member keys (§20.10).
 
 use super::StorageConnections;
 use crate::*;
 use std::sync::Arc;
 
-/// What guided console steps need to make a member key by hand (§4).
+/// What guided console steps need to make a member key by hand (§20.10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GuidedAccessKey {
     /// The bucket the key must reach.
@@ -17,7 +17,7 @@ pub struct GuidedAccessKey {
 
 impl StorageConnections {
     /// Obtain the storage account's admin access from the source the person
-    /// chose, for one operation (§4). Only S3 locations have member keys.
+    /// chose, for one operation (§20.10). Only S3 locations have member keys.
     pub(crate) async fn admin_access(
         &self,
         source: coven_storage::providers::AdminAccessSource,

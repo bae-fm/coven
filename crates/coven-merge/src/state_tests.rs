@@ -83,7 +83,7 @@ fn grocery_titles_and_a_lost_value_that_stops_being_lost() {
         column: "0".into(),
         write: id(4)
     }));
-    // §8.7: this winning title is the change a local title-index trigger sees.
+    // §9.4: this winning title is the change a local title-index trigger sees.
     assert_eq!(states[&row(42)].cells()["0"].write, id(2));
 }
 

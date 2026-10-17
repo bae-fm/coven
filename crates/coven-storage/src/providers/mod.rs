@@ -19,7 +19,7 @@ mod desktop_oauth;
 pub use desktop_oauth::DesktopOAuthPresenter;
 mod s3;
 pub(crate) mod s3_admin_query;
-/// The prefix policy a member key needs, as guided console steps show it (§4).
+/// The prefix policy a member key needs, as guided console steps show it (§20.10).
 pub fn s3_member_policy(
     config: &crate::StorageConfig,
     store: coven_foundation::id_source::StoreId,
@@ -39,7 +39,7 @@ pub(crate) fn response_arrived(source: &(dyn std::error::Error + 'static)) -> bo
 }
 /// The wait a provider failure's native response asked every consumer to
 /// observe: HTTP `Retry-After`, Dropbox's `retry_after`, or CloudKit's
-/// `CKErrorRetryAfterKey` (SP waiting).
+/// `CKErrorRetryAfterKey` (§6.7).
 pub(crate) fn retry_after(
     provider: crate::CloudProvider,
     source: &(dyn std::error::Error + 'static),

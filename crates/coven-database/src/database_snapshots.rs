@@ -135,7 +135,7 @@ impl Database {
     }
 
     /// The raise snapshots a breaking migration captured through its marker,
-    /// one per audience this device read then (§17.1, §18.1).
+    /// one per audience this device read then (§18.3, §11.5).
     pub async fn raise_captures(&self) -> Result<Vec<crate::RaiseCapture>, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
@@ -147,7 +147,7 @@ impl Database {
     /// The capture to seal for an audience's raise, right after a completed
     /// catch-up: kept if that catch-up applied nothing past it, otherwise
     /// captured again from the current state through this device's newest
-    /// write, which then joins the prefix to confirm (§15, §17.1). None when
+    /// write, which then joins the prefix to confirm (§16.3, §18.5). None when
     /// a later migration replaced the capture.
     pub async fn prepare_raise_capture(
         &self,
@@ -173,7 +173,7 @@ impl Database {
 
     /// The first own write of a snapshot's captured prefix, through its
     /// own position, not yet confirmed stored. Any snapshot, ordinary, raise
-    /// or reset, is sent only once this is `None` (§15).
+    /// or reset, is sent only once this is `None` (§16.1).
     #[cfg(test)]
     pub async fn unconfirmed_own_prefix(
         &self,

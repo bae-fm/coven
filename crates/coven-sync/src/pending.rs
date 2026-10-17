@@ -214,7 +214,7 @@ pub enum PendingReason {
         /// The retained grants.
         shares: Vec<RetainedAccess>,
     },
-    /// This S3 key awaits deletion with admin access or explicit confirmation (§13).
+    /// This S3 key awaits deletion with admin access or explicit confirmation (§14.3).
     DeleteAccessKey(#[serde(with = "encoding::AccessKey")] crate::AccessKeyToDelete),
     /// The uploading device cannot supply this file.
     FileUnavailable(FileMissingReason),
@@ -223,12 +223,12 @@ pub enum PendingReason {
     /// Work awaits the app’s next action, such as approval or resuming a transfer.
     Paused,
     /// Provider work needs the storage account's admin access again, which
-    /// coven never keeps beyond one operation (§4).
+    /// coven never keeps beyond one operation (§20.10).
     AdminAccessRequired,
     /// This installation was removed.
     Removed,
     /// Sending needs this stable member's current credentials, which this
-    /// installation does not hold (§10).
+    /// installation does not hold (§14.1).
     MemberKeysReplaced {
         /// The member whose held keys were replaced.
         member: MemberId,

@@ -18,7 +18,7 @@ pub(crate) fn children(
 }
 
 /// The registered row of a synced table's foreign key. Preparing the schema
-/// registers every one, so a reference can only name a registered key (§8).
+/// registers every one, so a reference can only name a registered key (Appendix B.1).
 pub(crate) fn foreign_key(
     database: &DatabaseConnection,
     table: &str,
@@ -33,7 +33,7 @@ pub(crate) fn foreign_key(
 }
 
 /// Register one `_coven_columns` row per column and one `_coven_foreign_keys`
-/// row per foreign key of each synced table (§8). Runs after a migration has
+/// row per foreign key of each synced table (Appendix B.1). Runs after a migration has
 /// carried renamed identities over and removed vanished ones, and on every
 /// writable open.
 pub(crate) fn register_schema(
@@ -41,7 +41,7 @@ pub(crate) fn register_schema(
     schema: &crate::schema::Schema,
     tables: &[crate::SyncedTable],
 ) -> Result<(), DbError> {
-    // The declarations a later open or migration compares against (§17.1).
+    // The declarations a later open or migration compares against (§18.3).
     database.internal_execute("DELETE FROM _coven_owner_tables", [])?;
     for declaration in tables.iter().filter(|d| d.owner_only) {
         let table = &schema.tables[&declaration.name.to_ascii_lowercase()];

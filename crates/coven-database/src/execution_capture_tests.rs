@@ -45,7 +45,7 @@ fn row(table: &str, key: &str) -> RowId {
 
 /// A queued write's steps by row, and the cause its judgement found for each
 /// foreign-key action, by the action's row and sequence. Every other step is
-/// direct (§8.8).
+/// direct (§9.6).
 pub(crate) struct Classified {
     pub(crate) steps: BTreeMap<RowId, Vec<Step>>,
     pub(crate) causes: BTreeMap<(RowId, u32), (RowId, u32)>,
@@ -89,7 +89,7 @@ fn cause(table: &str, key: &str, sequence: u32) -> Option<(RowId, u32)> {
 
 /// Deleting a track cascades to its review and sets its note's reference
 /// to NULL; a trigger's own deletes and updates stay direct, even one fired
-/// by the cascade (§8.8).
+/// by the cascade (§9.6).
 #[tokio::test]
 async fn foreign_key_actions_name_their_cause_and_trigger_writes_stay_direct() {
     let store = TestStore::new();
@@ -160,7 +160,7 @@ async fn a_key_update_is_two_halves_at_one_position() {
 }
 
 /// Statements that revisit a row keep every step; a row inserted and
-/// deleted again in one write has steps and no net change (§8.8, D5).
+/// deleted again in one write has steps and no net change (§9.6, D5).
 #[tokio::test]
 async fn revisited_and_cancelled_rows_keep_each_operation() {
     let store = TestStore::new();

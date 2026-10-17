@@ -1,4 +1,4 @@
-//! When queued uploads retry (§16.5, E7): each failure is the file's pending
+//! When queued uploads retry (§17.7, E7): each failure is the file's pending
 //! record. Recoverable source, disk and provider failures wait their persisted
 //! delay; sign-in and access failures wait for a new connection. A catch-up
 //! wait is woken by the sync state; a provider cooldown holds the whole queue.

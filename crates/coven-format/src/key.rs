@@ -7,7 +7,7 @@ use crate::wire::{Decoder, Encoder, Wire, MAX_BYTES, MAX_ITEMS};
 /// Encode a nonempty list of non-null key components in SQLite value order.
 /// Integers and reals share numeric order and equal numbers share bytes. Decoding
 /// chooses an integer whenever the number fits exactly in i64. Text uses BINARY
-/// collation, the only one synced key columns may declare (§8.5).
+/// collation, the only one synced key columns may declare (§9.2).
 /// Composite keys sort lexicographically, with a shorter prefix first.
 pub fn encode_key(values: &[Value]) -> Result<Vec<u8>, Error> {
     require(!values.is_empty(), "row key", Rule::Required)?;

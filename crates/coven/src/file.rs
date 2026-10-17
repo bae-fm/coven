@@ -3,7 +3,7 @@ use crate::*;
 
 impl CovenHandle {
     /// Calls single-object status, then checks the uploader's current state
-    /// and any source failure observed by this installation (§16.1). Checks the reference
+    /// and any source failure observed by this installation (§17.4). Checks the reference
     /// against its row. Network failures and denied access are errors, not Missing.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.files.file_status(file).await
@@ -20,7 +20,7 @@ impl CovenHandle {
             .process(UploadQueue::from_state)
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
-    /// hold them and individual failures stay in pending() (§16.5).
+    /// hold them and individual failures stay in pending() (§17.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }

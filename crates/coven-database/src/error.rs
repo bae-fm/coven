@@ -5,14 +5,14 @@ use coven_foundation::files::{SettingsError, StoreLockError};
 /// The result of opening or using this database.
 pub type CovenResult<T> = Result<T, CovenError>;
 
-/// Failures of opening, reading and writing a store (§5, E1, E3).
+/// Failures of opening, reading and writing a store (§4, E1, E3).
 #[derive(Debug, thiserror::Error)]
 pub enum CovenError {
     /// Reading device identity or an app callback's custody operation failed.
     #[error(transparent)]
     Key(#[from] coven_crypto::custody::KeyError),
     /// An app callback failed and SQLite also failed to roll it back. Later
-    /// calls fail with `DbError::RollbackFailed` until the store is reopened (§5).
+    /// calls fail with `DbError::RollbackFailed` until the store is reopened (§4).
     #[error("{operation}; rollback failed: {rollback}")]
     Rollback {
         /// The callback or database failure.
@@ -51,7 +51,7 @@ pub enum CovenError {
         field: &'static str,
     },
     /// The keychain holds no entry naming this directory's device; opening
-    /// changed nothing (§10).
+    /// changed nothing (§19.3).
     #[error("store {store}: this device's keychain entry is missing")]
     DeviceKeyMissing {
         /// The store whose device entry is missing.
@@ -59,7 +59,7 @@ pub enum CovenError {
     },
     /// A connected store's identity custody holds no member keys either,
     /// beside the missing device entry; only restoring with the restore code
-    /// continues. Opening changed nothing (§10, §12).
+    /// continues. Opening changed nothing (§19.3, §13).
     #[error("store {store}: this device's entry and member keys are missing")]
     MemberKeysMissing {
         /// The store whose member keys are missing.
@@ -73,7 +73,7 @@ impl From<rusqlite::Error> for CovenError {
     }
 }
 
-/// A failed database call or a write the database refuses (§5, §8, §14, §16).
+/// A failed database call or a write the database refuses (§4, §9, §15, §17).
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
     /// Another claim must settle before this device reserves a new number.
@@ -116,13 +116,13 @@ pub enum DbError {
     PendingPersistence(#[source] std::sync::Arc<DbError>),
     /// An earlier call's rollback failed, so a connection may still be inside
     /// that transaction, holding its uncommitted changes or its old snapshot;
-    /// this handle, read-only or not, refuses calls until reopened (§5).
+    /// this handle, read-only or not, refuses calls until reopened (§4).
     #[error("an earlier rollback failed; reopen the store")]
     RollbackFailed,
     /// Sync's part of a database transaction failed, keeping sync's own typed
     /// cause, and the transaction did not commit: a streamed transfer's
     /// producer or final authentication check, or the schema publication
-    /// operation a migration commits with (§17.1, E13).
+    /// operation a migration commits with (§18.3, E13).
     #[error("sync stream failed: {0}")]
     SyncStream(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// This handle or a clone has closed the store (E1).
@@ -142,7 +142,7 @@ pub enum DbError {
         /// The broken rule.
         what: &'static str,
     },
-    /// Directory settings disagree with a store's creation entry (§9).
+    /// Directory settings disagree with a store's creation entry (§10).
     #[error("store settings disagree with creation of {store} named {name:?}")]
     StoreSettingsMismatch {
         /// The id in the creation entry.
@@ -153,13 +153,13 @@ pub enum DbError {
     /// A synced table declaration or schema is invalid.
     #[error(transparent)]
     Schema(#[from] SchemaError),
-    /// App SQL read, changed or defined one of coven's internal objects (§5).
+    /// App SQL read, changed or defined one of coven's internal objects (§4).
     #[error("app SQL cannot access internal object {table}")]
     InternalTable {
         /// The reserved object.
         table: String,
     },
-    /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
+    /// A local trigger wrote a synced table or a shared trigger a local one (§9.4).
     #[error("trigger {trigger} cannot write table {table}")]
     TriggerTarget {
         /// The trigger doing the write.
@@ -172,13 +172,13 @@ pub enum DbError {
     TransactionEnded,
     /// App SQL tried transaction control, a PRAGMA, ATTACH, loading an
     /// extension, changing a hidden rowid, or changing the schema outside a
-    /// migration (§5, E13).
+    /// migration (§4, E13).
     #[error("app SQL cannot perform {operation}")]
     StatementForbidden {
         /// The refused operation.
         operation: &'static str,
     },
-    /// SQLite kept another journal mode instead of WAL (§5).
+    /// SQLite kept another journal mode instead of WAL (§4).
     #[error("SQLite kept journal mode {mode} instead of WAL")]
     WalUnavailable {
         /// The journal mode SQLite selected.
@@ -196,8 +196,8 @@ pub enum DbError {
         /// Configured encrypted-input limit.
         maximum: u64,
     },
-    /// A value or row exceeds the format (§5), or a write's plaintext and sealing
-    /// key ids cannot fit in its SQLite queue row (§6).
+    /// A value or row exceeds the format (§4), or a write's plaintext and sealing
+    /// key ids cannot fit in its SQLite queue row (§6.3).
     #[error("{field} length {actual} exceeds {maximum}")]
     TooLarge {
         /// The bounded field or collection.
@@ -207,19 +207,19 @@ pub enum DbError {
         /// Its maximum length.
         maximum: u64,
     },
-    /// Upload attempts must follow this device's queue order (§6).
+    /// Upload attempts must follow this device's queue order (§6.3).
     #[error("write {write:?} is not the oldest waiting upload")]
     UploadNotOldest {
         /// The write whose upload was requested.
         write: coven_merge::WriteId,
     },
-    /// An upload cannot succeed before its sealing keys have been fixed (§6).
+    /// An upload cannot succeed before its sealing keys have been fixed (§6.3).
     #[error("write {write:?} has no recorded upload attempt")]
     UploadNotAttempted {
         /// The write whose success was reported.
         write: coven_merge::WriteId,
     },
-    /// A reference reaches an audience the source row's readers cannot read (§14.5).
+    /// A reference reaches an audience the source row's readers cannot read (§15.3).
     #[error("reference {table}.{column} at {key:?} reaches another audience")]
     ReferenceAudience {
         /// The referencing table.
@@ -229,18 +229,18 @@ pub enum DbError {
         /// The referencing column.
         column: String,
     },
-    /// A write targets a circle whose deletion has been applied (§14.7).
+    /// A write targets a circle whose deletion has been applied (§15.9).
     #[error("circle {0} has been deleted")]
     DeletedCircle(coven_foundation::id_source::CircleId),
-    /// A local write targets a circle this member is not in or the store does not have (§14).
+    /// A local write targets a circle this member is not in or the store does not have (§15).
     #[error("not a member of circle {0}")]
     NotInCircle(coven_foundation::id_source::CircleId),
-    /// This audience still exposes its previous data while its selected boundary reloads (§15).
+    /// This audience still exposes its previous data while its selected boundary reloads (§16.5).
     #[error("audience {0:?} is reloading")]
     AudienceReloading(coven_merge::Audience),
     /// The write directly changed another member's row of an `owner_only()`
     /// table: a statement, a shared trigger, or coven copying or dismissing
-    /// it for the app (§8.8). The transaction, including its upload record,
+    /// it for the app (§9.6). The transaction, including its upload record,
     /// did not commit.
     #[error("{table} row {key:?} belongs to member {owner:?}")]
     NotOwner {
@@ -253,7 +253,7 @@ pub enum DbError {
     },
     /// The write's foreign-key actions on this row are not the schema's exact
     /// consequence of its direct changes, so every receiver would refuse
-    /// them (§8.8). The transaction, including its upload record, did not
+    /// them (§9.6). The transaction, including its upload record, did not
     /// commit.
     #[error("{table} row {key:?} is not an exact foreign-key effect")]
     InvalidForeignKeyEffect {
@@ -262,7 +262,7 @@ pub enum DbError {
         /// Its primary key, in declared key order.
         key: crate::RowKey,
     },
-    /// An inserted row's independent key holds no UUID (§8.5).
+    /// An inserted row's independent key holds no UUID (§9.2).
     #[error("independent key {key:?} of {table} does not contain a canonical lowercase UUIDv4 or UUIDv7")]
     KeyNotUuid {
         /// The inserted row's table.
@@ -271,7 +271,7 @@ pub enum DbError {
         key: crate::RowKey,
     },
     /// A root row's audience cell is neither `store` nor a circle id in
-    /// canonical lowercase form (§14).
+    /// canonical lowercase form (§15).
     #[error("audience cell of {table} at {key:?} is neither `store` nor a canonical lowercase circle id")]
     InvalidAudience {
         /// The written row's table.
@@ -369,7 +369,7 @@ pub enum DbError {
         /// The repeated converted reference.
         reference: coven_merge::ForeignKey,
     },
-    /// A write tried to replace a file declared write-once (§16).
+    /// A write tried to replace a file declared write-once (§17).
     #[error("file on {table} at {key:?} cannot be replaced")]
     FileWriteOnce {
         /// The declared table.
@@ -377,7 +377,7 @@ pub enum DbError {
         /// The row's key.
         key: crate::RowKey,
     },
-    /// A reference no longer names the row's current file (§16.3).
+    /// A reference no longer names the row's current file (§17.5).
     #[error("file reference changed for {table} at {key:?}")]
     FileRefChanged {
         /// The referenced table.
@@ -385,7 +385,7 @@ pub enum DbError {
         /// The referenced primary key.
         key: crate::RowKey,
     },
-    /// The supplied bytes disagree with the row's size (§16).
+    /// The supplied bytes disagree with the row's size (§17).
     #[error("file size is {actual}, expected {expected}")]
     FileSizeMismatch {
         /// The row's declared size.
@@ -540,14 +540,14 @@ pub enum DbError {
     /// Reading or keeping file bytes failed.
     #[error(transparent)]
     Disk(#[from] coven_foundation::files::FileError),
-    /// The attaching write could not create its file's random key (§16.1).
+    /// The attaching write could not create its file's random key (§17.2).
     #[error("creating a file key failed: {0}")]
     FileKey(#[source] coven_crypto::CryptoError),
     /// Retaining the store while staging file bytes failed.
     #[error(transparent)]
     Lock(#[from] StoreLockError),
     /// File cleanup failed, retaining every failure: on opening (`Ok`), or
-    /// after a failed write, whose error it keeps (§16.6).
+    /// after a failed write, whose error it keeps (Appendix C.3).
     #[error("file cleanup failed: {failures:?}; write outcome: {write:?}")]
     FileCleanup {
         /// `Ok` on opening; otherwise the failed write's error.
@@ -559,7 +559,7 @@ pub enum DbError {
     #[error("operation {0:?} changed or is absent")]
     OperationChanged(crate::OperationId),
     /// Self-replacement has paused app writes while queued objects settle
-    /// and the new binding and custody are installed (§10, E9).
+    /// and the new binding and custody are installed (§12.3, E9).
     #[error("member keys are changing; app writes are paused")]
     MemberKeysChanging,
     /// The prepared raise no longer names the current counted prefix.
@@ -575,7 +575,7 @@ pub enum DbError {
         failures: Vec<DbError>,
     },
     /// A transaction failed and rolling it back failed too. Later calls fail
-    /// with `RollbackFailed` until the store is reopened (§5).
+    /// with `RollbackFailed` until the store is reopened (§4).
     #[error("{operation}; rollback failed: {rollback}")]
     Rollback {
         /// The operation that required rollback.
@@ -615,7 +615,7 @@ impl From<rusqlite::Error> for DbError {
     }
 }
 
-/// A schema rule checked on open and after migrating (§8, §14.1).
+/// A schema rule checked on open and after migrating (§9, §15.1).
 #[derive(Clone, Debug, Eq, PartialEq, thiserror::Error)]
 pub enum SchemaError {
     /// Tables sharing a file namespace declare different cache budgets (E8).
@@ -624,7 +624,7 @@ pub enum SchemaError {
         /// The namespace.
         namespace: String,
     },
-    /// A synced foreign key does not reference the complete parent primary key (§8.4).
+    /// A synced foreign key does not reference the complete parent primary key (§9.1).
     #[error("foreign key {table}: {key} must reference the parent's primary key")]
     ForeignKeyNotPrimaryKey {
         /// The referencing synced table.
@@ -632,7 +632,7 @@ pub enum SchemaError {
         /// The foreign key's columns and referenced table and columns, as SQL.
         key: String,
     },
-    /// A synced foreign key is a single generated column (§8.4).
+    /// A synced foreign key is a single generated column (§9.1).
     #[error("foreign key {table}: {key} cannot be a single generated column")]
     GeneratedForeignKey {
         /// The referencing synced table.
@@ -640,7 +640,7 @@ pub enum SchemaError {
         /// The foreign key's columns and referenced table and columns, as SQL.
         key: String,
     },
-    /// SET DEFAULT is on a synced table or references one (§8.4).
+    /// SET DEFAULT is on a synced table or references one (§9.1).
     #[error("foreign key {table}: {key} cannot use SET DEFAULT")]
     SetDefault {
         /// The referencing table.
@@ -648,7 +648,7 @@ pub enum SchemaError {
         /// The foreign key's columns and referenced table and columns, as SQL.
         key: String,
     },
-    /// A local foreign key could prevent deletion of a synced row (§8.4).
+    /// A local foreign key could prevent deletion of a synced row (§9.1).
     #[error("local reference {table}.{column} must use CASCADE or nullable SET NULL")]
     LocalChildAction {
         /// The local child table.
@@ -656,7 +656,7 @@ pub enum SchemaError {
         /// The referencing column.
         column: String,
     },
-    /// A local foreign key could stop coven updating a synced value in place (§8.4).
+    /// A local foreign key could stop coven updating a synced value in place (§9.1).
     #[error("local reference {table}.{column} must use ON UPDATE CASCADE or SET NULL")]
     LocalChildUpdate {
         /// The local child table.
@@ -677,7 +677,7 @@ pub enum SchemaError {
         table: String,
     },
     /// A synced table's `owner_only` declaration changed without a breaking
-    /// migration to raise the schema (§17.1).
+    /// migration to raise the schema (§18.3).
     #[error("synced table {table} changed its owner_only declaration without a migration")]
     OwnerOnlyChanged {
         /// The table whose declaration changed.
@@ -689,7 +689,7 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
-    /// Hash and location must represent a row without a file (§16.1).
+    /// Hash and location must represent a row without a file (§17.2).
     #[error("file column {table}.{column} must allow NULL")]
     FileColumnNotNullable {
         /// The declared table.
@@ -697,7 +697,7 @@ pub enum SchemaError {
         /// The non-null managed column.
         column: String,
     },
-    /// SET NULL would change one file column alone (§16.1).
+    /// SET NULL would change one file column alone (§17.2).
     #[error("file column {table}.{column} cannot use SET NULL")]
     FileForeignKeyAction {
         /// The declared table.
@@ -713,7 +713,7 @@ pub enum SchemaError {
         /// The missing column.
         column: String,
     },
-    /// A trigger declared shared isn't on the table (§8.7).
+    /// A trigger declared shared isn't on the table (§9.4).
     #[error("shared trigger {trigger} is missing from {table}")]
     MissingTrigger {
         /// The declared table.
@@ -721,13 +721,13 @@ pub enum SchemaError {
         /// The missing trigger.
         trigger: String,
     },
-    /// A synced table has no primary key (§8.5).
+    /// A synced table has no primary key (§9.2).
     #[error("synced table {table} has no primary key")]
     NoPrimaryKey {
         /// The declared table.
         table: String,
     },
-    /// A primary-key column permits NULL (§8.5).
+    /// A primary-key column permits NULL (§9.2).
     #[error("primary-key column {table}.{column} allows NULL")]
     NullableKey {
         /// The synced table.
@@ -735,7 +735,7 @@ pub enum SchemaError {
         /// The nullable key column.
         column: String,
     },
-    /// A synced key column compares text by a collation other than BINARY (§8.5, D3).
+    /// A synced key column compares text by a collation other than BINARY (§9.2, D3).
     #[error(
         "key column {table}.{column} uses collation {collation}; synced keys compare text by bytes"
     )]
@@ -747,13 +747,13 @@ pub enum SchemaError {
         /// The column's or index term's collation.
         collation: String,
     },
-    /// SQLite chooses the primary key itself (§8.5).
+    /// SQLite chooses the primary key itself (§9.2).
     #[error("SQLite generates the primary key of {table}")]
     GeneratedPrimaryKey {
         /// The declared table.
         table: String,
     },
-    /// An independent key has no text-affinity column to hold its UUID (§8.5).
+    /// An independent key has no text-affinity column to hold its UUID (§9.2).
     #[error("independent key of {table} has no text-affinity column to hold its UUID")]
     IndependentKeyNotUuid {
         /// The declared table.
@@ -765,7 +765,7 @@ pub enum SchemaError {
         /// The declared table.
         table: String,
     },
-    /// SET NULL would put NULL in a NOT NULL column (§8.4).
+    /// SET NULL would put NULL in a NOT NULL column (§9.1).
     #[error("foreign key action would put NULL in non-null column {table}.{column}")]
     ImpossibleAction {
         /// The synced or local table.
@@ -773,7 +773,7 @@ pub enum SchemaError {
         /// The non-null referencing column.
         column: String,
     },
-    /// SET NULL acts on a primary-key column (§8.4).
+    /// SET NULL acts on a primary-key column (§9.1).
     #[error("foreign key action changes key column {table}.{column}")]
     PrimaryKeyAction {
         /// The declared table.
@@ -781,7 +781,7 @@ pub enum SchemaError {
         /// The primary-key column.
         column: String,
     },
-    /// The audience root column is nullable or is not text (§14, E2).
+    /// The audience root column is nullable or is not text (§15, E2).
     #[error("audience column {table}.{column} must be non-null text")]
     AudienceColumn {
         /// The declared table.
@@ -789,13 +789,13 @@ pub enum SchemaError {
         /// The audience column.
         column: String,
     },
-    /// The audience foreign key spans more than one column (§14.1).
+    /// The audience foreign key spans more than one column (§15.1).
     #[error("audience foreign key of {table} must have one column")]
     AudienceForeignKeyColumns {
         /// The declared table.
         table: String,
     },
-    /// The audience foreign key does not point into a synced table (§14.1).
+    /// The audience foreign key does not point into a synced table (§15.1).
     #[error("audience foreign key {table}.{column} must point into a synced table")]
     AudienceForeignKeyTarget {
         /// The declared table.
@@ -803,7 +803,7 @@ pub enum SchemaError {
         /// The audience foreign-key column.
         column: String,
     },
-    /// The audience foreign key uses SET NULL (§14.1).
+    /// The audience foreign key uses SET NULL (§15.1).
     #[error("audience foreign key {table}.{column} cannot use SET NULL")]
     AudienceForeignKeyAction {
         /// The declared table.
@@ -811,13 +811,13 @@ pub enum SchemaError {
         /// The audience foreign-key column.
         column: String,
     },
-    /// Following audience foreign keys forms a loop (§14.1).
+    /// Following audience foreign keys forms a loop (§15.1).
     #[error("audience inheritance from {table} forms a cycle")]
     AudienceCycle {
         /// The table from which the cycle was reached.
         table: String,
     },
-    /// A unique constraint or shared key spans audiences (§14.1).
+    /// A unique constraint or shared key spans audiences (§15.2).
     #[error("constraint {constraint} of {table} spans audiences")]
     AudienceConstraint {
         /// The declared table.
@@ -825,7 +825,7 @@ pub enum SchemaError {
         /// The primary key or unique index.
         constraint: String,
     },
-    /// A shared trigger lacks WHEN NOT coven_applying() (§8.7).
+    /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     #[error("shared trigger {trigger} on {table} requires WHEN NOT coven_applying()")]
     SharedTriggerGuard {
         /// The declared table.
@@ -835,7 +835,7 @@ pub enum SchemaError {
     },
 }
 
-/// Coven's local tables cannot be used at this version (§17.2, E1).
+/// Coven's local tables cannot be used at this version (Appendix C.1, E1).
 #[derive(Debug, thiserror::Error)]
 pub enum CovenMigrationError {
     /// The read-only connection cannot migrate coven's tables.

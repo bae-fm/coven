@@ -1,7 +1,7 @@
-//! Member keys on Cloudflare R2 (§4): an account API token limited to the
+//! Member keys on Cloudflare R2 (Appendix E.12): an account API token limited to the
 //! store's own bucket with Object Read & Write. Its S3 key id is the token id
 //! and its secret the SHA-256 of the token value. A token reaches its whole
-//! bucket, so every store has a bucket of its own (§4). Revocation deletes the
+//! bucket, so every store has a bucket of its own (§20.7). Revocation deletes the
 //! token; absence is read from the token itself.
 use super::minting::{AdminRequest, KeyMinter, Pending};
 use super::*;
@@ -215,7 +215,7 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
             Method::POST,
             cloudflare.url("tokens"),
             Some(json!({
-                // Carries the store and the minting device for a store's listing (§13).
+                // Carries the store and the minting device for a store's listing (§14.3).
                 "name": scope.label(),
                 "policies": [{
                     "effect": "allow",
@@ -294,7 +294,7 @@ async fn key_exists(
 }
 
 /// Every account token whose name coven made for this store, with the minting
-/// device it names (§13). The token id is the S3 key id.
+/// device it names (§14.3). The token id is the S3 key id.
 async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
     let (account, _) = account(&context.config)?;
     let cloudflare = Cloudflare { context, account };

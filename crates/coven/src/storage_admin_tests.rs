@@ -1,5 +1,5 @@
 //! Admin access from the facade: obtaining it, minting an invite's key with
-//! it, deleting that key on evidence, and guided console steps (§4, §13).
+//! it, deleting that key on evidence, and guided console steps (§20.10, §14.3).
 use crate::tests::Network;
 use crate::*;
 use coven_storage::Storage;
@@ -181,7 +181,7 @@ async fn invited_with_made_key() -> (Network, coven_storage::test_utils::MemoryK
 }
 
 /// A database too damaged to read carries no journal; its unrecorded keys
-/// remain subject to reclamation after the old device is retired (§13).
+/// remain subject to reclamation after the old device is retired (§14.3).
 #[tokio::test]
 async fn a_reset_of_an_unreadable_database_leaves_key_reclamation_to_admins() {
     for recorded in [false, true] {

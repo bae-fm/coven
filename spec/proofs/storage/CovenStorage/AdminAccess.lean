@@ -1,4 +1,4 @@
-/-! §4's admin access for one S3 key replacement (§13): the app supplies it
+/-! §20.10's admin access for one S3 key replacement (§14.3): the app supplies it
 to the operation, which holds it in memory only. Does a key get made with
 admin access the app did not supply again after a failure, and how long
 does a replacement hold it? Each mint call names its principal afresh
@@ -123,7 +123,7 @@ theorem failure_makes_nothing_until_supplied (w : World) (made : Bool) (c : Bool
   released_makes_nothing _ steps (failed_mint_releases w made c hr ha) hs
 
 /-- A replacement keeps admin access past the check, to delete the old key
-once its entry is kept (§13), and releases it when the operation ends. -/
+once its entry is kept (§14.3), and releases it when the operation ends. -/
 theorem check_keeps_admin (w : World) (k : Nat) (hr : w.row = some ⟨some k, false⟩)
     (ha : w.admin = true) :
     (step w .check).admin = true ∧ (step (step w .check) .record).admin = true ∧

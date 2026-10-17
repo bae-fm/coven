@@ -1,6 +1,6 @@
 //! Signed requests to an AWS-style query API (IAM), and their XML replies.
 //! Requests are signed with AWS Signature Version 4 using the admin access
-//! key; the secret never leaves this request (§4).
+//! key; the secret never leaves this request (§20.10).
 
 use crate::{AdminCredential, CloudProvider, StorageError, StorageFailure};
 use std::time::{SystemTime, UNIX_EPOCH};

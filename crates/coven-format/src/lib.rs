@@ -1,9 +1,9 @@
-//! Versioned plaintext frames and streaming sealed-object layouts (§20.1).
+//! Versioned plaintext frames and streaming sealed-object layouts (Appendix F.1).
 //!
 //! No I/O, clock, randomness or signing occurs here. File chunks compose
 //! crypto with validated headers and ranges. Plaintext frames
 //! are bounded; writes and snapshots stream without an object-size bound.
-//! Appendix D of `spec/format.md` specifies stored bytes.
+//! `spec/format.md` specifies stored bytes.
 
 pub mod access_key_delivery;
 pub mod admin;
@@ -52,7 +52,7 @@ use error::bound;
 use objects::JoinRequest;
 use wire::{decode_frame, Encoder, Wire, MAX_OBJECT};
 
-/// The object format written and read by coven (Appendix D).
+/// The object format written and read by coven (format.md).
 pub const FORMAT_VERSION: u16 = FormatVersion::CURRENT.number();
 /// The fixed prefix length: kind, format version, payload length.
 pub const FRAME_PREFIX_LEN: usize = 7;
@@ -62,9 +62,9 @@ pub const FRAME_PREFIX_LEN: usize = 7;
 /// with merge metadata; restore and invite codes use their zeroizing byte APIs.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Object {
-    /// One membership, device, circle, version or reset entry (§9).
+    /// One membership, device, circle, version or reset entry (§10).
     Admin(StoreChange),
-    /// A new person's public keys and device name (§12.2).
+    /// A new person's public keys and device name (§13.2).
     JoinRequest(JoinRequest),
 }
 

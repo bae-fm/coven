@@ -50,7 +50,7 @@ pub struct StorageSetup {
 }
 
 /// What a connection may publish: the sequence owner's gate, and the fresh
-/// objects of a provider check setup is running (§4, E5).
+/// objects of a provider check setup is running (§20.8, E5).
 pub(crate) struct Publications {
     state: Arc<SyncState>,
     checks: std::sync::Mutex<BTreeSet<ObjectPath>>,
@@ -645,7 +645,7 @@ impl StorageConnections {
     }
 
     /// Create the store at slot 1 when this device's history has none, or
-    /// catch up and record changed access for an existing device (§9, §10).
+    /// catch up and record changed access for an existing device (§10.1, §10.3).
     async fn claim_setup(
         &self,
         sync: &Arc<SequenceSync>,

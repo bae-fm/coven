@@ -1,6 +1,6 @@
 #!/bin/bash
-# The fast checks of §20.4, which the pre-commit hook runs: formatting,
-# clippy, and the checker's rules of §20.1 to §20.3.
+# The fast checks of Appendix F.6, which the pre-commit hook runs: formatting,
+# clippy, and the checker's rules of Appendix F.1 to F.5.
 #
 #   scripts/check-fast.sh
 # COVEN_CHECK_PACKAGES may select Cargo packages for clippy and checker
@@ -29,7 +29,7 @@ if [ -n "${COVEN_CHECK_PACKAGES:-}" ]; then
         checker_args+=("$package")
     done
 fi
-step "owner-construction-check: §20.1 dependencies, §20.2 capabilities and owners, §20.3 conventions"
+step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
 cargo run --quiet -p owner-construction-check -- "${checker_args[@]}"
 
 step "cargo clippy ${packages[*]} --all-targets --all-features"

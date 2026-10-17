@@ -1,6 +1,6 @@
 //! Wakes coalesce: a local write racing a pass retains one more pass, the
 //! pass's own bookkeeping retains none, and a stopped or closed loop runs
-//! nothing (SP, Waiting without repeated work). File uploads run beside passes, sharing
+//! nothing (§6.7). File uploads run beside passes, sharing
 //! their connection's lifetime and cooldown.
 
 use crate::tests::{wait_for_sent, Network};
@@ -11,8 +11,8 @@ use coven_storage::{
 };
 use std::time::Duration;
 
-/// Each pass reads forward to a missing slot, then reads the floor (SP
-/// steps 1-2). A claim's own floor read follows its create instead.
+/// Each pass reads forward to a missing slot, then reads the floor (§6.1
+/// and §6.2). A claim's own floor read follows its create instead.
 fn passes(device: &crate::tests::Device) -> usize {
     let floor = coven_storage::ObjectPath::floor(device.store);
     device
@@ -119,7 +119,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
 }
 
 /// The sync loop waits for a provider cooldown; requests made meanwhile
-/// coalesce into the pass that follows it (SP waiting).
+/// coalesce into the pass that follows it (§6.7).
 #[tokio::test]
 async fn a_retry_after_holds_passes_and_sync_now_coalesces() {
     let network = Network::new(1).await;
@@ -235,7 +235,7 @@ async fn stored(device: &crate::tests::Device, id: &str) -> bool {
 }
 
 /// A pass neither waits for an upload in flight nor sends file bytes; the
-/// upload's completion schedules no pass (SP, file uploads outside the pass).
+/// upload's completion schedules no pass (§6.6).
 #[tokio::test]
 async fn a_held_file_upload_delays_no_pass_and_its_completion_schedules_none() {
     let network = file_network().await;
@@ -306,7 +306,7 @@ async fn stopping_finishes_a_held_file_upload_and_restarting_resumes_the_queue()
 }
 
 /// An upload's Retry-After holds every worker of the connection, the sync
-/// loop included; both continue once it ends (SP waiting).
+/// loop included; both continue once it ends (§6.7).
 #[tokio::test]
 async fn an_uploads_retry_after_holds_the_next_pass() {
     let network = file_network().await;

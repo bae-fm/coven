@@ -27,7 +27,7 @@ pub trait StorageConnector: Send + Sync {
     /// Validate settings and wrap the selected native provider once. The caller
     /// verifies the connection before publication. Every request waits for
     /// the store's shared `cooldown`; a rejected OAuth token is refreshed in
-    /// the sign-in's custody (§4).
+    /// the sign-in's custody (§20.2).
     async fn connect(
         &self,
         config: StorageConfig,
@@ -36,7 +36,7 @@ pub trait StorageConnector: Send + Sync {
         cooldown: Arc<dyn crate::Cooldown>,
         transfers: Arc<crate::TransferBudget>,
     ) -> Result<Arc<StorageConnection>, StorageError>;
-    /// Probe an S3 location's service (§4), writing only fresh objects under
+    /// Probe an S3 location's service (§20.7), writing only fresh objects under
     /// the store's `.coven-check` prefix and deleting them, also on failure.
     /// A connector without native S3 refuses this capability.
     async fn detect_s3(
@@ -49,7 +49,7 @@ pub trait StorageConnector: Send + Sync {
     }
     /// Before a store's first setup at an S3 location whose member keys reach
     /// the whole bucket, refuse a bucket holding anything outside the store's
-    /// folder with `OwnBucketRequired { reason: Occupied }` (§4). Reads only.
+    /// folder with `OwnBucketRequired { reason: Occupied }` (§20.7). Reads only.
     /// A connector without native S3 refuses this capability.
     async fn check_new_s3_store(
         &self,
@@ -60,7 +60,7 @@ pub trait StorageConnector: Send + Sync {
         Err(StorageFailure::ProviderUnavailable.into())
     }
     /// Key administration for an S3 location's service, holding this admin
-    /// access for one operation (§4). A custom profile, or a service without
+    /// access for one operation (§20.10). A custom profile, or a service without
     /// a minter, is refused: its keys are made in the console.
     fn s3_key_admin(
         &self,

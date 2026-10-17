@@ -12,7 +12,7 @@ use rusqlite::types::Type;
 /// A live member and every device they registered (E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MemberInfo {
-    /// The stable member id, independent of its keys (§9).
+    /// The stable member id, independent of its keys (§10).
     pub id: MemberId,
     /// The current public signing and sealing pair.
     pub keys: MemberPublicKeys,
@@ -31,7 +31,7 @@ pub struct DeviceInfo {
     pub id: DeviceId,
     /// Its name from its registration.
     pub name: String,
-    /// Active, removed, or replaced by a kept registration (§10).
+    /// Active, removed, or replaced by a kept registration (§14.1).
     pub state: DeviceState,
 }
 
@@ -47,7 +47,7 @@ pub struct Circle {
 /// An active store member in a circle (E12).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct CircleMemberInfo {
-    /// The stable member id, independent of its keys (§9).
+    /// The stable member id, independent of its keys (§10).
     pub member: MemberId,
     /// Whether this is the local member.
     pub is_self: bool,

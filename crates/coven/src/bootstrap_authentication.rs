@@ -1,5 +1,5 @@
 //! The builder's held sign-in, as the custody a bootstrap connection
-//! refreshes in until publication commits it to device custody (§4, E10).
+//! refreshes in until publication commits it to device custody (§20.2, E10).
 
 use super::*;
 use coven_storage::ProviderAuth;

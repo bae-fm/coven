@@ -1,4 +1,4 @@
-//! Replacing a member's signing and sealing pair (§9, §10, §18.1): this
+//! Replacing a member's signing and sealing pair (§10.1, §12.3, §11.5): this
 //! member's own, which pauses app writes, confirms the queue and keeps a
 //! candidate before claiming its copies and binding, or a prepared public
 //! pair for another member, which is only the entry and its copies.
@@ -27,7 +27,7 @@ enum MemberKeysWork {
 }
 
 /// This member's held active pair, or its kept candidate, must be its
-/// current binding: only those sign or install the replacement (§10).
+/// current binding: only those sign or install the replacement (§12.3).
 fn held_current(session: &Session, identity: &MemberIdentity) -> Result<(), SyncError> {
     match session.history.state.members.get(&identity.member()) {
         None => Err(SyncError::Rejected(OperationRejection::TargetGone(
@@ -51,7 +51,7 @@ fn held_current(session: &Session, identity: &MemberIdentity) -> Result<(), Sync
 impl SequenceSync {
     /// Replace this member's own pair and return the installed identity.
     /// App writes wait with `MemberKeysChanging` until the binding applies
-    /// and identity and restore-code custody finish, or replacement fails (§10, E9).
+    /// and identity and restore-code custody finish, or replacement fails (§12.3, E9).
     pub async fn replace_member_keys(self: &Arc<Self>) -> Result<MemberIdentity, SyncError> {
         let mut session = self.session.lock().await;
         let identity = self
@@ -164,7 +164,7 @@ impl SequenceSync {
     }
 
     /// Publish a prepared public pair for another active member, with copies
-    /// of every store key and held keys of that member's circles first (§9, E9).
+    /// of every store key and held keys of that member's circles first (§10, E9).
     pub async fn replace_member_keys_for(
         self: &Arc<Self>,
         member: MemberId,
@@ -252,7 +252,7 @@ impl SequenceSync {
             };
             let Some(candidate) = candidate else {
                 // Writes fixed under the pair about to be retired must reach
-                // storage first: after the binding they count for nothing (§10).
+                // storage first: after the binding they count for nothing (§12.3).
                 if let Some(last) = self.database.waiting_snapshot_headers().await?.last() {
                     let through = last.header.position.number;
                     self.send_writes(session, ring, &identity, through).await?;
@@ -301,7 +301,7 @@ impl SequenceSync {
                 .map(|value| value.keys);
             if current == Some(candidate) {
                 // The binding applied: install its pair, keeping the previous
-                // one for copies that name it (§11). Code custody still owns the pause.
+                // one for copies that name it (§12.3). Code custody still owns the pause.
                 let installed =
                     identity
                         .activate(&candidate)
@@ -337,7 +337,7 @@ impl SequenceSync {
                 Ok(_) => continue,
                 Err(SyncError::Rejected(reason)) => {
                     // A replacement that never became current leaves its
-                    // copies, so its pair stays held as retired (§11).
+                    // copies, so its pair stays held as retired (§12.3).
                     self.member.persist(&identity.retire_candidate())?;
                     self.database.finish_operation(id).await?;
                     return Err(SyncError::Rejected(reason));

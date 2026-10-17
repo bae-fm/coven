@@ -1,5 +1,5 @@
 //! What S3 detection observed, the settings derived from it, and the setup
-//! safety check of effective settings against it (§4). The probes themselves
+//! safety check of effective settings against it (§20.8). The probes themselves
 //! run in the adapter; this is the pure decision over their results.
 use crate::{
     S3BucketVersioning, S3Checksums, S3CopyCondition, S3CopyPublication, S3Listing,
@@ -8,7 +8,7 @@ use crate::{
 };
 use std::sync::Arc;
 
-/// What detection observed at one location (§4).
+/// What detection observed at one location (§20.7).
 #[derive(Clone, Debug)]
 pub struct S3Detection {
     /// Bucket versioning, or the native refusal that left it unknown.
@@ -66,7 +66,7 @@ pub enum S3Probe {
     BucketList,
 }
 
-/// Detection's preference orders (§4): the first enforced condition is chosen.
+/// Detection's preference orders (Appendix E.7): the first enforced condition is chosen.
 pub(crate) const SIGNERS: [S3Signing; 2] = [S3Signing::GoogleHmac, S3Signing::AwsSigV4];
 pub(crate) const SINGLE_PUTS: [S3SinglePut; 2] =
     [S3SinglePut::IfNoneMatch, S3SinglePut::GenerationMatch];

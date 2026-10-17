@@ -1,12 +1,12 @@
-## Appendix B. Proof of convergence
+# Proof of convergence
 
 Owner tables restrict direct writes. Schema-derived foreign-key changes are
 verified against authorized direct causes; ordinary constraint losses still
 apply to owned rows. [B18](#b18-owner-tables-and-row-authenticity) states the
 checked permissions, causal records, restoration, and SQL boundary.
 
-- This appendix proves the convergence guarantee of [§3](../coven.md#3-guarantees) for the merge of [§8](../coven.md#8-merge)
-  and the audiences of [§14](../coven.md#14-audiences).
+- This document proves the convergence guarantee of [§2.2](../coven.md#22-convergence) for the merge of [§8](../coven.md#8-merging)
+  and the audiences of [§15](../coven.md#15-circles).
 - The proof is checked by machine: a Lean 4 development in
   `spec/proofs/merge/`, which has no unproven step and uses no axiom beyond
   Lean's own.
@@ -26,14 +26,14 @@ checked permissions, causal records, restoration, and SQL boundary.
   except which row shows for a key present in two audiences, and the rows
   taken out with it ([B9](#b9-audiences)).
 - `_coven_writes` holds the same writes on both, under row ids of each
-  device's own ([§8.1](../coven.md#81-example)).
+  device's own ([§8.1](../coven.md#81-cells)).
 
 ### B2 Terms
 
-- *Write*, *row change*, *cell*, *generation*, *audience*: as in [§5](../coven.md#5-local-database), [§8](../coven.md#8-merge),
-  [§8.3](../coven.md#83-deletes) and [§14](../coven.md#14-audiences).
+- *Write*, *row change*, *cell*, *generation*, *audience*: as in [§4](../coven.md#4-writing-locally), [§8](../coven.md#8-merging),
+  [§8.3](../coven.md#83-deletes) and [§15](../coven.md#15-circles).
 - *Row*: one table, key and audience. The store's note 1 and a circle's note
-  1 are two rows, each with its own generations ([§14.2](../coven.md#142-moving-rows)).
+  1 are two rows, each with its own generations ([§15.4](../coven.md#154-moving-rows)).
 - *Had read*: the recorded slot prefix includes `a` before making
   `w`, including its own earlier writes. Passing a position does not mean
   applying its data ([§7.1](../coven.md#71-causality)). Actual generation and
@@ -56,7 +56,7 @@ checked permissions, causal records, restoration, and SQL boundary.
   incarnation with a larger timestamp, or deletes that incarnation.
 - *Merged state*: each row's generation, the write `_coven_rows` names for
   each generation, each cell's winning write and value, and the lost values
-  ([§8](../coven.md#8-merge)).
+  ([§8](../coven.md#8-merging)).
 - *Removed row*: a row present in the merged state that a removal rule takes
   out of the app's table.
 
@@ -97,14 +97,14 @@ For a closed set `S` of writes, each part of the merged state is defined from
   generation, the one with the smallest timestamp ([§8.3](../coven.md#83-deletes)).
 - **Cell**: of the writes in `S` that set the cell in the current
   incarnation, the one with the largest timestamp; nothing while the row is
-  deleted ([§8.1](../coven.md#81-example), [§8.2](../coven.md#82-concurrent-writes-to-one-row)).
+  deleted ([§8.1](../coven.md#81-cells)).
 - **Lost**: a value is lost when some write in `S` replaced it and no write
-  in `S` that replaced it had read it ([§8](../coven.md#8-merge)).
+  in `S` that replaced it had read it ([§8.2](../coven.md#82-lost-values)).
 - **Replaced by**, for a lost value of incarnation `k`:
   - if `k` was deleted: its earliest delete, which is the write `_coven_rows`
     names for generation `k + 1`;
   - otherwise: the cell's current winning write.
-- E.g. the writes of [§8.1](../coven.md#81-example) on note 42's title:
+- E.g. the writes of [§8.1](../coven.md#81-cells) on note 42's title:
 
   ```
   write             value               stamp          had read
@@ -138,7 +138,7 @@ at.
   - an insert with `g = G` starts a new incarnation with its values;
   - an update at `G`, or an insert at `G - 1` concurrent with the one that
     started the current incarnation, competes per cell with the cell's
-    winning write: the larger timestamp stays ([§8.2](../coven.md#82-concurrent-writes-to-one-row), [§8.3](../coven.md#83-deletes));
+    winning write: the larger timestamp stays ([§8.1](../coven.md#81-cells), [§8.3](../coven.md#83-deletes));
   - a change made at an older incarnation changes no cell.
 - **`_coven_lost`**, for each value `a` of each cell of `r`:
   - `w`'s own value:
@@ -148,7 +148,7 @@ at.
       value: lost, replaced by the cell's winning write;
     - otherwise not lost;
   - a value already lost that `w` replaces:
-    - if `w` had read it: no longer lost ([§8.2](../coven.md#82-concurrent-writes-to-one-row));
+    - if `w` had read it: no longer lost ([§8.2](../coven.md#82-lost-values));
     - otherwise still lost, and "replaced by" becomes the earlier delete or
       the later setter, by [B4](#b4-the-merged-state-as-a-function-of-the-writes);
   - the cell's current value, which `w` replaces without having read it:
@@ -180,13 +180,13 @@ at.
   Lean: `isSpec_unique`.
 - **Convergence**: two causal orders of the same writes give the same merged
   state. Lean: `merge_converges`.
-- **Snapshots** ([§15](../coven.md#15-snapshots)): loading a snapshot and applying the writes after it,
+- **Snapshots** ([§16.5](../coven.md#165-coming-back-after-a-long-absence)): loading a snapshot and applying the writes after it,
   with the covered writes counting as applied, gives the same merged state
   as applying every write from the start. Lean: `snapshot_converges`.
 - **Timestamp order** is one causal order, by assumption 2, so every causal
   order gives the state applying the writes in timestamp order gives. Lean:
   `causalOrder_of_ts_sorted`.
-- **A write made after seeing another wins over it** ([§3](../coven.md#3-guarantees)):
+- **A write made after seeing another wins over it** ([§2.2](../coven.md#22-convergence)):
   `write_after_read_wins` quantifies over every causal application order.
   When a write sets the same cell in the same incarnation, or deletes that
   incarnation, having read the earlier setter, the earlier value is neither
@@ -207,7 +207,7 @@ at.
   its timestamp order to the merge model's natural numbers using D2's
   64-bit device ids. A successful stamp after the greatest read timestamp
   therefore satisfies assumption 2, including when the wall clock is behind.
-- E.g. Lean runs the step on the writes of [§8.1](../coven.md#81-example), [§8.2](../coven.md#82-concurrent-writes-to-one-row) and [§8.3](../coven.md#83-deletes), in the
+- E.g. Lean runs the step on the writes of [§8.1](../coven.md#81-cells) and [§8.3](../coven.md#83-deletes), in the
   arrival orders they describe:
   - Ben's phone and Carol's tablet both end with "Shopping" and one
     `_coven_lost` row, "Weekly groceries" replaced by Carol's write 2. Lean:
@@ -225,15 +225,15 @@ at.
   - which rows are present: an odd generation;
   - each row's references: the parent each points at, and whether it is
     *stale*: the parent's generation it carries has been deleted since
-    ([§8.4](../coven.md#84-foreign-keys));
-  - whether the row's merged values fail a CHECK ([§8.6](../coven.md#86-check-constraints));
-  - the kept entry that deleted the row's circle, if any ([§14.7](../coven.md#147-deleting-a-circle));
+    ([§9.1](../coven.md#91-foreign-keys));
+  - whether the row's merged values fail a CHECK ([§9.3](../coven.md#93-check-constraints));
+  - the kept entry that deleted the row's circle, if any ([§15.9](../coven.md#159-deleting-a-circle));
   - each row's unique claims, ordered by the greatest `(slot, write number)`
     among the setters of its current constraint inputs, including a partial
-    index's WHERE columns and changed generated columns ([§8.5](../coven.md#85-keys-and-uniqueness));
-  - each key present in two audiences on the device ([§14.2](../coven.md#142-moving-rows)).
+    index's WHERE columns and changed generated columns ([§9.2](../coven.md#92-keys-and-unique-values));
+  - each key present in two audiences on the device ([§15.4](../coven.md#154-moving-rows)).
 - **Set null** for a child whose parent's generation was deleted is part
-  of the merged state, not the rules ([§8.4](../coven.md#84-foreign-keys)):
+  of the merged state, not the rules ([§9.1](../coven.md#91-foreign-keys)):
   - under set null, the cell holds null, which CHECK and unique constraints
     see like any value;
   - later writes to the cell compete with the stamp of the write whose
@@ -266,7 +266,7 @@ at.
 - **Keys in two audiences**: of two present rows with one key, the store's
   wins over a circle's, and of two circles' rows, the one whose current
   generation started with the smaller timestamp.
-- [§8](../coven.md#8-merge)'s three steps:
+- [§8.4](../coven.md#84-rows-taken-out-and-rows-that-come-back)'s three steps:
   1. apply the other rules until none fires;
   2. judge unique values and keys in two audiences among the rows still
      present;
@@ -313,7 +313,7 @@ at.
   - unique first takes note 2 out, then cascade takes note 1 out: neither
     stays.
   - Lean: `unique_with_others`.
-- **[§8](../coven.md#8-merge)'s three steps have one result**: steps 1 and 3 have one result each
+- **[§8.4](../coven.md#84-rows-taken-out-and-rows-that-come-back)'s three steps have one result**: steps 1 and 3 have one result each
   by monotonicity, and step 2 is a function of step 1's result. In the
   example above, step 1 takes note 1 out, so note 2 keeps "Plan" on every
   device. Lean: `stratified_unique`, `judged_once`.
@@ -349,30 +349,30 @@ at.
   row, generation, optional column, written values/setters and cause. Lean:
   `lossRecord`, `device_converges`,
   `rule_order_converges`.
-- E.g. Lean runs the writes of [§8.4](../coven.md#84-foreign-keys), [§8.5](../coven.md#85-keys-and-uniqueness), [§8.6](../coven.md#86-check-constraints) and [§14.7](../coven.md#147-deleting-a-circle), with the
+- E.g. Lean runs the writes of [§9.1](../coven.md#91-foreign-keys), [§9.2](../coven.md#92-keys-and-unique-values), [§9.3](../coven.md#93-check-constraints) and [§15.9](../coven.md#159-deleting-a-circle), with the
   rules reading the merged state it computes, in more than one arrival
   order:
-  - [§8.4](../coven.md#84-foreign-keys): Carol's tablet applies Ana's delete of note 43, then Ben's
+  - [§9.1](../coven.md#91-foreign-keys): Carol's tablet applies Ana's delete of note 43, then Ben's
     attachment 9 on it: attachment 9 is taken out, and its `_coven_lost` row
     names the foreign key.
   - Ben's move of attachment 9 to note 44 then arrives: attachment 9 is
     back. Ben's phone, which gets Ana's delete last, never takes it out.
     Lean: `example_8_4`.
-  - [§8.5](../coven.md#85-keys-and-uniqueness): Ana renames the tag "urgent" to "important" while Ben tags note 44
+  - [§9.2](../coven.md#92-keys-and-unique-values): Ana renames the tag "urgent" to "important" while Ben tags note 44
     "urgent". Note 42 ends tagged "important", and Ben's `(44, "urgent")` is
     taken out, naming the foreign key. Lean: `example_8_5_key`.
-  - [§8.6](../coven.md#86-check-constraints): Ana sets start 10 while Ben sets end 8: the row is taken out,
+  - [§9.3](../coven.md#93-check-constraints): Ana sets start 10 while Ben sets end 8: the row is taken out,
     naming the CHECK. Ben's later end of 20 brings it back. Lean:
     `example_8_6`.
-  - [§14.7](../coven.md#147-deleting-a-circle): Ben's entry deletes Gifts while Ana adds note 9.
+  - [§15.9](../coven.md#159-deleting-a-circle): Ben's entry deletes Gifts while Ana adds note 9.
     Notes 7, 8 and 9 stay at generation 1, hidden with that entry named in
     their losses. There is no circle deletion write. Lean: `example_14_7`.
 
 ### B9 Audiences
 
-- A row is one table, key and audience, with its own generations ([§14.2](../coven.md#142-moving-rows)).
+- A row is one table, key and audience, with its own generations ([§15.4](../coven.md#154-moving-rows)).
   Each row change sits in the part of its row's audience; a device applies
-  the parts it can read and counts the rest as applied ([§14.4](../coven.md#144-writes)).
+  the parts it can read and counts the rest as applied ([§15.6](../coven.md#156-writes-into-circles)).
 - E.g. Ana moves note 1 into her circle; Ben, outside it, sees it deleted
   and re-adds note 1 in the store; then Carol, in the circle, edits the
   circle's note 1.
@@ -394,9 +394,9 @@ at.
   rows among any set of rows both have that holds, for each of its rows,
   every parent its references point at and every row whose claim rivals its
   own. Lean: `removal_local`.
-- [§14.5](../coven.md#145-references) gives the parents: a row points only at rows every reader of it can
+- [§15.3](../coven.md#153-references-stay-readable) gives the parents: a row points only at rows every reader of it can
   read.
-- [§14.1](../coven.md#141-roots-and-descendants) gives the unique rivals: a unique constraint on a root table
+- [§15.2](../coven.md#152-unique-values-dont-cross-audiences) gives the unique rivals: a unique constraint on a root table
   includes the audience column, and one on a descendant table includes the
   foreign key it takes its audience from, so rivals share an audience;
   constraints that could span audiences are refused. Lean: `rivals_closed`.
@@ -414,25 +414,25 @@ at.
 
 ### B10 The spec's examples, checked
 
-- [§8](../coven.md#8-merge): todo 7 names both rules. Lean: `example_8`.
-- [§8.1](../coven.md#81-example): both orders end with "Shopping" and one lost value. Lean:
+- [§8.4](../coven.md#84-rows-taken-out-and-rows-that-come-back): todo 7 names both rules. Lean: `example_8`.
+- [§8.1](../coven.md#81-cells): both orders end with "Shopping" and one lost value. Lean:
   `example_8_1`.
-- [§8.2](../coven.md#82-concurrent-writes-to-one-row): "Groceries" is lost on Carol's tablet until Ben's write 9 arrives.
+- [§8.2](../coven.md#82-lost-values): "Groceries" is lost on Carol's tablet until Ben's write 9 arrives.
   Lean: `example_8_2`.
 - [§8.3](../coven.md#83-deletes): Ben's edit is replaced by Ana's write 7 in every order. Lean:
   `example_8_3`.
-- [§8.4](../coven.md#84-foreign-keys): attachment 9 is taken out, then back when Ben's move arrives;
+- [§9.1](../coven.md#91-foreign-keys): attachment 9 is taken out, then back when Ben's move arrives;
   link 6 holds null, then ends on note 44 once Dan's write arrives. Lean:
   `example_8_4`, `example_8_4_later`.
-- [§8.5](../coven.md#85-keys-and-uniqueness): a key change leaves Ben's `(44, "urgent")` taken out;
+- [§9.2](../coven.md#92-keys-and-unique-values): a key change leaves Ben's `(44, "urgent")` taken out;
   a loser whose winner leaves in step 3 stays out. Lean:
   `example_8_5_key`, `example_8_5_subnote`,
   `example_8_5_step3`.
-- [§8.6](../coven.md#86-check-constraints): the row is taken out, then back when Ben sets end 20. Lean:
+- [§9.3](../coven.md#93-check-constraints): the row is taken out, then back when Ben sets end 20. Lean:
   `example_8_6`.
-- [§14.2](../coven.md#142-moving-rows): the store's note 1 wins over the circle's. Lean: `Moved.agree`,
+- [§15.4](../coven.md#154-moving-rows): the store's note 1 wins over the circle's. Lean: `Moved.agree`,
   `Moved.store_wins`.
-- [§14.7](../coven.md#147-deleting-a-circle): existing and late circle rows keep their
+- [§15.9](../coven.md#159-deleting-a-circle): existing and late circle rows keep their
   generations and setters and are hidden by the named entry. Lean: `example_14_7`.
 
 ### B11 What Lean checks, and what is outside the model
@@ -458,15 +458,15 @@ statements; Rust agreement is a separate check.
 
 ### B12 Circle entries, migration deletes and frozen losses
 
-For [§14.7](../coven.md#147-deleting-a-circle), `EntryInputs` holds the
+For [§15.9](../coven.md#159-deleting-a-circle), `EntryInputs` holds the
 responsible entry, and `entryView` records `deletedCircleEntry entry`.
 `deleted_rule_names_entry` proves the row is hidden and its loss names that
 entry. `circle_entries_preserve_merge` proves observation changes no merge
 record. `row_returns` proves a present row returns when no reason remains.
 `entry_device_converges` includes the named losses; `entry_device_rule_order`
-allows every order within §8's three passes.
+allows every order within §8.4's three passes.
 
-For [§17.1](../coven.md#171-host-application), `migrationRemoves` uses the
+For [§18.7](../coven.md#187-lost-values-across-a-migration), `migrationRemoves` uses the
 current three-pass removal result. Circle deletions in the applied sequence
 are permanent; migration selection has no finality input.
 
@@ -486,7 +486,7 @@ writes—insert, migration delete, concurrent edit—in both application orders.
 The migration's known input is kept in its frozen whole-row loss; the unseen
 edit is a separate cell loss. If several writes delete that incarnation,
 §8.3 chooses the earliest delete. An uncovered old-schema edit excluded by
-§17.1 instead gets the frozen schema loss proved by `excluded_values_recorded`.
+§18.6 instead gets the frozen schema loss proved by `excluded_values_recorded`.
 
 `migration_converges` covers every valid causal order of the authored
 migration and concurrent edits. The migration is authored from fixed inputs;
@@ -514,7 +514,7 @@ their active records with the frozen records proved above.
 
 ### B13 Reset contents on every device
 
-For [§19.3](../coven.md#193-resetting-a-store), `ResetBoundary` distinguishes
+For [§19.4](../coven.md#194-resetting-an-audience), `ResetBoundary` distinguishes
 writes consumed by the snapshot's slot prefix from writes that contributed to its merge
 state. Ignored and excluded writes can have consumed slots without
 contributing values, as [format D7](../format.md#d7-snapshots) requires.
@@ -553,7 +553,7 @@ loss. Each uses the same selected snapshot and incoming write.
 
 ### B14 Where every value goes
 
-For [§3](../coven.md#3-guarantees), `value_accounted` quantifies over every
+For [§2.2](../coven.md#22-convergence), `value_accounted` quantifies over every
 setter in the effective merge history. Each value is either still shown,
 replaced by a write that read it, recorded as a lost cell, or captured in a
 removed row with a rule that holds. `boundary_value_accounted` applies that
@@ -575,7 +575,7 @@ cannot both be shown. Other removal rules can hide both.
 
 `UniqueOnce.unique_with_others` shows why uniqueness cannot run in an
 unrestricted loop with foreign-key removal: rule order can change the result.
-The three passes in §8 avoid that ambiguity. Timestamps choose cells; supplied
+The three passes in §8.4 avoid that ambiguity. Timestamps choose cells; supplied
 claim ranks choose unique winners. These are different orders.
 
 Snapshot coverage represents consumed inputs, which can include writes with
@@ -844,7 +844,7 @@ general fact: with named parents compared, a classified action names in
 every reference it writes exactly the row and incarnation whose step caused
 it, so an action cannot point a row at another parent. Like `consequence`,
 these histories update a referenced key in place. Coven references only
-primary keys and turns a key change into a delete and an insert (§8.5), so the
+primary keys and turns a key change into a delete and an insert (§9.2), so the
 action names the inserted row, and a reference to the old key names an
 incarnation that ended; that refuses `Retarget`'s edit even before parents are
 compared. `FollowBack` holds either way: the second cascade's cause is a step
@@ -917,7 +917,7 @@ proves admitted copies mean a permitted move.
 **Authorship a snapshot carries.** `OwnerSnapshotAuthors.lean` models what a
 loader knows about a snapshot's author: its device, the key its signature
 verified with and, once registered, the device's member. A device belongs to
-one member for good and its authenticated key history is retained (§9, §10). D7 section 7
+one member for good and its authenticated key history is retained (§10, §10.4). D7 section 7
 needs evidence for a write unless it is from the snapshot's own device or,
 with the signer's member known, from that member's device.
 `own_writes_signers` proves such a write's author is the snapshot's signer and
@@ -1006,7 +1006,7 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
 A generated column is computed by SQL from the stored columns it reads, and
 coven merges stored cells one at a time. `GeneratedReference.lean` checks
 what that means for a foreign key on such a column
-([§8.4](../coven.md#84-foreign-keys)).
+([§9.1](../coven.md#91-foreign-keys)).
 
 **A single generated key column is unsafe.** `Unwritten` is the table
 `c(a, b, ref AS (a || b) REFERENCES p(id))`. One write inserts `a = x`,
@@ -1040,7 +1040,7 @@ refused too; the model does not need that case.
 Coven applies a change to a synced non-key column with an `UPDATE`, and
 SQLite then runs every local foreign key's `ON UPDATE` action. Local rows
 exist on one device only, so no write accounts for them.
-`LocalUpdateAction.lean` checks the rule of [§8.4](../coven.md#84-foreign-keys).
+`LocalUpdateAction.lean` checks the rule of [§9.1](../coven.md#91-foreign-keys).
 
 **NO ACTION stops the apply for good.** `Stuck` is synced `parents.code = 'a'`
 with a local pin on `'a'` under the default `ON UPDATE NO ACTION`; Ben's write
@@ -1059,5 +1059,5 @@ key's action rewrites, which is the set of columns the schema check follows.
 **Outside the model.** A column is a list of values. Keys act independently,
 as SQLite applies each key's action to its own columns; the model follows one
 chain at a time and does not cover a local column two keys rewrite at once.
-Primary-key changes are deletes and inserts (§8.5) and fall under the delete
+Primary-key changes are deletes and inserts (§9.2) and fall under the delete
 rule, which this file does not model.

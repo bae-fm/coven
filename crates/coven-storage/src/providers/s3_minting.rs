@@ -1,4 +1,4 @@
-//! Each catalogued profile's key minter (§4): function pointers in its const
+//! Each catalogued profile's key minter (Appendix E.12): function pointers in its const
 //! entry that make, roll back, delete and read member keys with the storage
 //! account's admin access. The key is checked from the member's side before
 //! the caller delivers it.
@@ -130,7 +130,7 @@ impl ProfileKeyAdmin {
 }
 
 /// The key administration a location's profile has. Custom profiles and
-/// services without a minter take guided console steps instead (§4).
+/// services without a minter take guided console steps instead (§20.10).
 pub(crate) fn key_admin(
     config: StorageConfig,
     admin: AdminCredential,
@@ -289,7 +289,7 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
 }
 
 /// The policy a prefix-scoped member key needs, also shown for console steps
-/// (§4): object access under the store's prefix, listing only there, a
+/// (Appendix E.12): object access under the store's prefix, listing only there, a
 /// bucket-versioning read so setup can check the owner's setting, and the
 /// multipart-upload listing a session needs to abort an initiation whose
 /// reply was lost. AWS takes no prefix condition on that listing.

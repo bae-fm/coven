@@ -1,4 +1,4 @@
-//! Owners and capabilities are constructed at composition roots (§20.2). The policy names
+//! Owners and capabilities are constructed at composition roots (Appendix F.3). The policy names
 //! interfaces; every implementation, including feature-gated fakes, contributes
 //! a construction-only type. Explicit non-trait capabilities join the same set.
 //!

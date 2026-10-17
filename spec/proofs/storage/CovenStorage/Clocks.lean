@@ -150,13 +150,13 @@ theorem waiting_is_not_seen (r : Receiver) (s : Timestamp) (causes keys : Bool)
     (h : (causes && keys) = false) : receive r s causes keys = r := by
   simp [receive, h]
 
-/-- A lower bound observed from provider metadata (§4, §9), in milliseconds.
+/-- A lower bound observed from provider metadata (§20.5, §10.2), in milliseconds.
 There is deliberately no conversion from a device's Timestamp. -/
 structure StorageTime where
   value : Nat
   deriving DecidableEq, Repr
 
-/-- §15: equality with the retention duration suffices. -/
+/-- §16.6: equality with the retention duration suffices. -/
 def aged (stored observed : StorageTime) (duration : Nat) : Bool :=
   decide (stored.value + duration ≤ observed.value)
 
@@ -175,7 +175,7 @@ structure Maintenance where
 def retentionAge (s : Maintenance) (stored : StorageTime) (duration : Nat) : Bool :=
   aged stored s.observed duration
 
-/-- §16.5: the live timer, not a persisted wall-clock deadline. -/
+/-- §6.7: the live timer, not a persisted wall-clock deadline. -/
 def retryReady (s : Maintenance) (started delay : Nat) : Bool :=
   decide (started + delay ≤ s.monotonic)
 

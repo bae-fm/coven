@@ -14,7 +14,7 @@ pub enum IfUnsent {
 impl CovenHandle {
     /// Deletes this store from this device. With storage set up, it first
     /// refuses unsent writes and files unless `unsent` discards them, then
-    /// publishes this device's removal (§13), which cuts off its later slots;
+    /// publishes this device's removal (§14.1), which cuts off its later slots;
     /// either failure deletes nothing. It then closes this handle and deletes
     /// as `Coven::discard_store`, which finishes a deletion failing after that.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError> {

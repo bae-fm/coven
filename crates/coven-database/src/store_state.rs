@@ -6,11 +6,11 @@ use coven_foundation::id_source::{CircleId, DeviceId, MemberId, StoreId};
 use coven_merge::{Audience, Slot};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// Store state, including removed identities needed to check older writes (§10).
+/// Store state, including removed identities needed to check older writes (§10.4).
 ///
 /// Schema versions belong to each audience: the store's version is
 /// under [`Audience::Store`], and each circle has its own. A version is absent
-/// until a kept raise selects it, as in Appendix C. These are independent of the
+/// until a kept raise selects it, as in §18.3. These are independent of the
 /// local app migration version returned by [`crate::Database::schema_version`].
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreState {
@@ -21,7 +21,7 @@ pub struct StoreState {
     /// Every public pair a kept creation, addition or member-key replacement
     /// bound, including pairs of removed members and pairs a later replacement
     /// retired. An addition of an id not active in its view, and every
-    /// replacement, must share no key with these (§9).
+    /// replacement, must share no key with these (§10).
     pub bound_keys: BTreeSet<MemberPublicKeys>,
     /// Every device added by a kept entry, including removed devices.
     pub devices: BTreeMap<DeviceId, StoreDevice>,
@@ -31,13 +31,13 @@ pub struct StoreState {
     pub circle_deletions: BTreeMap<CircleId, Slot>,
     /// The selected schema raise per audience; creation itself carries no raise.
     pub schema: BTreeMap<Audience, StoreVersion>,
-    /// The last kept reset of each audience (§19.3).
+    /// The last kept reset of each audience (§19.4).
     pub resets: BTreeMap<Audience, SnapshotId>,
 }
 
 impl StoreState {
     /// Whether `member` remains in the store and in `circle`, which exists and
-    /// is not deleted (§14.3).
+    /// is not deleted (§15.5).
     pub fn reads_circle(&self, circle: CircleId, member: &MemberId) -> bool {
         self.members.get(member).is_some_and(|m| !m.removed)
             && !self.circle_deletions.contains_key(&circle)
@@ -48,7 +48,7 @@ impl StoreState {
     }
 
     /// Every circle `member` reads under [`Self::reads_circle`]: the circles
-    /// whose parts its devices open, snapshot and reload (§14.4, §15).
+    /// whose parts its devices open, snapshot and reload (§15.6, §16).
     pub fn readable_circles(&self, member: &MemberId) -> BTreeSet<CircleId> {
         self.circles
             .keys()
@@ -58,7 +58,7 @@ impl StoreState {
     }
 }
 
-/// The created store, as its kept creation entry names it (§9).
+/// The created store, as its kept creation entry names it (§10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreIdentity {
     /// The store's id.
@@ -68,7 +68,7 @@ pub struct StoreIdentity {
 }
 
 impl StoreIdentity {
-    /// Opening requires directory settings to match checked creation (§9).
+    /// Opening requires directory settings to match checked creation (§10).
     pub fn check_settings(
         &self,
         settings: &coven_foundation::files::StoreSettings,
@@ -77,7 +77,7 @@ impl StoreIdentity {
     }
 }
 
-/// A creation's id and name must be the ones the directory settings name (§9).
+/// A creation's id and name must be the ones the directory settings name (§10).
 pub(crate) fn check_creation(
     store: StoreId,
     name: &str,
@@ -97,10 +97,10 @@ pub(crate) fn check_creation(
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreMember {
     /// The current public pair: the signing key that verifies this member's
-    /// objects in this view and the sealing key copies go to (§9, §11).
+    /// objects in this view and the sealing key copies go to (§10, §12.1).
     pub keys: MemberPublicKeys,
     /// Current access after the applied slot. Revocation also reads superseded
-    /// access from the retained administrative objects (§13).
+    /// access from the retained administrative objects (§14.2).
     pub access: coven_format::MemberAccess,
     /// The member's role, retained when removed.
     pub role: MemberRole,
@@ -109,7 +109,7 @@ pub struct StoreMember {
 }
 
 /// One install, retained after removal or replacement so its older objects
-/// remain attributable (§10).
+/// remain attributable (§10.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreDevice {
     /// The member who added the device.
@@ -121,7 +121,7 @@ pub struct StoreDevice {
 }
 
 impl StoreDevice {
-    /// Neither removed nor replaced: it may still author objects (§10).
+    /// Neither removed nor replaced: it may still author objects (§14.1).
     pub fn active(&self) -> bool {
         self.state == DeviceState::Active
     }
@@ -133,7 +133,7 @@ impl StoreDevice {
 }
 
 /// What counted administrative slots did to a device id (E9). Later slots
-/// from a removed or replaced device are refused (§10, D6).
+/// from a removed or replaced device are refused (§14.1, D6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DeviceState {
     /// Registered and neither removed nor replaced.
@@ -145,7 +145,7 @@ pub enum DeviceState {
 }
 
 /// A circle and its current membership; deleted circles retain their name.
-/// Its keys come from received introductions, not this membership projection (§11).
+/// Its keys come from received introductions, not this membership projection (§12.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreCircle {
     /// The last kept name.
@@ -154,7 +154,7 @@ pub struct StoreCircle {
     pub members: BTreeSet<MemberId>,
 }
 
-/// A selected version raise and the snapshot it chose (§17).
+/// A selected version raise and the snapshot it chose (§18.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreVersion {
     /// The raised schema version.

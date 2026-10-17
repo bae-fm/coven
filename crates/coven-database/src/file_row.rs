@@ -112,7 +112,7 @@ pub(crate) fn set(
 ) -> Result<(), DbError> {
     let (table, file) = declaration(schema, &key.0)?;
     let mut columns = vec![&file.hash, &file.location];
-    // Each attachment fixes a new uploader, random object id and key (§16.1);
+    // Each attachment fixes a new uploader, random object id and key (§17.2);
     // no later write changes them, including upload completion.
     let mut parameters = match contents {
         Some((hash, _)) => vec![

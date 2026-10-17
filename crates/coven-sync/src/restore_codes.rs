@@ -1,4 +1,4 @@
-//! Restore-code generation and credential replacement (§12.1, E9).
+//! Restore-code generation and credential replacement (§13.1, E9).
 
 use crate::{
     commit_credentials, credential_custody::cleanup_error, CredentialRollback, DeviceCredentials,
@@ -66,7 +66,7 @@ impl RestoreCodes {
 
     /// How a connection reaches storage with these committed credentials: a
     /// rejected OAuth token refreshes in this installation's device custody,
-    /// which takes no lock held by credential changes (§4).
+    /// which takes no lock held by credential changes (§20.2).
     pub fn provider_auth(&self, credentials: StorageCredentials) -> coven_storage::ProviderAuth {
         coven_storage::ProviderAuth::new(credentials, self.credentials.clone())
     }
@@ -74,7 +74,7 @@ impl RestoreCodes {
     /// Encode this member's stable id and current private pair, store id and
     /// name, and storage location only. The pair is the held one the applied
     /// history binds now; without it the call reports `MemberKeysReplaced` rather
-    /// than exporting a retired pair (§12.1).
+    /// than exporting a retired pair (§13.1).
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
@@ -100,7 +100,7 @@ impl RestoreCodes {
         .await
     }
 
-    /// Finish the code step of a self-replacement resumed by a sync pass (§18.1).
+    /// Finish the code step of a self-replacement resumed by a sync pass (§11.5).
     pub(crate) async fn resume_member_keys(&self) -> Result<(), SyncError> {
         let guard = self.inner.lock().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
@@ -169,7 +169,7 @@ impl RestoreCodes {
     }
 
     /// Keep a key an admin delivered to this member, unless this device already
-    /// uses it. Custody commits it before the connection does (§13).
+    /// uses it. Custody commits it before the connection does (§14.3).
     pub async fn adopt_delivered_key(
         &self,
         key: coven_format::access_key_delivery::DeliveredKey,

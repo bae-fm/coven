@@ -1,4 +1,4 @@
-//! Lost-cell acknowledgements in ordinary write streams (Appendix D5).
+//! Lost-cell acknowledgements in ordinary write streams (format.md D5).
 
 use crate::error::{require, Error, Rule};
 use crate::value::{name, positive, row};

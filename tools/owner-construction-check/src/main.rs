@@ -1,7 +1,7 @@
-//! The structural checker of §20.4. It reads the syntax tree of every Rust
+//! The structural checker of Appendix F.6. It reads the syntax tree of every Rust
 //! file and every member manifest in the workspace and holds them to the
-//! dependency rules of §20.1, the capability and owner rules of §20.2 —
-//! against the policy file, `owner_policy.rs` — and the conventions of §20.3.
+//! dependency rules of Appendix F.1, the capability and owner rules of F.2 and F.3 —
+//! against the policy file, `owner_policy.rs` — and the conventions of F.5.
 //!
 //! `owner-construction-check [workspace root] [package ...]` runs every rule.
 //! Package names limit diagnostics while keeping the complete workspace for

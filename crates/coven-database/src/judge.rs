@@ -1,4 +1,4 @@
-//! The permission check on each row change of one write (§8.8, D5). Every
+//! The permission check on each row change of one write (§9.6, D5). Every
 //! device runs it, the author on its own write before queueing it.
 //!
 //! A write's steps never say what produced them. The receiver orders the

@@ -6,7 +6,7 @@ use crate::value::name;
 use crate::wire::wire_struct;
 use coven_foundation::id_source::{InviteId, MemberId};
 
-/// A new person's request, encrypted with the invite-derived key and signed (§12.2).
+/// A new person's request, encrypted with the invite-derived key and signed (§13.2).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct JoinRequest {
     /// The invite this request answers.

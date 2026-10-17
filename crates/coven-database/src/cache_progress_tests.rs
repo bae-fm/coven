@@ -6,7 +6,7 @@ use crate::{
 };
 
 /// Eager reservations persist with their cancellation; a new request
-/// replaces a cancelled set, and a finished set retires together (§16.4).
+/// replaces a cancelled set, and a finished set retires together (§17.6).
 #[tokio::test]
 async fn eager_reservations_and_cancellation_survive_reopening() {
     let store = TestStore::new();

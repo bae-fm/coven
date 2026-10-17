@@ -1,6 +1,6 @@
 import CovenStorage.Objects
 
-/-! §4's copy publication: a multipart upload assembles its bytes at a
+/-! §20.6's copy publication: a multipart upload assembles its bytes at a
 staging temporary named by the session, outside D10's layout; one copy,
 conditioned on an absent destination, publishes it; the temporary is then
 deleted. The copy is atomic and conditional: that is the provider property
@@ -57,7 +57,7 @@ def publish (b : Bucket) (session : Nat) (dest : Path) (time : Nat) : Bucket × 
   (discard after session, outcome)
 
 /-- Settle a copy whose reply was lost or refused by reading the destination:
-this session's marker means its copy landed (§4). -/
+this session's marker means its copy landed (Appendix E.10). -/
 def confirm (b : Bucket) (session : Nat) (dest : Path) : Settlement :=
   match b.published dest with
   | none => .absent
@@ -248,13 +248,13 @@ theorem lost_reply_settles (b : Bucket) (s : Nat) (dest : Path) (time : Nat) (op
   simp [confirm, run_preserves _ ops dest x hx, hs]
 
 /-- Another session's marker reports an occupied path; the caller must compare
-its complete bytes before accepting it (§10). -/
+its complete bytes before accepting it (§5.1). -/
 theorem other_marker_refuses (b : Bucket) (s : Nat) (dest : Path) (x : Published)
     (held : b.published dest = some x) (other : x.session ≠ s) : confirm b s dest = .occupied := by
   simp [confirm, held, other]
 
 /-- The marker settles bytes: a session's temporary is fixed when it is
-assembled (its attempt's bytes are fixed, §6), so a destination holding this
+assembled (its attempt's bytes are fixed, §5.1), so a destination holding this
 session's marker holds this session's bytes. -/
 theorem marker_settles_bytes (b : Bucket) (s : Nat) (dest : Path) (bytesOf : Nat → Bytes)
     (fixed : ∀ p x, b.published p = some x → x.object.bytes = bytesOf x.session)
@@ -586,7 +586,7 @@ the other's staging and its copy, which then finds no source. That answer
 says nothing about the destination, so the adapter settles it by reading the
 destination, as it settles a refused copy or a lost reply: this attempt's
 marker is stored, another object is an occupied path whose bytes the caller
-compares (§10), and an empty destination is a retryable failure that keeps
+compares (§5.1), and an empty destination is a retryable failure that keeps
 the record. -/
 
 /-- What one attempt's create returns to its caller. -/
@@ -594,7 +594,7 @@ inductive CreateAnswer where
   /-- The destination carries this attempt's marker. -/
   | stored
   /-- Another publication occupies the destination; the caller compares
-  these bytes with its own (§10). -/
+  these bytes with its own (§5.1). -/
   | occupied (bytes : Bytes)
   /-- Nothing is published; the caller keeps its record and retries. -/
   | retry
@@ -737,7 +737,7 @@ theorem confirmDest_same (c : Create) (w : World) (marker : Nat) (b : Bytes) (h 
 
 /-- From a destination that is empty or already holds the create's bytes,
 every attempt's occupied answer shows the create's own bytes, so the
-caller's byte comparison accepts it as the same create (§10). -/
+caller's byte comparison accepts it as the same create (§5.1). -/
 theorem shared_occupied_identical (c : Create) (w : World) (acts : List Act) (h : Same c w)
     (b : Bytes) (occ : .occupied b ∈ (runActs true c w acts).2) : b = c.bytes := by
   induction acts generalizing w with
@@ -781,7 +781,7 @@ theorem shared_temporary_missing :
 /-- The marker names the staging, not the copy: when attempt 2 stages over
 attempt 1's bytes before attempt 1 copies, attempt 1's copy publishes attempt
 2's marker, and attempt 2's copy, finding no source, reads its own marker.
-Both answer stored, which is what equal bytes settle to anyway (§10). -/
+Both answer stored, which is what equal bytes settle to anyway (§5.1). -/
 theorem shared_temporary_both_stored :
     let c : Create := ⟨.slot 1, [7]⟩
     let w : World := { start with recorded := [.create c] }

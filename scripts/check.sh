@@ -1,5 +1,5 @@
 #!/bin/bash
-# Every check of §20.4, in order. CI runs the code checks on every platform
+# Every check of Appendix F.6, in order. CI runs the code checks on every platform
 # and the proofs once, on Linux: a proof checks the same everywhere.
 #
 #   scripts/check.sh                  everything
@@ -120,9 +120,9 @@ cargo_packages() {
 }
 
 code_checks() {
-    # Build the structural checker before the crates whose graph it validates (§20.4).
+    # Build the structural checker before the crates whose graph it validates (Appendix F.6).
     # It reads the whole workspace and runs in seconds, so every run includes it.
-    step "owner-construction-check: §20.1 dependencies, §20.2 capabilities and owners, §20.3 conventions"
+    step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
     cargo run --quiet -p owner-construction-check -- .
 
     step "cargo fmt --check"

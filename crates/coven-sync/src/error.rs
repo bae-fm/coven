@@ -46,14 +46,14 @@ pub enum SyncError {
     /// The requested journal row is not failed app work available for retry or discard.
     #[error("operation {0:?} is not pending")]
     NotPending(crate::OperationId),
-    /// Administrative and snapshot publication wait for the retained reload (§18).
+    /// Administrative and snapshot publication wait for the retained reload (§11).
     #[error("snapshot reload {0:?} must finish before publishing entries or snapshots")]
     ReloadPending(crate::OperationId),
     /// Decoding persisted operation data failed; its cause remains available.
     #[error("invalid operation data: {0}")]
     OperationData(#[from] serde_json::Error),
     /// Deleting an S3 key with admin access did not establish its absence;
-    /// its pending deletion stays (§13).
+    /// its pending deletion stays (§14.3).
     #[error(transparent)]
     AccessKeyNotDeleted(#[from] crate::sequence_sync::access_keys::DeleteAccessKeyError),
     /// No greater positive store slot remains.
@@ -89,23 +89,23 @@ pub enum SyncError {
     /// A required object failed authentication or parsing.
     #[error(transparent)]
     Damaged(#[from] crate::DamagedObject),
-    /// This device or its member was removed; syncing stops for good (§10).
+    /// This device or its member was removed; syncing stops for good (§14.1).
     #[error("this device or its member was removed")]
     Removed,
     /// Another copy uses this device's id, as this evidence shows. This copy
     /// sends nothing more; nothing is recorded, and `reset_device` is the
-    /// app's option (§10).
+    /// app's option (§19.3).
     #[error("another copy uses this device's id: {0:?}")]
     DeviceIdInUse(crate::DeviceIdEvidence),
     /// Held signing credentials are no longer current for this stable id, or
     /// an object was fixed under credentials that are no longer current.
-    /// Sending stops; it never re-signs an old object with newer keys (§10).
+    /// Sending stops; it never re-signs an old object with newer keys (§14.1).
     #[error("member {member:?} has newer keys; held credentials cannot send")]
     MemberKeysReplaced {
         /// The stable member whose keys were replaced.
         member: coven_foundation::id_source::MemberId,
     },
-    /// This call needs a newer app schema or coven format (§17).
+    /// This call needs a newer app schema or coven format (§18).
     #[error("an update is required: {0:?}")]
     UpdateRequired(crate::RequiredUpdate),
     /// A create-store entry named a store other than this database's store.
@@ -234,7 +234,7 @@ pub enum SyncFailure {
     /// This device or its member has been removed.
     #[error("this device or its member was removed")]
     Removed,
-    /// Another copy uses this device's id; this copy sends nothing more (§10).
+    /// Another copy uses this device's id; this copy sends nothing more (§19.3).
     #[error("another copy uses this device's id: {0:?}")]
     DeviceIdInUse(crate::DeviceIdEvidence),
     /// The provider refused or failed a request.

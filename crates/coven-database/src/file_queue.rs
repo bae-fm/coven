@@ -116,7 +116,7 @@ pub(crate) fn set_paused(db: &DatabaseConnection, paused: bool) -> Result<(), Db
 }
 
 /// Where a queued upload reads its bytes, fixed by the attaching write and
-/// kept by the queue whatever later happens to the row (§16.5).
+/// kept by the queue whatever later happens to the row (§17.7).
 pub(crate) enum Source {
     /// Coven's own copy of app-provided bytes.
     Copy(FileName),
@@ -131,7 +131,7 @@ pub(crate) struct Attachment {
 }
 
 /// Queue one attached file under its fixed reference, with its source and one
-/// hash per plaintext chunk, in the attaching transaction (§16.1, §16.6).
+/// hash per plaintext chunk, in the attaching transaction (§17.1, §17.9).
 pub(crate) fn enqueue(
     db: &DatabaseConnection,
     file: &FileRef,
@@ -236,7 +236,7 @@ pub(crate) fn upload_id(db: &DatabaseConnection, file: &FileRef) -> Result<Optio
 }
 
 /// Whether this device's queue still holds the file, so its local source
-/// remains the authoritative copy (§16.1).
+/// remains the authoritative copy (§17.5).
 pub(crate) fn queued(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_file_uploads WHERE device=?1 AND file=?2)",
@@ -300,7 +300,7 @@ pub(crate) fn chunk_hash(
     ))
 }
 
-/// Retire a confirmed upload in one transaction (§16.5): the queue row, its
+/// Retire a confirmed upload in one transaction (§17.7): the queue row, its
 /// chunk hashes, and the owned copy kept only until upload. The app row and
 /// every `FileRef` stay unchanged, whatever happened to the row meanwhile.
 /// A released copy no other queued file shares is recorded for removal after

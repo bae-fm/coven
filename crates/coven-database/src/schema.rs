@@ -271,7 +271,7 @@ impl Schema {
                     .into());
                 }
                 // Only a key of several columns captures a generated column's
-                // inputs with it (§8.4); one generated column could merge into a
+                // inputs with it (§9.1); one generated column could merge into a
                 // reference no write named.
                 if let [column] = foreign_key.columns.as_slice() {
                     if table

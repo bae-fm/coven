@@ -61,9 +61,9 @@ pub enum Replacement {
         /// The schema version reached by the breaking change.
         version: u32,
     },
-    /// This original row change used dropped data (§8, §10). Sources name
+    /// This original row change used dropped data (§9.5, §14.1). Sources name
     /// generation/setter changes, additional direct-execution sources, then
-    /// verified foreign-key causes (§8.8), in authored role/execution order,
+    /// verified foreign-key causes (§9.6), in authored role/execution order,
     /// with repeats. Row identity distinguishes several causes in the same
     /// write. An empty delete still names its write.
     DataDependency {
@@ -72,7 +72,7 @@ pub enum Replacement {
         /// The failed sources, in role order.
         sources: Vec<ChangeSource>,
     },
-    /// A member's row change lacked permission; other changes may apply (§8.8).
+    /// A member's row change lacked permission; other changes may apply (§9.6).
     NotAuthorized {
         /// The write containing this row change.
         write: WriteId,
@@ -81,7 +81,7 @@ pub enum Replacement {
     },
 }
 
-/// Why a member's row change was refused (§8.8).
+/// Why a member's row change was refused (§9.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowAuthorizationFailure {
     /// A direct target belongs to this member, or a foreign target had no
@@ -94,7 +94,7 @@ pub enum RowAuthorizationFailure {
     InvalidForeignKeyEffect,
 }
 
-/// An original row change or direct execution target used as data (§8, §8.8).
+/// An original row change or direct execution target used as data (§9.5, §9.6).
 #[derive(Clone, Debug, PartialEq)]
 pub struct ChangeSource {
     /// The write containing it.

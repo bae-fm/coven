@@ -22,7 +22,7 @@ abbrev Storage := Path → Option Object
 
 def emptyStorage : Storage := fun _ => none
 
-/-- §4: publication is atomic; even a different retry cannot overwrite. -/
+/-- §20.1: publication is atomic; even a different retry cannot overwrite. -/
 def create (s : Storage) (p : Path) (bytes : Bytes) (time : Nat) : Storage :=
   fun q => if q = p then
     match s p with
@@ -75,7 +75,7 @@ inductive Settlement where
   | occupied
   deriving DecidableEq, Repr
 
-/-- §6, §10: an occupied path is not an acknowledgement. -/
+/-- §5.1, §19.3: an occupied path is not an acknowledgement. -/
 def compareOccupied (expected : Bytes) : Except ReadFailure (Option Object) → Settlement
   | .error e => .pending e
   | .ok none => .absent
@@ -137,12 +137,12 @@ inductive Upload where
   | tried (attempt : Attempt)
   deriving DecidableEq, Repr
 
-/-- §17.1 permits changing only untried plaintext, preserving its identity. -/
+/-- §18.5 permits changing only untried plaintext, preserving its identity. -/
 def convert (f : Bytes → Bytes) : Upload → Upload
   | .untried d => .untried { d with plaintext := f d.plaintext }
   | .tried a => .tried a
 
-/-- §6, §17.2: the first attempt fixes the key and format; a retry ignores
+/-- §6.3, Appendix C.2: the first attempt fixes the key and format; a retry ignores
 new choices. The returned attempted state commits before encryption. -/
 def prepare (key format : Nat) : Upload → Attempt
   | .untried d => ⟨d, key, format⟩

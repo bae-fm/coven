@@ -12,7 +12,7 @@ Generic results about rules that take rows out:
   with the same set, by Newman's lemma;
 * `normal_least`: that set is the smallest set containing the start that is
   closed under the rules, so it can be stated with no order at all;
-* `Stratified`, `stratified_unique`: §8's three steps, with the unique rule
+* `Stratified`, `stratified_unique`: §8.4's three steps, with the unique rule
   judged once between two runs of the others, have exactly one result;
 * `closeN`: an executable run of the rules, which `closeN_star` and
   `closeN_normal` show is one of those orders;
@@ -152,7 +152,7 @@ when some row still present in `D₁` claims the same value before it. -/
 def uniqueLosers (rows : List Row) (claims : Row → Row → Bool) (D₁ : Row → Bool) : Row → Bool :=
   fun x => D₁ x || rows.any (fun y => claims y x && !D₁ y)
 
-/-- The result `D` of §8's three steps from the starting set `D₀`: apply the
+/-- The result `D` of §8.4's three steps from the starting set `D₀`: apply the
 other rules until none fires (`D₁`), add the unique losers judged among
 `D₁`'s survivors, apply the other rules again until none fires (`D`). -/
 def Stratified (rows : List Row) (fires : (Row → Bool) → Row → Prop)
@@ -349,7 +349,7 @@ theorem lfp_local {R : Row → Bool} {F G : (Row → Bool) → Row → Prop}
     · have := b x hx h'; rw [h] at this; cases this
   · exact (a x hx h).symm
 
-/-- **Locality of §8's three steps.** As `lfp_local`, when the unique
+/-- **Locality of §8.4's three steps.** As `lfp_local`, when the unique
 judgment of each row in `R` also reads only rows of `R`. -/
 theorem stratified_local {R : Row → Bool} {F G : (Row → Bool) → Row → Prop}
     (hmF : MonotoneRules F) (hmG : MonotoneRules G) (hA : AgreeOn R F G)

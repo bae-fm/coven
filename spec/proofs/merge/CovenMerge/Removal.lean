@@ -2,7 +2,7 @@ import CovenMerge.Fixpoint
 import CovenMerge.Converge
 
 /-!
-# §8's removal rules
+# §8.4's removal rules
 
 What the rules read from the merged state is collected in `Inputs`: which
 rows are present, each row's references, whether its merged values fail a
@@ -11,9 +11,9 @@ from the merged state and the applied sequence; nothing in it depends on which r
 the rules remove.
 
 * `fires`: the rules other than the unique ones: foreign keys, CHECK, and
-  deleted circles (§8, §8.4, §8.6, §14.7).
+  deleted circles (§8.4, §9.1, §9.3, §15.9).
 * `fires_monotone`: each keeps firing when more rows are removed.
-* `removal`: §8's three steps, run executably; `removal_stratified` shows
+* `removal`: §8.4's three steps, run executably; `removal_stratified` shows
   it is one of the orders `Stratified` allows, so by `any_order_removal`
   every order of applying the rules gives it.
 * `view`: what the app sees: rows shown, rows removed, and the rules
@@ -30,12 +30,12 @@ namespace CovenMerge
 
 /-- One reference, as the merged state has it.
 * `parent`: the row it points at;
-* `stale`: the parent's generation it carries was deleted since (§8.4).
+* `stale`: the parent's generation it carries was deleted since (§9.1).
 
 A reference under set null whose parent's generation was deleted holds null
 in the merged state, so it is no reference here. Where setting it to null would
 fail a CHECK, the reference stays here, stale, and the row is taken out as under
-restrict (§8.4). -/
+restrict (§9.1). -/
 structure Ref (Row : Type) where
   parent : Row
   stale : Bool
@@ -47,11 +47,11 @@ structure UniqueConstraint where
   deriving DecidableEq, Repr
 
 /-- One claim: the constraint, the value claimed, the claim's order rank, and
-whether it is a key present in two audiences (§8.5, §14.2). -/
+whether it is a key present in two audiences (§9.2, §15.4). -/
 structure Claim (K : Type) where
   con : UniqueConstraint
   key : K
-  /-- Unique claims use slot/write order; other-audience claims use §14.2. -/
+  /-- Unique claims use slot/write order; other-audience claims use §15.4. -/
   ts : Nat
   other : Bool
 
@@ -60,10 +60,10 @@ sequence.
 * `rows`: the synced rows the device has;
 * `present`: the row's generation is odd;
 * `refs`: its references;
-* `checkFails`: its merged values fail a CHECK (§8.6);
+* `checkFails`: its merged values fail a CHECK (§9.3);
 * `inDeletedCircle`: its audience is a circle the applied sequence has deleted
-  (§14.7);
-* `claims`: its claims (§8.5, §14.2);
+  (§15.9);
+* `claims`: its claims (§9.2, §15.4);
 * `rank`: its primary key's order, which breaks ties between claims. -/
 structure RemovalInputs (Row K Deletion : Type) where
   rows : List Row
@@ -75,14 +75,14 @@ structure RemovalInputs (Row K Deletion : Type) where
   rank : Row → Nat
 
 /-- Boolean deletion inputs used by the Rust differential runner. Entry-aware inputs use `RemovalInputs`
-with `Option Nat` (§14.7). -/
+with `Option Nat` (§15.9). -/
 abbrev Inputs (Row K : Type) := RemovalInputs Row K Bool
 
 section
 variable {Row K : Type} [DecidableEq Row] [DecidableEq K] (I : Inputs Row K)
 
 /-- Foreign keys: a reference whose parent's generation was deleted since,
-or whose parent is absent or taken out (§8, §8.4). -/
+or whose parent is absent or taken out (§8.4, §9.1). -/
 def fkFires (D : Row → Bool) (x : Row) : Bool :=
   (I.refs x).any (fun r => r.stale || D r.parent)
 
@@ -104,10 +104,10 @@ def rivalBefore (y x : Row) : Bool := rivalOf I false y x || rivalOf I true y x
 alike are "out". -/
 def start : Row → Bool := fun x => !I.present x
 
-/-- §8's step 1: the other rules until none fires. -/
+/-- §8.4's step 1: the other rules until none fires. -/
 def pass1 : Row → Bool := close I.rows (fires I) (start I)
 
-/-- §8's steps 2 and 3: unique values and keys in two audiences judged among
+/-- §8.4's steps 2 and 3: unique values and keys in two audiences judged among
 `pass1`'s survivors, then the other rules again. The result: every absent or
 removed row. -/
 def removal : Row → Bool := close I.rows (fires I) (uniqueLosers I.rows (rivalBefore I) (pass1 I))
@@ -136,7 +136,7 @@ theorem any_order_removal {D : Row → Bool}
     (h : Stratified I.rows (FiresP (fires I)) (rivalBefore I) (start I) D) : D = removal I :=
   stratified_unique (fires_monotone I) h (removal_stratified I)
 
-/-- A rule a removed row's `_coven_lost` row names (§8, §20.4). -/
+/-- A rule a removed row's `_coven_lost` row names (§8.4, Appendix F.6). -/
 inductive Rule where
   | foreignKey
   | check
@@ -223,7 +223,7 @@ end
 
 /-! ## End to end -/
 
-/-- Loss causes (§8, §17.1). The schema cause identifies the migration or
+/-- Loss causes (Appendix B.3, §18.6). The schema cause identifies the migration or
 excluded write as well as the breaking version (format D7). -/
 inductive LossCause (W : Type) where
   | write (setter : W)
@@ -340,7 +340,7 @@ theorem unique_with_others :
   revert this
   decide
 
-/-- §8's three steps: step 1 removes note 1 in the deleted folder, so note 2
+/-- §8.4's three steps: step 1 removes note 1 in the deleted folder, so note 2
 keeps the title. -/
 theorem judged_once : (view I).shown 2 = true ∧ (view I).removed 1 = true := by decide
 

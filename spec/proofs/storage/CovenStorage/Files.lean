@@ -2,7 +2,7 @@ import CovenStorage.Objects
 
 namespace CovenStorage.Files
 
-/-- §16.1, D12: this whole reference is fixed by the attaching transaction. -/
+/-- §17.2, D12: this whole reference is fixed by the attaching transaction. -/
 structure Reference where
   uploader : Nat
   id : Nat
@@ -29,7 +29,7 @@ inductive Status where
   | missing (device : Nat) (reason : MissingReason)
   deriving DecidableEq, Repr
 
-/-- Applied device states and source failures observed by the local uploader (§16.1). -/
+/-- Applied device states and source failures observed by the local uploader (§17.4). -/
 structure Reports where
   device : Nat → DeviceState
   unavailable : Nat → Nat → Option SourceFailure
@@ -42,7 +42,7 @@ inductive FileError where
   | integrity
   deriving DecidableEq, Repr
 
-/-- §16.1: the verdict for a confirmed absence. When both a device state and
+/-- §17.4: the verdict for a confirmed absence. When both a device state and
 a source report explain it, device state selects the reason. -/
 def absence (r : Reference) (reports : Reports) : Status :=
   match reports.device r.uploader with
@@ -52,8 +52,8 @@ def absence (r : Reference) (reports : Reports) : Status :=
     | some e => .missing r.uploader (.source e)
     | none => .uploading r.uploader
 
-/-- §16.1, E8. `size` is the file's complete encrypted size, which the row's
-plaintext size determines (§16.2, D12). An object of that size wins over every
+/-- §17.4, E8. `size` is the file's complete encrypted size, which the row's
+plaintext size determines (§17.3, D12). An object of that size wins over every
 report; an object of any other size is damage, not presence or absence; a
 failure is never absence. Row/reference validation precedes this function. -/
 def status (r : Reference) (size : Nat) (remote : Except ReadFailure (Option Object))
@@ -124,7 +124,7 @@ theorem absence_not_available (r : Reference) (reports : Reports) :
   · split <;> simp
 
 /-- A provider's reply to one ranged read of `[start, stop)`. A reply with
-bytes also reports the complete object's size (§4: a ranged read still
+bytes also reports the complete object's size (§20.5: a ranged read still
 describes the complete object). -/
 inductive RangeReply where
   | bytes (b : Bytes) (total : Nat)
@@ -133,7 +133,7 @@ inductive RangeReply where
   | failed (e : ReadFailure)
   deriving DecidableEq, Repr
 
-/-- §4, and the provider conformance check in coven-storage: a ranged read
+/-- §20.5, and the provider conformance check in coven-storage: a ranged read
 returns exactly the requested bytes with the object's complete size, or
 confirms absence, or refuses a range reaching past the object's end. -/
 def rangeReply (remote : Except ReadFailure (Option Object)) (start stop : Nat) : RangeReply :=
@@ -145,14 +145,14 @@ def rangeReply (remote : Except ReadFailure (Option Object)) (start stop : Nat) 
     else .pastEnd
 
 /-- A read's failure: no answer from storage, or a confirmed absence carrying
-the same verdict status gives (§16.1: the typed error distinguishes uploading
+the same verdict status gives (§17.4: the typed error distinguishes uploading
 from missing and names the uploader). -/
 inductive ReadError where
   | file (e : FileError)
   | unavailable (verdict : Status)
   deriving DecidableEq, Repr
 
-/-- §16.3: one ranged fetch of remote bytes, against the file's complete
+/-- §17.5: one ranged fetch of remote bytes, against the file's complete
 encrypted `size`. An object of any other size is damage, as status says; a
 range past the object's end means it is too short, the same damage. Chunk
 authentication and the content hash follow and are outside this function. -/
@@ -259,7 +259,7 @@ structure State where
   pending : List Reference
   writes : Nat
 
-/-- §16.1: a single transaction publishes all four columns and the queue. -/
+/-- §17.2: a single transaction publishes all four columns and the queue. -/
 def attach (s : State) (rowId : Nat) (q : QueuedFile) : State :=
   { s with rows := fun r => if r = rowId then some q.row else s.rows r
            queue := q :: s.queue
@@ -270,7 +270,7 @@ theorem attachment_atomic (s : State) (rowId : Nat) (q : QueuedFile) :
     q ∈ (attach s rowId q).queue := by
   simp [attach]
 
-/-- §16.5: called only after complete equal bytes have been confirmed.
+/-- §17.7: called only after complete equal bytes have been confirmed.
 Both local queue and pending record disappear in one transaction. -/
 def complete (s : State) (r : Reference) : State :=
   { s with queue := s.queue.filter (fun q => q.row.reference != r)
@@ -311,7 +311,7 @@ theorem unequal_bytes_keep_queue (s : State) (r : Reference) (expected : Bytes)
   simp [finish, compareOccupied, h]
 
 /-- An app write deleting a row: an ordinary recorded write. The upload queue
-keeps its own captured reference and source facts (§16.5), so nothing here
+keeps its own captured reference and source facts (§17.7), so nothing here
 touches the queue or pending records. -/
 def deleteRow (s : State) (rowId : Nat) : State :=
   { s with rows := fun r => if r = rowId then none else s.rows r
@@ -390,7 +390,7 @@ structure EncryptedChunk where
   plaintext : Bytes
   deriving DecidableEq, Repr
 
-/-- §16.5 models a collision-free checked chunk hash by equality with its
+/-- §17.7 models a collision-free checked chunk hash by equality with its
 ghost captured bytes. No changed chunk reaches encryption. -/
 def checkChunk (q : QueuedFile) (index : Nat) (source : Bytes) :
     Except SourceFailure EncryptedChunk :=

@@ -133,7 +133,7 @@ fn replacements_retain_change_tags_even_with_equal_sizes_and_dates() {
 }
 
 /// `NSDate` seconds rarely hold a millisecond exactly; the time lands on the
-/// millisecond tick CloudKit counts, never between ticks (§4).
+/// millisecond tick CloudKit counts, never between ticks (Appendix E.11).
 #[test]
 fn dates_land_on_whole_milliseconds() {
     use coven_format::value::StorageTime;

@@ -358,7 +358,7 @@ pub(crate) fn target_columns(table: &TableSchema, key: &SchemaForeignKey) -> Vec
 }
 
 /// Equal SQLite key values share these bytes: synced key columns compare text
-/// by bytes (§8.5), and the encoding gives equal numbers one form (D3).
+/// by bytes (§9.2), and the encoding gives equal numbers one form (D3).
 pub(crate) fn equality_key(values: &[Value]) -> Result<Vec<u8>, DbError> {
     encoded(coven_format::key::encode_key(values))
 }
@@ -404,7 +404,7 @@ pub(crate) fn row_key(table: &TableSchema, values: &AppValues) -> Result<Vec<u8>
 }
 
 /// A root row's audience: its column's `store` or circle id, in the one
-/// spelling every receiver accepts (§14).
+/// spelling every receiver accepts (§15).
 pub(crate) fn column_audience(
     table: &TableSchema,
     column: &str,

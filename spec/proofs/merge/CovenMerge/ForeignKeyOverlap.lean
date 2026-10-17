@@ -1,7 +1,7 @@
 import CovenMerge.ForeignKeyRecords
 import CovenMerge.ForeignKeyAuthoring
 
-/-! Actions whose columns another reference shares (§8.4, §8.8, D5).
+/-! Actions whose columns another reference shares (§9.1, §9.6, D5).
 
 A cascade into a compound key also writes the columns another reference of
 the child shares with it, so its recorded step names that reference's parent
@@ -144,7 +144,7 @@ namespace Stale
 
 /-! The track's album reference shares column 10 with its artist reference.
 If artist a's incarnation the track's setter named has ended before Ben's
-write, the track shows its artist NULL (ON DELETE SET NULL, §8.4), and the
+write, the track shows its artist NULL (ON DELETE SET NULL, §9.1), and the
 cascade from Ben's album key change records that NULL with no parent; if it
 is live, the cascade records a with its parent. No step of the write says
 which. -/

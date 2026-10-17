@@ -39,7 +39,7 @@ impl LiveS3 {
             .optional("COVEN_LIVE_S3_ENDPOINT")
             .map(|value| value.as_str().parse().expect("valid live endpoint"));
         // A service whose member keys reach a whole bucket keeps each store
-        // at the bucket's root (§4); the suite's stores share the test bucket.
+        // at the bucket's root (§20.7); the suite's stores share the test bucket.
         let prefix = match crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())
             .expect("valid live endpoint")
         {

@@ -57,7 +57,7 @@ impl DatabaseBuilder {
         self
     }
 
-    /// The source of fresh names for this store's owned file bytes (§16.6).
+    /// The source of fresh names for this store's owned file bytes (Appendix C.3).
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = Some(ids);
         self
@@ -215,7 +215,7 @@ impl DatabaseBuilder {
     }
 }
 
-/// The operation journal of a database a device reset discarded (§10), read
+/// The operation journal of a database a device reset discarded (§19.3), read
 /// in place and read-only on a blocking thread, never opened as a store. A
 /// copy that fails SQLite's integrity check is `DamagedDatabase`.
 pub async fn discarded_operations(

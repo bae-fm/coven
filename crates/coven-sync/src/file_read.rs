@@ -65,7 +65,7 @@ enum ChunkDestination {
 impl Files {
     /// Validate against the current row, then open its local source while
     /// this device still has it queued for upload, or else its cached or
-    /// stored bytes (§16.1).
+    /// stored bytes (§17.5).
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.inner.check_open()?;
         let local = self
@@ -264,7 +264,7 @@ impl UploadedFile {
     /// Open an uploaded file without a request when its header is cached.
     /// Otherwise the first fetch checks the header: one starting at chunk
     /// zero carries it in the same request, and any other first fetch reads
-    /// it alone (§16.3). An empty file's header is the whole object, so it
+    /// it alone (§17.5). An empty file's header is the whole object, so it
     /// is checked here.
     pub(crate) async fn open(owner: Arc<FilesInner>, file: FileRef) -> Result<Self, FileReadError> {
         let directory = owner.directory.clone();
@@ -344,7 +344,7 @@ impl UploadedFile {
         Ok(())
     }
     /// Fetch every chunk into the cache, authenticating each, then compare the
-    /// whole plaintext with the row's content hash (§16.3).
+    /// whole plaintext with the row's content hash (§17.5).
     pub(crate) async fn download(&self) -> Result<(), TransferError> {
         let mut index = 0;
         let mut hash = ContentHasher::new();
@@ -475,7 +475,7 @@ impl UploadedFile {
         let _guard = self.owner.cache.read().await;
         let cached = self.owner.database.cached(&self.file, first as i64).await?;
         // An unchecked header comes with an uncached chunk zero; any other
-        // first read checks it alone (§16.3).
+        // first read checks it alone (§17.5).
         let mut with_header = false;
         if !self.cached_header().await? {
             if first == 0 && cached.is_none() {
@@ -613,7 +613,7 @@ async fn fetch(
         .expect("storage lock poisoned")
         .clone()
         .ok_or(FileReadError::NoStorage)?;
-    // Rows may arrive before their files (§16.5): confirmed absence is judged
+    // Rows may arrive before their files (§17.4): confirmed absence is judged
     // with the uploader's evidence, never reported as a provider failure.
     let read = match storage
         .read_object(path, Some(ByteRange::new(start, end)?))
@@ -632,7 +632,7 @@ async fn fetch(
         }
         Err(error) => return Err(error.into()),
     };
-    // The reply describes the complete object (§4). Any size but the file's is
+    // The reply describes the complete object (§20.5). Any size but the file's is
     // damage, as file status says, even when the requested range is there.
     crate::files::file_status::complete(file, &read.metadata)?;
     let bytes = read.bytes;

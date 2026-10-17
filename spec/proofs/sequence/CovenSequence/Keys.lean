@@ -1,7 +1,7 @@
 import CovenSequence.Cutoff
 
 /-!
-# Audience keys in the sequence (§11)
+# Audience keys in the sequence (§12)
 
 This is the key projection of authenticated slots, not a second log. An
 introduction is projected only from an applied creation/rotation; every signed
@@ -12,7 +12,7 @@ holding bytes does not establish an introduction or authority.
 Natural numbers denote random key ids, exact sealing credentials and hash
 tokens. Hash equality checks the material committed under a named key.
 Distinct key identities stand for independently generated, non-aliasing
-secrets (§2's random-generation assumption). Encryption is idealized below by
+secrets (§3's random-generation assumption). Encryption is idealized below by
 observation with the matching secret, not implemented or proved
 cryptographically. No theorem promises delivery, custody availability,
 fairness, or secrecy against an unobserved in-flight copy.
@@ -261,7 +261,7 @@ def firstKey (h : History Aud Mem) (held : Custody Aud) (current : Current Aud M
 def metadataKey (h : History Aud Mem) (held : Custody Aud) (store : Aud) : Option (Introduction Aud) :=
   newest (h.introductions.filter fun i => decide (i.key.audience = store) && accepted h held i.key)
 
-/-- §14.6 permits a departed circle member to first send eligible originals
+/-- §15.8 permits a departed circle member to first send eligible originals
 authored before departure. Their authored membership is checked separately;
 this selection must not authorize newly authored content. -/
 def sendingKey (h : History Aud Mem) (held : Custody Aud) (current : Current Aud Mem)
@@ -514,7 +514,7 @@ theorem first_attempt_confidential (h : History Aud Mem) (held : Custody Aud) (c
     observe (exposed h current) i.key a = observe (exposed h current) i.key b := by
   simp [observe, first_not_exposed h held current writer audience i selected]
 
-/-- §3's confidentiality side of revocation: after catch-up excludes all
+/-- §2.5's confidentiality side of revocation: after catch-up excludes all
 credentials retained by the removed/stolen device, none of its routed keys
 can be the key of a new first attempt. -/
 theorem revocation (h : History Aud Mem) (held : Custody Aud) (current : Current Aud Mem)

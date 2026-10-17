@@ -8,7 +8,7 @@ inductive Clears where
   | byItself | byPerson | never
   deriving DecidableEq, Repr
 
-/-- Provider failures use the shared three classes (§16.5; Rust `storage_clears`). -/
+/-- Provider failures use the shared three classes (§17.7; Rust `storage_clears`). -/
 inductive Reason where
   | noStorage | network | disk | database
   | storage (clears : Clears)

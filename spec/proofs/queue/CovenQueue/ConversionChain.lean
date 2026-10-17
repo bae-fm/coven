@@ -1,6 +1,6 @@
 import CovenQueue.Conversion
 
-/-! §17.1: the conversions a received late old-schema write takes come from
+/-! §18.6: the conversions a received late old-schema write takes come from
 the app's migration list and the kept raise, never from the device's rows.
 
 Each step of the app's migration list is breaking or an addition. A step is
@@ -49,7 +49,7 @@ structure Step where
 /-- How a device classifies a step, given whether its own run changed rows. -/
 abbrev Classifier := Step → Bool → Bool
 
-/-- §17.1 as decided: the statements alone. -/
+/-- §18.1 as decided: the statements alone. -/
 def byStatements : Classifier := fun s _ => s.schemaBreaking || s.writesRows
 
 /-- The first declaration that disagrees with the runtime classification.

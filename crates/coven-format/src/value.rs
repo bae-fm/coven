@@ -93,7 +93,7 @@ impl Wire for Slot {
     }
 }
 
-/// A provider storage time: Unix seconds and a nanosecond fraction (D2, §4).
+/// A provider storage time: Unix seconds and a nanosecond fraction (D2, §20.5).
 /// It keeps every returned digit on every platform, unlike `SystemTime`,
 /// which counts 100 ns on Windows; ordering is time order.
 #[derive(

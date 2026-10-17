@@ -1,5 +1,5 @@
 //! Pin and eager-fill progress as queries over committed cache coverage and
-//! eager reservations (§16.4, E8). Nothing here counts bytes in flight.
+//! eager reservations (§17.6, E8). Nothing here counts bytes in flight.
 
 use crate::{
     file_queue, sqlite::DatabaseConnection, write_schema::WriteSchema, CovenResult, Database,
@@ -7,7 +7,7 @@ use crate::{
 };
 use coven_foundation::id_source::DeviceId;
 
-/// Verified cache coverage of requested files (§16.4, E8).
+/// Verified cache coverage of requested files (§17.6, E8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct PinProgress {
     /// Files whose bytes have all been kept.
@@ -21,7 +21,7 @@ pub struct PinProgress {
     pub bytes_total: u64,
 }
 
-/// Progress of files declared `CacheEager` (§16.4, E8). Failures appear only
+/// Progress of files declared `CacheEager` (§17.6, E8). Failures appear only
 /// in `pending()`; independent downloads keep progressing.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum EagerCacheFillStatus {
@@ -197,7 +197,7 @@ pub(crate) fn cancel_eager(db: &DatabaseConnection) -> Result<Vec<FileRef>, DbEr
 /// Retire the requested set together once every file in it has settled:
 /// downloaded, permanently refused or left to the app. Coverage cannot
 /// decide it, since a refusal or a later eviction never covers its file
-/// again (§16.4). A cancelled set stays until a new request replaces it.
+/// again (§17.6). A cancelled set stays until a new request replaces it.
 pub(crate) fn retire_eager(db: &DatabaseConnection) -> Result<(), DbError> {
     if cancelled(db)?
         || db.query_row(

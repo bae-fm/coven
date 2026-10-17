@@ -1,4 +1,4 @@
-//! Applications use Appendix E's declarations through the public crate root.
+//! Applications use api.md's declarations through the public crate root.
 
 use coven::{
     Clock, CryptoError, DbError, DeleteAccessKeyError, ObjectPath, PathError, S3Detection, S3Probe,

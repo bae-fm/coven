@@ -45,7 +45,7 @@ pub(crate) fn materialize(
     let mut dependencies = BTreeMap::<RowId, BTreeSet<RowId>>::new();
     // A returning child's parent is put first when it can be; foreign keys are
     // deferred, so this order yields to unique claims, which SQLite checks at
-    // once (§8.5).
+    // once (§9.2).
     let mut parents = BTreeMap::<RowId, BTreeSet<RowId>>::new();
     let mut old_claims = BTreeMap::new();
     for id in &actions {

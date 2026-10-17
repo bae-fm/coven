@@ -282,7 +282,7 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
     let file = f.uploaded("one", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
     // Opening reads nothing; a first read elsewhere than chunk zero fetches
-    // the header alone, then its chunk (§16.3).
+    // the header alone, then its chunk (§17.5).
     assert!(f.storage.ranges().await.is_empty());
     assert_eq!(
         stream.read_at(CHUNK as u64 * 4 + 5, 19).await.unwrap(),
@@ -732,7 +732,7 @@ async fn a_file_from_a_newer_format_requests_an_update() {
     f.close().await;
 }
 
-/// §16.3: a one-byte uncached file read from offset zero fetches its header
+/// §17.5: a one-byte uncached file read from offset zero fetches its header
 /// and its chunk in one request, caches both, and a later open reads nothing.
 #[tokio::test]
 async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {

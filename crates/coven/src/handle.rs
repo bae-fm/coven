@@ -21,7 +21,7 @@ use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;
 use std::sync::{Arc, Mutex};
 
-/// A shared handle to the open store and its running work (§20.2).
+/// A shared handle to the open store and its running work (Appendix F.4).
 /// Administrative changes catch up with storage before starting and report
 /// a refusal by the applied state as `SyncError::Rejected`, including its
 /// typed target.
@@ -93,7 +93,7 @@ impl CovenHandle {
             .setup_s3(storage, device_name, access_key_id, secret_access_key)
             .await
     }
-    /// Probe the S3 service at this location with this member's key (§4),
+    /// Probe the S3 service at this location with this member's key (§20.7),
     /// writing only fresh objects under the store's `.coven-check` prefix and
     /// deleting them, also on failure. Commits nothing.
     pub async fn detect_s3_settings(
@@ -145,7 +145,7 @@ impl CovenHandle {
     }
 
     /// The latest completed replacement stored in this installation, or None.
-    /// It survives reopening; unsent edits of the old copy were discarded (§10).
+    /// It survives reopening; unsent edits of the old copy were discarded (§19.3).
     pub async fn device_reset(&self) -> CovenResult<Option<DeviceReset>> {
         self.database.device_reset().await
     }
@@ -189,7 +189,7 @@ impl CovenHandle {
             .await
     }
     /// Publish removal and return once its slot commits. Provider work is
-    /// reported through pending(), independently of the removal call (§13).
+    /// reported through pending(), independently of the removal call (§14.2).
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
         self.storage
             .administer(coven_format::admin::StoreChange::RemoveMember { member: *member })
@@ -201,13 +201,13 @@ impl CovenHandle {
     }
     /// Explicitly confirms that this S3 key was deleted, including through the
     /// provider's console. Clears only this id's DeleteAccessKey record and
-    /// keeps the confirmation (§13).
+    /// keeps the confirmation (§14.3).
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
         Ok(self.database.clear_access_key(key.into()).await?)
     }
     /// Obtains the storage account's admin access from the source the person
     /// chose. It is held in memory for the operations it is passed to and is
-    /// never stored, logged or put in a slot or invite (§4).
+    /// never stored, logged or put in a slot or invite (§20.10).
     pub async fn admin_access(
         &self,
         source: AdminAccessSource,
@@ -215,13 +215,13 @@ impl CovenHandle {
         self.storage.admin_access(source).await
     }
     /// The bucket, store prefix and filled member policy for making a key in
-    /// the provider's console (§4).
+    /// the provider's console (§20.10).
     pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError> {
         self.storage.guided_access_key().await
     }
     /// Deletes the S3 key a pending DeleteAccessKey record names, with admin
     /// access, then reads the provider for that exact key. Only its absence
-    /// clears the record; every failure is returned and the record stays (§13).
+    /// clears the record; every failure is returned and the record stays (§14.3).
     pub async fn delete_access_key(
         &self,
         operation: OperationId,
@@ -229,7 +229,7 @@ impl CovenHandle {
     ) -> Result<(), SyncError> {
         self.storage.delete_access_key(operation, admin).await
     }
-    /// Replaces a member's S3 key with admin access (§13): makes the key and
+    /// Replaces a member's S3 key with admin access (§14.3): makes the key and
     /// checks it from the member's side, delivers it sealed to the member's
     /// devices, records it for them, then deletes the old key and reads it
     /// gone. The member's own key, or another member's as an admin. The
@@ -243,7 +243,7 @@ impl CovenHandle {
         self.storage.replace_member_access_key(*member, admin).await
     }
     /// Resumes work waiting with `AdminAccessRequired`, holding this admin
-    /// access for that operation only (§4).
+    /// access for that operation only (§20.10).
     pub async fn retry_with_admin_access(
         &self,
         operation: OperationId,
@@ -255,7 +255,7 @@ impl CovenHandle {
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError> {
         self.storage.reload_from_snapshot().await
     }
-    /// Reset the store audience from this device as an admin, then reload locally (§19.3).
+    /// Reset the store audience from this device as an admin, then reload locally (§19.4).
     pub async fn reset_store(&self) -> Result<(), SyncError> {
         self.storage.reset(Audience::Store).await
     }
@@ -356,14 +356,14 @@ impl CovenHandle {
             .subscribe_reconfigurable(initial_request, query)
     }
 
-    /// Every lost value and removed row, as `_coven_lost` holds them (§8).
+    /// Every lost value and removed row, as `_coven_lost` holds them (§8.2, §8.4).
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>> {
         self.database.lost_values().await
     }
 
     /// Dismisses lost values the app has dealt with, in a write, so every
     /// device drops them from `_coven_lost`; a removed row is deleted for
-    /// good, and never comes back (§8).
+    /// good, and never comes back (§8.4).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
         self.database.dismiss_lost_values(values).await
     }
@@ -387,7 +387,7 @@ impl CovenHandle {
         stream.read_at(0, stream.plaintext_size()).await
     }
 
-    /// Opens a file for reading ranges (§16.3). Opening checks the file
+    /// Opens a file for reading ranges (§17.5). Opening checks the file
     /// against its row once; keep the stream for as long as the file is read.
     /// Its shared store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {

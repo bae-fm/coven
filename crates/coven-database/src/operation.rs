@@ -1,4 +1,4 @@
-//! Durable operation records. Sync owns kinds and interprets their data (§18).
+//! Durable operation records. Sync owns kinds and interprets their data (§11).
 
 use crate::{sqlite::DatabaseConnection, DbError};
 
@@ -9,7 +9,7 @@ use crate::{sqlite::DatabaseConnection, DbError};
 pub struct OperationId(pub i64);
 
 /// An S3 key pending deletion: superseded, recorded for a removed member, or
-/// from an ended invite (§13, E9).
+/// from an ended invite (§14.3, E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AccessKeyToDelete {
     /// Public identifier; never the key's secret.
@@ -66,7 +66,7 @@ pub struct NewOperation {
     pub started_by: String,
     /// App writes are refused with `DbError::MemberKeysChanging` from its
     /// insertion until it finishes: a self-replacement of member keys
-    /// confirms its queue and installs its binding meanwhile (§10, §18).
+    /// confirms its queue and installs its binding meanwhile (§12.3, §11).
     pub pauses_writes: bool,
 }
 
@@ -96,7 +96,7 @@ pub(crate) fn insert(db: &DatabaseConnection, new: &NewOperation) -> Result<Oper
     Ok(id)
 }
 
-/// Refuse an app write while a self-replacement pauses writes (§10).
+/// Refuse an app write while a self-replacement pauses writes (§12.3).
 pub(crate) fn check_write_pause(db: &DatabaseConnection) -> Result<(), DbError> {
     let paused: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_write_pause WHERE paused=1)",
@@ -111,7 +111,7 @@ pub(crate) fn check_write_pause(db: &DatabaseConnection) -> Result<(), DbError> 
 
 /// Reserve the next number of this device's snapshot sequence. Every
 /// preparation takes a fresh one, so an abandoned attempt's path is never
-/// reused, and §10's identity check compares stored snapshots with the
+/// reused, and §19.3's identity check compares stored snapshots with the
 /// greatest number reserved, published or not.
 pub(crate) fn reserve_snapshot(db: &DatabaseConnection) -> Result<std::num::NonZeroU64, DbError> {
     let number = db.query_row(
@@ -168,7 +168,7 @@ fn record(row: &rusqlite::Row<'_>) -> rusqlite::Result<OperationRecord> {
 }
 
 /// Record each new obligation with its operation and pending notice, in the
-/// caller's transaction. Open and confirmed keys keep their state (§13).
+/// caller's transaction. Open and confirmed keys keep their state (§14.3).
 pub(crate) fn record_access_keys<P: crate::PendingValue>(
     db: &DatabaseConnection,
     deletions: &[AccessKeyDeletion],
@@ -193,7 +193,7 @@ pub(crate) fn record_access_keys<P: crate::PendingValue>(
 }
 
 /// Retire a key's deletion obligation and its notice, keeping the confirmation
-/// by id so no later entry, invite or retry records it again (§13).
+/// by id so no later entry, invite or retry records it again (§14.3).
 pub(crate) fn clear_access_key(db: &DatabaseConnection, key: &str) -> Result<(), DbError> {
     let open = db.query(
         "SELECT operation FROM _coven_access_keys WHERE access_key_id=?1 AND operation IS NOT NULL",

@@ -9,7 +9,7 @@ structure FrozenCell where
   setter : WriteId
   deriving DecidableEq, Repr
 
-/-- No live reference is retained in old-shape values (D7, §17.1). -/
+/-- No live reference is retained in old-shape values (D7, §18.7). -/
 structure FrozenRow where
   generation : Nat
   migration : WriteId

@@ -1,4 +1,4 @@
-//! Identity evidence from authenticated sequence slots (§10).
+//! Identity evidence from authenticated sequence slots (§19.3).
 
 use crate::SyncError;
 use coven_crypto::{ObjectDigest, ObjectHasher};
@@ -25,7 +25,7 @@ pub(crate) fn digest(bytes: &[u8]) -> (u64, ObjectDigest) {
 }
 
 /// Read the complete occupant of an immutable path. A failed read keeps the
-/// attempt pending; occupation alone proves nothing (§10).
+/// attempt pending; occupation alone proves nothing (§19.3).
 pub(crate) async fn stored_digest(
     storage: &dyn Storage,
     path: &ObjectPath,

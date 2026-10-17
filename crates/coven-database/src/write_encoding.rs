@@ -92,7 +92,7 @@ pub(crate) fn audience_text(audience: &Audience) -> String {
 
 /// The audience `text` names, spelled exactly as [`audience_text`] writes
 /// it: receivers compare a root's audience cell with that text, so any other
-/// spelling of the same circle id names no audience (§14).
+/// spelling of the same circle id names no audience (§15).
 pub(crate) fn canonical_audience(text: &str) -> Option<Audience> {
     Audience::column_result(ValueRef::Text(text.as_bytes())).ok()
 }

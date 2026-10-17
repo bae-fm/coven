@@ -261,7 +261,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         .unwrap();
     handle.unlock_store_key().await.unwrap();
     // A sync pass uploads the captured old prefix and marker, then the raise
-    // snapshot and entry publish (§18.1).
+    // snapshot and entry publish (§11.5).
     handle.start_sync().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
         while handle

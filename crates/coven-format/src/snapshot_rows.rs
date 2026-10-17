@@ -106,7 +106,7 @@ impl MergeRow {
     }
 }
 
-/// How a device interpreted one original row change (§8, §10, §17.1, §19.3).
+/// How a device interpreted one original row change (§9.5, §14.1, §18.6, §19.4).
 /// It decides whether the change survives as a source for later changes,
 /// independently of dismissible losses and consumed slots.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -115,20 +115,20 @@ pub enum ChangeVerdict {
     Unjudged,
     /// It entered the merge.
     Applied,
-    /// A breaking change to this schema version excluded its part (§17.1).
+    /// A breaking change to this schema version excluded its part (§18.6).
     Excluded(u32),
     /// An earlier removal or credential replacement cut off this write.
     Refused,
     /// It used data that does not survive: these sources, in role order.
     Dependent(Vec<crate::write_sources::ChangeId>),
-    /// A kept reset ignored its part: it had not read that entry (§19.3).
+    /// A kept reset ignored its part: it had not read that entry (§19.4).
     Ignored(Slot),
     /// It lacked permission: it directly changed another member's owned row,
-    /// or was not the exact foreign-key effect of authorized changes (§8.8).
+    /// or was not the exact foreign-key effect of authorized changes (§9.6).
     NotAuthorized(crate::loss::AuthorizationFailure),
     /// It entered the merge as the exact foreign-key effect of these changes
     /// in its own write: each action's root and intermediate causes, in
-    /// execution order (§8.8).
+    /// execution order (§9.6).
     Derived(Vec<crate::write_sources::ChangeId>),
 }
 impl ChangeVerdict {

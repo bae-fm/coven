@@ -35,7 +35,7 @@ pub(crate) fn carry(
             }
             db.internal_execute("DELETE FROM _coven_rows WHERE table_name=?1", [&table.name])?;
             crate::ownership::forget_table(db, &table.name)?;
-            // A dropped table's losses stay, frozen under its old names (§17.1).
+            // A dropped table's losses stay, frozen under its old names (§18.7).
             let losses = db.query(
                 "SELECT id FROM _coven_lost WHERE table_name=?1 AND frozen=0",
                 [&table.name],
@@ -61,7 +61,7 @@ pub(crate) fn carry(
 
 /// Lean `Migration.freezeDropped`: a loss whose table or column goes keeps its
 /// written values, setters, old names and original cause, without live
-/// parent links; it no longer follows merge or removal rules (§17.1, D7).
+/// parent links; it no longer follows merge or removal rules (§18.7, D7).
 pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbError> {
     for id in ids {
         let loss = db.query_row(
@@ -101,10 +101,10 @@ fn rename_table(db: &DatabaseConnection, old: &str, new: &str) -> Result<(), DbE
         "UPDATE _coven_rows SET table_name=?2 WHERE table_name=?1",
         params![old, new],
     )?;
-    // A renamed table's rows keep their original creations (§8.8).
+    // A renamed table's rows keep their original creations (§9.6).
     crate::ownership::rename(db, old, new)?;
     // Active losses follow their row: a hidden row keeps its values in its
-    // removal record (§17.1).
+    // removal record (§18.7).
     db.internal_execute(
         "UPDATE _coven_lost SET table_name=?2 WHERE table_name=?1 AND frozen=0",
         params![old, new],
@@ -173,7 +173,7 @@ fn columns(db: &DatabaseConnection, names: &MigrationMatch) -> Result<(), DbErro
         let Some((new_table, new_column)) = target else {
             db.internal_execute("DELETE FROM _coven_references WHERE column_id=?1", [id])?;
             db.internal_execute("DELETE FROM _coven_cells WHERE column_id=?1", [id])?;
-            // Its cell losses stay, frozen under the old name (§17.1).
+            // Its cell losses stay, frozen under the old name (§18.7).
             let losses = db.query(
                 "SELECT id FROM _coven_lost WHERE column_id=?1 AND frozen=0",
                 [id],

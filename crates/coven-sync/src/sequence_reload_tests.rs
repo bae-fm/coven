@@ -156,7 +156,7 @@ pub(super) async fn stored_floor(device: &Device) -> crate::floor_object::FloorO
 /// Ana's ordinary store snapshot covers `r`, and retention writes a floor
 /// whose first kept slot follows Ben's circle snapshot, deleting `c + 1`. Ben,
 /// applied through `r - 1`, would need those slots to apply the activation
-/// from its body, so he loads the store from the floor's snapshot (§15).
+/// from its body, so he loads the store from the floor's snapshot (§16.5).
 async fn activation_whose_suffix_is_below_the_floor(raise: bool) {
     let group = Group::new();
     let ana = group.device(1).await;
@@ -262,7 +262,7 @@ async fn a_reset_whose_suffix_is_below_the_floor_reads_no_deleted_slot() {
 /// Ana adds Ben to Gifts after retention deleted its earlier history and
 /// before she announces Gifts' first snapshot. The floor that follows names
 /// that later snapshot; Ben, below the addition, starts Gifts there and reaches
-/// the common target at its coverage (§15 "For a changed followed set").
+/// the common target at its coverage (§16.5, "Newly reading a circle").
 #[tokio::test]
 async fn a_newly_readable_circle_starts_from_the_floor_snapshot_announced_after_it() {
     let group = Group::new();
@@ -367,7 +367,7 @@ const PIN_2: &str = "00000000-0000-4000-8000-000000000002";
 
 /// Ben's ordinary store snapshot, announced after Ana's reset preparation,
 /// covers more than it; activating the stale preparation would be refused,
-/// so Ana's operation recaptures and activates a body covering Ben's (§15).
+/// so Ana's operation recaptures and activates a body covering Ben's (§16.3).
 #[tokio::test]
 async fn a_preparation_covered_by_a_later_announcement_is_recaptured() {
     let group = Group::new();
@@ -413,7 +413,7 @@ async fn a_preparation_covered_by_a_later_announcement_is_recaptured() {
 
 /// A breaking migration journals its raise with the schema; passes publish
 /// it for every audience it captured, and a member that migrated later
-/// takes the published raise instead of raising again (§17.1).
+/// takes the published raise instead of raising again (§18.3).
 #[tokio::test]
 async fn a_breaking_migration_raises_its_captured_audiences_through_passes() {
     let group = Group::new();
@@ -471,7 +471,7 @@ async fn a_breaking_migration_raises_its_captured_audiences_through_passes() {
 
 /// Two members migrate; Ana's raise lands while Ben's raise of the same
 /// version is under way. Ben's operation adopts the established version and
-/// claims nothing (§17.1).
+/// claims nothing (§18.3).
 #[tokio::test]
 async fn a_raise_whose_version_is_already_established_is_satisfied() {
     let group = Group::new();
@@ -519,7 +519,7 @@ async fn a_raise_whose_version_is_already_established_is_satisfied() {
     }
 }
 
-// §15 and E6: an explicit reload resumes its original selection and target.
+// §16.5 and E6: an explicit reload resumes its original selection and target.
 #[tokio::test]
 async fn a_reload_reopens_with_its_selected_snapshot_and_target() {
     for background in [false, true] {
@@ -602,7 +602,7 @@ async fn a_reload_reopens_with_its_selected_snapshot_and_target() {
     }
 }
 
-// §15: authenticating a later floor must not apply its membership to the fixed target.
+// §16.5: authenticating a later floor must not apply its membership to the fixed target.
 #[tokio::test]
 async fn a_reload_keeps_its_selected_audiences_when_a_later_floor_records_departure() {
     let group = Group::new();
@@ -667,7 +667,7 @@ async fn a_reload_keeps_its_selected_audiences_when_a_later_floor_records_depart
     ben.database().close().await.unwrap();
 }
 
-// §18: dropping the caller while a body is loading leaves the operation resumable.
+// §11: dropping the caller while a body is loading leaves the operation resumable.
 #[tokio::test]
 async fn cancelling_a_reload_keeps_its_selected_target_and_waiting_writes() {
     let group = Group::new();

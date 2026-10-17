@@ -1,4 +1,4 @@
-//! Key names that carry the store and the minting device (§4, §13).
+//! Key names that carry the store and the minting device (§20.10, §14.3).
 use super::*;
 
 fn store(n: u128) -> StoreId {

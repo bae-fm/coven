@@ -288,7 +288,7 @@ pub(crate) fn changes(
             }
         }
     }
-    // A copy into another audience keeps the row's original creation (§8.8).
+    // A copy into another audience keeps the row's original creation (§9.6).
     for (old, new) in &moved {
         let Some(change) = changes.get_mut(new) else {
             continue;

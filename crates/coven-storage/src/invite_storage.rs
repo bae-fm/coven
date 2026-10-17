@@ -4,7 +4,7 @@ use crate::{S3Credentials, StorageError, StorageFailure, StorageInvitation};
 use coven_crypto::SecretBytes;
 use serde::{Deserialize, Serialize};
 
-/// The storage payload of Appendix D13's invitation. Account credentials are
+/// The storage payload of format.md D13's invitation. Account credentials are
 /// never shared; S3 credentials are the key created specifically for this invite.
 #[derive(Clone, Serialize, Deserialize)]
 pub enum InviteStorage {

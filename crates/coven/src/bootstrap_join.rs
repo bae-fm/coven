@@ -1,5 +1,5 @@
 //! Joining with an invite: the fixed request, provider access and the wait for
-//! approval, before the shared new-device loading (§12.2).
+//! approval, before the shared new-device loading (§13.2).
 
 use super::*;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
@@ -73,7 +73,7 @@ impl Joining<'_> {
     /// Accept provider access, send the request once, and wait for its outcome.
     /// Returns false when the request was declined or expired.
     /// The connection refreshes its sign-in on rejection however long the
-    /// wait lasts (§4).
+    /// wait lasts (§20.2).
     pub(super) async fn admit(
         &mut self,
         sync: &SequenceSync,
@@ -95,7 +95,7 @@ impl Joining<'_> {
         let mut shown = BootstrapStatus::WaitingForApproval;
         status(shown.clone());
         // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay
-        // survives reopening and a provider cooldown holds them (§16.5).
+        // survives reopening and a provider cooldown holds them (§6.7).
         loop {
             sync.join_poll_due().await?;
             match sync.join_outcome(&self.identity).await? {

@@ -1,4 +1,4 @@
-//! Receipt of foreign-key effects and direct changes of owned rows (§8.8).
+//! Receipt of foreign-key effects and direct changes of owned rows (§9.6).
 //! Ana's, Ben's and Carol's devices declare every table `owner_only()`.
 //! Mallory is another device of Ben's member whose app declares no owner
 //! tables, so its writes carry whatever Ben's member did: what a receiver
@@ -203,7 +203,7 @@ async fn authorized_cascades_apply_and_record_their_causes() {
 
 /// A write changing Ben's track and Ana's review directly: the track change
 /// applies; the review change is Ana's to make, so it is a frozen loss
-/// naming her, and her review keeps its body (§8.8).
+/// naming her, and her review keeps its body (§9.6).
 #[tokio::test]
 async fn a_direct_change_of_another_members_row_is_refused_alone() {
     let devices = Devices::seeded().await;
@@ -358,7 +358,7 @@ async fn forged_action_payloads_are_direct_changes() {
             ChangeVerdict::Applied
         );
         // Without the action, Ana's label still points at Ben's old key, whose
-        // deletion takes it out under its NO ACTION delete rule (§8.4).
+        // deletion takes it out under its NO ACTION delete rule (§9.1).
         assert_eq!(count(&devices.ana, "labels"), 2);
         let lost = lost(&devices.ana, "labels", "l7").await;
         assert!(lost.iter().any(|value| matches!(
@@ -512,7 +512,7 @@ async fn coalesced_actions_keep_every_cause_and_lose_with_any() {
         ChangeVerdict::Dependent(causes(&forged, &[("tracks", "y")]))
     );
     // The note keeps both written references; x's applied delete shows its
-    // reference as NULL, as for any child whose parent went (§8.4).
+    // reference as NULL, as for any child whose parent went (§9.1).
     assert_eq!(
         text(
             &devices.ana,
@@ -716,7 +716,7 @@ async fn overlap_devices() -> Devices {
 /// that artist. Both are actions: Ben's device commits them and a receiver
 /// records them as derived. Moving the album to an artist the write never
 /// touches names that artist's incarnation in Ben's view, which no step
-/// carries: receivers refuse it, so Ben's device refuses it too (§8.8,
+/// carries: receivers refuse it, so Ben's device refuses it too (§9.6,
 /// B18 `Overlapping`).
 #[tokio::test]
 async fn actions_through_shared_columns_are_actions_when_the_write_names_their_parents() {

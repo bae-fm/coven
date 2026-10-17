@@ -34,7 +34,7 @@ def newest : List Key → Option Key
     | none => some k
     | some x => some (if newer k x then x else k)
 
-/-- §11 selects an unexposed key for current members. §6 and §14.6 explicitly
+/-- §12.2 selects an unexposed key for current members. §6.3 and §15.8 explicitly
 allow a departed circle member's untried pre-removal edits under a held key. -/
 def chooseKey (r : KeyRequest) : Option Key :=
   if r.currentMember then newest (r.candidates.filter (usable r))
@@ -95,7 +95,7 @@ theorem retired_never_selected (r : KeyRequest) (k : Key)
   simp only [usable, Bool.and_eq_true, Bool.not_eq_true', decide_eq_false_iff_not] at hu
   exact hu.1.2
 
-/-- Exposure knowledge survives replay reversals (§11). -/
+/-- Exposure knowledge survives replay reversals (§12.2). -/
 def rememberExposure (r : KeyRequest) (keys : List Nat) : KeyRequest :=
   { r with retiredKeys := r.retiredKeys ++ keys }
 

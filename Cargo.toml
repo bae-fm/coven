@@ -7,7 +7,7 @@ members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge
 edition = "2021"
 version = "0.1.0"
 
-# One version per external dependency for the whole workspace (§20.1). Members
+# One version per external dependency for the whole workspace (Appendix F.1). Members
 # name these with `workspace = true` and the features they need; they never
 # restate a version. The checker refuses a member dependency that does.
 [workspace.dependencies]
@@ -69,7 +69,7 @@ rustix = "1.1.5"
 
 [workspace.lints.rust]
 # Every `pub` not reachable from the crate's own root must be `pub(crate)` or
-# narrower (§20.3). `pub` silences `dead_code` unconditionally, so this is also
+# narrower (Appendix F.5). `pub` silences `dead_code` unconditionally, so this is also
 # what lets an unused internal item show up as dead.
 unreachable_pub = "deny"
 dead_code = "deny"
@@ -77,11 +77,11 @@ missing_docs = "deny"
 
 [workspace.lints.clippy]
 # Composition roots and owner constructors take their collaborators by name
-# (§20.2), so long argument lists are the intended shape there.
+# (Appendix F.3), so long argument lists are the intended shape there.
 too_many_arguments = "allow"
 new_without_default = "allow"
 # Error enums carry their causes inline so callers match them without
-# indirection (§20.3).
+# indirection (Appendix F.5).
 large_enum_variant = "allow"
 result_large_err = "allow"
 

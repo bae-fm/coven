@@ -1,4 +1,4 @@
-//! Waiting between automatic attempts (§3.1, §16.5, SP waiting).
+//! Waiting between automatic attempts (§6.7, §21.2).
 //!
 //! Ordinary delays double from one second to five minutes. A provider's
 //! `Retry-After` is a cooldown for every consumer of the store's connection:
@@ -21,7 +21,7 @@ pub fn retry_delay(attempt: u32) -> Duration {
     Duration::from_secs(seconds)
 }
 
-/// The wait a provider requested with a response (SP waiting).
+/// The wait a provider requested with a response (§6.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RetryAfter {
     /// Delay-seconds, or an HTTP-date measured against the response's own

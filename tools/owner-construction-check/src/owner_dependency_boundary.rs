@@ -1,4 +1,4 @@
-//! An owner never hands out what it holds (§20.2), by returning it or by a
+//! An owner never hands out what it holds (Appendix F.3), by returning it or by a
 //! public field; callers ask it to do the work. And a method never takes a raw
 //! capability, such as a database connection, as a parameter.
 //!

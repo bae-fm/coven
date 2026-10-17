@@ -104,14 +104,14 @@ pub enum LossCause {
     /// Every rule holding when the row was removed.
     Rules(BTreeSet<Rule>),
     /// A breaking schema change that excluded the write, or whose migration
-    /// write deleted a hidden row. Resets create no losses (§19.3).
+    /// write deleted a hidden row. Resets create no losses (§19.4).
     Excluded {
         /// The excluded write, including deletions with no retained cells.
         write: WriteId,
         /// The schema version reached by the breaking change.
         version: u32,
     },
-    /// An admitted row change that used data which does not survive (§8):
+    /// An admitted row change that used data which does not survive (§9.5):
     /// its generation source, a cell setter it replaced, a source its
     /// operations used, or a foreign-key cause in its own write.
     Dependency {
@@ -123,7 +123,7 @@ pub enum LossCause {
     },
     /// A member's row change without permission: a direct change of another
     /// member's owned row, or a foreign-key effect the receiver could not
-    /// derive exactly from an authorized direct change (§8.8).
+    /// derive exactly from an authorized direct change (§9.6).
     NotAuthorized {
         /// The write whose row change this is, even for an empty delete.
         write: WriteId,
@@ -132,7 +132,7 @@ pub enum LossCause {
     },
 }
 
-/// Why a row change lacked permission (§8.8).
+/// Why a row change lacked permission (§9.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum AuthorizationFailure {
     /// The row belongs to this member, and the change was not an exact

@@ -1,4 +1,4 @@
-//! A minted member key checked from the member's side before delivery (§4):
+//! A minted member key checked from the member's side before delivery (§20.10):
 //! it writes, reads, lists objects and multipart uploads, and deletes under
 //! the store's reserved
 //! `<store>/.coven-check/<run>/` prefix, reads bucket versioning as setup
@@ -99,7 +99,7 @@ impl S3Storage {
         self.list_page(self.settings.listing, namespace, None, None, None)
             .await?;
         // Setup reads the bucket's versioning with this key; only a profile
-        // certified with versioning enabled proceeds when it is refused (§4).
+        // certified with versioning enabled proceeds when it is refused (Appendix E.9).
         if let Err(error) = self.bucket_versioning().await {
             let StorageConfig::S3 {
                 endpoint, profile, ..
@@ -114,7 +114,7 @@ impl S3Storage {
             }
         }
         // A session lists the uploads at its name to abort one whose
-        // initiation reply was lost (§4).
+        // initiation reply was lost (Appendix E.10).
         self.client
             .list_multipart_uploads()
             .bucket(&self.bucket)

@@ -1,6 +1,6 @@
 //! Custody of an OAuth sign-in: coven's session custody until setup or
 //! bootstrap publishes the store, this installation's device custody after
-//! it (§4, E5, E10). A token is used until the provider rejects it; its one
+//! it (§20.2, E5, E10). A token is used until the provider rejects it; its one
 //! refresh is committed here before any connection uses it.
 
 use crate::{commit_credentials, SyncError};
@@ -101,7 +101,7 @@ impl DeviceCredentials {
 }
 
 /// A sign-in held for this session only, until setup or bootstrap publishes
-/// it to device custody; it then refreshes there (§4).
+/// it to device custody; it then refreshes there (§20.2).
 pub struct SessionSignIn {
     /// The tokens this session holds, or published; with the device custody
     /// holding them since publication.
@@ -189,7 +189,7 @@ impl TokenCustody for SessionSignIn {
             (_, Some(device)) => device.clone(),
         };
         // Publication moved the rejected tokens to device custody meanwhile:
-        // this one refresh is committed there instead (§4).
+        // this one refresh is committed there instead (§20.2).
         device.commit_refresh(rejected, refreshed)
     }
 }

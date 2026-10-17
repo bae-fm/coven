@@ -24,7 +24,7 @@ pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnec
                 region: "us-east-1".into(),
                 endpoint: Some(url.parse().unwrap()),
                 profile: None,
-                // An undetected endpoint's member keys reach the whole bucket (§4).
+                // An undetected endpoint's member keys reach the whole bucket (§20.7).
                 prefix: String::new(),
             },
             S3Credentials {
@@ -477,7 +477,7 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
             region: "us-east-1".into(),
             endpoint: Some(url.parse().unwrap()),
             profile: Some(crate::S3Profile::Custom(profile::PLAIN)),
-            // A custom profile's member keys reach the whole bucket (§4).
+            // A custom profile's member keys reach the whole bucket (§20.7).
             prefix: String::new(),
         },
         S3Credentials {
@@ -527,7 +527,7 @@ async fn errors_and_manual_key_instructions() {
             .unwrap_err();
         assert_eq!(error.failure(), failure);
         // The SDK retries nothing: a throttled or failed call is one request,
-        // and coven's shared backoff decides the next attempt (SP waiting).
+        // and coven's shared backoff decides the next attempt (§6.7).
         assert_eq!(state.lock().unwrap().requests.len(), before + 1, "{code}");
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
     }

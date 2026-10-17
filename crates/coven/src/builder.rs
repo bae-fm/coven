@@ -83,7 +83,7 @@ impl CovenBuilder {
         self.clock = clock;
         self
     }
-    /// Replace OS-random ids in tests (§20.2).
+    /// Replace OS-random ids in tests (Appendix F.2).
     #[cfg(any(test, feature = "test-utils"))]
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = ids;
@@ -180,8 +180,8 @@ impl CovenBuilder {
         self.open_graph(store).await?.open().await
     }
 
-    /// Replace this installation with a new device loaded from storage (§10,
-    /// §19.2), whenever the app chooses: after sync found another copy using
+    /// Replace this installation with a new device loaded from storage
+    /// (§19.3), whenever the app chooses: after sync found another copy using
     /// this device's id, a damaged database, or a device entry `open` found
     /// missing. Uses saved settings, credentials and member keys; nothing
     /// unsent is salvaged.
@@ -294,12 +294,12 @@ impl CovenBuilder {
             let mut builder = self;
             let settings = lock.settings()?;
             let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
-            // An interrupted reset_device resumes only through reset_device (§10).
+            // An interrupted reset_device resumes only through reset_device (§19.3).
             if directory.unfinished_device_reset()?.is_some() {
                 return Err(StoreLockError::BootstrapPending(settings.id).into());
             }
             // A copy restored without its non-backed-up custody id, or a
-            // keychain that no longer names it, changes nothing (§10).
+            // keychain that no longer names it, changes nothing (§19.3).
             if keychain.device_id()? != Some(settings.device_id) {
                 let identity = Self::make_identity(
                     std::mem::replace(

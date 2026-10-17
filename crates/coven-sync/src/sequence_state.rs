@@ -43,7 +43,7 @@ pub enum SyncStatus {
         /// The store's clock when the pass finished.
         finished_at: std::time::SystemTime,
     },
-    /// This slot invokes §6's stuck-device rule.
+    /// This slot invokes §5.4's stuck-device rule.
     Blocked {
         /// The slot that cannot apply.
         slot: coven_merge::Slot,

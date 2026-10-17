@@ -1,5 +1,5 @@
 //! The app's `reset_device` replaces this installation with a new device in
-//! its own directory (§10, §19.2).
+//! its own directory (§19.3).
 //!
 //! The durable record is that call's decision: once written, ordinary opens
 //! refuse the store and every retry uses the same fresh id. Turning the

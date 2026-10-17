@@ -1,5 +1,5 @@
 //! Upload waits: the queue's persisted retry delays, the category policy
-//! and the provider cooldown shared with every consumer (§16.5, E7).
+//! and the provider cooldown shared with every consumer (§6.7, E7).
 
 use super::*;
 use crate::{PendingReason, Prerequisite};
@@ -576,7 +576,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
 
 /// Bytes the provider holds are progress only once its confirmation is
 /// recorded in the session: a lost part reply leaves the committed progress
-/// where it was, and the retry resumes from the provider's state (§16.5, E7).
+/// where it was, and the retry resumes from the provider's state (§17.7, E7).
 #[tokio::test]
 async fn provider_bytes_are_progress_only_once_the_session_records_them() {
     let clock = Arc::new(FixedClock::new(

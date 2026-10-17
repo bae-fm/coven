@@ -1,7 +1,7 @@
 import CovenMerge.OwnerAdmission
 
 /-! How a receiver tells a write's foreign-key actions from its direct targets
-without any label (§8.8, D5). A write lists every SQL operation as a step and
+without any label (§9.6, D5). A write lists every SQL operation as a step and
 says nothing about what made it. The receiver calls a step a foreign-key
 action exactly when it equals the schema's consequence of an earlier step of
 the same write, given a reference the step's row holds at that moment: the

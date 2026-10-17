@@ -1,4 +1,4 @@
-//! Persisted retry waits through the owning database (§16.5).
+//! Persisted retry waits through the owning database (§6.7).
 
 use super::Database;
 use crate::{
@@ -84,7 +84,7 @@ impl Database {
         .await
     }
 
-    /// Every persisted wait, for arming on reopen (§16.5).
+    /// Every persisted wait, for arming on reopen (§6.7).
     pub async fn retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
         self.call(move |inner| {
             inner
@@ -96,7 +96,7 @@ impl Database {
         .await
     }
 
-    /// Every eager download's persisted wait (§16.5).
+    /// Every eager download's persisted wait (§6.7).
     pub async fn download_retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
         self.call(move |inner| {
             inner
@@ -138,7 +138,7 @@ impl Database {
     /// Record a failed download's pending reason and, in the same
     /// transaction, its next wait, or delete its wait when it no longer
     /// retries automatically. The wait belongs to that record: clearing the
-    /// record, for any reason, deletes it (§16.5).
+    /// record, for any reason, deletes it (§6.7).
     pub async fn record_pending_retry<P: crate::PendingValue>(
         &self,
         record: P,

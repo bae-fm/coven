@@ -12,7 +12,7 @@ import CovenMerge.StepLost
 * `merge_converges`: two causal orders of the same set of writes give the
   same state.
 * `snapshot_converges`: loading a snapshot and applying the writes after it
-  gives the same state as applying everything from scratch (§15).
+  gives the same state as applying everything from scratch (§16.5).
 -/
 
 namespace CovenMerge
@@ -157,7 +157,7 @@ theorem merge_converges (hV : Valid M) {L₁ L₂ : List W}
     L₁.foldl (step M) St.init = L₂.foldl (step M) (St.init : St W Row Col) :=
   isSpec_unique (run_isSpec hV h₁) (isSpec_congr (fun x => (hset x).symm) (run_isSpec hV h₂))
 
-/-- **Snapshots (§15).** Device A applied `L₀` and wrote a snapshot of its
+/-- **Snapshots (§16).** Device A applied `L₀` and wrote a snapshot of its
 state. Device B loads that snapshot and applies `L₁`, in an order where the
 snapshot's writes count as applied. Device C applied `L₂` from scratch. If B
 and C applied the same set of writes, they hold the same state. -/

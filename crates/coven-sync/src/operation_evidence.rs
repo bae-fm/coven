@@ -1,9 +1,9 @@
 //! What each waiting operation's wait names, and the evidence that it changed
-//! (§3.1, SP waiting; IO `WaitingEvidence`). A wait is due by evidence only
+//! (§6.7, §21.2; IO `WaitingEvidence`). A wait is due by evidence only
 //! when what it names changes: its rows commit outside the attempt that ended
 //! in it, the key it lacks arrives, or the storage connection it lacks changes.
 //! Nothing else wakes it, so a wait whose prerequisite never changes keeps
-//! §3.1's unchanged-wait rate (`unchanged_rate`).
+//! §21.2's unchanged-wait rate (`unchanged_rate`).
 
 use crate::{PendingReason, PendingRecord, Prerequisite, Retry, RetryWaits, SyncError};
 use coven_database::{

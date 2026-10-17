@@ -1,9 +1,9 @@
-//! Member keys through AWS-style IAM (§4): AWS IAM, Ceph RGW accounts and
+//! Member keys through AWS-style IAM (Appendix E.12): AWS IAM, Ceph RGW accounts and
 //! Versity Gateway's standalone IAM with an inline user policy, SeaweedFS's
 //! embedded IAM with a managed policy attached to the user, because its
 //! PutUserPolicy drops conditions.
 //!
-//! Each mint call's user name is fresh (§4), so minting deletes nothing.
+//! Each mint call's user name is fresh (§20.10), so minting deletes nothing.
 use super::minting::{member_policy, AdminRequest, KeyMinter, Pending};
 use super::*;
 use crate::providers::s3_admin_query::{elements, send, QueryService};
@@ -356,7 +356,7 @@ async fn mint(
     flavor: Flavor,
 ) -> Result<S3MemberKey, StorageError> {
     let iam = Iam::new(context, flavor)?;
-    // The user's name carries the store and the minting device (§13).
+    // The user's name carries the store and the minting device (§14.3).
     let user = scope.key_name.as_str();
     let store = scope.store.to_string();
     let mut create = vec![("UserName", user)];
@@ -505,7 +505,7 @@ async fn key_exists(
 }
 
 /// Every key held by a user whose name coven made for this store, and every
-/// such user holding none, with the minting device the name carries (§13).
+/// such user holding none, with the minting device the name carries (§14.3).
 async fn list(
     context: &AdminRequest,
     store: StoreId,

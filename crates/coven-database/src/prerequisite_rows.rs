@@ -1,5 +1,5 @@
-//! The rows whose commits can change what a waiting operation needs (§3.1,
-//! SP waiting; IO `WaitingEvidence`). A commit changing one of a wait's rows
+//! The rows whose commits can change what a waiting operation needs (§6.7,
+//! §21.2; IO `WaitingEvidence`). A commit changing one of a wait's rows
 //! is evidence for that wait; no other commit is. The rows are exactly what
 //! the waiting work reads, including advancement of the shared prefix.
 

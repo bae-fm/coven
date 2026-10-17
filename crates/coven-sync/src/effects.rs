@@ -1,4 +1,4 @@
-//! Administrative authority and effects at one preceding sequence prefix (§9).
+//! Administrative authority and effects at one preceding sequence prefix (§10).
 
 use crate::{EntryTarget, OperationRejection};
 use coven_database::{

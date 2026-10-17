@@ -77,7 +77,7 @@ pub fn identity() -> MemberIdentity {
 pub fn member() -> MemberPublicKeys {
     member_keys().public_keys()
 }
-/// Ana's replacement private pair, with fixed public test seeds 0x34 (§9).
+/// Ana's replacement private pair, with fixed public test seeds 0x34 (§10).
 pub fn replacement_keys() -> MemberKeys {
     keys_from_seed(0x34)
 }

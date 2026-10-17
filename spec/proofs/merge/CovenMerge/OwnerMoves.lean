@@ -2,7 +2,7 @@ import CovenMerge.OwnerAdmission
 import CovenMerge.OwnerProtection
 
 /-! Moving a row to another audience copies it, and every row its declared
-audience parent carries with it, into the destination (§8.8, §14.2). Each copy
+audience parent carries with it, into the destination (§9.6, §15.4). Each copy
 is a direct change of the mover's write, made by coven without SQL, so it has
 no step a receiver could classify as a foreign-key action. A copy keeps its
 original creation, so its owner is the original row's owner.

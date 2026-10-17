@@ -1,6 +1,6 @@
 import CovenQueue.Model
 
-/-! §3 and §6 receiver atomicity. Complete object/signature and causal checks
+/-! §2.2 and §6.2 receiver atomicity. Complete object/signature and causal checks
 precede `begin`; their result is the supplied write. Row updates within its
 transaction are separate events, so crashes can interrupt every update. -/
 namespace CovenQueue.AtomicReceive

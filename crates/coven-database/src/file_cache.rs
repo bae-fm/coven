@@ -1,5 +1,5 @@
 //! Cache publication and eviction obey the same bytes-before-row rule as
-//! attachments. Cache bytes are written and read with no writer held (§3.1).
+//! attachments. Cache bytes are written and read with no writer held (§21.2).
 
 use super::DatabaseAccess;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
@@ -74,7 +74,7 @@ fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbErro
 }
 /// The cached bytes of chunk `index`, or the header (-1). The entry is
 /// looked up, and its read recorded, under the writer; its bytes are read
-/// with no writer held (§3.1). An entry evicted between the lookup and
+/// with no writer held (§21.2). An entry evicted between the lookup and
 /// opening its bytes is no longer cached.
 pub(super) fn read<L>(
     access: &DatabaseAccess<L>,
@@ -121,9 +121,9 @@ pub(super) fn read<L>(
     Ok(Some(bytes))
 }
 /// Publish one verified range of `chunks` consecutive chunks from `first`,
-/// or the header (`first` = -1), as one file and one row (§16.6). Its name
+/// or the header (`first` = -1), as one file and one row (Appendix C.3). Its name
 /// is recorded as being written before any byte is written, the bytes are
-/// written with no writer held (§3.1), and the row replaces that record in
+/// written with no writer held (§21.2), and the row replaces that record in
 /// the transaction that publishes it. The shared cache-write lock, held
 /// throughout, keeps opening from taking the record as abandoned.
 pub(super) fn put<L>(
@@ -329,7 +329,7 @@ pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbE
         .unwrap_or(0))
 }
 /// Evict over-budget entries; returns their recorded names, whose bytes the
-/// caller removes once the writer is free (§16.6).
+/// caller removes once the writer is free (Appendix C.3).
 pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
     db.transaction(|db| {
         let budget = budget(db, namespace)?;
@@ -364,7 +364,7 @@ pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<Strin
     })
 }
 /// Drop a file's cache entries; returns their recorded names, whose bytes
-/// the caller removes once the writer is free (§16.6).
+/// the caller removes once the writer is free (Appendix C.3).
 pub(super) fn evict(db: &DatabaseConnection, file: &FileRef) -> Result<Vec<String>, DbError> {
     let id = id(file)?;
     db.transaction(|db| {
@@ -414,7 +414,7 @@ pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
         || crate::file_queue::pinned(db, file)?)
 }
 /// Carry a queued file's pin to the stored file as its upload completes: the
-/// pin then waits for a whole copy from storage like any pin (§16.4).
+/// pin then waits for a whole copy from storage like any pin (§17.6).
 pub(super) fn request_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     db.internal_execute(
         "INSERT INTO _coven_pin_requests(namespace,file_id,reference) VALUES(?1,?2,?3)
@@ -442,7 +442,7 @@ pub(super) fn settle_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), 
     Ok(())
 }
 /// Check a finished whole cache file's header and length on disk, and return
-/// its size. It reads only the reserved file, so no writer is held (§3.1).
+/// its size. It reads only the reserved file, so no writer is held (§21.2).
 pub(super) fn whole_size(
     directory: &StoreDir,
     file: &FileRef,

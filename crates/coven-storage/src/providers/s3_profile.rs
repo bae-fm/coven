@@ -4,7 +4,7 @@
 //! --ignored --nocapture`, with `COVEN_LIVE_S3_PROFILE=<name>` in the process
 //! environment to certify a named entry. The suite runs production detection, the adapter's
 //! live contracts, deletes its objects/uploads, and prints a Rust profile entry.
-//! An entry is certified only after every §4 check passes; a failing service's
+//! An entry is certified only after every §20 check passes; a failing service's
 //! entry stays uncertified. Commit either with the evidence. A location that
 //! names no profile at an uncatalogued endpoint gets detected settings at setup.
 use crate::{
@@ -55,7 +55,7 @@ impl S3CopyCondition {
         }
     }
 }
-/// The finest scope a member key can have on a service (§4).
+/// The finest scope a member key can have on a service (§20.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum S3KeyScope {
     /// A key reaches a whole bucket, so every store has its own bucket.
@@ -79,7 +79,7 @@ pub(super) struct CataloguedProfile {
     /// Separate evidence: a sequential or unversioned run cannot certify this.
     pub(super) versioned_buckets: Certification<'static>,
     /// How coven makes and deletes member keys with admin access; None where
-    /// the console makes them (§4).
+    /// the console makes them (§20.10).
     pub(super) minter: Option<&'static super::minting::KeyMinter>,
     pub(super) certification: Certification<'static>,
 }
@@ -172,7 +172,7 @@ const R2: CataloguedProfile = CataloguedProfile {
 // Detected by certification suite 2. RustFS refused occupied names on PUT and
 // multipart completion with HTTP 412 and dated objects at completion, so no
 // copy is needed. It returned no checksum, even when
-// asked; §4's complete-byte comparison applies instead. RustFS 1.0.1 passed
+// asked; §5.1's complete-byte comparison applies instead. RustFS 1.0.1 passed
 // suite 5 with versioning disabled and enabled: one conditional writer won
 // every race in both buckets.
 const RUSTFS: CataloguedProfile = CataloguedProfile {

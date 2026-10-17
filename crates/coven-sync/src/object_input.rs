@@ -98,7 +98,7 @@ impl ObjectInput {
         Ok(self.retained.local_bytes(self.object.size).await?)
     }
     /// Retain a whole-object GET's response under the observation it
-    /// describes: a next-number hit is the object itself (§6). Bytes this
+    /// describes: a next-number hit is the object itself (§6.1). Bytes this
     /// observation already retains are used first, and the response then
     /// supplies none of them.
     pub(crate) async fn receive_response(

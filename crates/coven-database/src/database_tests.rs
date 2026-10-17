@@ -867,7 +867,7 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
 }
 
 /// A self-replacement's operation pauses app writes from its insertion until
-/// it finishes; finishing it removes the pause in the same transaction (§10).
+/// it finishes; finishing it removes the pause in the same transaction (§12.3).
 #[tokio::test]
 async fn a_pausing_operation_refuses_app_writes_until_it_finishes() {
     let store = TestStore::new();

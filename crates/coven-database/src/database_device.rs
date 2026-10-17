@@ -1,4 +1,4 @@
-//! Device-reset notices and committed member lists (§10, E5).
+//! Device-reset notices and committed member lists (§19.3, E5).
 
 use super::{Database, DbError};
 use crate::{CovenResult, LiveQuery, NewOperation, PendingValue, ProviderChanges};

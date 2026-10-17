@@ -55,7 +55,7 @@ impl ByteRange {
     }
 }
 
-/// How a removed device's member cuts off its provider access (§13, E9).
+/// How a removed device's member cuts off its provider access (§14.2, E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ProviderSignOut {
     /// Remove the app's access, then sign in again on retained devices.
@@ -107,7 +107,7 @@ pub enum RetainedAccessReason {
     StoreOwner,
 }
 
-/// The operations coven needs from a provider (§4).
+/// The operations coven needs from a provider (§20.1).
 ///
 /// Implementations are capabilities assembled at composition roots. They own no
 /// database or key custody. Every mutation is awaited and failures reach the
@@ -143,13 +143,13 @@ pub trait Storage: Send + Sync {
     }
     /// Create a complete encrypted object, refusing an occupied path with
     /// [`StorageFailure::AlreadyExists`]. Occupation alone proves nothing: a
-    /// retry compares the occupant's complete bytes itself (§10).
+    /// retry compares the occupant's complete bytes itself (§5.1, §19.3).
     /// Bodies above [`Self::single_request_limit`] use a session for immutable
     /// paths; a writes slot can contain multiple writes in one object.
     /// A failed transfer aborts the session;
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
     /// Returns the object's metadata when the provider's one-request reply
-    /// carries it; otherwise exact status supplies it (SP step 5).
+    /// carries it; otherwise exact status supplies it (§21.1).
     async fn create(
         &self,
         path: &ObjectPath,
@@ -199,7 +199,7 @@ pub trait Storage: Send + Sync {
     async fn list(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError>;
 
     /// Delete an object. An already absent object succeeds, making operation retries safe.
-    /// Sync chooses the deleting device under §15; storage exposes no deletion-rights
+    /// Sync chooses the deleting device under §16.6; storage exposes no deletion-rights
     /// query. A provider refusal retains its cause, including a refused owned-object deletion.
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError>;
     /// Share the store using its owner's account, or tell an S3 admin to create a key.

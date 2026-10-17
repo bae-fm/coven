@@ -208,7 +208,7 @@ fn a_committed_app_write_survives_dropping_the_handle_and_uploads_after_reopen()
 
 const CRASH_WRITE: &str = "INSERT INTO notes VALUES('note','committed','store'); DELETE FROM files";
 // Deleting the row releases no bytes: its file's queued upload keeps its copy
-// (§16.5). Crashes while removing released bytes are covered where upload
+// (§17.7). Crashes while removing released bytes are covered where upload
 // completion releases them, in coven-database's file removal tests.
 // The write releases no bytes, so no cleanup transaction follows it: file
 // removal runs after the writer is free and only for committed records.
@@ -428,7 +428,7 @@ async fn growth_snapshots_let_retention_delete_covered_slots_and_superseded_snap
     async fn grow_and_retain(f: &Fixture, handle: &CovenHandle, body: String) {
         note(handle, body).await;
         f.sync(handle).await;
-        // Retention waits for the announcements' grace (§15).
+        // Retention waits for the announcements' grace (§16.6).
         f.clock.set(f.clock.now() + Duration::from_secs(8 * 86400));
         for _ in 0..3 {
             f.sync(handle).await;

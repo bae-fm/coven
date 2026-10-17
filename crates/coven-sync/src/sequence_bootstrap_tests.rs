@@ -162,7 +162,7 @@ async fn a_newcomer_without_a_copy_reports_the_key_it_lacks() {
 }
 
 /// Custody that lost its store keys after this installation applied history
-/// opens them again from this member's copies, then keeps them (§11).
+/// opens them again from this member's copies, then keeps them (§12.1).
 #[tokio::test]
 async fn an_installation_whose_custody_lost_its_keys_unlocks_from_its_copies() {
     let group = Group::new();

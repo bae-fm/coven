@@ -1,4 +1,4 @@
-//! Durable retry deadlines (§16.5, SP waiting).
+//! Durable retry deadlines (§6.7).
 //!
 //! Before an automatic retry waits, its owner persists the not-before
 //! wall-clock deadline `T` and the full wait `W` with the work: one row per
@@ -21,14 +21,14 @@ pub enum RetrySubject {
     Operation(OperationId),
     /// A queued file upload, by its queue id.
     Upload(i64),
-    /// An eager download of an uploaded file, by its fixed identity (§16.3).
+    /// An eager download of an uploaded file, by its fixed identity (§17.5).
     Download {
         /// The device that uploads the file.
         uploader: DeviceId,
         /// The file's identity.
         file: FileId,
     },
-    /// The joining device's polling for its request's outcome (§12.2).
+    /// The joining device's polling for its request's outcome (§13.2).
     Join,
     /// A failed sequence pass.
     Sync,
@@ -245,7 +245,7 @@ pub(crate) fn save(
 }
 
 /// Replace a download's wait, bound to the file's pending record: deleting
-/// that record deletes the wait (§16.5).
+/// that record deletes the wait (§6.7).
 pub(crate) fn save_download(
     db: &DatabaseConnection,
     subject: RetrySubject,

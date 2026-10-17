@@ -391,7 +391,7 @@ async fn local_admission_matches_the_model() {
 }
 
 /// Moving a row into another audience copies it, keeping its creation, so
-/// only its owner may move it (§8.8, §14.2).
+/// only its owner may move it (§9.6, §15.4).
 #[tokio::test]
 async fn moving_another_members_row_is_a_direct_change_of_it() {
     let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
@@ -456,7 +456,7 @@ async fn moving_another_members_row_is_a_direct_change_of_it() {
 /// Ben's album carries Ana's track through its audience foreign key. Moving
 /// the album copies the track too, a direct change of her row, so Ben cannot
 /// move it while her track is in it; his own album and track move together,
-/// each copy naming its original creation (§8.8, §14.2; Lean
+/// each copy naming its original creation (§9.6, §15.4; Lean
 /// `Moves.carried_foreign_refuses`).
 #[tokio::test]
 async fn moving_a_row_that_carries_another_members_row_is_refused() {
@@ -551,7 +551,7 @@ async fn moving_a_row_that_carries_another_members_row_is_refused() {
 /// Ben's tracks are in the store; Ana's reviews of them are in their circle.
 /// Deleting one track and changing the other's key reach her reviews
 /// through CASCADE and SET NULL: authorized actions, carried in the
-/// circle's part of Ben's write, which Ana's device applies (§8.8, §14).
+/// circle's part of Ben's write, which Ana's device applies (§9.6, §15).
 #[tokio::test]
 async fn foreign_key_actions_reach_rows_in_another_audience() {
     const DELETED: &str = "00000000-0000-4000-8000-0000000000d1";
@@ -635,7 +635,7 @@ async fn foreign_key_actions_reach_rows_in_another_audience() {
 /// owner may delete it by dismissing that loss. A migration that drops a
 /// column then freezes the removed row's values. The other member may dismiss
 /// the frozen loss: that changes no row and leaves the row's creation as it
-/// was (§8.8, §17.1, E4).
+/// was (§9.6, §18.7, E4).
 #[tokio::test]
 async fn dismissing_a_frozen_loss_rewrites_no_row() {
     const LABELS: &str =
@@ -724,7 +724,7 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
 
 /// Ben deletes his track. Its cascade deletes Ana's play, and the shared
 /// trigger that fires deletes her review before the cascade reaches it: the
-/// cascade's exact effect, which every device classifies as the action (§8.8,
+/// cascade's exact effect, which every device classifies as the action (§9.6,
 /// B18 `TriggerFirst`). Ben's device commits the write, and Ana's admits it
 /// with the same verdicts.
 #[tokio::test]

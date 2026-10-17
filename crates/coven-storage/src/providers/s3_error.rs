@@ -21,7 +21,7 @@ where
         .raw_response()
         .map(|response| response.status().as_u16());
     let failure = match &error {
-        // The device clock was refused after the retry its offset allowed (§4).
+        // The device clock was refused after the retry its offset allowed (§20.7).
         _ if super::clock::clock_refused(error.raw_response()) => StorageFailure::ClockSkew,
         SdkError::ConstructionFailure(_) => StorageFailure::InvalidConfiguration,
         SdkError::ResponseError(_) => StorageFailure::Protocol,

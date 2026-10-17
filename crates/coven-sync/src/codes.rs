@@ -27,7 +27,7 @@ pub struct CodeInfo {
     /// The shared store's name.
     pub store_name: String,
     /// The stable member id either kind of code fixes: the restoring
-    /// person's own, or the one the invite's admin chose (§12).
+    /// person's own, or the one the invite's admin chose (§13).
     pub member: MemberId,
     /// The storage provider.
     pub cloud_provider: CloudProvider,

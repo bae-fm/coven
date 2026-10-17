@@ -1,6 +1,6 @@
 //! A struct built only to be taken apart again, with every field public and
 //! no methods, is not used to pass collaborators; they are passed by name
-//! (§20.2).
+//! (Appendix F.3).
 //!
 //! A bundle type has two or more fields, all reachable outside its module, and
 //! one inherent method: an associated `new` returning it. Building one with

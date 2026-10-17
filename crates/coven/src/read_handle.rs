@@ -3,7 +3,7 @@
 use crate::*;
 use coven_database::DatabaseReadHandle;
 
-/// A handle that reads synced rows and maintains its local file cache (§5, E1).
+/// A handle that reads synced rows and maintains its local file cache (§4, E1).
 /// Its shared store lock prevents deletion until all its connections close.
 ///
 /// ```compile_fail
@@ -51,7 +51,7 @@ impl CovenReadHandle {
         let stream = self.open_file_stream(file).await?;
         stream.read_at(0, stream.plaintext_size()).await
     }
-    /// Opens a file for reading ranges (§16.3). Opening checks the file
+    /// Opens a file for reading ranges (§17.5). Opening checks the file
     /// against its row once; keep the stream for as long as the file is read.
     /// Its shared store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {

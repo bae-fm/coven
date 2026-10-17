@@ -41,7 +41,7 @@ pub(crate) fn run<'a>(
 ) -> Result<MigrationRun, DbError> {
     let mut before = Schema::read(database)?;
     let capture = RefCell::new(MigrationCapture::new(database, tables)?);
-    // Changing an existing table's owner declaration is breaking (§17.1): the
+    // Changing an existing table's owner declaration is breaking (§18.1): the
     // raise captures the state before any statement runs.
     let declared =
         crate::row_queries::owner_declaration_changed(database, &before, tables)?.is_some();
@@ -245,7 +245,7 @@ fn finish(
             database, &schema, &before, &visible, &store, &changed, &deleted,
         )?;
         // Rows removal rules hide independently become ordinary deletes at
-        // their generations (§17.1).
+        // their generations (§18.7).
         let selected = hidden.select();
         let mut deletes = Vec::new();
         for row in &selected {

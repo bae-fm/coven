@@ -19,11 +19,11 @@ theorem failed_scan_not_complete (e : Failure) : observeFiles .pending (.error e
 theorem completed_scan_retained (paths : List Path) (result : Except Failure (List Path)) :
     observeFiles (.complete paths) result = .complete paths := rfl
 
-/-! ### Restored access forgets the scan (§16.5)
+/-! ### Restored access forgets the scan (§17.8)
 
 A removed uploader can publish into its file folder only while its access is
 not confirmed taken away. Each retention lists the folder only after that
-cut-off, and the device's one owner (§20.2) runs a retention whole, so no
+cut-off, and the device's one owner (Appendix F.3) runs a retention whole, so no
 transaction recording access lands between a listing and its record. A
 transaction that records any of the access restored forgets the scan
 (`forgetOnRestore`); the rule it replaced forgot it only when a retention
@@ -40,7 +40,7 @@ structure Folder where
 def Folder.initial : Folder := ⟨false, [], .pending⟩
 
 inductive FolderEvent where
-  /-- The uploader publishes a file; a confirmed cut-off prevents it (§13). -/
+  /-- The uploader publishes a file; a confirmed cut-off prevents it (§14.2). -/
   | upload (file : Nat)
   /-- A transaction records some of the access restored. -/
   | restore
@@ -108,7 +108,7 @@ theorem step_sound (writer : Nat) (f : Folder) (e : FolderEvent) (sound : f.Soun
 
 /-- **A completed scan names every file the folder holds**, however restores
 and revocations interleave with retentions, because the transaction that
-records a restore forgets it (§16.5). -/
+records a restore forgets it (§17.8). -/
 theorem scan_names_every_file (writer : Nat) (events : List FolderEvent) :
     (Folder.run writer true events).Sound writer := by
   unfold Folder.run

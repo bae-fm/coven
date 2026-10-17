@@ -302,7 +302,7 @@ async fn a_bucket_scoped_key_must_not_list_other_buckets() {
 }
 
 /// A store's listing returns the account tokens whose name coven made for this
-/// store, with the minting device the name carries (§13).
+/// store, with the minting device the name carries (§14.3).
 #[tokio::test]
 async fn a_store_listing_returns_its_tokens_with_their_minting_device() {
     let (state, _server, admin) = fake().await;

@@ -97,7 +97,7 @@ impl Files {
     }
 }
 impl FilesInner {
-    /// SP, Files and waiting. One file's failure is that file's pending record; a failure
+    /// §6.7. One file's failure is that file's pending record; a failure
     /// no file subject holds, such as reading the work, fails the fill.
     pub(crate) async fn fill_eager(self: &Arc<Self>) -> Result<(), crate::SyncError> {
         let _fill = self.eager_fill.lock().await;
@@ -128,7 +128,7 @@ impl FilesInner {
         if pending.is_empty() {
             return Ok(());
         }
-        // The reservations are the fill's progress and cancellation (§16.4).
+        // The reservations are the fill's progress and cancellation (§17.6).
         self.database.request_eager(pending.clone()).await?;
         let mut cancel = self.cancel_eager.subscribe();
         for file in &pending {
@@ -153,7 +153,7 @@ impl FilesInner {
                 result = work => result,
             };
             // One file's failure is that file's pending record; the rest of
-            // the fill continues (§16.4, E8).
+            // the fill continues (§17.6, E8).
             let reason = match result {
                 Ok(()) => None,
                 Err(TransferError::Refused(refusal)) => {
@@ -177,7 +177,7 @@ impl FilesInner {
         Ok(())
     }
 
-    /// Pins carried from completed uploads (§16.4): each file is kept whole
+    /// Pins carried from completed uploads (§17.6): each file is kept whole
     /// from storage as an app's pin is. One file's failure is its own
     /// pending record; a pin whose row no longer names its file has nothing
     /// to keep.

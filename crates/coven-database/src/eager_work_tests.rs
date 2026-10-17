@@ -23,7 +23,7 @@ async fn work(db: &crate::Database) -> Vec<crate::FileRef> {
 
 /// Only a changed fixed file becomes eager work: an edit to another column
 /// requests nothing again, and work is noted in the transaction that
-/// changes the row (§16.4, SP, Files and waiting).
+/// changes the row (§17.6, §6.7).
 #[tokio::test]
 async fn only_changed_file_references_become_eager_work() {
     let ids = SequentialIds::new();

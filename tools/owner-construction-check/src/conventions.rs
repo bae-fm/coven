@@ -1,4 +1,4 @@
-//! The code conventions of §20.3 that read the syntax tree. They hold for every
+//! The code conventions of Appendix F.5 that read the syntax tree. They hold for every
 //! Rust file in the workspace, tools included.
 //!
 //! - `pub(in path)` and `super::super::` are not used: an item needed
@@ -18,10 +18,10 @@ use crate::macros::token_paths;
 use crate::syntax::RustFile;
 use crate::test_layout::find_test_layout_violations;
 
-/// The crate whose root re-exports the API (§20.3).
+/// The crate whose root re-exports the API (Appendix F.5).
 const API_CRATE_SOURCES: &str = "crates/coven/src/";
 
-/// The most lines a source file holds (§20.3). There is no exception list.
+/// The most lines a source file holds (Appendix F.5). There is no exception list.
 const MAX_FILE_LINES: usize = 1_000;
 
 #[derive(Debug, Clone, Copy, Ord, PartialOrd, Eq, PartialEq)]

@@ -100,7 +100,7 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
 }
 
 /// A longer object holds every range the read asks for, but the reply reports
-/// its complete size: the read is damage, as status says (§16.3).
+/// its complete size: the read is damage, as status says (§17.5).
 #[tokio::test]
 async fn a_longer_object_is_damage_to_status_and_reads() {
     let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;

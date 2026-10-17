@@ -143,7 +143,7 @@ fn dropbox_live_complete_publication_time() {
             );
             assert!(
                 finish_before <= object.stored_at && object.stored_at <= finish_after,
-                "§4 requires complete-publication time, not session initiation time"
+                "§20.5 requires complete-publication time, not session initiation time"
             );
             assert_eq!(
                 object.stored_at,
@@ -187,7 +187,7 @@ fn dropbox_live_unfinished_upload_is_invisible() {
 
 #[test]
 #[ignore = "requires COVEN_LIVE_DROPBOX_ENV and writes to Dropbox"]
-// Dropbox keeps rev and server_modified on an identical-byte overwrite, which §4
+// Dropbox keeps rev and server_modified on an identical-byte overwrite, which §20.1
 // permits: coven never replaces an object with identical bytes. The equal-byte
 // step is printed for the record and only different bytes must change revision.
 fn dropbox_live_replacement_revision() {
@@ -228,7 +228,7 @@ fn dropbox_live_replacement_revision() {
         }
         assert_ne!(
             native_revisions[1], native_revisions[2],
-            "§4: equal-size replacement must change revision"
+            "§20.1: equal-size replacement must change revision"
         );
         assert_ne!(adapter_revisions[1], adapter_revisions[2]);
     });

@@ -1,5 +1,5 @@
 //! A store on a service whose member keys reach a whole bucket has the bucket
-//! to itself (§4): any member's key reaches every object in it, so a second
+//! to itself (§20.7): any member's key reaches every object in it, so a second
 //! store there would be readable and deletable by the first store's members.
 //! Validation already requires the location's base prefix to be empty. The
 //! root listing admits only the store folder and the ownership marker.
@@ -74,7 +74,7 @@ impl S3Storage {
     /// marker, whose bytes setup checks after provider validation. The
     /// delimiter folds each store's objects into one entry, so a page never
     /// enumerates a store's contents. Objects stored within the listing
-    /// margin M may be absent (§4).
+    /// margin M may be absent (§20.7).
     async fn holds_only(&self, store: StoreId) -> Result<bool, StorageError> {
         if !self.prefix.is_empty() {
             return Err(StorageFailure::OwnBucketRequired {

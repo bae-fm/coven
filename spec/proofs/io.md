@@ -53,7 +53,7 @@ becomes runnable, not a proof of an operating system scheduler.
 ## Removed-device file scan
 
 [Retired.lean](io/CovenIO/Retired.lean) retains the file-folder model cited by
-§16.5. A complete listing after confirmed provider cut-off records every file
+§17.8. A complete listing after confirmed provider cut-off records every file
 in that folder. Failed listings leave the scan pending. The transaction that
 records restored access invalidates the completed scan.
 

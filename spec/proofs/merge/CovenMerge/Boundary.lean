@@ -1,7 +1,7 @@
 import CovenMerge.Accounting
 
-/-! The selected boundary snapshot and incoming parts, together (§8, §17.1,
-§19.3). Selection of the applied sequence boundary and schema conversion verdicts
+/-! The selected boundary snapshot and incoming parts, together (§8, §18.6,
+§19.4). Selection of the applied sequence boundary and schema conversion verdicts
 are inputs; the effects below do not depend on the device or arrival order. -/
 
 namespace CovenMerge

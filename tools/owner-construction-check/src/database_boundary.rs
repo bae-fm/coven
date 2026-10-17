@@ -1,10 +1,10 @@
-//! The SQLite capability (§20.2): nothing outside coven-database gets the
+//! The SQLite capability (Appendix F.2): nothing outside coven-database gets the
 //! SQLite connection; it asks the database owner to run a write.
 //!
 //! Outside the SQLite homes, naming a raw rusqlite handle — connection,
 //! session or transaction — is the violation, as is writing SQL that names one
 //! of coven's own tables. rusqlite's values, results and parameter macros are
-//! part of the API (Appendix E) and stay allowed.
+//! part of the API (api.md) and stay allowed.
 
 use crate::finding::Finding;
 use std::collections::BTreeSet;

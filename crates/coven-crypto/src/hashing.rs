@@ -1,9 +1,9 @@
-//! Content hashing (§16) and keyed original-write authorship (D11).
+//! Content hashing (§17) and keyed original-write authorship (D11).
 
 use hmac::Mac;
 use sha2::{Digest, Sha256};
 
-/// SHA-256 of a file's bytes, kept inside encrypted writes (§16).
+/// SHA-256 of a file's bytes, kept inside encrypted writes (§17).
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct ContentHash([u8; 32]);
 
@@ -22,7 +22,7 @@ impl ContentHash {
 pub struct ContentHasher(Sha256);
 
 impl ContentHasher {
-    /// Start hashing a file's bytes (§16).
+    /// Start hashing a file's bytes (§17).
     pub fn new() -> Self {
         Self(Sha256::new())
     }

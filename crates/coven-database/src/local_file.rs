@@ -136,7 +136,7 @@ impl LocalFileReader {
 /// Open the checked local source of a file this device still has queued for
 /// upload, after checking the reference against its row. Any other file,
 /// including one this device has finished uploading, returns `None`: its bytes
-/// are read from the cache or storage (§16.1).
+/// are read from the cache or storage (§17.1).
 pub(crate) fn open(
     db: &DatabaseConnection,
     schema: &WriteSchema,
@@ -153,7 +153,7 @@ pub(crate) fn open(
 
 /// Open a queued file's source from the facts its queue entry fixed at
 /// attachment, without consulting the row: a row retargeted, moved or deleted
-/// since cannot replace or release them (§16.5). The bytes must still match
+/// since cannot replace or release them (§17.7). The bytes must still match
 /// the captured size and content hash.
 fn open_queued(
     db: &DatabaseConnection,

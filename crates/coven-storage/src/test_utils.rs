@@ -147,7 +147,7 @@ struct HeldRequest {
 /// tokens, and replacement tokens govern subsequent calls on the same adapter.
 /// A token named by [`Self::reject_access_token`] is refused as a provider 401
 /// would be: the call refreshes once through its connection's custody and
-/// retries once, as the HTTP adapters do (§4).
+/// retries once, as the HTTP adapters do (§20.2).
 /// S3 console keys are outside this account-sharing model.
 /// Implements [`crate::providers::StorageConnector`] so application tests can
 /// exercise saved settings and credential custody through the `test-utils`
@@ -307,7 +307,7 @@ impl MemoryStorage {
     pub fn request_count(&self) -> u64 {
         *self.provider.requests.borrow()
     }
-    /// The account's key administration that admin access reaches (§4).
+    /// The account's key administration that admin access reaches (§20.10).
     pub fn key_admin(&self) -> MemoryKeyAdmin {
         self.provider.key_admin.clone()
     }
@@ -346,7 +346,7 @@ impl MemoryStorage {
         Ok(())
     }
     /// Store an object without a request or this connection's size limits,
-    /// as anyone holding the storage's credentials could (§2).
+    /// as anyone holding the storage's credentials could (§3).
     pub async fn plant(&self, path: &ObjectPath, bytes: &[u8]) -> Result<(), StorageError> {
         let stored_at = self.provider.storage_time()?;
         let mut state = self.provider.state.lock().await;
@@ -363,7 +363,7 @@ impl MemoryStorage {
         Ok(())
     }
     /// Refuse this access token from now on, on every connection, as a
-    /// provider 401 would (§4).
+    /// provider 401 would (§20.2).
     pub async fn reject_access_token(&self, token: &str) {
         self.provider
             .state

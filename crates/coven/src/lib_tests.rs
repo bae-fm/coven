@@ -297,7 +297,7 @@ impl Network {
         if running {
             self.pass(index).await;
         }
-        // S3 keys awaiting deletion stay until confirmed or deleted (§13).
+        // S3 keys awaiting deletion stay until confirmed or deleted (§14.3).
         let pending = handle.pending().await.unwrap();
         assert!(
             pending.iter().all(|record| !matches!(
@@ -441,7 +441,7 @@ impl Network {
     }
 }
 
-/// S3 keys a handle lists as pending deletion, by key id (§13).
+/// S3 keys a handle lists as pending deletion, by key id (§14.3).
 pub(crate) async fn access_keys(handle: &CovenHandle) -> Vec<AccessKeyToDelete> {
     let mut keys: Vec<_> = handle
         .pending()
@@ -776,7 +776,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
     network.close().await;
 }
 
-/// §6 and E5: a complete reset slot waits for its required reload body.
+/// §6.2 and E5: a complete reset slot waits for its required reload body.
 #[tokio::test]
 async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let network = Network::new(2).await;

@@ -1,4 +1,4 @@
-//! HKDF labels are the durable separation between cryptographic purposes (§11.1).
+//! HKDF labels are the durable separation between cryptographic purposes (Appendix D).
 
 use hkdf::Hkdf;
 use hmac::{Hmac, KeyInit, Mac};
@@ -29,7 +29,7 @@ pub(crate) fn mac(key: &[u8; 32]) -> Hmac<Sha256> {
     Hmac::<Sha256>::new_from_slice(key).expect("HMAC-SHA256 accepts a 32-byte key")
 }
 
-/// A purpose-derived key for objects, including an invite's join request (§11.1).
+/// A purpose-derived key for objects, including an invite's join request (Appendix D).
 pub struct EncryptionKey(pub(crate) Zeroizing<[u8; 32]>);
 
 impl EncryptionKey {
@@ -96,7 +96,7 @@ impl DerivedKeys {
         AuthorshipHasher::new(&self.authorship)
     }
 
-    /// Seal one chunk with this audience's derived encryption key (§11.1).
+    /// Seal one chunk with this audience's derived encryption key (Appendix D).
     /// See [`EncryptionKey::seal_object_chunk`] for section and index numbering.
     pub fn seal_object_chunk(
         &self,

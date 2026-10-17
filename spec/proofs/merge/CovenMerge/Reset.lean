@@ -1,7 +1,7 @@
 import CovenMerge.Snapshot
 
 /-! Reset eligibility is supplied by comparing the reset's slot with the
-write's read-through slot (§19.3). The shared snapshot merge handles covered
+write's read-through slot (§19.4). The shared snapshot merge handles covered
 inputs, generations and dependencies. -/
 
 namespace CovenMerge

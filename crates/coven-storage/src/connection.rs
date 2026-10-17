@@ -56,7 +56,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     }
 
     /// Record a requested cooldown before any consumer sees the response
-    /// that asked for it (SP waiting).
+    /// that asked for it (§6.7).
     pub(crate) async fn observed<T>(
         &self,
         result: Result<T, StorageError>,

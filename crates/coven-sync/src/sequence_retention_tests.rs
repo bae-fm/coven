@@ -193,7 +193,7 @@ async fn superseded_snapshots_wait_for_replacement_grace_and_floor_release() {
     ana.sync.database.close().await.unwrap();
 }
 
-// §15 and E6: failed superseded-body deletion remains journaled and retryable.
+// §16.6 and E6: failed superseded-body deletion remains journaled and retryable.
 #[tokio::test]
 async fn a_failed_snapshot_deletion_resumes_its_recorded_body_after_reopening() {
     let group = Group::new();

@@ -1,4 +1,4 @@
-//! Storage providers, encrypted objects at paths, and recorded upload sessions (§4).
+//! Storage providers, encrypted objects at paths, and recorded upload sessions (§20).
 //!
 //! This crate handles encrypted objects without performing coven's object
 //! cryptography. Provider adapters authenticate their native requests. The

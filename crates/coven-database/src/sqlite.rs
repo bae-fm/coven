@@ -301,7 +301,7 @@ impl DatabaseConnection {
                 true
             } else {
                 // Only additions: a raise still waiting to publish moves to
-                // this version, captured again at it (§17.1).
+                // this version, captured again at it (§18.5).
                 let device = device.expect("writable migration");
                 let moved = crate::raise_capture::raise_to(db, tables, device, supported)?;
                 if moved {
@@ -575,7 +575,7 @@ impl DatabaseConnection {
     }
 
     /// Run one migration step inside the open migration transaction. Which
-    /// tables its statements write is decided as they are prepared (§17.1).
+    /// tables its statements write is decided as they are prepared (§18.1).
     pub(crate) fn migrating<T>(
         &self,
         run: impl FnOnce() -> Result<T, DbError>,
@@ -648,7 +648,7 @@ impl DatabaseConnection {
         self.authorization.app_result(result)
     }
 
-    /// Serve an open handle once opening succeeds (§5).
+    /// Serve an open handle once opening succeeds (§4).
     pub(crate) fn serve(&mut self, handle: CommitObserver) {
         assert!(self.handle.is_none(), "a connection serves one handle");
         self.handle = Some(handle);
@@ -747,7 +747,7 @@ impl DatabaseConnection {
     /// ROLLBACK fails, this connection may still be inside the transaction: a
     /// writer would treat its uncommitted changes as committed and a reader
     /// would keep reading its old snapshot, so the handle refuses every later
-    /// call until the store is reopened (§5).
+    /// call until the store is reopened (§4).
     fn roll_back(&self) -> rusqlite::Result<()> {
         if self.connection.is_autocommit() {
             return Ok(());

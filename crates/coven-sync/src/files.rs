@@ -37,7 +37,7 @@ use tokio::sync::{watch, Notify};
 use coven_storage::TransferBudget;
 pub use coven_storage::TransferLimits;
 
-/// Owns storage, database file operations and the device's file area (§20.2).
+/// Owns storage, database file operations and the device's file area (Appendix F.3).
 /// Construction starts commit-driven uploads and eager caching; no sync loop or
 /// timer is created. Call `close` before closing the database.
 #[derive(Clone)]
@@ -120,7 +120,7 @@ impl Files {
         let wake = inner.wake.clone();
         let task = tokio::spawn(async move {
             // The earliest due upload or eager download retry, armed after
-            // each drain and fill (§16.5).
+            // each drain and fill (§6.7).
             let mut retry: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
                 Box::pin(std::future::pending());
             loop {
@@ -191,7 +191,7 @@ impl Files {
         let _cache = self.inner.cache.write().await;
     }
     /// Optionally retry recoverable uploads early. Provider cooldowns and
-    /// failures that never clear still hold (§16.5).
+    /// failures that never clear still hold (§17.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.inner.drain_uploads(true).await
     }
@@ -207,7 +207,7 @@ impl Files {
         Ok(())
     }
 
-    /// SP, Files and waiting: wake the upload worker, and fill the eager cache with new
+    /// §6.6, §6.7: wake the upload worker, and fill the eager cache with new
     /// references and the failed downloads whose retry waits are due.
     pub(crate) async fn sync_files(&self) -> Result<(), SyncError> {
         self.inner.wake.notify_one();
@@ -292,7 +292,7 @@ impl FilesInner {
     }
     pub(crate) async fn trim(&self, namespace: &str) {
         if let Err(error) = self.database.trim_cache(namespace).await {
-            // Space reclamation is ancillary to a successful read (§16.4),
+            // Space reclamation is ancillary to a successful read (§17.6),
             // but its failure must remain visible in the structured log.
             tracing::error!(?error, namespace, "cache eviction failed");
         }

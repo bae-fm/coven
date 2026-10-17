@@ -1,5 +1,5 @@
 //! Making and deleting members' S3 keys with the storage account's admin
-//! access (§4, §13). Admin credentials live in memory for one operation; they
+//! access (§20.10, §14.3). Admin credentials live in memory for one operation; they
 //! are never logged, stored, or put in the sequence or invites.
 
 use crate::{S3Credentials, StorageError};
@@ -10,7 +10,7 @@ use coven_foundation::id_source::{DeviceId, StoreId};
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// The storage account's admin access for one operation (§4). Its secrets are
+/// The storage account's admin access for one operation (§20.10). Its secrets are
 /// erased on drop and never formatted.
 #[derive(Clone)]
 pub enum AdminCredential {
@@ -45,13 +45,13 @@ impl fmt::Debug for AdminCredential {
 
 /// What a minted key may reach, and the principal names of one mint call.
 /// Each call draws fresh names, so two copies of a database never share a
-/// principal and minting deletes nothing (§4).
+/// principal and minting deletes nothing (§20.10).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MintScope {
     /// The store whose prefix the key reaches.
     pub store: StoreId,
     /// The device making the key. Its name carries the device so a key no
-    /// entry records is reclaimed only once that device is retired (§13).
+    /// entry records is reclaimed only once that device is retired (§14.3).
     pub device: DeviceId,
     /// The principal's short name, for services whose names are short (GCS
     /// service accounts, RustFS service accounts).
@@ -127,7 +127,7 @@ pub(crate) fn named_device(text: &str, store: StoreId) -> Option<DeviceId> {
 }
 
 /// A key the provider lists for a store, with the minting device its name
-/// carries (§13).
+/// carries (§14.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ListedKey {
     /// The key's public id.
@@ -140,7 +140,7 @@ pub struct ListedKey {
 
 /// An IAM user or GCS service account coven named for a store that holds no
 /// key: a mint call stopped between the two, and its rollback failed or never
-/// ran (§4, §13).
+/// ran (§20.10, §14.3).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UnkeyedPrincipal {
     /// The IAM user's name or the service account's email.
@@ -149,7 +149,7 @@ pub struct UnkeyedPrincipal {
     pub device: DeviceId,
 }
 
-/// What the provider holds under the names coven made for a store (§13).
+/// What the provider holds under the names coven made for a store (§14.3).
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct StoreListing {
     /// Every key, with its principal.
@@ -178,11 +178,11 @@ impl fmt::Debug for S3MemberKey {
 
 /// A service's key administration, holding admin access for one operation.
 /// Coven deletes a key and then reads whether that exact key remains; only
-/// both together clear the key's pending deletion (§13).
+/// both together clear the key's pending deletion (§14.3).
 #[async_trait]
 pub trait AccessKeyAdmin: Send + Sync {
     /// Create the principal and a key limited to the scope's store, under
-    /// names no earlier call used (§4). Nothing is deleted first.
+    /// names no earlier call used (§20.10). Nothing is deleted first.
     async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError>;
     /// Check the key from the member's side before it is delivered: a write,
     /// read, listing and deletion under the store's reserved check prefix,
@@ -212,7 +212,7 @@ pub trait AccessKeyAdmin: Send + Sync {
     /// Remove a listed principal of a retired device, with its policy or
     /// bindings. Refuse a principal that now holds a key or no longer matches
     /// the listed device; absence succeeds. The caller establishes retirement
-    /// from its applied state (§13).
+    /// from its applied state (§14.3).
     async fn remove_unkeyed(
         &self,
         store: StoreId,

@@ -1,6 +1,6 @@
 import CovenStorage.Objects
 
-/-! §4's fresh S3 provider principals. Minting for one database copy must not
+/-! §20.10's fresh S3 provider principals. Minting for one database copy must not
 delete a key made by another copy, including one already recorded by an
 applied set-access entry. This model contains minting, recording and database
 copy/loss; delivery, claim settlement, undo and key deletion are outside it. -/

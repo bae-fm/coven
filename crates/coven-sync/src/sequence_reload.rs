@@ -337,7 +337,7 @@ impl SequenceSync {
     /// reset's audience from its prepared body, a newly readable circle from
     /// its newest usable snapshot. Where that start's following slots lie
     /// below the floor's first kept slot, or a newly readable circle has
-    /// none, the floor's snapshot for that audience is the start (§15).
+    /// none, the floor's snapshot for that audience is the start (§16.5).
     pub(crate) async fn reload_activation(
         &self,
         session: &mut Session,

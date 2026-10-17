@@ -2,10 +2,10 @@
 
 use crate::Error;
 
-/// The format of an object or a persisted upload attempt (§17.2).
+/// The format of an object or a persisted upload attempt (Appendix C.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum FormatVersion {
-    /// Appendix D's first format.
+    /// format.md's first format.
     V1,
 }
 

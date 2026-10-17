@@ -2,7 +2,7 @@
 
 use coven_storage::StorageError;
 
-/// Why a deletion with admin access did not clear its notice (§13).
+/// Why a deletion with admin access did not clear its notice (§14.3).
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteAccessKeyError {
     /// The provider refused or failed the deletion.
@@ -66,9 +66,9 @@ impl crate::SequenceSync {
     }
 }
 
-/// The pending `DeleteAccessKey` work in a discarded operation journal (§10).
+/// The pending `DeleteAccessKey` work in a discarded operation journal (§19.3).
 /// A reset carries these into its replacement database; a key the old copy
-/// made but never recorded is reclaimed after its device's retirement (§13).
+/// made but never recorded is reclaimed after its device's retirement (§14.3).
 pub(crate) fn owed_access_key_deletions(
     records: &[coven_database::OperationRecord],
 ) -> Result<Vec<coven_database::AccessKeyDeletion>, crate::SyncError> {

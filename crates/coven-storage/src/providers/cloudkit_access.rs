@@ -107,7 +107,7 @@ fn holds_invitee(participants: &[Seen], added: &str, account: &str) -> bool {
 
 /// What removing `account`, whose user record name is `target` when known,
 /// does to a share: the participants to remove and the access that stays
-/// (§4). A public share still reaches the removed member while it stays
+/// (Appendix E.1). A public share still reaches the removed member while it stays
 /// public, which is reported; the participant is removed all the same, so
 /// turning public access off later cuts them off.
 fn revocation(

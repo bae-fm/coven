@@ -31,9 +31,9 @@ pub enum StoreFile {
 /// The two places coven keeps file bytes inside a store (E1).
 #[derive(Clone, Copy, Debug)]
 pub enum FileArea {
-    /// Coven's own copies of app-provided files (§16.1).
+    /// Coven's own copies of app-provided files (§17.1).
     AppProvided,
-    /// The cache of uploaded files and chunks (§16.4).
+    /// The cache of uploaded files and chunks (§17.6).
     Cache,
 }
 
@@ -148,7 +148,7 @@ impl StoreDir {
     }
 
     /// The recorded replacement of this installation, if one is unfinished
-    /// or its record outlived publication (§10).
+    /// or its record outlived publication (§19.3).
     pub fn device_reset(&self) -> Result<Option<super::DeviceReset>, super::FileError> {
         super::device_reset::read(&self.path)
     }
@@ -210,14 +210,14 @@ impl StoreDir {
 
     /// Hold while a cache range recorded as being written gets its bytes
     /// with no database writer held. Shared by such writes in every process;
-    /// `exclude_cache_writes` waits for all of them (§16.6).
+    /// `exclude_cache_writes` waits for all of them (Appendix C.3).
     pub fn lock_cache_write(&self) -> Result<CacheWriteLock, FileError> {
         lock::cache_writes(&self.path, true)
     }
 
     /// Wait until no cache range is being written in any process and keep new
     /// writes waiting, so a range still recorded as being written has no
-    /// live writer (§16.6).
+    /// live writer (Appendix C.3).
     pub fn exclude_cache_writes(&self) -> Result<CacheWriteLock, FileError> {
         lock::cache_writes(&self.path, false)
     }

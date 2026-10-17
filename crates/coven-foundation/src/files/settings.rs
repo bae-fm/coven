@@ -18,7 +18,7 @@ pub struct StoreSettings {
     pub id: StoreId,
     /// The store's name.
     pub name: String,
-    /// This install's identity; a restored copy receives a fresh one (§10).
+    /// This install's identity; a restored copy receives a fresh one (§19.3).
     pub device_id: DeviceId,
 }
 

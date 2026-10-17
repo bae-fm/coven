@@ -175,7 +175,7 @@ impl OneDriveStorage {
         Ok(())
     }
     /// Once [`Self::require_owner`] passed, the signed-in account holds the
-    /// store; inviting either of its addresses is refused (§12.2).
+    /// store; inviting either of its addresses is refused (§13.2).
     async fn refuse_owner(&self, account: &str) -> Result<(), StorageError> {
         let url = http::endpoint(&self.api, &["me"], &[("$select", "mail,userPrincipalName")])?;
         let value = http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;

@@ -1,5 +1,5 @@
 //! An original's record while its row is hidden, returns or is deleted
-//! (§14.7, §16.5, `RetentionSafety.LocalSources`).
+//! (§15.9, §17.7, `RetentionSafety.LocalSources`).
 use crate::file_write::tests::{complete_uploads, local_count, owned_paths};
 use crate::write::tests::records;
 use crate::{tests::TestStore, *};
@@ -153,7 +153,7 @@ async fn original_in_circle(
 /// Another device of the circle receives the row from `db`, deletes it, and
 /// `db` receives that delete as a write first published at `stored`: its own
 /// window verdict, which a later retirement could still change, decides it
-/// (§10). Returns the peer, whose store must outlive the call's use.
+/// (§14.1). Returns the peer, whose store must outlive the call's use.
 async fn receive_delete(
     db: &Database,
     ids: &SequentialIds,

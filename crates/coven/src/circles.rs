@@ -21,7 +21,7 @@ impl<'a> Circles<'a> {
     ) -> Self {
         Self { storage, database }
     }
-    /// Reset this circle to a snapshot of this device’s state (§19.3).
+    /// Reset this circle to a snapshot of this device’s state (§19.4).
     pub async fn reset(&self, circle: CircleId) -> Result<(), SyncError> {
         self.storage.reset(Audience::Circle(circle)).await
     }
@@ -40,7 +40,7 @@ impl<'a> Circles<'a> {
             .await
     }
     /// Claim the circle's deletion; from its slot the deleted-circle rule
-    /// hides the circle's rows (§14.7).
+    /// hides the circle's rows (§15.9).
     pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError> {
         self.storage
             .administer(StoreChange::DeleteCircle { circle })
@@ -55,7 +55,7 @@ impl<'a> Circles<'a> {
             })
             .await
     }
-    /// Remove a member; remaining members replace the exposed circle key (§14.6).
+    /// Remove a member; remaining members replace the exposed circle key (§15.8).
     pub async fn remove_member(
         &self,
         circle: CircleId,

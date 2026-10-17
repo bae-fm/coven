@@ -1,6 +1,6 @@
 import CovenMerge.Audience
 
-/-! Entry-named circle removal (§8, §14.7, API E4). The Boolean rule engine
+/-! Entry-named circle removal (§8.4, §15.9, API E4). The Boolean rule engine
 is shared with the Boolean differential runner; current inputs carry the applied entry. -/
 
 namespace CovenMerge
@@ -107,7 +107,7 @@ theorem row_returns (I : EntryInputs Row K) {r : Row}
     exact (named_rules_nonempty I hr h).elim
 
 /-- Any two surviving rows cannot have an ordered rival claim. In particular,
-two audiences with the same key show at most one row (§8, §14.2). -/
+two audiences with the same key show at most one row (§8.4, §15.4). -/
 theorem shown_not_rivals (I : Inputs Row K) {x y : Row} (hy : y ∈ I.rows)
     (hxShown : (view I).shown x = true) (hyShown : (view I).shown y = true) :
     rivalBefore I y x = false := by

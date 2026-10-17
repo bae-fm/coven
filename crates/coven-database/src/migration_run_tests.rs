@@ -424,7 +424,7 @@ async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() 
     };
     let db = store.builder(notes(), migrations()).open().await.unwrap();
     // The migration write deletes the hidden row at its generation and keeps
-    // its written values and setters in one frozen loss (§17.1).
+    // its written values and setters in one frozen loss (§18.7).
     let migrated = db.lost_values().await.unwrap();
     assert_eq!(migrated.len(), 1);
     assert_eq!(
@@ -785,7 +785,7 @@ async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_lo
         .unwrap();
     // The migration write read the concurrent title, so its delete
     // acknowledges that cell loss; the frozen whole-row loss keeps the old
-    // table and column names (§8.3, §17.1).
+    // table and column names (§8.3, §18.7).
     let check = |migrated: Vec<crate::LostValue>| {
         assert_eq!(migrated.len(), 1);
         assert_eq!(
@@ -842,7 +842,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     db.close().await.unwrap();
     let db = store.builder(notes(),vec![Migration::addition(1, "initial", INITIAL),Migration::breaking(2, "replace column", "DROP INDEX y_index; ALTER TABLE notes DROP COLUMN y; ALTER TABLE notes RENAME COLUMN x TO y", crate::OldWrites::Drop)]).open().await.unwrap();
     // The losing row is deleted at its generation; its frozen loss keeps the
-    // old x and y values with their setters (§17.1).
+    // old x and y values with their setters (§18.7).
     let migrated = db.lost_values().await.unwrap();
     assert_eq!(migrated.len(), 1);
     assert_eq!(

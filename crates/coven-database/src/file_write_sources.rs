@@ -16,7 +16,7 @@ impl FileWrite<'_> {
     /// original no row can name any more (`retain`). Historical generations
     /// cannot keep a record; audience moves keep a file's identity. The upload
     /// queue keeps its own source facts and owned copies independently of
-    /// rows (§16.5).
+    /// rows (§17.7).
     pub(crate) fn retain_rows(&self, keys: BTreeSet<AppKey>) -> Result<(), DbError> {
         for key in &keys {
             crate::file_protection::refresh(self.database, self.schema, key)?;

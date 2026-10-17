@@ -101,7 +101,7 @@ impl Keychain {
         }))
     }
 
-    /// List this service's synced restore codes without knowing any store ids (§12.1).
+    /// List this service's synced restore codes without knowing any store ids (§13.1).
     /// Apple searches the synced store by service; account prefixes are filtered
     /// locally because its keyring API supports exact matches only. Results are
     /// limited to the app's accessible keychain groups. Any read failure fails
@@ -166,7 +166,7 @@ impl StoreKeychain {
             .delete(EntryScope::DeviceOnly, &self.account(name))
     }
 
-    /// The installation id kept outside device backups (§10). Reading it does
+    /// The installation id kept outside device backups (§19.3). Reading it does
     /// not unlock any member or store key.
     pub fn device_id(&self) -> Result<Option<DeviceId>, KeyError> {
         self.read(DEVICE_ID_ENTRY)?
@@ -242,7 +242,7 @@ impl StoreKeychain {
         Ok(())
     }
 
-    /// Keep exactly the restore-code bytes in iCloud Keychain (§12.1).
+    /// Keep exactly the restore-code bytes in iCloud Keychain (§13.1).
     /// The caller supplies the encoded member keys, store identity and location;
     /// the crypto crate does not define the restore-code format.
     /// Native non-Apple keychains return `KeyError::Unsupported`.
@@ -254,14 +254,14 @@ impl StoreKeychain {
         )
     }
 
-    /// Read the synced restore code, or `None` if absent (§12.1).
+    /// Read the synced restore code, or `None` if absent (§13.1).
     /// Native non-Apple keychains return `KeyError::Unsupported`.
     pub fn synced_restore_code(&self) -> Result<Option<SecretBytes>, KeyError> {
         self.keychain
             .read(EntryScope::Synced, &self.account(RESTORE_CODE_ENTRY))
     }
 
-    /// Delete the synced restore code; succeeds if absent (§12.1).
+    /// Delete the synced restore code; succeeds if absent (§13.1).
     /// Native non-Apple keychains return `KeyError::Unsupported`.
     pub fn delete_synced_restore_code(&self) -> Result<(), KeyError> {
         self.keychain

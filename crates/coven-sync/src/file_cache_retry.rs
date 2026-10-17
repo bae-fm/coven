@@ -155,7 +155,7 @@ impl FilesInner {
     }
 
     /// Persist the failed download's record with its next wait before it
-    /// waits (§16.5): recoverable conditions retry by time or a new connection;
+    /// waits (§17.7): recoverable conditions retry by time or a new connection;
     /// permanent failures and updates keep no timer. A wait that
     /// cannot be chosen or persisted holds the download until the app acts,
     /// and fails the fill.
@@ -197,7 +197,7 @@ impl FilesInner {
         Ok(())
     }
 
-    /// The first unmet condition a failed read of `file` leaves (§16.3).
+    /// The first unmet condition a failed read of `file` leaves (§17.5).
     pub(super) fn read_pending(&self, file: &FileRef, error: &FileReadError) -> PendingReason {
         match error {
             FileReadError::NoStorage => PendingReason::NoStorage,

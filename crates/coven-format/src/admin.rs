@@ -7,7 +7,7 @@ pub use coven_crypto::MemberPublicKeys;
 use coven_foundation::id_source::{CircleId, DeviceId, KeyId, MemberId, StoreId};
 use coven_merge::Audience;
 
-/// A member's role in the store (§9).
+/// A member's role in the store (§10).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum MemberRole {
     /// Can add and remove members and change roles.
@@ -32,7 +32,7 @@ impl Wire for MemberRole {
     }
 }
 
-/// A snapshot's identity without a storage path (§15).
+/// A snapshot's identity without a storage path (§16.2).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SnapshotId {
     /// The rows the snapshot covers.
@@ -44,7 +44,7 @@ pub struct SnapshotId {
 }
 wire_struct!(SnapshotId, audience, device, number);
 
-/// Every admin operation listed in §9, including store creation.
+/// Every admin operation listed in §10, including store creation.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum StoreChange {
     /// Create a store, name its first admin and register the writing device.
@@ -77,7 +77,7 @@ pub enum StoreChange {
         /// The initial role.
         role: MemberRole,
     },
-    /// Record a member's current storage access, used by a later removal (§9):
+    /// Record a member's current storage access, used by a later removal (§10):
     /// the author's own, or an admin's replacement S3 key for another member.
     SetAccess {
         /// The member whose access this records.
@@ -85,7 +85,7 @@ pub enum StoreChange {
         /// The provider account, or the S3 key id and its principal; no credentials.
         access: crate::MemberAccess,
     },
-    /// Remove a member and delete circles left empty (§13).
+    /// Remove a member and delete circles left empty (§14.1).
     RemoveMember {
         /// The removed member.
         member: MemberId,
@@ -98,11 +98,11 @@ pub enum StoreChange {
         role: MemberRole,
     },
     /// Register the writing install for the entry's author: an install
-    /// registers only itself (§10).
+    /// registers only itself (§10.2).
     AddDevice {
         /// The device's name.
         name: String,
-        /// The older install of the same member being replaced, if any (§10).
+        /// The older install of the same member being replaced, if any (§19.3).
         /// Must differ from the writing device.
         replaces: Option<DeviceId>,
     },
@@ -129,26 +129,26 @@ pub enum StoreChange {
         /// Its new name.
         name: String,
     },
-    /// Delete a circle (§14.7).
+    /// Delete a circle (§15.9).
     DeleteCircle {
         /// The deleted circle.
         circle: CircleId,
     },
-    /// Add a store member to a circle (§14.3).
+    /// Add a store member to a circle (§15.5).
     AddCircleMember {
         /// The circle being joined.
         circle: CircleId,
         /// The added member.
         member: MemberId,
     },
-    /// Remove a circle member, deleting the circle if left empty (§14.6).
+    /// Remove a circle member, deleting the circle if left empty (§15.8).
     RemoveCircleMember {
         /// The circle being left.
         circle: CircleId,
         /// The removed member.
         member: MemberId,
     },
-    /// Introduce a key without changing audience membership (§11).
+    /// Introduce a key without changing audience membership (§12.1).
     RotateKey {
         /// The audience whose member authored the rotation.
         audience: Audience,
@@ -157,20 +157,20 @@ pub enum StoreChange {
         /// SHA-256 of the exact 32 key bytes.
         key_hash: [u8; 32],
     },
-    /// Raise an audience's app schema version with its replacement snapshot (§17.1).
+    /// Raise an audience's app schema version with its replacement snapshot (§18.3).
     RaiseSchema {
         /// The new schema version.
         version: u32,
         /// The earlier announcement of the prepared snapshot.
         announcement: Slot,
     },
-    /// Reset the store's or a circle's rows to a snapshot (§19.3).
+    /// Reset the store's or a circle's rows to a snapshot (§19.4).
     Reset {
         /// The earlier announcement of the prepared reset snapshot.
         announcement: Slot,
     },
     /// Replace an active member's public pair, keeping their id, role, access,
-    /// circles and devices (§9). It carries no audience keys.
+    /// circles and devices (§10). It carries no audience keys.
     ReplaceMemberKeys {
         /// The member whose keys change.
         member: MemberId,

@@ -7,7 +7,7 @@ use coven_merge::Audience;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage, StorageFailure};
 use serde_json::{json, Value};
 
-// §15: retention can remove the selected snapshot or its required suffix.
+// §16.5: retention can remove the selected snapshot or its required suffix.
 #[tokio::test]
 async fn a_retained_reload_uses_a_newer_floor_when_its_suffix_is_deleted() {
     for (older_circle_coverage, departure) in [(false, false), (true, false), (true, true)] {
@@ -144,7 +144,7 @@ async fn retained_reload(
     ben.sync.reload_from_snapshot().await.unwrap();
     assert!(ben.database().applied_slot().await.unwrap() >= floor.header.first.0 - 1);
     if let Some(departed_at) = departed_at {
-        // §15: the chosen followed set and installed prefix agree.
+        // §16.5: the chosen followed set and installed prefix agree.
         assert!(ben.database().applied_slot().await.unwrap() >= departed_at);
         assert!(!ben
             .database()

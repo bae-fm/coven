@@ -2,7 +2,7 @@ use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
 use serde::{Deserialize, Serialize};
 
-/// This member's S3 credentials, made by an admin in the provider console (§4).
+/// This member's S3 credentials, made by an admin in the provider console (§20.10).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3Credentials {
@@ -47,7 +47,7 @@ pub struct OAuthTokens {
     /// The token authorizing requests.
     pub access_token: SecretText,
     /// The token used to obtain a new access token, when issued. The access
-    /// token has no local expiry: it is used until the provider rejects it (§4).
+    /// token has no local expiry: it is used until the provider rejects it (§20.2).
     pub refresh_token: Option<SecretText>,
 }
 

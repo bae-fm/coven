@@ -28,7 +28,7 @@ pub(crate) struct FloorObject {
 }
 
 /// The floor's sealing key and the key copies in its clear prefix routed to
-/// this member, read before any store key is held (§12). The keys stay
+/// this member, read before any store key is held (§13). The keys stay
 /// tentative until the floor and its history authenticate.
 pub(crate) async fn routed_keys(
     database: &Database,

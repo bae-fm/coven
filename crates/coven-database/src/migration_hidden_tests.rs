@@ -1,4 +1,4 @@
-//! Rust / Lean `Migration.freezeDropped` (§17.1, D7): a migration that drops
+//! Rust / Lean `Migration.freezeDropped` (§18.7, D7): a migration that drops
 //! tables and columns, compared over generated losses with the merge model's
 //! frozen records and the live records the dropped schema leaves. Hidden
 //! rows are already frozen by an earlier breaking migration; schema drops

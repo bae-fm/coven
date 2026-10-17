@@ -1,4 +1,4 @@
-//! The fixed file identity carried by a synced file row (Appendix D12).
+//! The fixed file identity carried by a synced file row (format.md D12).
 
 use crate::{error::Rule, Error};
 use coven_crypto::{FileKey, SecretText};

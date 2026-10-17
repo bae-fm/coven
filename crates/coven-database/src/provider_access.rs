@@ -1,4 +1,4 @@
-//! Account intentions, confirmed provider state and their durable request (§13).
+//! Account intentions, confirmed provider state and their durable request (§14.2).
 
 use crate::{sqlite::DatabaseConnection, DbError, NewOperation, OperationId, PendingValue};
 use coven_crypto::SecretBytes;

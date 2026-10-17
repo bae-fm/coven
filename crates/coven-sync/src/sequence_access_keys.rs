@@ -1,4 +1,4 @@
-//! Replacing a member's S3 key from the device holding admin access (§13):
+//! Replacing a member's S3 key from the device holding admin access (§14.3):
 //! make the key and check it from the member's side, deliver it sealed to the
 //! member, record it for them, then delete the old key and read that it is
 //! gone. Applying the record makes the old key pending deletion in the same
@@ -69,7 +69,7 @@ impl ReplaceKeyWork {
 impl SequenceSync {
     /// Replace `member`'s S3 key with admin access: this member's own, or
     /// another member's as an admin; any other caller is refused before admin
-    /// access is used (§13, E9).
+    /// access is used (§14.3, E9).
     pub async fn replace_member_access_key(
         self: &Arc<Self>,
         member: MemberId,
@@ -132,7 +132,7 @@ impl SequenceSync {
         self.finish_key_replacement(id, result, &ring).await
     }
 
-    /// Record a key made in the provider's console as this member's own (§13).
+    /// Record a key made in the provider's console as this member's own (§14.3).
     pub async fn record_access_key(
         self: &Arc<Self>,
         access_key_id: String,
@@ -153,7 +153,7 @@ impl SequenceSync {
     }
 
     /// Resume work waiting with `AdminAccessRequired`, holding this admin
-    /// access for that operation only (§4).
+    /// access for that operation only (§20.10).
     pub async fn retry_with_admin_access(
         self: &Arc<Self>,
         id: OperationId,
@@ -296,7 +296,7 @@ impl SequenceSync {
                 }
                 Step::Delivering { key, delivery } => {
                     // A lost reply may have stored these bytes; the attempt id
-                    // is this device's own, so other bytes fail the attempt (§10).
+                    // is this device's own, so other bytes fail the attempt (§19.3).
                     match self.storage.create(&path, &delivery).await {
                         Ok(_) => (),
                         Err(error) if error.failure() == StorageFailure::AlreadyExists => {
@@ -424,7 +424,7 @@ impl SequenceSync {
 
     /// The key an admin delivered to this member that the applied history
     /// records as their current access, signed by the member who recorded
-    /// it (§13). A device already holding the recorded key (`held`) reads
+    /// it (§14.3). A device already holding the recorded key (`held`) reads
     /// nothing.
     pub async fn delivered_access_key(
         &self,
@@ -472,7 +472,7 @@ impl SequenceSync {
                 .iter()
                 .filter(|record| record.author == routing.author)
             {
-                // §13, E9: later replacements do not revoke this entry's signature.
+                // §14.3, E9: later replacements do not revoke this entry's signature.
                 let Ok(key) =
                     access_key_delivery::open(&me, &record.signing, object.path.as_str(), &bytes)
                 else {
@@ -489,7 +489,7 @@ impl SequenceSync {
 
 impl SequenceSync {
     /// Journal each mint's exact name before sending it. An interrupted call
-    /// is undone by its recorded name before a new call takes fresh names (§18).
+    /// is undone by its recorded name before a new call takes fresh names (§11).
     pub(crate) async fn mint_checked(
         &self,
         admin: &dyn AccessKeyAdmin,
@@ -537,7 +537,7 @@ impl SequenceSync {
 
     /// While an operation holds admin access, list this store's keys once
     /// retired devices could have made stray ones, and keep each key a
-    /// retired device made that no admin entry names pending deletion (§13).
+    /// retired device made that no admin entry names pending deletion (§14.3).
     /// A live device's key, recorded or still being made, is never taken.
     /// Keyless principals of retired devices grant nothing and are removed
     /// directly; a failed removal fails this sweep before it is marked complete.

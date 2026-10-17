@@ -44,7 +44,7 @@ restage_and_fail_if_changed() {
     fi
 }
 
-# Formatting, clippy and the checker's rules run before every commit (§20.4).
+# Formatting, clippy and the checker's rules run before every commit (Appendix F.6).
 run_check "cargo fmt" cargo fmt --all || {
     echo "cargo fmt failed"
     exit 1

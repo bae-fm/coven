@@ -1,7 +1,7 @@
 import CovenMerge.Model
 
 /-!
-# Local children of values coven updates in place (§8.4, Appendix A.9)
+# Local children of values coven updates in place (§9.1, Appendix A.9)
 
 A synced table's non-key columns change in place when coven applies another
 device's write: SQLite runs an `UPDATE`, and every local foreign key into the

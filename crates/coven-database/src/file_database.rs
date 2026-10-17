@@ -86,7 +86,7 @@ impl FileDatabase {
     }
 
     /// A read-only query on one committed state. A writable handle reads on
-    /// its read pool, so read-only decisions never take the writer (§3.1).
+    /// its read pool, so read-only decisions never take the writer (§21.2).
     async fn read<T: Send + 'static, E: From<DbError> + Send + 'static>(
         &self,
         read: impl FnOnce(&DatabaseConnection) -> Result<T, E> + Send + 'static,
@@ -126,7 +126,7 @@ impl FileDatabase {
         }
     }
     /// Pending eager work: changed references and temporary failures awaiting
-    /// their retry wait, from one indexed table (§16.4, SP, Files and waiting).
+    /// their retry wait, from one indexed table (§17.6, §6.7).
     pub async fn eager_work(&self) -> Result<Vec<FileRef>, DbError> {
         self.read(crate::eager_work::read).await
     }
@@ -150,7 +150,7 @@ impl FileDatabase {
                 for file in &files {
                     crate::eager_work::settle(db, file)?;
                 }
-                // The last settled request retires its set with it (§16.4).
+                // The last settled request retires its set with it (§17.6).
                 crate::cache_progress::retire_eager(db)
             })
         })
@@ -159,7 +159,7 @@ impl FileDatabase {
     /// The uploader's applied state and, for this device's uploads, its local
     /// record about `subject`, read
     /// in one committed state: the evidence a confirmed absence is judged
-    /// with (§16.1). A device with no registration here has no removal or
+    /// with (§17.4). A device with no registration here has no removal or
     /// replacement either, so it reads as active.
     pub async fn uploader_evidence<P: crate::PendingValue>(
         &self,
@@ -191,7 +191,7 @@ impl FileDatabase {
     }
     /// Record this device's first unmet condition for one file it reads,
     /// replacing an earlier reason, with its retry wait, or with none when it
-    /// waits for the app or an update (§16.3, §16.5). Read-only handles keep
+    /// waits for the app or an update (§17.5, §6.7). Read-only handles keep
     /// no records.
     pub async fn fail_download<P: crate::PendingValue>(
         &self,
@@ -214,7 +214,7 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(_) => Ok(None),
         }
     }
-    /// Every download's persisted retry wait (§16.5), read without the
+    /// Every download's persisted retry wait (§6.7), read without the
     /// writer. A read-only handle persists none.
     pub async fn download_waits(
         &self,
@@ -291,7 +291,7 @@ impl FileDatabase {
     }
     /// Each queued upload with this device's pending record about its file,
     /// read in one committed state: the reason an earlier attempt left decides
-    /// whether automatic work retries it (§16.5).
+    /// whether automatic work retries it (§17.7).
     pub async fn upload_work<P: crate::PendingValue>(
         &self,
         subject: impl Fn(&FileRef) -> P::Subject + Send + 'static,
@@ -311,7 +311,7 @@ impl FileDatabase {
     }
     /// Record a failed attempt as this device's pending record about its file,
     /// with its retry wait or none when it waits for a prerequisite or the app,
-    /// in one transaction (§16.5, §19.1).
+    /// in one transaction (§17.7, §19.1).
     pub async fn fail_upload<P: crate::PendingValue>(
         &self,
         id: i64,
@@ -386,13 +386,13 @@ impl FileDatabase {
         })
         .await
     }
-    /// Retire an upload once storage confirms its complete bytes (§16.5): one
+    /// Retire an upload once storage confirms its complete bytes (§17.7): one
     /// transaction removes the queue row, its chunk hashes, the copy kept for
     /// it and this device's pending record about the file. No app row, file
     /// reference or write changes, so a row retargeted, moved or deleted
     /// meanwhile keeps its newer state. Afterwards this device reads the file
     /// from the cache or storage. A pin taken while queued becomes the stored
-    /// file's carried pin in that transaction (§16.4).
+    /// file's carried pin in that transaction (§17.6).
     pub async fn complete_upload<S: serde::Serialize + Send + 'static>(
         &self,
         id: i64,
@@ -464,7 +464,7 @@ impl FileDatabase {
 
     /// Observe the file worker's work: changed application file rows and newly
     /// queued uploads. A confirmed upload retiring its own queue row wakes
-    /// nothing (§16.5). Subscribing before reading the work list prevents
+    /// nothing (§17.7). Subscribing before reading the work list prevents
     /// missed commits.
     pub fn queued_work_changes(&self) -> DatabaseChanges {
         match &self.access {
@@ -525,7 +525,7 @@ impl FileDatabase {
     }
 
     /// Cached encrypted chunk or header (-1). Its bytes are read with no
-    /// writer held (§3.1); an entry evicted meanwhile reads as not cached.
+    /// writer held (§21.2); an entry evicted meanwhile reads as not cached.
     pub async fn cached(&self, file: &FileRef, index: i64) -> Result<Option<Vec<u8>>, DbError> {
         let file = file.clone();
         match &self.access {
@@ -544,7 +544,7 @@ impl FileDatabase {
     /// Keep one verified range of `chunks` consecutive encrypted chunks from
     /// `first`, or the header (`first` = -1), durably before publishing its
     /// cache metadata in one transaction. The bytes are written with no
-    /// writer held (§3.1), on a blocking worker that finishes even if the
+    /// writer held (§21.2), on a blocking worker that finishes even if the
     /// caller stops waiting.
     pub async fn cache_range(
         &self,
@@ -571,7 +571,7 @@ impl FileDatabase {
         }
     }
     /// Remove the bytes of cache entries the writer just chose, once it is
-    /// free (§3.1, §16.6). Returns the failures, whose records stay for the
+    /// free (§21.2, Appendix C.3). Returns the failures, whose records stay for the
     /// next attempt.
     async fn remove_released(
         &self,
@@ -670,7 +670,7 @@ impl FileDatabase {
         .await
     }
     /// Reserve eager downloads of these references; a cancelled set gives
-    /// way to them (§16.4).
+    /// way to them (§17.6).
     pub async fn request_eager(&self, files: Vec<FileRef>) -> Result<(), DbError> {
         self.require_writer()?;
         self.run(move |db, _, _, _| {
@@ -732,7 +732,7 @@ impl CacheReservation {
                     let slot = pending.database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                     // Disk reads finish before the writer is taken: a stalled
-                    // read must not hold back app writes (§3.1).
+                    // read must not hold back app writes (§21.2).
                     let size = cache::whole_size(&inner.access.directory, &file, &pending.name)?;
                     inner
                         .access
@@ -770,7 +770,7 @@ impl Drop for CacheReservation {
     }
 }
 /// Find a queued file's source under the writer, then open and check its
-/// bytes once the writer is free: checking reads the whole file (§3.1).
+/// bytes once the writer is free: checking reads the whole file (§21.2).
 fn open_upload_source<L>(
     access: &DatabaseAccess<L>,
     file: &FileRef,

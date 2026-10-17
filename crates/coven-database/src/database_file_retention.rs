@@ -122,7 +122,7 @@ impl Database {
     }
 
     /// The candidates of these uploaders, each with whether local data still
-    /// protects it (§16.5). Other uploaders' candidates are not read: their
+    /// protects it (§17.8). Other uploaders' candidates are not read: their
     /// files are deleted by another device until ownership changes.
     pub async fn file_candidates(
         &self,
@@ -187,7 +187,7 @@ impl Database {
     }
 
     /// Paths named by a retained object this device confirmed deleted: its
-    /// protection ended with the object (§16.5).
+    /// protection ended with the object (§17.8).
     #[cfg(test)]
     pub async fn add_file_candidates(
         &self,
@@ -233,7 +233,7 @@ impl Database {
     /// followed. Returns false, recording nothing, when `removal` is not a
     /// counted cut-off for this device or access is not confirmed taken away: that
     /// listing cannot stand for the last one. A later transaction recording
-    /// any of it restored deletes the scan (§16.5).
+    /// any of it restored deletes the scan (§17.8).
     pub async fn complete_file_scan(
         &self,
         device: DeviceId,
@@ -286,7 +286,7 @@ impl Database {
 
     /// Whether this device holds confirmation that every listed access was
     /// taken away: each provider account revoked with no request outstanding,
-    /// and each S3 key deleted and read gone or confirmed by the person (§13).
+    /// and each S3 key deleted and read gone or confirmed by the person (§14.3).
     /// Nothing listed confirms nothing.
     pub async fn access_taken_away(
         &self,
@@ -305,7 +305,7 @@ impl Database {
 }
 
 /// Every listed account revoked with no request outstanding and every listed
-/// S3 key deleted; nothing listed confirms nothing (§13).
+/// S3 key deleted; nothing listed confirms nothing (§14.3).
 fn taken_away(
     db: &crate::sqlite::DatabaseConnection,
     accounts: &BTreeSet<String>,
@@ -337,7 +337,7 @@ fn taken_away(
     Ok(true)
 }
 
-/// A fixed file path awaiting a storage-deletion decision (§16.5).
+/// A fixed file path awaiting a storage-deletion decision (§17.8).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FileCandidate {
     /// The uploader named by its path.

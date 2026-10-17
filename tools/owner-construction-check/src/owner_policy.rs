@@ -1,4 +1,4 @@
-//! The policy file of §20.2. `owner_policy_tests.rs` holds the guard
+//! The policy file of Appendix F.3. `owner_policy_tests.rs` holds the guard
 //! tests that fail when a row names a crate, file, type or method that is not
 //! in the workspace.
 
@@ -218,7 +218,7 @@ pub(crate) const POLICY: Policy = Policy {
             "S3Storage",
             "with_settings",
         ),
-        // The S3 client's signing clock and its refusal handling (§4).
+        // The S3 client's signing clock and its refusal handling (§20.7).
         (
             "crates/coven-storage/src/providers/s3_clock.rs",
             "SigningClock",
@@ -241,7 +241,7 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "check_new_store",
         ),
-        // Admin access becomes one location's key administration (§4).
+        // Admin access becomes one location's key administration (§20.10).
         (
             "crates/coven-storage/src/providers/s3_minting.rs",
             "<free>",
@@ -320,7 +320,7 @@ pub(crate) const POLICY: Policy = Policy {
             "adopt_delivered_key",
         ),
         // A sign-in's custody: device custody once per opened installation,
-        // session custody per completed sign-in until publication (§4).
+        // session custody per completed sign-in until publication (§20.2).
         (
             "crates/coven-sync/src/sign_in.rs",
             "DeviceCredentials",
@@ -339,7 +339,7 @@ pub(crate) const POLICY: Policy = Policy {
             "reconnect",
         ),
         // An operation's call runs as its own task, so a dropped app future
-        // cannot abandon a provider request already sent (§18).
+        // cannot abandon a provider request already sent (§11).
         (
             "crates/coven-sync/src/sequence_operations.rs",
             "SequenceSync",
@@ -782,7 +782,7 @@ pub(crate) const POLICY: Policy = Policy {
     ],
 };
 
-/// §20.2's table. Each capability's homes are the paths the spec assigns it;
+/// Appendix F.2's table. Each capability's homes are the paths the spec assigns it;
 /// a home inside a crate that has not landed yet covers nothing until it does.
 const CAPABILITIES: Capabilities = Capabilities {
     network: Capability {

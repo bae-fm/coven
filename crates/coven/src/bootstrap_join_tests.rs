@@ -192,7 +192,7 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
 
 /// The provider refuses the first join request outright, so it stored
 /// nothing: the retry sends it again and is approved, instead of reading the
-/// absent request as a declined invite (§12.2).
+/// absent request as a declined invite (§13.2).
 #[tokio::test]
 async fn a_refused_join_request_is_sent_again() {
     let owner = Owner::new(CloudProvider::S3, false).await;

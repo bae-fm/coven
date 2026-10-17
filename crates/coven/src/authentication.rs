@@ -1,5 +1,5 @@
 //! Session custody for a sign-in awaiting storage setup or bootstrap
-//! publication (§4, E10): a completed sign-in is held for this session only.
+//! publication (§20.2, E10): a completed sign-in is held for this session only.
 
 use crate::{CloudProvider, OAuthError};
 use coven_sync::SessionSignIn;

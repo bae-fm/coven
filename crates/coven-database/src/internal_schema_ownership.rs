@@ -1,5 +1,5 @@
 //! Each row's selected original creation and the authorship evidence of
-//! other members' writes (§8.8, D7, D9), kept apart from merge state and
+//! other members' writes (§9.6, D7, D9), kept apart from merge state and
 //! dismissible losses.
 
 macro_rules! coven_ownership_tables {

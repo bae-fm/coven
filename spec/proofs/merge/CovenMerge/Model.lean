@@ -19,7 +19,7 @@ state the predicates describe.
 
 namespace CovenMerge
 
-/-- The kind of one row change (§5). -/
+/-- The kind of one row change (§4). -/
 inductive Kind where
   | ins
   | upd
@@ -44,7 +44,7 @@ def Change.inc {Col : Type} (ch : Change Col) : Nat :=
 * `past w a`: write `w` had read write `a` (§7.1).
 * `chg w r`: the change `w` makes to row `r`, if any. A write makes at most one
   change per row, as SQLite's session extension records it. A row is one
-  table, key and audience (§14.2). -/
+  table, key and audience (§15.4). -/
 structure Writes (W Row Col : Type) where
   ts : W → Nat
   past : W → W → Bool
@@ -264,7 +264,7 @@ inductive CausalOrder {W Row Col : Type} (M : Writes W Row Col) : List W → Pro
       (∀ a, M.past w a = true → a ∈ L) → CausalOrder M (L ++ [w])
 
 /-- A causal order of the writes applied after a snapshot covering the set
-`C` (§15): covered writes count as applied. -/
+`C` (§16.1): covered writes count as applied. -/
 inductive CausalFrom {W Row Col : Type} (M : Writes W Row Col) (C : W → Prop) :
     List W → Prop where
   | nil : CausalFrom M C []

@@ -1,8 +1,8 @@
-//! The merge of §8 and §14, as functions with no I/O.
+//! The merge of §8, §9 and §15, as functions with no I/O.
 //!
-//! [`apply`] implements Appendix B's incremental step. Its order-free definition
+//! [`apply`] implements the merge proof's incremental step. Its order-free definition
 //! is checked in tests. [`recompute`] runs the three removal steps over a
-//! closed region (Appendix B, B9).
+//! closed region (proofs/merge.md B9).
 //! Values are opaque to the merge. The database supplies CHECK results and
 //! unique claims after resolving references, using its own SQL semantics.
 

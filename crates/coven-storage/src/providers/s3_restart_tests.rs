@@ -98,7 +98,7 @@ fn conflict_code(gcs: bool) -> &'static str {
     }
 }
 
-/// Every code §4 names as a concurrent mutation: AWS's, GCS's and Ceph RGW's.
+/// Every code Appendix E.10 names as a concurrent mutation: AWS's, GCS's and Ceph RGW's.
 const CONFLICT_CODES: [&str; 3] = [
     "ConditionalRequestConflict",
     "OperationAborted",

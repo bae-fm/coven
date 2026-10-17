@@ -1,4 +1,4 @@
-//! Member keys on RustFS (§4): service accounts with the member policy inline,
+//! Member keys on RustFS (Appendix E.12): service accounts with the member policy inline,
 //! through `/rustfs/admin/v3`, which takes plain JSON where MinIO's
 //! `/minio/admin` alias expects madmin's encrypted bodies. Every member key is
 //! a service account of one dedicated parent user, `coven`, granted
@@ -290,7 +290,7 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
                 "policy": policy,
                 "targetUser": PARENT,
                 "name": scope.name,
-                // Carries the store and the minting device for a store's listing (§13).
+                // Carries the store and the minting device for a store's listing (§14.3).
                 "description": scope.label(),
             })),
             &[],
@@ -348,7 +348,7 @@ async fn key_exists(
 }
 
 /// Every service account of coven's parent whose description names this
-/// store, with the minting device it names (§13).
+/// store, with the minting device it names (§14.3).
 async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
     let mut listed = Vec::new();
     for account in Admin::new(context)?.accounts().await? {

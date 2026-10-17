@@ -11,13 +11,13 @@ use coven_format::sequence::Purpose;
 use coven_merge::Audience;
 use std::collections::BTreeSet;
 
-/// The journal kind a breaking migration commits with its schema (§17.1).
+/// The journal kind a breaking migration commits with its schema (§18.3).
 const SCHEMA_RAISE: &str = "schema-raise";
 
 impl SequenceSync {
     /// Supply to `DatabaseBuilder::migration_operation` at the composition
     /// root: the breaking migration's version commits with its schema, and
-    /// passes raise each audience it captured to that version (§17.1).
+    /// passes raise each audience it captured to that version (§18.3).
     pub fn migration_operation(
         version: u32,
     ) -> Result<coven_database::NewOperation, coven_database::DbError> {

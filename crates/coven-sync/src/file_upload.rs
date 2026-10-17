@@ -181,7 +181,7 @@ impl FilesInner {
         }
     }
     /// Send the file to the path and key its attaching write fixed. Confirmed
-    /// storage retires the queue row and changes no app row (§16.5). Returns
+    /// storage retires the queue row and changes no app row (§17.7). Returns
     /// false when paused between parts.
     pub(super) async fn upload(&self, item: &FileUpload) -> Result<bool, TransferError> {
         let coven_format::file_reference::FileReference { device, id, key } =
@@ -194,7 +194,7 @@ impl FilesInner {
             .clone()
             .ok_or(FileReadError::NoStorage)?;
         // The queue fixed this source at attachment; the row may have been
-        // retargeted, moved or deleted since without affecting it (§16.5).
+        // retargeted, moved or deleted since without affecting it (§17.7).
         let source =
             self.database
                 .open_upload_source(&item.file)
@@ -261,7 +261,7 @@ impl FilesInner {
             .map_err(FileReadError::from)?;
         Ok(true)
     }
-    /// Different bytes at a file path fail this upload attempt (§10).
+    /// Different bytes at a file path fail this upload attempt (§19.3).
     async fn settle_occupied(
         &self,
         storage: &dyn coven_storage::Storage,

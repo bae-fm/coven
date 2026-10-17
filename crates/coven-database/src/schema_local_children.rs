@@ -1,4 +1,4 @@
-//! Rules for local tables whose foreign keys reach synced data (§8.4, A.9).
+//! Rules for local tables whose foreign keys reach synced data (§9.1, A.9).
 //!
 //! Local rows exist only on this device, so no write accounts for them: a
 //! local key must follow whatever coven does to its parent, never stop it.
@@ -53,7 +53,7 @@ impl Schema {
     /// that change (`LocalUpdate.stuck_forever`). A following key rewrites its
     /// own columns, so a local key into those must follow too
     /// (`LocalUpdate.chain_holds`). Key columns change by delete and insert
-    /// (§8.5), which the delete rule above covers.
+    /// (§9.2), which the delete rule above covers.
     pub(crate) fn validate_local_updates(&self, synced: &BTreeSet<String>) -> Result<(), DbError> {
         let mut updated: BTreeMap<String, BTreeSet<String>> = synced
             .iter()

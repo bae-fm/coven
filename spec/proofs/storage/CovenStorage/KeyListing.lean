@@ -1,6 +1,6 @@
 import CovenStorage.KeyDelivery
 
-/-! A provider key minted by another copy cannot replace a recorded key (§4).
+/-! A provider key minted by another copy cannot replace a recorded key (§20.10).
 Provider-side reclaim scheduling belongs to sequence effects; this example
 checks only the fresh-principal property of the shared mint operation. -/
 

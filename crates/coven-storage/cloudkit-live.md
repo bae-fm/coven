@@ -124,7 +124,7 @@ cursor pages. Slots and the floor use exact record IDs and require no query. The
 correlation with CloudKit Console server logs. These are native operation counts,
 not measurements of the framework's private network traffic or metadata byte
 encoding; server logs are still needed to account for requests hidden inside an
-operation under §3.1.
+operation under §21.1.
 
 ## Sharing conformance on two accounts
 

@@ -153,13 +153,13 @@ impl JoiningIdentity {
         self.identity.clone()
     }
 
-    /// The inviting device: only its kept binding admits this request (§12.2).
+    /// The inviting device: only its kept binding admits this request (§13.2).
     pub fn approver(&self) -> coven_foundation::id_source::DeviceId {
         self.inviting_writer
     }
 
     /// The inviting device's applied slot when it made the invite: copies for
-    /// this request can only follow it (§12.2).
+    /// this request can only follow it (§13.2).
     pub fn read_through(&self) -> u64 {
         self.read_through
     }
@@ -186,7 +186,7 @@ impl JoiningIdentity {
     }
 
     /// The provider refused the request, so it was never published: a
-    /// retry sends it again (§12.2).
+    /// retry sends it again (§13.2).
     pub fn record_refusal(
         &mut self,
         file: &AtomicFile,
@@ -217,7 +217,7 @@ impl JoiningIdentity {
     }
 
     /// Publish the recorded immutable request. An occupied path must hold
-    /// exactly these bytes (§10).
+    /// exactly these bytes (§19.3).
     pub async fn publish(&self, storage: &dyn Storage) -> Result<(), SyncError> {
         match storage.create(&self.path, &self.request).await {
             Ok(_) => Ok(()),

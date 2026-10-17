@@ -348,7 +348,7 @@ async fn a_lost_row_does_not_require_an_accepted_generation() {
     db.close().await.unwrap();
 }
 
-/// Losses under schema a migration drops (§17.1, D7): Lean
+/// Losses under schema a migration drops (§18.7, D7): Lean
 /// `Migration.freezeDropped` keeps every affected record, frozen under its
 /// old names with its original cause and setters.
 mod dropped_schema {

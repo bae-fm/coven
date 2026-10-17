@@ -1,4 +1,4 @@
-//! New storage credentials on this owner's live connection (§4, E9).
+//! New storage credentials on this owner's live connection (§20.2, E9).
 
 use super::SequenceSync;
 use crate::{restore_codes::install_session, StorageCommit, SyncError};

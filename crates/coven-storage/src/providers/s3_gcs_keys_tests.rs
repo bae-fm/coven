@@ -501,7 +501,7 @@ async fn buckets_without_uniform_access_are_refused_and_rollback_removes_the_acc
 
 /// A store's listing reads every page of the project's service accounts and
 /// returns the HMAC keys of those whose description names this store, with
-/// the minting device (§13).
+/// the minting device (§14.3).
 #[tokio::test]
 async fn a_store_listing_returns_its_accounts_keys_with_their_minting_device() {
     let (state, _server, admin) = fake(true).await;

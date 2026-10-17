@@ -61,7 +61,7 @@ struct DatabaseInner {
     inputs: input_database::InputDatabase,
     access: DatabaseAccess<StoreLock>,
     // The directory settings' store name, read under the writer lock. A creation
-    // entry is prepared and applied only with this name (§9).
+    // entry is prepared and applied only with this name (§10).
     name: String,
     migrations: Vec<MigrationOutcome>,
     clock: ClockRef,
@@ -77,7 +77,7 @@ struct DatabaseInner {
 struct DatabaseAccess<L> {
     writer: Mutex<DatabaseConnection>,
     readers: ReadPool,
-    // Every connection reports its commits and handle failures here (§5).
+    // Every connection reports its commits and handle failures here (§4).
     observer: CommitObserver,
     write_schema: crate::write_schema::WriteSchema,
     directory: StoreDir,
@@ -100,7 +100,7 @@ impl<L> DatabaseAccess<L> {
     }
 
     /// Read one committed state on a reader: read-only decisions never take
-    /// the writer (§3.1).
+    /// the writer (§21.2).
     fn with_committed<R, E: From<DbError>>(
         &self,
         run: impl FnOnce(&DatabaseConnection) -> Result<R, E>,
@@ -129,7 +129,7 @@ impl<L> DatabaseAccess<L> {
     }
 
     /// Remove released files' bytes now that the writer is free, then forget
-    /// their records under it (§3.1, §16.6). `chosen` is what the writer
+    /// their records under it (§21.2, Appendix C.3). `chosen` is what the writer
     /// that recorded them chose, with the failures found choosing it.
     fn remove_released(&self, chosen: crate::file_removals::Chosen) -> Vec<DbError> {
         let (released, mut failures) = match chosen {
@@ -242,7 +242,7 @@ impl DatabaseInner {
     }
 
     /// Run a write under the writer, then remove the files it released once
-    /// the writer is free (§16.6).
+    /// the writer is free (Appendix C.3).
     fn with_files<R, E: crate::WriteFailure>(
         &self,
         staged: Vec<crate::file_write::StagedFile>,
@@ -259,7 +259,7 @@ impl DatabaseInner {
             let outcome =
                 std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| run(writer, &files)));
             // After a failed rollback the writer may still hold this write;
-            // removal records wait for the next open (§16.6).
+            // removal records wait for the next open (Appendix C.3).
             let usable = !matches!(self.access.observer.error(), Some(DbError::RollbackFailed));
             let chosen = (outcome.is_ok() || usable).then(|| released(writer, &self.staging));
             Ok::<_, E>((outcome, chosen))
@@ -279,7 +279,7 @@ impl DatabaseInner {
     }
 
     /// Remove what `chosen` names, after the writer that chose it is
-    /// released (§3.1, §16.6).
+    /// released (§21.2, Appendix C.3).
     fn remove_chosen(&self, chosen: crate::file_removals::Chosen) -> Vec<DbError> {
         #[cfg(test)]
         {
@@ -307,7 +307,7 @@ impl DatabaseInner {
 }
 
 /// The removals the write that just ran under `writer` released, chosen
-/// with the staging set held (§16.6).
+/// with the staging set held (Appendix C.3).
 fn released(
     writer: &DatabaseConnection,
     staging: &Mutex<BTreeSet<coven_foundation::files::FileName>>,
@@ -358,7 +358,7 @@ impl Database {
     }
     /// Observe new local writes: rows inserted into the outgoing write queue.
     /// Upload confirmation removing a row is this device's own bookkeeping
-    /// and wakes nothing (SP, Waiting without repeated work). Register before the first sync to
+    /// and wakes nothing (§6.7). Register before the first sync to
     /// include writes committed while a pass is running.
     pub fn sync_changes(&self) -> crate::DatabaseChanges {
         self.table_changes(&["_coven_uploads"], true, true)
@@ -397,7 +397,7 @@ impl Database {
 
     /// Observe, from now, every commit made outside `attempt`: an operation
     /// attempt's own commits are no evidence against the wait it ends in,
-    /// and which rows matter is known only when it ends (SP waiting).
+    /// and which rows matter is known only when it ends (§6.7).
     pub fn attempt_commits(&self, attempt: crate::CommitScope) -> crate::AttemptCommits {
         let slot = self.inner.read().expect("database lock poisoned");
         let commits = match slot.as_ref() {
@@ -554,7 +554,7 @@ impl Database {
     }
 
     /// Dismisses lost values in a write so every device drops them from
-    /// `_coven_lost`; a removed row is deleted for good (§8, E4).
+    /// `_coven_lost`; a removed row is deleted for good (§8.4, E4).
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()> {
         let values = values.to_vec();
         self.call(move |inner| {
@@ -589,7 +589,7 @@ impl Database {
     }
 
     /// Run app SQL and commit its unsigned write record and merge metadata in
-    /// one IMMEDIATE transaction (§5). The closure's result is returned after commit.
+    /// one IMMEDIATE transaction (§4). The closure's result is returned after commit.
     pub async fn write<F, R>(&self, sql: F) -> Result<R, DbError>
     where
         F: FnOnce(crate::SqlContext<'_, '_>) -> Result<R, DbError> + Send + 'static,

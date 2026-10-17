@@ -1,13 +1,13 @@
 import CovenMerge.ForeignKeyClassification
 
 /-! Steps as a write records them, and the consequence a receiver compares a
-step with (§8.4, §8.8, D5). `ForeignKeyClassification` decides with any
+step with (§9.1, §9.6, D5). `ForeignKeyClassification` decides with any
 `Rule`; this is the rule coven's receiver runs, which the merge runner's
 `classify` mode compares with the Rust receiver.
 
 * `Recorded` is a step as D5 records it: its effect, the parent each
   reference through each written column names, and for the old half of a
-  primary-key update the row and incarnation its new half makes (§8.5).
+  primary-key update the row and incarnation its new half makes (§9.2).
 * `Held` is a reference as a row holds it at one moment. Besides the
   reference's own columns, an action records every column sharing a reference
   with them, with the value it has at that moment (`carried`), and the parent

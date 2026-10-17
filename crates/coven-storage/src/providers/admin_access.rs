@@ -1,4 +1,4 @@
-//! Where the storage account's admin access comes from (§4). The person
+//! Where the storage account's admin access comes from (§20.10). The person
 //! chooses a signed-in CLI and its profile or account, a browser sign-in, or
 //! a pasted admin key; guided console steps need none. Coven reads no CLI
 //! configuration and runs no CLI before that choice. What a source yields is
@@ -14,7 +14,7 @@ use std::{sync::Arc, time::Duration};
 use url::Url;
 
 /// Shows a device sign-in page and its code, as AWS IAM Identity Center asks
-/// (§4). The desktop implementation opens the system browser.
+/// (§20.10). The desktop implementation opens the system browser.
 #[async_trait::async_trait]
 pub trait DeviceSignInPresenter: Send + Sync {
     /// Show the page where the person confirms this code.
@@ -34,7 +34,7 @@ impl DeviceSignInPresenter for DesktopDeviceSignIn {
     }
 }
 
-/// The source of admin access the person chose (§4).
+/// The source of admin access the person chose (§20.10).
 pub enum AdminAccessSource {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     /// `aws configure export-credentials --format process`, with this profile

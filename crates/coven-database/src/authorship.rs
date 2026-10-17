@@ -1,5 +1,5 @@
 //! Another member's authorship of the creations and cells a snapshot carries
-//! (§8.8, §15, D7, D9, D11).
+//! (§9.6, §16.1, D7, D9, D11).
 //!
 //! A snapshot's own signature covers what its author's member wrote. For every
 //! owned row created, or cell set, by another member's write, the snapshot
@@ -156,7 +156,7 @@ fn written(
 }
 
 /// Who signed a snapshot: its device, and that device's member when known.
-/// The signature itself vouches for whatever they wrote (§15).
+/// The signature itself vouches for whatever they wrote (§16.2).
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Author {
     pub(crate) device: coven_foundation::id_source::DeviceId,
@@ -478,7 +478,7 @@ pub(crate) fn load(
 
 /// Refuse a loaded snapshot of `audience` by `author` that names another
 /// member as creating an owned row, or setting one of its present cells,
-/// without that write's authenticated opening (§8.8, §15).
+/// without that write's authenticated opening (§9.6, §16.2).
 pub(crate) fn check(
     db: &DatabaseConnection,
     schema: &WriteSchema,

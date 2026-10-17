@@ -1,4 +1,4 @@
-//! S3 detection (§4): native probes against the user's bucket, under the
+//! S3 detection (§20.7): native probes against the user's bucket, under the
 //! store's reserved `<store>/.coven-check/<run>/` prefix, deleted afterwards.
 //! Only fixed labels, status codes and server times enter results.
 use super::*;
@@ -13,7 +13,7 @@ const PROBES: &str = ".coven-check";
 /// `Last-Modified` has whole seconds: the earliest a later marker can differ.
 const FIRST_PAUSE: Duration = Duration::from_secs(1);
 const RETRY_PAUSE: Duration = Duration::from_millis(250);
-/// 10 seconds of pauses, beyond the worst listing lag measured (5.5 seconds, §4).
+/// 10 seconds of pauses, beyond the worst listing lag measured (5.5 seconds, Appendix E.7).
 const RETRIES: u32 = 40;
 
 #[path = "s3_detect_headers.rs"]

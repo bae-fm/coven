@@ -5,7 +5,7 @@ use coven_format::admin::StoreChange;
 use coven_storage::Storage;
 use std::sync::Arc;
 
-// §13 and E9: a delivery is authenticated by the applied entry recording its key.
+// §14.3 and E9: a delivery is authenticated by the applied entry recording its key.
 #[tokio::test]
 async fn a_delivery_uses_the_signing_key_at_its_recorded_slot() {
     let group = Group::new();
@@ -235,7 +235,7 @@ impl AccessKeyAdmin for InterruptedMint {
     }
 }
 
-// §13, §18: record the exact artifact before creation; retry undoes that name.
+// §14.3, §11: record the exact artifact before creation; retry undoes that name.
 #[tokio::test]
 async fn uncertain_mints_are_recorded_before_creation_and_undone_after_reopening() {
     for kind in ["invite", "replace-access-key"] {
@@ -245,7 +245,7 @@ async fn uncertain_mints_are_recorded_before_creation_and_undone_after_reopening
     }
 }
 
-// §12.2, §18: cancellation cannot discard an uncertain grant.
+// §13.2, §11: cancellation cannot discard an uncertain grant.
 #[tokio::test]
 async fn cancelling_an_uncertain_invite_keeps_its_name_until_undo_succeeds() {
     for keyless in [false, true] {

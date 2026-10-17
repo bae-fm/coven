@@ -269,7 +269,7 @@ fn sends(f: &Fixture) -> usize {
 /// A backup restored after its device uploaded more: another copy used this
 /// device's id. Sync stops sending and says why, recording nothing; the
 /// database keeps working, reopening finds the same evidence, and calling
-/// reset_device, the app's choice, starts a new device (§10).
+/// reset_device, the app's choice, starts a new device (§19.3).
 #[tokio::test]
 async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     let f = Fixture::new().await;

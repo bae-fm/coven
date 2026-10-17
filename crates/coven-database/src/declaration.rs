@@ -1,6 +1,6 @@
 //! The application's declarations, independent of any SQLite connection.
 
-/// How independently inserted rows choose their identity (§8.5).
+/// How independently inserted rows choose their identity (§9.2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum RowIdentity {
     /// A canonical lowercase UUID, version 4 or 7, in a primary-key component.
@@ -45,10 +45,10 @@ impl SyncedTable {
     }
 
     /// Only each row's original creating member may directly update or
-    /// delete it (§8.8). Shared-trigger targets count as direct writes;
+    /// delete it (§9.6). Shared-trigger targets count as direct writes;
     /// foreign-key actions from authorized changes may still reach the row.
     /// No app owner column is needed. Changing this declaration for an
-    /// existing table is a breaking schema change (§17.1).
+    /// existing table is a breaking schema change (§18.1).
     pub fn owner_only(mut self) -> Self {
         self.owner_only = true;
         self
@@ -128,7 +128,7 @@ pub enum CacheFill {
     CacheLazy,
 }
 
-/// A table's file columns and declared file choices (§16, E2).
+/// A table's file columns and declared file choices (§17, E2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileDecl {
     pub(crate) namespace: String,

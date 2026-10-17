@@ -94,7 +94,7 @@ impl SequenceSync {
     }
 
     /// Register this installation for its member once the applied history
-    /// binds the member's current pair (§12). `replaces` names this member's
+    /// binds the member's current pair (§13). `replaces` names this member's
     /// earlier installation that a reset supersedes.
     pub async fn register_device(
         self: &std::sync::Arc<Self>,
@@ -170,7 +170,7 @@ impl SequenceSync {
                 .start_request(&mut session, &mut ring, &member, request, "operation")
                 .await
             {
-                // Another creation claimed slot 1 first (§9).
+                // Another creation claimed slot 1 first (§10).
                 Err(SyncError::Rejected(_)) if creation => {
                     Err(coven_storage::StorageFailure::StoreExists.into())
                 }
@@ -256,7 +256,7 @@ impl SequenceSync {
                     return Err(OperationRejection::NotAllowed);
                 }
                 // A raise that finds its version established adopts that
-                // state and claims nothing (§17.1).
+                // state and claims nothing (§18.3).
                 if let Purpose::Raise(version) = request.purpose {
                     return Ok(session
                         .history

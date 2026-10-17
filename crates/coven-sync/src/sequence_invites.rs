@@ -1,5 +1,5 @@
 //! The inviting device's one-time invitation, its join request and the
-//! approval that binds the request's exact pair (§12.2, §12.3).
+//! approval that binds the request's exact pair (§13.2, §13.3).
 
 use super::{SequenceSync, Session};
 use crate::{
@@ -35,7 +35,7 @@ pub(crate) enum InviteGrant {
     /// An S3 key and who holds it, made in the console or by coven.
     S3Key(S3MemberKey),
     /// Coven makes the key with admin access; each mint call names it
-    /// afresh from this scope (§4).
+    /// afresh from this scope (§20.10).
     Minting(MintScope),
 }
 
@@ -121,7 +121,7 @@ impl InviteWork {
             _ => None,
         }
     }
-    /// An invite still open: its account stays shared (§13).
+    /// An invite still open: its account stays shared (§14.2).
     fn open(&self) -> bool {
         !matches!(self.state, InviteState::Revoking | InviteState::Settled)
     }
@@ -147,7 +147,7 @@ impl SequenceSync {
     }
 
     /// Fix the member id and storage access, grant that access, and return
-    /// the code to show (§12.2). The invite expires a day later by this
+    /// the code to show (§13.2). The invite expires a day later by this
     /// device's clock.
     pub async fn create_invite(
         &self,
@@ -380,7 +380,7 @@ impl SequenceSync {
     }
 
     /// Approve exactly this checked request: claim copies of every store key
-    /// and the held circle keys for its pair, then bind the pair (§12.2).
+    /// and the held circle keys for its pair, then bind the pair (§13.2).
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
         self.decide(request.invite, Some(request), true).await
     }
@@ -717,7 +717,7 @@ impl SequenceSync {
                         admin.roll_back(scope).await?;
                     }
                     // Cleanup takes back only the invite's new grant. An
-                    // approval may have landed before its device reset (§12.2).
+                    // approval may have landed before its device reset (§13.2).
                     let deletions = match work.access.member_access() {
                         Ok(access @ MemberAccess::S3AccessKey { .. }) => {
                             let retained = session.history.state.members.values().any(|value| {
@@ -888,7 +888,7 @@ impl SequenceSync {
     }
 
     /// Open and check a request: it repeats the invite's id and member id,
-    /// and its own new signing key verifies it (§12.2).
+    /// and its own new signing key verifies it (§13.2).
     fn open_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<Vec<u8>, SyncError> {
         let envelope = SingleChunkObject::decode(bytes)?;
         let SingleChunkObject::JoinRequest { signature, .. } = &envelope;

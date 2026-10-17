@@ -1,12 +1,12 @@
 import CovenMerge.Removal
 
 /-!
-# Audiences (§14)
+# Audiences (§15)
 
-A row is one table, key and audience, with generations of its own (§14.2).
+A row is one table, key and audience, with generations of its own (§15.4).
 A write's row changes are split into parts by audience, each change in the
 part of its row's audience; a device applies the parts it can read and counts
-the rest as applied (§14.4).
+the rest as applied (§15.6).
 
 * `project`: the writes as a device that reads some audiences sees them.
 * `audience_converges`: devices that read the same audiences and applied the
@@ -17,7 +17,7 @@ the rest as applied (§14.4).
 * `restrict`, `removal_local`: removal agrees on a set of rows both devices
   have, closed under parents and rivals.
 * `rivals_closed`: when every unique claim includes the audience, unique
-  rivals share an audience (§14.1).
+  rivals share an audience (§15.2).
 * `Moved.agree`, `Moved.store_wins`: Ana moves note 1 into her circle while
   Ben re-adds it in the store; devices in and out of the circle agree on the
   store's note 1, which wins over the circle's.
@@ -186,7 +186,7 @@ theorem removal_local {G : Inputs Row K} {visA visB R : Row → Bool}
     (fun D D' x hx hD => rivals_restrict_eq hc hD hx) h0
     (removal_stratified _) (removal_stratified _)
 
-/-- When every unique claim includes the claiming row's audience, as §14.1
+/-- When every unique claim includes the claiming row's audience, as §15.2
 requires, a row's unique rivals share its audience. -/
 theorem rivals_closed {A V : Type} [DecidableEq A] [DecidableEq V] (G : Inputs Row (A × V))
     (aud : Row → A) (hkey : ∀ x, ∀ c ∈ G.claims x, c.other = false → c.key.1 = aud x) {x y : Row}
@@ -239,7 +239,7 @@ theorem agree :
     by decide, by decide⟩
 
 /-- On Carol's device, note 1 is present in the store and in the circle. The
-store's wins, and the circle's is removed like a unique loser (§14.2). -/
+store's wins, and the circle's is removed like a unique loser (§15.4). -/
 def carolInputs : Inputs Nat Nat where
   rows := [1, 2]
   present _ := true

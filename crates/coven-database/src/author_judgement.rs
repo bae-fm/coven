@@ -1,4 +1,4 @@
-//! The author's judgement of its own write (§8.8): the check every receiver
+//! The author's judgement of its own write (§9.6): the check every receiver
 //! makes, run before the write is queued. A change receivers would refuse
 //! refuses the whole local transaction, and the same judgement records each
 //! change's verdict.

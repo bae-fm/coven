@@ -12,7 +12,7 @@ pub trait Clock: Send + Sync {
     /// The wall clock's current time.
     fn now(&self) -> SystemTime;
     /// Monotonic time since an arbitrary origin, counting time the system
-    /// spent asleep (§10, §15). Readings never decrease within a process; only
+    /// spent asleep (§14.1, §16.6). Readings never decrease within a process; only
     /// differences between two readings of one clock mean anything.
     fn elapsed(&self) -> Duration;
     /// Wait for an elapsed duration. System clocks use the runtime's monotonic

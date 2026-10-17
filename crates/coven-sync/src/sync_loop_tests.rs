@@ -2,7 +2,7 @@ use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_crypto::custody::Keychain;
 
-/// E5 and sync-pass's Object reads: an incomplete read is retryable input,
+/// E5 and §6.5: an incomplete read is retryable input,
 /// never evidence that the slot's bytes cannot apply.
 #[tokio::test]
 async fn slot_read_failures_keep_their_pass_status_and_retry() {

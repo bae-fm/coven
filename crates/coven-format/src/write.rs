@@ -1,4 +1,4 @@
-//! A write's old values and merge-owned changes, split into audience parts (§5, §14.4).
+//! A write's old values and merge-owned changes, split into audience parts (§4, §15.6).
 //!
 //! `WriteRecord` and `WritePart` are in-memory values, not additional encodings.
 //! `write_stream::WriteEncoder` emits the header and per-audience frame streams.
@@ -19,7 +19,7 @@ pub struct WriteHeader {
     pub timestamp: Timestamp,
     /// Last applied slot when authored; own earlier writes are implicit reads.
     pub read_through: u64,
-    /// The app schema version (§17.1).
+    /// The app schema version (§18).
     pub schema_version: u32,
     /// Whether to apply rows, retain them as lost, or consume a migration write.
     pub disposition: WriteDisposition,
@@ -45,7 +45,7 @@ impl WriteHeader {
 }
 
 /// An ordinary write or a breaking migration's empty marker (D5). Schema
-/// exclusion is a received interpretation, never transmitted (§17.1).
+/// exclusion is a received interpretation, never transmitted (§18.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteDisposition {
     /// Apply its changes under the merge rules.
@@ -108,7 +108,7 @@ impl Wire for Operation<Value> {
 }
 wire_struct!(Change<Value>, generation, operation);
 
-/// Merge's change to one row, together with SQLite's old column values (§5),
+/// Merge's change to one row, together with SQLite's old column values (§4),
 /// the original creation it copies and the SQL operations that produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowChange {
@@ -122,8 +122,8 @@ pub struct RowChange {
     pub old: BTreeMap<String, Value>,
     /// Authenticated original generation and cell sources, independent of scalars.
     pub sources: crate::write_sources::WriteSources,
-    /// For an insert copying a row from another audience (§14.2), the copied
-    /// row's original creation, whose author keeps owning it (§8.8).
+    /// For an insert copying a row from another audience (§15.4), the copied
+    /// row's original creation, whose author keeps owning it (§9.6).
     pub creator: Option<ChangeId>,
     /// The statement, shared-trigger and foreign-key operations on this row,
     /// in the write's execution order. Empty for a change coven made without
@@ -234,7 +234,7 @@ impl RowChange {
 }
 
 /// One SQLite row operation of a write, at its place in the whole write's
-/// execution (§8.8, D5). Statements, shared triggers and foreign-key actions
+/// execution (§9.6, D5). Statements, shared triggers and foreign-key actions
 /// all record steps; no step says which of them produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
@@ -245,7 +245,7 @@ pub struct Step {
     /// with the parents its references named at that moment.
     pub change: Change<Value>,
     /// A delete that is the old half of a primary-key update: its foreign
-    /// keys follow their ON UPDATE actions, not ON DELETE (§8.5).
+    /// keys follow their ON UPDATE actions, not ON DELETE (§9.2).
     pub key_update: bool,
 }
 impl crate::wire::Wire for Step {
@@ -285,7 +285,7 @@ impl Step {
 }
 
 /// A row's operations in execution order, with the sources they replaced
-/// that its net change, if any, does not already name (§8, D5). An
+/// that its net change, if any, does not already name (§9.5, D5). An
 /// operation after the row moved into this audience in the same write
 /// starts from the generation the move began, not the net change's.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -396,7 +396,7 @@ impl Execution {
 
 /// A row the write's SQL changed with no net change: it was inserted and
 /// deleted again, or ends with the values it began with (kind 13). Its
-/// operations can still cause foreign-key actions on other rows (§8.8).
+/// operations can still cause foreign-key actions on other rows (§9.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowExecution {
     /// Table, encoded primary key and audience.
@@ -444,7 +444,7 @@ impl RowExecution {
     }
 }
 
-/// All changes for one audience, sealed together (§14.4).
+/// All changes for one audience, sealed together (§15.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WritePart {
     /// The audience of every row in this part.
@@ -571,7 +571,7 @@ impl<'a> PartRecord<'a> {
     }
 }
 
-/// A committed transaction, with one header and a part per audience (§5, §14.4).
+/// A committed transaction, with one header and a part per audience (§4, §15.6).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct WriteRecord {
     /// Who wrote it, when, what it had read and its schema.

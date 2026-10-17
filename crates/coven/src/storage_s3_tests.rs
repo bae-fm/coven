@@ -1,4 +1,4 @@
-//! S3 setup's detection and safety check at the application boundary (§4, E5).
+//! S3 setup's detection and safety check at the application boundary (§20.7, §20.8, E5).
 use super::*;
 use coven_storage::{test_utils::DETECTED_S3_SETTINGS, OwnBucketReason, S3Detection, S3Profile};
 

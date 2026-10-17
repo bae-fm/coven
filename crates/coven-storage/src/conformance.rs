@@ -246,7 +246,7 @@ impl Conformance {
         Ok(())
     }
 
-    /// Setups of one store race for its first sequence slot (§10, D10): of three
+    /// Setups of one store race for its first sequence slot (§10.3, D10): of three
     /// concurrent creates, one per claimant connection, exactly one wins and
     /// keeps its bytes, and the others are refused as occupied. The winner's
     /// connection deletes the slot afterwards.
@@ -447,7 +447,7 @@ impl Conformance {
             storage.abort_upload(&pending).await.err().unwrap(),
         ];
         if storage.config().provider() != CloudProvider::S3 {
-            // S3 names its upload before any request (§4).
+            // S3 names its upload before any request (Appendix E.10).
             errors.push(storage.begin_upload(&path, 4).await.err().unwrap());
             errors.push(storage.grant_access("member").await.err().unwrap());
             errors.push(storage.revoke_access("member").await.err().unwrap());

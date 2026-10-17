@@ -813,7 +813,7 @@ fn local_and_access_failures_require_app_action() {
     }
     assert_eq!(retry(PendingReason::Removed), Retry::Never);
     // This installation never sends again with a retired pair; restoring
-    // with the current keys is a new installation (§10).
+    // with the current keys is a new installation (§13.1).
     assert_eq!(
         retry(PendingReason::MemberKeysReplaced {
             member: MemberId(uuid::Uuid::from_u128(3)),

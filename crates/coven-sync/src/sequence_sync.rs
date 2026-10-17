@@ -51,7 +51,7 @@ pub struct SequenceSync {
     waits: Arc<crate::RetryWaits>,
     files: crate::Files,
     session: Arc<Mutex<Session>>,
-    /// Admin access an operation holds in memory until its key is made (§4).
+    /// Admin access an operation holds in memory until its key is made (§20.10).
     admin_access: Arc<
         std::sync::Mutex<
             std::collections::BTreeMap<
@@ -84,7 +84,7 @@ impl SequenceSync {
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
         // Without store keys in custody, history waits for this member's
-        // copies in storage (§11).
+        // copies in storage (§12.1).
         let (history, locked) = match keys.read()? {
             Some(mut ring) => {
                 let history = History::restore(&originals, directory.id(), &mut ring, &identity)?;
@@ -487,7 +487,7 @@ impl SequenceSync {
                 coven_database::DeviceState::Active => (),
             }
             // This member's own replacement binds its kept candidate before
-            // custody installs it (§18.1).
+            // custody installs it (§11.5).
             let current = session.history.state.members[&device.member].keys;
             if current != member.keys().public_keys()
                 && member.candidate().map(|keys| keys.public_keys()) != Some(current)

@@ -14,7 +14,7 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     ) -> Self;
     /// Report an audience whose selected boundary has no committed data input.
     fn reload(audience: coven_merge::Audience) -> Self;
-    /// Report an S3 key awaiting deletion on its journal operation (§13).
+    /// Report an S3 key awaiting deletion on its journal operation (§14.3).
     fn access_key(operation: OperationId, key: crate::AccessKeyToDelete) -> Self;
     /// Report one account's unresolved intended sharing change.
     fn provider_access(operation: OperationId, account: String, grant: bool, owner: bool) -> Self;
@@ -100,7 +100,7 @@ pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Resul
 }
 
 /// An operation's retry wait lives only while its condition does: advancing,
-/// finishing or an explicit retry ends both (§16.5).
+/// finishing or an explicit retry ends both (§6.7).
 pub(crate) fn clear_operation(db: &DatabaseConnection, id: OperationId) -> Result<(), DbError> {
     crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
     db.pending_change(|| {
@@ -180,7 +180,7 @@ fn stored_object<P: PendingValue>(record: &P) -> Option<Vec<u8>> {
     Some(object_key(record.slot()?, record.ends_when_covered()))
 }
 
-/// An applied reset clears data-related observations permanently (§19.3).
+/// An applied reset clears data-related observations permanently (§19.4).
 pub(crate) fn reset(db: &DatabaseConnection) -> Result<(), DbError> {
     db.pending_change(|| {
         db.internal_execute("DELETE FROM _coven_pending AS p WHERE NOT EXISTS(SELECT 1 FROM _coven_access_keys k WHERE k.operation=p.operation) AND NOT EXISTS(SELECT 1 FROM _coven_provider_access a WHERE a.operation=p.operation)",[])?;

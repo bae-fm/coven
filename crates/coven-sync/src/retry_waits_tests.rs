@@ -84,7 +84,7 @@ async fn unsuccessful_attempts_double_their_persisted_wait() {
 
 #[tokio::test]
 async fn reopening_arms_the_remaining_wait_bounded_by_the_full_wait() {
-    // Ana restarts with four seconds left in an eight-second delay (§16.5).
+    // Ana restarts with four seconds left in an eight-second delay (§6.7).
     for (jump, expected) in [(0i64, 4u64), (-1_000_000, 8), (1_000, 0)] {
         let fixture = Fixture::new();
         let (database, waits) = fixture.open().await;

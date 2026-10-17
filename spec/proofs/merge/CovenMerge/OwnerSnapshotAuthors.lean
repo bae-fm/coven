@@ -1,6 +1,6 @@
 import CovenMerge.Ownership
 
-/-! Which authorship a snapshot must prove (§8.8, §15, D7 section 7). A
+/-! Which authorship a snapshot must prove (§9.6, §16.1, D7 section 7). A
 snapshot carries another member's write evidence for every owned creation and
 present owned cell it attributes to that member. Writes of the snapshot's own
 device, and of the signer's other devices once the signer's member is known,
@@ -18,8 +18,8 @@ namespace CovenMerge.Ownership.SnapshotAuthors
 open CovenStorage.RowAuthorship
 
 /-- Who signed what. Registration fixes each device's member, and a device id
-is never registered again (§10). Replacing a member's keys binds a fresh pair
-to the same id; every historical binding is kept (§9). -/
+is never registered again (§10.4). Replacing a member's keys binds a fresh pair
+to the same id; every historical binding is kept (§10). -/
 structure Identities (WriteId Device Member Key : Type) where
   device : WriteId → Device
   member : Device → Member

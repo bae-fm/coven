@@ -1,13 +1,13 @@
-//! Reset this installation as a new device, at the app's call (§10, §19.2).
+//! Reset this installation as a new device, at the app's call (§19.3).
 
 use super::*;
 
 /// Replace this installation with a new device loaded from storage, whatever
 /// the app's reason: another copy using this device's id, a missing device
-/// entry (§10), or a damaged database (§19.2). Settings, credentials, the
+/// entry, or a damaged database (§19.3). Settings, credentials, the
 /// connection and both key custodies are checked before anything moves; a
 /// failure leaves the files in place with its typed error. The new device
-/// names the old id as the one it replaces (§12.1). Only the old database's
+/// names the old id as the one it replaces (§13.1). Only the old database's
 /// operation journal is read, for owed provider cleanup and open invites.
 pub(crate) async fn reset_device(
     mut builder: CovenBuilder,
@@ -29,7 +29,7 @@ pub(crate) async fn reset_device(
     }
     let data = coven_sync::read_connection(&location, &keychain)?.ok_or(SyncError::NoStorage)?;
     // The held sign-in refreshes in this session until the new device
-    // publishes it, like any bootstrap's (§4).
+    // publishes it, like any bootstrap's (§20.2).
     let sign_in = match &data.credentials {
         StorageCredentials::OAuth(tokens) => Some(coven_sync::SessionSignIn::new(
             tokens.clone(),
@@ -127,7 +127,7 @@ async fn record(
 }
 
 /// Carry provider cleanup from the discarded journal and commit the reset
-/// notice together (§10). A database too damaged to read carries nothing;
+/// notice together (§19.3). A database too damaged to read carries nothing;
 /// any other failure fails the reset, which retries.
 pub(super) async fn carry_discarded_provider_work(
     sync: &SequenceSync,
@@ -145,7 +145,7 @@ pub(super) async fn carry_discarded_provider_work(
 
 /// A store that never set up storage has no stored history and no published
 /// device. Its replacement is an empty database under the fresh id, with the
-/// notice that unsent local work was discarded (§10).
+/// notice that unsent local work was discarded (§19.3).
 async fn reset_unconnected(
     builder: CovenBuilder,
     store: StoreId,

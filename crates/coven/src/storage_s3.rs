@@ -1,6 +1,6 @@
 //! S3 setup: a new store's own-bucket check where member keys reach a whole
 //! bucket, then detection and the safety check of the effective settings
-//! against the service, before the provider check and any commitment (§4).
+//! against the service, before the provider check and any commitment (§20.8).
 
 use super::*;
 use coven_storage::S3Detection;
@@ -29,13 +29,13 @@ impl StorageConnections {
             owner.check_location(&config).await?;
             if recorded.is_none() {
                 // Creating the store: where member keys reach the whole
-                // bucket, the bucket must hold nothing but this store (§4).
+                // bucket, the bucket must hold nothing but this store (§20.7).
                 owner
                     .connector
                     .check_new_s3_store(config.clone(), credentials.clone(), owner.store())
                     .await?;
             }
-            // §4's safety check: the effective settings must agree with what
+            // §20.8's safety check: the effective settings must agree with what
             // the service does, before the provider check and any commitment.
             let detection = owner
                 .connector
@@ -77,7 +77,7 @@ impl StorageConnections {
 }
 
 /// Reconnecting with the recorded S3 location and no profile reuses the
-/// recorded settings, which every other device already uses (§4).
+/// recorded settings, which every other device already uses (§20.7).
 fn recorded_s3(supplied: StorageConfig, recorded: Option<&StorageConfig>) -> StorageConfig {
     match (supplied, recorded) {
         (

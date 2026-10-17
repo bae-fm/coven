@@ -1,4 +1,4 @@
-//! Write headers describe independently framed, chunked audience streams (§14.4).
+//! Write headers describe independently framed, chunked audience streams (§15.6).
 
 use crate::chunks::{FrameDecoder, PlaintextChunks, CHUNK_SIZE};
 use crate::dismissal::WriteFrame;

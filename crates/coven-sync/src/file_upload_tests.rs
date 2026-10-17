@@ -406,7 +406,7 @@ async fn lost_completion_reply_resumes_the_published_object() {
 }
 
 /// Ana attaches A, then the row is pointed at B while A's bytes are in flight.
-/// A's completion changes no row and cannot restore A over B (§16.1).
+/// A's completion changes no row and cannot restore A over B (§17.2).
 pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
     let old = f.attach("files", "old", vec![33; 19]).await;
 
@@ -907,7 +907,7 @@ mod differential {
 
 /// One create carries a file up to the provider's limit, across several
 /// encryption chunks; one byte past it, or past the buffered bound on a
-/// provider accepting more, the file goes up in a recorded session (SP).
+/// provider accepting more, the file goes up in a recorded session (§17.7).
 #[tokio::test]
 async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
     use coven_storage::{test_utils::MemoryRequest, BUFFERED_REQUEST_LIMIT};

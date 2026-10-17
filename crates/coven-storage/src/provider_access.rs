@@ -3,7 +3,7 @@
 use crate::{CloudProvider, StorageError, StorageFailure};
 use serde::{Deserialize, Serialize};
 
-/// Dropbox fixes this access level on the app registration (§4).
+/// Dropbox fixes this access level on the app registration (§20.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DropboxAccess {
     /// Paths relative to the app's folder; sharing is unavailable.

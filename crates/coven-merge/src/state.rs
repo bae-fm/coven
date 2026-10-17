@@ -31,7 +31,7 @@ pub struct LostValue<V> {
 }
 
 /// One table, key and audience's merged state. Removed rows retain this state;
-/// a removal never advances their generation (§8).
+/// a removal never advances their generation (§8.4).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RowState<V> {
     pub(crate) row: RowId,
@@ -207,7 +207,7 @@ impl<V> RowState<V> {
         self
     }
 
-    /// §8.5: a unique claim is ordered by the latest winning setter of any of
+    /// §9.2: a unique claim is ordered by the latest winning setter of any of
     /// its columns. Null reference substitutions keep that setter.
     #[cfg(test)]
     pub(crate) fn claim_order(
@@ -253,7 +253,7 @@ pub(crate) fn timestamp(oracle: &impl WriteOracle, id: WriteId) -> Result<Timest
     oracle.timestamp(id).ok_or(MergeError::MissingWrite(id))
 }
 
-/// Apply one write to one row (Appendix B, B5; Lean `step`). It touches only
+/// Apply one write to one row (proofs/merge.md B5; Lean `step`). It touches only
 /// the supplied row. All past writes must be applied and the arriving write
 /// must be absent from the oracle. Call for each changed row against the same
 /// pre-write oracle, then commit all results in the database's transaction.

@@ -50,7 +50,7 @@ impl MemoryStorageBuilder {
         self
     }
     /// Return listings in native pages of this many entries, each page its own
-    /// request in the trace, as a provider's continuation requests are (§3.1).
+    /// request in the trace, as a provider's continuation requests are (§21.1).
     pub fn listing_page(mut self, entries: std::num::NonZeroUsize) -> Self {
         self.listing_page = entries.get();
         self

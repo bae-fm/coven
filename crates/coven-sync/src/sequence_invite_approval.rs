@@ -1,4 +1,4 @@
-//! The invite owns its binding claim's retries and rejection cleanup (§18).
+//! The invite owns its binding claim's retries and rejection cleanup (§11).
 use super::*;
 use crate::sequence_sync::sequence_operations::{Request, SequenceOperation};
 

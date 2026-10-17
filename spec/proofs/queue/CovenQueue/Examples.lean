@@ -130,7 +130,7 @@ def departed : KeyRequest := ⟨1, false, true, [1], [1], [oldCircleKey]⟩
 theorem remaining_member_rotates : chooseKey remaining = some newCircleKey ∧
     1 ∉ newCircleKey.knownRecipients := by decide
 
-/-- Smallest removal exception, §6 and §14.6: two circle members share K;
+/-- Smallest removal exception, §6.3 and §15.8: two circle members share K;
 Ben queues an edit, learns Ana removed him, then first sends that edit with K.
 The literal claim that every first send excludes the removed member fails. -/
 theorem departed_member_counterexample :

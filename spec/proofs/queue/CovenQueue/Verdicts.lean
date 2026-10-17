@@ -365,7 +365,7 @@ theorem reloading_blocks_commit (audiences : List AudienceState) (v : View)
   cases ready
 
 /-- Download or rebuilding failure retains the previous state. Only successful
-atomic replacement changes which boundary a new write may claim (§15, E3). -/
+atomic replacement changes which boundary a new write may claim (§16.5, E3). -/
 def finishReload (s : AudienceState) (loaded : Option Materialized) : AudienceState :=
   match s, loaded with
   | .reloading v _, some data => .ready v data

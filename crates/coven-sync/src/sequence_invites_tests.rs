@@ -151,7 +151,7 @@ async fn a_declined_request_takes_back_the_share_and_the_joiner_sees_the_decline
     assert_eq!(access.granted, Some(false));
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
     // The revoked share makes the request unreadable, which is not absence:
-    // the provider's permission failure reaches the app (§12.2).
+    // the provider's permission failure reaches the app (§13.2).
     let outcome = carol.device.sync.join_outcome(&carol.request).await;
     assert!(
         matches!(&outcome, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::PermissionDenied),
@@ -446,7 +446,7 @@ async fn a_pass_publishes_checked_join_requests_to_the_subscription() {
 }
 
 /// A request waiting for the app's decision does not keep an expired invite
-/// open: the next pass takes its grant back (§12.2).
+/// open: the next pass takes its grant back (§13.2).
 #[tokio::test]
 async fn an_invite_waiting_for_a_decision_still_expires() {
     let group = Group::shared();
@@ -477,7 +477,7 @@ async fn an_invite_waiting_for_a_decision_still_expires() {
     }
 }
 
-// §12.2, §18 and E9: an invite cannot replace a competing binding on retry.
+// §13.2, §11 and E9: an invite cannot replace a competing binding on retry.
 #[tokio::test]
 async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry() {
     for (interrupted, failed_cleanup) in

@@ -19,7 +19,7 @@ impl std::fmt::Display for StoreId {
     }
 }
 
-/// A circle's identity, independent of its name or current key (§14.3).
+/// A circle's identity, independent of its name or current key (§15.5).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct CircleId(
@@ -33,7 +33,7 @@ impl std::fmt::Display for CircleId {
     }
 }
 
-/// A store or circle key's identity, named by the entry introducing it (§11).
+/// A store or circle key's identity, named by the entry introducing it (§12.1).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct KeyId(
@@ -47,7 +47,7 @@ impl std::fmt::Display for KeyId {
     }
 }
 
-/// A member's random stable identity, independent of their keys (§9).
+/// A member's random stable identity, independent of their keys (§10).
 /// Device ownership, circle membership and slot authors name it; a key
 /// replacement keeps it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
@@ -87,7 +87,7 @@ impl std::fmt::Display for InvalidMemberId {
 
 impl std::error::Error for InvalidMemberId {}
 
-/// An invitation's identity, independent of its one-time secret (§12.2).
+/// An invitation's identity, independent of its one-time secret (§13.2).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct InviteId(
@@ -101,7 +101,7 @@ impl std::fmt::Display for InviteId {
     }
 }
 
-/// An uploaded file's random identity, independent of its content (§16.2).
+/// An uploaded file's random identity, independent of its content (§17.3).
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct FileId(
@@ -129,7 +129,7 @@ pub trait IdSource: Send + Sync {
     fn new_id(&self) -> Uuid;
 
     /// A fresh device id derived from this source, without another randomness
-    /// source. Every install and restored copy receives a new device id (§10).
+    /// source. Every install and restored copy receives a new device id (§10.4).
     ///
     /// Uses 62 payload bits from the UUID's last eight bytes and two from its
     /// eighth byte: all 64 are random in UUIDv4 and UUIDv7. The version,

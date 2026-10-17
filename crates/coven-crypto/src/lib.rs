@@ -1,4 +1,4 @@
-//! Store keys, circle keys, member keys, cryptography and key custody (§11.1).
+//! Store keys, circle keys, member keys, cryptography and key custody (Appendix D).
 //!
 //! Object and file chunks authenticate their storage path, cleartext prefix and
 //! coordinates. Every file has an independent key and uses its index as nonce.

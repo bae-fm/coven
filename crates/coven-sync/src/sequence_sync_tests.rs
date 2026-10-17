@@ -99,7 +99,7 @@ impl Group {
         .await
     }
     /// A new installation of `identity` whose store custody holds no key yet,
-    /// reaching storage through `storage` (§12).
+    /// reaching storage through `storage` (§13).
     pub(crate) async fn newcomer(
         &self,
         identity: MemberIdentity,
@@ -396,7 +396,7 @@ pub(crate) async fn rows(db: &Database) -> Vec<(String, String)> {
     .unwrap()
 }
 
-/// §14.4: applied membership controls reading even when a retained key opens
+/// §15.6: applied membership controls reading even when a retained key opens
 /// a retry authored before departure; rejoining reloads the skipped history.
 #[tokio::test]
 async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {

@@ -1,4 +1,4 @@
-//! Every opened key remains available by its store or circle key id (§11).
+//! Every opened key remains available by its store or circle key id (§12.2).
 
 use std::collections::BTreeMap;
 use std::fmt;
@@ -12,7 +12,7 @@ use zeroize::Zeroizing;
 use crate::{derivation, randomness, wire};
 use crate::{CircleId, CryptoError, DerivedKeys, EncryptionKey, MaterialError, SecretBytes};
 
-/// A store's identified 32-byte key (§11), erased on drop.
+/// A store's identified 32-byte key (§12), erased on drop.
 /// Cloning supplies an independent unlocked snapshot to in-memory custody.
 #[derive(Clone)]
 pub struct StoreKey {
@@ -28,18 +28,18 @@ impl StoreKey {
         Ok(Self { id, bytes })
     }
 
-    /// Import a store key opened from custody or a member's sealed copy (§11).
+    /// Import a store key opened from custody or a member's sealed copy (§12.1).
     pub fn from_bytes(id: KeyId, bytes: [u8; 32]) -> Self {
         let bytes = Zeroizing::new(bytes);
         Self { id, bytes }
     }
 
-    /// The random identity named by the entry introducing this key (§11).
+    /// The random identity named by the entry introducing this key (§12.1).
     pub fn id(&self) -> KeyId {
         self.id
     }
 
-    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§11).
+    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§12.1).
     pub fn hash(&self) -> [u8; 32] {
         Sha256::digest(self.bytes.as_ref()).into()
     }
@@ -76,7 +76,7 @@ impl fmt::Debug for StoreKey {
     }
 }
 
-/// One circle's identified 32-byte key, introduced by creation or rotation (§11).
+/// One circle's identified 32-byte key, introduced by creation or rotation (§12.1).
 /// Cloning supplies an independent unlocked snapshot to in-memory custody.
 #[derive(Clone, Debug)]
 pub struct CircleKey {
@@ -111,7 +111,7 @@ impl CircleKey {
         self.key.id()
     }
 
-    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§11).
+    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§12.1).
     pub fn hash(&self) -> [u8; 32] {
         self.key.hash()
     }
@@ -144,7 +144,7 @@ impl CircleKey {
     }
 }
 
-/// Every store and circle key this device has opened, including older keys (§11).
+/// Every store and circle key this device has opened, including older keys (§12.2).
 /// Cloning lets in-memory custody keep its copy while returning an unlocked one.
 #[derive(Clone, Debug)]
 pub struct StoreKeyring {
@@ -173,7 +173,7 @@ impl StoreKeyring {
         Ok(())
     }
 
-    /// Keep an opened circle key, retaining its earlier keys too (§14.3).
+    /// Keep an opened circle key, retaining its earlier keys too (§15.5).
     pub fn insert_circle_key(&mut self, key: CircleKey) -> Result<(), MaterialError> {
         let id = (key.circle(), key.id());
         if let Some(existing) = self.circles.get(&id) {
@@ -189,7 +189,7 @@ impl StoreKeyring {
         Ok(())
     }
 
-    /// An opened store key by identity, so older writes still open (§11).
+    /// An opened store key by identity, so older writes still open (§12.2).
     pub fn store_key(&self, key: KeyId) -> Result<&StoreKey, MaterialError> {
         self.stores
             .get(&key)
@@ -208,7 +208,7 @@ impl StoreKeyring {
             .filter_map(move |(owner, key)| (*owner == circle).then_some(*key))
     }
 
-    /// An opened circle key by its circle and identity (§14.3).
+    /// An opened circle key by its circle and identity (§15.5).
     pub fn circle_key(&self, circle: CircleId, key: KeyId) -> Result<&CircleKey, MaterialError> {
         self.circles
             .get(&(circle, key))
@@ -263,7 +263,7 @@ impl StoreKeyring {
     }
 }
 
-/// The one-time invite secret lets a person ask to join, not open the store (§12.2).
+/// The one-time invite secret lets a person ask to join, not open the store (§13.2).
 pub struct InviteSecret(Zeroizing<[u8; 32]>);
 
 impl InviteSecret {
@@ -274,7 +274,7 @@ impl InviteSecret {
         Ok(Self(bytes))
     }
 
-    /// Import the secret carried by a scanned invite (§12.2).
+    /// Import the secret carried by a scanned invite (§13.2).
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(Zeroizing::new(bytes))
     }
@@ -284,7 +284,7 @@ impl InviteSecret {
         SecretBytes::new(self.0.to_vec())
     }
 
-    /// Derive the join request's encryption key with its own HKDF label (§11.1).
+    /// Derive the join request's encryption key with its own HKDF label (Appendix D).
     pub fn join_request_key(&self) -> EncryptionKey {
         EncryptionKey(derivation::derive_label(&self.0, derivation::JOIN_REQUEST))
     }

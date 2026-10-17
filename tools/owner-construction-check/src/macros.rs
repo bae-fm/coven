@@ -1,4 +1,4 @@
-//! Macro calls (§20.4: the checker reads the syntax tree "including inside
+//! Macro calls (Appendix F.6: the checker reads the syntax tree "including inside
 //! macro calls"). A macro's arguments reach `syn` as unparsed tokens, so a
 //! visitor never enters them on its own.
 //!

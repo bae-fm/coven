@@ -30,7 +30,7 @@ impl RustFile {
     }
 
     /// Whether the file belongs to one of the workspace's crates, which the
-    /// §20.1 and §20.2 rules govern; tools answer only to the conventions.
+    /// Appendix F.1 to F.3 rules govern; tools answer only to the conventions.
     pub(crate) fn is_crate_source(&self) -> bool {
         self.relative_path.starts_with("crates/")
     }
@@ -257,7 +257,7 @@ pub(crate) fn path_names(path: &syn::Path) -> Vec<String> {
         .collect()
 }
 
-/// The test layout of §20.3: a source's tests live beside it in
+/// The test layout of Appendix F.5: a source's tests live beside it in
 /// `<name>_tests.rs`, and integration tests in a crate's `tests/` directory.
 /// Nothing else is test code — test-support modules behind a `test-utils`
 /// feature are production sources and answer to every rule.

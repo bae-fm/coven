@@ -1,5 +1,5 @@
 //! The device clock S3 signs with, corrected by the service's own evidence
-//! (§4, E5). `RequestTimeTooSkewed` means the device clock is off, not that
+//! (§20.7, E5). `RequestTimeTooSkewed` means the device clock is off, not that
 //! access was denied: the request is retried once, signed with the offset the
 //! response's `Date` states, and a second refusal is `ClockSkew`. Every
 //! attempt, the retry included, waits for the store's provider cooldown and

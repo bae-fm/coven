@@ -1,4 +1,4 @@
-//! A member's signing and sealing key pairs, kept together (§11.1).
+//! A member's signing and sealing key pairs, kept together (Appendix D).
 
 use crate::{cipher, derivation, randomness, wire};
 use crate::{CircleKey, CryptoError, MaterialError, ObjectDigest, SecretBytes, StoreKey};
@@ -8,7 +8,7 @@ use std::fmt;
 use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
-/// A member's validated Ed25519 public signing key (§11.1). It is bound to a
+/// A member's validated Ed25519 public signing key (Appendix D). It is bound to a
 /// stable [`MemberId`] by admin entries and is never that identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct SigningKey([u8; 32]);
@@ -28,7 +28,7 @@ impl SigningKey {
         &self.0
     }
 
-    /// Verify a detached signature against this public key (§10).
+    /// Verify a detached signature against this public key (§12).
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
         let key = VerifyingKey::from_bytes(&self.0)
             .expect("SigningKey contains a validated Ed25519 public key");
@@ -36,7 +36,7 @@ impl SigningKey {
             .map_err(|_| CryptoError::Signature)
     }
 
-    /// Verify an object's signature after hashing all bytes before it (§14.4).
+    /// Verify an object's signature after hashing all bytes before it (Appendix D.3).
     /// The domain and path are authenticated along with the SHA-256 digest.
     /// Panics if the storage path is empty.
     pub fn verify_object(
@@ -86,14 +86,14 @@ impl SealingKey {
     pub fn from_bytes(bytes: [u8; 32]) -> Self {
         Self(bytes)
     }
-    /// The public bytes carried with the member's join request (§12.2).
+    /// The public bytes carried with the member's join request (§13.2).
     pub fn as_bytes(&self) -> &[u8; 32] {
         &self.0
     }
 }
 
 /// A member's public signing and sealing keys, independent of their stable
-/// [`MemberId`] (§9, D2). Creation, addition and replacement bind a pair to an id.
+/// [`MemberId`] (§10, D2). Creation, addition and replacement bind a pair to an id.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Ord, PartialOrd)]
 pub struct MemberPublicKeys {
     /// The Ed25519 key that verifies the member's signatures.
@@ -102,7 +102,7 @@ pub struct MemberPublicKeys {
     pub sealing: SealingKey,
 }
 
-/// A detached Ed25519 signature on bytes authored by a member (§10).
+/// A detached Ed25519 signature on bytes authored by a member (§12).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Signature([u8; 64]);
 
@@ -117,7 +117,7 @@ impl Signature {
     }
 }
 
-/// A member's Ed25519 signing pair and independent X25519 sealing pair (§11.1).
+/// A member's Ed25519 signing pair and independent X25519 sealing pair (Appendix D).
 /// Both secrets erase on drop. Clone is needed by in-memory custody to keep
 /// its keys while returning an independently owned unlocked pair.
 #[derive(Clone)]
@@ -139,7 +139,7 @@ impl MemberKeys {
         })
     }
 
-    /// The public pair admin entries bind to a stable member id (§9).
+    /// The public pair admin entries bind to a stable member id (§10).
     pub fn public_keys(&self) -> MemberPublicKeys {
         MemberPublicKeys {
             signing: SigningKey(self.signing.verifying_key().to_bytes()),
@@ -147,12 +147,12 @@ impl MemberKeys {
         }
     }
 
-    /// Sign bytes with the member's Ed25519 pair (§10).
+    /// Sign bytes with the member's Ed25519 pair (§12).
     pub fn sign(&self, bytes: &[u8]) -> Signature {
         Signature(self.signing.sign(bytes).to_bytes())
     }
 
-    /// Sign the digest of every object byte before the signature (§14.4).
+    /// Sign the digest of every object byte before the signature (Appendix D.3).
     /// Feed the prefix, length fields and sealed chunks to [`crate::ObjectHasher`]
     /// in storage order. The signed message binds its domain, path and digest.
     /// Panics if the storage path is empty.
@@ -187,7 +187,7 @@ impl MemberKeys {
         self.sign(&header_message(path, prefix, header, roots))
     }
 
-    /// Encode both private seeds for custody or the person's restore code (§12.1).
+    /// Encode both private seeds for custody or the person's restore code (§13.1).
     pub fn to_secret_bytes(&self) -> SecretBytes {
         let mut bytes = Zeroizing::new(Vec::with_capacity(MEMBER_KEYS_LENGTH));
         bytes.extend_from_slice(b"CVMK\x01");
@@ -196,7 +196,7 @@ impl MemberKeys {
         SecretBytes(bytes)
     }
 
-    /// Restore both pairs from custody or the person's restore code (§12.1).
+    /// Restore both pairs from custody or the person's restore code (§13.1).
     pub fn from_secret_bytes(mut bytes: &[u8]) -> Result<Self, MaterialError> {
         wire::prefix(&mut bytes, b"CVMK\x01")?;
         let signing = Zeroizing::new(wire::array(&mut bytes)?);
@@ -243,7 +243,7 @@ impl MemberKeys {
     }
 
     /// Open a member's delivered S3 key box, authenticating the exact path and
-    /// clear prefix (§13). Its plaintext is at most `MAX_ACCESS_KEY_BOX`
+    /// clear prefix (§14.3). Its plaintext is at most `MAX_ACCESS_KEY_BOX`
     /// bytes; format decodes it. Panics if the storage path is empty.
     pub fn open_access_key(
         &self,
@@ -297,8 +297,8 @@ impl fmt::Debug for MemberKeys {
 /// The active pair is the one the last installed binding made current. A
 /// self-replacement keeps its candidate here before publishing it, and every
 /// pair a kept replacement retired stays held, because copies name the exact
-/// credential they open with (§11). Which pair may sign is replay's decision,
-/// never this record's (§10).
+/// credential they open with (§12.1). Which pair may sign is replay's decision,
+/// never this record's (§12.3).
 #[derive(Clone)]
 pub struct MemberIdentity {
     member: MemberId,
@@ -318,7 +318,7 @@ impl MemberIdentity {
         }
     }
 
-    /// Make both key pairs for an independently generated id (§9).
+    /// Make both key pairs for an independently generated id (§10).
     pub fn generate(member: MemberId) -> Result<Self, CryptoError> {
         Ok(Self::new(member, MemberKeys::generate()?))
     }
@@ -348,7 +348,7 @@ impl MemberIdentity {
 
     /// The held private pair whose sealing key is `sealing`. A copy names the
     /// exact credential it is sealed to, and opens only with that one, never
-    /// with whichever pair is latest (§11).
+    /// with whichever pair is latest (§12.1).
     pub fn credential(&self, sealing: &SealingKey) -> Option<&MemberKeys> {
         self.held()
             .find(|keys| keys.public_keys().sealing == *sealing)
@@ -368,7 +368,7 @@ impl MemberIdentity {
     }
 
     /// This identity with the held pair `current` active, as replay's current
-    /// binding selects it (§10). The previously active pair and any other
+    /// binding selects it (§12.3). The previously active pair and any other
     /// candidate stay held as retired credentials. `None` when no held pair
     /// is `current`.
     pub fn activate(&self, current: &MemberPublicKeys) -> Option<Self> {
@@ -398,7 +398,7 @@ impl MemberIdentity {
     }
 
     /// This identity with its candidate retired: a replacement that never
-    /// became current leaves its copies, so its pair stays held (§11).
+    /// became current leaves its copies, so its pair stays held (§12.4).
     pub fn retire_candidate(&self) -> Self {
         let mut next = self.clone();
         next.retained.extend(next.candidate.take());
@@ -516,11 +516,11 @@ pub fn seal_circle_key(
     seal_box(b"circle", recipient, path, prefix, &bytes)
 }
 
-/// The largest delivered S3 key plaintext: its id, secret and principal (§13).
+/// The largest delivered S3 key plaintext: its id, secret and principal (§14.3).
 pub const MAX_ACCESS_KEY_BOX: usize = 8 * 1024;
 
 /// Seal a member's new S3 key anonymously to their sealing key, binding the
-/// path and exact clear prefix (§13). Format encodes the plaintext.
+/// path and exact clear prefix (§14.3). Format encodes the plaintext.
 /// Panics if the storage path is empty.
 pub fn seal_access_key(
     plaintext: &[u8],

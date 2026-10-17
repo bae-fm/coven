@@ -7,7 +7,7 @@ pub(crate) const CLOUDKIT_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 
-/// A create-once provider upload recorded by the caller's operation (§16.5, §18).
+/// A create-once provider upload recorded by the caller's operation (§17.7, §11).
 /// The floor uses conditional replacement and cannot have a create-once session.
 ///
 /// Record it before sending parts and after each call, including failed calls:
@@ -81,7 +81,7 @@ pub(crate) enum SessionState {
     },
     /// A session whose upload name is recorded before the native multipart
     /// upload is initiated, so no upload exists that its recording does not
-    /// name (§4).
+    /// name (Appendix E.10).
     S3Planned {
         token: SecretText,
         /// True only while this process knows no initiation was attempted.

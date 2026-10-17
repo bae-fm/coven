@@ -1,4 +1,4 @@
-//! The joining device's wait for its approving device's binding (§12.2).
+//! The joining device's wait for its approving device's binding (§13.2).
 
 use super::{
     sequence_bootstrap::{Bootstrap, MemberBinding},
@@ -7,7 +7,7 @@ use super::{
 use crate::{JoiningIdentity, SyncError};
 use coven_storage::{StorageFailure, StorageInvitation};
 
-/// The joining member's outcome after checking storage (§12.2).
+/// The joining member's outcome after checking storage (§13.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum JoinOutcome {
     /// The request exists, or copies arrived before the binding entry.
@@ -31,7 +31,7 @@ impl SequenceSync {
 
     /// Inspect the slots after the invite for copies routed to the request's
     /// pair; once they open a store key, apply the sequence and look for the
-    /// approving device's binding. Copies alone do not admit (§12.2).
+    /// approving device's binding. Copies alone do not admit (§13.2).
     pub async fn join_outcome(&self, request: &JoiningIdentity) -> Result<JoinOutcome, SyncError> {
         let mut session = self.session.lock().await;
         let member = self
@@ -77,7 +77,7 @@ impl SequenceSync {
     }
 
     /// Wait until the next approval poll is due: its persisted delay, armed
-    /// again after reopening, and any provider cooldown (§16.5).
+    /// again after reopening, and any provider cooldown (§6.7).
     pub async fn join_poll_due(&self) -> Result<(), SyncError> {
         let subject = coven_database::RetrySubject::Join;
         loop {

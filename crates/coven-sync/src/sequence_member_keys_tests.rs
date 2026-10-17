@@ -1,7 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 
-/// E9 and §12.2: replacement supplies every store key and only held circle keys.
+/// E9 and §13.2: replacement supplies every store key and only held circle keys.
 #[tokio::test]
 async fn an_admin_outside_the_targets_circle_can_replace_its_pair() {
     let group = Group::new();
@@ -75,7 +75,7 @@ async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_
     );
     insert(&ana.sync.database, "after", "under the new pair").await;
     // The old pair's copies expose the store key: this pass rotates it,
-    // and the write waits for the replacement key (§11).
+    // and the write waits for the replacement key (§12.3).
     ana.sync.pass().await.unwrap();
     assert!(ana
         .sync
@@ -151,7 +151,7 @@ async fn an_admin_publishes_a_prepared_pair_with_copies_for_its_member() {
 use coven_crypto::custody::Keychain;
 use coven_crypto::SecretBytes;
 
-// §18.1 and E9: identity installation is unfinished until code custody commits.
+// §11.5 and E9: identity installation is unfinished until code custody commits.
 #[tokio::test]
 async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_reopening() {
     let group = Group::new();
@@ -226,7 +226,7 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
     ana.sync.database.close().await.unwrap();
 }
 
-// §18.1: completing a binding in a background pass also commits its restore code.
+// §11.5: completing a binding in a background pass also commits its restore code.
 #[tokio::test]
 async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
     let group = Group::new();

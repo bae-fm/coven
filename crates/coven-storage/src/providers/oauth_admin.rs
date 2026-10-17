@@ -1,4 +1,4 @@
-//! Google sign-in for the storage account's admin access (§4): the app's
+//! Google sign-in for the storage account's admin access (§20.10): the app's
 //! Google client, the installed-app loopback with PKCE, and the
 //! `cloud-platform` scope. The access token lives for one operation; no
 //! refresh token is requested or kept.
@@ -7,7 +7,7 @@ use super::*;
 /// The scope managing service accounts, HMAC keys and managed folders.
 pub(crate) const CLOUD_PLATFORM: &str = "https://www.googleapis.com/auth/cloud-platform";
 
-/// Google sign-in administers GCS, an S3 location (§4): its redirect, its
+/// Google sign-in administers GCS, an S3 location (§20.10): its redirect, its
 /// unavailability and its failures name the S3 provider.
 pub(super) const GOOGLE_ADMIN: CloudProvider = CloudProvider::S3;
 

@@ -386,7 +386,7 @@ fn dependency_losses_round_trip_with_their_sources() {
 }
 
 /// An unauthorized change's loss keeps its write and reason through the
-/// snapshot section, frozen with its own write as setter (§8.8, D7).
+/// snapshot section, frozen with its own write as setter (§9.6, D7).
 #[test]
 fn unauthorized_losses_round_trip_with_their_reason() {
     let empty = test_utils::oracle();

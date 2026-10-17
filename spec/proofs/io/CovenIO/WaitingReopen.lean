@@ -1,7 +1,7 @@
 import CovenIO.WaitingEvidence
 
-/-! Reopening the store with operations waiting (§3.1 Waiting, §16.5, SP
-"Waiting without repeated work"), as `RetryWaits::open` and `watch_persisted`
+/-! Reopening the store with operations waiting (§6.7
+"Waiting and retrying", §21.2), as `RetryWaits::open` and `watch_persisted`
 run it.
 
 A wait persists its wall-clock deadline `T` and its full wait `W`, the delay
@@ -17,11 +17,11 @@ Proved here: a reopened wait is due within its full wait `W`, under any wall
 clock, whatever committed before the reopen (`reopen_within_wait`,
 `reopened_due`), so a prerequisite satisfied before the reopen stalls it at
 most that long. With no forward wall-clock jump, starts across any number of
-reopens are at most §3.1's count plus one per reopen (`reopen_rate`,
+reopens are at most §21.2's count plus one per reopen (`reopen_rate`,
 `reopen_unchanged_rate`); the extra start is the lost attempt starting again
 (`reopen_mid_attempt_restarts`), and a reopen with no attempt running adds
 none (`idle_reopen_keeps_count`). A forward jump can end a wait early
-(`forward_jump_ends_wait`); §3.1 states its restart bound only without one. -/
+(`forward_jump_ends_wait`); §21.2 states its restart bound only without one. -/
 
 namespace CovenIO.Waiting
 
@@ -222,7 +222,7 @@ theorem reopened_due {s t : Session} {jump : Int} {es : List Event}
           simp only [Bool.or_eq_true, decide_eq_true_eq]
           left; omega
 
-/-! ## §3.1's count across reopens, without a forward wall-clock jump -/
+/-! ## §21.2's count across reopens, without a forward wall-clock jump -/
 
 theorem live_now {s t : Session} {ls : List Life} (h : live s ls = some t) :
     t.now = s.now + lifeTicks ls := by
@@ -412,7 +412,7 @@ theorem lifeUnchanged_paid {u : Nat → Bool} {s t : Session} {ls : List Life}
           obtain ⟨⟨ha', hl', _, _⟩, paid⟩ := unchanged_step one hs
           rw [ih ⟨ha', hl', hc', hf'⟩ hr, paid]
 
-/-- §3.1's bound for an unchanged wait across reopens: at most one start,
+/-- §21.2's bound for an unchanged wait across reopens: at most one start,
 plus one per reopen, plus the elapsed time over `d`. Within one
 uninterrupted run (no reopen) it is exactly `unchanged_rate`. -/
 theorem reopen_unchanged_rate {d : Nat} {u : Nat → Bool} {s t : Session} {ls : List Life}

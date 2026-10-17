@@ -30,7 +30,7 @@ fn own(write: WriteId, row: RowId) -> Creation {
 }
 
 /// Two devices insert the same shared key concurrently. Whatever arrives
-/// first in the store sequence is the creation (§8.8, Lean Owners).
+/// first in the store sequence is the creation (§9.6, Lean Owners).
 #[tokio::test]
 async fn the_first_slot_keeps_the_creation_regardless_of_timestamps() {
     let earliest = insert(0, 0).header.position;
@@ -56,13 +56,13 @@ async fn the_first_slot_keeps_the_creation_regardless_of_timestamps() {
 }
 
 /// Updates, deletes and reinserts keep the original creation: none of them
-/// is a generation-zero insert (§8.8).
+/// is a generation-zero insert (§9.6).
 #[tokio::test]
 async fn later_generations_keep_the_original_creation() {
     let store = TestStore::new();
     let db = store.schema(owned(), SCHEMA).await.unwrap();
     // The creating device is another of this device's member's, who may
-    // edit the row (§8.8).
+    // edit the row (§9.6).
     let creator = insert(0, 0);
     TestStore::register(&db, store.device(), 1);
     TestStore::register(&db, creator.header.position.device, 1);
@@ -150,7 +150,7 @@ async fn snapshots_carry_creations_through_reload() {
 }
 
 /// Renaming the table keeps the creating write, and its original names:
-/// the migration's author does not become the creator (§8.8, §17.1).
+/// the migration's author does not become the creator (§9.6, §18.4).
 #[tokio::test]
 async fn a_table_rename_keeps_the_original_creation() {
     let store = TestStore::new();

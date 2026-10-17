@@ -1,6 +1,6 @@
 //! The received interpretation of authenticated original changes: each
-//! part's direct admission by the selected boundaries and the slot cut-off, then every admitted change's permission and data sources (§8,
-//! §8.8, §10, §17.1, §19.3). Original bytes stay retained; only this
+//! part's direct admission by the selected boundaries and the slot cut-off, then every admitted change's permission and data sources (§9.5,
+//! §9.6, §14.1, §18.6, §19.4). Original bytes stay retained; only this
 //! interpretation reaches the merge.
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
@@ -14,8 +14,8 @@ use coven_format::{
 use coven_merge::{Audience, ColumnValue, Operation, Provenance, RowId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// How a whole part is admitted before its changes are judged (§10, §17.1,
-/// §19.3).
+/// How a whole part is admitted before its changes are judged (§14.1, §18.6,
+/// §19.4).
 #[derive(Clone, Debug)]
 enum PartAdmission {
     /// A preceding removal or key replacement refuses the batch.
@@ -39,7 +39,7 @@ enum Interpretation {
 
 /// One write's received interpretation: every opened change's verdict,
 /// decided for the whole write before any part merges, since a foreign-key
-/// action and its causes can be in different parts (§8, §8.8).
+/// action and its causes can be in different parts (§9.5, §9.6).
 pub(crate) struct Interpreter {
     header: WriteHeader,
     parts: BTreeMap<Audience, PartAdmission>,
@@ -61,7 +61,7 @@ impl Interpreter {
             parts: BTreeMap::new(),
             verdicts: BTreeMap::new(),
         };
-        // A write after its cut-off is consumed without effects or losses (§10).
+        // A write after its cut-off is consumed without effects or losses (§14.1).
         if crate::sequence::refused(database, header.position)? {
             for audience in audiences {
                 interpreter
@@ -109,7 +109,7 @@ impl Interpreter {
             .map(|(audience, _)| audience)
             .collect();
         // An admitted part's creations are offered before any check decides
-        // about its changes (§8.8).
+        // about its changes (§9.6).
         let mut sources = BTreeMap::new();
         let mut fixed = BTreeMap::new();
         crate::judge::visit_write(database, header, |record| {
@@ -285,7 +285,7 @@ impl Interpreter {
     }
 }
 
-/// A change's data sources in role order (§8, Lean `Admission.dependencies`):
+/// A change's data sources in role order (§9.5, Lean `Admission.dependencies`):
 /// generation, replaced setters, then the further sources its operations used.
 fn provenance(record: &OriginalRow) -> Provenance<ChangeId> {
     let (generation, setters) = match record {

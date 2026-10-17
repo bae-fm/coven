@@ -2,7 +2,7 @@
 
 use crate::{Slot, WriteId, WritePast};
 
-/// Publication order of a unique value's input setter (§8.5).
+/// Publication order of a unique value's input setter (§9.2).
 /// Local writes follow every published claim, in their original number order.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum ClaimOrder {

@@ -328,7 +328,7 @@ impl Database {
         Ok(RetainedBytes::new(reader, reading, length))
     }
     /// The retained provider observation of an exact path, if any. A drained
-    /// writer's discovered objects are found here instead of by probing (§6).
+    /// writer's discovered objects are found here instead of by probing (§6.1).
     pub async fn retained_observation(&self, path: String) -> Result<Option<Vec<u8>>, DbError> {
         self.call(move |inner| {
             inner.inputs.read(|db| {
@@ -580,7 +580,7 @@ impl RetainedInput {
         .await
     }
 
-    /// The checked file evidence of these bytes, if any (§16.5).
+    /// The checked file evidence of these bytes, if any (§17.8).
     pub async fn files(&self) -> Result<Option<FileEvidence>, DbError> {
         self.read(|db, id| {
             let (complete, schema): (Option<bool>, Option<u32>) = db.query_row(
@@ -691,7 +691,7 @@ impl RetainedInput {
 }
 
 /// What checked retained bytes establish about the uploaded files they name
-/// (§16.5).
+/// (§17.8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileEvidence {
     /// Every fixed file path the bytes name, after complete authentication.
@@ -701,7 +701,7 @@ pub enum FileEvidence {
     Unproven(UnprovenFiles),
 }
 
-/// Why retained bytes cannot yet name every file they refer to (§16.5).
+/// Why retained bytes cannot yet name every file they refer to (§17.8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum UnprovenFiles {
     /// Parts sealed for these audiences under these keys, which this device

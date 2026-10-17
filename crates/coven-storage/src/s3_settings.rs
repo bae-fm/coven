@@ -1,4 +1,4 @@
-//! The S3 behaviors a location uses (§4). Catalogued profiles fill them; a
+//! The S3 behaviors a location uses (§20.7). Catalogued profiles fill them; a
 //! custom profile carries its own, so every device behaves identically.
 use serde::{Deserialize, Serialize};
 
@@ -11,7 +11,7 @@ pub enum S3Profile {
     Custom(S3Settings),
 }
 
-/// An S3 service whose catalogued profile a location names (§4).
+/// An S3 service whose catalogued profile a location names (§20.7).
 /// Self-hosted services have arbitrary endpoints, so no hostname identifies them.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum S3ProfileName {
@@ -31,7 +31,7 @@ pub enum S3ProfileName {
     VersityGw,
 }
 
-/// The bucket's versioning state, read through the service's XML API (§4).
+/// The bucket's versioning state, read through the service's XML API (§20.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum S3BucketVersioning {
     /// The bucket has never enabled versioning.
@@ -44,7 +44,7 @@ pub enum S3BucketVersioning {
     Unavailable,
 }
 
-/// Every S3 behavior the adapter varies, one value each (§4).
+/// Every S3 behavior the adapter varies, one value each (§20.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct S3Settings {
@@ -86,7 +86,7 @@ pub enum S3SinglePut {
     GenerationMatch,
 }
 
-/// Which creates publish by a conditional copy of a reserved temporary (§4).
+/// Which creates publish by a conditional copy of a reserved temporary (§20.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum S3CopyPublication {
     /// None: a single PUT and a multipart completion (`If-None-Match: *` on

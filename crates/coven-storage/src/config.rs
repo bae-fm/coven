@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-/// A provider supported by coven (§4).
+/// A provider supported by coven (§20.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum CloudProvider {
     /// S3, including compatible providers.
@@ -14,7 +14,7 @@ pub enum CloudProvider {
 }
 
 impl CloudProvider {
-    /// Instructions for cutting off a removed device's provider access (§13).
+    /// Instructions for cutting off a removed device's provider access (§14.2).
     /// This depends on the provider kind, not on a connected account or request.
     pub fn sign_out(self) -> crate::ProviderSignOut {
         match self {
@@ -32,13 +32,13 @@ pub enum StorageConfig {
     /// An existing S3 bucket and a base prefix. Where the service's member
     /// keys can be limited to a prefix, the base prefix may hold several
     /// stores; where they reach a whole bucket (R2, and every custom or
-    /// detected profile), the store has the bucket to itself (§4).
+    /// detected profile), the store has the bucket to itself (§20.7).
     S3 {
         /// Bucket name.
         bucket: String,
         /// Signing region.
         region: String,
-        /// None is AWS's own endpoint. Catalogued hosts (§4) require https.
+        /// None is AWS's own endpoint. Catalogued hosts (Appendix E.3) require https.
         endpoint: Option<url::Url>,
         /// A catalogued service's name or custom settings; either must agree
         /// with a catalogued endpoint host. None selects by host:
@@ -117,7 +117,7 @@ impl StorageConfig {
                 let scope = crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?;
                 crate::path::validate_root(prefix)?;
                 // A key that reaches the whole bucket reaches every store in
-                // it, so such a store occupies the bucket's root (§4).
+                // it, so such a store occupies the bucket's root (§20.7).
                 if scope == crate::providers::S3KeyScope::Bucket && !prefix.is_empty() {
                     return Err(crate::StorageFailure::OwnBucketRequired {
                         reason: crate::OwnBucketReason::Prefix,

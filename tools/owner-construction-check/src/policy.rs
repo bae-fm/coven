@@ -1,4 +1,4 @@
-//! The shape of the policy file (`owner_policy.rs`, §20.2): every name the
+//! The shape of the policy file (`owner_policy.rs`, Appendix F.3): every name the
 //! rules read about this workspace — the crate order, where each capability
 //! lives, the construction and task-start roots, and the types that
 //! are capabilities, owners, tasks or plain values.
@@ -6,7 +6,7 @@
 //! Guard tests require listed files, types and callables to exist.
 
 /// `(source file, type, method)`: a callable allowed to construct owners or
-/// start tasks (§20.2), including owner constructors and feature-gated fixtures.
+/// start tasks (Appendix F.3), including owner constructors and feature-gated fixtures.
 /// `<free>` in the type position names a free function such as restore bootstrap.
 pub(crate) type CompositionRoot = (&'static str, &'static str, &'static str);
 
@@ -23,14 +23,14 @@ pub(crate) type CapabilityFactory = (&'static str, &'static str, &'static str, &
 pub(crate) type DatabaseSchema = (&'static str, &'static [&'static str]);
 
 pub(crate) struct Policy {
-    /// §20.1: the workspace's crates in dependency order. A crate depends only
+    /// Appendix F.1: the workspace's crates in dependency order. A crate depends only
     /// on crates earlier in this list. Rows are added as crates land, in the
     /// spec's order.
     pub(crate) crate_order: &'static [&'static str],
-    /// §20.1: pairs of crates in `crate_order` that never depend on each
+    /// Appendix F.1: pairs of crates in `crate_order` that never depend on each
     /// other in either direction.
     pub(crate) separated_crates: &'static [(&'static str, &'static str)],
-    /// §20.2: each capability, the one place that uses it directly, and what
+    /// Appendix F.2: each capability, the one place that uses it directly, and what
     /// using it directly looks like in source.
     pub(crate) capabilities: Capabilities,
     pub(crate) database_schema: Option<DatabaseSchema>,
@@ -54,7 +54,7 @@ pub(crate) struct Policy {
     pub(crate) non_owner_types: &'static [&'static str],
     /// API namespaces that borrow an owner without becoming one.
     pub(crate) borrowed_facade_types: &'static [&'static str],
-    /// Tasks (§20.2): values that live for one piece of work and are then
+    /// Tasks (Appendix F.3): values that live for one piece of work and are then
     /// dropped, such as one sync pass.
     pub(crate) task_types: &'static [&'static str],
     /// Dependencies an owner keeps to itself; returning one it retains leaks
@@ -66,7 +66,7 @@ pub(crate) struct Policy {
     pub(crate) closed_session_types: &'static [&'static str],
 }
 
-/// §20.2's table: each capability and the one place that uses it directly.
+/// Appendix F.2's table: each capability and the one place that uses it directly.
 pub(crate) struct Capabilities {
     pub(crate) network: Capability,
     pub(crate) cryptography: Capability,

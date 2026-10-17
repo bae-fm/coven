@@ -1,4 +1,4 @@
-//! An explicit reload retains its selected bodies and common target (§15, E6).
+//! An explicit reload retains its selected bodies and common target (§16.5, E6).
 use super::*;
 use coven_database::{NewOperation, OperationRecord, OperationUpdate, RetrySubject};
 use serde::{Deserialize, Serialize};
@@ -71,7 +71,7 @@ fn selections(
 
 impl SequenceSync {
     /// Reload readable audiences from selected snapshots and retained slots,
-    /// preserving waiting writes. Repeated calls resume the same journal (§15).
+    /// preserving waiting writes. Repeated calls resume the same journal (§16.5).
     pub async fn reload_from_snapshot(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         if let crate::SequenceStatus::Stopped(_) = &*self.state.subscribe().borrow() {
@@ -259,7 +259,7 @@ impl SequenceSync {
                     let selections = selections(&history, Some(floor), member);
                     if let Some((slot, announcement, error)) = missing {
                         // A missing body can move only to its authenticated
-                        // replacement, never to an older floor selection (§15).
+                        // replacement, never to an older floor selection (§16.5).
                         if !floor.header.snapshots.iter().any(|next_slot| {
                             let next = &history.announcements[next_slot];
                             next_slot > slot

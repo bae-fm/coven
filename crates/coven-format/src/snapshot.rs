@@ -1,4 +1,4 @@
-//! Snapshots stream a header, twelve ordered sections and an end marker (§15).
+//! Snapshots stream a header, twelve ordered sections and an end marker (§16.1).
 //! The caller stages records and supplies the applied write metadata to merge.
 
 use crate::admin::SnapshotId;
@@ -63,7 +63,7 @@ pub enum SnapshotRecord<E = crate::authorship::WriteEvidence> {
     Loss(Loss),
     /// An original row change and its verdict, kept as source evidence.
     Authored(AuthoredChange),
-    /// A row's selected original creation (§8.8).
+    /// A row's selected original creation (§9.6).
     Creation(crate::authorship::Creation),
     /// Another member's write header, roots and openings in this audience.
     Evidence(E),

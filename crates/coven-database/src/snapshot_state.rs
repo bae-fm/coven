@@ -62,7 +62,7 @@ pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError
 }
 
 /// A generated cell keeps the value its write computed, which can differ from
-/// the value SQLite computes from the merged inputs (§8), so a snapshot's
+/// the value SQLite computes from the merged inputs (Appendix B.1), so a snapshot's
 /// generated values are checked against their cells rather than recomputed.
 fn generated(table: &crate::schema::TableSchema, name: &str) -> bool {
     table

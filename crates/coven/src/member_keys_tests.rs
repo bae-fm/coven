@@ -162,7 +162,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     owner.close().await;
 }
 
-/// An owned row's owner is a member id, which a key replacement keeps (§8.8, §9).
+/// An owned row's owner is a member id, which a key replacement keeps (§9.6, §10).
 mod owner_identity {
     use crate::tests::Network;
     use crate::*;
@@ -288,7 +288,7 @@ mod owner_identity {
     /// it covers is deleted. Dan joins later and has only that snapshot: it
     /// carries Carol's creation with the evidence of her write, which Ana
     /// cannot sign for her, so Dan's device knows the note is Carol's and
-    /// refuses Dan's edit naming her, as Ana's does (§8.8, §15, D7).
+    /// refuses Dan's edit naming her, as Ana's does (§9.6, §16.1, D7).
     #[tokio::test]
     async fn a_snapshot_carries_another_members_ownership_to_a_new_device() {
         use coven_storage::Storage;
@@ -331,7 +331,7 @@ mod owner_identity {
         network.sync(0).await;
         let store = network.devices[0].store;
         let storage = &network.devices[0].storage;
-        // Aged history makes each device snapshot what it reads (§15).
+        // Aged history makes each device snapshot what it reads (§16.2).
         assert!(!crate::tests::snapshots(storage, store).await.is_empty());
         // Retention moved the floor past the slots Dan never reads.
         assert!(storage

@@ -1,6 +1,6 @@
 //! Primary-key values reported by database validation.
 
-/// The primary-key values of a row, in the table's declared key order (Appendix E).
+/// The primary-key values of a row, in the table's declared key order (api.md).
 #[derive(Clone, Debug, PartialEq)]
 pub struct RowKey(pub(crate) Vec<rusqlite::types::Value>);
 

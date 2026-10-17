@@ -253,7 +253,7 @@ pub(crate) fn circle_row() -> WriteRecord {
 
 mod queued {
     //! A local breaking migration leaves every queued original record as it
-    //! was authored (§17.1); only the local state and its marker change.
+    //! was authored (§18.5); only the local state and its marker change.
     use crate::{
         tests::TestStore,
         write::tests::{notes, records, sql, NOTES},

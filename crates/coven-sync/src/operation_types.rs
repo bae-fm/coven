@@ -1,4 +1,4 @@
-//! Application values for operations, members, circles and invitations (Appendix E).
+//! Application values for operations, members, circles and invitations (api.md).
 
 use coven_crypto::SecretText;
 use coven_format::admin::MemberRole;
@@ -59,18 +59,18 @@ pub enum OperationKind {
     Invite,
     /// Align one provider account's grants with members and open invitations.
     RevokeAccess,
-    /// An S3 key awaiting deletion with admin access or explicit confirmation (§13).
+    /// An S3 key awaiting deletion with admin access or explicit confirmation (§14.3).
     DeleteAccessKey,
-    /// An admin desktop replacing a member's S3 key (§13).
+    /// An admin desktop replacing a member's S3 key (§14.3).
     ReplaceAccessKey,
     /// Replace a member's signing and sealing pair: this member's own, with a
-    /// candidate kept in identity custody, or a prepared pair as an admin (§9).
+    /// candidate kept in identity custody, or a prepared pair as an admin (§10).
     ReplaceMemberKeys,
 }
 
 impl OperationKind {
     /// Coven's own work, which no app call retries or discards: a failed
-    /// attempt retries under the shared backoff (§18, E5).
+    /// attempt retries under the shared backoff (§11, E5).
     pub(crate) fn coven_owned(self) -> bool {
         matches!(
             self,
@@ -85,7 +85,7 @@ impl OperationKind {
     }
 }
 
-/// A member's replaced S3 key (§13): the new key, which the member keeps
+/// A member's replaced S3 key (§14.3): the new key, which the member keeps
 /// separately, and what happened to the old one.
 #[derive(Debug)]
 pub struct AccessKeyReplacement {
@@ -95,13 +95,13 @@ pub struct AccessKeyReplacement {
     pub old_key: OldKeyDeletion,
 }
 
-/// The old key after a replacement was recorded (§13).
+/// The old key after a replacement was recorded (§14.3).
 #[derive(Debug)]
 pub enum OldKeyDeletion {
     /// No deletion remains: coven deleted it with admin access and read it
     /// absent, or its record had already cleared.
     Deleted,
-    /// Made in the console: delete it there and confirm (§13).
+    /// Made in the console: delete it there and confirm (§14.3).
     Console {
         /// Its pending deletion.
         operation: OperationId,
@@ -115,7 +115,7 @@ pub enum OldKeyDeletion {
     },
 }
 
-/// The admin's choice, fixed before the invite is shown (§12.2, §12.3).
+/// The admin's choice, fixed before the invite is shown (§13.2, §13.3).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InviteTarget {
     /// A new person: coven generates a fresh member id, added with this role.
@@ -147,7 +147,7 @@ pub enum InviteAccess {
         secret_access_key: SecretText,
     },
     /// S3: coven makes the invited person's key with the storage account's
-    /// admin access, held by this invite's operation until the key is made (§4).
+    /// admin access, held by this invite's operation until the key is made (§20.10).
     S3AdminAccess(std::sync::Arc<dyn coven_storage::AccessKeyAdmin>),
 }
 
@@ -171,7 +171,7 @@ pub struct JoinRequest {
     /// The stable member id the invite fixed and the request repeats.
     pub member: MemberId,
     /// The fresh public pair the request's signature proves it holds;
-    /// approval binds exactly this pair to `member` (§12.2).
+    /// approval binds exactly this pair to `member` (§13.2).
     pub keys: coven_crypto::MemberPublicKeys,
     /// The device's name, covered by its signature.
     pub device_name: String,

@@ -1,5 +1,5 @@
 //! Preserve the facade's callback failure when a transaction or cleanup also fails.
-//! A committed result never becomes a failure because of cleanup (§3, §16.6).
+//! A committed result never becomes a failure because of cleanup (§2.1, Appendix C.3).
 
 use crate::{CovenError, DbError};
 
@@ -16,7 +16,7 @@ pub trait WriteFailure: From<DbError> + From<rusqlite::Error> {
 }
 
 /// The outcome of an operation whose released bytes were then removed. A
-/// failed removal stays recorded for the next write or open (§16.6): it
+/// failed removal stays recorded for the next write or open (Appendix C.3): it
 /// joins a failed operation's error, and leaves a committed result as it is.
 pub(crate) fn after_cleanup<R, E: WriteFailure>(
     result: Result<R, E>,

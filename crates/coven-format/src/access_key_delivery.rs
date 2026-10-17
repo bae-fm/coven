@@ -1,4 +1,4 @@
-//! A member's new S3 key delivered to their remaining devices (§13, D9):
+//! A member's new S3 key delivered to their remaining devices (§14.3, D9):
 //! sealed anonymously to the member's sealing key, then signed by the admin
 //! who made and recorded it.
 //!

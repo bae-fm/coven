@@ -1,7 +1,7 @@
 import CovenSequence.QueueReload
 
 /-! A migration captures originals through its marker. Publication confirms
-that prefix before the preparation and raise, as §17.1 requires. Later writes
+that prefix before the preparation and raise, as §18.5 requires. Later writes
 wait without extending the capture or preventing its confirmation. -/
 namespace CovenSequence.RaiseQueue
 

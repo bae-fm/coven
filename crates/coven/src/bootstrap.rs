@@ -1,5 +1,5 @@
 //! New-device composition roots. Sync owns admission and loading; foundation
-//! owns unpublished directories and crypto owns final key custody (§12, E10).
+//! owns unpublished directories and crypto owns final key custody (§13, E10).
 
 use super::*;
 use coven_crypto::custody::{InMemoryCustody, Keychain, StoreKeychain};
@@ -373,7 +373,7 @@ async fn prepare_and_load(
     // Completing a reset registers the fresh id as the old one's replacement.
     let reset = pending.device_reset().map_err(SyncError::from)?;
     // The database opens before connecting: its persisted waits and provider
-    // cooldown hold the joiner's polls and every request across restarts (§16.5).
+    // cooldown hold the joiner's polls and every request across restarts (§6.7).
     let database = builder.database(directory.clone())?.open().await?;
     let connected = async {
         let waits = Arc::new(

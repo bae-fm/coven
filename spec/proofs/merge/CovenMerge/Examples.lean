@@ -78,7 +78,7 @@ theorem example_8_3 :
 
 end Delete
 
-/-! ## §8: todo 7 removed for two reasons
+/-! ## §8.4: todo 7 removed for two reasons
 
 List 3 is deleted, and todo 7, in it under cascade, fails `start <= end`. -/
 
@@ -99,7 +99,7 @@ theorem example_8 : (view I).removed 7 = true ∧
 
 end TwoReasons
 
-/-! ## §8.4: a removed child comes back when re-pointed; set null
+/-! ## §9.1: a removed child comes back when re-pointed; set null
 
 Rows 43 and 44 are notes, row 9 tag 9, row 6 link 6. Cell 0 of tag 9 is its
 `note_id`, under cascade; cell 0 of link 6 is its `note_id`, under set null.
@@ -161,7 +161,7 @@ theorem example_8_4 :
 
 end FK
 
-/-! ## §8.5: a key change is a delete plus an insert
+/-! ## §9.2: a key change is a delete plus an insert
 
 Row 10 is the tag "urgent", row 11 "important"; rows 20, 21 and 22 are the
 `note_tags` rows (42, "urgent"), (42, "important") and (44, "urgent"), each
@@ -206,7 +206,7 @@ theorem example_8_5_key :
 
 end KeyChange
 
-/-! ## §8.5: when a unique loser comes back
+/-! ## §9.2: when a unique loser comes back
 
 Notes are unique by title, and a sub-note points at its parent under
 cascade. -/
@@ -250,7 +250,7 @@ theorem example_8_5_step3 :
 
 end Comeback
 
-/-! ## §8.6: a CHECK failure clears
+/-! ## §9.3: a CHECK failure clears
 
 Row 50 checks `start <= end`: cell 0 is start, cell 1 end.
 
@@ -295,7 +295,7 @@ theorem example_8_6 :
 
 end Check
 
-/-! ## §14.7: a kept entry hides existing and arriving circle rows
+/-! ## §15.9: a kept entry hides existing and arriving circle rows
 
 Ana and Ben share Gifts, holding notes 7 and 8. Ben's entry 4 deletes the
 circle without a row write. Ana's write 5 adds note 9 while offline. -/
@@ -331,7 +331,7 @@ theorem example_14_7 :
 
 end DeletedCircle
 
-/-! ## §8.4: a later write to a set null reference
+/-! ## §9.1: a later write to a set null reference
 
 Links point at notes with set null. Row 6 is link 6, cell 0 its `note_id`;
 row 43 is note 43.

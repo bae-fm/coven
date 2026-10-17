@@ -765,7 +765,7 @@ async fn run(db: &Database, statement: String) -> Result<(), crate::DbError> {
 /// A-D2: receivers compare a root's audience cell with the circle id's
 /// canonical lowercase text, so the author refuses every other spelling of
 /// it, such as Swift's uppercase `uuidString`, instead of committing a write
-/// every receiver refuses (§14). Statements, shared triggers and moves are
+/// every receiver refuses (§15). Statements, shared triggers and moves are
 /// all refused, and the transaction rolls back.
 #[tokio::test]
 async fn a_root_audience_must_be_spelled_canonically() {
@@ -835,7 +835,7 @@ async fn a_root_audience_must_be_spelled_canonically() {
 }
 
 /// A received root whose audience cell spells its circle another way is
-/// refused, whoever wrote it (§14).
+/// refused, whoever wrote it (§15).
 #[tokio::test]
 async fn a_received_root_spelling_its_circle_another_way_is_refused() {
     let author = TestStore::new();

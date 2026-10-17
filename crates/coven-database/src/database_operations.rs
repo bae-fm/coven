@@ -43,7 +43,7 @@ impl Database {
     }
 
     /// Reserve the path number of a snapshot attempt about to be prepared:
-    /// the next of this device's snapshot sequence, never reused, which §10
+    /// the next of this device's snapshot sequence, never reused, which §19.3
     /// compares with its stored snapshots.
     pub async fn reserve_snapshot_number(&self) -> Result<std::num::NonZeroU64, DbError> {
         self.call(move |inner| {
@@ -124,7 +124,7 @@ impl Database {
 
     /// Commit an operation's step together with new S3 deletion obligations,
     /// each with its own operation and pending notice. Keys already open or
-    /// confirmed deleted keep their state (§13).
+    /// confirmed deleted keep their state (§14.3).
     pub async fn record_access_key_deletions<P: crate::PendingValue>(
         &self,
         update: Option<OperationUpdate>,
@@ -145,7 +145,7 @@ impl Database {
 
     /// Clear an S3 key's deletion obligation, after an explicit confirmation or
     /// a verified provider deletion, and retain the confirmation by key id.
-    /// Confirmation before any notice prevents that notice (§13).
+    /// Confirmation before any notice prevents that notice (§14.3).
     pub async fn clear_access_key(&self, key: String) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {

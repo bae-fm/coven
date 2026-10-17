@@ -1,6 +1,6 @@
 name: ci
 
-# One script runs every check of §20.4: its code checks on every platform,
+# One script runs every check of Appendix F.6: its code checks on every platform,
 # and the Lean proofs once, on Linux, since a proof checks the same anywhere.
 # Spec edits alone don't run it, so they never cancel a run checking code.
 on:

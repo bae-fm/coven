@@ -21,7 +21,7 @@ enum Command {
 impl SyncLoop {
     /// Compose a stopped loop for an open, connected sequence owner.
     /// `codes` completes member-key replacement and installs delivered S3 keys
-    /// on this device after each pass (§18.1, §13).
+    /// on this device after each pass (§11.5, §14.3).
     pub fn new(sync: Arc<SequenceSync>, codes: crate::RestoreCodes) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         tokio::spawn(run(sync, codes, receiver));
@@ -90,8 +90,8 @@ async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, Sy
         }))
 }
 
-/// Complete a pass and member-key custody (§18.1), then install any delivered
-/// S3 key this device does not already use (§13).
+/// Complete a pass and member-key custody (§11.5), then install any delivered
+/// S3 key this device does not already use (§14.3).
 async fn pass(
     sync: &SequenceSync,
     codes: &crate::RestoreCodes,

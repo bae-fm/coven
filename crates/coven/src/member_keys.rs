@@ -3,7 +3,7 @@
 use super::*;
 
 impl CovenHandle {
-    /// Replace this member's signing and sealing pair (§9, §11). App writes
+    /// Replace this member's signing and sealing pair (§10, §12.3). App writes
     /// return `DbError::MemberKeysChanging` until it finishes; this
     /// installation's queued writes and entries are confirmed first. A fresh
     /// pair is kept in identity custody before its key copies and the entry
@@ -17,7 +17,7 @@ impl CovenHandle {
         self.storage.replace_member_keys().await
     }
     /// Publish a prepared public pair for another active member, as any
-    /// admin under §9's authority rules, independently of provider ownership.
+    /// admin under §10's authority rules, independently of provider ownership.
     /// The member keeps the private pair; this call changes no private
     /// custody and no provider access. Confirms the audience-key copies to
     /// the new credential first and returns once its slot commits. A

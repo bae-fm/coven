@@ -1,6 +1,6 @@
 import CovenMerge.Migration
 
-/-! Loading a boundary snapshot (§15, §17.1, §19.3). Its consumed positions
+/-! Loading a boundary snapshot (§16.5, §18.6, §19.4). Its consumed positions
 and effective inputs are distinct. A caller supplies the eligibility test;
 reset and schema processing compose their tests before using this merge. -/
 
@@ -23,7 +23,7 @@ def afterSnapshot (B : SnapshotBoundary W) (eligible : W → Bool) (w : W) : Boo
   !B.covered w && eligible w
 
 /-- Remove discarded parts and their input edges. The transport still consumes
-their identities; only the row merge uses these effective records (§7.1, §19.3). -/
+their identities; only the row merge uses these effective records (§7.1, §19.4). -/
 def snapshotWrites (M : Writes W Row Col) (B : SnapshotBoundary W)
     (eligible : W → Bool) : Writes W Row Col :=
   { M with

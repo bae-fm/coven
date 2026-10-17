@@ -1,6 +1,6 @@
 //! Commits attributed to the work that made them, so an observation can leave
 //! one piece of work's own commits out: an operation attempt's own commits are
-//! never evidence against the wait it ends in (§3.1, SP waiting; IO
+//! never evidence against the wait it ends in (§6.7, §21.2; IO
 //! `WaitingEvidence`).
 
 use std::cell::Cell;

@@ -9,7 +9,7 @@
 - App-facing calls reaching storage or the database are `async`;
   transaction callbacks (`SqlContext`, `MigrationContext`) are synchronous.
 - A row is named by its table and its *key*: the values of its primary key
-  columns, in order ([§8.5](coven.md#85-keys-and-uniqueness)).
+  columns, in order ([§9.2](coven.md#92-keys-and-unique-values)).
 
 ```rust
 // External types used by the declarations below.
@@ -21,7 +21,7 @@ use tokio::{io::AsyncRead, sync::watch};
 use url::Url;
 use uuid::Uuid;
 
-/// Primary-key values in declaration order (§8.5).
+/// Primary-key values in declaration order (§9.2).
 pub struct RowKey(/* private */);
 
 impl From<&str> for RowKey { /* one text key */ }
@@ -32,33 +32,33 @@ impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
 /// One install of the app, by its 64-bit device id (§10).
 pub struct DeviceId(/* private */);
 
-/// A member's random stable UUID, independent of their keys (§9).
+/// A member's random stable UUID, independent of their keys (§10).
 pub struct MemberId(pub Uuid);
 
 /// A validated Ed25519 public key; invalid and weak points are refused.
 pub struct SigningKey(/* private */);
 
-/// An X25519 public key (§11.1).
+/// An X25519 public key (Appendix D).
 pub struct SealingKey(/* private */);
 
 /// The public pair from D2, re-exported without duplicating its type:
 /// `signing: SigningKey`, `sealing: SealingKey`.
 pub use coven_format::MemberKeys as MemberPublicKeys;
 
-/// One write: its device and local write number, independent of its slot (§6).
+/// One write: its device and local write number, independent of its slot (§4).
 /// Claim numbers separately count every slot kind and remain internal to sync.
 pub struct WriteId {
     pub device: DeviceId,
     pub number: u64,
 }
 
-/// A positive slot number in the store's one sequence (§6).
+/// A positive slot number in the store's one sequence (§5).
 pub struct Slot(pub u64);
 
-/// An admin entry is identified by the slot containing it (§9).
+/// An admin entry is identified by the slot containing it (§10).
 pub type EntryId = Slot;
 
-/// Row audience; ToSql/FromSql bind/read canonical text (§14).
+/// Row audience; ToSql/FromSql bind/read canonical text (§15).
 pub enum Audience {
     Store,
     Circle(CircleId),
@@ -71,7 +71,7 @@ pub enum Audience {
   the database, coven's copies of files, the cache, and the store's
   settings: its id and name, this device's id, and its storage settings.
 - Creating, restoring or joining a store makes the directory and writes
-  the settings, so the app never chooses a device id ([§10](coven.md#10-device-identity)).
+  the settings, so the app never chooses a device id ([§10](coven.md#10-members-roles-and-devices)).
 - Provider access is chosen when storage is first attached (E5), not when the
   device-local directory is created. Dropbox's required `DropboxLocation`
   selects not-shared (`AppFolder`) or shared-capable (`SharedFolder`); it has
@@ -88,15 +88,15 @@ pub enum Audience {
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
   and its migrations ([E13](#e13-migrations)).
 - Writable opens always migrate coven's own local tables in place
-  ([§17.2](coven.md#172-covens-schema)). Read-only opens refuse tables that
+  ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse tables that
   need migrating; any open refuses an internal schema newer than it supports.
 - *Key custody* is where this device keeps the store keys and circle keys
-  it has opened ([§11](coven.md#11-keys)): every key it has used, so it reads
+  it has opened ([§12.2](coven.md#122-exposure-and-which-key-new-data-uses)): every key it has used, so it reads
   writes made under older ones.
 - *Identity custody* keeps the stable member id and held private pairs,
   including historical credentials and a pending replacement candidate
-  ([§11.1](coven.md#111-cryptography)).
-- CloudKit is a built-in provider on Apple platforms (§4). The app supplies
+  ([Appendix D](coven.md#appendix-d-cryptography-and-keys-reference)).
+- CloudKit is a built-in provider on Apple platforms (§20.2). The app supplies
   the container identifier and its iCloud entitlement; coven-storage calls
   Apple's CloudKit framework through `objc2-cloud-kit`. Native failures retain
   their cause in `StorageError::Provider`. On other platforms, setup returns
@@ -106,7 +106,7 @@ pub enum Audience {
 /// A store's UUID, independent of its name and location (E1).
 pub struct StoreId(pub Uuid);
 
-/// Circle UUID; ToSql/FromSql bind/read canonical text (§14.3).
+/// Circle UUID; ToSql/FromSql bind/read canonical text (§15.5).
 pub struct CircleId(pub Uuid);
 
 /// ToSql/FromSql for canonical UUID text; bare rusqlite UUIDs bind as BLOBs.
@@ -125,7 +125,7 @@ pub trait Clock: Send + Sync {
     }
 }
 
-/// A shared clock supplied when opening a store (§20.2).
+/// A shared clock supplied when opening a store (Appendix F.2).
 pub type ClockRef = Arc<dyn Clock>;
 
 /// The system wall clock used unless the app supplies another (E1).
@@ -135,15 +135,15 @@ impl Clock for SystemClock {
     fn now(&self) -> SystemTime;
 }
 
-/// Test-injected ids; production uses OS randomness (§20.2).
+/// Test-injected ids; production uses OS randomness (Appendix F.2).
 pub trait IdSource: Send + Sync {
     /// A fresh UUID; distinct calls must yield distinct ids.
     fn new_id(&self) -> Uuid;
-    /// The default implementation derives a fresh 64-bit device id from this source (§10).
+    /// The default implementation derives a fresh 64-bit device id from this source (§10.4).
     fn new_device_id(&self) -> DeviceId;
 }
 
-/// A shared source of ids (§20.2).
+/// A shared source of ids (Appendix F.2).
 pub type IdSourceRef = Arc<dyn IdSource>;
 
 /// Random UUIDv4 ids, independent of the clock (E1).
@@ -170,16 +170,16 @@ pub struct StoreInfo {
 /// The opening choices for stores under one layout (E1).
 pub struct CovenBuilder { /* private fields */ }
 
-/// A shared handle to the open store and its running work (§20.2).
+/// A shared handle to the open store and its running work (Appendix F.4).
 pub struct CovenHandle { /* private fields */ }
 
-/// A handle that only reads an already open store (§5, E1).
+/// A handle that only reads an already open store (§4, E1).
 pub struct CovenReadHandle { /* private fields */ }
 
 /// A table's name, key, audience, file and shared-trigger declarations (E2).
 pub struct SyncedTable { /* private fields */ }
 
-/// A numbered database migration and its optional received-write conversion (§17.1).
+/// A numbered database migration and its optional received-write conversion (§18.3).
 pub struct Migration { /* private fields */ }
 
 /// A passphrase owned by custody and erased when dropped (E1).
@@ -190,21 +190,21 @@ impl Passphrase {
     pub fn new(secret: String) -> Self;
 }
 
-/// The member's Ed25519 and X25519 pairs, erased when dropped (§11.1).
+/// The member's Ed25519 and X25519 pairs, erased when dropped (Appendix D).
 pub struct MemberKeys { /* private fields */ }
 
 /// Stable member id and held private pairs, including historical credentials
-/// and a durable replacement candidate. Applied slots select current authority (§11).
+/// and a durable replacement candidate. Applied slots select current authority (§12.3).
 /// Private material is erased when dropped.
 pub struct MemberIdentity { /* private fields */ }
 
-/// Every opened store and circle key, including older keys (§11, §14.3).
+/// Every opened store and circle key, including older keys (§12.2, §15.5).
 pub struct StoreKeyring { /* private fields */ }
 
 /// The app's provider client ids, kept private (E10).
 pub struct OAuthClients { /* private fields */ }
 
-/// A validated encrypted-object path, beginning with its store id (§4).
+/// A validated encrypted-object path, beginning with its store id (§20.3).
 pub struct ObjectPath { /* private fields */ }
 
 impl ObjectPath {
@@ -219,7 +219,7 @@ impl ObjectPath {
 /// A path outside the canonical object layout.
 pub struct PathError;
 
-/// A prefix of the validated object layout (§4).
+/// A prefix of the validated object layout (§20.3).
 pub struct ObjectPrefix { /* private fields */ }
 
 impl ObjectPrefix {
@@ -227,7 +227,7 @@ impl ObjectPrefix {
     pub fn as_str(&self) -> &str;
 }
 
-/// A nonempty byte range, including its start and excluding its end (§16.3).
+/// A nonempty byte range, including its start and excluding its end (§17.5).
 pub struct ByteRange { /* private fields */ }
 
 impl ByteRange {
@@ -245,7 +245,7 @@ impl ByteRange {
 
 /// A provider time: Unix seconds and a nanosecond fraction (D2). It keeps
 /// every digit the provider returned on every platform, which `SystemTime`
-/// cannot: Windows counts it in 100 ns intervals (§4). Ordered by time.
+/// cannot: Windows counts it in 100 ns intervals (§20.5). Ordered by time.
 pub struct StorageTime(/* seconds: u64, nanos: u32 */);
 
 impl StorageTime {
@@ -255,7 +255,7 @@ impl StorageTime {
     pub fn nanos(self) -> u32;
 }
 
-/// Metadata of a complete object returned by a provider read, listing or status (§4).
+/// Metadata of a complete object returned by a provider read, listing or status (§20.5).
 pub struct StoredObject {
     /// Validated path relative to the store's location.
     pub path: ObjectPath,
@@ -263,13 +263,13 @@ pub struct StoredObject {
     pub size: u64,
     /// Server publication time of the complete object, not the uploading device's clock.
     /// Immutable objects retain their first stored time across retries. Replaced
-    /// floor objects carry their replacement time (§4).
+    /// floor objects carry their replacement time (§20.5).
     pub stored_at: StorageTime,
-    /// Timestamp resolution; S3 uses its whole-second HEAD/GET representation (§4).
+    /// Timestamp resolution; S3 uses its whole-second HEAD/GET representation (§20.5).
     pub time_resolution: Duration,
     /// Native object id, or the complete S3 key.
     pub object_id: String,
-    /// Opaque identity that changes when replaced encrypted bytes change (§4).
+    /// Opaque identity that changes when replaced encrypted bytes change (§20.1).
     /// It is not a checksum or proof of byte equality.
     pub revision: String,
     /// Opaque native replacement condition from this same observation. It can
@@ -299,15 +299,15 @@ pub enum ChecksumValue {
     Sha1Base64(String),
 }
 
-/// A database or store call's result, retaining its typed cause (§20.3).
+/// A database or store call's result, retaining its typed cause (Appendix F.5).
 pub type CovenResult<T> = Result<T, CovenError>;
 
-/// Failures of opening, reading and writing a store (§5, E1, E3).
+/// Failures of opening, reading and writing a store (§4, E1, E3).
 pub enum CovenError {
     /// Reading device identity or an app callback's custody operation failed.
     Key(KeyError),
     /// An app callback failed and SQLite also failed to roll it back. Later
-    /// calls fail with `DbError::RollbackFailed` until the store is reopened (§5).
+    /// calls fail with `DbError::RollbackFailed` until the store is reopened (§4).
     Rollback { operation: Box<CovenError>, rollback: rusqlite::Error },
     /// Cleanup also failed after an app callback failed.
     FileCleanup { write: Box<CovenError>, failures: Vec<DbError> },
@@ -323,13 +323,13 @@ pub enum CovenError {
     Lock(StoreLockError),
     /// A required builder choice was not supplied (E1).
     MissingConfiguration { field: &'static str },
-    /// The keychain has no entry for this device; nothing changed (§10).
+    /// The keychain has no entry for this device; nothing changed (§19.3).
     DeviceKeyMissing { store: StoreId },
     /// A connected store's member keys are missing too; only restore continues.
     MemberKeysMissing { store: StoreId },
 }
 
-/// A failed database call or a write the database refuses (§5, §8, §14, §16).
+/// A failed database call or a write the database refuses (§4, §9, §15, §17).
 pub enum DbError {
     /// This handle or a clone has closed the store (E1).
     StoreClosed,
@@ -342,53 +342,53 @@ pub enum DbError {
     /// Sync reports it as `Failed(LocalFailure::Database)` (§19.1).
     Invariant { what: &'static str },
     /// Directory settings disagree with the store's creation entry when it
-    /// is prepared, applied or read at opening (§9); these are the id and
+    /// is prepared, applied or read at opening (§10); these are the id and
     /// name in that entry.
     StoreSettingsMismatch { store: StoreId, name: String },
     /// A synced table declaration or schema is invalid.
     Schema(SchemaError),
-    /// App SQL read, changed or defined one of coven's internal objects (§5).
+    /// App SQL read, changed or defined one of coven's internal objects (§4).
     InternalTable { table: String },
     /// App SQL tried transaction control, a PRAGMA, ATTACH or loading an
-    /// extension (§5, E13).
+    /// extension (§4, E13).
     StatementForbidden { operation: &'static str },
     /// SQLite rolled a migration's transaction back itself, so it can't go on (E13).
     TransactionEnded,
-    /// SQLite kept another journal mode instead of WAL (§5).
+    /// SQLite kept another journal mode instead of WAL (§4).
     WalUnavailable { mode: String },
     /// The wall clock reads past the last time a timestamp holds, or no
     /// later timestamp is left (§7.2).
     ClockOutOfRange,
-    /// A value or row exceeds the format (§5), or a write's plaintext or sealed
-    /// bytes cannot fit in a SQLite value and its queue row (§6).
+    /// A value or row exceeds the format (§4), or a write's plaintext or sealed
+    /// bytes cannot fit in a SQLite value and its queue row (§6.3).
     TooLarge { field: &'static str, actual: u64, maximum: u64 },
-    /// The write directly changed another member's row (§8.8). The
+    /// The write directly changed another member's row (§9.6). The
     /// transaction, including its upload record, did not commit.
     NotOwner { table: String, key: RowKey, owner: MemberId },
     /// The write's foreign-key actions on a row are not the schema's exact
-    /// consequence of its direct changes (§8.8). Nothing committed.
+    /// consequence of its direct changes (§9.6). Nothing committed.
     InvalidForeignKeyEffect { table: String, key: RowKey },
-    /// A local trigger wrote a synced table or a shared trigger a local one (§8.7).
+    /// A local trigger wrote a synced table or a shared trigger a local one (§9.4).
     TriggerTarget { trigger: String, table: String },
-    /// A reference points at a row outside the source row's audience (§14.5).
+    /// A reference points at a row outside the source row's audience (§15.3).
     ReferenceAudience { table: String, key: RowKey, column: String },
-    /// A write targets a circle whose deletion has been applied (§14.7).
+    /// A write targets a circle whose deletion has been applied (§15.9).
     DeletedCircle(CircleId),
     /// A write puts a row in a circle this member isn't in, or a circle
-    /// absent from this device's applied membership (§14.5, §14.6).
+    /// absent from this device's applied membership (§15.3, §15.8).
     NotInCircle(CircleId),
-    /// A reset, schema raise or newly readable circle is still loading (§15).
+    /// A reset, schema raise or newly readable circle is still loading (§16.5).
     AudienceReloading(Audience),
-    /// This device has exhausted its local write identities (§6).
+    /// This device has exhausted its local write identities (§4).
     WriteNumberExhausted,
 
     /// Self-replacement has paused app writes while queued objects settle
-    /// and the new binding and custody are installed (§10, E9).
+    /// and the new binding and custody are installed (§12.3, E9).
     MemberKeysChanging,
-    /// An inserted row's independent key holds no UUID (§8.5).
+    /// An inserted row's independent key holds no UUID (§9.2).
     KeyNotUuid { table: String, key: RowKey },
     /// A root row's audience cell is neither `store` nor a circle id in
-    /// canonical lowercase form (§14).
+    /// canonical lowercase form (§15).
     InvalidAudience { table: String, key: RowKey },
     /// A downloaded write fails the merge's checks, such as a timestamp no
     /// later than a write it had read; it is never applied (§19.1).
@@ -396,7 +396,7 @@ pub enum DbError {
     /// A received record or its conversion violates the write format (E13).
     WriteFormat(coven_format::Error),
     /// Snapshots or their gap writes could not be checked or loaded; the
-    /// database is unchanged (§15, §19.2).
+    /// database is unchanged (§16.5, §19.2).
     Snapshot(SnapshotError),
     /// The declared migration kind disagrees with its runtime classification (E13).
     MigrationKindMismatch { version: u32 },
@@ -418,15 +418,15 @@ pub enum DbError {
     MigrationReferenceCollision { table: String, reference: coven_merge::ForeignKey },
     /// A write changes a file declared write-once (E2).
     FileWriteOnce { table: String, key: RowKey },
-    /// A file reference no longer names the row's file (§16.3).
+    /// A file reference no longer names the row's file (§17.5).
     FileRefChanged { table: String, key: RowKey },
-    /// The row's declared size differs from the prepared file (§16).
+    /// The row's declared size differs from the prepared file (§17).
     FileSizeMismatch { expected: u64, actual: u64 },
-    /// The user's file is no longer at the recorded path (§16.1).
+    /// The user's file is no longer at the recorded path (§17.1).
     UserFileMissing { path: PathBuf },
     /// The user's file changed during preparation or since it was prepared (E3).
     UserFileChanged { path: PathBuf },
-    /// App SQL tried to assign a hash or where-column, including NULL (§16.1).
+    /// App SQL tried to assign a hash or where-column, including NULL (§17.2).
     FileColumnWrite { table: String, column: String },
     /// A batch supplies the same namespace and file id twice.
     FileBatchDuplicate { namespace: String, id: String },
@@ -464,19 +464,19 @@ pub enum DbError {
     FileAbsent { table: String, key: RowKey },
     /// Reading or keeping file bytes failed (E3).
     Disk(DiskError),
-    /// The attaching write could not create its file's random key (§16.1).
+    /// The attaching write could not create its file's random key (§17.2).
     FileKey(CryptoError),
     /// Retaining the store while staging file bytes failed.
     Lock(StoreLockError),
     /// Removing owned bytes or their records failed: on opening (`Ok`), or
-    /// after a failed write, whose error it retains (§16.6).
+    /// after a failed write, whose error it retains (Appendix C.3).
     FileCleanup { write: Result<(), Box<DbError>>, failures: Vec<DbError> },
     /// A transaction failed and rolling it back failed too. Later calls fail
-    /// with `RollbackFailed` until the store is reopened (§5).
+    /// with `RollbackFailed` until the store is reopened (§4).
     Rollback { operation: Box<DbError>, rollback: rusqlite::Error },
     /// An earlier call's rollback failed, so a connection may still be inside
     /// that transaction, holding its uncommitted changes or its old snapshot;
-    /// this handle, read-only or not, refuses calls until reopened (§5).
+    /// this handle, read-only or not, refuses calls until reopened (§4).
     RollbackFailed,
     /// Saving pending state failed. The call that lost the update and every
     /// later call and live query fail with this same cause until the store is
@@ -488,13 +488,13 @@ pub enum DbError {
     /// Sync's part of a database transaction failed, keeping sync's own typed
     /// cause, and the transaction did not commit: a streamed transfer's
     /// producer or final authentication check, or the schema raise
-    /// operation a migration commits with (§17.1, E13).
+    /// operation a migration commits with (§18.3, E13).
     SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
     Closing { failures: Vec<DbError> },
 }
 
-/// Why snapshots or their gap writes could not be checked or loaded (§15, §19.2).
+/// Why snapshots or their gap writes could not be checked or loaded (§16.5, §19.2).
 pub enum SnapshotError {
     /// Reading or checking a selected snapshot's plaintext failed.
     Body { snapshot: SnapshotId, error: Box<DbError> },
@@ -502,7 +502,7 @@ pub enum SnapshotError {
     Read(std::io::Error),
     /// A frame or its merge state failed the format's checks.
     Format(coven_format::Error),
-    /// The snapshot needs a different app schema (§17).
+    /// The snapshot needs a different app schema (§18).
     Schema { snapshot: u32, database: u32 },
     /// Authenticating a snapshot's original write evidence needs this key.
     KeyUnavailable { audience: Audience, key: KeyId },
@@ -510,7 +510,7 @@ pub enum SnapshotError {
     Inconsistent(&'static str),
 }
 
-/// What a downloaded write waits for before it can apply (§6, §19.1).
+/// What a downloaded write waits for before it can apply (§5.4, §19.1).
 pub enum WriteWait {
     /// The original's authored sequence prefix has not been applied.
     Slot(u64),
@@ -524,17 +524,17 @@ pub enum WriteWait {
     Reload(Audience),
 }
 
-/// A schema rule checked on open and after migrating (§8, §14.1).
+/// A schema rule checked on open and after migrating (§9, §15.1).
 pub enum SchemaError {
     /// Tables sharing a file namespace declare different cache budgets (E8).
     CacheBudgetDisagrees { namespace: String },
-    /// A synced foreign key does not reference the complete parent primary key (§8.4).
+    /// A synced foreign key does not reference the complete parent primary key (§9.1).
     /// `key` names the referencing columns and referenced table and columns as SQL.
     ForeignKeyNotPrimaryKey { table: String, key: String },
-    /// A synced foreign key is one generated column (§8.4).
+    /// A synced foreign key is one generated column (§9.1).
     /// `key` names the referencing column and referenced table and columns as SQL.
     GeneratedForeignKey { table: String, key: String },
-    /// SET DEFAULT is on a synced table or references one (§8.4).
+    /// SET DEFAULT is on a synced table or references one (§9.1).
     /// `key` names the referencing columns and referenced table and columns as SQL.
     SetDefault { table: String, key: String },
     /// A declared synced table isn't in the database (E2).
@@ -542,57 +542,57 @@ pub enum SchemaError {
     /// Two declarations name one table (E2).
     DuplicateTable { table: String },
     /// A table's `owner_only` declaration changed without a breaking
-    /// migration (§8.8, §17.1).
+    /// migration (§9.6, §18.1).
     OwnerOnlyChanged { table: String },
     /// A table declares both `audience_column` and `audience_from` (E2).
     TwoAudiences { table: String },
     /// A declared file column isn't in the table (E2).
     FileColumn { table: String, column: String },
-    /// A hash or where-column cannot represent a row without a file (§16.1).
+    /// A hash or where-column cannot represent a row without a file (§17.2).
     FileColumnNotNullable { table: String, column: String },
-    /// SET NULL would change one file column alone (§16.1).
+    /// SET NULL would change one file column alone (§17.2).
     FileForeignKeyAction { table: String, column: String },
-    /// A trigger declared shared isn't on the table (§8.7).
+    /// A trigger declared shared isn't on the table (§9.4).
     MissingTrigger { table: String, trigger: String },
-    /// A synced table has no primary key (§8.5).
+    /// A synced table has no primary key (§9.2).
     NoPrimaryKey { table: String },
-    /// A primary key column allows NULL (§8.5).
+    /// A primary key column allows NULL (§9.2).
     NullableKey { table: String, column: String },
-    /// SET NULL would put NULL in a NOT NULL column (§8.4).
+    /// SET NULL would put NULL in a NOT NULL column (§9.1).
     ImpossibleAction { table: String, column: String },
-    /// A local table's foreign key could stop coven deleting a synced row (§8.4).
+    /// A local table's foreign key could stop coven deleting a synced row (§9.1).
     LocalChildAction { table: String, column: String },
-    /// A local table's foreign key could stop coven updating a synced value (§8.4).
+    /// A local table's foreign key could stop coven updating a synced value (§9.1).
     LocalChildUpdate { table: String, column: String },
-    /// SQLite chooses the primary key itself (§8.5).
+    /// SQLite chooses the primary key itself (§9.2).
     GeneratedPrimaryKey { table: String },
     /// A synced key, unique or foreign-key column, or a unique index term, uses
-    /// a collation other than BINARY (§8.5, D3). `column` names the index for
+    /// a collation other than BINARY (§9.2, D3). `column` names the index for
     /// an expression term.
     KeyCollation { table: String, column: String, collation: String },
-    /// An independent key has no text column to hold its UUID (§8.5).
+    /// An independent key has no text column to hold its UUID (§9.2).
     IndependentKeyNotUuid { table: String },
     /// Declared key columns do not match the table's primary key (E2).
     KeyColumns { table: String },
-    /// SET NULL acts on a primary-key column (§8.4).
+    /// SET NULL acts on a primary-key column (§9.1).
     PrimaryKeyAction { table: String, column: String },
-    /// The audience root column is nullable or is not text (§14, E2).
+    /// The audience root column is nullable or is not text (§15, E2).
     AudienceColumn { table: String, column: String },
-    /// The audience foreign key spans more than one column (§14.1).
+    /// The audience foreign key spans more than one column (§15.1).
     AudienceForeignKeyColumns { table: String },
-    /// The audience foreign key does not point into a synced table (§14.1).
+    /// The audience foreign key does not point into a synced table (§15.1).
     AudienceForeignKeyTarget { table: String, column: String },
-    /// The audience foreign key uses SET NULL (§14.1).
+    /// The audience foreign key uses SET NULL (§15.1).
     AudienceForeignKeyAction { table: String, column: String },
-    /// Following audience foreign keys forms a loop (§14.1).
+    /// Following audience foreign keys forms a loop (§15.1).
     AudienceCycle { table: String },
-    /// A unique constraint or shared key spans audiences (§14.1).
+    /// A unique constraint or shared key spans audiences (§15.2).
     AudienceConstraint { table: String, constraint: String },
-    /// A shared trigger lacks WHEN NOT coven_applying() (§8.7).
+    /// A shared trigger lacks WHEN NOT coven_applying() (§9.4).
     SharedTriggerGuard { table: String, trigger: String },
 }
 
-/// Coven's local tables cannot be used at this version (§17.2, E1).
+/// Coven's local tables cannot be used at this version (Appendix C.1, E1).
 pub enum CovenMigrationError {
     /// The read-only connection cannot migrate coven's tables.
     ReadOnly,
@@ -602,7 +602,7 @@ pub enum CovenMigrationError {
     Failed { source: Box<DbError> },
 }
 
-/// A filesystem failure, including whether bytes already changed (E1, §20.3).
+/// A filesystem failure, including whether bytes already changed (E1, Appendix F.5).
 pub enum FileError {
     /// The operation failed without replacing its target.
     Io { operation: &'static str, path: PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
@@ -614,7 +614,7 @@ pub enum FileError {
     Cleanup { operation: Box<FileError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
 }
 
-/// File reads and custody report the same filesystem failures (§16, E1).
+/// File reads and custody report the same filesystem failures (§17, E1).
 pub type DiskError = FileError;
 
 /// The store's directory settings could not be read or written (E1).
@@ -725,7 +725,7 @@ pub enum KeyError {
     UnsupportedKeyringPlatform,
 }
 
-/// Secret bytes crossing custody or code boundaries, erased when dropped (§11, §12).
+/// Secret bytes crossing custody or code boundaries, erased when dropped (§12.4, §13).
 pub struct SecretBytes { /* private fields */ }
 
 impl SecretBytes {
@@ -735,7 +735,7 @@ impl SecretBytes {
     pub fn as_bytes(&self) -> &[u8];
 }
 
-/// Secret text, erased when dropped and redacted in diagnostics (§11, E10).
+/// Secret text, erased when dropped and redacted in diagnostics (§12.4, E10).
 pub struct SecretText { /* private fields */ }
 
 impl SecretText {
@@ -745,10 +745,10 @@ impl SecretText {
     pub fn as_str(&self) -> &str;
 }
 
-/// A native keychain cause whose diagnostics do not expose secret bytes (§11).
+/// A native keychain cause whose diagnostics do not expose secret bytes (§12.4).
 pub struct KeychainError(/* private */);
 
-/// A cryptographic operation failed (§11.1).
+/// A cryptographic operation failed (Appendix D).
 pub enum CryptoError {
     /// The device cannot provide a cryptographic service needed by this call.
     Unavailable(Box<dyn std::error::Error + Send + Sync>),
@@ -768,7 +768,7 @@ pub enum CryptoError {
     Material(MaterialError),
 }
 
-/// A key or encoded secret has an invalid representation, or isn't held (§11).
+/// A key or encoded secret has an invalid representation, or isn't held (§12.4).
 pub enum MaterialError {
     /// The encoded secret or sealed value is malformed.
     Encoding,
@@ -783,7 +783,7 @@ pub enum MaterialError {
 }
 
 /// A store or circle key's random id, named by the admin slot that
-/// brings the key in (§11).
+/// brings the key in (§12.1).
 pub struct KeyId(pub Uuid);
 
 /// Registers the OS keychain service every key and secret is stored under.
@@ -832,7 +832,7 @@ impl CovenBuilder {
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
-    /// Replace OS-random ids in tests (§20.2).
+    /// Replace OS-random ids in tests (Appendix F.2).
     #[cfg(feature = "test-utils")]
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
@@ -880,8 +880,8 @@ impl CovenBuilder {
     pub async fn open(self, store: StoreId) -> CovenResult<CovenHandle>;
 
     /// Replaces this copy with a new device loaded from storage when the app
-    /// chooses: a damaged database (§19.2), a missing device entry, or another
-    /// copy using this id (§10). Uses saved settings and custody; no salvage.
+    /// chooses: a damaged database (§19.3), a missing device entry, or another
+    /// copy using this id (§19.3). Uses saved settings and custody; no salvage.
     /// Checks storage and keys before moving the old directory aside.
     /// Uses the existing bootstrap state and errors; an interrupted call
     /// resumes with the same fresh id. The returned handle holds a device-reset
@@ -929,7 +929,7 @@ impl CovenHandle {
 
     /// Deletes this store from this device. With storage set up, it refuses
     /// unsent work unless discarding it, then publishes this device's removal
-    /// (§13); either failure deletes nothing. Then closes and deletes as
+    /// (§14.1); either failure deletes nothing. Then closes and deletes as
     /// `Coven::discard_store`, which finishes a deletion failing after that.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError>;
 }
@@ -970,11 +970,11 @@ handle.setup_oauth_storage(
 - Table names in declarations match SQLite identifiers without regard to ASCII
   case. Opening records SQLite's spelling, which identifies the table in writes,
   snapshots and file retention.
-- Each synced table declares its kind of key ([§8.5](coven.md#85-keys-and-uniqueness)),
-  how its rows get their audience ([§14](coven.md#14-audiences)), and whether its rows
-  carry a file ([§16](coven.md#16-files)). It may restrict direct writes to
+- Each synced table declares its kind of key ([§9.2](coven.md#92-keys-and-unique-values)),
+  how its rows get their audience ([§15](coven.md#15-circles)), and whether its rows
+  carry a file ([§17](coven.md#17-files)). It may restrict direct writes to
   each row's original creator with `owner_only()`
-  ([§8.8](coven.md#88-owner-tables)).
+  ([§9.6](coven.md#96-owner-tables)).
 - Owner tables use the same foreign-key actions, unique constraints, CHECKs
   and shared triggers as other synced tables. Opening and schema raises
   enforce the ordinary schema rules, including SET DEFAULT's refusal; no
@@ -1004,21 +1004,21 @@ impl SyncedTable {
 
     /// Only each row's original creating member may directly update or delete
     /// it. Shared-trigger targets count as direct writes; exact foreign-key
-    /// consequences are verified separately (§8.8). No app owner column is needed.
+    /// consequences are verified separately (§9.6). No app owner column is needed.
     pub fn owner_only(self) -> Self;
 
     /// Root audience column: bind Audience or CircleId; NULL and
-    /// noncanonical text are refused (§14).
+    /// noncanonical text are refused (§15).
     pub fn audience_column(self, column: impl Into<String>) -> Self;
 
     /// A descendant: each row takes the audience of the row its
-    /// `foreign_key` column points at (§14.1).
+    /// `foreign_key` column points at (§15.1).
     pub fn audience_from(self, foreign_key: impl Into<String>) -> Self;
 
     /// The table's rows carry a file, declared by `declaration`.
     pub fn carries_files(self, declaration: FileDecl) -> Self;
 
-    /// Declares the trigger `name` on this table as shared (§8.7); every
+    /// Declares the trigger `name` on this table as shared (§9.4); every
     /// trigger not declared shared is local. Opening refuses a shared trigger
     /// without `WHEN NOT coven_applying()`, naming it.
     pub fn shared_trigger(self, name: impl Into<String>) -> Self;
@@ -1026,7 +1026,7 @@ impl SyncedTable {
 
 pub enum Provenance {
     /// The user's own file at a path on their device; coven records it and
-    /// never copies, changes or deletes it (§16.1).
+    /// never copies, changes or deletes it (§17.1).
     UserProvided,
     /// Bytes the app hands to coven, which keeps and owns them.
     AppProvided,
@@ -1039,7 +1039,7 @@ pub enum CacheFill {
     CacheLazy,
 }
 
-/// One table's file columns, namespace, kind and cache choice (§16, E2).
+/// One table's file columns, namespace, kind and cache choice (§17, E2).
 pub struct FileDecl { /* private fields */ }
 
 impl FileDecl {
@@ -1061,12 +1061,12 @@ impl FileDecl {
     pub fn with_size_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding the file's content hash, the SHA-256 of its bytes,
-    /// which coven fills in (§16.2). Must allow NULL; app SQL cannot assign it.
+    /// which coven fills in (§17.3). Must allow NULL; app SQL cannot assign it.
     /// Defaults to `hash`.
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding the fixed path, uploader and file key chosen by
-    /// the attaching write (§16.1, D12). `file_status` checks availability
+    /// the attaching write (§17.2, D12). `file_status` checks availability
     /// without changing this column.
     /// Must allow NULL; app SQL cannot assign it. Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
@@ -1093,7 +1093,7 @@ fn tables() -> Vec<SyncedTable> {
             .carries_files(FileDecl::new("thumbnails", 256 << 20, Provenance::AppProvided, CacheFill::CacheEager)),
         // In the store, with keys from the tag's name.
         SyncedTable::new("tags", RowIdentity::SharedKey),
-        // A shared key over two columns, which includes note_id (§14.1).
+        // A shared key over two columns, which includes note_id (§15.2).
         SyncedTable::new("note_tags", RowIdentity::SharedKey)
             .key_columns(["note_id", "tag_id"])
             .audience_from("note_id"),
@@ -1104,23 +1104,23 @@ fn tables() -> Vec<SyncedTable> {
 ### E3 Writing
 
 - App SQL runs in one transaction; errors roll back rows and files
-  ([§5](coven.md#5-local-database)).
+  ([§4](coven.md#4-writing-locally)).
 - Ordinary reload queues app writes with their original authored view.
   Required audience reloads return `AudienceReloading`; self-replacement returns
   `MemberKeysChanging`. Retry after installation to author against its state
-  ([§10](coven.md#10-device-identity), [§15](coven.md#15-snapshots)).
+  ([§12.3](coven.md#123-replacing-a-members-keys), [§16.5](coven.md#165-coming-back-after-a-long-absence)).
 
 ```rust
 /// App-provided files staged for one write; a failure discards them (E3).
 pub struct WriteBatch { /* private fields */ }
 
-/// A transaction's SQL access, borrowing its connection and write's file state (§5, E3).
+/// A transaction's SQL access, borrowing its connection and write's file state (§4, E3).
 pub struct SqlContext<'connection, 'write> { /* private fields */ }
 
 /// A user's file checked before a write; callers cannot change its recorded facts (E3).
 pub struct PreparedUserFile { /* private fields */ }
 
-/// The facts recorded for a user's original file (§16.1).
+/// The facts recorded for a user's original file (§17.1).
 pub struct UserFile {
     /// The user's path, which coven never changes or deletes.
     pub path: PathBuf,
@@ -1130,12 +1130,12 @@ pub struct UserFile {
     pub modified_at: SystemTime,
 }
 
-/// A row's file at the time it was read; its captured facts are private (§16.3).
+/// A row's file at the time it was read; its captured facts are private (§17.5).
 pub struct FileRef { /* private fields */ }
 
 impl CovenHandle {
     /// Runs one write. A statement or shared trigger targeting another owner's
-    /// row refuses the transaction with DbError::NotOwner (§8.8). Authorized
+    /// row refuses the transaction with DbError::NotOwner (§9.6). Authorized
     /// foreign-key actions may change that row under the declared schema.
     pub async fn write<F, R>(&self, sql: F) -> CovenResult<R>
     where
@@ -1202,7 +1202,7 @@ impl SqlContext<'_, '_> {
 
     /// Forgets the user-provided file recorded on a row and clears its hash
     /// and where-columns to NULL. All four file columns go in the write
-    /// (§16.1). The original is untouched.
+    /// (§17.1). The original is untouched.
     pub fn clear_user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<(), DbError>;
 
     /// Checks that a file reference taken earlier still names the row's
@@ -1246,7 +1246,7 @@ handle
 
 ### E4 Reading
 
-- Reads run on several read-only connections at once ([§5](coven.md#5-local-database)).
+- Reads run on several read-only connections at once ([§4](coven.md#4-writing-locally)).
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read.
 - Table-backed built-in reads work offline. Each `subscribe_x()` counterpart reports the same
@@ -1257,12 +1257,12 @@ handle
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, as slots apply. Their callback
-  histories need not match between devices (§9).
-- Offer a removed row elsewhere with the same key (§8); copying to a new key
+  histories need not match between devices (§10).
+- Offer a removed row elsewhere with the same key (§8.4); copying to a new key
   can produce two rows. Published owner and unique claims follow slot order.
 
 ```rust
-/// SQL access to one read-only database snapshot (§5, E4).
+/// SQL access to one read-only database snapshot (§4, E4).
 pub struct SqlReadContext<'connection> { /* private fields */ }
 
 /// An awaitable read that keeps its store borrow until it finishes (E4).
@@ -1314,7 +1314,7 @@ pub enum LiveQueryCause {
     RequestAndWrite,
 }
 
-/// An open file with checked identity, header and range-reading state (§16.3).
+/// An open file with checked identity, header and range-reading state (§17.5).
 /// Retaining a stream prevents store deletion, including after the store closes.
 pub struct FileStream { /* private fields */ }
 
@@ -1345,14 +1345,14 @@ impl CovenHandle {
         F: Fn(&Q, SqlReadContext<'_>) -> CovenResult<R> + Send + Sync + 'static,
         R: Send + 'static;
 
-    /// Every lost value and removed row, as `_coven_lost` holds them (§8).
+    /// Every lost value and removed row, as `_coven_lost` holds them (§8.2, §8.4).
     /// References show what was written, even if their parents were deleted.
     pub async fn lost_values(&self) -> CovenResult<Vec<LostValue>>;
 
     /// Dismisses lost values the app has dealt with, in a write, so every
     /// device drops them from `_coven_lost`; a removed row is deleted for
-    /// good, and never comes back (§8). Deleting an owned removed row requires
-    /// its owner's permission (§8.8); dismissing a frozen record changes no row.
+    /// good, and never comes back (§8.4). Deleting an owned removed row requires
+    /// its owner's permission (§9.6); dismissing a frozen record changes no row.
     pub async fn dismiss_lost_values(&self, values: &[LostValue]) -> CovenResult<()>;
 
     /// The same, as a live query.
@@ -1400,7 +1400,7 @@ impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
     pub fn set(&self, request: Q) -> Result<LiveQueryRevision, LiveQueryClosed>;
 }
 
-/// One `_coven_lost` row (§8).
+/// One `_coven_lost` row (Appendix B.3).
 pub struct LostValue {
     pub table: String,
     pub key: RowKey,
@@ -1409,7 +1409,7 @@ pub struct LostValue {
     /// What replaced it: a write that hadn't read it, removal rules, a
     /// breaking change, dropped data sources, or failed row authorization.
     pub replaced_by: Replacement,
-    /// Old-shape values kept independently of the current schema (§17.1).
+    /// Old-shape values kept independently of the current schema (§18.7).
     /// Their table or columns may no longer exist; dismissal still works.
     pub frozen: bool,
 
@@ -1432,23 +1432,23 @@ pub struct LostCell {
 
 pub enum Replacement {
     Write(WriteId),
-    /// Removal rules took the row out: every one that holds (§8.4, §8.5,
-    /// §8.6, §14).
+    /// Removal rules took the row out: every one that holds (§9.1, §9.2,
+    /// §9.3, §15).
     Rules(Vec<RemovalRule>),
     /// A breaking change excluded the write or deleted a hidden row through
-    /// its generation. Frozen values retain their original setters (§17.1).
+    /// its generation. Frozen values retain their original setters (§18.7).
     SchemaChange { version: u32 },
-    /// This original row change used dropped data (§8, §10). Sources name
+    /// This original row change used dropped data (§9.5, §14.1). Sources name
     /// generation/setter changes, additional direct-execution sources, then
-    /// verified foreign-key causes (§8.8),
+    /// verified foreign-key causes (§9.6),
     /// in authored role/execution order, with repeats. Row identity distinguishes
     /// several causes in the same write. Empty deletes retain their write id.
     DataDependency { write: WriteId, sources: Vec<ChangeSource> },
-    /// A member's row change lacked permission; other changes may apply (§8.8).
+    /// A member's row change lacked permission; other changes may apply (§9.6).
     NotAuthorized { write: WriteId, reason: RowAuthorizationFailure },
 }
 
-/// An original row change or direct execution target used as data (§8, §8.8).
+/// An original row change or direct execution target used as data (§9.5, §9.6).
 pub struct ChangeSource {
     pub write: WriteId,
     pub table: String,
@@ -1467,11 +1467,11 @@ pub enum RowAuthorizationFailure {
 pub enum RemovalRule {
     ForeignKey { columns: Vec<String>, parent: String, parent_columns: Vec<String> },
     Check { constraint: String },
-    /// The circle is deleted by this entry (§14.7). This describes
+    /// The circle is deleted by this entry (§15.9). This describes
     /// the deletion, not a conflicting row edit; deletion is final.
     DeletedCircle { entry: EntryId },
     /// The same key is present in another audience, whose row is shown
-    /// (§14.2).
+    /// (§15.4).
     OtherAudience,
     Unique { terms: Vec<String>, partial: Option<String> },
 }
@@ -1530,7 +1530,7 @@ while let Ok(values) = lost.next().await {
   - After `disconnect_storage`, setup reconnects at the recorded location.
     It refuses a different location with `LocationChangeUnsupported`;
     setup does not relocate a store already used by other devices.
-  - Creating claims slot 1, then the creator’s key-copy slot (§10). Waiting
+  - Creating claims slot 1, then the creator’s key-copy slot (§10.3). Waiting
     writes then claim a writes slot through ordinary sync.
 - The app calls `authenticate(access)` on the handle before OAuth setup.
   Coven owns the request, checked redirect and code exchange. The builder's
@@ -1550,21 +1550,21 @@ while let Ok(values) = lost.next().await {
   classified cause; the error retains a cleanup failure too if both fail.
   It also checks conditional replacement for the floor: a matching revision
   succeeds and a stale revision changes nothing.
-- An S3 location's behaviors are `S3Settings` (§4). Its `S3Profile` names a
+- An S3 location's behaviors are `S3Settings` (§20.7). Its `S3Profile` names a
   known service or carries custom settings; with no profile, the
-  endpoint selects (§4): no endpoint means AWS S3; `storage.googleapis.com`
+  endpoint selects (Appendix E.3): no endpoint means AWS S3; `storage.googleapis.com`
   means GCS XML, using generation conditions and conditional copy to publish
   multipart uploads. Hosts ending in `.r2.cloudflarestorage.com` select R2,
   using conditional PUT and multipart completion and ignoring checksums
   without stated scope. The self-hosted RustFS, SeaweedFS, Ceph RGW and
   Versity Gateway profiles are selected only by name; SeaweedFS publishes
-  every object by conditional copy (§4). A name or custom profile contradicting a
+  every object by conditional copy (§20.6). A name or custom profile contradicting a
   known host, a name other than AWS or any custom profile without an
   endpoint, or plain `http` to a known host is `InvalidConfiguration`;
   other endpoints may use `http`.
 - Where an S3 service's member keys reach a whole bucket (R2, and every
   custom profile, detected or chosen), any member's key reaches every store
-  in the bucket, so each store has its own bucket from creation (§4). A
+  in the bucket, so each store has its own bucket from creation (§20.7). A
   non-empty base prefix fails validation, before any request, with
   `StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Prefix }`.
   A store's first setup lists the bucket's root before detection writes and
@@ -1610,27 +1610,27 @@ while let Ok(values) = lost.next().await {
   keys, location and code commit once the connection is ready; failure retains
   their previous values and connection. An uncertain claim retains its
   destination and exact bytes. Confirmed contention reads forward and
-  revalidates; invalidated work undoes its journaled artifacts (§6, §18).
-- Setup takes the first device's name, as joining and restore do (§10, §12).
+  revalidates; invalidated work undoes its journaled artifacts (§6.3, §11).
+- Setup takes the first device's name, as joining and restore do (§10.3, §13).
   Reconnecting an existing device keeps its registered name. Changed provider
   access is published as `Set access` before committing the new credentials.
 - A started connection runs one complete sync at a time, immediately after a
   local write or `sync_now`, and every 30 seconds while idle, subject to
   connection backoff and provider cooldowns. Stopping and closing finish the
   active pass first.
-  - [One sync pass](sync-pass.md) gives the read, apply, claim and effects order.
+  - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots.
-    Returning devices retain eligible queued writes ([§15](coven.md#15-snapshots)).
+    Returning devices retain eligible queued writes ([§16.5](coven.md#165-coming-back-after-a-long-absence)).
   - `Blocked` names a slot that cannot apply and its cause.
-    [§6's stuck-device rule](coven.md#stuck-devices) applies;
+    [§5.4's stuck-device rule](coven.md#54-a-stuck-device-stops) applies;
     local reads and eligible app writes continue.
   - File transfers run outside the pass. Their failures appear in `pending()`
     without blocking sequence application.
   - `Synced` means the pass reached its read end. Files, provider effects or
     retention may still be pending, but an unapplied discovered slot prevents this status.
   - Each pending record names this device's first unmet condition for that subject.
-    Cut-off writes record `WritesRefused`; [§19.1](coven.md#191-noticing) specifies retries.
+    Cut-off writes record `WritesRefused`; [§19.1](coven.md#191-what-the-app-sees) specifies retries.
 
 - `Offline` describes the last failed attempt, not the connection's history.
   `Failed`: storage refused the whole pass, or coven's own operation failed;
@@ -1642,7 +1642,7 @@ while let Ok(values) = lost.next().await {
     with its subject.
   - Removal records a `Connection` block with `Removed`, and stops the loop
     for good. Another copy using this device's id fails the pass with
-    `DeviceIdInUse` and stops the loop, recording nothing (§10). Local
+    `DeviceIdInUse` and stops the loop, recording nothing (§19.3). Local
     failures also name their pending subject and preserve their typed cause
     for a waiting caller.
   - If the database cannot save a pending record, stop the loop and fail database
@@ -1653,10 +1653,10 @@ while let Ok(values) = lost.next().await {
   `Offline`. A later provider error denying the required read is `Failed`.
   One bad photo while the rest syncs leaves `Synced` with a pending file record.
 - A device that isn't connected still reads and writes
-  ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
+  ([§2.1](coven.md#21-local-writes)); its writes wait in `_coven_uploads`.
 - `start_sync` starts the loop; its first pass builds the provider client from
   custody credentials, failing and backing off like any pass. Tokens refresh
-  on provider rejection (§4).
+  on provider rejection (§20.2).
 - `stop_sync` returns immediately, releasing providers after the active pass
   and transfers. Keys, credentials and location remain. Status reports completion
   or `Failed` with its cause; no pending connection record is written.
@@ -1671,7 +1671,7 @@ without reclassifying storage failures. Missing member keys are always
 classification when the native cause cannot survive closing the app.
 
 ```rust
-/// The provider holding a store (§4).
+/// The provider holding a store (§20.2).
 pub enum CloudProvider {
     /// S3, including compatible providers.
     S3,
@@ -1683,18 +1683,18 @@ pub enum CloudProvider {
     CloudKit,
 }
 
-/// A store's location, with credentials kept separately (§4, E5).
+/// A store's location, with credentials kept separately (§20.3, E5).
 pub enum StorageConfig {
     /// An existing S3 bucket and a base prefix. Where the service's member
     /// keys can be limited to a prefix, the base prefix may hold several
     /// stores; where they reach a whole bucket (R2, and every custom or
-    /// detected profile), the store has the bucket to itself (§4).
+    /// detected profile), the store has the bucket to itself (§20.7).
     S3 {
         /// The bucket's name.
         bucket: String,
         /// The signing region.
         region: String,
-        /// None is AWS's own endpoint. Known hosts require https (§4).
+        /// None is AWS's own endpoint. Known hosts require https (Appendix E.3).
         endpoint: Option<Url>,
         /// A known service's name or custom settings; either must agree
         /// with a known endpoint host. None selects by host:
@@ -1723,7 +1723,7 @@ pub enum StorageConfig {
     },
 }
 
-/// An S3 location's behaviors: a known service's, or its own (§4).
+/// An S3 location's behaviors: a known service's, or its own (§20.7).
 pub enum S3Profile {
     /// The known service's settings.
     Named(S3ProfileName),
@@ -1731,7 +1731,7 @@ pub enum S3Profile {
     Custom(S3Settings),
 }
 
-/// Every S3 behavior the adapter varies, one value each (§4).
+/// Every S3 behavior the adapter varies, one value each (§20.7).
 pub struct S3Settings {
     pub signing: S3Signing,
     /// The condition a create-once single PUT sends.
@@ -1780,7 +1780,7 @@ pub enum S3Listing { V2, V1 }
 pub enum S3Revision { ETag, Generation }
 pub enum S3ResponseHeaders { S3, Google }
 
-/// What detection observed at one location (§4).
+/// What detection observed at one location (§20.7).
 pub struct S3Detection {
     /// Bucket versioning, or a refused/unimplemented read with its native cause.
     pub versioning: Result<S3BucketVersioning, Arc<StorageError>>,
@@ -1854,7 +1854,7 @@ pub enum S3Probe {
     BucketList,
 }
 
-/// An S3 service whose known profile a location names (§4).
+/// An S3 service whose known profile a location names (§20.7).
 /// Self-hosted services have arbitrary endpoints, so no hostname identifies them.
 pub enum S3ProfileName {
     /// Amazon S3.
@@ -1873,7 +1873,7 @@ pub enum S3ProfileName {
     VersityGw,
 }
 
-/// Dropbox's location fixes its access level at cloud-store creation (§4).
+/// Dropbox's location fixes its access level at cloud-store creation (§20.2).
 pub enum DropboxLocation {
     /// Not-shared: paths are relative to the registered app's folder.
     AppFolder,
@@ -1898,7 +1898,7 @@ pub struct TransferLimits {
     pub downloads: NonZeroUsize,
 }
 
-/// The single storage failure classification used by every app-facing error (§20.3).
+/// The single storage failure classification used by every app-facing error (Appendix F.5).
 pub enum StorageFailure {
     /// This platform cannot use the selected built-in provider.
     ProviderUnavailable,
@@ -1919,22 +1919,22 @@ pub enum StorageFailure {
     /// A create-once path is occupied.
     AlreadyExists,
     /// A concurrent mutation defeated a conditional request; retry fixed bytes.
-    /// Invalidated multipart publication reports SessionExpired instead (§4).
+    /// Invalidated multipart publication reports SessionExpired instead (Appendix E.10).
     Conflict,
     /// The bucket, folder or zone is absent.
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
     /// The S3 service's member keys reach a whole bucket, so a store there
-    /// needs a bucket of its own (§4).
+    /// needs a bucket of its own (§20.7).
     OwnBucketRequired { reason: OwnBucketReason },
-    /// A member key coven made could list outside its store's prefix (§4).
+    /// A member key coven made could list outside its store's prefix (§20.10).
     KeyBeyondStore,
     /// Setting up a store that never had storage found another device's
-    /// slot 1: another installation claimed this location first (§10, D10).
+    /// slot 1: another installation claimed this location first (§10.3, D10).
     /// Restore or join it instead.
     StoreExists,
-    /// S3 rejected the device clock after one retry with the learned offset (§4).
+    /// S3 rejected the device clock after one retry with the learned offset (§20.7).
     ClockSkew,
     /// The provider has no space left.
     QuotaExceeded,
@@ -1952,7 +1952,7 @@ pub enum StorageFailure {
     InvalidRange,
     /// Only the account holding the store may change its sharing.
     NotStoreOwner,
-    /// The invited account is the one holding the store (§12.2).
+    /// The invited account is the one holding the store (§13.2).
     InviteeIsStoreOwner,
     /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     AccountIdUnavailable,
@@ -1975,7 +1975,7 @@ pub enum StorageFailure {
         limit: u64,
     },
     /// An S3 object published by `CopyObject` exceeds its single-copy limit,
-    /// so it cannot be published atomically on this profile (§4).
+    /// so it cannot be published atomically on this profile (§20.6).
     CopyTooLarge {
         /// Encrypted body length in bytes.
         size: u64,
@@ -1990,7 +1990,7 @@ pub enum StorageFailure {
     MemberKeysMissing,
 }
 
-/// Why an S3 location cannot hold a store that needs its own bucket (§4).
+/// Why an S3 location cannot hold a store that needs its own bucket (§20.7).
 pub enum OwnBucketReason {
     /// The location names a base prefix; the store occupies the bucket's root.
     Prefix,
@@ -2003,7 +2003,7 @@ impl StorageFailure {
     pub fn with_source(self, source: impl Into<Box<dyn std::error::Error + Send + Sync>>) -> StorageError;
 }
 
-/// A storage error preserves its classification and typed cause (§4, E5).
+/// A storage error preserves its classification and typed cause (§20, E5).
 pub enum StorageError {
     /// A failure with no underlying native error; also constructed by `failure.into()`.
     Failure(StorageFailure),
@@ -2067,7 +2067,7 @@ pub enum StorageCheck {
     Create,
     /// Refuse a second create at the same path.
     CreateOnce,
-    /// Replace at a matching revision and refuse a stale revision (§15).
+    /// Replace at a matching revision and refuse a stale revision (§16.6).
     ConditionalReplace,
     /// Read the original bytes in full.
     Read,
@@ -2086,7 +2086,7 @@ pub enum StorageCheck {
     Behavior,
 }
 
-/// Opening the member's sealed store key failed (§11, E5).
+/// Opening the member's sealed store key failed (§12.1, E5).
 pub enum StoreKeyUnlockError {
     /// No storage is connected.
     NoStorage,
@@ -2098,7 +2098,7 @@ pub enum StoreKeyUnlockError {
     SecureStorage(KeyError),
 }
 
-/// Sync or an administrative operation failed (§9, §13, §17, E5).
+/// Sync or an administrative operation failed (§10, §14, §18, E5).
 pub enum SyncError {
     /// This call requires work that cannot yet advance (§19.1).
     Pending(Box<PendingRecord>),
@@ -2111,16 +2111,16 @@ pub enum SyncError {
     /// A key introduction reused an immutable key identity.
     KeyAlreadyUsed(KeyId),
     /// The latest applied prefix no longer permits the operation; its journal
-    /// undoes owned artifacts before completion (§18).
+    /// undoes owned artifacts before completion (§11).
     Rejected(OperationRejection),
     /// The sequence has no next slot.
     SequenceExhausted,
     /// An object required by the change failed its checks.
     Damaged(DamagedObject),
-    /// This device or its member was removed; syncing stops for good (§10).
+    /// This device or its member was removed; syncing stops for good (§14.1).
     Removed,
     /// Another copy uses this device's id; this one sends nothing more.
-    /// Nothing is recorded; `reset_device` is the app's option (§10).
+    /// Nothing is recorded; `reset_device` is the app's option (§19.3).
     DeviceIdInUse(DeviceIdEvidence),
     /// Held signing credentials are no longer current for this stable id.
     /// Sending stops; restoring with current keys registers a new device.
@@ -2148,11 +2148,11 @@ pub enum SyncError {
     /// The request or invitation is absent, expired, or no longer matches.
     InvitationChanged,
     /// The member's provider account holds the store, so they can't be
-    /// removed (§4, §13).
+    /// removed (§20.9, §14.2).
     StoreOwner,
-    /// This call needs a newer app schema or coven format (§17).
+    /// This call needs a newer app schema or coven format (§18).
     UpdateRequired(RequiredUpdate),
-    /// A create-store entry names another store (§4).
+    /// A create-store entry names another store (§10.3).
     WrongStore { expected: StoreId, actual: StoreId },
     /// The requested journal row has no retryable work for this call.
     NotPending(OperationId),
@@ -2160,11 +2160,11 @@ pub enum SyncError {
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
     /// Deleting an S3 key with admin access did not establish its absence;
-    /// the key stays pending (§13).
+    /// the key stays pending (§14.3).
     AccessKeyNotDeleted(DeleteAccessKeyError),
 }
 
-/// What showed that another copy uses this device's id (§10).
+/// What showed that another copy uses this device's id (§19.3).
 pub enum DeviceIdEvidence {
     /// A slot signed by this device has a path its journal never attempted.
     UnattemptedSlot { slot: Slot },
@@ -2172,7 +2172,7 @@ pub enum DeviceIdEvidence {
     Replaced,
 }
 
-/// Why coven's deletion of an S3 key did not clear its record (§13).
+/// Why coven's deletion of an S3 key did not clear its record (§14.3).
 pub enum DeleteAccessKeyError {
     /// The provider refused or failed the deletion.
     DeleteFailed(StorageError),
@@ -2190,7 +2190,7 @@ pub struct DamagedObject {
     pub failure: Refusal,
 }
 
-/// One audience snapshot, identified by its storage path (§15).
+/// One audience snapshot, identified by its storage path (§16).
 pub struct SnapshotId {
     pub audience: Audience,
     pub device: DeviceId,
@@ -2221,14 +2221,14 @@ pub enum PendingSubject {
 
 /// A condition coven has not yet observed (§19.1).
 pub enum Prerequisite {
-    /// A completed read and apply through the current sequence end (§10).
+    /// A completed read and apply through the current sequence end (§14.1).
     SequenceCatchUp,
 
     Object(ObjectPath),
     DeviceRegistration(DeviceId),
     SchemaRaise { audience: Audience, version: u32 },
     Reload(Audience),
-    /// A snapshot needed to load history below the floor (§15).
+    /// A snapshot needed to load history below the floor (§16.4).
     Snapshot(SnapshotId),
 
 }
@@ -2287,7 +2287,7 @@ pub enum PendingReason {
     NoStorage,
     Storage { provider: CloudProvider, failure: StorageFailure },
     Refused(Refusal),
-    /// Consumed without effects; a permanent lower-slot cut-off (§10).
+    /// Consumed without effects; a permanent lower-slot cut-off (§14.1).
     WritesRefused { cutoff: Slot, cause: WriteCutoff },
     ProviderPending { action: ProviderAccessAction, account: String },
     PendingOwner { account: String },
@@ -2298,10 +2298,10 @@ pub enum PendingReason {
     Failed(LocalFailure),
     Paused,
     /// Provider work needs the storage account's admin access again; coven
-    /// holds it for one operation only (§4).
+    /// holds it for one operation only (§20.10).
     AdminAccessRequired,
     Removed,
-    /// Sending needs this stable member's current credentials (§10).
+    /// Sending needs this stable member's current credentials (§14.1).
     MemberKeysReplaced { member: MemberId },
 }
 
@@ -2328,14 +2328,14 @@ impl PendingRecord {
     pub fn retry(&self) -> Retry;
 }
 
-/// The absent target named by a rejected administrative change (§9).
+/// The absent target named by a rejected administrative change (§10).
 pub enum EntryTarget {
     Member(MemberId),
     Device(DeviceId),
     Circle(CircleId),
 }
 
-/// Why validation refused an administrative operation (§9, §18).
+/// Why validation refused an administrative operation (§10, §11).
 pub enum OperationRejection {
     TargetGone(EntryTarget),
     NoAdminLeft,
@@ -2345,7 +2345,7 @@ pub enum OperationRejection {
     NotAllowed,
 }
 
-/// The lower-slot event that permanently excluded a writes slot (§10).
+/// The lower-slot event that permanently excluded a writes slot (§14.1).
 pub enum WriteCutoff {
     DeviceRemoved,
     MemberRemoved,
@@ -2354,7 +2354,7 @@ pub enum WriteCutoff {
 
 impl CovenHandle {
     /// Checks S3 and returns its committed location, key state and restore code.
-    /// The location includes any detected settings (§4).
+    /// The location includes any detected settings (§20.7).
     pub async fn setup_s3_storage(
         &self,
         storage: StorageConfig,
@@ -2363,7 +2363,7 @@ impl CovenHandle {
         secret_access_key: SecretText,
     ) -> Result<StorageSetup, StorageSetupError>;
 
-    /// Probes the S3 service at this location with this member's key (§4),
+    /// Probes the S3 service at this location with this member's key (§20.7),
     /// writing only fresh objects under the store's `.coven-check` prefix and
     /// deleting them, also on failure. Commits nothing.
     pub async fn detect_s3_settings(
@@ -2396,9 +2396,9 @@ impl CovenHandle {
     ) -> Result<StorageSetup, StorageSetupError>;
 
     /// Opens store keys from their copies sealed to this member in storage
-    /// (§11), keeps them in custody, and connects without starting sync.
+    /// (§12.1), keeps them in custody, and connects without starting sync.
     /// Uses the member-key session already held at open; it does not unlock
-    /// custody again. Key selection follows §11; other waits remain in pending().
+    /// custody again. Key selection follows §12.2; other waits remain in pending().
     pub async fn unlock_store_key(&self) -> Result<ConnectedStorage, StoreKeyUnlockError>;
 
     /// Whether the held session has the store key: `Available` or `Locked`.
@@ -2429,7 +2429,7 @@ impl CovenHandle {
 
     /// The latest completed replacement stored in this installation, or None.
     /// It survives reopening; unsent edits were discarded, or may be lost
-    /// for a damaged database (§10, §19.2).
+    /// for a damaged database (§19.3).
     pub async fn device_reset(&self) -> CovenResult<Option<DeviceReset>>;
 
     /// The same pre-built query, including a replacement completed during open.
@@ -2467,7 +2467,7 @@ pub enum SyncStatus {
     Syncing,
     /// The pass reached its observed end; other subjects may still be pending.
     Synced { finished_at: SystemTime },
-    /// This slot invokes §6's stuck-device rule.
+    /// This slot invokes §5.4's stuck-device rule.
     Blocked { slot: Slot, reason: PendingReason },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed { error: SyncFailure },
@@ -2525,10 +2525,10 @@ loop {
 
 ### E6 Operations and recovery
 
-- Every administrative call follows [§18](coven.md#18-operations): validate,
+- Every administrative call follows [§11](coven.md#11-admin-operations): validate,
   journal, do prerequisite work, then claim. Contention reads forward and validates again.
 - On reopening or retrying, settle the recorded path and bytes before another
-  attempt ([§6](coven.md#settling-a-claim)). Each device has one claim counter
+  attempt ([§5.1](coven.md#51-claiming-a-slot)). Each device has one claim counter
   across writes, admin entries, key copies and announcements, and settles its
   current claim before starting another. If the floor has passed the slot,
   compare its recorded claim number c with the snapshot's last included claim L:
@@ -2539,14 +2539,14 @@ loop {
   Failed undo reports both causes and keeps the journal for retry.
 - A claimed entry is final. An already-satisfied request needs no extra entry.
   Neither dropping the call nor resetting data erases cleanup obligations.
-- Snapshot creation, reload and retention use journals too (§15).
+- Snapshot creation, reload and retention use journals too (§16).
   Calls retain native errors; local pending records retain the subject and category.
 
 ```rust
-/// The local integer primary key of one unfinished operation (§18).
+/// The local integer primary key of one unfinished operation (§11).
 pub struct OperationId(pub i64);
 
-/// The app purpose of an unfinished operation (§18.1, §19.3).
+/// The app purpose of an unfinished operation (§11.5, §19.4).
 pub enum OperationKind {
     CreateStore,
     AddDevice,
@@ -2556,9 +2556,9 @@ pub enum OperationKind {
     RemoveDevice,
     RenameCircle,
     RemoveCircleMember,
-    /// Conditionally advance the floor, then delete slots below it (§15).
+    /// Conditionally advance the floor, then delete slots below it (§16.6).
     RetainSequence,
-    /// Delete stored files nothing retained refers to (§16.5).
+    /// Delete stored files nothing retained refers to (§17.8).
     RetainFiles,
     /// Make a circle and publish its first sealed key.
     CreateCircle,
@@ -2574,24 +2574,24 @@ pub enum OperationKind {
     ReloadFromSnapshot,
     /// A reload sync requires.
     RequiredReload,
-    /// Replace an audience key exposed to an excluded member or credential (§11).
+    /// Replace an audience key exposed to an excluded member or credential (§12.2).
     RotateKey,
-    /// Publish a member's replacement pair and finish required custody (§11, E9).
+    /// Publish a member's replacement pair and finish required custody (§12.3, E9).
     ReplaceMemberKeys,
-    /// Upload a snapshot, then claim its announcement (§15).
+    /// Upload a snapshot, then claim its announcement (§16.2).
     WriteSnapshot,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
     /// An S3 key awaiting deletion with admin access or explicit
-    /// confirmation (§13). Its record names the key.
+    /// confirmation (§14.3). Its record names the key.
     DeleteAccessKey,
-    /// An admin desktop replacing a member's S3 key (§13).
+    /// An admin desktop replacing a member's S3 key (§14.3).
     ReplaceAccessKey,
-    /// Snapshot and reset an audience (§19.3).
+    /// Snapshot and reset an audience (§19.4).
     Reset,
 }
 
-/// Operation calls retain the same typed causes as sync calls (§18).
+/// Operation calls retain the same typed causes as sync calls (§11).
 pub type OperationError = SyncError;
 
 impl CovenHandle {
@@ -2600,10 +2600,10 @@ impl CovenHandle {
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting
-    /// writes, as an operation (§19.2). It cannot bypass §6's stuck-device rule.
+    /// writes, as an operation (§19.2). It cannot bypass §5.4's stuck-device rule.
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError>;
 
-    /// Resets the store from this device's copy, as an admin (§19.3): writes
+    /// Resets the store from this device's copy, as an admin (§19.4): writes
     /// a snapshot, then announces it and claims the reset slot. Every device,
     /// including this one, reloads from it. Pre-reset writes outside it are
     /// ignored without loss records; queued writes retain their original pasts when claimed.
@@ -2615,13 +2615,13 @@ impl CovenHandle {
 
 - A row moves to another audience by an ordinary write that changes its
   root's audience column, or points a descendant at a parent in another
-  audience ([§14.2](coven.md#142-moving-rows)).
+  audience ([§15.4](coven.md#154-moving-rows)).
   - The write commits at once on this device; its moved rows' file
-    references stay fixed ([§16.1](coven.md#161-kinds-and-where-files-are)).
+    references stay fixed ([§17.2](coven.md#172-attaching-a-file)).
 - Files enter the upload queue as the attaching write commits, including
   with no storage connected. That write fixes the path and key. Upload
   completion changes no row or `FileRef`; `file_status` derives availability
-  ([§16.1](coven.md#161-kinds-and-where-files-are)). Pinning and caching
+  ([§17.2](coven.md#172-attaching-a-file)). Pinning and caching
   change no file reference either.
 - Upload attempts read the source again, checking its size and whole-file
   content hash before transfer, and the first-read hash of each plaintext
@@ -2639,7 +2639,7 @@ impl CovenHandle {
     pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue>;
 
     /// Optional early retry of recoverable uploads; coven retries on its own.
-    /// Provider cooldowns still hold; failures stay in pending() (§16.5).
+    /// Provider cooldowns still hold; failures stay in pending() (§6.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// Pauses uploads, or resumes them. A paused upload keeps its place,
@@ -2696,14 +2696,14 @@ loop {
 - A *file reference*, `FileRef`, names one row's file as of that row's
   current version, so a later change to the row can't redirect a read.
 - Coven reads a file from wherever it is: the user's original, coven's own
-  copy, the cache, or storage ([§16](coven.md#16-files)).
+  copy, the cache, or storage ([§17](coven.md#17-files)).
 
 Ana's photo cannot be downloaded while her voice note continues arriving.
 The photo's reason is in `pending()`; eager-fill status still describes the
 files and bytes completed. There is no competing failure state in that progress.
 
 ```rust
-/// Progress while keeping files whole on this device (§16.4, E8).
+/// Progress while keeping files whole on this device (§17.6, E8).
 pub struct PinProgress {
     /// Files whose bytes have all been kept.
     pub files_completed: u64,
@@ -2715,7 +2715,7 @@ pub struct PinProgress {
     pub bytes_total: u64,
 }
 
-/// Progress of files declared CacheEager (§16.4, E8).
+/// Progress of files declared CacheEager (§17.6, E8).
 /// Failures appear only in pending(); independent downloads keep progressing.
 pub enum EagerCacheFillStatus {
     /// No files are waiting to download.
@@ -2733,7 +2733,7 @@ impl CovenHandle {
     /// file facts return `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 
-    /// Reads the fixed path's metadata and checks the uploader's current state (§16.1).
+    /// Reads the fixed path's metadata and checks the uploader's current state (§17.4).
     /// This device also knows its own source failures. Checks the reference against its row.
     /// Network failures and denied access are errors, not Missing; an object
     /// at the fixed path of any size but the file's complete one is `Integrity`.
@@ -2742,7 +2742,7 @@ impl CovenHandle {
     /// Reads a whole file, checking it against its row.
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
 
-    /// Opens a file for reading ranges (§16.3). Opening checks the file
+    /// Opens a file for reading ranges (§17.5). Opening checks the file
     /// against its row once; keep the stream for as long as the file is read.
     /// Its shared store lock prevents deletion until it and its I/O finish.
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError>;
@@ -2785,7 +2785,7 @@ impl CovenHandle {
 
     /// Progress of downloading every file declared to download as soon as
     /// its row arrives that this device doesn't have yet, such as after
-    /// loading a snapshot to join or recover (§16, §19.2).
+    /// loading a snapshot to join or recover (§17.6, §19.2).
     pub async fn eager_cache_fill_status(&self) -> CovenResult<EagerCacheFillStatus>;
 
     /// The same committed progress and later changes as eager_cache_fill_status.
@@ -2802,13 +2802,13 @@ impl FileRef {
     pub fn column(&self) -> &str;
     /// The file's size in bytes.
     pub fn plaintext_size(&self) -> u64;
-    /// The row's audience, whose encrypted writes carry the file's key (§16.1).
+    /// The row's audience, whose encrypted writes carry the file's key (§17.2).
     pub fn audience(&self) -> Audience;
     pub fn id(&self) -> FileId;
     pub fn uploader(&self) -> DeviceId;
 }
 
-/// Current remote availability; never persisted in the app row (§16.1).
+/// Current remote availability; never persisted in the app row (§17.4).
 pub enum FileStatus {
     Available,
     /// Confirmed absent; the uploader is active, with no source failure known here.
@@ -2843,13 +2843,13 @@ impl FileRangeStream<'_> {
 }
 
 pub enum FileReadError {
-    /// This file uses a newer coven format (§17.2).
+    /// This file uses a newer coven format (Appendix C.2).
     UpdateRequired(RequiredUpdate),
     /// Remote status or uncached bytes were requested with no storage connected.
     NoStorage,
     /// Storage confirms absence; the uploader is active, with no local source failure.
     Uploading { id: String, device: DeviceId },
-    /// Storage confirms absence and the uploader cannot supply it (§16.1).
+    /// Storage confirms absence and the uploader cannot supply it (§17.4).
     Missing { id: String, device: DeviceId, reason: FileMissingReason },
     /// A user-provided file is gone from its recorded path.
     UserFileMissing { id: String, path: PathBuf },
@@ -2857,7 +2857,7 @@ pub enum FileReadError {
     /// longer matches what coven recorded.
     UserFileChanged { id: String, path: PathBuf },
     /// A chunk, a copy on this device, or the object at the fixed path failed
-    /// its check; a stored object of the wrong size is damage, not absence (§16.1).
+    /// its check; a stored object of the wrong size is damage, not absence (§17.4).
     Integrity { id: String },
     /// The range lies outside the file.
     RangeOutOfBounds { id: String, offset: u64, end: u64, size: u64 },
@@ -2891,17 +2891,17 @@ match stream.read_at(resume_at, 256 * 1024).await {
 ### E9 Members and devices
 
 - Only admins add and remove members, and change roles; each member removes
-  their own devices, and admins any device ([§9](coven.md#9-members-and-roles)).
-- Administrative calls require an online sequence catch-up (§9, E6).
+  their own devices, and admins any device ([§10](coven.md#10-members-roles-and-devices)).
+- Administrative calls require an online sequence catch-up (§10, E6).
 - A member records their own new storage access; an admin may also record an
   S3 replacement for another member. Authority uses the author's role in the
   state immediately preceding its slot, independently of who holds
   provider-admin access.
   `ProviderSignOut::ReplaceAccessKey` directs the person to the admin desktop
-  flow in §13, `replace_member_access_key`: create, deliver to remaining
+  flow in §14.3, `replace_member_access_key`: create, deliver to remaining
   devices, record for that member, then delete the old key. Each remaining
   device installs the delivered key on its next sync. Without admin access,
-  `replace_access_key` records a console-made key instead. §4 lists the
+  `replace_access_key` records a console-made key instead. Appendix E.12 lists the
   operation-scoped admin-access sources.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
@@ -2912,12 +2912,12 @@ match stream.read_at(resume_at, 256 * 1024).await {
 
 - Replacement preserves the id, role, circle memberships and device ids.
   Historical public bindings remain available for signature checks. Old
-  sealing credentials expose their audience keys (§11); storage access is
+  sealing credentials expose their audience keys (§12.2); storage access is
   a separate operation. Neither a restore code nor a key copy proves approval.
 - Removing a member publishes one entry. It returns `()` once its slot commits; applying entries is the single path that records provider access work.
 - The pending list describes unresolved access work. Each owner's device
   serializes grant and revoke requests, and performs the opposite request
-  when a later slot changes the required access (§4, §13).
+  when a later slot changes the required access (§20.9, §14.2).
   Pending and failed work appears in `pending()`, with the operation id for
   retry. Derived provider work cannot be discarded while its current
   intention remains unmet: disappearance from this list must not hide a
@@ -2935,7 +2935,7 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - A key coven made that no entry records, such as one whose minting database
   was lost before recording it, gets its own `DeleteAccessKey` record from
   an admin's sync while admin access is held, once its minting device is
-  retired (§13).
+  retired (§14.3).
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner;
@@ -2955,7 +2955,7 @@ impl CovenHandle {
     /// The same internal query, live (E4).
     pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>>;
 
-    /// Replaces this member's pair and returns its restore code (§9, §11).
+    /// Replaces this member's pair and returns its restore code (§10, §12.3).
     /// Refuses app writes with MemberKeysChanging while confirming writes
     /// made under the old binding, then keeps the candidate before claiming its copies
     /// and binding. Success follows the claimed binding, custody and synced-code
@@ -2963,7 +2963,7 @@ impl CovenHandle {
     /// the old pair report MemberKeysReplaced.
     pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError>;
 
-    /// Publishes a prepared public pair for an active member under §9's
+    /// Publishes a prepared public pair for an active member under §10's
     /// authority rules. The target retains its private pair before this call;
     /// this call receives no private keys and changes no local private custody.
     /// Confirms copies of every store key and the held circle keys before
@@ -2979,15 +2979,15 @@ impl CovenHandle {
         keys: MemberPublicKeys,
     ) -> Result<(), SyncError>;
 
-    /// On S3: switches this member to a key supplied through §4's admin-access
-    /// or console path and records the new key's id in an admin entry (§9).
+    /// On S3: switches this member to a key supplied through §20.10's admin-access
+    /// or console path and records the new key's id in an admin entry (§10).
     /// The restore code does not change. They keep the key separately,
     /// update their other devices with update_credentials, and the old key
-    /// becomes pending deletion under §13. Requires connected storage.
+    /// becomes pending deletion under §14.3. Requires connected storage.
     /// An uncertain claim retains the new credentials and attempted bytes.
-    /// Retry with the same key to settle it before completing or undoing (§18).
+    /// Retry with the same key to settle it before completing or undoing (§11).
     /// Member removal lists every recorded key until confirmed deleted,
-    /// An invalidated operation settles any uncertain claim before undo (§18).
+    /// An invalidated operation settles any uncertain claim before undo (§11).
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -3004,35 +3004,35 @@ impl CovenHandle {
         secret_access_key: SecretText,
     ) -> Result<(), SyncError>;
 
-    /// Changes a member's role, as an admin (§9).
+    /// Changes a member's role, as an admin (§10).
     pub async fn set_member_role(&self, member: &MemberId, role: MemberRole) -> Result<(), SyncError>;
 
     /// Explicitly confirms that the admin deleted this S3 key, including
     /// through guided console steps. Clears only this id's DeleteAccessKey
-    /// record and retains its confirmation (§13). Coven's automatic path
+    /// record and retains its confirmation (§14.3). Coven's automatic path
     /// instead requires its admin deletion followed by a provider read
     /// confirming this exact id absent; it never infers this confirmation.
     pub async fn confirm_access_key_deleted(&self, access_key_id: &str) -> Result<(), SyncError>;
 
     /// Obtains the storage account's admin access from the source the person
     /// chose, held in memory by the operations it is passed to and never
-    /// stored, logged or put in admin entries or invites (§4). S3 only.
+    /// stored, logged or put in admin entries or invites (§20.10). S3 only.
     pub async fn admin_access(&self, source: AdminAccessSource) -> Result<Arc<dyn AccessKeyAdmin>, SyncError>;
 
     /// The bucket, the store's prefix and the filled member policy for making
-    /// a key in the provider's console (§4).
+    /// a key in the provider's console (§20.10).
     pub async fn guided_access_key(&self) -> Result<GuidedAccessKey, SyncError>;
 
     /// Deletes the key a DeleteAccessKey record names with admin access, then
     /// reads the provider for that exact key. Only its absence clears the
-    /// record; failures return AccessKeyNotDeleted and the record stays (§13).
+    /// record; failures return AccessKeyNotDeleted and the record stays (§14.3).
     pub async fn delete_access_key(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), SyncError>;
 
     /// Resumes work pending with AdminAccessRequired, holding this admin access
-    /// for that operation only (§4).
+    /// for that operation only (§20.10).
     pub async fn retry_with_admin_access(&self, operation: OperationId, admin: Arc<dyn AccessKeyAdmin>) -> Result<(), OperationError>;
 
-    /// Replaces a member's S3 key with admin access (§13): makes the key and
+    /// Replaces a member's S3 key with admin access (§14.3): makes the key and
     /// checks it from the member's side, delivers it sealed to the member's
     /// devices (D9), records it for them, then deletes the old key and reads
     /// it gone. Their own key, or another member's as an admin; any other
@@ -3040,22 +3040,22 @@ impl CovenHandle {
     /// the person to keep, and the old key’s outcome. Validation failure
     /// deletes the newly made key and delivery, retaining the old binding.
     /// After a restart the operation waits with AdminAccessRequired.
-    /// Failed undo retains its journal and retries (§18).
+    /// Failed undo retains its journal and retries (§11).
     pub async fn replace_member_access_key(&self, member: &MemberId, admin: Arc<dyn AccessKeyAdmin>) -> Result<AccessKeyReplacement, SyncError>;
 
-    /// Publishes the removal of this member and all their devices (§13).
+    /// Publishes the removal of this member and all their devices (§14.1).
     /// Returns once the slot commits. Provider work appears only in pending(),
     /// including owner waits, retained grants and S3 keys until confirmed deleted.
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes a device. The provider can't cut off one device alone, so the
     /// result says how its member signs out of the provider and signs in
-    /// again on the devices they keep (§13).
+    /// again on the devices they keep (§14.2).
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
 }
 
 /// A member's replaced S3 key: the new key, which the member keeps
-/// separately, and what happened to the old one (§13).
+/// separately, and what happened to the old one (§14.3).
 pub struct AccessKeyReplacement {
     pub key: S3MemberKey,
     pub old_key: OldKeyDeletion,
@@ -3071,7 +3071,7 @@ pub enum OldKeyDeletion {
     Failed { operation: OperationId, error: SyncError },
 }
 
-/// An S3 key superseded, recorded for a removed member, or from an ended invite (§13).
+/// An S3 key superseded, recorded for a removed member, or from an ended invite (§14.3).
 pub struct AccessKeyToDelete {
     pub access_key_id: String,
     /// Who holds the key; deleting it with admin access uses these handles.
@@ -3101,13 +3101,13 @@ pub enum IamPolicy {
 }
 
 /// A service's key administration with the storage account's admin access,
-/// for one operation (§4). Coven's minters implement it per known profile.
+/// for one operation (§20.10). Coven's minters implement it per known profile.
 #[async_trait]
 pub trait AccessKeyAdmin: Send + Sync {
     /// Create the principal and a key limited to the scope's store, under
     /// names fresh for this call; nothing is deleted first.
     async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError>;
-    /// The member-side check before delivery (§4).
+    /// The member-side check before delivery (§20.10).
     async fn probe(&self, scope: &MintScope, key: &S3Credentials) -> Result<(), StorageError>;
     /// Remove whatever a failed call with this scope made.
     async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError>;
@@ -3116,7 +3116,7 @@ pub trait AccessKeyAdmin: Send + Sync {
     /// Read whether this exact key remains; a failed read is never absence.
     async fn key_exists(&self, access_key_id: &str, principal: &S3Principal) -> Result<bool, StorageError>;
     /// Every key and principal holding none under a name coven made for this
-    /// store, with the minting device that name carries (§4, §13). A failed
+    /// store, with the minting device that name carries (§20.10, §14.3). A failed
     /// or incomplete listing is an error, never a shorter list.
     async fn list_keys(&self, store: StoreId) -> Result<StoreListing, StorageError>;
     /// Remove a listed principal of a retired device only while it holds no
@@ -3124,7 +3124,7 @@ pub trait AccessKeyAdmin: Send + Sync {
     async fn remove_unkeyed(&self, store: StoreId, principal: &UnkeyedPrincipal) -> Result<(), StorageError>;
 }
 
-/// Where admin access comes from (§4). The CLI and browser sources exist on
+/// Where admin access comes from (§20.10). The CLI and browser sources exist on
 /// desktops only; coven runs or reads nothing before the person chooses one.
 pub enum AdminAccessSource {
     AwsCli { profile: Option<String> },
@@ -3147,7 +3147,7 @@ pub enum AdminCredential {
         secret_access_key: SecretText,
         session_token: Option<SecretText>,
         /// Versity Gateway's standalone IAM service, which listens apart
-        /// from the S3 endpoint; None for every other service (§4).
+        /// from the S3 endpoint; None for every other service (Appendix E.12).
         iam_endpoint: Option<Url>,
     },
     BearerToken(SecretText),
@@ -3159,7 +3159,7 @@ pub trait DeviceSignInPresenter: Send + Sync {
     async fn show(&self, verification_url: &str, user_code: &str) -> Result<(), StorageError>;
 }
 
-/// Guided console steps for a key made by hand (§4).
+/// Guided console steps for a key made by hand (§20.10).
 pub struct GuidedAccessKey {
     pub bucket: String,
     pub store_prefix: String,
@@ -3168,7 +3168,7 @@ pub struct GuidedAccessKey {
 
 /// What a minted key reaches and who makes it, named afresh for each mint call.
 /// `name` is the short principal name, `key_name` the name carrying the store,
-/// the minting device and the call (§4).
+/// the minting device and the call (§20.10).
 pub struct MintScope {
     pub store: StoreId,
     pub device: DeviceId,
@@ -3233,7 +3233,7 @@ pub struct DeviceInfo {
 pub enum DeviceState {
     Active,
     Removed,
-    /// An earlier add-device slot replaced this id. Later writes are refused (§10).
+    /// An earlier add-device slot replaced this id. Later writes are refused (§14.1).
     Replaced,
 }
 
@@ -3242,7 +3242,7 @@ pub enum MemberRole {
     Member,
 }
 
-/// How a removed device's member cuts off its provider access (§13).
+/// How a removed device's member cuts off its provider access (§14.2).
 pub enum ProviderSignOut {
     /// Remove the app's access from Dropbox or OneDrive, then sign in again.
     RemoveAppAccess { provider: CloudProvider },
@@ -3250,10 +3250,10 @@ pub enum ProviderSignOut {
     RemoveFromAppleAccount,
     /// An admin desktop with the storage account's admin access creates a new
     /// S3 key, delivers it to the member's remaining devices, records it for
-    /// that member, then deletes the old key (§13, replace_member_access_key). The old key is pending
+    /// that member, then deletes the old key (§14.3, replace_member_access_key). The old key is pending
     /// DeleteAccessKey work from recording until verified deletion or explicit
     /// confirmation. Keep the new member key separately; the restore code does
-    /// not change. Admin access is held for one operation and never stored (§4).
+    /// not change. Admin access is held for one operation and never stored (§20.10).
     ReplaceAccessKey,
 }
 ```
@@ -3262,7 +3262,7 @@ pub enum ProviderSignOut {
 
 - A person's new device opens the store from their restore code: scanned
   as a QR code, typed in, or read from iCloud Keychain
-  ([§12.1](coven.md#121-a-persons-new-device)).
+  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
 - The restore code contains only the stable member id and current private
   pair, store id and name, and
   storage location. On S3, the person keeps their access key separately,
@@ -3273,7 +3273,7 @@ pub enum ProviderSignOut {
   accompanies the code; it is never part of the restore-code encoding.
   iCloud Keychain may also hold the S3 key separately alongside the code.
 - An admin adds a person with an invite, and approves their join request
-  ([§12.2](coven.md#122-adding-a-person)).
+  ([§13.2](coven.md#132-adding-a-person-invites)).
 - Before `create_invite` makes any provider change, an App-folder Dropbox
   store fails with `DropboxAppFolderNotShareable`: sharing it requires store
   relocation, outside this operation.
@@ -3301,7 +3301,7 @@ pub enum ProviderSignOut {
     custody lives with the returned handle. OAuth sign-in tokens move from
     session custody into the device keychain on successful publication.
   - Every call migrates coven's own local tables in place before applying
-    the app's migrations, as a writable open does ([§17.2](coven.md#172-covens-schema)).
+    the app's migrations, as a writable open does ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
   - An unfinished store is created at its permanent path with a durable
     `.coven-bootstrap` marker. Listings hide it and ordinary opens refuse it.
     Bootstrap holds its own directory capability and opens the database once;
@@ -3323,10 +3323,10 @@ pub enum ProviderSignOut {
     queue starts with the returned handle and uses the builder's limits.
 
 ```rust
-/// A one-time invite's UUID, also naming its join-request object (§12.2).
+/// A one-time invite's UUID, also naming its join-request object (§13.2).
 pub struct InviteId(pub Uuid);
 
-/// An uploaded file's random id, its name in storage (§16.2).
+/// An uploaded file's random id, its name in storage (§17.3).
 pub struct FileId(pub Uuid);
 
 /// What the app may show before using a scanned or typed code (E10).
@@ -3346,16 +3346,16 @@ pub struct CodeInfo {
     pub oauth_access: Option<OAuthAccess>,
 }
 
-/// The two codes used to open a store on a new device (§12).
+/// The two codes used to open a store on a new device (§13).
 pub enum CodeKind {
     /// Holds only the person's member id and private keys, store id/name and location.
     Restore,
     /// Holds an invite id, chosen member id, secret, initial key id, inviting writer and its
-    /// applied slot at invite time; approval is required (§12.2).
+    /// applied slot at invite time; approval is required (§13.2).
     Invite,
 }
 
-/// A scanned or typed code cannot be used for this call (§12, E10).
+/// A scanned or typed code cannot be used for this call (§13, E10).
 pub enum CodeError {
     /// The code does not contain valid restore or invite data.
     Invalid,
@@ -3363,7 +3363,7 @@ pub enum CodeError {
     WrongKind { expected: CodeKind, actual: CodeKind },
 }
 
-/// Opening a store on a new device failed (§12, E10).
+/// Opening a store on a new device failed (§13, E10).
 pub enum BootstrapError {
     /// The person cancelled the call.
     Cancelled,
@@ -3472,21 +3472,21 @@ impl CovenHandle {
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError>;
 }
 
-/// The admin's choice, fixed before sharing the invite (§12.2, §12.3).
+/// The admin's choice, fixed before sharing the invite (§13.2, §13.3).
 pub enum InviteTarget {
     NewMember { role: MemberRole },
     ReplaceMemberKeys { member: MemberId },
 }
 
-/// How the invited person reaches storage (§12.2).
+/// How the invited person reaches storage (§13.2).
 pub enum InviteAccess {
     /// Dropbox, OneDrive or iCloud: the store is shared with
     /// this account.
     ProviderAccount { email: String },
-    /// S3: a member key made in the provider's console (§4).
+    /// S3: a member key made in the provider's console (§20.10).
     S3AccessKey { access_key_id: String, secret_access_key: SecretText },
     /// S3: coven makes the person's key with this admin access, held by the
-    /// invite's operation until the key passes its member-side check (§4).
+    /// invite's operation until the key passes its member-side check (§20.10).
     S3AdminAccess(Arc<dyn AccessKeyAdmin>),
 }
 
@@ -3543,7 +3543,7 @@ pub async fn restore_from_code(
 ) -> Result<CovenHandle, BootstrapError>;
 
 /// Opens the store on a new Apple device from its iCloud Keychain restore
-/// code (§12.1). On S3, uses the supplied credentials when Some; None reads
+/// code (§13.1). On S3, uses the supplied credentials when Some; None reads
 /// the S3 key held separately alongside the code. An absent key fails with
 /// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration;
 /// a keychain read failure is returned. Other providers require None and
@@ -3577,7 +3577,7 @@ pub async fn join_with_invite(
 
 impl OAuthClients {
     /// Registers the access the app offers; None disables a sign-in. The
-    /// Google client serves only GCS admin sign-in (§4); no store lives on Google.
+    /// Google client serves only GCS admin sign-in (§20.10); no store lives on Google.
     pub fn new(
         google_client_id: Option<String>,
         dropbox: Option<DropboxClients>,
@@ -3733,7 +3733,7 @@ pub enum IdentityError {
 impl MemberKeys {
     /// The public pair bound to a stable member id by admin entries.
     pub fn public_keys(&self) -> MemberPublicKeys;
-    /// Encodes both private seeds for custody or a restore code (§12.1).
+    /// Encodes both private seeds for custody or a restore code (§13.1).
     pub fn to_secret_bytes(&self) -> SecretBytes;
     /// Restores both pairs from custody or a restore code.
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
@@ -3748,7 +3748,7 @@ impl MemberIdentity {
 }
 
 impl StoreKeyring {
-    /// Encodes every opened store and circle key for custody (§11).
+    /// Encodes every opened store and circle key for custody (§12.4).
     pub fn to_secret_bytes(&self) -> SecretBytes;
     /// Reads custody bytes, rejecting malformed, duplicate or empty keyrings.
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
@@ -3812,8 +3812,8 @@ pub trait MemberKeyCustody: Send + Sync {
 
 ### E12 Circles
 
-- A circle's members add and remove its members ([§14.3](coven.md#143-circles)).
-  Circle changes first catch up on reachable storage (§9, E6).
+- A circle's members add and remove its members ([§15.5](coven.md#155-running-a-circle)).
+  Circle changes first catch up on reachable storage (§10, E6).
 - Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
   do ([E9](#e9-members-and-devices)). Validation uses the latest applied prefix:
   `Rejected(NotAllowed)` for authority, `Rejected(NoAdminLeft)` for the
@@ -3821,10 +3821,10 @@ pub trait MemberKeyCustody: Send + Sync {
   device or circle. The target retains its typed id. `StoreOwner` remains
   a separate provider constraint.
 - Removing someone from a circle publishes one entry and returns once it is
-  claimed. Rotation follows in the sync pass; it is not part of that call (§11).
+  claimed. Rotation follows in the sync pass; it is not part of that call (§12.2).
 
 ```rust
-/// Circle calls borrowing the open store that owns their work (§14, E12).
+/// Circle calls borrowing the open store that owns their work (§15, E12).
 pub struct Circles<'a> { /* private fields */ }
 
 impl CovenHandle {
@@ -3839,15 +3839,15 @@ impl Circles<'_> {
     pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), SyncError>;
 
     /// Deletes a circle with one admin slot. The deletion rule hides
-    /// its rows permanently; there is no row-delete write (§14.7).
+    /// its rows permanently; there is no row-delete write (§15.9).
     pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError>;
 
     /// Adds a store member to the circle. They get its current and earlier
     /// keys, so they read its history. Rejoining devices reload skipped parts,
-    /// using the snapshot and retained suffix (§14.4).
+    /// using the snapshot and retained suffix (§15.7).
     pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
-    /// Removes someone with one entry; remaining members rotate exposed keys (§14.6).
+    /// Removes someone with one entry; remaining members rotate exposed keys (§15.8).
     pub async fn remove_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// The circles this member is in.
@@ -3863,7 +3863,7 @@ impl Circles<'_> {
     pub fn subscribe_members(&self, circle: CircleId) -> LiveQuery<Vec<CircleMemberInfo>>;
 
     /// Resets a circle from this copy; only the snapshot and writes that
-    /// read the reset count in that circle, on this device too (§19.3).
+    /// read the reset count in that circle, on this device too (§19.4).
     pub async fn reset(&self, circle: CircleId) -> Result<(), SyncError>;
 }
 
@@ -3881,7 +3881,7 @@ pub struct CircleMemberInfo {
 ### E13 Migrations
 
 - Coven migrates its own local tables automatically before the app's
-  migrations; each internal migration is atomic ([§17.2](coven.md#172-covens-schema)).
+  migrations; each internal migration is atomic ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
 - The app's schema is a list of migrations numbered from 1 with no gaps.
 - Opening runs every migration above the database's version in one
   transaction, so a failure leaves the schema as it was.
@@ -3889,15 +3889,15 @@ pub struct CircleMemberInfo {
   `addition_with` or `breaking_with` for code. Breaking constructors require
   `OldWrites::Convert(f)` or `OldWrites::Drop`; there is no implicit choice.
   `Convert` handles eligible received late ordinary changes in version and
-  causal order (§17.1;
+  causal order (§18.6;
   [`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
   - Local migration preserves every queued original record, including
     untried writes; tried uploads also retain their format and sealing keys
     ([`conversions_preserve_uploads`, `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Member-key slot cut-offs use the same data rule (§10).
+  - Member-key slot cut-offs use the same data rule (§14.1).
   - Before invoking a callback, coven determines candidate schema admission
     and resolves each change's original generation source and replaced
-    setters under §8. A dependent change never reaches the callback: retain
+    setters under §9.5. A dependent change never reaches the callback: retain
     its original write/row identity, generation, operation, names, scalar
     values and failed source identities as a frozen loss. A delete keeps
     its identity even without scalars. Recorded reads only govern readiness
@@ -3917,11 +3917,11 @@ pub struct CircleMemberInfo {
   - The author reloading after a competing raise uses the same per-change
     rule as peers. New writes use the atomically reloaded state; an implicit
     own read of an excluded position creates no data dependence. Source
-    evidence and verdicts survive snapshots and loss dismissal (§8).
+    evidence and verdicts survive snapshots and loss dismissal (§9.5).
   - A failed callback aborts the receive or reload transaction, preserving
     the preceding committed values, losses, source verdicts and applied slot.
     The upload queue remains unchanged on success and failure alike.
-- Coven still classifies every migration (§17.1). Either kind mismatch returns
+- Coven still classifies every migration (§18.1). Either kind mismatch returns
   `DbError::MigrationKindMismatch { version }` and rolls back the whole batch;
   local-only changes accept `addition`. Reopening checks historical declarations
   against committed classifications before running new migrations.
@@ -3951,10 +3951,10 @@ impl Migration {
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static;
 }
 
-/// SQL access inside the transaction applying a migration (§17.1, E13).
+/// SQL access inside the transaction applying a migration (§18.3, E13).
 pub struct MigrationContext<'connection> { /* private fields */ }
 
-/// What one row change does (§5).
+/// What one row change does (§4).
 pub enum ChangeOp {
     /// Inserts the row.
     Insert,
@@ -3971,7 +3971,7 @@ impl MigrationContext<'_> {
     pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>;
 }
 
-/// One row change of a write record (§5).
+/// One row change of a write record (§4).
 pub struct RowChange {
     pub table: String,
     pub key: RowKey,
@@ -3986,7 +3986,7 @@ impl RowChange {
 }
 
 /// One column of a row change. A column that holds a reference also keeps,
-/// privately, which generation of its parent the write named (§8.4).
+/// privately, which generation of its parent the write named (§9.1).
 pub struct ColumnChange {
     pub name: String,
     pub old: Option<rusqlite::types::Value>,

@@ -1,5 +1,5 @@
 //! A local write: the app's SQL recorded one row operation at a time, then
-//! coven's capture, merge and queueing in the same transaction (§5, §8.8).
+//! coven's capture, merge and queueing in the same transaction (§4, §9.6).
 
 use super::event_capture::{Event, EventCapture};
 use super::transaction_capture::ChangeCapture;
@@ -87,7 +87,7 @@ impl DatabaseConnection {
     }
 
     /// A local write's transaction. Its app phase records each row operation
-    /// (§8.8); a session observes the coven phase after it, as for every
+    /// (§9.6); a session observes the coven phase after it, as for every
     /// other transaction.
     fn local_transaction<T, E: crate::WriteFailure>(
         &self,

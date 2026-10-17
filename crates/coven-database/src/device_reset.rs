@@ -1,4 +1,4 @@
-//! This installation's completed replacement notice and its reserved counters (§10).
+//! This installation's completed replacement notice and its reserved counters (§19.3).
 
 use crate::{sqlite::DatabaseConnection, DbError};
 use coven_foundation::files::DeviceReset;

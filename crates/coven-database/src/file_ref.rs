@@ -31,7 +31,7 @@ struct FileVersion {
     location: FixedReference,
 }
 
-/// A row's file at the time it was read. Facts and version remain private (§16.3).
+/// A row's file at the time it was read. Facts and version remain private (§17.5).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileRef {
     row: RowId,
@@ -59,7 +59,7 @@ impl FileRef {
         reader.scan(|bytes| hash.update(bytes))?;
         Ok(hash.finish() == self.content_hash())
     }
-    /// The random object id fixed by the attaching write (§16.1).
+    /// The random object id fixed by the attaching write (§17.2).
     pub fn id(&self) -> FileId {
         self.version.location.id
     }

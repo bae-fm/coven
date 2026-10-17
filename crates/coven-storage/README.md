@@ -13,9 +13,9 @@ Every path and listing prefix begins with the canonical store UUID. Stores can
 share a provider location without sharing object names, except on an S3
 service whose member keys reach a whole bucket (R2, and every custom or
 detected profile): there a store has the bucket to itself, at an empty base
-prefix, and creating it refuses a bucket holding anything else (§4). Writers compete for shared sequence slots. `create` refuses an occupied path with
+prefix, and creating it refuses a bucket holding anything else (§20.7). Writers compete for shared sequence slots. `create` refuses an occupied path with
 `AlreadyExists`; the caller counts a retry as stored only after comparing the
-occupant's complete bytes (§6). Only `<store>/floor` can be replaced, conditioned
+occupant's complete bytes (§5.1). Only `<store>/floor` can be replaced, conditioned
 on the fetched native revision; a stale condition returns `Conflict`. Slots use
 `<store>/seq/<n>` and exact reads. Files use foundation `FileId` UUIDs. Listings
 serve file scans and provider setup, not sequence discovery. A range is half-open and must fit
@@ -58,7 +58,7 @@ provider storage time, rejecting missing or malformed metadata. Dropbox uses
 the top-level `lastModifiedDateTime`, CloudKit the publication record's server
 time, and S3 `LastModified`. OneDrive copy preserves the temporary's creation
 time, so its modification time records publication. AWS's native multipart
-timestamp records initiation and remains a publication-time limitation (§4).
+timestamp records initiation and remains a publication-time limitation (§20.6).
 Writes slots can exceed the single-request limit; a provider profile must supply
 complete-publication time through conditional completion or conditional copy.
 [AWS metadata documentation](https://docs.aws.amazon.com/AmazonS3/latest/userguide/UsingMetadata.html).
@@ -72,7 +72,7 @@ uploads contain no stored objects. The provider check removes its test object
 even after an unconfirmed create and retains both operation and cleanup failures.
 Changing an established store's location returns `LocationChangeUnsupported`.
 Storage exposes `delete`, not a deletion-rights query: sync chooses the deleting
-device under §15. A refusal retains its native cause.
+device under §16.6. A refusal retains its native cause.
 
 ## Provider operations and test evidence
 
@@ -91,7 +91,7 @@ S3 selects shared behaviors from the const [profile table](src/providers/s3_prof
 The ignored `s3_certification` test reads `COVEN_LIVE_S3_ENV`, detects native
 behavior, exercises the adapter and deletes its live objects and uploads. GCS
 and R2 passed suite version 1 on 2026-10-13; AWS remains uncertified without a
-live account. See the [procedure](../../spec/coven.md#4-storage-providers-and-access)
+live account. See the [procedure](../../spec/coven.md#e6-running-the-certification-suite)
 and [raw evidence](../../spec/s3-certification.md).
 Every live test that reads an env file (`COVEN_LIVE_S3_ENV`,
 `COVEN_LIVE_DROPBOX_ENV`, `COVEN_LIVE_DROPBOX_B_ENV`,

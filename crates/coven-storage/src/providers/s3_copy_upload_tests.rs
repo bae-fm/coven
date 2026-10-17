@@ -377,7 +377,7 @@ async fn an_occupied_create_does_not_hide_failed_temporary_cleanup() {
 }
 
 /// One `CopyObject` copies at most 5 GiB, so an S3 copy profile refuses a
-/// larger upload before any request; GCS's copy has no such limit (§4).
+/// larger upload before any request; GCS's copy has no such limit (§20.6).
 #[tokio::test]
 async fn s3_copy_profiles_refuse_uploads_above_the_single_copy_limit() {
     let limit = 5 * 1024 * 1024 * 1024;
@@ -435,7 +435,7 @@ fn temporaries(state: &Mutex<Remote>) -> usize {
 
 /// A profile publishing every object by copy stages even a single-request
 /// create and publishes it with one conditional copy, which an occupied name
-/// refuses with its bytes unchanged; no temporary outlives the call (§4).
+/// refuses with its bytes unchanged; no temporary outlives the call (§20.6).
 #[tokio::test]
 async fn every_object_copy_publishes_single_request_creates_by_conditional_copy() {
     let (_server, state, storage) = every_object_provider().await;
@@ -483,7 +483,7 @@ async fn every_object_copy_settles_a_lost_copy_reply_by_its_marker() {
 /// A temporary that cannot be deleted fails the create even when the copy
 /// published it. The caller's retry of the same create stages and deletes
 /// the same temporary, and finds a plain occupied path holding its own
-/// bytes, which it accepts by comparing them (§4, §10).
+/// bytes, which it accepts by comparing them (Appendix E.10, §5.1).
 #[tokio::test]
 async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary() {
     let (_server, state, storage) = every_object_provider().await;
@@ -509,7 +509,7 @@ async fn every_object_copy_retry_after_a_failed_deletion_removes_the_temporary()
 
 /// A crash between staging and deletion leaves the create's temporary; the
 /// create is still recorded by its caller, and its retry removes it. Another
-/// create's temporary has another name (§4,
+/// create's temporary has another name (Appendix E.10,
 /// `CopyPublication.Recorded.staged_recorded`).
 #[tokio::test]
 async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
@@ -540,7 +540,7 @@ async fn every_object_copy_retry_after_a_crash_removes_the_staged_temporary() {
 /// A copy profile records its session before the native multipart upload
 /// exists: the first part initiates it. An initiation whose reply was lost
 /// is found under the recording's name and aborted on resume or abort, so
-/// no upload outlives a recording that does not name it (§4).
+/// no upload outlives a recording that does not name it (Appendix E.10).
 #[tokio::test]
 async fn a_planned_session_aborts_an_initiation_whose_reply_was_lost() {
     for abandon in [false, true] {
@@ -603,7 +603,7 @@ pub(super) async fn hold_copy(state: &Mutex<Remote>, headers: &HeaderMap) {
 /// second stages over it, copies and deletes it, so the first copy finds no
 /// source. It settles by the destination: an occupied path holding the same
 /// bytes, which the caller's comparison accepts, or, when the second copy
-/// published nothing, a conflict whose repeated create publishes (§4,
+/// published nothing, a conflict whose repeated create publishes (Appendix E.10,
 /// `CopyPublication.Recorded.shared_never_fails`,
 /// `shared_occupied_identical`, `retry_publishes`).
 #[tokio::test]

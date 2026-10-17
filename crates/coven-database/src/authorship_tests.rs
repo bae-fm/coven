@@ -63,7 +63,7 @@ fn overwrite() -> WriteRecord {
 /// A database holding device 100's owned row, as streamed writes left it.
 async fn source(store: &TestStore, writes: &[WriteRecord]) -> Database {
     let db = store.schema(owned(), SCHEMA).await.unwrap();
-    // Devices 100 and 101 are one member's, who may edit the row (§8.8).
+    // Devices 100 and 101 are one member's, who may edit the row (§9.6).
     for write in writes {
         TestStore::register(&db, write.header.position.device, 1);
     }
@@ -142,7 +142,7 @@ async fn prepared_authorship_is_not_decoded_during_installation() {
 }
 
 /// The snapshot opens the creation marker and each surviving cell of
-/// another member's row, and hides the replaced value behind a hash (§8.8).
+/// another member's row, and hides the replaced value behind a hash (§9.6).
 #[tokio::test]
 async fn openings_name_the_creation_and_surviving_cells_but_not_replaced_ones() {
     let store = TestStore::new();

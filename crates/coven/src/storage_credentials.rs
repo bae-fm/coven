@@ -3,7 +3,7 @@
 use super::*;
 
 impl CovenHandle {
-    /// This member's current restore code, for their other devices (§12.1).
+    /// This member's current restore code, for their other devices (§13.1).
     pub async fn restore_code(&self) -> Result<String, SyncError> {
         self.storage.restore_code().await
     }

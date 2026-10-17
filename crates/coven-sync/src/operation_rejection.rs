@@ -1,4 +1,4 @@
-//! Administrative validation against the preceding sequence prefix (§9).
+//! Administrative validation against the preceding sequence prefix (§10).
 
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 

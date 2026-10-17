@@ -1,5 +1,5 @@
 //! Detection's raw response-header observations: checksums and their scope,
-//! and GCS's generation and hash headers, before any translation (§4).
+//! and GCS's generation and hash headers, before any translation (Appendix E.7).
 use super::*;
 use crate::S3Probe;
 use aws_sdk_s3::config::{

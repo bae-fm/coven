@@ -33,7 +33,7 @@ or cleanup failures. `attempt_naming_strands` demonstrates why naming a
 private object by a later attempt can strand an earlier upload.
 `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`,
 `retry_publishes`, `shared_temporary_missing` and `shared_temporary_both_stored`
-state the shared/private publication outcomes cited in §4.
+state the shared/private publication outcomes cited in Appendix E.10.
 
 Atomic conditional copy, truthful reads and provider replies are assumptions.
 `createRunner` compares these model operations with the S3 and OneDrive
@@ -62,7 +62,7 @@ verified original chunks before encryption and preserve retry plaintext.
 in coven-sync through `COVEN_FILES_LEAN`. The model assumes truthful source
 checks, authenticated chunks and atomic local transactions. The removed-device
 folder scan is proved in [IO](io.md#removed-device-file-scan); reference-based
-file deletion also needs the evidence required by §16.5.
+file deletion also needs the evidence required by §17.8.
 
 ## Hybrid timestamps and retry time
 

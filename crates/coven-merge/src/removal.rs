@@ -1,7 +1,7 @@
 use crate::{Audience, ClaimOrder, MergeError, Parent, RowId, Slot, Timestamp};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-/// The foreign key's ON DELETE action (§8.4).
+/// The foreign key's ON DELETE action (§9.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum OnDelete {
     /// A stale reference takes the child out.
@@ -27,7 +27,7 @@ pub struct Reference {
 }
 
 /// What a reference reads as in the app's table. Substitution changes neither
-/// its winning write nor its timestamp; lost values stay as written (§8.4).
+/// its winning write nor its timestamp; lost values stay as written (§9.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReferenceValue {
     /// The original parent; stale references take their children out.
@@ -52,7 +52,7 @@ impl ReferenceValue {
 
 /// Resolve a winning reference against its parent's generation, before CHECK
 /// and unique evaluation. Substitution affects the app's row, while lost values
-/// retain the written reference (§8.4).
+/// retain the written reference (§9.1).
 pub fn resolve_reference(
     child: &RowId,
     reference: &Reference,
@@ -107,9 +107,9 @@ impl RemovalRow {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniqueClaim {
     /// Canonical equality encoding of the whole value: text compares by bytes,
-    /// since unique index terms are BINARY (§8.5). Non-conflicting nulls make no claim.
+    /// since unique index terms are BINARY (§9.2). Non-conflicting nulls make no claim.
     pub value: Vec<u8>,
-    /// The latest winning setter of any of the constraint's columns (§8.5).
+    /// The latest winning setter of any of the constraint's columns (§9.2).
     pub order: ClaimOrder,
 }
 
@@ -211,8 +211,8 @@ pub trait FullRemovalView: RemovalView {
     fn rows(&self) -> Result<Vec<RowId>, Self::Error>;
 }
 
-/// Recompute every row using §8's three steps. The view controls iteration
-/// order; no choice of monotone rule order changes the result (Appendix B, B8).
+/// Recompute every row using §8.4's three steps. The view controls iteration
+/// order; no choice of monotone rule order changes the result (proofs/merge.md B8).
 #[cfg(any(test, feature = "test-utils"))]
 pub fn removals<V: FullRemovalView>(view: &V) -> Result<RemovalResult, V::Error> {
     let rows = view.rows()?;
@@ -231,7 +231,7 @@ pub fn removals<V: FullRemovalView>(view: &V) -> Result<RemovalResult, V::Error>
 /// Recompute only the touched rows' dependency region in the union of the
 /// before/after views. Including old edges releases former losers and children
 /// when a claim/reference changes. The region is closed under parents and
-/// rivals, so Appendix B, B9 (`Audience.lean`, `removal_local`) gives exactly
+/// rivals, so proofs/merge.md B9 (`Audience.lean`, `removal_local`) gives exactly
 /// the full recomputation's answer there. Outside it no input or dependency
 /// changed. The caller must include admin changes' rows among `touched`.
 /// No global row enumeration is performed by this function. Each competition

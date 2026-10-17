@@ -133,7 +133,7 @@ pub(crate) fn refresh(
         },
     )?;
     // Change only the references that differ: deleting a kept one would make
-    // its file a retention candidate (§16.5) although nothing released it.
+    // its file a retention candidate (§17.8) although nothing released it.
     let previous: BTreeSet<_> = db
         .query(
             "SELECT device,file FROM _coven_row_file_refs WHERE table_name=?1 AND key=?2",

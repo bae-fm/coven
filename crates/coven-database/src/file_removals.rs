@@ -3,7 +3,7 @@
 //! The transaction that ends a file's last reference records it in
 //! `_coven_file_removals`. Its bytes go only after that writer is released,
 //! so a stalled disk holds back no app write; then its record goes, under the
-//! writer (§3.1, §16.6). A crash between them leaves the record, and the next
+//! writer (§21.2, Appendix C.3). A crash between them leaves the record, and the next
 //! open removes the bytes the same way, from that list rather than a scan.
 //! A cache range being written is recorded in `_coven_cache_writes` instead,
 //! which no removal here reads until opening finds it abandoned.

@@ -183,7 +183,7 @@ pub struct OAuthClients {
     token_override: Option<String>,
 }
 
-/// The app's Google client, used only for GCS admin sign-in (§4).
+/// The app's Google client, used only for GCS admin sign-in (§20.10).
 #[derive(Clone)]
 struct GoogleClient {
     id: String,
@@ -382,7 +382,7 @@ impl OAuthClients {
             .filter(|code| !code.as_str().is_empty())
             .ok_or(OAuthError::MissingCode)
     }
-    /// One refresh of `tokens` after the provider rejected them (§4), for its
+    /// One refresh of `tokens` after the provider rejected them (§20.2), for its
     /// custody to commit before any connection uses it. Tokens without a
     /// refresh token need a new sign-in; a missing client is the app's
     /// configuration. Token-endpoint failures keep their classification.

@@ -1,5 +1,5 @@
 //! The first store keys of an installation whose custody holds none, and
-//! the registration that follows its admission (§12).
+//! the registration that follows its admission (§13).
 
 use super::{SequenceSync, Session};
 use crate::{floor_object, slot_object, snapshot_object::RoutedKey, SyncError};
@@ -20,7 +20,7 @@ pub(crate) enum Bootstrap {
     Empty,
 }
 
-/// How this member's binding stands in the applied history (§12).
+/// How this member's binding stands in the applied history (§13).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum MemberBinding {
     /// The member id is bound to this installation's pair, by `device`.
@@ -35,10 +35,10 @@ pub(crate) enum MemberBinding {
 
 impl SequenceSync {
     /// Custody's keyring, or the store keys this member's own copies supply
-    /// when custody holds none (§12.1). A new installation's keys enter
+    /// when custody holds none (§13.1). A new installation's keys enter
     /// custody with the slots that apply them. An installation that applied
     /// history before custody lost its keys reconstructs that history with
-    /// the copies' keys; authenticating it admits them to custody (§11).
+    /// the copies' keys; authenticating it admits them to custody (§12.1).
     pub(crate) async fn ring(
         &self,
         session: &mut Session,
@@ -66,7 +66,7 @@ impl SequenceSync {
     }
 
     /// The store key that sealed this installation's newest applied original
-    /// while custody holds no store key: syncing needs it unlocked first (§11).
+    /// while custody holds no store key: syncing needs it unlocked first (§12.4).
     pub async fn missing_store_key(
         database: &coven_database::Database,
         keys: &coven_crypto::custody::KeySession<StoreKeyring>,
@@ -93,7 +93,7 @@ impl SequenceSync {
     }
 
     /// Open this member's store keys from their copies in storage, keep them
-    /// in custody and read forward, without sending (§11, E5).
+    /// in custody and read forward, without sending (§12.1, E5).
     pub async fn unlock(&self) -> Result<(), SyncError> {
         let mut session = self.session.lock().await;
         let member = self
@@ -208,7 +208,7 @@ impl SequenceSync {
 }
 
 /// Check a restored member's pair before it can register: an old restore
-/// code cannot bind its keys back (§12.1).
+/// code cannot bind its keys back (§13.1).
 pub(crate) fn restorable(
     admission: MemberBinding,
     member: &MemberIdentity,

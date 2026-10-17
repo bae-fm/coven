@@ -1,7 +1,7 @@
 use crate::{providers::OAuthError, CloudProvider};
 use coven_crypto::custody::KeyError;
 
-/// Failures the app can distinguish and act on (§20.3).
+/// Failures the app can distinguish and act on (Appendix F.5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum StorageFailure {
     /// The platform or OS version cannot use this built-in provider.
@@ -36,17 +36,17 @@ pub enum StorageFailure {
     ContainerNotFound,
     /// The S3 endpoint or signing region is wrong.
     RegionMismatch,
-    /// A member key coven made could list beyond its store's prefix (§4).
+    /// A member key coven made could list beyond its store's prefix (§20.10).
     KeyBeyondStore,
     /// Setting up a store that never had storage found another installation's
     /// creation slot: another installation of the store claimed this
-    /// location first (§10). Restore or join it instead.
+    /// location first (§10.3). Restore or join it instead.
     StoreExists,
     /// S3 rejected the device clock after one retry with the offset its
-    /// response stated (§4).
+    /// response stated (§20.7).
     ClockSkew,
     /// The S3 service's member keys reach a whole bucket, so a store there
-    /// needs a bucket of its own (§4).
+    /// needs a bucket of its own (§20.7).
     OwnBucketRequired {
         /// What the location shares.
         reason: OwnBucketReason,
@@ -67,7 +67,7 @@ pub enum StorageFailure {
     InvalidRange,
     /// Only the account holding the store may change its sharing.
     NotStoreOwner,
-    /// The invited account is the one holding the store (§12.2).
+    /// The invited account is the one holding the store (§13.2).
     InviteeIsStoreOwner,
     /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     AccountIdUnavailable,
@@ -89,7 +89,7 @@ pub enum StorageFailure {
         limit: u64,
     },
     /// An S3 object published by `CopyObject` exceeds its single-copy limit,
-    /// so it cannot be published atomically on this profile (§4).
+    /// so it cannot be published atomically on this profile (§20.6).
     CopyTooLarge {
         /// Encrypted body length in bytes.
         size: u64,
@@ -104,7 +104,7 @@ pub enum StorageFailure {
     MemberKeysMissing,
 }
 
-/// Why an S3 location cannot hold a store that needs its own bucket (§4).
+/// Why an S3 location cannot hold a store that needs its own bucket (§20.7).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OwnBucketReason {
     /// The location names a base prefix; the store occupies the bucket's root.

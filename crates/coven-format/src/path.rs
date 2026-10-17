@@ -1,4 +1,4 @@
-//! Canonical object names and listing prefixes from Appendix D10.
+//! Canonical object names and listing prefixes from format.md D10.
 //!
 //! Crate-to-crate API: coven's format, storage and sync code build paths and
 //! prefixes here. Native provider adapters map these validated paths into
@@ -9,13 +9,13 @@ use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 use std::num::NonZeroU64;
 
-/// One validated encrypted-object path in the layout of §§6, 9, 11, 12, 15 and 16.
+/// One validated encrypted-object path in the layout of §§5, 10, 12, 13, 16 and 17.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct ObjectPath(String);
 
 impl ObjectPath {
-    /// One create-once slot in the store's shared sequence (§6).
+    /// One create-once slot in the store's shared sequence (§5).
     pub fn slot(store: StoreId, number: NonZeroU64) -> Self {
         Self(format!("{store}/seq/{number}"))
     }
@@ -25,7 +25,7 @@ impl ObjectPath {
             .strip_prefix("seq/")
             .map(|number| crate::value::Slot(number.parse().expect("validated slot")))
     }
-    /// The store's conditionally replaced floor (§15).
+    /// The store's conditionally replaced floor (§16.4).
     pub fn floor(store: StoreId) -> Self {
         Self(format!("{store}/floor"))
     }
@@ -45,7 +45,7 @@ impl ObjectPath {
             number: number.parse().expect("validated number"),
         })
     }
-    /// A snapshot written by a device (§15).
+    /// A snapshot written by a device (§16).
     pub fn snapshot(
         store: StoreId,
         audience: Audience,
@@ -61,11 +61,11 @@ impl ObjectPath {
             device.0
         ))
     }
-    /// Encrypted file bytes named by a random UUID (§16.2).
+    /// Encrypted file bytes named by a random UUID (§17.3).
     pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self {
         Self(format!("{store}/files/{}/{name}", device.0))
     }
-    /// An encrypted join request under its invite id (§12.2).
+    /// An encrypted join request under its invite id (§13.2).
     pub fn join_request(store: StoreId, invite: InviteId) -> Self {
         Self(format!("{store}/join-requests/{invite}"))
     }
@@ -75,7 +75,7 @@ impl ObjectPath {
             .strip_prefix("join-requests/")
             .map(|invite| InviteId(invite.parse().expect("validated invite id")))
     }
-    /// A member's new S3 key, sealed to them, named by its mint attempt (§13).
+    /// A member's new S3 key, sealed to them, named by its mint attempt (§14.3).
     pub fn access_key(
         store: StoreId,
         member: &coven_foundation::id_source::MemberId,
@@ -193,7 +193,7 @@ impl ObjectPrefix {
     pub fn files(store: StoreId) -> Self {
         Self(format!("{store}/files/"))
     }
-    /// The files one device uploaded (§16.2).
+    /// The files one device uploaded (§17.3).
     pub fn device_files(store: StoreId, device: DeviceId) -> Self {
         Self(format!("{store}/files/{}/", device.0))
     }
@@ -201,7 +201,7 @@ impl ObjectPrefix {
     pub fn join_requests(store: StoreId) -> Self {
         Self(format!("{store}/join-requests/"))
     }
-    /// The S3 keys delivered to one member (§13).
+    /// The S3 keys delivered to one member (§14.3).
     pub fn access_keys(store: StoreId, member: &coven_foundation::id_source::MemberId) -> Self {
         Self(format!("{store}/access-keys/{member}/"))
     }

@@ -459,7 +459,7 @@ async fn attachment_and_upload_queue_commit_or_roll_back_together() {
 /// One verified range is one cache file and one row; each chunk in it reads
 /// back at its own offset. A range overlapping a published one is not
 /// written, and a crash while writing one leaves bytes that opening removes
-/// (§16.6).
+/// (Appendix C.3).
 #[tokio::test]
 async fn cache_ranges_publish_whole_and_never_overlap() {
     use crate::file_write::tests::{local_count, SCHEMA};
@@ -517,7 +517,7 @@ async fn cache_ranges_publish_whole_and_never_overlap() {
 }
 
 /// The namespace total changes with its cache records in their transaction:
-/// publication, eviction, a failed publication and pinning (§16.6).
+/// publication, eviction, a failed publication and pinning (Appendix C.3).
 #[tokio::test]
 async fn cache_totals_follow_their_records() {
     use crate::file_write::tests::SCHEMA;
@@ -565,7 +565,7 @@ async fn cache_totals_follow_their_records() {
     db.close().await.unwrap();
 }
 
-/// SP 517–518, §3.1: publishing a completed pin reads the finished file's
+/// §17.6, §21.2: publishing a completed pin reads the finished file's
 /// header before taking the writer. A FIFO stands in for a stalled disk: the
 /// publication blocks opening it while an app write commits. Releasing it
 /// with bytes that are not the file fails the publication, publishing nothing.
@@ -653,7 +653,7 @@ async fn release_fifo_writer(path: std::path::PathBuf) {
     .unwrap();
 }
 
-/// §3.1, §16.6: a cache range's bytes are written with no writer held. A
+/// §21.2, Appendix C.3: a cache range's bytes are written with no writer held. A
 /// FIFO at its recorded name stands in for a stalled disk: the range write
 /// blocks opening it while an app write commits. Released, it is no regular
 /// file, so the range publishes nothing and its name and bytes go.
@@ -702,7 +702,7 @@ async fn a_stalled_cache_range_write_holds_back_no_app_write() {
     db.close().await.unwrap();
 }
 
-/// §16.6: a read-only handle, as from another process, writes a recorded
+/// Appendix C.3: a read-only handle, as from another process, writes a recorded
 /// range while the writer commits and removes the files its writes release.
 /// That removal leaves the range being written alone: only its own writer,
 /// or an open that finds it abandoned, removes it.
@@ -756,7 +756,7 @@ async fn another_handles_removals_leave_a_range_being_written() {
     db.close().await.unwrap();
 }
 
-/// §16.6: opening the writer while a read-only handle writes a recorded
+/// Appendix C.3: opening the writer while a read-only handle writes a recorded
 /// range waits for that write to finish. A range still recorded as being
 /// written once no handle writes it was abandoned by a crash: it becomes a
 /// removal, and its bytes go.
@@ -813,7 +813,7 @@ async fn opening_waits_for_a_range_being_written_and_removes_abandoned_ones() {
     db.close().await.unwrap();
 }
 
-/// §3.1: a cached chunk's bytes are read with no writer held. A FIFO in
+/// §21.2: a cached chunk's bytes are read with no writer held. A FIFO in
 /// place of a published range stands in for a stalled disk: the read blocks
 /// opening it while an app write commits. Released, it is no regular file,
 /// so the read fails.
@@ -865,7 +865,7 @@ async fn a_stalled_cache_read_holds_back_no_app_write() {
     db.close().await.unwrap();
 }
 
-/// §3.1: opening an upload's source reads the whole copy to check it, with
+/// §21.2: opening an upload's source reads the whole copy to check it, with
 /// no writer held. A FIFO in place of the queue's copy stands in for a
 /// stalled disk: opening blocks while an app write commits. Released, it is
 /// no regular file, so opening fails.

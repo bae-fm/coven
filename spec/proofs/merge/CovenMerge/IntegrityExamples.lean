@@ -98,7 +98,7 @@ theorem dropped_schema_keeps_losses :
     (freezeDropped (fun _ => true) (.active wholeLoss)).record.values "title" = some 1 ∧
     (freezeDropped (fun _ => true) (.active wholeLoss)).record.cause = .rules [.check] := by decide
 
-/-! §19.3: snapshot covers 0, writes 1 and 2 read only old history, and write
+/-! §19.4: snapshot covers 0, writes 1 and 2 read only old history, and write
 3 read the kept reset as well as write 2. The author can have applied 1 and 2
 before learning its own entry; installing the reset discards both. -/
 

@@ -1,16 +1,16 @@
 # One store sequence
 
 The Lean package in [`sequence/`](sequence/) backs the normative sequence rules:
-[claims and application (§6)](../coven.md#6-syncing-writes),
-[unique claims (§8.5)](../coven.md#unique-constraints),
-[owner selection (§8.8)](../coven.md#88-owner-tables),
-[admin prefixes (§9)](../coven.md#9-members-and-roles),
-[cut-offs (§10)](../coven.md#10-device-identity),
-[audience keys and revocation (§11)](../coven.md#11-keys),
-[audience reads (§14.4)](../coven.md#144-writes),
-[snapshots and retention (§15)](../coven.md#15-snapshots), and
-[operation journals (§18)](../coven.md#18-operations), in the order described by
-[one sync pass](../sync-pass.md). Each result has the assumptions and limits
+[claims and application (§5)](../coven.md#5-the-sequence),
+[unique claims (§9.2)](../coven.md#92-keys-and-unique-values),
+[owner selection (§9.6)](../coven.md#96-owner-tables),
+[admin prefixes (§10)](../coven.md#10-members-roles-and-devices),
+[cut-offs (§14.1)](../coven.md#141-the-cut-off),
+[audience keys and revocation (§12)](../coven.md#12-keys-and-encryption),
+[audience reads (§15.6)](../coven.md#156-writes-into-circles),
+[snapshots and retention (§16)](../coven.md#16-snapshots-the-floor-and-deleting-history), and
+[operation journals (§11)](../coven.md#11-admin-operations), in the order described by
+[a sync pass (§6)](../coven.md#6-a-sync-pass). Each result has the assumptions and limits
 below.
 It uses Lean 4.34.1 and its standard library,
 without additional axioms or unfinished proofs. All named results are audited by
@@ -213,7 +213,7 @@ separate from both authorization and introduction.
   The theorem does not assume key ids or copy slots order introductions.
   `metadata_newest_held` selects the newest accepted held store key regardless
   of exposure. `sending_current` connects this selection to Rust's selector;
-  its departed-circle branch implements §14.6 for eligible old originals.
+  its departed-circle branch implements §15.8 for eligible old originals.
 - `removal_publishable`, `rotation_publishable`: with one accepted store key
   held, exposure creates no missing encryption dependency. Removal needs only
   the metadata key. Rotation additionally needs its generated material and
@@ -241,7 +241,7 @@ separate from both authorization and introduction.
   private credentials. Encryption and sealed boxes are ideal observation
   functions, not cryptographic implementations or security reductions.
   Distinct key identities represent independently generated, non-aliasing
-  secrets under §2's random-generation assumption; hash tokens check material
+  secrets under §3's random-generation assumption; hash tokens check material
   under a named key. The model does not prove random-key collision bounds.
 - `first_attempt_confidential`, `revocation`, `rotation_revokes`: at the applied
   prefix used for selection, no exposed key opens newly protected content.
@@ -252,14 +252,14 @@ separate from both authorization and introduction.
 - `revoked_write_no_effect` composes the confidentiality claim with `cutoff`:
   late writes by a removed device/member or under a replaced credential have
   no row, unique-value or owner effects, even if their ciphertext still opens.
-  Together with `device_stops` and `stopped_stays`, these state §3's Revocation
+  Together with `device_stops` and `stopped_stays`, these state §2.5's Revocation
   claim: a blocked reader cannot claim knowledge of a later removal.
 
 [`KeysExamples`](sequence/CovenSequence/KeysExamples.lean) checks the limits:
 `retry_readable_after_rotation` preserves old attempted bytes;
 `late_copy_exposes_selected_key` permits disclosure by a copy landing after
 the selecting read; `departed_circle_original_can_use_exposed_key` preserves
-§14.6's first send of previously authored circle edits. An unbound recipient
+§15.8's first send of previously authored circle edits. An unbound recipient
 still exposes a key (`unbound_recipient_exposes_key`). These are counterexamples
 to stronger claims, not discrepancies with Rust. `device_removal_keeps_credentials`
 proves that removing an installation does not retire its member's shared
@@ -290,7 +290,7 @@ These are permanent abstract claims. Unique values that can be released use
   uniqueness releases the claim. The first claim after release wins when no
   earlier live claimant survives. `older_loser_returns` checks why that
   qualification is necessary: claims 1 and 2 precede deletion of 1; 2 returns
-  ahead of a new claim 3. This agrees with §8.5's returning-loser rule.
+  ahead of a new claim 3. This agrees with §9.2's returning-loser rule.
 - `readers_agree`: applying the selector to sound sequence readers' merged
   rows gives the same winner. Later removal does not rerun uniqueness.
 
@@ -514,7 +514,7 @@ installation, including local commits made while loading.
 [`RaiseQueue`](sequence/CovenSequence/RaiseQueue.lean) represents capture,
 confirmation, body upload, preparation announcement and raise activation as
 separate persisted states. Confirmation means the captured writes slot has
-landed under the existing claim protocol; it precedes the raise slot (§17.1).
+landed under the existing claim protocol; it precedes the raise slot (§18.5).
 
 - `captured_prefix`, `later_writes_do_not_delay`, `confirm_captured`: publication
   selects the frozen prefix through the marker, regardless of later appends or
@@ -696,7 +696,7 @@ Answer: `{"reload":false,"apply":[2,3]}`.
 `Authority.withRoles` and `LiveClaims.winner`. The initial membership must
 contain an admin; initial devices refer to active members. Each audience gives
 its starting `version` and the devices allowed to write to it. The runner uses
-§9's per-member authority: members register their own fresh devices, remove
+§10's per-member authority: members register their own fresh devices, remove
 their own devices and replace their own keys. Admins may also remove another
 member's device or replace that member's keys; only admins add or remove members
 and change roles. Registration must be authored by the fresh device itself,

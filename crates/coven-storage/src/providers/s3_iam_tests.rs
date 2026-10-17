@@ -600,7 +600,7 @@ async fn minting_deletes_no_key_already_under_its_name() {
             fake.state.lock().unwrap().users[&scope.key_name].keys.len(),
             1
         );
-        // Each call's names are fresh (§4); reused, they still lose no key.
+        // Each call's names are fresh (§20.10); reused, they still lose no key.
         let minted = admin.mint(&scope).await.unwrap();
         let state = fake.state.lock().unwrap();
         let keys = &state.users[&scope.key_name].keys;
@@ -772,7 +772,7 @@ async fn minted_iam_keys_can_read_bucket_versioning_without_listing_other_stores
 }
 
 /// A copy profile's session is recorded before its first part initiates the
-/// native upload, so aborting it lists the uploads at its temporary (§4).
+/// native upload, so aborting it lists the uploads at its temporary (Appendix E.10).
 #[tokio::test]
 async fn minted_copy_profile_keys_abort_a_session_whose_initiation_reply_was_lost() {
     for profile in [S3ProfileName::Aws, S3ProfileName::SeaweedFs] {
@@ -890,7 +890,7 @@ async fn console_keys_and_other_principals_are_not_deleted_through_iam() {
 
 /// A store's listing returns the keys of users whose name coven made for this
 /// store, with the minting device the name carries, and a managed policy's
-/// ARN where the service attaches one (§13).
+/// ARN where the service attaches one (§14.3).
 #[tokio::test]
 async fn a_store_listing_returns_its_users_keys_with_their_minting_device() {
     for profile in [

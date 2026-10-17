@@ -7,7 +7,7 @@ pub(crate) fn fill(bytes: &mut [u8]) -> Result<(), CryptoError> {
 }
 
 /// A fresh random secret of 32 bytes as lowercase hex, for a credential coven
-/// sets but nobody keeps, such as a service's parent user (§4).
+/// sets but nobody keeps, such as a service's parent user (Appendix E.12).
 pub fn random_secret() -> Result<crate::SecretText, CryptoError> {
     let mut bytes = zeroize::Zeroizing::new([0u8; 32]);
     fill(bytes.as_mut())?;

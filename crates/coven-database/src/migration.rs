@@ -7,11 +7,11 @@ use rusqlite::{Params, Row};
 use std::cell::RefCell;
 use std::sync::Arc;
 
-/// How one migration changed the schema and synced rows (§17.1).
+/// How one migration changed the schema and synced rows (§18.1).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MigrationChange {
     /// No synced definition or row changed and no table disappeared. Local-only and
-    /// view changes must not be mistaken for a synced schema addition (§17.1).
+    /// view changes must not be mistaken for a synced schema addition (§18.1).
     NoChange,
     /// Only synced tables or their columns were added.
     Addition,

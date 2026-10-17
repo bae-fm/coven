@@ -1,5 +1,5 @@
 //! Real NSError conversion: the failure, whether CloudKit's server answered,
-//! and its requested wait (E5, SP waiting).
+//! and its requested wait (E5, §6.7).
 
 use super::*;
 use crate::RetryAfter;

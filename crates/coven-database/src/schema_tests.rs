@@ -89,7 +89,7 @@ async fn set_default_is_refused_on_open_and_after_migrating() {
 }
 
 /// A single-column key on a generated column could merge its inputs into a
-/// reference no write named (§8.4, `unwritten_reference`); a key of several
+/// reference no write named (§9.1, `unwritten_reference`); a key of several
 /// columns captures the inputs with it, and local tables do not merge.
 #[tokio::test]
 async fn a_single_generated_reference_column_is_refused_on_open_and_after_migrating() {

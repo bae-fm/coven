@@ -1,4 +1,4 @@
-//! The application API for coven stores (Appendix E).
+//! The application API for coven stores (api.md).
 //!
 //! Declare tables and migrations on [`Coven::builder`], then create or open
 //! the store. SQL, files, keys and their capabilities remain with the
@@ -46,7 +46,7 @@ pub use coven_database::{
     SqlContext, SqlReadContext, SyncedTable, ToSql, UnsentWork, UserFile, WriteBatch, WriteId,
     WriteWait,
 };
-/// An admin entry is identified by the slot containing it (§9).
+/// An admin entry is identified by the slot containing it (§10).
 pub type EntryId = Slot;
 pub use coven_format::value::StorageTime;
 pub use coven_format::{IamPolicy, MemberAccess, S3Principal};

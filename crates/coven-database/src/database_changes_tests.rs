@@ -29,7 +29,7 @@ pub(crate) fn io_runner(cases: &[Value]) -> Vec<Value> {
 
 /// IO `Wakes`: at each pass start the sync loop's write-queue observation
 /// reports whether an app write committed since the previous start; the
-/// pass's own attempts and confirmations never count (SP, Waiting without repeated work).
+/// pass's own attempts and confirmations never count (§6.7).
 #[tokio::test]
 #[ignore = "requires COVEN_IO_RUNNER"]
 async fn io_differential_wakes() {

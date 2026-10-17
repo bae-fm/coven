@@ -1,5 +1,5 @@
 //! Rows a breaking migration deletes through the ordinary generation path
-//! (§17.1), including rows hidden by irreversible circle deletions. Each becomes a delete at its generation in the migration write,
+//! (§18.7), including rows hidden by irreversible circle deletions. Each becomes a delete at its generation in the migration write,
 //! with one frozen whole-row loss keeping its written values, old names and
 //! setters.
 use crate::merge_store::MergeStore;

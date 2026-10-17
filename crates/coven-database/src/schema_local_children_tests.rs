@@ -12,7 +12,7 @@ const PARENTS: &str = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,code TE
 
 /// Coven applies a change to a synced non-key value with an UPDATE, so a local
 /// key into it, or into a local value a following key rewrites, must follow
-/// the update; key columns change by delete and insert (§8.4).
+/// the update; key columns change by delete and insert (§9.1).
 #[tokio::test]
 async fn local_keys_into_values_coven_updates_must_follow_them() {
     let pins = "CREATE TABLE pins(id TEXT PRIMARY KEY,code TEXT UNIQUE REFERENCES parents(code) ON DELETE CASCADE";

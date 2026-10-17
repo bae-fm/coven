@@ -1,4 +1,4 @@
-//! The guard tests of §20.4: every file, crate, type and composition root the
+//! The guard tests of Appendix F.6: every file, crate, type and composition root the
 //! policy file names must exist, so the policy can't go stale. A row keyed on
 //! a path that moved does not fail a rule — it stops matching, and the rule
 //! silently covers nothing — so each one is resolved against the workspace
@@ -28,7 +28,7 @@ fn workspace_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// Capability homes name the paths §20.2 assigns ahead of the code. A home
+/// Capability homes name the paths Appendix F.2 assigns ahead of the code. A home
 /// inside a crate that has not landed is skipped; one inside a crate that has
 /// must exist.
 fn stranded_homes(root: &Path, policy: &Policy) -> Vec<String> {

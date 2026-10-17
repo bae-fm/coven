@@ -29,7 +29,7 @@ pub enum SnapshotError {
         database: u32,
     },
     /// Authenticating another member's write that the snapshot carries needs
-    /// a key this device has not opened yet (§8.8, D9): loading waits for it.
+    /// a key this device has not opened yet (§9.6, D9): loading waits for it.
     #[error("snapshot write evidence needs key {key} of {audience:?}")]
     KeyUnavailable {
         /// The audience whose key seals the evidence.

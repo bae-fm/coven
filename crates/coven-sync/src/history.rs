@@ -30,7 +30,7 @@ pub(crate) struct Introduction {
 }
 
 /// A member id bound to a key pair by a counted entry, with its authoring
-/// device: a joiner is admitted only by its approving device's binding (§12.2).
+/// device: a joiner is admitted only by its approving device's binding (§13.2).
 #[derive(Clone)]
 pub(crate) struct Binding {
     pub(crate) member: MemberId,
@@ -59,10 +59,10 @@ pub(crate) struct History {
     pub(crate) cutoffs: Vec<(Slot, StoreChange)>,
     pub(crate) bindings: Vec<Binding>,
     /// Who recorded each member's S3 key: a delivered key is installed only
-    /// from the author of the applied entry naming it (§13).
+    /// from the author of the applied entry naming it (§14.3).
     pub(crate) key_records: Vec<KeyRecord>,
     /// Every S3 key id an admin entry names, valid or refused: a key some
-    /// entry recorded is never reclaimed as stray (§13).
+    /// entry recorded is never reclaimed as stray (§14.3).
     pub(crate) named_keys: std::collections::BTreeSet<String>,
     members: BTreeMap<MemberId, BTreeMap<u64, StoreMember>>,
     devices: BTreeMap<DeviceId, BTreeMap<u64, StoreDevice>>,

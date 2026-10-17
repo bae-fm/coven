@@ -121,7 +121,7 @@ async fn attempted_and_untried_records_survive_successive_migrations() {
             .await
             .unwrap();
         // Every original record keeps its bytes and fixed keys; each
-        // migration appends only its own empty marker (§17.1).
+        // migration appends only its own empty marker (§18.5).
         let queued = queue(&db);
         assert_eq!(queued[..2], original[..]);
         let markers = records(&db)[2..]
@@ -337,7 +337,7 @@ async fn a_migrated_device_judges_received_writes_under_its_capture() {
     let capture = db.raise_captures().await.unwrap().remove(0);
     let mut later = records(&db).remove(0);
     // An old-schema write from a peer that has not updated converts as the
-    // kept raise will judge it, instead of waiting for that raise (§17.1).
+    // kept raise will judge it, instead of waiting for that raise (§18.5).
     let outcome = crate::tests::try_remote_update_at(
         &db,
         "notes",
@@ -420,7 +420,7 @@ async fn refreshing_coverage_preserves_the_original_captured_prefix() {
 /// An addition-only update while a raise waits moves that raise to the
 /// update's version, captured again at its schema so the snapshot's header
 /// names the version it raises to; once no capture waits, an addition raises
-/// nothing (§17.1; queue `RaiseCaptures.capture_at_raise_version`).
+/// nothing (§18.5; queue `RaiseCaptures.capture_at_raise_version`).
 #[tokio::test]
 async fn an_addition_moves_a_waiting_raise_to_its_version() {
     let store = TestStore::new();
@@ -468,7 +468,7 @@ async fn an_addition_moves_a_waiting_raise_to_its_version() {
 /// Another device's established raise replaces what this device's own
 /// unpublished migration computed: its marker sets nothing here, so a later
 /// write names the raise's migration write as the setter, a source every
-/// receiver holds (§17.1).
+/// receiver holds (§18.6).
 #[tokio::test]
 async fn an_adopted_raise_replaces_an_unpublished_migrations_setters() {
     let ids = coven_foundation::id_source::SequentialIds::new();
@@ -555,7 +555,7 @@ async fn unpublished_frames(db: &Database, audience: Audience) -> SnapshotFrames
 
 /// A reload replays its slots only into the audiences it loads. This
 /// device's own write in its captured prefix stays applied once in the store
-/// audience the reload keeps, while the reload loads a circle (§15, §17.1).
+/// audience the reload keeps, while the reload loads a circle (§16.5, §18.5).
 #[tokio::test]
 async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
     use crate::{RowIdentity, SyncedTable};

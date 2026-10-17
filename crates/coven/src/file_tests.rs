@@ -398,7 +398,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     handle.close().await.unwrap();
     // Backup bytes survive, but the new installation has no device-only entry.
     // Opening refuses; an approved reset makes a new device, and nothing of
-    // the old copy is renumbered (§10).
+    // the old copy is renumbered (§19.3).
     let restored = TestCoven::new();
     let old_device = directory.settings().unwrap().device_id;
     assert!(matches!(

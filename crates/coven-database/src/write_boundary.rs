@@ -216,9 +216,9 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BoundaryRule {
     /// An older-schema part needs admission through the raise's retained
-    /// breaking steps (§17.1).
+    /// breaking steps (§18.6).
     Raise(u32),
-    /// A reset ignores a part whose write had not read this entry (§19.3).
+    /// A reset ignores a part whose write had not read this entry (§19.4).
     Reset(Slot),
 }
 
@@ -255,7 +255,7 @@ impl WriteBoundary {
     /// The realized boundaries, with each unpublished raise capture judging
     /// its audience as its kept raise will: a migrated device applies
     /// received writes before its raise is kept, so a capture taken again
-    /// after its catch-up covers them (§15, §17.1). A capture whose
+    /// after its catch-up covers them (§16.3, §18.5). A capture whose
     /// audience already realized a raise to its version adds nothing.
     pub(crate) fn judging(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
         let mut boundaries = Self::load(database)?;
@@ -276,9 +276,9 @@ impl WriteBoundary {
     }
 
     /// This boundary's verdict on an uncovered part of its audience: a kept
-    /// reset ignores a part whose write had not read the reset entry (§19.3);
+    /// reset ignores a part whose write had not read the reset entry (§19.4);
     /// a raise returns a candidate schema exclusion, resolved by the interpreter
-    /// using the retained breaking steps (§17.1).
+    /// using the retained breaking steps (§18.6).
     pub(crate) fn excludes(
         &self,
         header: &WriteHeader,

@@ -67,7 +67,7 @@ mod rustfs_keys;
 pub(crate) use own_bucket::check_new_store;
 
 /// The finest scope a member key has at this location, after refusing a
-/// profile or plain-http endpoint that contradicts the endpoint (§4).
+/// profile or plain-http endpoint that contradicts the endpoint (Appendix E.3).
 pub(crate) fn s3_key_scope(
     endpoint: Option<&url::Url>,
     profile: Option<&crate::S3Profile>,
@@ -112,7 +112,7 @@ impl aws_credential_types::provider::ProvideCredentials for SigningCredentials {
 impl S3Storage {
     /// Construct at a composition root. No credential discovery, IAM calls, key
     /// creation or revocation occurs. The SDK computes protocol checksums itself.
-    /// Every request, a clock retry included, waits for `cooldown` (§4).
+    /// Every request, a clock retry included, waits for `cooldown` (§6.7, §20.7).
     pub(crate) fn new(
         config: StorageConfig,
         credentials: S3Credentials,
@@ -169,7 +169,7 @@ impl S3Storage {
             .credentials_provider(credentials.clone())
             .identity_cache(aws_sdk_s3::config::IdentityCache::no_cache())
             .time_source(signing.clone())
-            // Coven corrects the signing clock itself, for both signers (§4).
+            // Coven corrects the signing clock itself, for both signers (§20.7).
             .disable_clock_skew_correction(true)
             .interceptor(clock::ClockSkew::new(signing, cooldown))
             .retry_classifier(clock::ClockRetry)
@@ -535,7 +535,7 @@ impl ProviderOps for S3Storage {
         path: &ObjectPath,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        // A copy above the single-copy limit cannot publish atomically (§4).
+        // A copy above the single-copy limit cannot publish atomically (§20.6).
         if let Some(condition) = self.settings.copy_publication.multipart() {
             if let Some(limit) = condition.single_copy_limit().filter(|limit| total > *limit) {
                 return Err(StorageFailure::CopyTooLarge { size: total, limit }.into());
@@ -543,7 +543,7 @@ impl ProviderOps for S3Storage {
         }
         let part_size = crate::session::s3_part_size(total)?;
         // The upload is named before any request: the caller records the
-        // session, and the first part initiates the native upload (§4).
+        // session, and the first part initiates the native upload (Appendix E.10).
         let token = SecretText::new(self.ids.new_id().to_string());
         Ok(UploadSession {
             location: self.config(),
@@ -777,7 +777,7 @@ impl ProviderOps for S3Storage {
                 self.recover_completed_upload(publication, session).await
             }
             Err(error) => match s3_error(error) {
-                // A concurrent mutation, under any service's code (§4).
+                // A concurrent mutation, under any service's code (Appendix E.10).
                 error if error.failure() == StorageFailure::Conflict => {
                     self.require_restart(
                         publication,

@@ -1,4 +1,4 @@
-//! The storage account carried by member additions and access updates (Appendix D6).
+//! The storage account carried by member additions and access updates (format.md D6).
 
 use crate::wire::{Decoder, Encoder, Wire};
 use crate::Error;
@@ -41,7 +41,7 @@ impl MemberAccess {
     }
 }
 
-/// Who holds an S3 key at its provider: the handles deleting it needs (§13).
+/// Who holds an S3 key at its provider: the handles deleting it needs (§14.3).
 /// None is a secret; each names an identity in the storage account.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum S3Principal {

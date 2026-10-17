@@ -1,4 +1,4 @@
-//! A method never takes a raw capability as a parameter (§20.2), such as a
+//! A method never takes a raw capability as a parameter (Appendix F.2), such as a
 //! store directory: it is fixed when the owner graph is built, and the owner
 //! uses the one it retains. Only an owner's constructors and the composition
 //! roots accept the policy's construction-only capabilities.

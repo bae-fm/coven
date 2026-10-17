@@ -1,7 +1,7 @@
 import CovenMerge.ForeignKeyClassification
 
 /-! What a write's author checks before the write leaves, and which rows'
-net changes must end where their steps end (§8.8, D5).
+net changes must end where their steps end (§9.6, D5).
 
 * `LocalAccept`: the author runs the receivers' label-free rule (`cause`) on
   its own write and commits only when every step on a row its writer may not

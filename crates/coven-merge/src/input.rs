@@ -2,7 +2,7 @@ use crate::{MergeError, Timestamp};
 use coven_foundation::id_source::{CircleId, DeviceId};
 use std::collections::{BTreeMap, BTreeSet};
 
-/// A foreign key's columns in declaration order (§8).
+/// A foreign key's columns in declaration order (Appendix B.5).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstraintColumns(
     /// Ordered column names, retaining composite-constraint boundaries.
@@ -15,7 +15,7 @@ impl<const N: usize> From<[&str; N]> for ConstraintColumns {
     }
 }
 
-/// A unique constraint's ordered terms and optional partial predicate (§8).
+/// A unique constraint's ordered terms and optional partial predicate (Appendix B.5).
 /// Column terms use their names; expression terms retain their SQL text.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct UniqueConstraint {
@@ -34,7 +34,7 @@ impl<const N: usize> From<[&str; N]> for UniqueConstraint {
     }
 }
 
-/// A foreign key's stable identity, independent of SQLite's positional id (§8).
+/// A foreign key's stable identity, independent of SQLite's positional id (Appendix B.5).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ForeignKey {
     /// Referencing columns in declaration order.
@@ -60,7 +60,7 @@ impl ForeignKey {
     }
 }
 
-/// One device's numbered write (§5).
+/// One device's numbered write (§4).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct WriteId {
     /// The install's 64-bit device id.
@@ -69,11 +69,11 @@ pub struct WriteId {
     pub number: u64,
 }
 
-/// A positive position in the store's shared sequence (§6).
+/// A positive position in the store's shared sequence (§5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Slot(pub u64);
 
-/// Every synced row reaches the store or one circle (§14).
+/// Every synced row reaches the store or one circle (§15).
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Audience {
     /// Every member can read the row.
@@ -93,7 +93,7 @@ pub struct RowId {
     pub audience: Audience,
 }
 
-/// The parent and odd incarnation a reference names (§8.4).
+/// The parent and odd incarnation a reference names (§9.1).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Parent {
     /// The referenced row, including its audience.
@@ -104,7 +104,7 @@ pub struct Parent {
 
 impl Parent {
     /// Validate a written reference from `child`: it must name an odd
-    /// incarnation in the child's audience or the store (§8.4, §14.1).
+    /// incarnation in the child's audience or the store (§9.1, §15.3).
     pub fn validate_written(&self, child: &RowId) -> Result<(), MergeError> {
         if self.generation.is_multiple_of(2) {
             return Err(MergeError::ParentGeneration(self.generation));
@@ -158,7 +158,7 @@ pub struct Change<V> {
 
 impl<V> Change<V> {
     /// Validate generation parity, advancement without overflow, and every
-    /// written parent's generation and audience for this row (§8.3–§8.4, §14).
+    /// written parent's generation and audience for this row (§8.3–§9.1, §15).
     /// Values and their encodings are opaque here. The authoring database
     /// establishes generation witnesses; [`crate::apply`] checks the received
     /// change against applied metadata.

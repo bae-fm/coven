@@ -1,4 +1,4 @@
-//! Each capability is used directly in one place only (§20.2). Outside a
+//! Each capability is used directly in one place only (Appendix F.2). Outside a
 //! capability's homes, naming one of its crates, writing one of its paths or
 //! calling one of its methods is the violation; everything else reaches the
 //! capability through the owner that holds it.

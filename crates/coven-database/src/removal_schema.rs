@@ -174,7 +174,7 @@ impl TableRules {
                             Some(column) => identifier(column),
                             None => term.clone(),
                         };
-                        // Every unique index term is BINARY (§8.5), but an
+                        // Every unique index term is BINARY (§9.2), but an
                         // expression such as `+title` compares by its column's
                         // collation unless the comparison names the index's.
                         format!("({expression}) COLLATE BINARY")

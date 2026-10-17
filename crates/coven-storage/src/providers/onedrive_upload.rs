@@ -425,7 +425,7 @@ impl OneDriveStorage {
         validate_download_url(&self.api, monitor.as_str())?;
         let monitor = monitor.clone();
         let copying = async {
-            // Status checks back off like every automatic wait (SP waiting).
+            // Status checks back off like every automatic wait (§6.7).
             let mut checks = 0;
             loop {
                 let response = self

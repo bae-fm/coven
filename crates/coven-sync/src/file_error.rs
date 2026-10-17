@@ -11,7 +11,7 @@ use std::path::PathBuf;
 /// Reading a file failed with a cause the app can distinguish (E8).
 #[derive(Debug, thiserror::Error)]
 pub enum FileReadError {
-    /// This file uses a newer coven format (§17.2).
+    /// This file uses a newer coven format (Appendix C.2).
     #[error("an update is required to read this file")]
     UpdateRequired(crate::RequiredUpdate),
     /// No storage capability is connected.
@@ -25,7 +25,7 @@ pub enum FileReadError {
         /// The device responsible for uploading it.
         device: DeviceId,
     },
-    /// Storage confirms absence and the uploader cannot supply it (§16.1).
+    /// Storage confirms absence and the uploader cannot supply it (§17.4).
     #[error("file {id} is missing: device {device:?} cannot supply it ({reason:?})")]
     Missing {
         /// The file's fixed object id.

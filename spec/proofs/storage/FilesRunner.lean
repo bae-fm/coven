@@ -2,7 +2,7 @@ import CovenStorage.Files
 import Lean
 
 /-! JSON adapter comparing the Rust attachment, upload completion and the
-rows and queue they leave with `Files.attach` and `Files.finish` (§16.1, §16.5).
+rows and queue they leave with `Files.attach` and `Files.finish` (§17.2, §17.7).
 
 Each case is a list of events. `attach` fixes a row's reference and queues it;
 `delete` removes a row with `Files.deleteRow`; `begin` marks when the Rust

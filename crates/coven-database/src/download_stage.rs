@@ -36,7 +36,7 @@ pub(crate) fn values(
 /// Keep one streamed frame: its original record, checked and retained as
 /// evidence, or a dismissal for after the write's rows. Nothing merges until
 /// the whole write is judged, since a foreign-key action and its causes can
-/// be anywhere in it (§8.8).
+/// be anywhere in it (§9.6).
 pub(crate) fn ignored(
     database: &DatabaseConnection,
     header: &WriteHeader,

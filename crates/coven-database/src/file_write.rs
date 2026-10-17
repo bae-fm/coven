@@ -343,7 +343,7 @@ impl<'a> FileWrite<'a> {
         result
     }
 
-    /// Queue each file this write attached, atomically with the write (§16.1).
+    /// Queue each file this write attached, atomically with the write (§17.2).
     /// A file attached and then removed by the same write never reaches the
     /// queue; its staged copy is released when the write commits.
     pub(crate) fn queue_attached(&self, now: std::time::SystemTime) -> Result<(), DbError> {

@@ -357,7 +357,7 @@ pub(crate) fn prepare(
 /// The first own queued write at or before `through` not yet confirmed
 /// stored. A snapshot covering own writes through `through` is sent only
 /// once this is none: capture may precede confirmation, but neither settles
-/// a queue slot (§15).
+/// a queue slot (§16.1).
 pub(crate) fn unconfirmed(
     db: &DatabaseConnection,
     through: WriteId,

@@ -1,5 +1,5 @@
 //! A received late old-schema change converts through the winning raise's
-//! callback (§17.1, E13). Upload records never change; each case authors
+//! callback (§18.6, E13). Upload records never change; each case authors
 //! writes on an old-schema device and receives them on a migrated one.
 use crate::{
     tests::TestStore,
@@ -453,7 +453,7 @@ async fn invalid_conversions_report_typed_causes_and_commit_nothing() {
 }
 
 mod data_sources {
-    //! Ben's late old-schema writes 9 and 10 after a raise (§17.1): the data
+    //! Ben's late old-schema writes 9 and 10 after a raise (§18.6): the data
     //! rule runs on original changes before any converter (E13).
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -662,7 +662,7 @@ mod data_sources {
 /// A step's classification comes from its statements, never this device's
 /// rows: a receiver that ran a data step on an empty table, as a fresh
 /// device does, converts a late old-schema write exactly as one with rows
-/// does (§17.1).
+/// does (§18.1).
 #[tokio::test]
 async fn a_data_step_run_on_an_empty_table_still_converts_late_writes() {
     use crate::write::tests::{notes, NOTES};

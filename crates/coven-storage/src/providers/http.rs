@@ -10,7 +10,7 @@ use std::sync::Arc;
 
 /// A device's provider sign-in and HTTP connection, injected into its provider.
 /// A token is used until the provider rejects it with HTTP 401; the request
-/// then refreshes once through the sign-in's custody and is retried once (§4).
+/// then refreshes once through the sign-in's custody and is retried once (§20.2).
 pub struct OAuthSession {
     client: reqwest::Client,
     provider: CloudProvider,
@@ -253,7 +253,7 @@ impl ProviderResponse {
         }
     }
     /// The provider's requested wait: `Retry-After` as delay-seconds, or as an
-    /// HTTP-date less this response's own `Date` (SP waiting). Dropbox also
+    /// HTTP-date less this response's own `Date` (§6.7). Dropbox also
     /// states it in its error body.
     pub(crate) fn retry_after(&self, provider: CloudProvider) -> Option<crate::RetryAfter> {
         use reqwest::header::{DATE, RETRY_AFTER};

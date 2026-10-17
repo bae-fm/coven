@@ -1,4 +1,4 @@
-//! A local write's row operations as steps on merge rows (§8.8, D5).
+//! A local write's row operations as steps on merge rows (§9.6, D5).
 //!
 //! The steps travel in the write without saying what produced them. Every
 //! device, the author included, tells foreign-key actions from direct targets
@@ -64,7 +64,7 @@ impl Tracker<'_> {
     }
 
     /// The audience a row with these values has now: its column's, or its
-    /// audience parent's as the operations so far left it (§14.1). None while
+    /// audience parent's as the operations so far left it (§15.1). None while
     /// its audience parent does not exist, as within a cascade of deletes or
     /// before a deferred parent is inserted.
     fn audience(
@@ -96,7 +96,7 @@ impl Tracker<'_> {
     /// The merge row an app row with these values is in now. Without a
     /// present audience parent, it is where the row last was, or where the
     /// write leaves it; a row the write leaves without a parent is refused
-    /// when its net change is built (§14.5).
+    /// when its net change is built (§15.3).
     fn row(&self, key: &AppKey, values: &AppValues) -> Result<RowId, DbError> {
         let audience = match self.audience(self.schema.table(&key.0), values)? {
             Some(audience) => audience,
@@ -139,7 +139,7 @@ impl Tracker<'_> {
 
     /// The merge row an existing app row is in now. When an earlier
     /// operation moved it, or its audience parent, into another audience,
-    /// that move ended the old merge row and began this one (§14.2).
+    /// that move ended the old merge row and began this one (§15.4).
     fn existing(&mut self, key: &AppKey, values: &AppValues) -> Result<RowId, DbError> {
         let now = self.row(key, values)?;
         let last = match self.rows.get(key) {
@@ -317,7 +317,7 @@ pub(crate) fn capture(
                 tracker.current.insert(old_key.clone(), Some(new.clone()));
                 // An update changing the row's audience moves it: the old
                 // audience's row ends, and the update is the first operation
-                // on the new audience's row, which the move began (§14.2).
+                // on the new audience's row, which the move began (§15.4).
                 let row = tracker.existing(old_key, new)?;
                 let columns = tracker.columns(
                     table,
@@ -364,7 +364,7 @@ pub(crate) fn capture(
                     let columns = tracker.columns(table, new, Some(&row.audience), all)?;
                     let generation = tracker.generation(&row)?;
                     // Inserting a removed row's key updates it, setting every
-                    // column (§8); only a deleted or new row starts an incarnation.
+                    // column (§8.4); only a deleted or new row starts an incarnation.
                     let operation = if generation % 2 == 1 {
                         Operation::Update(columns)
                     } else {

@@ -56,7 +56,7 @@ fn expected(columns: &[(&str, &[&str])], keys: &[(&str, &str)]) -> Registered {
     (columns, keys)
 }
 
-/// §8: `_coven_columns` has one row per synced column and `_coven_foreign_keys`
+/// Appendix B.1: `_coven_columns` has one row per synced column and `_coven_foreign_keys`
 /// one per foreign key of a synced table, before any write names them, through
 /// additions, a dropped column and a renamed one. Local tables have none, and
 /// writes only look the rows up.

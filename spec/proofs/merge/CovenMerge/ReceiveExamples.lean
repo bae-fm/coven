@@ -123,7 +123,7 @@ theorem receive_runs_agree (rules : St Write Unit Unit → EntryInputs Unit Unit
 example (rules : St Write Unit Unit → EntryInputs Unit Unit) :
     output rules editThenDelete = output rules deleteThenEdit := receive_runs_agree rules
 
-/-- Reset has an explicit exception for discarded causes (§19.3). It passes
+/-- Reset has an explicit exception for discarded causes (§19.4). It passes
 the old write, applies the new one, and records no loss for the old effect. -/
 def resetPolicy : Policy Write :=
   { policy with

@@ -9,7 +9,7 @@ use coven_format::admin::StoreChange;
 use std::sync::Arc;
 
 impl StorageConnections {
-    /// Validate, journal and claim one administrative change (§18).
+    /// Validate, journal and claim one administrative change (§11).
     pub(crate) async fn administer(&self, change: StoreChange) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
@@ -47,7 +47,7 @@ impl StorageConnections {
         live.sync.create_circle(name).await
     }
 
-    /// Snapshot an audience and claim its reset (§19.3).
+    /// Snapshot an audience and claim its reset (§19.4).
     pub(crate) async fn reset(&self, audience: Audience) -> Result<(), SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;
@@ -177,7 +177,7 @@ impl StorageConnections {
         live.sync.cancel_invite(invite).await
     }
 
-    /// The restore code for the pair the applied history binds now (§12.1).
+    /// The restore code for the pair the applied history binds now (§13.1).
     /// It reads only committed state, so it never waits for the connection.
     pub(crate) async fn restore_code(&self) -> Result<String, SyncError> {
         self.codes.restore_code().await
@@ -239,7 +239,7 @@ impl StorageConnections {
         }
     }
 
-    /// Replace this member's pair, returning the code for it (§11, E9).
+    /// Replace this member's pair, returning the code for it (§12.3, E9).
     pub(crate) async fn replace_member_keys(&self) -> Result<SecretText, SyncError> {
         let mut live = self.live.lock().await;
         self.ready(&mut live).await?;

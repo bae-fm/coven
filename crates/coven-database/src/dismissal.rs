@@ -37,7 +37,7 @@ pub(crate) fn dismiss(
                 LossTarget::Removed { row, generation } => {
                     let old = store.row(row)?;
                     // A stale query must not delete a restored or re-created row.
-                    // Only an owned row's owner may delete it; queueing judges that (§8.8).
+                    // Only an owned row's owner may delete it; queueing judges that (§9.6).
                     if old.loss.is_some() && old.state.generation() == *generation {
                         changes.insert(
                             row.clone(),

@@ -32,7 +32,7 @@ impl History {
     }
 
     /// Intentions after this state: an account stays shared while an active
-    /// member or one of this device's open invites uses it (§13).
+    /// member or one of this device's open invites uses it (§14.2).
     pub(crate) fn provider_changes(
         &self,
         member: MemberId,

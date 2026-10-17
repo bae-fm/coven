@@ -1,2 +1,2 @@
 # Keep this workspace independent of ancestor Clippy configurations.
-# The owner-construction checker enforces the file capability in §20.2.
+# The owner-construction checker enforces the file capability in Appendix F.2.

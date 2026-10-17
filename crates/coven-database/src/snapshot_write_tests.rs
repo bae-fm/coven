@@ -512,7 +512,7 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
         .unwrap();
     // The migration deletes the losing row at its generation: its removed-row
     // loss becomes one frozen loss with the old names. The migration write had
-    // read the concurrent cell, so its delete acknowledges that loss (§17.1).
+    // read the concurrent cell, so its delete acknowledges that loss (§18.7).
     let retained = a.lost_values().await.unwrap();
     let removed = losses
         .iter()

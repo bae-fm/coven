@@ -1,4 +1,4 @@
-//! Member keys on GCS (§4): a service account per key, granted
+//! Member keys on GCS (Appendix E.12): a service account per key, granted
 //! `roles/storage.objectUser` on the store's managed folder `<prefix>/<store>/`
 //! and `roles/storage.bucketViewer` on the bucket, whose `storage.buckets.get`
 //! setup's versioning read needs, and whose HMAC key is the member key. Managed folders need uniform bucket-level
@@ -392,7 +392,7 @@ async fn mint(context: &AdminRequest, scope: &MintScope) -> Result<S3MemberKey, 
             "accountId": scope.name,
             "serviceAccount": {
                 "displayName": "coven member key",
-                // Carries the store and the minting device for a store's listing (§13).
+                // Carries the store and the minting device for a store's listing (§14.3).
                 "description": scope.label(),
             },
         })),
@@ -525,7 +525,7 @@ async fn key_exists(
 
 /// Every HMAC key of a service account whose description names this store,
 /// and every such account holding none, with the minting device it names
-/// (§13). Accounts are read from the bucket's project, every page.
+/// (§14.3). Accounts are read from the bucket's project, every page.
 async fn list(context: &AdminRequest, store: StoreId) -> Result<StoreListing, StorageError> {
     let gcs = Gcs::new(context, store)?;
     let project = gcs.project().await?;

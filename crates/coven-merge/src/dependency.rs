@@ -1,4 +1,4 @@
-//! Original sources consumed by a row change (§8, D5).
+//! Original sources consumed by a row change (§9.5, D5).
 
 /// The changes one row change used, in role order: the generation source
 /// first, then each replaced setter in the authored column order, then the
@@ -14,7 +14,7 @@ pub struct Provenance<C> {
     /// the net change does not already name (D5 `Execution`).
     pub execution: Vec<C>,
     /// The direct changes and intermediate actions in the same write whose
-    /// foreign-key actions produced this change (§8.8).
+    /// foreign-key actions produced this change (§9.6).
     pub causes: Vec<C>,
 }
 

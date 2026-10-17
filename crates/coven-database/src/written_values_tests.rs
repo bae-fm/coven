@@ -248,7 +248,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
         .unwrap();
     // The removed child is deleted at its generation: one frozen loss keeps its
     // old names and written values. The migration write had read the
-    // concurrent cell, so its delete acknowledges that loss (§17.1).
+    // concurrent cell, so its delete acknowledges that loss (§18.7).
     let retained = a.lost_values().await.unwrap();
     let removed = losses
         .iter()
@@ -368,7 +368,7 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
     }
 }
 
-/// §8: a lost value is one some write set. A generated cell can display a
+/// §8.2: a lost value is one some write set. A generated cell can display a
 /// value no write set, computed from a NULL-substituted reference or from
 /// inputs other writes merged in; every arrival order records the written one.
 #[tokio::test]

@@ -235,7 +235,7 @@ pub(crate) fn check_membership(
     Ok(())
 }
 
-/// Retain already committed work even after its author leaves a circle (§14.6).
+/// Retain already committed work even after its author leaves a circle (§15.8).
 /// The header is followed by its parts' plaintext frame streams; sync records
 /// sealing keys before the first upload attempt.
 pub(crate) fn retain_queue(
@@ -280,7 +280,7 @@ pub(crate) fn plaintext(
 }
 
 /// The registered row of a synced column. Preparing the schema registers
-/// every one, so a cell or live loss can only name a registered column (§8).
+/// every one, so a cell or live loss can only name a registered column (Appendix B.1).
 pub(crate) fn column(
     database: &DatabaseConnection,
     table: &str,
@@ -295,7 +295,7 @@ pub(crate) fn column(
 }
 
 /// The row of a column a frozen loss names. Frozen values keep columns a
-/// breaking migration dropped (§17.1); such a column no longer syncs, so it
+/// breaking migration dropped (§18.7); such a column no longer syncs, so it
 /// has a row only once a frozen loss names it. A synced column is registered.
 pub(crate) fn frozen_column(
     database: &DatabaseConnection,

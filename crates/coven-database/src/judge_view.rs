@@ -1,5 +1,5 @@
 //! A child row's references as the author saw them, and the foreign-key
-//! action the write's schema derives on it (§8.4, §8.8, D5).
+//! action the write's schema derives on it (§9.1, §9.6, D5).
 //!
 //! A child's cell at a step is what an earlier step of the write set in the
 //! row's current incarnation, or else the value its replaced setter's
@@ -25,7 +25,7 @@ use coven_merge::{Audience, ColumnValue, ForeignKey, Operation, Parent, RowId};
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The schema a write was authored under: the current one, unless a
-/// breaking migration since then retained the earlier one (§17.1).
+/// breaking migration since then retained the earlier one (§18.6).
 pub(crate) struct Authoring<'a> {
     schema: &'a Schema,
     /// Reference groups, and SQLite's column affinities, of the current schema.

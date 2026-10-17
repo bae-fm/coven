@@ -20,7 +20,7 @@ pub(crate) struct MigrationCapture {
     pub(crate) snapshot: Option<MigrationSnapshot>,
     /// Tables the current step's statements write rows of, as SQLite
     /// authorizes each statement when it is prepared: whether any row
-    /// matches never decides a step's class (§17.1).
+    /// matches never decides a step's class (§18.1).
     targets: BTreeSet<String>,
 }
 

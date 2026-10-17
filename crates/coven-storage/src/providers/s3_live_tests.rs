@@ -179,7 +179,7 @@ async fn s3_detection() {
 }
 
 /// Three installations' setups of one store claim its first slot at once
-/// (§10, D10), each through its own connection: one claim wins and the others
+/// (§10.3, D10), each through its own connection: one claim wins and the others
 /// are refused, in each of 20 fresh stores.
 #[tokio::test]
 #[ignore = "COVEN_LIVE_S3_ENV; creates and deletes live first slots"]
@@ -277,21 +277,21 @@ where
     let value = match result {
         Ok(Ok(value)) => Some(value),
         Ok(Err(error)) => {
-            println!("§4 {label} cause={error}");
+            println!("§20 {label} cause={error}");
             None
         }
         Err(_) => {
-            println!("§4 {label} assertion_failed");
+            println!("§20 {label} assertion_failed");
             None
         }
     };
     if let Err(error) = cleanup {
-        println!("§4 {label} cleanup FAIL cause={error}");
+        println!("§20 {label} cleanup FAIL cause={error}");
         panic!("certification could not delete its live objects/uploads");
     }
     for requirement in requirements {
         println!(
-            "§4 {requirement} {} cleanup=PASS",
+            "§20 {requirement} {} cleanup=PASS",
             if value.is_some() { "PASS" } else { "FAIL" }
         );
     }
@@ -545,8 +545,8 @@ async fn s3_certification() {
     let detection = match settings.detect().await {
         Ok(detection) => detection,
         Err(error) => {
-            println!("§4 native_behavior_detection cause={error}");
-            println!("§4 native_behavior_detection FAIL");
+            println!("§20 native_behavior_detection cause={error}");
+            println!("§20 native_behavior_detection FAIL");
             panic!("S3 certification could not detect the service");
         }
     };
@@ -563,7 +563,7 @@ async fn s3_certification() {
     println!("candidate {profile:?}");
     let mut passed = detection.check(&profile).is_ok();
     println!(
-        "§4 native_behavior_detection {}",
+        "§20 native_behavior_detection {}",
         if passed { "PASS" } else { "FAIL" }
     );
     assert!(
@@ -690,7 +690,7 @@ async fn s3_certification() {
         "certification suite={SUITE_VERSION} {}",
         if passed { "PASS" } else { "FAIL" }
     );
-    assert!(passed, "S3 certification failed; see §4 lines above");
+    assert!(passed, "S3 certification failed; see §20 lines above");
 }
 
 fn print_profile(

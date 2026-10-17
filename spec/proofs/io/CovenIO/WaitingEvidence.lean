@@ -1,7 +1,7 @@
 import CovenIO.Waiting
 
-/-! Evidence-triggered attempts (§3.1 Waiting, SP, "Waiting without
-repeated work"), as `retry_waits.rs` and `operation_evidence.rs` run them: an
+/-! Evidence-triggered attempts (§6.7, "Waiting and
+retrying", §21.2), as `retry_waits.rs` and `operation_evidence.rs` run them: an
 operation's wait names the prerequisite its attempt ended on, and is due when
 its monotonic deadline passes, or when a commit changing that prerequisite
 arrives after the wait began. Due by evidence keeps the backoff: the next
@@ -20,7 +20,7 @@ only removes starts, so the bounds below hold with it too.
 
 `Session.paid` is a ghost counter of the commits that woke a wait. Every start
 after the first is paid for by a full delay or by one of them
-(`evidence_rate`). A wait whose prerequisite no commit changes is §3.1's
+(`evidence_rate`). A wait whose prerequisite no commit changes is §21.2's
 unchanged wait, and meets its bound (`unchanged_rate`, `unchanged_one_second`,
 `unchanged_capped`). -/
 
@@ -284,7 +284,7 @@ theorem evidence_rate {d : Nat} {s t : Session} {es : List Event} (positive : 0 
 
 /-- The run's commits change only prerequisites in `unrelated`, its waits name
 none of them, and the session's own wait and running attempt name none and
-saw none: no wait in it ever changes (§3.1's unchanged wait). -/
+saw none: no wait in it ever changes (§21.2's unchanged wait). -/
 def Unchanged (unrelated : Nat → Bool) (s : Session) (es : List Event) : Prop :=
   (∀ a, s.armed = some a → unrelated a.prereq = false) ∧
   (∀ l, s.running = some l → ∀ q ∈ l, unrelated q = true) ∧
@@ -353,7 +353,7 @@ theorem unchanged_paid {u : Nat → Bool} {s t : Session} {es : List Event}
       obtain ⟨un', paid⟩ := unchanged_step un hs
       rw [ih un' hr, paid]
 
-/-- §3.1's bound for one unchanged wait: with no commit changing what its
+/-- §21.2's bound for one unchanged wait: with no commit changing what its
 waits name, starts are at most one plus the elapsed time over `d`. -/
 theorem unchanged_rate {d : Nat} {u : Nat → Bool} {s t : Session} {es : List Event}
     (positive : 0 < d) (floor : d ≤ s.floor) (un : Unchanged u s es)
@@ -376,7 +376,7 @@ theorem unchanged_capped {u : Nat → Bool} {s t : Session} {es : List Event} {a
     omega
   exact unchanged_rate (by decide) floor un h
 
-/-- `W` waits sharing one run's clock: §3.1's `W * (1 + floor(t / d))`. -/
+/-- `W` waits sharing one run's clock: §21.2's `W * (1 + floor(t / d))`. -/
 theorem unchanged_waits_rate (bounds : List Nat) (b : Nat) (each : ∀ n ∈ bounds, n ≤ b) :
     bounds.sum ≤ bounds.length * b := by
   induction bounds with
@@ -440,7 +440,7 @@ def capped : Session := ⟨0, 0, some ⟨9, 300, 1, false⟩, none⟩
 /-- Three commits at one instant changing other prerequisites, for example
 three other operations advancing in one drive: the capped wait stays waiting,
 so no attempt starts. T190 found that counting every prerequisite commit for
-every wait gave three starts here where §3.1 allows one. -/
+every wait gave three starts here where §21.2 allows one. -/
 theorem unrelated_burst_starts_none :
     (run capped [.commit 2, .commit 3, .commit 4]).map (·.ready) = some false ∧
     run capped [.commit 2, .start] = none := by

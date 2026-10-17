@@ -254,7 +254,7 @@ fn publication_time(pause: Duration) {
         );
         assert!(
             complete_before.1 <= observed.stored_at && observed.stored_at <= complete_after.1,
-            "§4 requires the copy publication time inside completion markers"
+            "§20.6 requires the copy publication time inside completion markers"
         );
         assert!(upload.is_complete());
         bytes.push(b'z');

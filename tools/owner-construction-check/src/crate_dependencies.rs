@@ -1,4 +1,4 @@
-//! The dependency rules of §20.1, read from the member manifests.
+//! The dependency rules of Appendix F.1, read from the member manifests.
 //!
 //! - Each crate depends only on crates above it in the list — earlier in the
 //!   policy's `crate_order` — and the separated pairs never depend on each
@@ -24,7 +24,7 @@ const DEPENDENCY_TABLES: &[&str] = &["dependencies", "dev-dependencies", "build-
 /// What a member may say about a dependency besides `workspace = true`.
 const MEMBER_DEPENDENCY_KEYS: &[&str] = &["workspace", "features", "optional"];
 
-const REMEDY: &str = "each crate depends only on crates above it in §20.1's list, and each external dependency's version is set once in [workspace.dependencies]";
+const REMEDY: &str = "each crate depends only on crates above it in Appendix F.1's list, and each external dependency's version is set once in [workspace.dependencies]";
 
 pub(crate) fn find_crate_dependency_violations(
     workspace: &Workspace,

@@ -1,11 +1,11 @@
 //! Where a connection's OAuth sign-in is held, and its one refresh after the
-//! provider rejects a token (§4, E10). No device clock decides expiry.
+//! provider rejects a token (§20.2, E10). No device clock decides expiry.
 
 use crate::{OAuthTokens, S3Credentials, StorageCredentials, StorageError};
 use std::sync::Arc;
 
 /// The custody of a connection's sign-in: coven's session custody before
-/// setup or bootstrap publishes the store, device custody afterwards (§4).
+/// setup or bootstrap publishes the store, device custody afterwards (§20.2).
 #[async_trait::async_trait]
 pub trait TokenCustody: Send + Sync {
     /// Replace tokens the provider rejected with HTTP 401. When the held
@@ -16,7 +16,7 @@ pub trait TokenCustody: Send + Sync {
     async fn replace(&self, rejected: &OAuthTokens) -> Result<OAuthTokens, StorageError>;
 }
 
-/// What a connection authenticates with (§4).
+/// What a connection authenticates with (§20.2).
 pub enum ProviderAuth {
     /// This member's S3 key.
     S3(S3Credentials),

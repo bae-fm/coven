@@ -26,7 +26,7 @@ pub(crate) const CACHE_COMPLETE_FILE: i64 = -2;
 // D2 timestamps contain six clock bytes, two counter bytes, then the device id.
 pub(crate) const WRITE_DEVICE_SQL: &str = "substr(timestamp,9,8)";
 
-/// App objects cannot use either reserved namespace (§17.2).
+/// App objects cannot use either reserved namespace (Appendix C.1).
 pub(crate) fn reserved_name(name: &str) -> bool {
     let name = name.to_ascii_lowercase();
     name.starts_with("_coven_") || name.starts_with("coven_")
@@ -94,7 +94,7 @@ macro_rules! coven_tables {
                 removed INTEGER NOT NULL CHECK(removed IN (0,1))
             ) STRICT, WITHOUT ROWID;
         ");
-        // Every public key pair bound by a counted administrative slot (§9).
+        // Every public key pair bound by a counted administrative slot (§10).
         $visit!(_coven_bound_keys, "
             CREATE TABLE _coven_bound_keys (
                 signing BLOB NOT NULL CHECK(length(signing)=32),
@@ -381,7 +381,7 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
         ");
         // Cache ranges whose bytes are being written with no writer held;
-        // opening makes the abandoned ones removals (§16.6).
+        // opening makes the abandoned ones removals (Appendix C.3).
         $visit!(_coven_cache_writes, "
             CREATE TABLE _coven_cache_writes (path TEXT NOT NULL PRIMARY KEY) STRICT, WITHOUT ROWID;
         ");
@@ -396,7 +396,7 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_device_files_path ON _coven_device_files(path);
         ");
         // Each S3 key named for deletion: the open deletion operation, which
-        // carries its pending notice, or NULL once deletion was confirmed (§13).
+        // carries its pending notice, or NULL once deletion was confirmed (§14.3).
         $visit!(_coven_access_keys, "
             CREATE TABLE _coven_access_keys (
                 access_key_id TEXT PRIMARY KEY NOT NULL,
@@ -435,7 +435,7 @@ macro_rules! coven_tables {
                     ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
-        // Fixed file paths awaiting a storage-deletion decision (§16.5): the
+        // Fixed file paths awaiting a storage-deletion decision (§17.8): the
         // transaction ending a path's last local protection adds it, so
         // retention never lists files/.
         $visit!(_coven_file_candidates, "
@@ -463,7 +463,7 @@ macro_rules! coven_tables {
         // A removed uploader's file folder, listed once after its access was
         // confirmed taken away, and the counted removal that justified it. The
         // transaction recording restored access deletes the scan: a later
-        // cut-off scans again (§16.5). The paths found are candidates.
+        // cut-off scans again (§17.8). The paths found are candidates.
         $visit!(_coven_file_scans, "
             CREATE TABLE _coven_file_scans (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
@@ -471,7 +471,7 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
         ");
         // The provider accounts and S3 keys whose confirmed removal a scan
-        // followed (§13).
+        // followed (§14.2).
         $visit!(_coven_file_scan_access, "
             CREATE TABLE _coven_file_scan_access (
                 device BLOB NOT NULL REFERENCES _coven_file_scans(device) ON DELETE CASCADE,
@@ -505,7 +505,7 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);
         ");
         // Eager-fill reservations: the requested fixed references, kept
-        // until the whole set is cached, and the set's cancellation (§16.4).
+        // until the whole set is cached, and the set's cancellation (§17.6).
         $visit!(_coven_eager_requests, "
             CREATE TABLE _coven_eager_requests (
                 namespace TEXT NOT NULL,
@@ -554,7 +554,7 @@ macro_rules! coven_tables {
             ) STRICT, WITHOUT ROWID;
         ");
         // Pins carried from queued uploads to their stored files, until a
-        // whole pinned copy is published or the app unpins (§16.4).
+        // whole pinned copy is published or the app unpins (§17.6).
         $visit!(_coven_pin_requests, "
             CREATE TABLE _coven_pin_requests (
                 namespace TEXT NOT NULL,
@@ -574,7 +574,7 @@ macro_rules! coven_tables {
                 CHECK(target IS NULL OR operation IS NOT NULL)
             ) STRICT, WITHOUT ROWID;
             -- Access no longer confirmed taken away ends the cut-off a file
-            -- folder scan followed, in the transaction that records it (§16.5).
+            -- folder scan followed, in the transaction that records it (§17.8).
             CREATE TRIGGER _coven_file_scan_account_restored AFTER UPDATE ON _coven_provider_access
             WHEN NOT (NEW.intended=0 AND NEW.granted IS 0 AND NEW.operation IS NULL) BEGIN
                 DELETE FROM _coven_file_scans WHERE device IN (SELECT device FROM _coven_file_scan_access WHERE kind='account' AND name=NEW.account);
@@ -594,7 +594,7 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_operations_kind ON _coven_operations(kind);
         ");
         // The one operation pausing app writes while it replaces this
-        // member's keys (§10). Its row goes with the operation's.
+        // member's keys (§12.3). Its row goes with the operation's.
         $visit!(_coven_write_pause, "
             CREATE TABLE _coven_write_pause (
                 paused INTEGER PRIMARY KEY CHECK(paused=1),
@@ -604,7 +604,7 @@ macro_rules! coven_tables {
         ");
         // One persisted retry wait, T and W, per waiting operation, queued
         // upload, eager file download, joiner poll or provider cooldown
-        // (§16.5). Work rows take their waits with them; a download's work
+        // (§6.7). Work rows take their waits with them; a download's work
         // is its file's pending record.
         $visit!(_coven_retries, "
             CREATE TABLE _coven_retries (

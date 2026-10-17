@@ -1,5 +1,5 @@
 //! Remote file availability, derived from one storage observation and the
-//! uploader's applied state and locally observed source failures; never written to a row (§16.1).
+//! uploader's applied state and locally observed source failures; never written to a row (§17.4).
 
 use crate::FileSourceFailure;
 use crate::{
@@ -44,7 +44,7 @@ fn missing_reason(
     }
 }
 
-/// §16.1, ST `Files.status`. Presence wins; a failed observation is never
+/// §17.4, ST `Files.status`. Presence wins; a failed observation is never
 /// absence, and the evidence only explains a confirmed absence.
 pub(crate) fn status<E>(
     uploader: DeviceId,
@@ -113,7 +113,7 @@ impl FilesInner {
     }
 
     /// The typed read failure for remote bytes storage confirms are absent:
-    /// still uploading, or missing with the uploader's reason (§16.1).
+    /// still uploading, or missing with the uploader's reason (§17.4).
     pub(crate) async fn absence_error(&self, file: &FileRef) -> FileReadError {
         let (state, report) = match self.evidence(file).await {
             Ok(evidence) => evidence,

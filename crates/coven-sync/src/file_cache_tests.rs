@@ -1,6 +1,6 @@
-//! Eager cache fill (§16.4, E8, SP, Files and waiting): commit-driven fills, one file's
+//! Eager cache fill (§17.6, E8, §6.7): commit-driven fills, one file's
 //! failure as its own pending record, retries under persisted waits and the
-//! provider cooldown (§16.5), and cancellation.
+//! provider cooldown (§6.7), and cancellation.
 use super::*;
 use coven_database::RetrySubject;
 use coven_foundation::clock::{Clock, FixedClock};
@@ -192,7 +192,7 @@ fn clock() -> Arc<FixedClock> {
     ))
 }
 
-/// Pass `seconds` and keep §10's catch-up fresh for any upload in between.
+/// Pass `seconds` and keep §14.1's catch-up fresh for any upload in between.
 fn advance(_f: &Fixture, clock: &FixedClock, seconds: u64) {
     clock.set(clock.now() + Duration::from_secs(seconds));
 }
@@ -490,7 +490,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
 }
 
 /// A fill that cannot read its own work fails the pass's step rather than
-/// leaving it `Synced` with nothing recorded (§16.4, E5).
+/// leaving it `Synced` with nothing recorded (§17.6, E5).
 #[tokio::test]
 async fn a_fill_that_cannot_read_its_work_fails_its_step() {
     let clock = clock();
@@ -514,7 +514,7 @@ mod retries;
 
 /// A failed eager download persists `T` and `W` with its record before it
 /// waits: no fill requests it again before its deadline, reopening included,
-/// and the completed download takes the wait with its record (§16.5).
+/// and the completed download takes the wait with its record (§6.7).
 #[tokio::test]
 async fn a_failed_download_is_not_requested_before_its_deadline() {
     let clock = clock();
@@ -566,7 +566,7 @@ async fn a_failed_download_is_not_requested_before_its_deadline() {
 
 /// A `Retry-After` a download receives is the store's cooldown: no eager
 /// download, even one whose own wait ended, and no upload is requested until
-/// it ends (SP waiting).
+/// it ends (§6.7).
 #[tokio::test]
 async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
     let clock = clock();
@@ -618,7 +618,7 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
 }
 
 /// The file worker wakes when a download's wait ends, without a pass or
-/// another commit (SP waiting).
+/// another commit (§6.7).
 #[tokio::test]
 async fn the_worker_retries_a_download_when_its_wait_ends() {
     let clock = clock();
@@ -678,7 +678,7 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
 /// upload: completing the upload carries the pin to the stored file, and the
 /// file worker keeps it whole from storage without the app pinning again, so
 /// reading it then needs no request. A pin released while queued leaves
-/// nothing pinned (§16.4, E8).
+/// nothing pinned (§17.6, E8).
 #[tokio::test]
 async fn a_pin_taken_while_queued_survives_the_upload() {
     for original in [false, true] {
@@ -743,7 +743,7 @@ async fn a_pin_taken_while_queued_survives_the_upload() {
 
 /// Pin progress is a query over committed, verified cache coverage: bytes a
 /// concurrent reader caches count, a failed read adds none, eviction removes
-/// them, and reopening reads the same answer (§16.4, E8).
+/// them, and reopening reads the same answer (§17.6, E8).
 #[tokio::test]
 async fn pin_progress_reads_committed_coverage() {
     let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
@@ -802,7 +802,7 @@ fn cache_files(f: &Fixture) -> usize {
 }
 
 /// A fetched range is authenticated whole, then published as one file and
-/// one row; reopening serves it without a request (§16.3, §16.6).
+/// one row; reopening serves it without a request (§17.5, Appendix C.3).
 #[tokio::test]
 async fn a_verified_range_publishes_as_one_entry() {
     let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
@@ -855,7 +855,7 @@ async fn a_failed_chunk_publishes_none_of_its_range() {
 }
 
 /// Overlapping readers share one transfer: the second waits for the first
-/// range and reads it from the cache (SP, Files and waiting).
+/// range and reads it from the cache (§6.7).
 #[tokio::test]
 async fn overlapping_readers_fetch_each_byte_once() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
@@ -893,7 +893,7 @@ async fn overlapping_readers_fetch_each_byte_once() {
         .map(|(_, _, length)| *length)
         .sum::<u64>()
         - before;
-    // The header arrives with the first reader's range (§16.3).
+    // The header arrives with the first reader's range (§17.5).
     assert_eq!(fetched, 11 + 4 * (CHUNK as u64 + 16));
     f.close().await;
 }

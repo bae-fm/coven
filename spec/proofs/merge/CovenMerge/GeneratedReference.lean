@@ -1,7 +1,7 @@
 import CovenMerge.Converge
 
 /-!
-# Foreign keys on generated columns (§8.4)
+# Foreign keys on generated columns (§9.1)
 
 A generated column's value is computed by SQL from the stored columns it
 reads. Coven merges stored cells one by one, so when a foreign key reads a
@@ -16,7 +16,7 @@ reference that no write named.
   columns or none of them, every cell of that group holds the same write.
 * `accepted_reference_written`: under a schema the check accepts, a key with a
   generated column spans several columns, so its capture group holds the key
-  columns and every generated column's inputs (§8.4). Every reference a device
+  columns and every generated column's inputs (§9.1). Every reference a device
   shows is then the tuple one write set, or a stored column's own value.
 
 Computing generated inputs from SQL and capturing a group's components are
@@ -31,7 +31,7 @@ section General
 variable {W Row Col V : Type} (M : Writes W Row Col)
 
 /-- Every change sets either all of `G` or none of it: the capture rule for a
-reference group, “changing any component records every component” (§8.4). -/
+reference group, “changing any component records every component” (§9.1). -/
 def Grouped (G : Col → Prop) : Prop :=
   ∀ w r ch c c', M.chg w r = some ch → G c → G c' → ch.sets c = ch.sets c'
 
@@ -99,7 +99,7 @@ def captureGroup (T : Columns Col V) (k : List Col) (c : Col) : Prop :=
 def accepts (T : Columns Col V) (keys : List (List Col)) : Prop :=
   ∀ k ∈ keys, ∀ c ∈ k, T.generated c = true → 1 < k.length
 
-/-- **Refusal is safe.** Under an accepted schema whose captures follow §8.4,
+/-- **Refusal is safe.** Under an accepted schema whose captures follow §9.1,
 every key's shown reference is the tuple one write set (or none set), or a
 single stored column's own cell. -/
 theorem accepted_reference_written (T : Columns Col V) (val : W → Col → V)
@@ -235,7 +235,7 @@ theorem orders_causal : CausalOrder M [0, 1, 2] ∧ CausalOrder M [0, 2, 1] := b
   · refine .snoc (L := [0, _]) (.snoc (L := [0]) (.snoc (L := []) .nil (by simp) ?_) (by simp) ?_)
       (by simp) ?_ <;> intro a ha <;> simp [M] at ha ⊢ <;> omega
 
-/-- With §8.4's capture (`a` and `b` recorded together), the same edits show
+/-- With §9.1's capture (`a` and `b` recorded together), the same edits show
 Ben's whole tuple, which he recorded. -/
 def Mgroup : Writes Nat Nat Nat :=
   { M with chg := fun w r =>

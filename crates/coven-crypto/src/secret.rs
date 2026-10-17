@@ -12,7 +12,7 @@ impl SecretBytes {
         Self(Zeroizing::new(bytes))
     }
 
-    /// Borrow the bytes while writing custody or encoding a restore code (§12).
+    /// Borrow the bytes while writing custody or encoding a restore code (§13).
     pub fn as_bytes(&self) -> &[u8] {
         &self.0
     }

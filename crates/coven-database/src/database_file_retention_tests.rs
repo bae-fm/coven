@@ -120,7 +120,7 @@ fn files_table() -> SyncedTable {
 
 /// Reopen after the app runs breaking version 2, `change`, with an explicit
 /// drop choice, under a kept raise to 2 covering what was consumed: a later
-/// version-1 write is excluded (§17.1).
+/// version-1 write is excluded (§18.6).
 async fn migrate(
     store: &TestStore,
     db: Database,
@@ -422,7 +422,7 @@ fn candidates_of(device: DeviceId) -> BTreeSet<DeviceId> {
     BTreeSet::from([device])
 }
 
-/// §16.5: a frozen loss keeps its file path protected. Dismissing it leaves
+/// §17.8: a frozen loss keeps its file path protected. Dismissing it leaves
 /// the counted base's protection until the dismissal is applied. Applying it
 /// releases the last local reference and makes the path a candidate in the same
 /// transaction, without any listing of storage.

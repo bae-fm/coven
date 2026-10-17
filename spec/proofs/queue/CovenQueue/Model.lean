@@ -1,7 +1,7 @@
 import CovenMerge.Boundary
 import Std
 
-/-! Queue identities and audience verdicts: coven §6, §7, §17.1, §19.3;
+/-! Queue identities and audience verdicts: coven §4, §7, §18.6, §19.4;
 format D5. Natural numbers abstract bounded identifiers and timestamps.
 The history index is timestamp order, separate from a device's write number. -/
 
@@ -12,7 +12,7 @@ structure WriteId where
   number : Nat
   deriving DecidableEq, Repr
 
-/-- Metadata conversion is forbidden to change (§17.1, E13). -/
+/-- Metadata conversion is forbidden to change (§18.5, E13). -/
 structure Identity where
   id : WriteId
   timestamp : Nat
@@ -71,7 +71,7 @@ theorem own_earlier_read (w a : Identity)
 
 structure Boundary where
   entry : Nat
-  /-- Writes in the chosen snapshot's covered slot prefix (§15). -/
+  /-- Writes in the chosen snapshot's covered slot prefix (§16.1). -/
   covers : List WriteId
   deriving DecidableEq, Repr
 

@@ -1,6 +1,6 @@
 import CovenMerge.Reset
 
-/-! Value accounting (§3, §8, §17.1, §19.3). A value is identified by its
+/-! Value accounting (§2, §8.2, §18.6, §19.4). A value is identified by its
 setter and cell. These results quantify over every such value, not only the
 currently displayed winner. -/
 
@@ -70,7 +70,7 @@ end
 
 /-! Schema exclusions and the two explicit exceptions. Reset eligibility is
 tested before schema exclusion, so a reset-ignored part never gains a loss.
-The schema verdict is supplied by version/conversion processing (§17.1). -/
+The schema verdict is supplied by version/conversion processing (§18.6). -/
 
 inductive SchemaDisposition where
   | eligible

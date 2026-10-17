@@ -233,7 +233,7 @@ async fn a_failed_device_identity_prevents_publication() {
 
 #[tokio::test]
 /// A local migration never converts the queue: the waiting write keeps its
-/// original schema and the callback serves only received late writes (§17.1).
+/// original schema and the callback serves only received late writes (§18.6).
 async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());

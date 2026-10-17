@@ -1,4 +1,4 @@
-//! Each row's selected original creation, and the owner it names (§8.8).
+//! Each row's selected original creation, and the owner it names (§9.6).
 //!
 //! A row's owner is the authenticated member whose write originally created
 //! it. Of several generation-zero inserts of one row, the one with the
@@ -41,7 +41,7 @@ pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Cr
 }
 
 /// Offer a part's generation-zero inserts as creations, before any check
-/// decides about them (§8.8).
+/// decides about them (§9.6).
 pub(crate) fn offer_part(
     db: &DatabaseConnection,
     header: &coven_format::write::WriteHeader,
@@ -183,7 +183,7 @@ pub(crate) fn owner_table(schema: &crate::write_schema::WriteSchema, table: &str
         .any(|declaration| declaration.owner_only && declaration.name.eq_ignore_ascii_case(table))
 }
 
-/// Carry an audience's creations across a table rename (§17.1).
+/// Carry an audience's creations across a table rename (§18.4).
 pub(crate) fn rename(db: &DatabaseConnection, from: &str, to: &str) -> Result<(), DbError> {
     db.internal_execute(
         "UPDATE _coven_creations SET table_name=?2 WHERE table_name=?1",

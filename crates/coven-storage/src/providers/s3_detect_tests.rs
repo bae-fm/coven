@@ -603,7 +603,7 @@ async fn detection_reproduces_each_catalogued_entry() {
         // Detection prefers enforced conditional completion; only the
         // certification races showed SeaweedFS's racing completions, and a
         // racing PUT and copy, both succeed, so its entry publishes every
-        // object by copy instead (§4).
+        // object by copy instead (§20.6).
         let detected = match name {
             S3ProfileName::SeaweedFs => S3Settings {
                 copy_publication: S3CopyPublication::Never,
@@ -918,7 +918,7 @@ async fn complete_v2_does_not_pass_when_v1_never_completes() {
 }
 
 /// A marker the server never dates later fails detection after the 1 second
-/// wait and 40 pauses of 250 ms between its attempts (§4).
+/// wait and 40 pauses of 250 ms between its attempts (Appendix E.7).
 #[tokio::test]
 async fn a_marker_that_never_advances_fails_after_forty_pauses() {
     let fixture = Fixture::new(AWS).await;

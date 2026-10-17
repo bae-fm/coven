@@ -1,4 +1,4 @@
-//! The shared retry schedule (§3.1, §16.5, SP waiting).
+//! The shared retry schedule (§6.7, §21.2).
 //!
 //! Durable rows hold each wait's wall-clock deadline `T` and full wait `W`;
 //! this owner keeps the monotonic timer a running session enforces: a wait
@@ -76,7 +76,7 @@ impl Armed {
 }
 
 impl RetryWaits {
-    /// Arm every persisted wait with the restart rule (§16.5).
+    /// Arm every persisted wait with the restart rule (§6.7).
     pub async fn open(database: Database, clock: ClockRef) -> Result<Self, DbError> {
         let waits = database.retry_waits().await?;
         let now = clock.now();
@@ -161,7 +161,7 @@ impl RetryWaits {
     }
 
     /// A wait that could not be persisted holds until the app retries; it is
-    /// never permission to retry at once (§16.5).
+    /// never permission to retry at once (§6.7).
     pub(crate) fn hold(&self, subject: RetrySubject) {
         self.lock().armed.insert(
             subject,

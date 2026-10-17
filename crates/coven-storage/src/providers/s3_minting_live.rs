@@ -1,6 +1,6 @@
 #![cfg(test)]
 
-//! A member key minted live with the service's admin access (§4): setup's
+//! A member key minted live with the service's admin access (Appendix E.12): setup's
 //! member-side check passes, the key is refused outside its store's prefix,
 //! and after revocation the provider no longer lists or honors it. Only fixed
 //! labels, principal kinds and failure kinds enter output, never a key.
@@ -145,7 +145,7 @@ async fn lifecycle(
     if !present {
         return Err(StorageFailure::Protocol.with_source("the minted key is not listed"));
     }
-    // The store's listing names the key with its minting device (§13).
+    // The store's listing names the key with its minting device (§14.3).
     let listed = admin.list_keys(scope.store).await?.keys;
     let found = listed.iter().any(|listed| {
         listed.access_key_id == id

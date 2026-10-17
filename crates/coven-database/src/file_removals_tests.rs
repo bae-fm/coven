@@ -6,7 +6,7 @@ use crate::{
 
 /// A committed write returns its own result while a removal fails: the
 /// removal stays recorded, and an app that retries on `Err` would apply its
-/// change twice (§3, §16.6). Opening reports the failure.
+/// change twice (§2.1, Appendix C.3). Opening reports the failure.
 #[tokio::test]
 async fn failed_deletions_remain_recorded_until_a_write_or_open_retries_them() {
     for reopen in [false, true] {
@@ -414,7 +414,7 @@ async fn a_failed_rollback_cannot_release_bytes_using_uncommitted_records() {
     db.close().await.unwrap();
 }
 
-/// §3.1, §16.6: upload completion releases the queue's copy, whose bytes go
+/// §21.2, Appendix C.3: upload completion releases the queue's copy, whose bytes go
 /// only after the writer is free. While that removal stalls on the disk an
 /// app write commits; once it finishes, the record goes too.
 #[tokio::test]

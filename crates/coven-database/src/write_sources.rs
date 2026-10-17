@@ -205,7 +205,7 @@ pub(crate) fn authored(
 }
 
 /// The pre-write sources a row's operations used beyond its net change's own
-/// sources (§8, D5): the generation the first operation started from, and the
+/// sources (§9.5, D5): the generation the first operation started from, and the
 /// setter of each pre-write cell an operation replaced before the row's
 /// incarnation ended. Cells this write itself set are not sources.
 pub(crate) fn executed(
@@ -338,7 +338,7 @@ pub(crate) fn validate_past(
     Ok(())
 }
 /// A copy names an original generation-zero creation of the same row in
-/// another audience (§8.8). A part this device opened proves or refutes it;
+/// another audience (§9.6). A part this device opened proves or refutes it;
 /// a part it could not read leaves the authenticated claim as written.
 fn creation(
     db: &DatabaseConnection,
@@ -647,7 +647,7 @@ pub(crate) fn load_evidence(
 }
 
 /// This device's migration write changes rows only through its own raise's
-/// snapshot (§17.1). A loaded snapshot that covers it without carrying those
+/// snapshot (§18.4). A loaded snapshot that covers it without carrying those
 /// changes was made from another raise's data, in which they never counted:
 /// their evidence goes with the data they described. A loaded snapshot at
 /// the marker's version or later, covering it or not, comes from the raise

@@ -1,4 +1,4 @@
-//! Durable identity and exact attempted bytes for one sequence claim (§6).
+//! Durable identity and exact attempted bytes for one sequence claim (§5.1).
 
 use crate::{sqlite::DatabaseConnection, write_encoding::counter, DbError, OperationId};
 use coven_format::path::ObjectPath;

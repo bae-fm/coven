@@ -1,4 +1,4 @@
-//! Incremental hashing of the bytes covered by an object's signature (§14.4).
+//! Incremental hashing of the bytes covered by an object's signature (Appendix D.3).
 
 use sha2::{Digest, Sha256};
 

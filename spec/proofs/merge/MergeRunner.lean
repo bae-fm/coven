@@ -7,7 +7,7 @@ import Lean
 /-! JSON adapter for differential tests. All merge and removal computation calls
     the existing model; this file changes no theorem or proof. Values in the
     model are setter identities. Reference substitution and SQL constraint
-    evaluation are inputs, as in Appendix B's stated proof boundary. The
+    evaluation are inputs, as in merge.md's stated proof boundary. The
     `effects` mode recomputes foreign-key consequences from resolved
     references (B18). -/
 

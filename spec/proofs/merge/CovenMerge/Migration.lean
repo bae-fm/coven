@@ -1,7 +1,7 @@
 import CovenMerge.Circles
 import CovenMerge.DataDependency
 
-/-! Breaking migrations (§17.1). Use the current removal rules
+/-! Breaking migrations (§18.7). Use the current removal rules
 and the ordinary generation delete. Capture
 the whole written row even though the migration had read its setters. -/
 
@@ -63,7 +63,7 @@ def PendingLoss.record : PendingLoss W Row Col → LossRecord W Row Col
   | .frozen r => r.record
 
 /-- Dropping any part of a pending row loss freezes its whole captured row;
-the caller's affected predicate comes from table/column identity (§17.1). -/
+the caller's affected predicate comes from table/column identity (§18.7). -/
 def freezeDropped (affected : LossRecord W Row Col → Bool) :
     PendingLoss W Row Col → PendingLoss W Row Col
   | .active r => if affected r then .frozen (freeze r) else .active r
@@ -88,7 +88,7 @@ theorem drop_preserves_all_pending (affected : LossRecord W Row Col → Bool)
   funext loss
   exact drop_preserves_pending affected loss
 
-/-- §17.1's affected losses, by table and column identity: the migration
+/-- §18.7's affected losses, by table and column identity: the migration
 drops the loss's table, the column of a cell loss, or a column that a
 whole-row loss's values name. `cols` lists the columns values can name. -/
 def droppedBy (cols : List Col) (table : Row → Bool) (column : Row → Col → Bool)

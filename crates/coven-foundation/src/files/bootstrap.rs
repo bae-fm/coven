@@ -65,7 +65,7 @@ impl BootstrapStore {
     }
 
     /// The discarded installation's database, which beginning this reset moved
-    /// aside unchanged (§10). Only its operation journal is read, in place.
+    /// aside unchanged (§19.3). Only its operation journal is read, in place.
     pub fn discarded_database_path(&self, reset: &DeviceReset) -> std::path::PathBuf {
         device_reset::discarded_database(&self.path, reset.old_device)
     }
@@ -153,7 +153,7 @@ pub(super) async fn reserve_bootstrap_directory(
     // A published or interrupted installation may still have a live writer,
     // including one in another process. Refuse it before inspecting its data.
     let _writer = lock::acquire_for_open(&path, id).await?;
-    // A recorded reset continues by moving the discarded copy aside (§10).
+    // A recorded reset continues by moving the discarded copy aside (§19.3).
     if device_reset::read(&path)?.is_some() {
         device_reset::begin(&path, id)?;
     }

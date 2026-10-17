@@ -25,7 +25,7 @@ pub(crate) enum Uploaded {
     /// A paused session remains intact for the next invocation.
     Paused,
     /// The path was already occupied. The caller compares the occupant with
-    /// this length and digest of the source bytes before counting it (§10).
+    /// this length and digest of the source bytes before counting it (§19.3).
     Occupied((u64, coven_crypto::ObjectDigest)),
 }
 

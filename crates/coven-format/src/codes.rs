@@ -1,4 +1,4 @@
-//! Restore and invite codes keep every owned secret buffer zeroizing (§12).
+//! Restore and invite codes keep every owned secret buffer zeroizing (§13).
 
 use crate::error::{bound, require, Error, Rule};
 use crate::value::name;
@@ -12,7 +12,7 @@ const MAX_STORAGE: usize = 16 * 1024;
 const MAX_CODE_BYTES: usize = 18 * 1024;
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-/// A person's keys and the store's identity, name and location (§12.1).
+/// A person's keys and the store's identity, name and location (§13.1).
 #[derive(Debug)]
 pub struct RestoreCode {
     /// The store's id.

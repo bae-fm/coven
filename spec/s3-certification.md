@@ -2,9 +2,9 @@
 
 Suite version 1 passed GCS and R2 on 2026-10-13, and suite version 2 passed
 RustFS and SeaweedFS the same day. Version 2 differs only in recording a
-service that returns no checksum as such, which §4 permits; version 1 failed
+service that returns no checksum as such, which §20.5 permits; version 1 failed
 detection for it. AWS is uncertified because no live account is available.
-Suite version 3 runs the production detection that setup uses (§4); on
+Suite version 3 runs the production detection that setup uses (§20.7); on
 2026-10-13 it reproduced the GCS, R2, RustFS and SeaweedFS entries and passed
 the setup safety check at each, and the full suite 3 passed RustFS. Its output
 is in [Detection](#detection-suite-3).
@@ -37,7 +37,8 @@ three times in each state
 ([Versity Gateway reruns](#versity-gateway-reruns-2026-10-15)).
 The selected entries are in
 [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs); the
-contract and certification procedure are in [§4](coven.md#4-storage-providers-and-access).
+contract and certification procedure are in [§20](coven.md#20-what-coven-needs-from-a-provider)
+and [Appendix E.6](coven.md#e6-running-the-certification-suite).
 
 The output below retains native observations and every requirement result.
 Account endpoints, keys and object names are omitted. `list_end_s` measures
@@ -45,9 +46,11 @@ elapsed time from the successful upload reply through the listing response;
 these samples do not establish the one-hour completeness bound. Every case's
 cleanup passed after deleting its objects and aborting its remaining uploads.
 The bucket-check setting was removed after these runs: every profile tells a
-missing bucket by a zero-entry listing at the missing object's key (§4). Its
+missing bucket by a zero-entry listing at the missing object's key (§20.5). Its
 `selected=` and `bucket_check` values are omitted below; the HEAD Bucket
-observations are kept as recorded.
+observations are kept as recorded. The suite printed each requirement line with
+`§4`, the number the provider contract had before the spec was renumbered; it is
+now §20, and new runs print `§20`. The recorded lines are kept as printed.
 
 ## GCS
 

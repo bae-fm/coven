@@ -18,7 +18,7 @@ pub(crate) struct DropboxStorage {
     api: String,
     content: String,
     single_request_limit: u64,
-    /// One second; the job-status backoff counts in these units (SP waiting).
+    /// One second; the job-status backoff counts in these units (§6.7).
     removal_poll_unit: std::time::Duration,
 }
 impl DropboxStorage {
