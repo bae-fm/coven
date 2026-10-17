@@ -1,6 +1,10 @@
 use super::*;
 use crate::owner_policy::POLICY;
 
+fn check(workspace: &Workspace, policy: &Policy) -> Report {
+    check_packages(workspace, policy, &[]).unwrap()
+}
+
 fn workspace(files: Vec<RustFile>) -> Workspace {
     Workspace {
         files,
@@ -262,4 +266,91 @@ fn unrooted_worker(path: &str, caller: &str) -> Vec<Finding> {
         Finding::new(path, 1, "thread or task spawn outside a composition root",
             "start long-lived work only at a listed root, which must retain and stop it"),
     ]
+}
+
+fn member(directory: &str, name: &str) -> crate::sources::Manifest {
+    crate::sources::Manifest {
+        relative_path: format!("{directory}/Cargo.toml"),
+        table: format!("[package]\nname = {name:?}").parse().unwrap(),
+    }
+}
+
+#[test]
+fn package_selection_uses_manifest_names_and_directory_boundaries() {
+    let mut workspace = workspace(vec![
+        RustFile::fixture(
+            "tools/selected/src/main.rs",
+            "pub(in crate::sources) fn read() {}",
+        ),
+        RustFile::fixture(
+            "tools/selected-other/src/main.rs",
+            "pub(in crate::sources) fn read() {}",
+        ),
+    ]);
+    workspace.manifests = vec![
+        member("tools/selected", "selected-package"),
+        member("tools/selected-other", "other-package"),
+    ];
+    let all = check(&workspace, &Policy::EMPTY);
+    assert_eq!(all.0.len(), 2);
+    let selected =
+        check_packages(&workspace, &Policy::EMPTY, &["selected-package".into()]).unwrap();
+    assert_eq!(selected.0.len(), 1);
+    assert_eq!(selected.0[0].path, "tools/selected/src/main.rs");
+    let both = check_packages(
+        &workspace,
+        &Policy::EMPTY,
+        &["selected-package".into(), "other-package".into()],
+    )
+    .unwrap();
+    assert_eq!(both.0, all.0);
+}
+
+#[test]
+fn package_selection_keeps_dependency_definitions_for_owner_analysis() {
+    let mut workspace = workspace(vec![
+        capability_implementations(),
+        RustFile::fixture(
+            "crates/coven/src/runtime.rs",
+            "use coven_foundation::implementations::*; fn acquire() { let _ = SystemClock; }",
+        ),
+    ]);
+    workspace.manifests = vec![
+        member("crates/coven-foundation", "coven-foundation"),
+        member("crates/coven", "coven"),
+    ];
+    let selected = check_packages(&workspace, &POLICY, &["coven".into()]).unwrap();
+    assert!(selected
+        .lines()
+        .iter()
+        .any(|line| line.contains("outside a composition root")));
+    assert!(!selected
+        .lines()
+        .iter()
+        .any(|line| line.contains("cannot resolve")));
+}
+
+#[test]
+fn package_selection_cannot_hide_an_ambiguous_workspace_graph() {
+    const POLICY: Policy = Policy {
+        capability_types: &["Clock"],
+        ..Policy::EMPTY
+    };
+    let mut workspace = workspace(vec![
+        RustFile::fixture("crates/first/src/lib.rs", "trait Clock {}"),
+        RustFile::fixture("crates/second/src/lib.rs", "struct Clock;"),
+    ]);
+    workspace.manifests = vec![member("crates/second", "second")];
+    let selected = check_packages(&workspace, &POLICY, &["second".into()]).unwrap();
+    assert!(selected
+        .0
+        .iter()
+        .any(|finding| finding.path == "crates/first/src/lib.rs"
+            && finding.message.contains("declared more than once")));
+}
+
+#[test]
+fn an_unknown_package_is_an_error() {
+    let result = check_packages(&workspace(Vec::new()), &Policy::EMPTY, &["missing".into()]);
+    assert!(matches!(result, Err(UnknownPackage(package)) if package == "missing"));
 }

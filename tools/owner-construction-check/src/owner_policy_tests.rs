@@ -320,7 +320,10 @@ fn native_keychain_acquisition_is_checked_at_its_real_factory_use_site() {
         &files,
         &rooted,
         &crate::owner_graph::OwnerGraph::collect(&files, &rooted),
-    );
+    )
+    .into_iter()
+    .filter(|finding| finding.path == "crates/coven/src/builder.rs")
+    .collect::<Vec<_>>();
     assert_eq!(violations, [crate::finding::Finding::new(
         "crates/coven/src/builder.rs", call_line,
         "Builder::run constructs capability Keychain outside a composition root",

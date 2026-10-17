@@ -3,9 +3,9 @@
 //! dependency rules of §20.1, the capability and owner rules of §20.2 —
 //! against the policy file, `owner_policy.rs` — and the conventions of §20.3.
 //!
-//! `owner-construction-check [workspace root]` runs every rule; there is no
-//! way to run fewer. It exits 1 when a rule is broken and 2 when the workspace
-//! can't be read.
+//! `owner-construction-check [workspace root] [package ...]` runs every rule.
+//! Package names limit diagnostics while keeping the complete workspace for
+//! analysis. It exits 1 when a rule is broken and 2 for invalid inputs.
 
 mod capability_boundaries;
 mod capability_construction;
@@ -35,11 +35,17 @@ use std::path::PathBuf;
 
 fn main() {
     let mut arguments = std::env::args_os().skip(1);
-    let root = match (arguments.next(), arguments.next()) {
-        (None, None) => PathBuf::from("."),
-        (Some(root), None) => PathBuf::from(root),
-        _ => {
-            eprintln!("usage: owner-construction-check [workspace root]");
+    let root = match arguments.next() {
+        None => PathBuf::from("."),
+        Some(root) => PathBuf::from(root),
+    };
+    let packages = match arguments
+        .map(|name| name.into_string())
+        .collect::<Result<Vec<_>, _>>()
+    {
+        Ok(packages) => packages,
+        Err(name) => {
+            eprintln!("owner-construction-check: package name is not UTF-8: {name:?}");
             std::process::exit(2);
         }
     };
@@ -50,7 +56,13 @@ fn main() {
             std::process::exit(2);
         }
     };
-    let report = report::check(&workspace, &owner_policy::POLICY);
+    let report = match report::check_packages(&workspace, &owner_policy::POLICY, &packages) {
+        Ok(report) => report,
+        Err(error) => {
+            eprintln!("owner-construction-check: {error}");
+            std::process::exit(2);
+        }
+    };
     if !report.is_empty() {
         for line in report.lines() {
             eprintln!("{line}");

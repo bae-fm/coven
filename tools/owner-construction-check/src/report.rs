@@ -18,8 +18,40 @@ use crate::unique_type_names::find_unique_type_name_violations;
 
 pub(crate) struct Report(pub(crate) Vec<Finding>);
 
+#[derive(Debug, thiserror::Error)]
+#[error("unknown workspace package {0}")]
+pub(crate) struct UnknownPackage(String);
+
+/// Package selection limits diagnostics, never the workspace used to resolve
+/// names and ownership. An empty selection checks the whole workspace.
+pub(crate) fn check_packages(
+    workspace: &Workspace,
+    policy: &Policy,
+    packages: &[String],
+) -> Result<Report, UnknownPackage> {
+    let roots = packages
+        .iter()
+        .map(|package| {
+            workspace
+                .manifests
+                .iter()
+                .find(|manifest| {
+                    manifest
+                        .table
+                        .get("package")
+                        .and_then(|table| table.get("name"))
+                        .and_then(toml::Value::as_str)
+                        == Some(package.as_str())
+                })
+                .map(|manifest| manifest.relative_path.trim_end_matches("Cargo.toml"))
+                .ok_or_else(|| UnknownPackage(package.clone()))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(check_paths(workspace, policy, &roots))
+}
+
 /// The capability and owner rules read crates; conventions also read tools.
-pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Report {
+fn check_paths(workspace: &Workspace, policy: &Policy, roots: &[&str]) -> Report {
     let files = workspace
         .files
         .iter()
@@ -28,7 +60,6 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Report {
         .collect::<Vec<_>>();
     let graph = OwnerGraph::collect(&files, policy);
     let mut findings = Vec::new();
-    findings.extend(find_unique_type_name_violations(&files, policy, &graph));
     findings.extend(find_crate_dependency_violations(workspace, policy));
     findings.extend(find_database_boundary_violations(&files, policy));
     findings.extend(find_owner_dependency_leaks(&files, policy, &graph));
@@ -43,6 +74,14 @@ pub(crate) fn check(workspace: &Workspace, policy: &Policy) -> Report {
         &files, policy, &graph,
     ));
     findings.extend(find_convention_violations(&workspace.files));
+    findings.retain(|finding| {
+        roots.is_empty()
+            || finding.path == "Cargo.toml"
+            || roots.iter().any(|root| finding.path.starts_with(root))
+    });
+    // Ambiguous names invalidate the workspace graph, even when the first
+    // declaration (where the diagnostic points) is outside selected packages.
+    findings.extend(find_unique_type_name_violations(&files, policy, &graph));
     findings.sort();
     findings.dedup();
     Report(findings)
