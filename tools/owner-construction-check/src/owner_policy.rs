@@ -4,6 +4,7 @@
 
 use crate::policy::{Capabilities, Capability, Gate, Policy};
 
+const CONNECTION_CONTROL: &str = "crates/coven/src/storage_control.rs";
 pub(crate) const POLICY: Policy = Policy {
     crate_order: &[
         "coven-foundation",
@@ -511,8 +512,8 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         // A started loop's connection attempts outlive the start call; close
         // stops and awaits them. Stopping releases the client after the pass.
-        ("crates/coven/src/storage.rs", "StorageConnections", "start"),
-        ("crates/coven/src/storage.rs", "StorageConnections", "stop"),
+        (CONNECTION_CONTROL, "StorageConnections", "start"),
+        (CONNECTION_CONTROL, "StorageConnections", "stop"),
         ("crates/coven/src/test_utils.rs", "TestCoven", "builder"),
         (
             "crates/coven/src/test_utils.rs",
@@ -996,7 +997,6 @@ const CAPABILITIES: Capabilities = Capabilities {
         }],
     },
 };
-
 #[cfg(test)]
 #[path = "owner_policy_tests.rs"]
 mod tests;

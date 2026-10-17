@@ -933,3 +933,6 @@ mod credential_changes;
 
 #[path = "storage_s3_tests.rs"]
 mod s3_setup;
+
+#[path = "storage_control_tests.rs"]
+mod control;
