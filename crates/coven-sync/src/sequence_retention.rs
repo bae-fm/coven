@@ -250,6 +250,8 @@ impl SequenceSync {
         ring: &StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<Option<Retention>, SyncError> {
+        // Every introduced audience needs coverage, even without data writes:
+        // its membership and boundary history also crosses the floor.
         let audiences: BTreeSet<_> = std::iter::once(Audience::Store)
             .chain(
                 session

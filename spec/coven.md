@@ -256,7 +256,7 @@ is ready to delete, it is deleted within U + G + P + D, assuming:
 - **P:** a successful conditional floor update within P after the grace period;
 - **D:** deletion within D after that update.
 
-Every audience involved must supply snapshots that cover the prefix and stay
+Every introduced audience must supply snapshots that cover the prefix and stay
 usable through the floor update. Missing coverage holds deletion back. An
 audience with no reader online to supply its snapshot has no deletion deadline
 at all.
@@ -2948,8 +2948,9 @@ Before any floor exists, the sequence starts at slot 1.
 
 - **Every named snapshot covers at least `first - 1`,** so nothing deleted is
   lost.
-- **It names every audience whose deleted history still matters:** the store and
-  every circle, even one the device writing the floor can't open.
+- **It names every introduced audience:** the store and every circle, including
+  idle and deleted circles and those the writer cannot open. Membership and
+  boundary history matter even without write parts.
 - **Snapshots may cover different slots.** The store's might cover 560 and
   Gifts' 520, with `first` at 501.
 - **It carries the original key-copy boxes** needed to open the store key. Their
@@ -3063,9 +3064,8 @@ acknowledge anything. No deletion waits for the device that wrote the slots.
 The rules:
 
 - **Choose announced snapshots that apply** (§16.2, §16.3) and cover the slots to
-  delete. Every audience with a part in a deleted write needs coverage. Missing or
-  unchecked coverage waits, including for a deleted circle whose lost values or
-  source verdicts are still needed.
+  delete for every introduced audience (§16.4). Missing or unchecked coverage
+  waits, even if that audience has no parts in the deleted writes.
 - **A lost race changes nothing.** If the floor changed, the conditional write
   fails. The device reads the current floor and decides again. It never moves
   `first`, or any audience's coverage, backward.
@@ -6324,6 +6324,7 @@ Write-ups explain each model and state its assumptions:
 | *Body.* Keeping queued writes and applying the eligible ones once doesn't make their outcome equal to writes made after the reload installs: an unread reset ignores them, a breaking migration can bring a conflicting key, a newly readable circle changes authorization and key checks | `reset_counterexample`, `breaking_raise_counterexample`, `newly_readable_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §2.1, §16.5 |
 | *Body.* Without checking that a snapshot replaces the reload's selection, switching to the floor's snapshot after deletion can move coverage backward | `unchecked_reselection_goes_backwards` | `proofs/sequence/CovenSequence/ReloadExamples.lean` | §16.5 |
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
+| A floor needs coverage for every introduced audience, even an idle circle; complete coverage places the floor past the covered cut | `floor_requires_every_audience`, `complete_coverage_advances`, `floor_covered`, `idle_audience_blocks_floor` | `proofs/sequence/CovenSequence/Retention.lean` | §16.4, §16.6 |
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | Under any interleaving of storage and device steps, a device can still reach the full state at the end of the sequence | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |

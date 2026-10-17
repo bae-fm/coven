@@ -534,4 +534,9 @@ def keyCase (slots held current : List Json) : Json := json% {
   rejects (json% {"kind":"queueReload","scenario":"reset"})
   rejects (json% {"kind":"queueReload","scenario":"unknown"})
 
+#eval do
+  check (json% {"kind":"floor","coverage":[10,null]}) Json.null
+  check (json% {"kind":"floor","coverage":[10,8]}) (toJson (9 : Nat))
+  check (json% {"kind":"floor","coverage":[]}) Json.null
+
 end SequenceTests

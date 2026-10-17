@@ -3,6 +3,7 @@ import SequenceInput
 import SequenceKeys
 import CovenSequence.Settle
 import CovenSequence.Causality
+import CovenSequence.Retention
 import CovenSequence.Reload
 import CovenSequence.QueueReloadExamples
 import CovenSequence.AccessKeyReplacement
@@ -317,6 +318,7 @@ def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
   | "read" => readRead j
+  | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))
   | "reselect" => readReselect j
   | "apply" => readApply j
   | "past" => readPast j

@@ -354,3 +354,61 @@ async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_late
     assert_eq!(rows(&ana.sync.database).await.len(), 2);
     ana.sync.database.close().await.unwrap();
 }
+
+async fn idle_circle_coverage(compare: bool) {
+    use coven_merge::Audience;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    let store = ana.sync.snapshot(Audience::Store).await.unwrap();
+    let mut coverage = vec![
+        Some(ana.sync.session.lock().await.history.announcements[&store].covers),
+        None,
+    ];
+    for covered in [false, true] {
+        if covered {
+            let slot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+            coverage[1] = Some(ana.sync.session.lock().await.history.announcements[&slot].covers);
+        }
+        group.clock.set(
+            std::time::UNIX_EPOCH
+                + super::GRACE * if covered { 2 } else { 1 }
+                + std::time::Duration::from_secs(if covered { 2 } else { 1 }),
+        );
+        let session = ana.sync.session.lock().await;
+        let proposal = ana
+            .sync
+            .propose_floor(&session, &group.ring, &ana.identity)
+            .await
+            .unwrap();
+        let first = proposal.map(|proposal| match proposal {
+            super::Retention::Floor { first, .. } => first,
+            _ => panic!("expected floor"),
+        });
+        assert_eq!(
+            first.is_some(),
+            covered,
+            "an idle introduced circle still needs coverage"
+        );
+        if compare {
+            let input = serde_json::json!({"kind":"floor","coverage":coverage});
+            assert_eq!(
+                serde_json::json!(first),
+                crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input)
+            );
+        }
+    }
+    ana.database().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn idle_circle_requires_floor_coverage() {
+    idle_circle_coverage(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_audience_coverage_matches_lean() {
+    idle_circle_coverage(true).await;
+}

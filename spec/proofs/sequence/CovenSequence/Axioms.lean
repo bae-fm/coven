@@ -248,3 +248,7 @@ import SequenceApply
 #print axioms CovenSequence.KeyCustody.restart_reuses_saved
 #print axioms CovenSequence.KeyCustody.save_keeps_other
 #print axioms CovenSequence.KeyCustody.journal_depends_only_on_commitment
+#print axioms CovenSequence.Retention.floor_requires_every_audience
+#print axioms CovenSequence.Retention.complete_coverage_advances
+#print axioms CovenSequence.Retention.floor_covered
+#print axioms CovenSequence.Retention.idle_audience_blocks_floor

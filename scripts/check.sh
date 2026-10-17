@@ -282,6 +282,7 @@ proofs() {
         step "Rust / Lean sequence floor checks, authenticated settlement, administration and keys"
         COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-sync --all-features -- --nocapture \
             sequence_sync::tests::differential::sequence_floor_matches_lean \
+            sequence_sync::sequence_retention::tests::sequence_audience_coverage_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_reload_reselection_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_queue_reset_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_queue_breaking_raise_matches_lean \

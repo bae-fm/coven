@@ -195,3 +195,78 @@ theorem claim_floor_check {seq : Nat → Slot S} {st st' : Store S} (g : Good R 
       exact ⟨a, by omega, c⟩)
 
 end CovenSequence
+
+namespace CovenSequence.Retention
+
+/-- One coverage per introduced audience, including the store. Missing any
+snapshot prevents a floor; an empty audience universe supplies no floor. -/
+def floorStart : List (Option Nat) → Option Nat
+  | [] => none
+  | [covered] => covered.map (· + 1)
+  | covered :: next :: rest => do
+    let c ← covered
+    let first ← floorStart (next :: rest)
+    pure (min (c + 1) first)
+
+theorem floor_requires_every_audience (coverage : List (Option Nat))
+    (missing : none ∈ coverage) : floorStart coverage = none := by
+  induction coverage with
+  | nil => simp at missing
+  | cons head tail ih =>
+    cases tail with
+    | nil => simp only [List.mem_singleton] at missing; subst head; rfl
+    | cons next rest =>
+      rcases List.mem_cons.mp missing with eq | later
+      · subst head; rfl
+      · simp [floorStart, ih later]
+
+theorem complete_coverage_advances (coverage : List (Option Nat)) (cut : Nat)
+    (nonempty : coverage ≠ [])
+    (covered : ∀ c ∈ coverage, ∃ n, c = some n ∧ cut ≤ n) :
+    ∃ first, floorStart coverage = some first ∧ cut < first := by
+  induction coverage with
+  | nil => exact False.elim (nonempty rfl)
+  | cons head tail ih =>
+    obtain ⟨c, rfl, hc⟩ := covered head (by simp)
+    cases tail with
+    | nil => exact ⟨c + 1, rfl, by omega⟩
+    | cons next rest =>
+      obtain ⟨first, hf, hc'⟩ := ih (by simp) (fun x hx => covered x (by simp [hx]))
+      exact ⟨min (c + 1) first, by simp [floorStart, hf], by omega⟩
+
+theorem floor_covered (coverage : List (Option Nat)) (first : Nat)
+    (selected : floorStart coverage = some first) :
+    ∀ c ∈ coverage, ∃ n, c = some n ∧ first ≤ n + 1 := by
+  induction coverage generalizing first with
+  | nil => simp [floorStart] at selected
+  | cons head tail ih =>
+    cases head with
+    | none => cases tail <;> simp [floorStart] at selected
+    | some c =>
+      cases tail with
+      | nil =>
+        simp [floorStart] at selected
+        subst first
+        intro x hx
+        simp only [List.mem_singleton] at hx
+        subst x
+        exact ⟨c, rfl, Nat.le_refl _⟩
+      | cons next rest =>
+        cases hs : floorStart (next :: rest) with
+        | none => simp [floorStart, hs] at selected
+        | some f =>
+          simp [floorStart, hs] at selected
+          subst first
+          intro x hx
+          rcases List.mem_cons.mp hx with rfl | ht
+          · exact ⟨c, rfl, by omega⟩
+          · obtain ⟨n, hn, hf⟩ := ih f hs x ht
+            exact ⟨n, hn, by omega⟩
+
+/-- An idle circle still needs a snapshot: its membership and boundaries are
+history even when no data-write part belongs to it. -/
+theorem idle_audience_blocks_floor :
+    floorStart [some 10, none] = none ∧ floorStart [some 10, some 8] = some 9 := by
+  decide
+
+end CovenSequence.Retention

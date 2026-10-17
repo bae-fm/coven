@@ -390,10 +390,16 @@ storage meanwhile:
   that slot was deleted.
 - **Floor write:** retention writes the floor record conditionally and never
   backwards. Each audience's snapshot is validly announced with its body
-  stored, and the first kept slot is covered by every audience's snapshot.
+  stored, and the first kept slot is covered by every introduced audience's
+  snapshot, including idle and deleted circles.
 - **Deletion:** retention then deletes slots below the first kept slot, and
   bodies no floor names and no raise or reset above the floor needs.
 - **Uploads:** a body uploaded to a fresh path.
+
+`floorStart` takes one optional coverage per introduced audience.
+`floor_requires_every_audience` rejects missing coverage;
+`complete_coverage_advances` and `floor_covered` establish its bounds.
+`idle_audience_blocks_floor` checks a circle with no data writes.
 
 There is no separate step that advertises a floor before it takes effect. The
 reader's floor read after its fetch, and the claimant's after its claim, are
@@ -728,6 +734,10 @@ key waits, prepared-body loads and snapshot contents are outside this case.
 ```
 
 Answer: `{"reload":false,"apply":[2,3]}`.
+
+**`floor`** calls `Retention.floorStart`. Its `coverage` array contains one
+number or null per introduced audience. It returns the first kept slot, or
+null when coverage is incomplete: `[10,null]` gives null; `[10,8]` gives 9.
 
 **`reselect`** calls `Reload.reselect`, the decision a reload makes after
 deletion forces it to change its journaled selection (`Reload.lean`).
