@@ -814,17 +814,16 @@ these examples do not require changing the key-selection policy.
 **What the sealing key reveals.** Opening a metadata object gives its
 contents and nothing more. Entries name keys only by id and hash
 (`KeyCommitment`), never by their bytes, so a rotation sealed with a key Ben
-knows tells him the new key's id and hash but not the key. Clock objects carry a
-device id and store-log positions. Positions also carry fingerprints, each naming its own
-audience key ([D8](../format.md#d8-small-frames),
-[D11](../format.md#d11-keys-contexts-and-fingerprints)). A fingerprint is a
+knows tells him the new key's id and hash but not the key. Clock objects in this
+model carry a device id and store-log positions. Positions carry fingerprints,
+each naming its audience key. These objects are outside the
+[sequence protocol](../coven.md#6-syncing-writes). A fingerprint is a
 keyed digest of that audience's app data, so anyone holding its key can test
 a guess about the data. Which key it uses therefore decides what the
 positions envelope reveals.
 
 [`PositionFingerprints`](storelog/CovenStorelog/PositionFingerprints.lean)
-models both readings. The [sync pass](../sync-pass.md#4-observe-keys-and-peers)
-says the fingerprint key is usable, which is C12's exposure-checked selection
+models two readings. One uses C12's exposure-checked selection
 (`usableFingerprint`); the other reading is the newest key the device reads the
 audience with (`readableFingerprint`), the same rule as the envelope's store
 key (`envelope_readable`).
@@ -857,8 +856,7 @@ Carol concurrently to G3, sealed to Ben. Ben opens Ana's positions with the
 store key he holds as a member and tests a Gifts write sealed with G2 against
 the G3 fingerprint (`circle_keys`, `readable_circle_fingerprint_reveals_write`,
 with `circle_history_valid` and `circle_online`). Both have literal Lean
-`example`s. So §11's relaxed envelope rule is safe only with fingerprints under
-usable keys, and §19.1 cites that reading.
+`example`s. This model's relaxed envelope rule requires fingerprints under usable keys.
 
 The model assumes correct encryption and supplies ciphertext availability and
 the reader's key knowledge as inputs. A fingerprint is abstracted to its key
@@ -884,8 +882,7 @@ axiom audit.
 #### Posting positions without a fresh copy observation
 
 [`PositionPublication`](storelog/CovenStorelog/PositionPublication.lean)
-models step 9 of the [sync pass](../sync-pass.md#9-post-changed-positions-and-finish)
-with T164's two rules: an audience with no usable key omits its fingerprint,
+models two rules for positions: an audience with no usable key omits its fingerprint,
 and without a fresh, complete key-copy observation the current positions wait
 while the confirmed post stands. Fresh means less than five minutes after the
 catch-up started, the same window that permits sending (§10). The model

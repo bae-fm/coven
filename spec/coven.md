@@ -98,8 +98,8 @@
 - A thief with storage credentials but not the store key may be hostile.
 - Deletion and withholding can't be prevented. No design can.
   - Coven does not recover lost or damaged storage. The household starts a
-    new store by hand; the reset in §19.3 is for devices that disagree, not
-    for rebuilding storage.
+    new store by hand. The reset in §19.3 replaces an audience
+    from a chosen device; it cannot rebuild storage.
 - Current members trust each other: each has access to the storage and
   isn't hostile on it.
 - An ex-member may keep a copy of the store key they had.
@@ -122,155 +122,96 @@ access cut-off—is assumed, not established for real providers by the models.
 
 ## 3. Guarantees
 
-Proof links below cover the stated model results under their hypotheses, not
-the whole Rust implementation. Cryptographic and environmental assumptions
-are those of [§2](#2-threat-model); the write-ups state their additional limits.
+Proof links establish their named model results under stated assumptions.
+They do not prove the Rust implementation. [§2](#2-threat-model) states the
+cryptographic and environmental assumptions.
 
-- **Availability:** the app reads local data and commits writes with no
-  network; a commit never waits for sync. This does not promise that every
-  write is accepted:
-  - A write into an audience reloading after a reset, a schema raise requiring
-    reload, or skipped history returns `DbError::AudienceReloading` until the
-    reload commits (§14.4, §15, §19.3). This refusal is an exception to write
-    availability, not a wait inside the write call. Other audiences remain
-    writable; an ordinary snapshot reload permits app writes throughout (§15).
-  - `NotInCircle` and `DeletedCircle` refuse writes using the locally applied
-    membership/deletion state; `ReferenceAudience` refuses a reference or move
-    across an unreadable audience, `KeyNotUuid` refuses an invalid independent
-    row key and `InvalidAudience` an invalid root audience cell (§8.5, §14,
-    §14.5–§14.7). None requests a network check at commit.
-  - Schema declarations and migration/version errors gate opening or migration
-    (§8, §14.1, §17). SQL constraints and trigger failures can reject a write;
-    `InternalTable`, `StatementForbidden`, `TriggerTarget` and `FileColumnWrite`
-    enforce local SQL access rules. These are local validity checks, not waits
-    for schema publication. A migrated app's writes can commit before the raise
-    is published; publication gates upload (§17.1).
-  - Self-replacement pauses app writes with `MemberKeysChanging` while this
-    installation confirms its queue and installs its new binding/custody (§10).
-  - `ClockOutOfRange` and `TooLarge` enforce timestamp and representation limits
-    (§6, §7.2). File attachment checks can reject absent/changed sources, wrong
-    sizes or references, missing bytes, invalid file declarations/keys/columns,
-    reused or unreferenced staged files, or replacement of a write-once file
-    ([E3](api.md#e3-writing)). SQLite/disk failures, `TransactionEnded` and
-    rollback failures are local failures too; a closed or unusable installation
-    cannot accept writes (§10, [E1](api.md#e1-opening)). A post-commit file-cleanup
-    failure leaves the committed result returned (§16.6).
-  Uncached file reads require storage (§16.3); administrative calls require
-  online catch-up (§9). The [queue model's `reloading_blocks_commit`](proofs/queue.md#availability-and-commit-refusals)
-  proves the reload gate. Commit has no network precondition in its transition
-  definition, but no separate availability theorem or proof of Rust's lack of
-  network waits is provided.
-- **Confidentiality:** provider and outsiders cannot read encrypted contents.
-  Circle data is readable only by its members. Slot kinds and key-copy routing
-  are clear; names, values, key commitments and operation contents remain
-  encrypted. Content-derived fingerprints and authorship roots are keyed, so
-  storage cannot test guesses without the secret (§11, D11).
-- **Integrity and authorization:** signatures identify authors; each device
-  validates admin actions in the preceding sequence state and writes in their
-  authored view, with the removal cut-off (§9, §10). Only authorized members
-  change membership and at least one admin remains. Cryptographic security
-  is assumed, not proved by Lean.
-- **Atomicity:** a received write and its source verdicts, losses and applied
-  position become visible together. A batched slot advances only after all
-  its writes are realized; no partial batch is published as applied.
-  SQLite transaction atomicity is assumed.
-- **Convergence:** devices applying the same prefix agree on membership and
-  data for the same readable audience and schema. Timestamps still select
-  cell values; generations still defeat concurrent edits to deleted rows.
-  Unique claims and original row owners instead use first slot (§8.5, §8.8).
-  Original-value losses and per-change dependency losses remain available;
-  retirement refusals and reset-ignored parts create no losses (§8, §19.3).
-- **Durability:** local commits and operation journals survive crashes while
-  database and custody remain usable. Queued writes eventually claim a slot
-  with successful prerequisites, storage and fair claim progress. Contention
-  has no fairness bound. Admin work either claims or undoes its recorded
-  artifacts; failed undo stays recorded. Resetting a damaged/stale local
-  installation discards unsent edits and tells the app (§10, §18).
-- **Revocation:** catch up before sending and use the newest usable key for
-  first attempts, with the five-minute send gate (§10, §11). A device blocked
-  on any slot sends nothing and cannot observe later removals until it
-  continues. A writes slot after its device/member removal or credential
-  replacement has no effects; its refusal is recorded. There is no grace
-  for those late claims. Prior attempts retain their inner bytes and keys;
-  provider access cut-off remains separate. Later in-flight key copies keep
-  §11's residual disclosure window. Leaving only a circle retains §14.6's
-  admission of previously authored circle edits.
-- **Bounded storage:** announced coverage and a grace period permit deleting
-  the covered sequence prefix (§15), without acknowledgements or waiting for
-  absent devices. Returning devices reload and keep eligible unsent writes.
-  With snapshot service bounded by U, grace G, maintenance spacing P and
-  deletion service D, a ready prefix can be reclaimed within U+G+P+D, provided
-  every relevant audience supplies coverage and the floor updates succeed.
-  This is a conditional service bound, not a byte bound on live rows, retained
-  losses, authentication evidence, or an unbounded write rate. An audience
-  without a reader to supply missing coverage has no such deadline.
+- **Local reads and writes:** app commits need no network and never wait for sync.
+  Uncached file reads need storage (§16.3); admin operations need online catch-up (§9).
+- A reset, breaking raise or skipped history can require an audience reload.
+  That audience refuses writes with `AudienceReloading` until reload commits (§15).
+- Other audiences remain writable. Ordinary snapshot reloads permit app writes throughout.
+  The [queue model's `reloading_blocks_commit`](proofs/queue.md#availability-and-commit-refusals) proves the reload gate.
+- Membership, audience and row-key checks use locally applied state (§8.5, §14).
+  They can refuse an app write, but never request a network check at commit.
+- Schema and migration checks can refuse opening or migration (§17).
+  SQL constraints, triggers and coven's SQL access rules can refuse local writes (§5, §8).
+- A migrated app can commit writes before its raise claims a slot.
+  Those writes wait in its queue (§17.1).
+- Self-replacement temporarily refuses app writes with `MemberKeysChanging` (§10).
+  Timestamp, representation and file checks can also refuse writes (§6, §7.2, [E3](api.md#e3-writing)).
+- Database, disk and rollback failures retain their causes.
+  A closed or unusable installation cannot accept writes ([E1](api.md#e1-opening)).
+- File cleanup failure after commit leaves the committed result returned (§16.6).
+  No proof establishes that the Rust implementation avoids every network wait.
+- **Confidentiality:** the provider and outsiders cannot read encrypted contents.
+  Circle data is readable only by its members (§11).
+- Slot kinds and key-copy routing are clear. Names, values, key commitments
+  and operation contents stay encrypted. Keyed authorship roots prevent guessing values without the secret (D11).
+- **Authorization:** signatures identify authors. Admin actions use the preceding
+  slot's state; writes use their authored view and the removal cut-off (§9, §10).
+- Only authorized members change membership, and at least one admin remains.
+  Lean assumes cryptographic security; it does not prove it.
+- **Atomicity:** a slot's effects and applied number commit together (§6).
+  Its verdicts and losses cannot become visible with partial progress. SQLite atomicity is assumed.
+- **Convergence:** one applied prefix determines membership and each readable
+  audience's data at a given schema. Timestamps select cell values; generations defeat edits concurrent with deletion.
+- First slot selects unique-value winners and original row owners (§8.5, §8.8).
+  Original-value and dependency losses remain available. Removal refusals and reset-ignored parts create no losses (§8, §19.3).
+- **Durability:** commits and operation journals survive crashes while the database
+  and custody remain usable. Resetting an unusable installation reports discarded unsent edits (§10).
+- Queued writes eventually claim with successful prerequisites, storage and fair
+  claim progress. Contention has no fairness bound.
+- Admin work either claims or undoes its recorded artifacts.
+  Failed undo remains journaled and reported (§18).
+- **Revocation:** catch up before sending. First attempts use the newest usable key (§10, §11).
+  A blocked slot stops sends and prevents reading later removals.
+- Writes after device or member removal, or credential replacement, have no effects.
+  Record their refusal; there is no grace period for late claims (§10).
+- Prior attempts retain their inner bytes and keys. Provider cut-off remains separate;
+  in-flight key copies retain §11's residual disclosure window.
+- Leaving a circle still permits previously authored circle edits (§14.6).
+- **Storage bounds:** snapshot coverage and grace permit deletion without waiting
+  for absent devices. Returning devices reload and retain eligible unsent writes (§15).
+- A ready prefix can be reclaimed within U+G+P+D: snapshot service U, grace G,
+  maintenance spacing P and deletion service D.
+- That bound requires coverage for every relevant audience and successful floor updates.
+  An audience without a reader to supply coverage has no deletion deadline.
+- The bound does not limit live rows, losses, authentication evidence or an unbounded write rate.
   [proof pending: bounded snapshot and deletion service bounds retained sequence history without absent-device acknowledgements]
-- **Nothing waits silently:** a blocked slot, operation, file or cleanup
-  obligation names its first unmet condition in the pending list (§19.1).
-  A sequence block stops later admin reads as well as data reads, and all
-  sends. This reduces progress compared with independent streams; it does
-  not reduce local reads or otherwise eligible app commits.
+- **Visible failures:** a blocked slot, operation, file or cleanup names its
+  first unmet condition to the local app (§19.1). Eligible local work continues.
 
-The sequence-specific claims above are obligations of the sequence model;
-its citations are marked where the rules are specified (§6, §9, §10, §15,
-§18). Existing merge and conversion proofs cover their stated abstract
-inputs, not a proof of this storage protocol or its Rust implementation.
+Sequence claims awaiting proofs are marked at their rules (§6, §9, §10, §15, §18).
+Existing merge and conversion proofs cover their stated inputs, not this storage protocol.
 
 ### 3.1 IO bounds
 
-[One sync pass](sync-pass.md) specifies the request order. Stores target
-1–20 people, with a median of 4–5; throughput beyond that is not a goal.
-A steady store has unchanged data and local work, retained checked inputs,
-usable credentials and no due retry or retention work.
+[One sync pass](sync-pass.md#counting-a-pass) counts the requests for each kind of work.
 
-- Count actual provider requests, including pages, metadata, redirects,
-  upload sessions, parts and SDK retries. Report discovery metadata, new
-  object bytes and file bytes separately.
-- Separate discovery D, objects O, transfer parts/ranges F, publications P,
-  deletions X, provider access A, other metadata/session requests M and
-  failed/repeated requests E. No request belongs to two terms.
-  With at most two prefix reads and one remainder stream per object,
-  `R <= D + 3*O + F + P + X + A + M + E`.
-- A warm idle pass probes one next slot, checks the floor's revision and
-  reads the status revisions of known active devices: `D = 2 + N` logical
-  observations for N devices, including this one. Charge every provider
-  metadata lookup separately. There is no listing and no history-dependent
-  request count. Unchanged objects need no body download or publication.
-- Far-behind end finding takes logarithmic existence probes, then the
-  required suffix reads or a checkpoint reload. Application still visits
-  each required slot. Claim collisions add the occupied-slot read and each
-  retry; no constant per-pass bound hides contention.
-- Reuse checked immutable bytes and facts across consumers and passes.
-  Replaceable status/floor bodies are read once per observed revision;
-  retained file chunks once per range. Failed partial reads resume missing
-  bytes where supported. Explicit eviction is charged separately.
-- Every automatic wait uses 1, 2, 4, …, 256, then 300 seconds, monotonically;
-  provider `Retry-After` may lengthen it. Pass completion never resets the
-  delay. Persist and restore deadlines under §16.5. SDK retries share it.
-  [The waiting model](proofs/io.md#requests-and-retained-observations) gives
-  its request-rate assumptions and limits.
-- Unlock each custody once per open handle. Warm passes perform no unlock
-  or passphrase derivation; persist changed keys with that session.
-- Retain decoded sequence state between passes. Decode each arriving slot
-  once, fold it once, and retain authenticated historical views needed by
-  old writes. An idle pass performs no full-history decoding or rebuilding.
-- An idle pass takes no database writer and commits no durable transaction.
-  Never hold the writer across network, custody, decoding, timers or file IO.
-  Advance state only in transactions doing actual work; completion status
-  is an in-memory notification.
-- Index slot identity, write identity and audience, snapshot coverage,
-  publication receipts, peer revisions, key introductions/copies, file
-  references, pending subjects and journals. Eager-file work selects changed
-  references; cache budgeting uses maintained totals, not history scans.
-- Tests count native requests and bytes, custody derivations, decodes,
-  writer holds and durable commits. Exercise reopening, eviction, interrupted
-  streams, contention, blocked slots, provider throttling and floor changes.
-  More unchanged history or files must not increase an idle pass's work.
+- An idle pass makes 2 requests: read the next slot, which is absent, and read
+  the floor. It lists nothing and writes nothing.
+- Count provider metadata, redirects, pages, upload parts and retries too.
+  Report these extra requests separately from the two reads above.
+- A complete object needs at most two prefix reads and one remaining-body
+  stream. Charge native requests separately when a provider splits that stream.
+- Finding the end from far behind takes logarithmic existence checks.
+  Applying the missing history still reads each needed slot, or reloads from snapshots.
+- Contention adds creates, occupied-slot reads and retries. There is no bound
+  on how many times a device can lose a claim.
+- More unchanged history or files must not increase an idle pass's work.
+  An idle pass does no full-history decoding and commits no database transaction.
+- Unlock custody once per open handle. Sync passes do not repeat passphrase derivation.
+- Never hold the database writer across network requests, custody calls,
+  decoding, timers or file IO.
+- Automatic retries follow the persisted delays in [§16.5](#165-uploads-and-deletion).
+  Completing a pass does not reset a delay.
+- Tests count requests, bytes, custody derivations, decoding and durable commits.
+  They cover reopening, contention, interrupted reads, blocked slots and floor changes.
 
-Ana's quiet store with three active devices needs five logical observations:
-one next-slot miss, the floor revision and three status revisions. Adding
-20,000 old files adds no idle request or body byte. Provider-specific status
-lookups still count; a new note's slot and changed status count separately.
+Ana's idle store needs the same two reads with three devices or twenty.
+Receiving Ben's note adds its slot read.
+
 ## 4. Storage providers and access
 
 - A store lives on one provider: S3, Dropbox, OneDrive, or iCloud through
@@ -293,10 +234,8 @@ lookups still count; a new note's slot and changed status count separately.
     [ifServerRecordUnchanged](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/recordsavepolicy/ifserverrecordunchanged).
     An occupied name returns `CKError.serverRecordChanged`, mapped to
     `AlreadyExists`; coven never merges or overwrites that immutable record.
-    Status objects instead use
-    [allKeys](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/recordsavepolicy/allkeys)
-    for replacement; conditional replacement retains the fetched change tag
-    and uses `ifServerRecordUnchanged`.
+    Replacing the floor retains its fetched change tag and uses
+    `ifServerRecordUnchanged`.
   - The publication record's server-assigned
     [creationDate](https://developer.apple.com/documentation/cloudkit/ckrecord/creationdate)
     is an immutable object's complete-publication time. Replacements use
@@ -310,8 +249,8 @@ lookups still count; a new note's slot and changed status count separately.
     string fields `directory1` through `directory4` for its existing ancestor
     directories, without trailing slashes: store, store/kind, store/kind/scope,
     and the snapshot writer directory. A prefix selects the field at its depth,
-    so a scoped object listing uses one equality query. Sequence and peer
-    discovery use exact record ids, not queries. Object metadata queries
+    so a scoped object listing uses one equality query. Sequence
+    discovery uses exact record ids, not queries. Object metadata queries
     request only `path` and `size`, exclude assets and follow every
     [CKQueryOperation cursor](https://developer.apple.com/documentation/cloudkit/ckqueryoperation).
     Exact-id fetches establish status; only `CKError.unknownItem` means absent,
@@ -401,10 +340,10 @@ lookups still count; a new note's slot and changed status count separately.
     whether reads request checksums. Each behavior is implemented once in the
     adapter; apps do not supply capability flags or service branches.
   - A location's profile is one of three: none, selecting by endpoint host; a
-    catalogued service's name; or a custom profile carrying its own complete
+    known service's name; or a custom profile carrying its own complete
     `S3Settings`. The location records it as given, so restore codes and every
     other device use identical behavior.
-  - Catalogued services are const entries in the adapter's
+  - Known services are const entries in the adapter's
     [`s3_profile.rs`](../crates/coven-storage/src/providers/s3_profile.rs):
     name, endpoint host or host suffix (none for a self-hosted service), the
     settings they fill, the finest scope a member key can have (below), the
@@ -418,12 +357,12 @@ lookups still count; a new note's slot and changed status count separately.
     include the separating dot and require a preceding host component.
   - Self-hosted services have arbitrary endpoints, so no hostname identifies
     them. A named profile is used as is. A name or custom profile never
-    overrides a catalogued host: such an endpoint admits only its own
+    overrides a known host: such an endpoint admits only its own
     profile's name. Without an endpoint, requests reach AWS, so only AWS may
-    be named and no custom profile is accepted. Catalogued hosts require
+    be named and no custom profile is accepted. Known hosts require
     `https`; other endpoints may use plain `http`, as a self-hosted server on
     the same machine or a private network can. A contradicting name or custom
-    profile, or a plain-`http` catalogued host, fails validation with
+    profile, or a plain-`http` known host, fails validation with
     `InvalidConfiguration` before any request. The self-hosted profiles are
     **RustFS**, **SeaweedFS**, **Ceph RGW** and **Versity Gateway**; no
     hostname selects them.
@@ -456,7 +395,7 @@ lookups still count; a new note's slot and changed status count separately.
       stores.
     - E.g. Ana creates Household in the R2 bucket `household`. Creating
       Garden in that bucket is refused; Garden gets the bucket `garden`.
-  - An endpoint that matches no catalogued host and names no profile has no
+  - An endpoint that matches no known host and names no profile has no
     AWS fallback. Setup detects its behaviors (below) and records them as the
     location's custom profile; the returned and recorded location carries
     those settings. Connecting such a location outside setup fails with
@@ -474,7 +413,7 @@ lookups still count; a new note's slot and changed status count separately.
     never reaches a published-object listing. Detection deletes its objects
     and aborts its multipart uploads afterwards, also after a failed probe;
     a failed cleanup fails the call, retaining both causes. The result is the
-    detected `S3Settings` and one typed observation per probe, each saying
+    detected `S3Settings` and one typed result per probe, each saying
     whether the behavior held, with a native outcome that names no key,
     endpoint or object. The probes:
     - both signers, with a read-only zero-entry listing;
@@ -503,7 +442,7 @@ lookups still count; a new note's slot and changed status count separately.
     probe object. Both stop after 40 pauses, 10 seconds of waiting, beyond the
     worst listing lag measured (5.5 seconds): a marker that never advances
     fails detection, and a listing that never completes is a failed listing
-    observation. Pauses use the store's clock capability. No other probe
+    result. Pauses use the store's clock capability. No other probe
     waits.
   - Detected settings take the first enforced single-PUT condition in the
     order above; conditional completion when it is enforced, unfinished
@@ -524,7 +463,7 @@ lookups still count; a new note's slot and changed status count separately.
     profile's separate passing date and suite version; otherwise setup returns
     `StorageSetupError::S3VersioningUnsupported`. Detected and custom settings
     never inherit this certification, even when their settings equal a
-    catalogued profile's. Coven addresses current objects; it does not choose
+    known profile's. Coven addresses current objects; it does not choose
     older versions to repair an incorrect publication.
     A versioned Ceph RGW 20.2.4 bucket accepted concurrent conditional creates
     as separate versions: both writers received success while readers saw only
@@ -544,7 +483,7 @@ lookups still count; a new note's slot and changed status count separately.
     Hosted R2 has no object versioning and
     [no versioning API](https://developers.cloudflare.com/r2/api/s3/api/): its documented
     absence, together with its refused read, is `Unavailable`, not an unknown
-    owner setting. This exception requires R2's catalogued hostname, not an
+    owner setting. This exception requires R2's known hostname, not an
     R2 name at an arbitrary endpoint.
   - **Every S3 setup checks safety against the server** before the provider
     check below, whatever selected its settings: detection runs, and the
@@ -560,13 +499,13 @@ lookups still count; a new note's slot and changed status count separately.
       complete publication (conditional completion with a start timestamp,
       or a copy not dated later than its source), or the recorded multipart
       timestamp contradicts the observed one;
-    - `Behavior`: another setting contradicts an observation: a signer the
+    - `Behavior`: another setting contradicts a result: a signer the
       service refused, a listing protocol that failed or disagreed, no
       checksum policy where one was returned, stated scope where scope was
       missing, checksum requests the service refused, generation revision or
       Google headers without GCS's headers, S3 headers where GCS's arrived,
       or a refused zero-entry listing at a missing object's key.
-    A manual override contradicting the observations is refused this way and
+    A manual override contradicting the results is refused this way and
     never silently accepted. Where no setting in the menu makes a check hold,
     no override can either: a server that accepts writes to an occupied
     name, e.g. Garage, is refused at setup with `CreateOnce`.
@@ -638,10 +577,10 @@ lookups still count; a new note's slot and changed status count separately.
     profile name written there cannot be silently ignored.
     The ignored test runs production detection from the location's settings,
     or the plain S3 settings where detection must supply them, and prints
-    every observation. A detected entry that fails the setup safety
+    every result. A detected entry that fails the setup safety
     check above prints as uncertified with its first failed check. From suite
     version 5 a named profile's own entry is the candidate, checked against
-    those observations; otherwise the detected settings are. Sequential probes
+    those results; otherwise the detected settings are. Sequential probes
     cannot show that a race needs copy publication, so detection alone would
     race SeaweedFS's conditional completion instead of its copy, and
     detection never chooses copy publication for every object. A profile
@@ -661,10 +600,10 @@ lookups still count; a new note's slot and changed status count separately.
     (`AlreadyExists` or `Conflict`), and the stored bytes must be the winner's.
     Two-writer checks run 200 trials each; eight-writer checks run 50 each.
     A non-overlapping trial fails certification too. Replacement races are
-    required, not observations exempted from failure. A service that
+    required, not results exempted from failure. A service that
     returns no checksum on any probe, even with checksum mode, is recorded as
     returning none: §4 permits a missing checksum, so suite version 2 accepts
-    that observation where version 1 failed detection. Each §4 requirement
+    that result where version 1 failed detection. Each §4 requirement
     prints PASS or FAIL, and cleanup removes the run's objects, temporaries
     and uploads even after a failed assertion, including object versions and
     delete markers in a versioned run. Certification needs permission to list
@@ -695,7 +634,6 @@ lookups still count; a new note's slot and changed status count separately.
     bytes or publication time. Conditional replacements use the observed
     generation in `x-goog-if-generation-match`; each replacement's revision
     is its new `x-goog-generation`, including equal-byte replacements.
-    Unconditional replacement remains available for a device's own status.
     Requests use Google V4 HMAC authentication and `x-goog-*` headers: GCS
     refuses requests mixing Google and AWS extension headers.
   - GCS XML multipart initiation rejects generation conditions and completion
@@ -810,7 +748,7 @@ lookups still count; a new note's slot and changed status count separately.
     and cannot complete or copy again. A replacement session starts only after
     cleanup succeeds, at offset zero with the same path, size and fixed bytes.
     An occupied destination still requires complete-byte comparison (§10).
-  - Every S3 location, catalogued, named, custom or detected, runs the setup
+  - Every S3 location, known, named, custom or detected, runs the setup
     safety check above and every provider check below, including
     `CreateOnce`. Accepting a second create is a protocol failure, even if the
     service claims compatibility; certification does not exempt a connection
@@ -897,7 +835,7 @@ lookups still count; a new note's slot and changed status count separately.
   root followed by client-side filtering. S3 uses the exact key prefix;
   CloudKit queries the exact indexed ancestor directory in the selected zone.
   Folder ids stay with the connection.
-  Failed discovery never installs a partial catalog as complete.
+  A failed listing cannot establish that all objects were found.
 
   - S3 and Dropbox downloads include their metadata without a preliminary
     status request. OneDrive fetches exact metadata before downloading. Its
@@ -915,11 +853,11 @@ lookups still count; a new note's slot and changed status count separately.
     outside the requested scope, missing metadata, or a failed or
     incomplete page.
 - Listings may lag publication. Their measured lag remains a provider
-  observation/setup fact, not a sequence correctness rule. Sequence,
+  setup measurement, not a sequence correctness rule. Sequence,
   snapshot and member discovery use exact paths and authenticated slots.
   Exact reads and status must reflect completed publication. A provider
   error is never absence. Destructive orphan scans require a complete
-  post-cut-off observation, independent of ordinary listing lag (§16.5).
+  post-cut-off listing, independent of ordinary listing lag (§16.5).
 - Create-once is required on every supported provider, under simultaneous
   claims as well as retries. At most one distinct byte string may occupy a
   slot, including multipart publication. `AlreadyExists` can reach the
@@ -936,7 +874,7 @@ lookups still count; a new note's slot and changed status count separately.
     S3 listings use that same precision: truncate fractional XML listing times
     to whole seconds. GCS listings include milliseconds while HEAD and GET
     omit them; keeping both representations would give one immutable publication
-    different times depending on the observation call.
+    different times depending on the read.
   - Dropbox metadata: `server_modified`, in whole seconds, so
     `δ = 1 second`; never use `client_modified`
     ([timestamp format](https://github.com/dropbox/dropbox-api-spec/blob/main/common.stone)).
@@ -972,7 +910,7 @@ lookups still count; a new note's slot and changed status count separately.
   CRC32C is a whole-object checksum. R2's unscoped checksum is absent from
   coven's metadata; its scope is never guessed. RustFS, SeaweedFS and Ceph RGW return
   none; a checksum returned under their profile, scoped or not, contradicts
-  the certified observation and fails as a protocol error rather than being
+  the certified result and fails as a protocol error rather than being
   used. Metadata and downloaded bytes must describe the same revision:
   OneDrive rechecks replaceable metadata after download and fails if it
   changed.
@@ -981,18 +919,16 @@ lookups still count; a new note's slot and changed status count separately.
   Count any missing-container check separately. S3 HEAD's
   bodyless 404 requires a bucket check: every S3 service uses a zero-entry
   listing with the exact object's key as its prefix, under the configured
-  prefix and store id. Catalogued profiles use ListObjectsV2; a custom V1
+  prefix and store id. Known profiles use ListObjectsV2; a custom V1
   profile uses ListObjects. Where the service allows it, a member key is
   scoped to the store's prefix; HEAD Bucket requires bucket-list permission
   without a prefix condition, which that key does not grant. Object absence
   comes from the exact HEAD, never from the listing. A miss remains two requests: one HEAD and one listing.
   A revision proves freshness, not byte
   equality: occupied immutable paths still require §10's complete comparison.
-  - Ben replaces his status twice within one storage clock tick with
-    equal-length bytes. Ana notices the new revision and reads the new post.
 - Storage times come from the provider. Immutable objects retain their first
-  complete publication time; replacing status or the floor records the
-  replacement time. These times describe provider observations, not slot
+  complete publication time; replacing the floor records the
+  replacement time. These times describe provider results, not slot
   order or a deadline for accepting writes or admin entries.
 - Native publication gaps remain visible in the profiles and certification.
   GCS conditional-copy timestamps and R2 single-PUT and multipart timestamps
@@ -1096,7 +1032,7 @@ lookups still count; a new note's slot and changed status count separately.
     a failure reports only its exit status, since CLI text can echo
     configuration. Guided steps show the bucket, the store's prefix and the
     member policy below, filled in.
-  - Each catalogued profile's const entry names its key minter, function
+  - Each known profile's const entry names its key minter, function
     pointers that make, roll back, delete and read a member key with admin
     access, and list a store's keys. AWS uses IAM at its global endpoint,
     signing for `us-east-1`: a user named with the key name below, under the
@@ -1230,7 +1166,6 @@ lookups still count; a new note's slot and changed status count separately.
     after a restart
     the step waits with `PendingReason::AdminAccessRequired` until a retry
     supplies admin access again.
-- Status lives at `<store>/status/<device>` ([§6](#6-syncing-writes)).
 - Sealed key copies occupy sequence slots with clear routing (§11, D9).
 
 ## 5. Local database
@@ -1289,107 +1224,71 @@ lookups still count; a new note's slot and changed status count separately.
 
 ## 6. Syncing writes
 
-A pass reads forward, applies the slots, sends by claiming slots, and performs
-state-driven effects. [One sync pass](sync-pass.md) gives the request order.
+A *slot* is one create-once object in the store's sequence:
+`<store>/seq/1`, `seq/2`, `seq/3`, and so on.
+A *claim* is an attempt to create the next slot.
+The slot holds an admin entry, writes, a key copy, or a snapshot announcement.
+The store log means the admin entries in this sequence.
 
-- One sequence belongs to the store: `<store>/seq/1`, `seq/2`, `seq/3`, … .
-  Each slot is created once. Its kind is an admin entry, writes, a key copy,
-  or a snapshot announcement. The store log is the admin entries in this
-  sequence, not a separate stream.
-- A device applies slots strictly in number order. Applying a slot, its
-  effects, source verdicts, pending records and the consumed position commit
-  together. A failure leaves the preceding state and position intact.
-  [proof pending: applying a sequence prefix preserves causal order and atomic progress]
-- A slot this device cannot apply stops it there with its named cause:
-  `UpdateRequired`, `KeyUnavailable`, a failed read, or a permanent refusal.
-  It reads no later slot and sends nothing, including retries, files,
-  operations and status reports. Later admin entries are unavailable too.
-  Local reads and eligible app writes remain available.
-- An audience part this member is not entitled to read is consumed without
-  opening it (§14.4). This is its specified disposition, not a skipped slot.
-  A missing key for a readable part blocks the whole slot. The removal
-  cut-off in §10 also consumes a writes slot without effects and records why.
-- A write keeps its identity `(device, number)` from local commit. These
-  numbers order that device's writes and name sources before publication;
-  they are not storage paths or discovery cursors.
-- Each pass fixes one batch of this device's queued, sendable writes, in
-  write-number order, and claims one slot for it. Later app commits wait
-  for the next pass. A schema publication gate can end the sendable prefix
-  (§17.1); a pass with no sendable writes claims no writes slot.
-  The batch has no size cap: large slots upload in parts like other objects.
-  Each individual plaintext write still must fit SQLite's 1 GB value limit;
-  otherwise its local commit returns `DbError::TooLarge`.
-- A write records `read_through`, the last fully applied slot when it was
-  authored. Its own earlier writes are implicit reads. Catch-up and claim
-  retries never change that record, its timestamp, schema or data sources.
-- Before its first attempt, record the write's format and sealing keys.
-  Use the newest usable key for each current audience (§11); a departed
-  circle member's pre-removal parts use a key already held (§14.6).
-  Its stable signing identity comes from its authored view. Member-key
-  replacement prevents sending records signed with the old credential (§10).
-  Deterministic inner sealing preserves these bytes across slot attempts
-  (D9). Conversion never rewrites an upload record (§17.1).
-- To publish after applying through n, record the candidate slot n+1 and its
-  exact bytes before the create-once request. Before confirming success,
-  check the floor revision as below, then apply it as any received slot.
-  On `AlreadyExists`, read n+1 and compare its complete bytes
-  with this attempt's bytes. Equal means this attempt succeeded, including
-  a lost success reply reported as a refusal. A failed comparison stays pending.
-- Different bytes mean another device claimed that slot. Apply it and read
-  forward through the new slots; revalidate the waiting work, then try the
-  first empty slot. Reseal the outer envelope for the new path; retrying the
-  same slot uses the same bytes. A shared-slot collision is not evidence of
-  a copied device identity. §10 checks the authenticated publication identity.
-  [proof pending: create-once claims and byte comparison settle one winner without duplicate publication]
-- Never abandon an uncertain claim and publish it elsewhere: first settle
-  its recorded destination. After retention, the checkpoint's authenticated
-  publication receipt settles it by the digest of the complete attempted
-  bytes (§15, D7). An unresolved receipt blocks sending. If that slot’s
-  authenticated receipt names another publication, this attempt did not win;
-  revalidate before trying the current end. A checkpoint must prove absence
-  of this publication through its complete receipt section, not a failed lookup.
-- Remove queued writes only in the transaction consuming their confirmed
-  slot. A locally visible queued write is not applied twice. Apply the
-  confirmed prefix with the remaining local queue on top, using the same
-  source and admission rules. First-slot claims are provisional locally
-  until publication (§8.5, §8.8).
-- Discover the end by exact reads from the last known slot. When far behind,
-  existence probes at n+1, n+2, n+4, … bracket the end; narrow that interval.
-  Probes do not apply anything or authorize skipping. Read every required
-  slot in order, or load a covering checkpoint under §15.
-- On a miss, read `<store>/floor`. If its checkpoint covers the missing
-  slot, reload. Otherwise a miss immediately after the known end means no
-  new slot at that observation. A miss below a known later slot is damage
-  unless the floor supplies replacement coverage. Errors are never misses.
-  Neither writer discovery nor sequence discovery uses listing.
-- After reading a batch, and after any claim response, check the floor’s
-  revision before committing or confirming; the end-of-read floor check
-  is reused when it follows every read being committed. Its covered prefix
-  is authoritative even before physical deletion finishes. Reload instead
-  of applying bytes now covered by that checkpoint. This closes a race in
-  which deletion and a delayed create reuse a physical path.
-  A late create cannot replace the original claim retained in the checkpoint.
-  Any recreated bytes at that covered path are prefix-cleanup work under
-  §15, recorded before the attempt settles. If the receipt names another
-  claim, revalidate this still-unclaimed work at the current end. Failed
-  cleanup retains its obligation. Neither physical recreation nor its
-  deletion changes the original logical claim; no entry is dropped.
-- Keep complete received bytes and checked facts before advancing the
-  applied cursor. A blocked slot reuses them after its prerequisite changes.
-  Read-ahead never applies past a block; after discovering one, stop scheduling
-  later reads. Requests already in flight are charged and retained.
-- Agreement and peer reports use one replaceable status object per device,
-  `<store>/status/<device>` (D8). Read known devices by exact path, using the
-  membership in the applied prefix. Status never discovers slots or gates
-  retention. It carries one applied slot, schema and fingerprints for exactly
-  that published state, and this device's reports. Unclaimed local writes
-  prevent a fingerprint of that state; omit it until comparable.
-  Replace a status only when its canonical contents change. A blocked
-  sequence records its cause locally and cannot publish the report until
-  sending is allowed again.
-- Ana and Ben both try slot 41. Ana's bytes are stored, but her reply is lost.
-  Both receive `AlreadyExists`: Ana reads equal bytes and confirms 41; Ben
-  applies 41 and tries 42. Carol reads 41 then 42, regardless of their clocks.
+- A device applies slots in order. It claims n+1 only after applying 1 through n.
+  [One sync pass](sync-pass.md) gives the read, apply, claim and effects order.
+- Applying a slot commits its changes and applied slot number in one transaction.
+  Failure leaves both at the preceding slot.
+  [proof pending: applying slots in order preserves causality and commits progress atomically]
+- A slot that cannot apply stops the device there. It reports `UpdateRequired`,
+  `KeyUnavailable`, the read failure, or a `Refused` reason, and sends nothing.
+- Ben's laptop cannot open its key copy at slot 41. It applies nothing after
+  41 and sends nothing until it can open that copy.
+- Parts outside this member's audiences need not be opened ([§14.4](#144-writes)).
+  A readable part missing its key stops the whole slot.
+- Writes cut off by removal or key replacement are consumed without effects
+  and record `WritesRefused` ([§10](#10-device-identity)). They do not stop later slots.
+- A write keeps its `(device, number)` identity from local commit.
+  Numbers order that device's writes; they are not storage paths.
+- Each pass claims at most one writes slot, containing its device's queued,
+  sendable writes in number order. App writes committed after capture wait for the next pass.
+- A schema raise can leave later writes waiting ([§17.1](#171-host-application)).
+  A pass with no sendable writes claims no writes slot.
+- A writes slot has no size cap. Large slots upload in parts.
+  Each individual plaintext write must fit SQLite's 1 GB value limit; otherwise commit returns `DbError::TooLarge`.
+- Each write records `read_through`: the last applied slot when it was authored.
+  Its own earlier writes are implicit reads. Catch-up never changes this record.
+- Before first sending a write, record its format and sealing keys.
+  [§11](#11-keys) chooses the keys; [D9](format.md#d9-sealed-objects) fixes its signed inner bytes across retries.
+- Remove queued writes only when their claim is settled and their consumed
+  state commits. Apply the remaining local queue over that state without applying any write twice.
+
+### Settling a claim
+
+A *journal* is the device's durable record of unfinished work.
+Before each create, it records the slot path and exact bytes.
+An operation keeps this record in its journal; a writes queue keeps it with its batch.
+
+- On reopening or retrying, settle this claim before validating again, undoing,
+  or trying another slot. Read its recorded slot and compare all bytes.
+- Equal bytes mean the claim landed, even if the provider replied `AlreadyExists`.
+  Different bytes mean contention. A failed read leaves the claim unsettled.
+- If the slot is absent and the floor has not passed it, retry the same
+  path with the same bytes. Absence does not cancel a request still in flight.
+- After a create lands, read the floor before confirming the claim.
+  If the floor has passed its slot, that create is void.
+- The floor's snapshots settle an earlier attempt whose slot was deleted:
+  a writes claim landed if the snapshot's last-write number includes all its writes ([§15](#15-snapshots)).
+- For an admin claim below the floor, inspect the loaded state for its change.
+  For example, a rotation is satisfied when its new key is current.
+- If the writes are absent or the admin change is not present, read forward
+  and validate again before claiming at the current end.
+- Copies and announcements below the floor are settled from their signed
+  records in the store snapshot. They need no separate claim identity.
+- Any bytes recreated below the floor are deleted as recorded cleanup.
+  Failure retains that obligation; those bytes never change the sequence's meaning.
+- When another claim won, apply the new slots and validate the waiting work again.
+  A new slot needs a new outer envelope; its inner writes stay unchanged.
+  [proof pending: journaled claims settle without duplicate effects despite lost replies and deleted slots]
+
+Ana and Ben try slot 41. Ana's reply is lost, then her retry says `AlreadyExists`.
+She reads her bytes at 41 and checks the floor. Ben reads different bytes,
+applies Ana's slot, and tries 42.
 
 ## 7. Order
 
@@ -1402,7 +1301,7 @@ Two mechanisms order writes:
 
 - A write's past is every write in slots at or below its `read_through`,
   plus its own earlier writes. Slot zero means no published history read.
-  A later publication slot does not enlarge that authored past.
+  Claiming a later slot does not enlarge that authored past.
 - Writes in one slot are in the author's write-number order. Every cause
   is in an earlier slot or is an earlier write of that same batch.
 - Authenticate each write with its device owner's signing key in the state
@@ -1420,7 +1319,7 @@ Two mechanisms order writes:
 - Ben and Carol both edit while their `read_through` is 20. Their writes
   remain concurrent even if Ben claims 21 and Carol claims 30: neither edit
   read the other. Their cell values still compete by timestamp (§7.2).
-- App commits are visible locally before publication. Reading slots in order
+- App commits are visible locally before their writes claim slots. Reading slots in order
   combines that published prefix with the local queue; it never pretends
   an offline write saw intervening slots. Once the same writes are published,
   devices use the same slot order and authored pasts.
@@ -1437,7 +1336,7 @@ Two mechanisms order writes:
 - So no two devices' timestamps are ever equal.
 - Every new installation and every device reset gets a new device id (§10).
   Restoring a backup on the same installation can keep its id when custody
-  is intact and storage has nothing newer than its reservations.
+  is intact and the journal check in §10 finds no evidence of another copy.
 - The stamping rule:
   - each device keeps the latest timestamp it has seen, from its own writes
     and every write it applies, saved on disk;
@@ -1677,21 +1576,10 @@ Two mechanisms order writes:
       ([§17.1](#171-host-application));
     - for an excluded or dependent change, its write identity and operation,
       even if a deletion has no old values.
-    All losses use this record, one snapshot section and one fingerprint
-    leaf shape. Required source evidence is retained independently of these
-    loss records; dismissing one cannot change a source's verdict.
-- `_coven_sequence` holds the applied slot; `_coven_sequence_inputs` keeps
-  checked received slots. Claim attempts and publication reservations live
-  with their queue or operation journal (§6, §18). `_coven_writes` records
-  each published write's slot and `read_through`; local queued writes have
-  no slot until confirmed.
+    All losses use this record and one snapshot section. Keep required source evidence separately; dismissing one cannot change a source's verdict.
 - `_coven_circle_deletions` names the entry deleting each circle. The applied
   admin state holds each audience's schema/reset slot and named snapshot.
   Snapshot metadata retains the historical facts needed for old writes.
-- Fingerprints ([§19.1](#191-noticing)) are kept incrementally:
-  `_coven_fingerprint_leaves` holds one hash per row and per loss in
-  each audience, and `_coven_fingerprint_sums` their sum per audience, so
-  a write updates only the hashes of the rows it changed.
 - Note 42 on Ben's phone, after Ana's write 4 and its own write 9:
 
   ```
@@ -2189,12 +2077,12 @@ Carol's tablet:
 
 - On one device, SQLite refuses a write that repeats a unique value, so two
   rows can claim one value only through concurrent writes.
-- Of two rows claiming one value, the lowest claimed slot keeps it.
-  Within one slot use write-number order; equal claims in one write use
-  primary-key order. Timestamps still choose the cell values being judged.
-  Unclaimed local writes rank after published claims, in local write order;
-  their claims remain provisional until their slot is confirmed.
+- Of two rows claiming one value, the lowest slot keeps it.
+  Within one slot, the lower write number wins; within one write, the lower primary key wins.
   [proof pending: first-slot unique claims agree on every device and cannot be displaced by a backdated late claim]
+- Timestamps choose the cell values before uniqueness is judged.
+- Local writes without slots rank after claimed slots, in local write order.
+  A locally created row can therefore lose its unique value before claiming a slot.
 - The other row is taken out, whether its write inserted it or edited it
   to claim the value, and recorded as lost.
   - A change to its own value that ends the conflict clears that reason.
@@ -2206,7 +2094,8 @@ Carol's tablet:
   note titled "Groceries".
   - Ana's insert of note 45 claims slot 40; Ben's note 46 claims slot 41,
     even if he authored it earlier while offline.
-  - Every device keeps note 45, and records Ben's note 46 in `_coven_lost`.
+  - Ben reads slot 40 before sending his note. His local note loses "Groceries"
+    and is recorded in `_coven_lost`.
 - A row's claim is the greatest `(slot, write number)` among the setters
   of the constraint's current inputs, when that complete value was established.
   - The constraint reads its columns, the columns its expressions use and,
@@ -2430,226 +2319,151 @@ Carol's tablet:
 
 ## 9. Members and roles
 
-- A member is a person, with a random stable `MemberId` and current signing
-  and sealing keys. Devices and circles name the id, not the keys.
-- Admin entries occupy the same sequence as writes, key copies and snapshot
-  announcements (§6). Their `EntryId` is their slot number. They record
-  creation, membership, roles, access, devices, member-key replacement,
-  circles, rotation, schema raises and resets (D6).
-- The state before slot n is the fold of slots 1 through n−1, or the
-  equivalent checkpoint and suffix. Validate the entry against exactly
-  that state. Every device holding that prefix gets the same result.
-  An applied entry is final; a later entry can change state only from its
-  own slot onward.
-  [proof pending: ordered admin entries preserve agreement, authority and at least one admin]
-- Slot 1 creates the store and registers its first device and admin. Its
-  supplied public key verifies its signature; the store id must match the
-  path. The creator has the first store key in custody and publishes its
-  sealed copy next. Setup succeeds only after both are confirmed.
-  A different creation at slot 1 returns `StorageFailure::StoreExists`.
-- Every other entry is signed by the current key of its named member in
-  the preceding prefix. Its writer is that member's active device, or the
-  fresh device this entry registers. Historical bindings remain available
-  to authenticate old writes and snapshots.
-- Every administrative action uses §18's operation path, including set role,
-  rename, removal and set access. First catch up online and validate, then
-  record and perform prerequisites, then claim. A collision reads the new
-  slots and validates again. A no-longer-allowed action undoes its recorded
-  artifacts and fails with `SyncError::Rejected(OperationRejection)`.
-  It is never returned for app approval merely because another admin acted.
-- Without storage or a complete applicable prefix, a new admin call fails
-  before creating artifacts. Local app writes and schema migration remain
-  available offline; publishing their raise requires online validation.
-- Roles and authority:
-  - several equal admins; only admins add/remove members or set roles;
-  - a member replaces their own keys; an admin can replace another member's;
-  - both replacement keys must be fresh, unused in any established binding;
-    replacement preserves role, circles, access and device ids;
-  - each member adds their own devices and removes their own; admins may
-    remove any device; an added device has a fresh id;
-  - a member sets their own access; an admin can set another member's S3
-    access; provider-admin credentials alone confer no store role;
-  - a circle's members manage it; any store member can create one;
-  - a rotation requires membership of its audience;
-  - the target must exist, and a member removal or role change must leave
-    at least one admin. The provider's store owner cannot be removed (§13).
-- A request already satisfied by the prefix completes without another entry
-  when it establishes exactly the requested state. Adding an active member
-  must repeat its keys, role and access; it cannot replace any of them.
-  Removed member ids stay retired; inviting that person again uses a fresh
-  id and keys. Replacing keys requires the
-  expected current binding still to match the operation's validated binding;
-  it never silently replaces a pair another operation installed meanwhile.
-- Ana and Ben both try to remove each other. Ana claims 41 first. Ben reads
-  it, is no longer authorized, and his call fails; no Ben removal is stored.
-  If Carol and Ana both rename Gifts, the first claim applies, and the later
-  valid rename changes the name at its own slot.
-- Each device keeps the applied slot and state, the checked admin entries
-  and historical bindings needed for authored views, and its operation
-  journals. Members, devices, circles and circle memberships derive from
-  that one state. Removed identities and used public keys remain known.
-  Circle deletion records name their causing entry; schema/reset state
-  names its snapshot and slot. Snapshot checkpoints preserve these facts.
-- The store id and name come from creation. Directory settings supply them
-  during bootstrap and must match it; a mismatch is
-  `DbError::StoreSettingsMismatch`. Private keys remain only in custody.
-- Applying an entry commits its state, required reload or data effects and
-  resulting provider work together. If the local transaction fails, none
-  advances. The sync owner retains the decoded state between passes; it
-  never reconstructs a second independently writable membership view.
-- Subscriptions show committed current results; callback histories can
-  differ as devices catch up. Applying a removal immediately changes key
-  eligibility and schedules access work. No time or peer acknowledgement
-  is needed to decide an entry's effect.
+- A member is a person with a random stable `MemberId` and current signing
+  and sealing keys. Devices and circles name the id.
+- An admin entry's `EntryId` is its slot number.
+  [D6](format.md#d6-admin-entries) lists the actions and their fields.
+- Validate an entry against the state after every preceding slot.
+  Loading a snapshot and applying its suffix establishes that same state.
+- An applied entry is final. Later entries change state from their own slots onward.
+  [proof pending: ordered admin entries preserve authority and at least one admin]
+- Slot 1 creates the store and registers its first device and admin.
+  Its supplied public key verifies the signature; its store id must match the path.
+- The creator holds the first store key and claims its sealed copy next.
+  Setup succeeds after both slots are confirmed. A different creation returns `StorageFailure::StoreExists`.
+- Other entries use their member's current signing key before that slot.
+  Their authoring device must be active, or be the fresh device the entry registers.
+- Every admin action uses [§18](#18-operations), including role changes, renames and removals.
+  Without storage or an applicable sequence, a new call fails before creating anything.
+- Several members may be admins. Only admins add or remove members and change roles.
+- Each member adds and removes their own devices. Admins may remove any device.
+  Added devices always have fresh ids.
+- Members replace their own keys; admins may replace another member's keys.
+  Both new keys must be unused. Replacement preserves the member's id, role, circles and devices.
+- Members set their own access. Admins may set another member's S3 access.
+  Provider-admin credentials alone grant no store authority.
+- Any member may create a circle. Only its members manage it or rotate its key.
+- A target must exist. Removing a member or changing a role must leave an admin.
+  The provider's store owner cannot be removed ([§13](#13-removing-members-and-devices)).
+- An already-satisfied request completes without another entry.
+  Adding an active member must repeat its exact keys, role and access.
+- A removed member id is never reused. Inviting that person again gives them
+  a fresh id and keys.
+- Key replacement requires the operation's expected old pair still to be current.
+  Another completed replacement requires a new call.
+- Snapshots preserve historical bindings, removed identities and used public keys.
+  These authenticate old writes and prevent identity reuse.
+- Creation supplies the store id and name. Bootstrap settings must match;
+  a mismatch returns `DbError::StoreSettingsMismatch`.
+- Applying an entry commits its state and required work together.
+  A failed transaction advances nothing. Subscriptions expose only committed results.
+
+Ana and Ben both try to remove each other. Ana claims 41 first.
+Ben reads it and loses authority; his call undoes its work and fails.
+No removal of Ana enters the sequence.
 
 ## 10. Device identity
 
 - A device is one installation with its own id, belonging to one member.
-  Its id also lives in custody backups do not copy. Missing or different
-  custody refuses opening without changing the database.
-- Each publication reserves a local increasing number before sending.
-  `(device, publication)` identifies its journaled slot claim across retries;
-  it is not a separate log. Write ids and snapshot ids keep their own
-  counters. Check authenticated sequence and checkpoint evidence against
-  these reservations before sending.
-- A publication from this id beyond its reservations, or different content
-  under the same publication identity, proves another copy uses the id.
-  Report `SyncError::DeviceIdInUse` and send nothing. Occupation of a shared
-  sequence slot by a different publication is ordinary contention (§6).
-  Snapshot receipts retain this evidence after slot deletion (§15).
-- Every send requires completed sequence catch-up and identity checks.
-  The catch-up must have started less than five minutes ago on a monotonic
-  clock including sleep. Recheck immediately before every request, including
-  SDK retries, file parts and publication completion. Reopen, reconnect,
-  removal, replacement or a blocked slot invalidates this permission.
-  A blocked pass cannot reuse an earlier permission to send.
-- The installation's signing credential and a signed attempt's credential
-  must still be current. Read-only confirmation can settle an old attempt
-  already stored. Creation and invite-bound join requests are bootstrap
-  exceptions; they grant no ordinary sending authority.
-- Removal cut-off is the slot order. A writes slot claimed after removal of
-  its device, replacement of that device id, removal of its member, or a
-  replacement of its signing credential counts for nothing. Authenticate its
-  original identity before recording this disposition. Consume the slot,
-  record `WritesRefused` with the deciding entry, and apply no effects or
-  losses from those writes. Otherwise eligible changes using their data
-  follow §8's frozen-source rule.
-  [proof pending: an earlier retirement or credential replacement permanently excludes later old-author writes]
-- A replacement does not exclude writes signed by the new credential after
-  that binding. Circle removal alone uses the authored circle view (§14.6),
-  not this whole-device cut-off. A write already claimed before removal
-  keeps its admission; timestamps and elapsed time do not change it.
-- Ana's old phone has write 8 in flight when its replacement claims 70.
-  If the write claims 69 it counts; if it claims 71 it is consumed and
-  refused. “I had not read the replacement” cannot change that result.
-- Reading its own removal or its member's removal stops syncing for good
-  and tells the app. Reading its id's replacement stops sending with
-  `DeviceIdInUse`. Member-key replacement leaves device ids in place but
-  stops old-credential senders with `MemberKeysReplaced`; restore with the
-  current code installs a fresh device and does not rescue the old queue.
-- Self-replacement pauses app writes with `MemberKeysChanging`, confirms
-  its queue, journals its new private pair and copies, then claims the
-  replacement signed by the current key. Activate custody and refresh the
-  restore code before returning success or releasing the pause (§18).
-- `reset_device` discards the stale or damaged database and unsent work,
-  creates a fresh id, loads storage, and registers that id naming the old
-  one as replaced. Only the same member can replace its id. Separate new
-  devices may replace the same old id; each keeps its own identity.
-  A failed bootstrap resumes under its recorded new id; ordinary opening
-  refuses it until publication finishes.
-- Carry readable pending `DeleteAccessKey` obligations into the replacement
-  database before publishing it. Other unclaimed artifacts belong to their
-  journals; §13 permits orphan-key cleanup after the old device's retirement.
-  A database too damaged to read supplies no such records.
-- Commit the local `DeviceReset` notice with the old and new ids before
-  publishing the replacement handle. It survives reopening and tells the
-  app unsent edits were discarded. It is not snapshot data.
-- An unconnected store has no remote history. Reset creates an empty local
-  database under the fresh id. Competing first setups still compete at the
-  same slot 1, so at most one creates the store (§9).
-- A backup with intact custody, no newer authenticated publication evidence,
-  and no removal or replacement can continue. These checks do not detect
-  every copied installation; content-bound nonces protect different
-  plaintexts even when a backup forgot an attempt (§11.1).
-- Outside the shared sequence, an occupied immutable path succeeds only
-  after complete-byte equality with its recorded attempt. A mismatch at an
-  own snapshot, file or delivered-key path stops the copy. A failed read
-  leaves the attempt pending; metadata alone never establishes equality.
-- Storage access cut-off is separate (§13). Until it completes, old devices
-  may reach storage, but their later slots receive the same refusal everywhere.
+  Its id also lives in custody that backups do not copy.
+- Missing or different custody refuses opening without changing the database.
+- When reading a new slot, check whether it is signed by this device.
+  If this device's journal never attempted that path, report `SyncError::DeviceIdInUse` and stop sending.
+- Different bytes at an attempted slot are ordinary contention, even when
+  the slot names this device. Settle the claim under [§6](#settling-a-claim).
+- Slot order controls sending ([§6](#6-syncing-writes)); no elapsed-time permission is required.
+  A removed device or an installation holding replaced member keys cannot send.
+- Creation and invite-bound join requests have their bootstrap rules (§9, §12).
+  They do not permit ordinary sends before the device has applied the sequence.
+- A writes slot after its device's removal or replacement counts for nothing.
+  The same applies after its member's removal or replacement of its signing key.
+- Authenticate the original author, consume the slot, and record `WritesRefused`
+  with the deciding entry. Those writes create neither data effects nor losses.
+  [proof pending: earlier removal or key replacement excludes later writes under the old identity]
+- Eligible changes using refused data follow [§8](#8-merge)'s source rule.
+  Writes signed by the member's new key can count after replacement.
+- Writes claimed before removal keep their admission.
+  Circle removal alone follows [§14.6](#146-leaving-a-circle).
+- Ana's old phone sends write 8 while its replacement claims 70.
+  Write 8 counts at slot 69; at 71 it is consumed and refused.
+- Applying this device's or member's removal stops syncing and tells the app.
+  Device replacement reports `DeviceIdInUse`; member-key replacement reports `MemberKeysReplaced`.
+- Restoring with current member keys registers a fresh device.
+  It does not rescue the old installation's queue.
+- Self-replacement pauses app writes with `MemberKeysChanging` while it confirms
+  queued writes, claims the new binding, and installs custody and the restore code (§18).
+- `reset_device` discards the local database and unsent work, creates a fresh
+  id, loads storage, and registers that id as replacing the old one.
+- Only the same member may replace its device id.
+  Separate new devices may replace the same old id; each keeps its fresh identity.
+- A failed reset resumes with its recorded new id.
+  Ordinary opening refuses the installation until reset finishes.
+- Carry readable `DeleteAccessKey` obligations into the new database before opening it.
+  A database too damaged to read supplies no records; orphan keys follow §13.
+- Commit the `DeviceReset` notice with old and new ids before returning the handle.
+  The notice survives reopening and tells the app that unsent edits were discarded.
+- An unconnected reset creates an empty database with a fresh id.
+  Competing first setups still contend for slot 1 (§9).
+- A backup may continue with intact custody unless history shows another copy,
+  removal or replacement. This detects only the evidence described above, not every clone.
+- Content-bound nonces protect changed plaintext even when a backup forgot an attempt (§11.1).
+- Outside the sequence, an occupied immutable path requires complete-byte equality
+  with its recorded attempt. A mismatch at an own artifact path stops that attempt.
+- A failed comparison read remains pending. Metadata alone never proves equality.
+  Provider access cut-off remains separate ([§13](#13-removing-members-and-devices)).
 
 ## 11. Keys
 
-- Coven uses store keys for store data and metadata, circle keys for circle
-  data, each member's signing/sealing pair, and separate provider credentials.
-  A file has an independent key carried inside its encrypted row (§16).
-- Creation and rotation entries introduce audience keys by random id and
-  SHA-256 of the exact 32 key bytes, inside the encrypted entry. Removals
-  contain no keys. Only creation and rotation introduce an audience key.
-- Key copies are slots. Their clear routing names audience, key id,
-  recipient member and exact sealing key (D9). Everything else remains
-  sealed and signed as specified there. A copy to another recipient is
-  consumed by checking and retaining its routing and signed envelope; this
-  device is not required to open that recipient's box.
-- Open a matching box with the historical private credential it names.
-  Check its audience, key id and hash against the authorized introduction.
-  A candidate before its introduction is tentative: retain it, but use it
-  only to validate that introduction. It cannot seal app data yet.
-  Invalid framing, authentication or a failed required hash check blocks
-  the slot with a named refusal. It never advances to seek a better copy.
-- Key-introducing operations claim all required copies before the entry.
-  Copies use an already accepted store key for their outer metadata; the
-  new key may seal its own introduction. Creation is the bootstrap exception:
-  slot 1 supplies the initial binding, followed by its creator's copy (§9).
-- An observed copy is exposure whether the recipient opened it or not.
-  A key with a copy outside the current audience or to a retired/noncurrent
-  credential is unusable for new data. Tentative recipients are checked
-  against the membership established by the introducing/binding entry. A candidate never bound by an
-  entry still exposes any key copied to it. Undo cannot erase a disclosure.
-  Checkpoints retain these routing facts and the historical boxes (§15).
-- Before first sending data, use the newest usable audience key in the
-  applied prefix, ordered by introduction slot. Usable means authorized,
-  held in custody, and with no observed exposed copy. Never fall back to
-  a known exposed key for app data or fingerprints.
-- When none is usable, a current audience member acquires a replacement or
-  rotates: make a key, journal it, claim copies for current recipients, then
-  claim its introduction. Revalidate after every intervening slot. An admin
-  outside a circle cannot rotate it. Several valid rotations can follow one
-  another; all introduced keys remain readable.
-- Metadata entries and status use the newest accepted store key held, so
-  exposure alone cannot prevent a removal or rotation. App data and
-  fingerprints require a usable key. Retried inner writes keep their first
-  key; each new slot attempt rechecks current authority (§6, §10).
-- Replacing member keys retires the preceding sealing credential. Existing
-  copies to it remain exposure even while the member is active. Historical
-  sharing and new rotations use current non-retired credentials; a binding
-  operation's prerequisites instead name its validated candidate.
-- Share needed historical keys with current audience members who lack a
-  copy for their credential. Determine that need from the applied prefix;
-  do not publish another copy merely because an operation retried.
-  Ana and Ben can both supply K to Carol in different slots. Both copies
-  remain readable and both contribute the same exposure facts.
-- A new member or restored installation without a store key first reads
-  the floor's bootstrap copies and retained sequence routing, without
-  claiming an applied position. It opens copies for its exact credential,
-  validates introductions, then loads the checkpoint and applies the suffix
-  in order (§12, §15). This bootstrap scan grants no sending authority.
-- The revocation promise uses the sender's completed sequence observation.
-  Once a remaining member has applied a removal, its first attempts exclude
-  every key known to have reached that former member. An in-flight copy can
-  still claim after the observation; the next read exposes that key and
-  requires another usable one. This residual disclosure window remains.
-  A conflict while claiming a writes slot forces a new read before retrying;
-  it never changes the already attempted inner write bytes.
-- Keys and ciphertext obtained before provider cut-off remain readable.
-  Cut-off prevents further downloads, not opening previously held bytes (§13).
-  A departed circle member's queued pre-removal parts are governed by §14.6.
-- Private member credentials and audience keys stay in custody. Retain the
-  historical credentials needed to open old boxes. A new installation can
-  receive historical keys sealed to its current credential instead.
-  A self-replacement journals and durably keeps its candidate before any
-  publication; activation and restore-code custody must succeed before
-  success is reported. Failed undo or activation retains the journal (§18).
+- Store keys encrypt store data and metadata; circle keys encrypt circle data.
+  Member signing/sealing pairs and provider credentials have separate purposes.
+- Each file has its own key inside its encrypted row ([§16](#16-files)).
+- Creation and rotation introduce an audience key by random id and SHA-256
+  of its exact 32 bytes. These fields stay encrypted; removals carry no keys.
+- A key copy occupies a slot. Clear routing names its audience, key id,
+  recipient member and exact sealing key ([D9](format.md#d9-sealed-objects)).
+- Open a required copy with the private key its routing names.
+  If its introduction is present, check the key against it; a mismatch blocks the slot.
+- Without its introduction, keep the opened key tentative and apply the copy.
+  The later introduction confirms it before use, as described below.
+- A copy to someone else need not be opened.
+  Its signed routing still records whom the key reached.
+- An operation claims required copies before introducing the key.
+  The copies' outer encryption uses an accepted store key; the new key may seal its introduction.
+- Creation is the exception: slot 1 establishes the first binding, followed by
+  the creator's copy (§9).
+- Before introduction, an opened key may only verify that introduction.
+  It cannot encrypt app data yet.
+- A copy exposes its key to its recipient, even if unopened.
+  Copies to former members or retired credentials make the key unusable for new data.
+- Check tentative recipients against the later binding or introduction.
+  A candidate never bound still received the key; undo cannot erase that exposure.
+- Before first sending data, use the newest usable audience key by introduction slot.
+  It must be authorized, held in custody, and have no known exposed copy.
+- If none is usable, acquire a replacement or rotate through §18.
+  An admin outside a circle cannot rotate its key.
+- Several rotations may follow each other. Introduced older keys remain readable;
+  new data uses the newest usable key.
+- Admin metadata may use the newest accepted store key held, even when exposed.
+  Exposure cannot prevent removal or rotation.
+- Retried inner writes keep the keys fixed on their first attempt (§6).
+  Circle parts authored before leaving follow [§14.6](#146-leaving-a-circle).
+- Key replacement retires the preceding sealing credential.
+  Copies to it remain exposure even though the member's id stays active.
+- Share historical keys with current audience members whose credential lacks a copy.
+  A retry does not require another copy already present in the sequence.
+- Ana and Ben may both supply K to Carol in different slots.
+  Both copies remain readable and record the same recipient.
+- A new device first opens copies for its credential from the floor or sequence.
+  It verifies introductions and membership before loading data (§12, §15).
+- Once Ana applies Ben's removal, her first attempts exclude keys known to have
+  reached Ben. An in-flight copy can still land after her read.
+- That later copy exposes the key on the next read. Ana then needs another
+  usable key; already attempted inner writes retain their bytes.
+- Provider cut-off prevents new downloads, not opening ciphertext already held (§13).
+- Private credentials and audience keys stay in custody.
+  Keep historical private credentials needed for old boxes, or supply copies to the current credential.
+- Self-replacement keeps the new private pair before claiming it.
+  It completes custody and the restore code before reporting success (§18).
 
 - Creation initializes the member in the chosen custody (OS keychain by default)
   before publishing the store.
@@ -2691,7 +2505,7 @@ Carol's tablet:
   - for inner writes and sequence slots, the first 24 bytes of HMAC-SHA256
     under the encryption key, over a context binding the path or inner identity,
     cleartext prefix, section, chunk index and SHA-256 of that chunk's
-    plaintext ([D11](format.md#d11-keys-contexts-and-fingerprints)). Binding
+    plaintext ([D11](format.md#d11-keys-and-contexts)). Binding
     the prefix also separates changed authentication data. Rollback and
     copied identities need no unique-path assumption for this separation;
     it still relies on SHA-256 and the truncated HMAC resisting collisions;
@@ -2699,8 +2513,8 @@ Carol's tablet:
 - A key is sealed to a member with an anonymous sealed box: X25519 with
   XChaCha20-Poly1305.
 - Keys for each purpose are derived from the store key, or a circle's key,
-  with HKDF-SHA256 and a label per purpose: encryption and fingerprints
-  ([§19.1](#191-noticing)).
+  with HKDF-SHA256 and separate labels for encryption and authorship
+  ([D11](format.md#d11-keys-and-contexts)).
 - A join request's key is derived from its invite secret
   ([§12.2](#122-adding-a-person)) the same way, with its own label.
 - An uploaded file's storage name is a random id, and it is encrypted with
@@ -2745,7 +2559,7 @@ Carol's tablet:
   asks coven to sign in to the person's own account first, through the builder's
   presenter. Restore and join use coven's held tokens. Restore codes never
   carry OAuth tokens.
-- The new device reads the floor and bootstrap copies, loads the checkpoint
+- The new device reads the floor and bootstrap copies, loads the snapshot
   and applies the retained suffix. The supplied id and pair must match an
   active current binding. An old code returns `MemberKeysReplaced`; it cannot
   bind its keys back. Register the fresh device through §18's claim loop,
@@ -2808,7 +2622,7 @@ Carol's tablet:
 - The pre-membership scan can inspect routing before holding a store key;
   it is not sequence application or sending authority. Once she has her
   keys, Carol authenticates the matching approving device's binding, loads
-  the floor's checkpoint and applies its suffix in order. If retention
+  the floor's snapshot and applies its suffix in order. If retention
   passed her scan cursor, the floor's bootstrap evidence supplies its copies.
 - Her own sealed keys plus the matching applied binding permit registration.
   Copies alone do not. If the request disappears, read forward again and
@@ -2819,7 +2633,7 @@ Carol's tablet:
   bytes in its unpublished local directory, encrypted with the invite secret
   and bound to the store, invite and chosen member id. Restarting with the same invite and
   device name reuses them and the device id. These are not final key custody.
-  - It records the publication attempt before issuing it. If the attempt's
+  - It records the create attempt before issuing it. If the attempt's
     reply is lost and neither a request nor sealed keys exist on retry, it
     treats the invite as settled. A request the provider refused was not
     stored; the retry sends it again. Recreating that request could revive an
@@ -2908,7 +2722,7 @@ Carol's tablet:
 - Keys with no entry can outlive a lost database or lost mint reply. Their
   provider names carry the store and minting device (§4). An admin holding
   provider access lists them after that device's retirement is applied,
-  and queues keys neither recorded in the prefix/checkpoint nor current.
+  and queues keys neither recorded in the sequence or store snapshot nor current.
   Later entries by the retired device cannot make such a key current.
   A live device's unrecorded key remains protected by its operation.
   The ordinary file-folder orphan scan still requires confirmed provider
@@ -3112,7 +2926,7 @@ Carol's tablet:
   applies the slot cut-off (§10).
 - This relies on current members being trusted about their recorded reads
   (§2). Once Ben reads the removal, new writes into Gifts return
-  `NotInCircle`; he no longer snapshots or fingerprints it.
+  `NotInCircle`; he no longer snapshots it.
 
 ### 14.7 Deleting a circle
 
@@ -3126,7 +2940,7 @@ Carol's tablet:
   with Gifts' other rows. The app can offer its values in another audience,
   preserving its key (§8). There is no later reversal of the deletion.
 - Keep merge rows, losses and source evidence for arriving old writes and
-  snapshot agreement. Devices outside the circle see the entry, not values.
+  snapshot loading. Devices outside the circle see the entry, not values.
   Dismissing a loss still follows its ordinary write and owner rules.
 - Applying deletion releases local original-source records no visible row
   can name again. Queued files retain their own sources and finish under
@@ -3137,145 +2951,106 @@ Carol's tablet:
 
 ## 15. Snapshots
 
-- A snapshot records one audience as of slot n: rows, merge state, losses,
-  original authorship and data-source evidence. Coverage is the consumed
-  prefix through n, not a claim that every covered change had effects.
-  Its path remains `<store>/snapshots/<audience>/<device>/<number>`.
-- Store snapshots also carry the administrative checkpoint: member/device
-  history and bindings, circles, schema/reset state, key introductions and
-  copies, snapshot announcements and publication receipts (D7). This is
-  enough to authenticate old authored views and find every audience's
-  replacement history without reading deleted slots.
-- Snapshots exclude local uploads, journals, pending reports, file sources
-  and cache state. Loading preserves those. A changed reset clears pending
-  reports when its reload commits (§19.3); it cannot cancel owed cleanup.
-- A snapshot's signed prefix names its audience, key, coverage and schema
-  purpose (D9). Check it before trusting coverage; check every chunk and
-  the complete signature before loading. Required original authorship and
-  source evidence is retained independently of dismissible loss values.
-- A device snapshots only audiences it can read. It captures a fully
-  applied published prefix; unclaimed local writes are left out and reapplied
-  locally on top. Migration effects are carried by their raise snapshot
-  after the captured writes and marker have claimed their slot (§17.1).
-- Publication is an operation: capture and seal, upload the fixed snapshot,
-  then claim an announcement, “audience as of n is at path X”. The
-  announcement follows n and names the checked snapshot exactly. A stored
-  snapshot with no announcement is not selected or used for coverage; its
-  journal deletes it if the operation cannot complete.
-- At each announcement claim, coverage for that audience must be at least
-  the largest coverage already announced for it. A stale candidate is
-  recaptured after applying the intervening slots, and its unannounced
-  object is deleted. Equal coverage selects the later announcement.
-  There is no upload-time deadline.
-- An announcement for a raise or reset records its purpose, and only its
-  matching admin entry makes that schema/reset state effective. Before
-  claiming a raise, its snapshot must cover at least every earlier
-  announcement for that audience, including intervening announcements.
-  Otherwise recapture, announce and validate again. A reset uses the same
-  coverage requirement; its contents are the chosen device's state.
-  [proof pending: monotone announced coverage makes schema raises safe without a raise retention hold]
-- The current newest snapshot is the last usable announcement for the
-  audience's current schema/reset state, with the largest coverage. A device
-  cannot choose an older snapshot to evade an update, missing key or damaged
-  body. Required snapshots remain pending until usable. Announcement and
-  coverage checks never authorize applying a damaged body.
-- Growth requests a snapshot when encoded parts since the latest one exceed
-  that snapshot's encoded size, or 1 MiB without one. Retention also requests
-  coverage for unsnapshotted history even below that threshold. Use indexed
-  lengths and checked announcements; no snapshot-folder listing is needed.
+A *snapshot* records one audience after applying through a slot.
+Its *coverage* is that slot number, including writes consumed without effects.
+It holds rows, merge records, losses and the evidence needed for old writes.
+
+- Store snapshots also hold signed admin entries, key copies and announcements.
+  They preserve the history needed for membership, keys, schema changes and resets (D7).
+- Each snapshot records, for every device, the number of its last included write.
+  This counts consumed writes, including refused writes and reset-ignored parts, not only surviving row changes.
+- The numbers cover all writes slots through its coverage, including opaque parts.
+  A device with no included write has number zero. Claim recovery uses these numbers (§6).
+- A snapshot excludes local uploads, journals, pending records, file sources and caches.
+  Reloading preserves them; a reset clears pending records only as §19.3 specifies.
+- A device snapshots only audiences it can read.
+  It captures applied slots; local writes without slots stay outside the snapshot.
+- To make a snapshot available, journal it, upload its fixed bytes, then claim
+  an announcement naming its path, coverage and purpose.
+- An unannounced upload supplies no coverage. If its operation cannot finish,
+  the journal deletes it and retains any cleanup failure.
+- An announcement's coverage must not decrease that audience's announced coverage.
+  Equal coverage selects the later announcement. There is no upload deadline.
+- An ordinary snapshot must cover the last schema raise and reset before its announcement.
+  Its schema and reset state must match the audience at that slot.
+- A prepared raise or reset snapshot is usable only after its matching admin entry.
+  Until then, its announcement cannot authorize retention or ordinary reload.
+- A raise or reset snapshot must cover at least as much as every earlier
+  announcement for that audience. It must also cover the preceding raise and reset slots.
+- After contention, recapture if these coverage conditions no longer hold.
+  [proof pending: snapshot version and coverage rules make schema raises safe without a retention hold]
+- Delete an abandoned preparation through its journal. An announcement whose
+  preparation never takes effect remains history, but supplies no usable snapshot.
+- Select the newest applicable snapshot for the audience's schema and reset.
+  A missing key, required update or damaged body waits; do not choose an older snapshot to bypass it.
+- Check the signed prefix before using coverage, then the entire signature
+  and body before loading ([D9](format.md#d9-sealed-objects)).
+- Request a snapshot when new encoded parts exceed the last snapshot's size,
+  or 1 MiB without one. Retention also requests missing coverage below that threshold.
 
 ### The floor and reloading
 
-- `<store>/floor` is one atomically replaced, signed record (D8/D9). It
-  names the first retained slot and a checkpoint bundle: a store snapshot
-  and the announced snapshot for every circle whose deleted history still
-  matters. The bundle records a common covered slot. A device loads only
-  its readable audiences, while retaining authenticated metadata for all.
-- A bundle can use audience snapshots with different covered slots. Its
-  common cut is their minimum; each selected snapshot covers at least that
-  cut. A loader stages every readable audience through the maximum of its
-  required applied slot and the selected coverages, using the retained
-  suffix for each audience beyond its snapshot. It commits once they reach
-  that common target. Coverage never licenses a missing part.
-- Before deleting any prefix, conditionally replace the floor record to
-  name the verified replacement bundle, leaving `first` unchanged. This
-  publishes the replacement even if deletion stops halfway. After every
-  slot through the common cut is confirmed absent, conditionally advance
-  `first` to cut+1. A journal retains unfinished deletions and floor updates;
-  failures are reported and retried idempotently. Conflicts reread the floor
-  and never lower either coverage or `first`.
-- A reader missing a slot reads the floor by exact path. If the bundle
-  covers it, reload even while `first` still names the old prefix during
-  deletion. If it does not, a required gap stops the sequence loudly. A
-  failed floor read supplies no absence evidence.
-- The floor includes retained original key-copy boxes for opening its store
-  key, with their authenticated original slot contexts. Their routing is
-  clear; its checkpoint references and other contents are encrypted.
-  These are copies of published evidence, not new key disclosures. New and
-  restored devices first open their own box, verify the checkpoint's
-  binding history, then load and apply the suffix. Before any floor exists,
-  bootstrap reads slot 1 and the subsequent key routing (§11, §12).
-- A new device reads this record, loads the named bundle, then applies the
-  slots after the snapshot coverage. A returning device does the same when
-  its next required slot has been covered and deleted. It neither lists
-  writers nor infers deletion from elapsed absence.
-- Freeze the reload's required slot when staging begins. Keep selected
-  bodies and suffix inputs. If deletion overtakes a required read, obtain
-  the newer floor bundle and restage to its common target. New writes or
-  announcements alone do not restart a staged reload.
-- Loading commits rows, merge records, losses, metadata, the applied slot
-  and eligible waiting writes together. During ordinary reload the app
-  sees the preceding committed state and can keep queuing writes. A reset,
-  breaking raise or newly readable circle gates that audience's writes
-  with `AudienceReloading` until its reload commits. A failed load changes
-  neither visible state nor the applied cursor.
-- The local queue keeps each write's original `read_through`, number,
-  timestamp, schema and source evidence. A device returning after a year
-  loads the snapshot, applies the suffix, then claims its queued writes.
-  Its active identity's writes are not too old to count. Cell and generation
-  conflicts, first-slot claims, schema conversion and resets still decide
-  their effects. Removal and credential replacement keep §10's cut-off.
-  [proof pending: checkpoint reload preserves eligible queued writes and every readable audience's covered data]
-- Publication receipts retain `(device, publication)`, claimed slot and
-  SHA-256 of the complete slot bytes, plus write ids and their authenticated
-  source metadata. These are permanent logical claims after physical slot
-  deletion. A sender can confirm its original claim or establish that another
-  claim occupied its attempted slot. A late create at a deleted path cannot
-  replace that history, and the publication cannot count twice.
-  The hash relies on §2's cryptographic assumptions. Snapshot bodies carrying
-  these receipts must be authenticated before they settle a queue record.
+The *floor* is one signed record at `<store>/floor`.
+It names the first kept slot and the snapshot it relies on for each audience.
+Before a floor exists, the sequence starts at slot 1.
+
+- Every named snapshot covers at least `first - 1`.
+  Include the store and every circle whose deleted history still matters, even if the writer cannot open that circle.
+- Snapshots may cover different slots. Load readable audiences through one target:
+  the greatest selected coverage or required applied slot, whichever is later.
+- Read the retained slots each audience needs after its snapshot.
+  Commit all readable audiences together only after they reach that target.
+- The floor carries original key-copy boxes needed to open its store key.
+  Their routing is clear; snapshot references stay encrypted (D8, D9).
+- A joiner opens its box, verifies the historical binding and floor signature,
+  then loads the snapshots and applies the retained slots. Without a floor, bootstrap starts at slot 1.
+- A device missing its next slot reads the floor.
+  If the missing slot is below `first`, reload from the floor's snapshots.
+- A gap at or above `first`, before a known later slot, is damage.
+  A failed floor read proves neither absence nor permission to skip history.
+- A reader also reads the floor after the pass's slots and before committing them.
+  If it has passed any unapplied slot read, discard those inputs and reload.
+- The floor takes effect when written, even while old slots remain in storage.
+  [proof pending: checking the floor after slot reads prevents applying recreated deleted slots]
+- Fix the reload target when loading begins. New writes or announcements do
+  not restart it. If deletion removes needed slots, use the newer floor's snapshots.
+- Reload commits rows, merge records, source verdicts and the applied slot together.
+  Failure preserves the previously visible state.
+- Ordinary reload permits local app writes throughout, then applies eligible queued
+  writes over the loaded state. Their numbers, timestamps, schema and original reads stay unchanged.
+- Reset, breaking raise and newly readable circle reloads refuse writes into that
+  audience with `AudienceReloading`. Other audiences stay locally writable.
+  [proof pending: snapshot reload preserves eligible queued writes and every readable audience's data]
+
+Ben returns after a year. The floor starts at 501; his next slot was 41.
+He loads the floor's snapshots and resumes from their coverage.
+His unsent edits keep their original reads and timestamps; age alone does not refuse them.
 
 ### Deletion
 
-- Slots covered by an announced, applicable checkpoint bundle become
-  deletable after a grace period, normally seven days from the bundle's
-  announcements. Use the latest announcement time among its snapshots.
-  Grace is a request/storage setting, not a correctness premise; no active
-  or absent device's acknowledgement is required.
-- Every part audience in a deleted writes slot must have coverage, including
-  circles the deleting device cannot open. Verified announcements establish
-  that coverage; missing or unverified coverage waits. Deletion of a circle
-  does not excuse losing its retained losses or source evidence.
-  [proof pending: deleting a covered prefix leaves a discoverable checkpoint and sufficient suffix for every reader]
-- Any device with the provider's deletion permission may perform prefix
-  cleanup; it does not wait for the uploader. A device returning after grace
-  reloads. A device that never returns can be removed by an admin.
-- Keep every snapshot referenced by the current floor, an in-progress floor
-  replacement, or an effective raise/reset until a successor checkpoint
-  carries its needed evidence. Delete superseded snapshots only after the
-  replacement is announced, applicable and has passed grace. Record owned
-  unannounced snapshots for undo, including uncertain upload outcomes.
-- The grace timer uses the injected clock and persisted retry policy (§16.5).
-  Clock error can shorten or lengthen this cost-saving delay, but cannot
-  authorize deletion without the coverage and publication checks above.
-- Bounded cleanup requires successful snapshot service for every relevant
-  audience and a running device allowed to delete. An unreadable circle
-  with no available member to supply coverage has no deletion-time bound.
-  Existing covered history does not wait for that member to return.
-- Deleted-row generations and source verdicts remain in snapshots, so an
-  arbitrarily old write cannot recreate a deleted incarnation or revive a
-  refused source. The bound is on retained slot history, not the total size
-  of live data, loss records or authentication evidence.
+- After the grace period, choose announced, applicable snapshots covering the slots
+  to delete. The usual grace is seven days from their latest announcement.
+- Grace limits reload traffic; it is not a correctness condition.
+  Deletion never waits for an absent device or an acknowledgement.
+- First journal the new floor and deletion work. Conditionally write the floor
+  with the snapshots and new `first` together; then delete slots below it.
+- A conflicting floor write changes nothing. Read the current floor, reconsider
+  the deletion, and never move `first` or any audience's coverage backward.
+- A lost floor-write reply is settled by reading the floor before deleting.
+  Delete only slots the confirmed floor puts below `first`.
+- Failed deletions remain journaled and reported. No second floor update waits
+  for deletion to finish.
+  [proof pending: advancing the floor before deletion preserves snapshots and enough slots for every reader]
+- Every audience in deleted writes needs coverage. Missing or unverified coverage
+  waits, including for deleted circles whose losses or source evidence remain needed.
+- Any device with provider permission may delete covered slots.
+  No deletion waits for the device that wrote them.
+- Keep snapshots used by the floor, a pending floor write, or a still-needed raise or reset.
+  Delete a superseded snapshot only after its applicable replacement passes grace and preserves the needed evidence.
+- An audience without a member able to supply missing coverage has no deletion deadline.
+  Already covered history does not wait for that member.
+- Snapshots retain deleted-row generations and source verdicts.
+  Old edits cannot revive a deleted incarnation or turn refused data into an accepted source.
 
 ## 16. Files
 
@@ -3318,22 +3093,22 @@ Carol's tablet:
     No later write marks it uploaded or changes the row when transfer ends.
   - Pinning and caching change no file reference. A `FileRef` stays valid
     across upload completion.
-- File status makes a fresh single-object status call (§4), then combines
-  that observation with the current uploader and reports (E8), in this order:
+- File status reads the fixed path's metadata, then checks the uploader's current state
+  and any source failure known on this device (E8):
   - **Available:** storage contains the complete file at its fixed path.
   - **Integrity error:** storage holds an object at the fixed path whose
     size is not the file's complete encrypted size. That is damage, never
-    Available and never absence, whatever the reports say
+    Available and never absence
     ([`available_iff`, `wrong_size_is_damage`](proofs/storage/CovenStorage/Files.lean)).
-  - **Missing:** storage confirms absence, and its uploader was removed
-    or replaced, or reports that it cannot upload this file (§19.1, D8).
-  - **Uploading on D:** storage confirms absence and D is still active,
-    with no report that it cannot supply the file. This includes a paused
-    queue or an offline uploader; it does not promise current byte transfer.
+  - **Missing:** storage confirms absence and the uploader was removed or
+    replaced. This device also reports Missing for its own failed source.
+  - **Uploading on D:** storage confirms absence and D is active, with no
+    source failure known here. D may be offline or paused; bytes need not be moving.
+  - Other devices cannot see D's source failure. D reports it to its own app.
   - A network or permission failure is an error, never proof of absence.
     With no storage configured, the call returns `NoStorage`.
-  - Storage presence wins over an old missing-source report. A report's
-    absence does not mean the object exists.
+  - Storage presence wins over a local source failure.
+    No source failure is evidence that stored bytes are absent.
 - A read can still use a checked local source or cached bytes. If it needs
   absent remote bytes, its typed error distinguishes uploading from missing
   and names the uploader, with the verdict file status gives
@@ -3345,7 +3120,7 @@ Carol's tablet:
   there. Every range a read requests lies within that size, because the
   header is checked against the row first, so a range the provider refuses
   as reaching past the object's end is the same damage, never absence. Status
-  and reads agree on every storage observation
+  and reads agree on every storage read
   ([`read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads`](proofs/storage/CovenStorage/Files.lean)).
 - After a successful upload, reads on the attaching device use the cache
   or storage; coven never reads its user-provided original again.
@@ -3419,8 +3194,8 @@ Carol's tablet:
   cause; the list records the first unmet condition:
   - no connection is `NoStorage`; network and provider failures retain the
     provider's `Storage` category and use §16.5's failure classes and retries;
-  - confirmed absence with an active, capable uploader is
-    `Waits(Object(path))`; removal, replacement or a reported source failure
+  - confirmed absence with an active uploader and no local source failure is
+    `Waits(Object(path))`; removal, replacement or a source failure on this device
     is `FileUnavailable(FileMissingReason)`, requiring app action;
   - a complete chunk failing authentication is `Refused(Decryption)`;
     authenticated bytes disagreeing with the row's content hash are
@@ -3462,17 +3237,11 @@ Carol's tablet:
     from storage like any pin.
 - The app can remove an uploaded file from the cache, which never touches
   storage.
-- Eager-fill work and progress are derived from cache reservations and verified
-  cached ranges. Reservations retain the requested fixed references and
-  cancellation; they do not duplicate byte counters or failure reasons.
-  Reservations stay in their set until each settles, refusals included,
-  then retire together. Evicting a completed fill does not request it again.
-  A new changed file reference can request a new fill.
-  - `eager_cache_fill_status()` and its subscription execute one query.
-    Cancellation commits before it is reported. Failures remain in `pending()`.
-  - `pin_progress(files)` and its subscription query verified cache coverage
-    for the same references. Neither pinning nor eager fill reports bytes
-    that have arrived but have not passed authentication and committed.
+- Eager fill keeps its requested file references until each settles, failures included.
+  Evicting a completed fill does not request it again; a changed reference can.
+- Cancellation commits before it is reported. Failures remain in `pending()`.
+- Pin and eager-fill progress count authenticated bytes committed to the cache.
+  Their one-shot reads and subscriptions report the same data (E4).
 - Ana restarts after the provider confirmed two upload parts and the cache
   committed three download ranges. Her first reads and subscriptions show
   those same parts and ranges, even before storage reconnects. If open
@@ -3512,8 +3281,8 @@ Carol's tablet:
   As it streams, it checks each plaintext chunk against its recorded hash
   before encrypting or sending that chunk. A missing or changed source
   fails the upload with the existing file error and records
-  `FileUnavailable` for this device and file (§19.1). Its status publishes
-  that typed reason; a differing chunk is never encrypted or sent.
+  `FileUnavailable` for this device and file (§19.1).
+  The local app sees the cause; a differing chunk is never encrypted or sent.
   - A retry must encrypt the same plaintext under the same key and chunk
     nonces ([§11.1](#111-cryptography)). The per-chunk check guarantees
     this even if the source changes after the whole-file check, without
@@ -3566,29 +3335,17 @@ Carol's tablet:
 - A stored file is deleted only when no retained row, loss, snapshot or
   queued or published write refers to its fixed path. Local rows, waiting writes, upload
   queues and journal-owned artifacts protect it too.
-  - Check local protection first. If it protects every eligible known
-    file, no snapshot rows or write parts need reading for file retention.
-  - Otherwise stream the necessary retained data into the database's
-    reference checks, with complete object authentication before deletion.
-    Keep checked references and metadata by immutable object identity across
-    passes and reopening, with an explicit completeness record. Loading and
-    retention share this index; an object already checked is not downloaded
-    again. Keep inspected ranges and any subsequently loaded body under the
-    retained-input budget; checked references have no pass-end expiry.
-  - Reconsider deletion when references, protected inputs, coverage,
-    ownership or file presence change. Discover files from their fixed row
-    references, retained inputs and this device's upload queue; read or check
-    status at the exact path. There is no idle file listing.
+  - Read and authenticate all data needed to prove the file is unreferenced.
+    Incomplete or unreadable data prevents deletion.
+  - No idle pass lists files. File work follows changed references, uploads,
+    history deletion or provider cut-off.
   - Under §13's storage cut-off assumption, the device responsible for a
     removed device's cleanup lists `<store>/files/<device>/` once after
     access is taken away. Cut-off must prevent in-flight sessions from
     publishing later too. This complete listing finds orphan files whose
     attaching rows did not survive; incomplete scans fail visibly and retry.
-    Keep the discovered paths and scan completion so later passes and reopen
-    continue the reference checks without listing again. If access is restored,
-    a later cut-off needs its own scan: the transaction that records the
-    restored access forgets the completed scan, so a completed scan always
-    names every file the folder holds
+    A completed scan is not repeated after reopening.
+    Restored access invalidates it; a later cut-off needs another complete scan
     ([`scan_names_every_file`, `retention_forgetting_counterexample`](proofs/io/CovenIO/Retired.lean)).
     Removal alone does not
     authorize a scan to be treated as the last one while storage access
@@ -3601,17 +3358,15 @@ Carol's tablet:
     access is cut off, she lists his file folder: the photo either landed
     before cut-off and is included, or cannot land. Retained references and
     coverage still decide whether she can delete it.
-  - When deletion needs remote reference completeness, use the applied
-    snapshot announcements and floor bundle. Retain their checked references;
-    no snapshot-folder listing is needed.
+  - Announcements and the floor name the snapshots to inspect.
+    File retention does not list snapshot folders.
 - Its storage path and fixed row reference carry the uploader's device
   id, so ownership remains known after the last reference disappears.
 - If retained data belongs to an unreadable audience, lacks a key copy,
   or fails validation,
   a device cannot prove file absence and leaves uploaded files in storage.
-  Keep that uncertainty by object identity; retry the local proof only when
-  its prerequisite or applicable reader version changes, or the object is
-  deleted. Another pass alone does not download the same retained data.
+  Retry only when its prerequisite or reader version changes, or the object
+  is deleted. An unchanged pass does not download that data again.
 - A device deletes uploaded files only with provider permission and the
   reference evidence above; a missing permission remains visible.
 - Deleting a row deletes only coven's copies of its file, never a
@@ -3619,96 +3374,28 @@ Carol's tablet:
 
 ### 16.6 What a device keeps about files
 
-- Coven keeps, in its local tables, what only this device knows about
-  files; none of it syncs:
-  - `_coven_user_files`: each user-provided file's path, size and
-    modification time, by its row and column;
-  - `_coven_device_files`: each app-provided file waiting to upload, and
-    where in coven's own folder;
-  - `_coven_file_chunks`: one plaintext hash per 64-KiB chunk, keyed by the
-    fixed `(store, device, file id, chunk index)` reference. The upload queue
-    owns these rows; attachment inserts them with the queue, and confirmed
-    upload completion deletes them with it. Hashes use separate rows so
-    file length does not become a single SQLite-value limit;
-  - `_coven_file_uploads`: the upload queue, each file's captured reference,
-    source location and original-source metadata, independent id and key,
-    whether it is pinned, and its provider session while one is in progress;
-    failures and waits use `_coven_pending`, not a second failure column;
-    - Provider sessions belong to this queue; file upload operations do not
-      keep a second recording of the same session.
-    - Native error objects are available in the running process. Reopening
-      exposes the persisted failure category rather than reconstructing an
-      operating-system or provider error from text.
-    - A stored file whose row changed is considered for storage deletion
-      under the same retained-reference checks; no marking write is queued;
-  - `_coven_upload_pause`: a row while the app has paused uploads, read
-    with the queue by `uploads()`;
-  - `_coven_cache`: each cached file or chunk, its namespace, verified range,
-    size, when it was last read, and whether it is pinned. Cache reservations
-    (`_coven_eager_requests`, with `_coven_eager_cancel` while the app has
-    cancelled them) retain the fixed references requested for eager fill and
-    cancellation, including requests that have not received any bytes;
-  - `_coven_cache_budgets`: each namespace's budget and cached byte total,
-    updated with its cache records so a budget check needs no full sum;
-  - `_coven_eager_rows` and `_coven_eager_work`: each eager row's fixed file
-    as last noted, and the changed references awaiting an eager fill, kept in
-    the transaction that changes the row, so finding eager work reads no
-    unchanged row;
-  - `_coven_pin_requests`: pins a completed upload carried to its stored
-    file, until a whole pinned copy is published;
-  - `_coven_file_removals`: unused local copies waiting to be deleted;
-  - `_coven_cache_writes`: cache ranges whose bytes are being written;
-  - `_coven_file_candidates`: stored files awaiting a deletion decision
-    (§16.5). The transaction ending a file's last local reference adds it;
-    so does a retained object's checked reference list before this device
-    deletes that object, and a removed uploader's folder scan. Another
-    uploader's object is read before it goes, and an unproven verdict again
-    once one of its parts opens or the schema range covers it
-    ([`read_before_delete`, `names_become_candidates`, `stale_unproven_counterexample`](proofs/storelog-data/CovenStorelogData/ReferenceCandidates.lean)).
-    A candidate
-    goes once storage confirms its deletion, or while local data still
-    protects it, since that protection's end adds it again;
-  - `_coven_file_scans`: each removed uploader whose file folder this device
-    listed after its cut-off, with the removal slot that cut-off followed;
-  - `_coven_retries`: each waiting upload's, operation's and approval
-    poll's persisted deadline `T` and full wait `W` with the consecutive
-    failures that chose `W`, and the provider cooldown (§16.5). An upload's
-    or operation's row goes with its work, an operation's also when its
-    condition clears.
-- Reading a not-yet-uploaded original finds its hashes through the row's
-  fixed where-column reference. There is no row-and-column hash copy to keep
-  in sync with the queue. After upload, reads use cache or storage (§16.1).
-  - Ana attaches A, then the row is pointed at B before A finishes. A's
-    queued reference still owns A's hashes; B's attachment records B's hashes
-    under B's own id. Finishing A cannot delete B's facts.
-- The bytes themselves are files in the store's directory: coven's own
-  copies, and the cache.
-- A file's bytes are written and synced to disk before the row that names
-  them commits, and a row's removal commits before its bytes are deleted,
-  so a crash never leaves a table naming bytes that aren't there.
-- Nor bytes that no table names:
-  - before writing new bytes, coven records their name in
-    `_coven_file_removals`, and the write that attaches them takes it out;
-  - a cache range's bytes are written with no writer held (§3.1), by
-    any handle, including a read-only one in another process. Its name is
-    recorded in `_coven_cache_writes` instead, which only its own write
-    removes: the transaction publishing its row takes the name out, and a
-    failed write makes it a removal. Every range write holds a shared lock
-    on the cache's writes, and opening the writer holds it exclusively, so
-    a name opening still finds recorded has no live write: it becomes a
-    removal;
-  - the write that lets bytes go records them there in its transaction;
-  - after a write commits or fails, and when the database opens, coven
-    deletes the unused bytes `_coven_file_removals` names, then their records.
-    Only committed records name bytes to delete, and the deletion runs after
-    the writer is released, so a stalled disk holds back no app write (§3.1);
-    only removing the records takes the writer again.
-    Names still held by staging or cache reservations are retained. Cancelling
-    either releases its active names synchronously, without requiring an async
-    runtime. The durable removal records retain its abandoned bytes for the next
-    write or open.
-  - A deletion that fails stays recorded and is tried again then. A
-    committed write still returns its result; opening reports the failure.
+- Local file records describe sources, uploads, cache work and cleanup.
+  They do not sync.
+- A queued upload owns its fixed reference and source facts (§16.5).
+  Retargeting its row cannot replace those facts or forget its unfinished upload.
+- Ana attaches A, then changes the row to B before A finishes.
+  Finishing A changes no row and cannot delete B's source or hashes.
+- Native errors remain available during the process. After reopening, pending
+  work exposes its persisted failure category (§19.1).
+- Write and sync owned bytes to disk before committing a row that names them.
+  Remove the row before deleting its bytes; a crash cannot leave it naming missing bytes.
+- Record every new file's name before creating it. Attaching it clears its
+  cleanup record in the same transaction; failure leaves recorded cleanup.
+- An unfinished cache write keeps its own name until the transaction exposing
+  its verified range commits. Opening never deletes bytes another live writer still owns.
+- Cancelling staging or a cache write releases its active names.
+  Durable records keep any abandoned bytes discoverable for deletion.
+- A transaction releasing owned bytes records the deletion before committing.
+  Delete those bytes after releasing the database writer, then remove the record.
+- Run owed local deletions after writes and on opening.
+  Failure retains the record. A committed write still returns its result; opening reports the cleanup failure.
+- Original user files are never deleted by this work.
+  File retention in storage follows [§16.5](#165-uploads-and-deletion).
 
 ## 17. Schema changes
 
@@ -3833,7 +3520,7 @@ Carol's tablet:
   - Keep its table and column names, key, audience, scalar values, setters
     and original cause. Strip live parent links; the old schema need not exist.
   - Frozen records no longer take part in merge or current removal rules.
-    They remain readable, dismissible, snapshotted and fingerprinted.
+    They remain readable, dismissible and included in snapshots.
   - E.g. Ana's migration drops `notes.color` while Ben's losing value “blue”
     is still pending. Every device keeps that loss under `notes.color`;
     opening the new schema does not silently discard it.
@@ -3855,16 +3542,16 @@ Carol's tablet:
 - A later local breaking migration can include writes between its marker and
   the preceding marker in its new capture. Those writes and both markers
   publish before that raise; writes after the latest marker wait. Reopening
-  retains the same queued originals, captured version and publication gate.
+  retains the same queued originals, captured version and schema wait.
   Ana queues write 1, migrates with marker 2, writes 3, migrates with marker 4,
   then writes 5: 1–4 can claim one slot, the raise follows, and 5 waits for it.
-- Before publication, a migrated device interprets uncovered older-schema
+- Before claiming its raise, a migrated device interprets uncovered older-schema
   changes using its local capture's conversion, preserving original records.
   Recapture includes every write already judged. If another device claims
   the version first, load that announced state and interpret uncovered writes
   under the same rule as every receiver; local migration results do not
   become shared losses.
-  [proof pending: schema publication preserves queued originals and admits its captured prefix without waiting for later writes]
+  [proof pending: schema raise preserves queued originals and admits its captured prefix without waiting for later writes]
 
 - Conversion is for received late old-schema writes from other devices,
   including already-attempted writes that arrive after the raise. After adopting an
@@ -3978,196 +3665,116 @@ Carol's tablet:
 
 ## 18. Operations
 
-- Every admin action is an operation: creation, registration, set role,
-  rename, set access, removals, invitations, key replacement, circles,
-  rotation, schema raises and resets. All use this path:
-  1. read and apply to the latest observed slot; validate the requested
-     action against that state;
-  2. record prerequisites and every artifact before creating it: key custody,
-     provider principals and keys, grants, deliveries, snapshots and upload
-     sessions, with enough identity to complete or undo them;
-  3. perform that recorded work, then claim the next slot;
-  4. on a collision, compare bytes first (§6), otherwise read/apply the new
-     slots and validate again. If still allowed, finish any changed
-     prerequisites and claim the next slot. If no longer allowed, undo all
-     uncommitted artifacts and return that typed reason;
-  5. once claimed, apply and complete the recorded local work. State-driven
-     provider access, key deletion, rotation and reloads follow applied state.
-  [proof pending: a journaled admin operation either commits once or retains every obligation until undo completes]
-- A collision itself is not an app decision or a failed administrative call.
-  The expected binding of a member-key replacement and the approved invite
-  pair stay fixed. Revalidation cannot turn the request into approval of a
-  different pair. A schema raise already established is adopted (§17.1).
-- The journal is `_coven_operations`: an unreused local id, kind, completed
-  step, typed data and initiator. The data records the claim destination,
-  fixed bytes, created artifacts and any remaining undo. Local effects and
-  journal progress commit in the same transaction.
-- Storage steps are idempotent. Retry a recorded destination with identical
-  bytes; compare an occupied path before confirming it. An uncertain claim
-  must be settled before undo or a different destination is attempted.
-  Deleting an already absent artifact succeeds. A failed undo retains both
-  the initiating reason and cleanup failure, keeps the journal and retries.
-  Never report successful cancellation while an artifact remains owed.
-- Prerequisite key-copy slots already claimed are sequence history. Undo
-  cannot unpublish them or revoke a disclosed key. Retain their exposure
-  evidence; delete unintroduced local key material only when no retained
-  attempt needs it. Ordinary prefix retention removes the physical slots.
-  Unannounced snapshots, unpublished deliveries, created S3 keys and new
-  provider grants remain their operation's responsibility to undo.
-- A claimed admin entry is final. Its operation completes activation and
-  required custody after a crash; it cannot be discarded or replaced by a
-  different action. The journal disappears only after completion or full
-  undo. S3 deletion obligations can be transferred atomically to their
-  dedicated operation, never forgotten.
-- One serialized owner runs claims for this device. No database writer is
-  held across network, custody, whole-object decoding or timers. Local
-  validation and actual state changes acquire it only for their transaction.
-- A new call requires online validation before creating artifacts. A
-  started call returns on completion or a typed failure requiring attention;
-  dropping its future does not discard its journal. Transient failures and
-  failed undo resume automatically under the shared backoff. Claim progress
-  assumes eventual successful IO and scheduling; contention has no fairness
-  or elapsed-time bound.
-- Every waiting step records its first unmet condition in `_coven_pending`.
-  Calls retain native typed causes; durable records retain categories.
-  The app may make a recorded retry due; an invite’s cancellation follows
-  its undo path.
-  It cannot discard state-driven provider work or required reloads. A
-  blocked sequence prevents every send by every operation (§6).
-- Resume journals after reopening, when prerequisites change or retry timers
-  become due. An unchanged wait does no repeated work. A local failure
-  leaves the preceding committed state visible and advances no cursor.
+Every admin action uses one operation and its journal.
+Role changes and renames use the same path as key rotation, invitations and resets.
+
+1. Read and apply the sequence to its current end. Validate the requested action.
+   A new call without storage fails before creating anything.
+2. Journal each prerequisite before creating it: keys, grants, deliveries,
+   snapshots or upload sessions. Keep enough information to finish or undo that work.
+3. Do the prerequisite work, then claim the next slot under [§6](#settling-a-claim).
+   Copies and snapshot announcements claim their own earlier slots.
+4. After contention, apply the new slots and validate again.
+   If still allowed, finish changed prerequisites and claim again.
+5. If no longer allowed, undo the work the journal still owns and fail with
+   `SyncError::Rejected(OperationRejection)`. Report an undo failure too and keep the journal for retry.
+6. After the claim settles, apply the entry and finish its local work.
+   Complete required custody before returning success.
+
+[proof pending: operations preserve their journals until completion or confirmed undo]
+
+- Contention does not return a decision to the app.
+  An already-satisfied request completes without a redundant entry.
+- Revalidation keeps the requested target and approved keys fixed.
+  It cannot overwrite a competing member-key replacement or approve a different invite request.
+- Before undo, await or cancel every artifact request already sent.
+  Delete by the recorded name and confirm absence; a late result cannot escape the journal.
+- A provider call that cannot be cancelled retains its cleanup obligation.
+  S3 keys also carry the minting device's name for [§13](#13-removing-members-and-devices)'s reclaim rule.
+- Deleting an absent artifact succeeds. A failed undo keeps both causes and
+  retries; cancellation cannot report success while cleanup remains owed.
+- Claimed prerequisite copies remain history. Undo cannot erase a disclosed key.
+  Their exposure still affects key selection ([§11](#11-keys)).
+- A claimed admin entry is final. After a crash, finish its required activation
+  and custody; do not substitute another action.
+- Local changes and journal progress commit together.
+  Delete the unfinished-work record only after completion or confirmed undo.
+- Dropping a call's future preserves its journal. Temporary failures and failed
+  undo resume under [§16.5](#165-uploads-and-deletion)'s backoff.
+- Each wait records its first unmet condition locally ([§19.1](#191-noticing)).
+  The app may request a retry, but cannot discard required reloads or provider work.
+- Claim progress requires successful IO and eventual scheduling.
+  Contention has no fairness or elapsed-time bound.
 
 ### 18.1 Operations
 
-- A role, rename or removal action has no created prerequisite artifact.
-  It still validates, journals, claims, and applies through the same path.
-- Rotation and circle creation persist the new key, claim required sealed
-  copies, then claim the introducing entry. Adding a circle member supplies
-  historical keys before its membership entry. Revalidation adjusts the
-  required recipients; already published copies remain exposure evidence.
-- An invitation records its fixed target and new access before showing the
-  code. Approval records the exact checked request, supplies its keys, then
-  claims its binding. Decline, expiry or failed validation undoes only new
-  access; the existing member's current access stays. Request deletion comes
-  after the binding or the recorded refusal is settled (§12).
-- Self-replacement pauses local app writes and settles their queued prefix,
-  persists the candidate pair, claims its copies and replacement, and
-  activates custody and restore code. Failure before a claim releases the
-  pause only after undo and verification that held credentials still match
-  the applied binding. After a claim, activation must finish.
-- A schema raise confirms its captured writes and marker, uploads and
-  announces its new-schema snapshot, then claims the raise after the coverage
-  check (§15, §17.1). A reset uses the same publication path with reset purpose.
-- Snapshot publication captures, seals, uploads and announces (§15).
-  Unannounced bytes belong to its journal until claimed or deleted.
-- Reload stages a checkpoint and suffix, then atomically installs every
-  readable audience at the common target with eligible queued writes on top.
-  It never settles an upload merely because its value appears in a snapshot.
-- Prefix deletion journals the replacement floor bundle before deleting
-  covered slots, then advances the floor (§15). File deletion uses the
-  retained-reference checks (§16.5); failures remain visible by path.
-- Writes and files wait in their own queues, not a second operation journal.
-  The writes batch keeps its fixed attempted envelope and provider session;
-  each file keeps its session in its file queue. Every confirmed part is
-  durable before progress is reported.
+- Rotation and circle creation keep the new key, claim its required copies,
+  then claim its introduction. Adding a circle member first supplies historical keys (§11).
+- An invite records its fixed target and new access before showing the code.
+  Approval and undo follow [§12.2](#122-adding-a-person).
+- Self-replacement pauses app writes, confirms its queue, keeps the new pair,
+  then claims copies and replacement. Success installs custody and refreshes the restore code.
+- A failed self-replacement releases the pause only after undo and confirmation
+  that held credentials still match the current binding.
+- A schema raise confirms captured writes and its marker, uploads and announces
+  the snapshot, then claims the raise ([§17.1](#171-host-application)).
+- Snapshot creation and retention follow [§15](#15-snapshots).
+  Reload stages the required data before committing it atomically.
+- Writes and files keep their journals with their queues.
+  Provider-confirmed upload progress survives reopening; sending bytes alone does not advance it.
 
 ### 18.2 Example
 
-- Carol rotates after Ana removes Ben. Her journal holds K2, its hash and
-  the published copies at slots 41 and 42. She crashes before the rotation.
-- On reopening she reads through 42 and validates again. If still allowed,
-  she claims 43 with the rotation; then K2 can seal data.
-- If slot 43 removes Carol first, her call fails with that reason and undoes
-  its uncommitted artifacts. Copies at 41 and 42 remain recorded exposure;
-  no entry at 43 is changed, and no replacement action waits for app approval.
+- Carol's rotation journal holds K2 and its copies at slots 41 and 42.
+  She records her attempt at 43, sends it, and crashes before receiving the reply.
+- On reopening, she settles 43 first. If her rotation landed, she completes it.
+  If another entry took 43, she applies it and validates again.
+- If 43 removes Carol, her call undoes its remaining artifacts and fails.
+  Copies at 41 and 42 remain exposure; undo cannot take them back.
 
 ## 19. Recovery
 
-- Recovery is for any state coven's rules didn't produce: a write that
-  never arrives, a database a disk or a bug damaged, or devices holding
-  different data after the same writes.
-- The last is the one nothing else would catch, since every rule would
-  still run; it is what a bug in coven or the app looks like.
+- Recovery reloads a usable installation, replaces a damaged one, or resets
+  an audience from a device the person chooses.
+- Coven reports failed input checks and blocked work to the local app.
 
 ### 19.1 Noticing
 
-- `_coven_pending` holds one record per subject and reporting device. The
-  app reads `pending()` or `subscribe_pending()` (E5), including offline.
-  Each record names the first unmet condition, not every downstream symptom.
-  Persist the block with any progress it permits; change or remove it only
-  when that condition changes or the work settles.
-- A sequence block names its slot and cause. An update, unavailable required
-  key, failed read or damaged slot stops all later slots and every send.
-  Do not create separate waits for each inaccessible later entry. The
-  local cause remains visible even though the blocked device cannot post it.
-- Removal cut-off instead consumes a writes slot and records `WritesRefused`
-  with its deciding entry (§10). It creates no effects or restorable losses.
-  Eligible dependent changes have their own frozen losses (§8). This verdict
-  is permanent, not a reason to download or reconsider the slot repeatedly.
-- Other subjects include a write, key copy, snapshot, peer status, file,
-  operation, retention path, audience, agreement check, join or connection.
-  Key-copy subjects include the exact sealing credential; an old-credential
-  report cannot satisfy a new-credential wait.
-- Record missing objects, missing source evidence, unavailable keys, required
-  updates, unpublished raises, reloads, file-source failures, provider access,
-  undo failures and disagreements. No clock or retry count decides whether
-  the subject still needs its record.
-- A permanent refusal requires a complete immutable input and a failed
-  decryption, signature, parsing, authorization, identity, causality or merge
-  check. A transport failure is a failed read. Calls and records use the
-  same `Refusal` variant; native causes remain only in the running process.
-- Keep the installed coven version of each refusal. An applicable update
-  permits one check using retained bytes first; reopening the same version
-  does not repeat it. A valid checkpoint may replace history removed by
-  retention; a device cannot skip a refused slot outside the floor’s
-  replacement coverage to reach later admin entries or a reset. Damaged storage remains outside recovery (§2).
-- A successfully applied changed reset clears the current pending reports
-  atomically with its reload. Failed reloads clear nothing. Unresolved journal
-  obligations and source evidence remain; still-unmet conditions are reported
-  again when observed. A reset cannot reverse a consumed retirement refusal.
-- Status carries only this device's observations peers can act on (D8):
-  immutable refusals, missing objects/source evidence, unavailable key copies,
-  update requirements and undeliverable files. Never forward a peer's report.
-  Authenticate reports before retaining those relevant to this device.
-- Read each known device's status by exact path. A successful observation
-  replaces its previous reports; absence removes them, a failed read does
-  neither. Reuse unchanged revisions and decoded records. Invalid status is
-  `InvalidStatus`, not an immutable refusal: a replacement can repair it.
-  Reports do not grant permission to advance the sequence or delete history.
-- A snapshot with unverified metadata supplies no coverage. A verified
-  announcement with an unreadable or refused body still names the required
-  snapshot: record that cause and wait, rather than load an older state that
-  requires already deleted history. A newer applicable floor bundle can
-  replace it under §15's reload rules; no listing decides this.
-- A failed database transaction leaves the old state and applied slot intact.
-  SQLite integrity failures and invalid persisted facts report
-  `Failed(LocalFailure::Database)` with the native cause on the call.
-  Failure to save a pending record stops the loop and database calls with
-  `DbError::PendingPersistence`; never expose a falsely empty list.
-- A fingerprint covers each audience's visible rows, generations, cell
-  setters and losses, with written values and causes, as if both copies of
-  a key in different audiences were shown (§14.2). It excludes local ids,
-  queues, journals and caches. Update its leaves in the same transaction
-  as the data (D11).
-- Key the fingerprint with that audience's usable key (§11). Post none
-  without such a key, or while local unclaimed writes prevent describing
-  exactly the published prefix. Metadata may use a held exposed key; data
-  fingerprints may not.
-- Compare two fingerprints only at equal applied slots, schemas and keys,
-  with the same readable audience. A mismatch records `Agreement` with
-  `Disagrees`, naming the peer and audience. Neither device knows which
-  copy is right; the person chooses reload or reset (§19.2, §19.3).
-- Ana's laptop stops on slot 80 needing an app update. It still displays
-  local data and the named update requirement, but cannot read Ben's
-  removal at 81 or send its pending writes. After updating, it applies
-  80 and then 81 before sending anything.
+- `_coven_pending` holds one local record per subject.
+  `pending()` and `subscribe_pending()` expose it to this device's app, including offline (E5).
+- Each record names the first unmet condition. Keep it until that condition
+  changes or the work settles; elapsed time alone cannot clear it.
+- A blocked slot has one record naming its cause ([§6](#6-syncing-writes)).
+  Do not add waits for every inaccessible later slot.
+- Other subjects are writes, key copies, snapshots, files, operations, retention
+  paths, audiences, joins and the connection. Key copies name the exact recipient credential.
+- Refused cut-off writes keep their `WritesRefused` record (§10).
+  A later slot cannot reverse that verdict.
+- A permanent refusal requires a completely downloaded immutable object and a
+  failed input check. A transport failure remains a failed read.
+- Calls and pending records use the same `Refusal` variant.
+  Calls retain native errors; durable records retain the category.
+- An applicable coven update permits one recheck of a refused object.
+  Reopening the same version does not repeat that work.
+- A floor may replace deleted history. Otherwise a device cannot skip a
+  refused slot to reach a later reset or admin entry.
+- Missing keys, required updates, failed reloads, unavailable files and failed
+  cleanup stay visible. A failed snapshot read cannot justify loading an older state (§15).
+- Applying a changed reset clears pending records with its reload.
+  Failed reloads clear nothing. Journals and source evidence remain; unresolved work still reports its cause.
+- A database transaction failure preserves the old state and applied slot.
+  Storage corruption reports `Failed(LocalFailure::Database)` with the native cause on the call.
+- Failure to save pending state stops sync and database calls with `DbError::PendingPersistence`.
+  The app must not see an empty list after a failed save.
+
+Ana's laptop needs an update at slot 80. Its app shows that cause and local data.
+It cannot read Ben's removal at 81 or send queued writes until 80 applies.
 
 ### 19.2 Recovering one device
 
-- A usable database that disagrees with another device reloads in place
-  from snapshots and the sequence (§15). It keeps its device id and waiting writes.
-  - Settle attempted writes by sending their original bytes. Convert
+- At the app's request, a usable database reloads from snapshots and the
+  sequence (§15). It keeps its device id and waiting writes.
+  - Settle attempted writes under [§6](#settling-a-claim). Convert
     eligible received old-schema records or record their original-value
     losses under §17.1, leaving upload records unchanged
     ([`reload_matches_receiver`, `conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
@@ -4200,10 +3807,8 @@ Carol's tablet:
 
 ### 19.3 Resetting a store
 
-- When the problem is shared, or nobody can tell which device is right,
-  the person picks the device they trust, and the store is reset from it.
-- E.g. "Ana's phone and Ben's laptop disagree about the store; reset it
-  from this device?"
+- The person chooses the device whose data should replace the audience.
+- For example, Ana asks to reset the store from her phone.
 - An admin's device resets the store's rows; a member of a circle resets
   that circle's rows, one reset per audience.
 - A reset is an operation ([§18](#18-operations)):
@@ -4252,7 +3857,7 @@ Carol's tablet:
 | `coven-foundation` | The clock, the id source, atomic file writes, the store's directory and its lock | [§7.2](#72-timestamps), [§10](#10-device-identity), [E1](api.md#e1-opening) |
 | `coven-crypto` | Ciphers, sealed boxes, derived keys, file keys, member keys and their custody | [§11.1](#111-cryptography) |
 | `coven-merge` | Timestamps, the merged state, the removal rules and lost values, as functions with no I/O | [§7](#7-order), [§8](#8-merge), [§14](#14-audiences) |
-| `coven-format` | The bytes in storage: sequence slots, inner writes, checkpoints, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | [Appendix D](format.md) |
+| `coven-format` | The bytes in storage: sequence slots, inner writes, snapshots, file headers and chunks, encoded, decoded and checked, using merge's and crypto's types | [Appendix D](format.md) |
 | `coven-database` | The SQLite connection, coven's internal tables, applying the merge's results, triggers, live queries, migrations | [§5](#5-local-database) |
 | `coven-storage` | Each provider, and the operations coven needs from it, including upload sessions | [§4](#4-storage-providers-and-access) |
 | `coven-sync` | The store sequence, members, circles, snapshots, files and the cache, operations, recovery | [§6](#6-syncing-writes), [§9](#9-members-and-roles), [§12](#12-joining-and-restore) to [§19](#19-recovery) |
@@ -4373,7 +3978,7 @@ Carol's tablet:
   `Offline` means the last attempt could not reach storage; `Failed` means
   storage answered with an error preventing the whole pass (E5).
   Every object or operation that cannot advance has a typed pending record,
-  including maintenance, prerequisites and relevant signed peer reports
+  including maintenance and prerequisites
   (§19.1, E5). A persisted reason never substitutes text for its category.
 - A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
@@ -4407,7 +4012,7 @@ Carol's tablet:
       with the removed member's keys; identical file uploads store different
       ciphertext; snapshots delete covered logs and superseded own snapshots;
     - injected failures at each remote-write mutation roll back app rows,
-      merge records, losses, fingerprints, the applied slot and query notifications;
+      merge records, losses, the applied slot and query notifications;
       these tests use fixed inputs, an injected clock and explicit barriers;
   - the Lean proofs, built from scratch, with no `sorry` and no axiom
     beyond Lean's own, and their differential tests against Rust.
