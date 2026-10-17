@@ -247,8 +247,8 @@ Snapshot coverage plus a grace period let history be deleted without waiting for
 absent devices. A returning device reloads and keeps the unsent writes that still
 count (§16.5, §16.6).
 
-The model gives a deadline. From the moment a prefix of history is ready to
-delete, it is deleted within U + G + P + D, assuming:
+Four assumed bounds add up to a deadline. From the moment a prefix of history
+is ready to delete, it is deleted within U + G + P + D, assuming:
 
 - **U:** a snapshot is prepared, uploaded and announced successfully within U;
 - **G:** the grace period;
@@ -1142,9 +1142,9 @@ away; the same key shows once (in two audiences, the store's row wins).
   3. apply the other rules again, to the losers' children.
 
   So every device that applied the same writes sees the same rows, whatever order
-  the writes arrived in and whatever order the rules ran in. The machine-checked
-  merge model must establish this for the merged state and every removal rule,
-  including rows hidden by a circle-deletion slot. The
+  the writes arrived in and whatever order the rules ran in. The merge model
+  proves this for the merged state and every removal rule, including rows hidden
+  by a circle-deletion slot (Appendix G.3). The
   [merge write-up](proofs/merge.md) explains the model.
 
 ### 9. The rules SQL brings with it
@@ -3541,8 +3541,8 @@ earlier migrations against the kinds they committed with.
 
 Declaring the kind, and the choice for old writes, means late old writes are
 never lost without the app having chosen it: a breaking change the app took for an
-addition would otherwise drop them silently. The model refuses an
-undeclared breaking change and a breaking change declared as an addition, and
+addition would otherwise drop them silently. The model refuses a breaking
+change declared as an addition and an addition declared as breaking, and
 commits no part of the run when either happens
 ([`undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch`](proofs/queue/CovenQueue/ConversionChain.lean)).
 
@@ -3787,7 +3787,7 @@ first valid claim establishes it. The other device reads that slot, adopts its
 snapshot, and undoes its own unused work. Its announced snapshot, never activated
 by an admin entry, is still its operation's to clean up: once the device checks
 again and finds the raise taken, it deletes the body. The announcement stays in
-history and supplies no coverage (§16.3). The losing device publishes no entry.
+history and supplies no usable snapshot (§16.3). The losing device publishes no entry.
 
 Raises and resets are always checked against the actual state just before their
 slot, with §16.3's coverage rules.
@@ -4681,7 +4681,11 @@ rechecks (§20.5) and any container-existence check count here.
   call, decoding, a timer or file IO, so the app's own writes never wait on the
   network.
 - **Retries** follow the persisted delays of §6.7: 1, 2, 4, … seconds up to five
-  minutes. Finishing a pass doesn't reset a delay.
+  minutes. Finishing a pass doesn't reset a delay. So in t seconds, n waits whose
+  prerequisites nothing changes start at most n × (1 + ⌊t / d⌋) attempts, where d
+  is the shortest of their delays. Each commit that changes a wait's prerequisite
+  can add one start, and so can each reopen while the wall clock hasn't moved
+  forward.
 
 #### 21.3 How the costs are tested
 
@@ -4704,8 +4708,8 @@ What the models cover:
   operations, causality, authority, unique values, owners, the cut-off,
   snapshots, reloads and schema raises.
 - **The merge,** and conversion of old writes.
-- **Pieces of storage behaviour,** such as copy publication, and S3 key
-  minting and its admin access.
+- **Pieces of storage behaviour,** such as copy publication, that an S3 key
+  mint deletes no key, and how long a key replacement holds admin access.
 
 What they don't cover:
 
@@ -4714,7 +4718,8 @@ What they don't cover:
   conversion and storage models on generated cases and compare the answers; that
   is evidence, not proof.
 - **Their own assumptions.** The models take as given correct cryptography,
-  honest snapshot contents, and providers that behave as §20 requires.
+  honest snapshot contents, a prepared snapshot's body in storage before its
+  announcement counts, and providers that behave as §20 requires.
 - **The providers.** Whether a real service really is create-once is checked
   live: certification races writers against each service (§20.7), and every
   setup re-checks the server (§20.8). A live sample measures listing lag; it
@@ -6188,7 +6193,7 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | One applied prefix of the sequence determines membership and each readable audience's data at a schema version, given deterministic admin, merge and conversion rules | `prefix_determines_state` | `proofs/sequence/CovenSequence/Converge.lean` | §2.2, §8 |
 | Once caught up, a device never picks for a first attempt a key copied to a removed member's sealing keys | `revocation` | `proofs/sequence/CovenSequence/Keys.lean` | §2.5, §12.2 |
-| From the moment a prefix is ready to delete, it is deleted within U + G + P + D, without waiting for absent devices | `bounded_retention` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
+| Given the four bounds as assumptions (every relevant audience announces a covering snapshot within U, the floor moves past the prefix within P once those snapshots are G old, and the prefix is deleted within D after that), it is deleted within U + G + P + D; no bound mentions absent devices. The theorem adds the assumed bounds; it doesn't derive them from the storage steps | `bounded_retention` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
 | An audience with no reader to supply coverage has no deletion deadline | `uncovered_has_no_deadline` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sequence.md` | §2.9 |
 
@@ -6198,7 +6203,7 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | Each followed audience stays at the state of a sequence prefix in storage that satisfies the coverage and snapshot rules | `read_ok` | `proofs/sequence/CovenSequence/Reader.lean` | §5, §16.4 |
 | (same) | `dev_ok` | `proofs/sequence/CovenSequence/Device.lean` | §5 |
-| A claim with byte comparison wins exactly once | `conclude_correct`, `exactly_one_claimant` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
+| For one slot, in storage that only grows (no slot deleted), with every attempt's bytes unique to it: the claimant whose bytes fill the slot concludes it won, every other claimant that concludes anything concludes it lost, and both conclusions stay true | `conclude_correct`, `exactly_one_claimant` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* Without the byte comparison, a batch lands twice | `no_compare_lands_twice` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* An operation that forgets its claim on restart lands twice | `forgetful_lands_twice` | `proofs/sequence/CovenSequence/Operation.lean` | §5.1, §11.1 |
 | A read followed by a floor check admits only genuine first bytes | `floor_check_sound` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2 |
@@ -6212,6 +6217,8 @@ Write-ups explain each model and state its assumptions:
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
 | A device already stopped takes no apply or reload step | `stopped_stays` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |
+| A wait is due when its delay passes or a commit changes the prerequisite it names; a commit changing another prerequisite leaves it waiting, and being woken doesn't reset the backoff. Every start after the first is paid for by a full delay or by such a commit, so a wait nothing changes starts at most 1 + ⌊t / d⌋ times in t seconds, and n of them at most n times that | `evidence_rate`, `unrelated_commit_ignored`, `evidence_keeps_backoff`, `unchanged_rate`, `unchanged_waits_rate` | `proofs/io/CovenIO/WaitingEvidence.lean` | §6.7, §21.2 |
+| A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |
 | The authored `read_through` and every queued original are preserved; a device's own earlier writes count as read | `authored_readThrough`, `catchup_preserves_originals`, `own_predecessor_is_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Given publication after the authored read, a device's own writes in number order, and authored reads that never decrease, slot order consumes every cause first; authored pasts are transitive | `ordered_application_causal`, `past_transitive` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Receivers that agree on a cause's slot agree whether it is in a write's past; later publication adds no intervening remote write | `receivers_agree`, `intervening_write_not_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
@@ -6222,9 +6229,9 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | Two orders of the same writes give the same merged state | `merge_converges` | `proofs/merge/CovenMerge/Converge.lean` | §8 |
 | The merge model and its write-up (its Appendix B) | (write-up) | `proofs/merge.md` | §8, §8.4 |
-| A lost value stays lost unless a write that read it replaces it in place | `lostStep` | `proofs/merge/CovenMerge/Model.lean` | §8.2 |
+| After each arriving write, a device's lost values are exactly the rule's: a value is lost when some write replaced it in place (set the same cell in the same generation, or deleted that generation) and none of those writes had read it. So a lost value stops being lost only when a write that read it replaces it in place | `step_lost`, `seen_replacer_not_lost` | `proofs/merge/CovenMerge/StepLost.lean`; `proofs/merge/CovenMerge/Causality.lean` | §8.2 |
 | The removal rules give the same rows in any order | `device_converges`, `rule_order_converges` | `proofs/merge/CovenMerge/Removal.lean` | §8.4 |
-| Stated requirement: the merge model must establish convergence for the merged state and every removal rule, including rows hidden by a circle-deletion slot | (requirement) | `proofs/merge.md` | §8.4 |
+| Devices that applied the same writes in any causal order show the same rows and lost-value records, including rows hidden by a circle-deletion slot, which name that slot's entry; every order of running the removal rules that §8.4 allows gives the same rows | `entry_device_converges`, `entry_device_rule_order` | `proofs/merge/CovenMerge/Circles.lean` | §8.4, §15.9 |
 | *Body.* A foreign key on one generated column can name a parent no write named | `unwritten_reference` | `proofs/merge/CovenMerge/GeneratedReference.lean` | §9.1 |
 | Every reference a device shows is a tuple one write set | `accepted_reference_written`; write-up B19 | `proofs/merge/CovenMerge/GeneratedReference.lean`; [`proofs/merge.md`](proofs/merge.md#b19-foreign-keys-on-generated-columns) | §9.1 |
 | *Body.* A local key with no update action can never apply a remote rename | `stuck_forever` | `proofs/merge/CovenMerge/LocalUpdateAction.lean` | §9.1 |
@@ -6233,14 +6240,14 @@ Write-ups explain each model and state its assumptions:
 | The first slot wins a unique value and keeps it | `first_slot_wins`, `owner_stays` | `proofs/sequence/CovenSequence/Unique.lean` | §9.2 |
 | The model selects the lowest live claim, counting its setter, with the within-slot order; sound readers of one audience at one position select the same winner | `first_live_claim`, `winner_counted_setter`, `within_slot`, `readers_agree` | `proofs/sequence/CovenSequence/LiveClaims.lean` | §9.2 |
 | A released value goes to the earliest live claimant, including an older loser; the first claim after the release wins only when none earlier remains | `deleted_releases`, `first_after_release`, `older_loser_returns` | `proofs/sequence/CovenSequence/LiveClaims.lean` | §9.2 |
-| A change is kept exactly when none of its data sources was dropped | `retained_iff` | `proofs/merge/CovenMerge/DataDependency.lean` | §9.5 |
+| Within its row, a change is kept exactly when its write makes it, it passes its own checks, and the writes that supplied its generation and set the cells it replaced are all kept; a change whose foreign-key cause in the same write was dropped has no effect | `retained_iff`, `dropped_cause_no_effect` | `proofs/merge/CovenMerge/DataDependency.lean`; `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.5 |
 | The data rule and value accounting: receive order, progress, and dropping by data | write-up B17 | [`proofs/merge.md`](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data) | §9.5 |
 | The owner is the creation with the lowest slot, then the lower write number | `selected_creation`, `lower_write_number_wins` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | Later claims, updates, deletion, re-adding and audience moves keep the creator | `later_claim_preserves_creator`, `move_preserves_owner`, `retained_creator` | `proofs/sequence/CovenSequence/Owners.lean` | §9.6 |
 | A kept foreign-key effect on an owned row traces back to an authorized direct change in the same write | `derived_root_authorized` | `proofs/merge/CovenMerge/OwnerAdmission.lean` | §9.6 |
 | An accepted effect is one the schema actually implies | `no_forged_effect` | `proofs/merge/CovenMerge/ForeignKeyActions.lean` | §9.6 |
 | Owner authorization and loss recording, at the stated SQL extraction boundary, and the definition of a foreign-key action step | write-up B18 | [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
-| A step that depends on rows of the author's view that no step carries is refused | B18 `Overlapping` | `proofs/merge/CovenMerge/ForeignKeyOverlap.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
+| Why a step that depends on rows of the author's view that no step carries must be refused: two author views with the same write make different steps, and a receiver reading only the write accepts at most one of them. An action that keeps the shared reference's values, or points it at a row an earlier step made, is classified from the write alone. That receivers refuse every other such step is not proved | `one_view_misjudged`, `Untouched.views_differ`, `Stale.views_differ`, `Overlap.kept_classified`, `Retargeted.retargeted_classified`; write-up B18 | `proofs/merge/CovenMerge/ForeignKeyOverlap.lean`; [`proofs/merge.md`](proofs/merge.md#b18-owner-tables-and-row-authenticity) | §9.6 |
 
 ### G.4 People (§10–§15)
 
@@ -6259,12 +6266,12 @@ Write-ups explain each model and state its assumptions:
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
-| A counted preparation announcement has its body already in storage | `announcement_uploaded` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.2 |
+| Model premise, for preparation announcements only: the storage step that claims a preparation announcement requires its body to be in storage already, and the theorem reads that premise back. Ordinary announcements carry no such premise | `announcement_uploaded` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.2 |
 | A counted ordinary announcement covers the latest raise and reset, and matches the schema and reset state | `ordinary_covers_boundary`, `ordinary_matches_schema_reset` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | With the coverage rules, a sound reader with its key advances and reaches the end without anyone holding deletion back (honest snapshot bodies and kept raise and reset bodies assumed); a reader behind a floor snapshot's coverage may always reload | `read_progress`, `reaches_head` | `proofs/sequence/CovenSequence/Reader.lean` | §16.3, §16.4, §16.6 |
-| An abandoned preparation has no effect, supplies no coverage and isn't usable | `preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
+| A preparation announcement alone changes no rows, schema version, reset or usable ordinary snapshots, though its coverage still limits later preparations and entries. In one example history, a reset preparation never activated stays out of the snapshots, never becomes a reset, and is never usable | `preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | Loading a floor snapshot and the slots after it reaches the full state; sound readers at one position agree | `joiner_reaches_head`, `readers_agree` | `proofs/sequence/CovenSequence/Reader.lean` | §16.4, §16.5 |
 | A running device with fixed audiences and all their keys brings every reader to the end of the sequence | `device_reaches_head` | `proofs/sequence/CovenSequence/Device.lean` | §16.5 |
 | A reload installs the queue as it stands at commit, including writes made while loading, and keeps originals that aren't eligible | `queued_originals_preserved`, `write_during_reload` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
@@ -6295,16 +6302,16 @@ Write-ups explain each model and state its assumptions:
 | Claim | Theorems | File | Section |
 |---|---|---|---|
 | *Body.* A migration's kind follows its statements; deciding by the rows a device holds makes devices disagree | `statement_plans_agree`, `row_classification_diverges` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.1 |
-| *Body.* An undeclared breaking change, or a breaking change declared as an addition, is refused, and no part of the run commits | `undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.3 |
+| *Body.* A breaking change declared as an addition, and an addition declared as breaking, are refused, and no part of the run commits | `undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.3 |
 | Migrating keeps every queued original, tried or untried | `conversions_preserve_uploads`, `conversions_preserve_attempt`, `conversions_preserve_untried` | `proofs/queue/CovenQueue/Conversion.lean` | §18.5 |
 | Capturing freezes the queue through the marker; later writes don't delay it | `captured_prefix`, `later_writes_do_not_delay` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | The captured writes are published once; writes after the marker wait for the raise; originals and their order are kept | `confirm_captured`, `confirmation_not_repeated`, `tail_waits`, `raise_without_waiting`, `originals_preserved` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | Uploading the raise snapshot waits for confirmation, and the raise waits for the announcement; no storage or contention deadline is imposed | `preparation_waits_for_confirmation`, `activation_waits_for_announcement` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | A later breaking migration's capture includes both markers and the writes between them | `recapture_includes_waiting` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
-| Interpreting a late original from the queue gives the same result as receiving it from the sequence | `late_original_converted`, `reload_matches_receiver` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
-| The author rebuilding after adopting a raise matches every receiver; its uploads stay unchanged | `reload_matches_receiver`, `conversions_preserve_uploads` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6, §19.2 |
-| Uncovered old-schema changes convert in version and causal order, whether or not their upload was tried | `receive_matches_evaluation`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
-| The converters used are those after the write's version, up to the raise's | `one_step_is_conversion` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
+| Interpreting a late original from the queue converts it from its own schema version to the applied one. When the next slot carries that original's part unchanged, passes validation, and the reset filter drops nothing from it, applying the slot gives the same rows as that interpretation | `late_original_converted`, `reload_matches_receiver` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
+| Receipt never reads whether an upload was tried: given, as a premise, that the author's queued records with that status set aside are the history receivers have, its rebuild after adopting a raise gives every receiver's result. Its uploads stay unchanged | `reload_matches_receiver`, `conversions_preserve_uploads` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6, §19.2 |
+| Receiving a write has one result: its verdict is the evaluation of the received history, and two receipts of it under the same conversion, schema view and history, each made after the write's recorded reads were received and not refused, agree. Receipt takes the write's record, never whether its upload was tried | `receive_matches_evaluation`, `receive_agreement` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
+| The model defines the converters a write takes as those of the breaking migrations after its version through the raise's, composed in the order of the app's migration list, which it takes to be version order. For a single breaking migration that is the raise itself, this is exactly the conversion the receipt theorems use | `one_step_is_conversion` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
 | Dependent changes stay frozen; independent ones convert and match receivers | `dependent_change_not_converted`, `independent_change_converted`, `converted_change_matches_receiver` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
 | With `Drop`, values are kept; frozen stays frozen; a lost value is never converted again | `explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
 | *Body.* With no breaking migration in a write's range, no converter is needed; older writes still need the conversions they cross | `newest_breaking_write_admitted`, `retained_step_required` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
@@ -6329,9 +6336,9 @@ Write-ups explain each model and state its assumptions:
 | Concurrent attempts sharing one temporary never hard-fail or lose the create; a missing temporary settles from the destination; an empty destination retries and publishes | `shared_never_fails`, `shared_occupied_identical`, `attemptCopy_retry_empty`, `retry_publishes`, `shared_temporary_missing` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | An attempt staging over another's sees its own marker, so both answer stored, which equal bytes settle to anyway | `shared_temporary_both_stored` | `proofs/storage/CovenStorage/CopyPublication.lean` | E.10 |
 | Temporaries are always recorded; a retry clears them, even after a failed deletion; a fresh name per attempt would strand one | `staged_recorded`, `retry_clears`, `failed_deletion_retry_accepted`, `attempt_naming_strands` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6, E.10 |
-| A mint makes and checks its key before the secret joins the journal, and deletes nothing, so another live copy of the database never takes a key this one made | `run_keeps_provider` | `proofs/storage/CovenStorage/KeyDelivery.lean` | §20.10 |
+| No step of the mint model deletes a provider key, so minting, recording, copying or losing a database never takes a key another copy made. The model has no check step: that a mint checks its key before the secret joins the journal is not modelled, and delivery, claim settlement, undo and key deletion are outside it | `run_keeps_provider` | `proofs/storage/CovenStorage/KeyDelivery.lean` | §20.10 |
 | A mint by a cloned database spares the key this one recorded | `clone_mint_spares_recorded_key` | `proofs/storage/CovenStorage/KeyListing.lean` | §20.10 |
-| Admin access is held only by the operation that needs it, and released once its key is checked or its call fails | `released_makes_nothing`, `check_keeps_admin` | `proofs/storage/CovenStorage/AdminAccess.lean` | §20.10 |
+| For a key replacement, the only case modelled: a failed mint or check releases admin access, after which no key is made until the app supplies it again; a successful check keeps it, to delete the old key, until the replacement ends | `failed_mint_releases`, `failed_check_releases`, `released_makes_nothing`, `check_keeps_admin` | `proofs/storage/CovenStorage/AdminAccess.lean` | §20.10 |
 
 ---
 

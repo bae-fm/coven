@@ -3,6 +3,7 @@ import CovenMerge
 open CovenMerge
 
 #print axioms step_spec
+#print axioms step_lost
 #print axioms foldl_isSpec
 #print axioms merge_converges
 #print axioms snapshot_converges
