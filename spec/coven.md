@@ -159,7 +159,10 @@ cryptographic and environmental assumptions.
 - **Atomicity:** a slot's effects and applied number commit together (§6).
   Its verdicts and losses cannot become visible with partial progress. SQLite atomicity is assumed.
 - **Convergence:** one applied prefix determines membership and each readable
-  audience's data at a given schema. Timestamps select cell values; generations defeat edits concurrent with deletion.
+  audience's data at a given schema
+  ([`prefix_determines_state`](proofs/sequence/CovenSequence/Converge.lean),
+  with deterministic admin, merge and conversion rules supplied to the model).
+  Timestamps select cell values; generations defeat edits concurrent with deletion.
 - First slot selects unique-value winners and original row owners (§8.5, §8.8).
   Original-value and dependency losses remain available. Removal refusals and reset-ignored parts create no losses (§8, §19.3).
 - **Durability:** commits and operation journals survive crashes while the database
@@ -186,8 +189,10 @@ cryptographic and environmental assumptions.
 - **Visible failures:** a blocked slot, operation, file or cleanup names its
   first unmet condition to the local app (§19.1). Eligible local work continues.
 
-Sequence claims awaiting proofs are marked at their rules (§6, §9, §10, §15, §18).
-Existing merge and conversion proofs cover their stated inputs, not this storage protocol.
+The [sequence proof](proofs/sequence.md) covers claims, prefix agreement, cut-offs,
+readers, retention and operation journals under its stated assumptions.
+Unproved parts are marked at their rules. Merge and conversion proofs cover
+their stated inputs; they do not establish the composed storage protocol.
 
 ### 3.1 IO bounds
 
@@ -1237,8 +1242,11 @@ The store log means the admin entries in this sequence.
 - A device applies slots in order. It claims n+1 only after applying 1 through n.
   [One sync pass](sync-pass.md) gives the read, apply, claim and effects order.
 - Applying a slot commits its changes and applied slot number in one transaction.
-  Failure leaves both at the preceding slot.
-  [proof pending: applying slots in order preserves causality and commits progress atomically]
+  Failure leaves both at the preceding slot; SQLite atomicity is assumed (§2).
+- In the model, each followed audience remains at the state of a sequence prefix on
+  storage satisfying §15's coverage and snapshot-body rules
+  ([`read_ok`](proofs/sequence/CovenSequence/Reader.lean),
+  [`dev_ok`](proofs/sequence/CovenSequence/Device.lean)).
 - Parts outside this member's audiences need not be opened ([§14.4](#144-writes)).
   A readable part missing its key stops the whole slot.
 - Writes cut off by removal or key replacement are consumed without effects
@@ -1253,6 +1261,7 @@ The store log means the admin entries in this sequence.
   Each individual plaintext write must fit SQLite's 1 GB value limit; otherwise commit returns `DbError::TooLarge`.
 - Each write records `read_through`: the last applied slot when it was authored.
   Its own earlier writes are implicit reads. Catch-up never changes this record.
+  [proof pending: ordered slot application preserves authored read-through and implicit write predecessors]
 - Before first sending a write, record its format and sealing keys.
   [§11](#11-keys) chooses the keys; [D9](format.md#d9-sealed-objects) fixes its signed inner bytes across retries.
 - Remove queued writes only when their claim is settled and their consumed
@@ -1282,13 +1291,20 @@ An operation keeps this record in its journal; a writes queue keeps it with its 
   queues and operations. Contention retries keep that claim number; a new
   claim takes the next number. Never reuse a settled number for different work.
 - On reopening or retrying, settle this claim before validating again, undoing,
-  or trying another slot. Read its recorded slot and compare all bytes.
+  or trying another slot. Read its recorded slot and compare all bytes;
+  forgetting the claim can land an operation twice
+  ([`forgetful_lands_twice`](proofs/sequence/CovenSequence/Operation.lean)).
 - Equal bytes mean the claim landed, even if the provider replied `AlreadyExists`.
   Different bytes mean contention. A failed read leaves the claim unsettled.
+  Skipping the comparison can duplicate a batch
+  ([`no_compare_lands_twice`](proofs/sequence/CovenSequence/Claim.lean)).
 - If the slot is absent and the floor has not passed it, retry the same
   path with the same bytes. Absence does not cancel a request still in flight.
 - After a create lands, read the floor before confirming the claim.
-  If the floor has passed its slot, recreated bytes cannot confirm it.
+  A slot still at or above that floor holds the genuine bytes
+  ([`claim_floor_check`](proofs/sequence/CovenSequence/Retention.lean)).
+  If the floor has passed its slot, recreated bytes cannot confirm it
+  ([`stale_create_wins_deleted_slot`](proofs/sequence/CovenSequence/Claim.lean)).
 - When the floor has passed the recorded slot, use an authenticated floor
   snapshot's last included claim number for this device ([§15](#15-snapshots)).
   The claim landed exactly when that number reaches its recorded number,
@@ -1302,7 +1318,14 @@ An operation keeps this record in its journal; a writes queue keeps it with its 
   Failure retains that obligation; those bytes never change the sequence's meaning.
 - When another claim won, apply the new slots and validate the waiting work again.
   A new slot needs a new outer envelope; its inner writes stay unchanged.
-  [proof pending: journaled claims settle without duplicate effects despite lost replies and deleted slots]
+
+With this journal ordering and floor coverage, settlement distinguishes a landed
+claim, one absent from the sequence, and an attempt whose slot is still empty
+([`settle_correct`](proofs/sequence/CovenSequence/Settle.lean)). Once an occupied
+attempt is settled, retaining its claim or successfully claiming again after
+`notLanded` leaves exactly one slot for that claim
+([`lands_once_never_lost`](proofs/sequence/CovenSequence/Settle.lean)). This proves
+no bound on contention or time to success.
 
 Ana and Ben try slot 41. Ana's reply is lost, then her retry says `AlreadyExists`.
 She reads her bytes at 41 and checks the floor. Ben reads different bytes,
@@ -2097,7 +2120,11 @@ Carol's tablet:
   rows can claim one value only through concurrent writes.
 - Of two rows claiming one value, the lowest slot keeps it.
   Within one slot, the lower write number wins; within one write, the lower primary key wins.
-  [proof pending: first-slot unique claims agree on every device and cannot be displaced by a backdated late claim]
+- For abstract claims that are never released, starting with no owners, the
+  first counted slot wins and later claims cannot displace it
+  ([`first_slot_wins`, `owner_stays`](proofs/sequence/CovenSequence/Unique.lean)).
+  The model does not select claims from merged live rows or order claims within a slot.
+  [proof pending: unique-value selection composes with merged values, removal, release and within-slot ties]
 - Timestamps choose the cell values before uniqueness is judged.
 - Local writes without slots rank after claimed slots, in local write order.
   A locally created row can therefore lose its unique value before claiming a slot.
@@ -2261,7 +2288,10 @@ Carol's tablet:
     Later claims never reselect an established owner. Local unclaimed
     creations are provisional; when a published creation already owns that
     key, queued changes are checked against it before their effects count.
-    [proof pending: first-slot owner selection is stable under every later claim]
+    Starting with no owners, the model selects the first counted creator slot
+    and preserves it under every later claim
+    ([`first_slot_wins`, `owner_stays`](proofs/sequence/CovenSequence/Unique.lean)).
+    [proof pending: owner selection resolves within-slot ties and preserves creator identity across audience moves]
   - Retain the creating write's authenticated identity through deletion,
     loss dismissal, schema conversion and snapshots. Renaming a table or
     key does not make the migration's author the row's creator.
@@ -2332,7 +2362,7 @@ Carol's tablet:
   every device from the same authenticated inputs, including after a reload.
   [B18](proofs/merge.md#b18-owner-tables-and-row-authenticity) proves their
   authorization and loss recording at the stated SQL extraction boundary;
-  the sequence selection claim above remains pending. Ownership grants no
+  the selection details marked above remain unproved. Ownership grants no
   additional schema restrictions.
 
 ## 9. Members and roles
@@ -2342,8 +2372,12 @@ Carol's tablet:
 - An admin entry's `EntryId` is its slot number.
   [D6](format.md#d6-admin-entries) lists the actions and their fields.
 - Validate an entry against the state after every preceding slot.
+  Equal preceding prefixes give equal validity decisions
+  ([`valid_prefix`](proofs/sequence/CovenSequence/Converge.lean)).
   Loading a snapshot and applying its suffix establishes that same state.
 - An applied entry is final. Later entries change state from their own slots onward.
+  The model supplies role authorization as a parameter; it does not prove the
+  concrete role rules or the last-admin condition.
   [proof pending: ordered admin entries preserve authority and at least one admin]
 - Slot 1 creates the store and registers its first device and admin.
   Its supplied public key verifies the signature; its store id must match the path.
@@ -2387,17 +2421,22 @@ No removal of Ana enters the sequence.
 - Missing or different custody refuses opening without changing the database.
 - When reading a new slot, check whether it is signed by this device.
   If this device's journal never attempted that path, report `SyncError::DeviceIdInUse` and stop sending.
+  Starting from empty storage, with every create recorded and the journal
+  retained, the model proves that an unattempted signed slot implies another copy
+  ([`foreign_slot_means_copy`](proofs/sequence/CovenSequence/Settle.lean)).
 - Different bytes at an attempted slot are ordinary contention, even when
   the slot names this device. Settle the claim under [§6](#settling-a-claim).
 - Slot order controls sending ([§6](#6-syncing-writes)); no elapsed-time permission is required.
   A removed device or an installation holding replaced member keys cannot send.
 - Creation and invite-bound join requests have their bootstrap rules (§9, §12).
   They do not permit ordinary sends before the device has applied the sequence.
-- A writes slot after its device's removal or replacement counts for nothing.
+- A writes slot after its device's applied removal or replacement counts for nothing.
   The same applies after its member's removal or replacement of its signing key.
 - Authenticate the original author, consume the slot, and record `WritesRefused`
   with the deciding entry. Those writes create neither data effects nor losses.
-  [proof pending: earlier removal or key replacement excludes later writes under the old identity]
+  The model proves refusal with unchanged rows and no new unique-value or owner
+  claim, while still recording the claim number
+  ([`cutoff`](proofs/sequence/CovenSequence/Cutoff.lean)).
 - Eligible changes using refused data follow [§8](#8-merge)'s source rule.
   Writes signed by the member's new key can count after replacement.
 - Writes claimed before removal keep their admission.
@@ -2998,12 +3037,18 @@ It holds rows, merge records, losses and the evidence needed for old writes.
   Equal coverage selects the later announcement. There is no upload deadline.
 - An ordinary snapshot must cover the last schema raise and reset before its announcement.
   Its schema and reset state must match the audience at that slot.
+  For raises, the version rule rejects a stale capture that would strand a joiner
+  ([`slot4_refused`, `stale_floor_strands_joiner`](proofs/sequence/CovenSequence/ReaderExamples.lean)).
 - A prepared raise or reset snapshot is usable only after its matching admin entry.
   Until then, its announcement cannot authorize retention or ordinary reload.
 - A raise or reset snapshot must cover at least as much as every earlier
   announcement for that audience. It must also cover the preceding raise and reset slots.
 - After contention, recapture if these coverage conditions no longer hold.
-  [proof pending: snapshot version and coverage rules make schema raises safe without a retention hold]
+  For the model's raises, these coverage rules let a sound reader with its key
+  advance and reach the head without a retention hold, assuming honest snapshot
+  bodies and retained raise bodies
+  ([`read_progress`, `reaches_head`](proofs/sequence/CovenSequence/Reader.lean)).
+  [proof pending: snapshot coverage composes with resets and separately announced raise or reset preparations]
 - Delete an abandoned preparation through its journal. An announcement whose
   preparation never takes effect remains history, but supplies no usable snapshot.
 - Select the newest applicable snapshot for the audience's schema and reset.
@@ -3035,8 +3080,13 @@ Before a floor exists, the sequence starts at slot 1.
   A failed floor read proves neither absence nor permission to skip history.
 - A reader also reads the floor after the pass's slots and before committing them.
   If it has passed any unapplied slot read, discard those inputs and reload.
+  A read followed by a floor check admits only genuine first bytes
+  ([`floor_check_sound`](proofs/sequence/CovenSequence/Claim.lean)); omitting it
+  admits the recreated-slot counterexample
+  ([`stale_create_wins_deleted_slot`](proofs/sequence/CovenSequence/Claim.lean)).
 - The floor takes effect when written, even while old slots remain in storage.
-  [proof pending: checking the floor after slot reads prevents applying recreated deleted slots]
+  Checked reads preserve the audience's prefix state
+  ([`read_ok`](proofs/sequence/CovenSequence/Reader.lean)).
 - Fix the reload target when loading begins. New writes or announcements do
   not restart it. If deletion removes needed slots, use the newer floor's snapshots.
 - Reload commits rows, merge records, source verdicts and the applied slot together.
@@ -3045,7 +3095,15 @@ Before a floor exists, the sequence starts at slot 1.
   writes over the loaded state. Their numbers, timestamps, schema and original reads stay unchanged.
 - Reset, breaking raise and newly readable circle reloads refuse writes into that
   audience with `AudienceReloading`. Other audiences stay locally writable.
-  [proof pending: snapshot reload preserves eligible queued writes and every readable audience's data]
+  [proof pending: snapshot reload preserves eligible queued writes while readable audiences change]
+
+On storage satisfying the coverage rules and holding honest snapshot bodies,
+a running device with a fixed set of followed audiences and all their keys can bring every reader to
+the head ([`device_reaches_head`](proofs/sequence/CovenSequence/Device.lean)).
+Loading a floor snapshot and its suffix reaches the full-prefix state;
+sound readers at the same position agree
+([`joiner_reaches_head`, `readers_agree`](proofs/sequence/CovenSequence/Reader.lean)).
+These results model neither the local write queue nor changes to followed audiences.
 
 Ben returns after a year. The floor starts at 501; his next slot was 41.
 He loads the floor's snapshots and resumes from their coverage.
@@ -3065,7 +3123,6 @@ His unsent edits keep their original reads and timestamps; age alone does not re
   Delete only slots the confirmed floor puts below `first`.
 - Failed deletions remain journaled and reported. No second floor update waits
   for deletion to finish.
-  [proof pending: advancing the floor before deletion preserves snapshots and enough slots for every reader]
 - Every audience in deleted writes needs coverage. Missing or unverified coverage
   waits, including for deleted circles whose losses or source evidence remain needed.
 - Any device with provider permission may delete covered slots.
@@ -3076,6 +3133,14 @@ His unsent edits keep their original reads and timestamps; age alone does not re
   Already covered history does not wait for that member.
 - Snapshots retain deleted-row generations and source verdicts.
   Old edits cannot revive a deleted incarnation or turn refused data into an accepted source.
+
+Starting with genuine kept slots, validly announced honest floor snapshots and
+retained raise bodies, the modeled storage steps preserve those properties and
+every sound reader ([`store_good`, `store_reader`](proofs/sequence/CovenSequence/Retention.lean)).
+Under any interleaving of those steps and device steps, a running device with
+fixed followed audiences and all their keys can still reach the current head's
+full state ([`deletion_keeps_reachable`](proofs/sequence/CovenSequence/Device.lean)).
+Reset and prepared-snapshot activation remain outside these results, as marked above.
 
 ## 16. Files
 
@@ -3706,7 +3771,15 @@ Role changes and renames use the same path as key rotation, invitations and rese
 6. After the claim settles, apply the entry and finish its local work.
    Complete required custody before returning success.
 
-[proof pending: operations preserve their journals until completion or confirmed undo]
+With validation depending only on the preceding slots, the operation model
+preserves recorded artifacts and in-flight requests through every step
+([`steps_inv`, `step_req`](proofs/sequence/CovenSequence/Operation.lean)).
+Starting with none of the operation's bytes in the sequence, it occupies at
+most one slot; a completed claim passed validation against its filled prefix;
+confirmed undo leaves neither its slot bytes nor its artifacts
+([`operation_outcome`](proofs/sequence/CovenSequence/Operation.lean)).
+This model retains sequence slots and proves safety, not eventual completion;
+[§6](#settling-a-claim) gives the separate settlement proof after deletion.
 
 - Contention does not return a decision to the app.
   An already-satisfied request completes without a redundant entry.
@@ -3714,6 +3787,8 @@ Role changes and renames use the same path as key rotation, invitations and rese
   It cannot overwrite a competing member-key replacement or approve a different invite request.
 - Before undo, await or cancel every artifact request already sent.
   Delete by the recorded name and confirm absence; a late result cannot escape the journal.
+  Undoing before a create ends can leave an artifact after confirmed undo
+  ([`eager_undo_leaks`](proofs/sequence/CovenSequence/Operation.lean)).
 - A provider call that cannot be cancelled retains its cleanup obligation.
   S3 keys also carry the minting device's name for [§13](#13-removing-members-and-devices)'s reclaim rule.
 - Deleting an absent artifact succeeds. A failed undo keeps both causes and

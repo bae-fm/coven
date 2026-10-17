@@ -1,9 +1,17 @@
 # One store sequence
 
-The Lean package in [`sequence/`](sequence/) checks the proposed replacement of
-per-device store logs and write logs with one numbered sequence per store. The
-normative spec does not describe the sequence yet; this package checks the
-design before the spec changes. It uses Lean 4.34.1 and its standard library,
+The Lean package in [`sequence/`](sequence/) backs the normative sequence rules:
+[claims and application (§6)](../coven.md#6-syncing-writes),
+[unique claims (§8.5)](../coven.md#unique-constraints),
+[owner selection (§8.8)](../coven.md#88-owner-tables),
+[admin prefixes (§9)](../coven.md#9-members-and-roles),
+[cut-offs (§10)](../coven.md#10-device-identity),
+[audience reads (§14.4)](../coven.md#144-writes),
+[snapshots and retention (§15)](../coven.md#15-snapshots), and
+[operation journals (§18)](../coven.md#18-operations), in the order described by
+[one sync pass](../sync-pass.md). Each result has the assumptions and limits
+below; unproved parts remain marked in the spec.
+It uses Lean 4.34.1 and its standard library,
 without additional axioms or unfinished proofs. All named results are audited by
 `CovenSequence/Axioms.lean`, and `scripts/check.sh` builds the package and runs
 the audit with the other proofs.
@@ -119,8 +127,9 @@ storage model:
 
 - `claim_floor_check`: a claimant that saw its bytes at slot `i` and then, after
   any storage steps, reads a floor whose first kept slot is not past `i` holds
-  the genuine slot `i`. If the floor has passed `i`, the claim is void and the
-  batch is claimed again.
+  the genuine slot `i`. If the floor has passed `i`, the bytes do not settle the
+  claim: use the snapshot's per-device claim number
+  ([settlement](#settling-a-claim-whose-slot-was-deleted)) before deciding to claim again.
 
 ## Convergence
 
@@ -414,6 +423,10 @@ ended. It deletes by recorded name and confirms absence before deleting the
 journal. Other devices claim slots at any time. Validation (`allowed`) reads
 only slots `1..n-1`.
 
+This operation model retains sequence slots. Its results are safety properties,
+not a promise that storage requests or contention eventually succeed. Settlement
+after slot deletion is proved separately below.
+
 - `step_inv`, `step_req`, `steps_inv`: every step keeps the invariants. One of
   them is that every create still in flight is recorded while the journal
   exists, and outlives it only for a landed operation.
@@ -435,11 +448,13 @@ only slots `1..n-1`.
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each device numbers every slot
 it claims with one counter: batches, admin entries, key copies, announcements.
-Before each create, the journal records the slot and the exact bytes. On
+Before each create, the journal records the claim number, slot and exact bytes. On
 reopen, the device reads the slot and compares bytes. If the floor has passed
 the slot, it settles from the floor's snapshot instead. Each snapshot records,
-per device, the last claim number it includes, and a claim landed exactly when
-that number covers it. Admin claims settle by the same rule as batches.
+per device, the last claim number it includes, valid or refused, and a claim
+landed exactly when that number covers it. Every slot kind uses this rule.
+The device settles its current claim before starting another; contention retries
+retain that number, and new claims take increasing positive numbers.
 
 The first part abstracts slots to what settlement reads: a claim's device, its
 number, an attempt nonce and a value. `Own` holds what the device knows of its
@@ -452,10 +467,10 @@ landed.
 - `settle_correct`: settlement says `landed` exactly when the claim is in the
   sequence. `notLanded` means it is nowhere in it, and `retry` means its slot
   is still empty.
-- `lands_once_never_lost`: a device that claims again exactly when settlement
-  says `notLanded` ends with the claim at exactly one slot. For a batch its
-  writes land once; for an admin entry its change lands once. That
-  re-establishes `Own` for its next return.
+- `lands_once_never_lost`: once the recorded slot is occupied, retaining a landed
+  claim or successfully claiming again exactly when settlement says `notLanded`
+  leaves the claim at exactly one slot. The theorem assumes the new claim succeeds;
+  it does not establish eventual success under contention.
 
 The second part reads the record from `Model`. The ledger keeps each device's
 last claim number, so every snapshot body carries it.
@@ -511,6 +526,9 @@ sending it and creates only what it recorded, signed with its id.
   device's numbers increase is a hypothesis of `settle_from_floor`, not
   derived from a device's counter.
 - Not modelled:
+  - concrete role authorization or the last-admin condition;
+  - authored `read_through`, implicit write predecessors or the local write queue;
+  - resets and separately announced preparations activated by a raise or reset;
   - Drive's head file and its compare-and-swap;
   - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;
