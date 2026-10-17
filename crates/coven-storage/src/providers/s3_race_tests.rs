@@ -176,7 +176,8 @@ async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions
         .await
         .unwrap();
         assert!(refused.load(Ordering::SeqCst));
-        assert_eq!(discarded, 1);
+        assert_eq!(discarded.throttled, 1);
+        assert_eq!(discarded.refused, 0);
         assert!(clock
             .waits
             .lock()

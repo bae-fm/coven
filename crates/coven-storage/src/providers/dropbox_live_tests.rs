@@ -43,9 +43,14 @@ fn dropbox_live_sequence() {
         suite::slots(live.clock.as_ref(), &writers, live.store)
             .await
             .unwrap();
-        suite::floor(live.clock.as_ref(), &writers, live.store)
-            .await
-            .unwrap();
+        suite::floor(
+            live.clock.as_ref(),
+            &writers,
+            live.store,
+            suite::AllRefused::Fails,
+        )
+        .await
+        .unwrap();
     });
 }
 

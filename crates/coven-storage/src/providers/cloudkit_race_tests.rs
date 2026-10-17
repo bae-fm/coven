@@ -347,9 +347,14 @@ async fn cloudkit_live_create_once_race() {
                     .into_iter()
                     .map(|writer| writer.storage as Arc<dyn Storage>)
                     .collect();
-                sequence_live::floor(clock.as_ref(), &writers, store)
-                    .await
-                    .unwrap();
+                sequence_live::floor(
+                    clock.as_ref(),
+                    &writers,
+                    store,
+                    sequence_live::AllRefused::Fails,
+                )
+                .await
+                .unwrap();
             })
             .catch_unwind()
             .await;

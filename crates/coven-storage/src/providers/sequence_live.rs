@@ -8,6 +8,35 @@ use tokio::sync::Barrier;
 
 pub(crate) const STAGES: [(usize, u64); 2] = [(2, 200), (8, 50)];
 
+/// Whether a floor round may refuse every writer. OneDrive can refuse both
+/// upload sessions of one race; such a round must leave the floor's bytes and
+/// revision unchanged, and the caller rereads the floor and retries.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AllRefused {
+    /// Every counted round has exactly one winner.
+    Fails,
+    /// A round may refuse every writer if the stored floor is unchanged.
+    Allowed,
+}
+
+/// What one judged round established.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Round {
+    /// Exactly one writer succeeded and readers hold its bytes.
+    Won,
+    /// Every writer was refused and the floor is unchanged.
+    AllRefused,
+}
+
+/// Rounds a stage discarded or retried besides its counted winners.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(crate) struct Tally {
+    /// Throttled rounds, never judged as contention.
+    pub(crate) throttled: u64,
+    /// Accepted rounds in which every writer was refused.
+    pub(crate) refused: u64,
+}
+
 pub(crate) struct Reply {
     pub(crate) writer: usize,
     pub(crate) start: Duration,
@@ -40,12 +69,15 @@ pub(crate) fn replies_valid(replies: &[Reply]) -> Result<(), StorageError> {
 
 /// All counted intervals share an instant. Throttled rounds still check every
 /// known winner and the stored bytes before returning the longest retry delay.
+/// A round refusing every writer passes only when `all_refused` allows it and
+/// the stored bytes are `before`; the caller also compares the revision.
 pub(crate) fn judge(
     replies: Vec<Reply>,
     payloads: &[Vec<u8>],
     stored: Option<&[u8]>,
     before: Option<&[u8]>,
-) -> Result<(), StorageError> {
+    all_refused: AllRefused,
+) -> Result<Round, StorageError> {
     replies_valid(&replies)?;
     let winner = replies.iter().find(|r| r.result.is_ok());
     require(
@@ -64,6 +96,9 @@ pub(crate) fn judge(
             .max_by_key(|e| throttle_wait(e, 0))
             .unwrap());
     }
+    if winner.is_none() && before.is_some() && all_refused == AllRefused::Allowed {
+        return Ok(Round::AllRefused);
+    }
     let overlap = replies
         .iter()
         .map(|r| r.start)
@@ -73,7 +108,8 @@ pub(crate) fn judge(
     require(
         winner.is_some() && overlap,
         "race lacked one winner or overlapping requests",
-    )
+    )?;
+    Ok(Round::Won)
 }
 
 /// Ordinary backoff never shortens a provider's requested wait.
@@ -133,34 +169,52 @@ pub(crate) async fn retry<T>(
 }
 
 /// An attempt gets its own slot name; a replacement fetches the current floor
-/// again. Throttling never advances the count of completed rounds.
+/// again. Neither throttling nor a round refusing every writer advances the
+/// count of completed rounds, which each have one winner.
 pub(crate) async fn rounds(
     clock: &dyn Clock,
     label: &str,
     trials: u64,
-    mut round: impl AsyncFnMut(u64, u64) -> Result<(), StorageError>,
-) -> Result<u64, StorageError> {
+    mut round: impl AsyncFnMut(u64, u64) -> Result<Round, StorageError>,
+) -> Result<Tally, StorageError> {
     let mut completed = 0;
-    let mut throttled = 0;
+    let mut tally = Tally::default();
     let mut consecutive = 0;
     while completed < trials {
         // Pace independent rounds without separating the concurrent writers.
         clock.sleep(Duration::from_secs(1)).await;
-        let attempt = completed + throttled + 1;
+        let attempt = completed + tally.throttled + tally.refused + 1;
         match round(completed + 1, attempt).await {
-            Ok(()) => {
+            Ok(Round::Won) => {
                 completed += 1;
                 consecutive = 0;
+            }
+            Ok(Round::AllRefused) => {
+                tally.refused += 1;
+                consecutive = 0;
+                println!(
+                    "sequence {label} attempt={attempt} completed={completed} all_refused={}",
+                    tally.refused
+                );
+                if tally.refused >= 100 {
+                    return Err(
+                        StorageFailure::Protocol.with_source("100 rounds refused every writer")
+                    );
+                }
             }
             Err(error)
                 if error.failure() == StorageFailure::RateLimited
                     && !matches!(error, StorageError::Cleanup { .. }) =>
             {
-                throttled += 1;
+                tally.throttled += 1;
                 let wait = throttle_wait(&error, consecutive);
-                println!("sequence {label} attempt={attempt} completed={completed} throttled={throttled} wait_ms={}", wait.as_millis());
+                println!(
+                    "sequence {label} attempt={attempt} completed={completed} throttled={} wait_ms={}",
+                    tally.throttled,
+                    wait.as_millis()
+                );
                 clock.sleep(wait).await;
-                if throttled >= 100 {
+                if tally.throttled >= 100 {
                     return Err(error);
                 }
                 consecutive += 1;
@@ -168,7 +222,7 @@ pub(crate) async fn rounds(
             Err(error) => return Err(error),
         }
     }
-    Ok(throttled)
+    Ok(tally)
 }
 
 pub(crate) async fn observed(
@@ -296,32 +350,36 @@ pub(crate) async fn slots(
 ) -> Result<(), StorageError> {
     let mut slot = 1;
     for (width, trials) in STAGES {
-        let throttled = rounds(clock, "create", trials, async |trial, attempt| {
+        let tally = rounds(clock, "create", trials, async |trial, attempt| {
             slot += 1;
             run(
                 clock,
                 &writers[..width],
                 &ObjectPath::slot(store, slot.try_into().unwrap()),
                 None,
+                AllRefused::Fails,
                 trial,
                 attempt,
             )
             .await
         })
         .await?;
-        println!("sequence SUMMARY create writers={width} trials={trials} overlapping={trials} winners={trials} throttled={throttled} violations=0");
+        println!("sequence SUMMARY create writers={width} trials={trials} overlapping={trials} winners={trials} throttled={} violations=0", tally.throttled);
     }
     Ok(())
 }
 
+/// Each stage counts `trials` one-winner rounds; `all_refused` says whether a
+/// round refusing every writer is retried from a fresh observation.
 pub(crate) async fn floor(
     clock: &dyn Clock,
     writers: &[Arc<dyn Storage>],
     store: StoreId,
+    all_refused: AllRefused,
 ) -> Result<(), StorageError> {
     let path = ObjectPath::floor(store);
     for (width, trials) in STAGES {
-        let throttled = rounds(clock, "floor", trials, async |trial, attempt| {
+        let tally = rounds(clock, "floor", trials, async |trial, attempt| {
             let previous = retry(clock, async || writers[0].read_object(&path, None).await).await?;
             for writer in &writers[1..width] {
                 require(
@@ -334,13 +392,14 @@ pub(crate) async fn floor(
                 &writers[..width],
                 &path,
                 Some(&previous),
+                all_refused,
                 trial,
                 attempt,
             )
             .await
         })
         .await?;
-        println!("sequence SUMMARY floor writers={width} trials={trials} overlapping={trials} winners={trials} throttled={throttled} violations=0");
+        println!("sequence SUMMARY floor writers={width} trials={trials} overlapping={trials} winners={trials} all_refused={} throttled={} violations=0", tally.refused, tally.throttled);
     }
     Ok(())
 }
@@ -350,9 +409,10 @@ async fn run(
     writers: &[Arc<dyn Storage>],
     path: &ObjectPath,
     previous: Option<&crate::ObjectRead>,
+    all_refused: AllRefused,
     trial: u64,
     attempt: u64,
-) -> Result<(), StorageError> {
+) -> Result<Round, StorageError> {
     let width = writers.len();
     let kind = if previous.is_some() {
         "floor"
@@ -425,16 +485,17 @@ async fn run(
         other.as_ref().map(|s| &s.bytes) == stored.as_ref().map(|s| &s.bytes),
         "sequence race readers disagree on the winning bytes",
     )?;
-    judge(
+    let round = judge(
         replies,
         &payloads,
         stored.as_ref().map(|s| s.bytes.as_slice()),
         previous.map(|p| p.bytes.as_slice()),
+        all_refused,
     )?;
-    if trial.is_multiple_of(25) {
+    if round == Round::Won && trial.is_multiple_of(25) {
         println!("sequence {kind} writers={width} completed={trial}");
     }
-    Ok(())
+    Ok(round)
 }
 
 #[cfg(test)]

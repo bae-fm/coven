@@ -85,7 +85,8 @@ async fn s3_live_sequence() {
                     store,
                 )
                 .await?;
-                sequence_live::floor(&clock, &writers, store).await
+                sequence_live::floor(&clock, &writers, store, sequence_live::AllRefused::Fails)
+                    .await
             }
         )
         .await
@@ -413,7 +414,7 @@ async fn run_race(
         })
         .await?;
     }
-    let throttled = sequence_live::rounds(
+    let tally = sequence_live::rounds(
         &clock,
         &format!("{race:?} writers={width}"),
         trials,
@@ -422,7 +423,7 @@ async fn run_race(
         },
     )
     .await?;
-    println!("race SUMMARY {race:?} writers={width} trials={trials} overlapping={trials} successes={trials} throttled={throttled} violations=0");
+    println!("race SUMMARY {race:?} writers={width} trials={trials} overlapping={trials} successes={trials} throttled={} violations=0", tally.throttled);
     Ok(())
 }
 
@@ -434,7 +435,7 @@ async fn run_race_round(
     width: usize,
     trial: u64,
     attempt: u64,
-) -> Result<(), StorageError> {
+) -> Result<crate::providers::tests::sequence_live::Round, StorageError> {
     use crate::providers::tests::sequence_live;
     use races::{fire, judge, prepare, single, Race, Reply, Write};
     let target = if matches!(race, Race::Replace) {
@@ -528,14 +529,15 @@ async fn run_race_round(
             )?;
         }
     }
-    judge(
+    let round = judge(
         replies,
         &payloads,
         stored.as_ref().map(|s| s.bytes.as_slice()),
         previous.as_ref().map(|p| p.bytes.as_slice()),
+        sequence_live::AllRefused::Fails,
     )?;
     println!("race {race:?} writers={width} trial={trial} attempt={attempt} overlap=true successes=1 pass=true");
-    Ok(())
+    Ok(round)
 }
 
 #[tokio::test]

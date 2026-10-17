@@ -34,26 +34,40 @@ fn judge_rejects_double_success_wrong_bytes_unexpected_failures_and_disjoint_req
             },
         ]
     };
-    assert!(judge(replies(), &payloads, Some(b"first"), None).is_ok());
-    assert!(judge(replies(), &payloads, Some(b"other"), None).is_err());
+    assert!(judge(
+        replies(),
+        &payloads,
+        Some(b"first"),
+        None,
+        AllRefused::Fails
+    )
+    .is_ok());
+    assert!(judge(
+        replies(),
+        &payloads,
+        Some(b"other"),
+        None,
+        AllRefused::Fails
+    )
+    .is_err());
     let mut both = replies();
     both[1].result = Ok(());
-    assert!(judge(both, &payloads, Some(b"other"), None).is_err());
+    assert!(judge(both, &payloads, Some(b"other"), None, AllRefused::Fails).is_err());
     let mut neither = replies();
     neither[0].result = Err(StorageFailure::AlreadyExists.into());
-    assert!(judge(neither, &payloads, Some(b"first"), None).is_err());
+    assert!(judge(neither, &payloads, Some(b"first"), None, AllRefused::Fails).is_err());
     let mut disjoint = replies();
     disjoint[1].start = disjoint[0].end;
-    assert!(judge(disjoint, &payloads, Some(b"first"), None).is_err());
+    assert!(judge(disjoint, &payloads, Some(b"first"), None, AllRefused::Fails).is_err());
     let mut network = replies();
     network[1].result = Err(StorageFailure::Network.into());
-    assert!(judge(network, &payloads, Some(b"first"), None).is_err());
+    assert!(judge(network, &payloads, Some(b"first"), None, AllRefused::Fails).is_err());
     let mut cleanup = replies();
     cleanup[1].result = Err(StorageError::Cleanup {
         operation: Box::new(StorageFailure::AlreadyExists.into()),
         cleanup: Box::new(StorageFailure::Network.into()),
     });
-    assert!(judge(cleanup, &payloads, Some(b"first"), None).is_err());
+    assert!(judge(cleanup, &payloads, Some(b"first"), None, AllRefused::Fails).is_err());
 }
 
 #[tokio::test]
@@ -89,12 +103,13 @@ async fn throttled_slot_round_is_retried_without_counting_it() {
             .map(|_| storage.clone() as Arc<dyn Storage>)
             .collect();
         let started = tokio::time::Instant::now();
-        let throttled = rounds(clock.as_ref(), "create", trials, async |trial, attempt| {
+        let tally = rounds(clock.as_ref(), "create", trials, async |trial, attempt| {
             run(
                 clock.as_ref(),
                 &writers,
                 &ObjectPath::slot(crate::test_utils::STORE_ID, attempt.try_into().unwrap()),
                 None,
+                AllRefused::Fails,
                 trial,
                 attempt,
             )
@@ -103,7 +118,14 @@ async fn throttled_slot_round_is_retried_without_counting_it() {
         .await
         .unwrap();
         assert!(started.elapsed() >= Duration::from_secs(7));
-        assert_eq!(throttled, 1);
+        assert_eq!(
+            tally,
+            Tally {
+                throttled: 1,
+                refused: 0
+            }
+        );
+        let throttled = tally.throttled;
         assert_eq!(storage.peak_requests(), width);
         assert_eq!(
             storage
@@ -146,6 +168,7 @@ fn throttling_preserves_the_longest_delay_and_cannot_hide_a_violation() {
         &payloads,
         Some(b"winner"),
         None,
+        AllRefused::Fails,
     )
     .unwrap_err();
     assert_eq!(result.failure(), StorageFailure::RateLimited);
@@ -196,7 +219,14 @@ fn throttling_preserves_the_longest_delay_and_cannot_hide_a_violation() {
             Some(b"old floor".as_slice()),
         ),
     ] {
-        let error = judge(replies_with(results), &payloads, stored, before).unwrap_err();
+        let error = judge(
+            replies_with(results),
+            &payloads,
+            stored,
+            before,
+            AllRefused::Fails,
+        )
+        .unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Protocol);
     }
     for before in [None, Some(b"old floor".as_slice())] {
@@ -205,6 +235,7 @@ fn throttling_preserves_the_longest_delay_and_cannot_hide_a_violation() {
             &payloads,
             before,
             before,
+            AllRefused::Allowed,
         )
         .unwrap_err();
         assert_eq!(error.failure(), StorageFailure::RateLimited);
@@ -221,12 +252,12 @@ async fn rounds_retry_the_same_trial_with_new_attempts_and_wait_before_releasing
         if attempt <= 2 {
             Err(throttled(7))
         } else {
-            Ok(())
+            Ok(Round::Won)
         }
     })
     .await
     .unwrap();
-    assert_eq!(discarded, 2);
+    assert_eq!(discarded.throttled, 2);
     assert_eq!(
         attempts,
         vec![
@@ -262,7 +293,7 @@ async fn exhausted_throttling_waits_before_returning_control_to_cleanup() {
         assert_eq!(trial, 1);
         attempts = attempt;
         last_request = tokio::time::Instant::now();
-        Err(throttled(37))
+        Err::<Round, _>(throttled(37))
     })
     .await
     .unwrap_err();
@@ -292,4 +323,106 @@ async fn failed_round_waits_for_throttled_writers_before_cleanup() {
         assert_eq!(error.failure(), StorageFailure::Protocol);
         assert!(started.elapsed() >= Duration::from_secs(9));
     }
+}
+
+#[test]
+fn an_all_refused_floor_round_passes_only_when_allowed_and_unchanged() {
+    let payloads = vec![b"first".to_vec(), b"other".to_vec()];
+    let refused = || {
+        replies_with(vec![
+            Err(StorageFailure::Conflict.into()),
+            Err(StorageFailure::Conflict.into()),
+        ])
+    };
+    let before = Some(b"old floor".as_slice());
+    assert_eq!(
+        judge(refused(), &payloads, before, before, AllRefused::Allowed).unwrap(),
+        Round::AllRefused
+    );
+    for (replies, stored, all_refused) in [
+        (refused(), before, AllRefused::Fails),
+        (refused(), Some(b"first".as_slice()), AllRefused::Allowed),
+        (refused(), None, AllRefused::Allowed),
+        (
+            replies_with(vec![Ok(()), Ok(())]),
+            Some(b"other".as_slice()),
+            AllRefused::Allowed,
+        ),
+        (
+            replies_with(vec![Ok(()), Err(StorageFailure::Conflict.into())]),
+            before,
+            AllRefused::Allowed,
+        ),
+        (
+            replies_with(vec![
+                Err(StorageFailure::Conflict.into()),
+                Err(StorageFailure::Network.into()),
+            ]),
+            before,
+            AllRefused::Allowed,
+        ),
+    ] {
+        assert_eq!(
+            judge(replies, &payloads, stored, before, all_refused)
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol
+        );
+    }
+    // A create race has no previous bytes to keep.
+    assert!(judge(refused(), &payloads, None, None, AllRefused::Allowed).is_err());
+}
+
+#[tokio::test(start_paused = true)]
+async fn an_all_refused_floor_round_is_counted_apart_and_retried() {
+    let clock = Arc::new(RaceClock(AtomicU64::new(0)));
+    let storage = Arc::new(
+        crate::test_utils::MemoryStorage::builder()
+            .clock(clock.clone())
+            .build()
+            .unwrap(),
+    );
+    let path = ObjectPath::floor(crate::test_utils::STORE_ID);
+    storage.create(&path, b"initial floor").await.unwrap();
+    let writers: Vec<Arc<dyn Storage>> = (0..2)
+        .map(|_| storage.clone() as Arc<dyn Storage>)
+        .collect();
+    for (all_refused, trials) in [(AllRefused::Allowed, 3), (AllRefused::Fails, 1)] {
+        let mut faults = crate::test_utils::Faults::none();
+        faults.refuse_replacements = writers.len();
+        // Held calls make every round's writers overlap.
+        faults.delay = Duration::from_millis(10);
+        storage.set_faults(faults).await;
+        let result = rounds(clock.as_ref(), "floor", trials, async |trial, attempt| {
+            let previous = storage.read_object(&path, None).await?;
+            run(
+                clock.as_ref(),
+                &writers,
+                &path,
+                Some(&previous),
+                all_refused,
+                trial,
+                attempt,
+            )
+            .await
+        })
+        .await;
+        match all_refused {
+            AllRefused::Allowed => assert_eq!(
+                result.unwrap(),
+                Tally {
+                    throttled: 0,
+                    refused: 1
+                }
+            ),
+            AllRefused::Fails => {
+                assert_eq!(result.unwrap_err().failure(), StorageFailure::Protocol)
+            }
+        }
+    }
+    assert!(storage
+        .read(&path)
+        .await
+        .unwrap()
+        .starts_with(b"floor width=2 trial=3 attempt=4 "));
 }

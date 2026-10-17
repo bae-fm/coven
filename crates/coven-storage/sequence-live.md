@@ -28,7 +28,12 @@ reads and lost-reply checks retry throttling up to 20 attempts; other errors
 and any known atomicity violation fail the run.
 
 Floor races use 200 two-writer and 50 eight-writer rounds against one observed
-revision. Lost-reply checks await a real write, withhold its successful reply,
+revision. OneDrive can refuse every writer of one floor round; such a round
+passes only if the floor's bytes and revision (eTag) are unchanged and both
+readers return those bytes. It is counted as `all_refused`, not as a completed round, and the
+next round observes the floor again; 100 such rounds stop the stage. Two
+successes, a success whose bytes are not stored, or an unexpected error still
+fail. Other providers' floor rounds need exactly one winner. Lost-reply checks await a real write, withhold its successful reply,
 then settle by reading; they also test occupied slot retries and stale floor
 retries. They do not inject a network failure inside the provider's transport.
 

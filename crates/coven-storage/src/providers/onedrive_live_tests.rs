@@ -204,9 +204,16 @@ fn onedrive_live_sequence() {
         suite::slots(live.clock.as_ref(), &writers, live.store)
             .await
             .unwrap();
-        suite::floor(live.clock.as_ref(), &writers, live.store)
-            .await
-            .unwrap();
+        // OneDrive can refuse every session of one race, leaving the floor
+        // unchanged; the stage counts those rounds and retries them.
+        suite::floor(
+            live.clock.as_ref(),
+            &writers,
+            live.store,
+            suite::AllRefused::Allowed,
+        )
+        .await
+        .unwrap();
         assert!(live
             .storage
             .revoke_access(&account)
