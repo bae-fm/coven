@@ -3195,7 +3195,7 @@ with the row.
 The content hash is a column of the row and syncs inside the encrypted writes
 like any other. Every device checks a downloaded file against it.
 
-Uploading stores the file, encrypted with the attaching write's key, at its
+Uploading stores the file, encrypted with the file key chosen by the attaching write, at its
 already chosen path.
 
 - The provider sees only a random name, never a hash of the content.
