@@ -30,7 +30,7 @@ impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, 
 impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
 
 /// One install of the app, by its 64-bit device id (§10).
-pub struct DeviceId(/* private */);
+pub struct DeviceId(pub u64);
 
 /// A member's random stable UUID, independent of their keys (§10).
 pub struct MemberId(pub Uuid);
@@ -43,7 +43,7 @@ pub struct SealingKey(/* private */);
 
 /// The public pair from D2, re-exported without duplicating its type:
 /// `signing: SigningKey`, `sealing: SealingKey`.
-pub use coven_format::MemberKeys as MemberPublicKeys;
+pub use coven_crypto::MemberPublicKeys;
 
 /// One write: its device and local write number, independent of its slot (§4).
 /// Claim numbers separately count every slot kind and remain internal to sync.
