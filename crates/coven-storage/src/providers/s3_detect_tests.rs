@@ -102,7 +102,17 @@ struct Upload {
     started: u64,
     parts: BTreeMap<u32, Vec<u8>>,
 }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LostReply {
+    Put,
+    Copy,
+    Initiate,
+    Complete,
+}
+
 struct Remote {
+    lost_reply: Option<LostReply>,
+    hidden: BTreeSet<String>,
     versioning: &'static str,
     versioning_failure: Option<u16>,
     service: Service,
@@ -174,6 +184,21 @@ async fn serve(
         .trim_start_matches('/')
         .to_owned();
     if key.is_empty() {
+        if q.contains_key("uploads") {
+            let prefix = q.get("prefix").expect("scoped multipart listing");
+            let contents: String = state
+                .uploads
+                .iter()
+                .filter(|(_, upload)| upload.key.starts_with(prefix))
+                .map(|(id, upload)| {
+                    format!(
+                        "<Upload><Key>{}</Key><UploadId>{id}</UploadId></Upload>",
+                        upload.key
+                    )
+                })
+                .collect();
+            return response(200, format!("<ListMultipartUploadsResult><IsTruncated>false</IsTruncated>{contents}</ListMultipartUploadsResult>"));
+        }
         if q.contains_key("versioning") {
             if let Some(status) = state.versioning_failure {
                 return error(
@@ -210,6 +235,9 @@ async fn serve(
             parts: BTreeMap::new(),
         };
         state.uploads.insert(id.clone(), upload);
+        if state.lost_reply == Some(LostReply::Initiate) {
+            return error(503, "ServiceUnavailable");
+        }
         return response(
             200,
             format!("<InitiateMultipartUploadResult><UploadId>{id}</UploadId></InitiateMultipartUploadResult>"),
@@ -243,7 +271,11 @@ async fn serve(
                     now()
                 };
                 let bytes = upload.parts.into_values().flatten().collect();
-                publish(&mut state, key, bytes, modified);
+                publish(&mut state, key.clone(), bytes, modified);
+                if state.lost_reply == Some(LostReply::Complete) {
+                    state.hidden.insert(key);
+                    return error(503, "ServiceUnavailable");
+                }
                 response(
                     200,
                     "<CompleteMultipartUploadResult><ETag>\"complete\"</ETag></CompleteMultipartUploadResult>",
@@ -267,7 +299,11 @@ async fn serve(
         }
         let source = source.strip_prefix("/bucket/").unwrap();
         let bytes = state.objects[source].bytes.clone();
-        publish(&mut state, key, bytes, now());
+        publish(&mut state, key.clone(), bytes, now());
+        if state.lost_reply == Some(LostReply::Copy) {
+            state.hidden.insert(key);
+            return error(503, "ServiceUnavailable");
+        }
         return response(
             200,
             "<CopyObjectResult><ETag>\"copied\"</ETag></CopyObjectResult>",
@@ -281,7 +317,11 @@ async fn serve(
             if enforced && state.objects.contains_key(&key) {
                 return error(412, "PreconditionFailed");
             }
-            publish(&mut state, key, body.to_vec(), now());
+            publish(&mut state, key.clone(), body.to_vec(), now());
+            if state.lost_reply == Some(LostReply::Put) {
+                state.hidden.insert(key);
+                return error(503, "ServiceUnavailable");
+            }
             response(200, Vec::new())
         }
         Method::DELETE => {
@@ -376,7 +416,11 @@ fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Body> {
     let entries: Vec<_> = state
         .objects
         .iter()
-        .filter(|(key, _)| key.starts_with(prefix) && after.is_none_or(|after| *key > after))
+        .filter(|(key, _)| {
+            !state.hidden.contains(*key)
+                && key.starts_with(prefix)
+                && after.is_none_or(|after| *key > after)
+        })
         .collect();
     let truncated = limit > 0 && entries.len() > limit;
     let page = &entries[..limit.min(entries.len())];
@@ -417,6 +461,8 @@ struct Fixture {
 impl Fixture {
     async fn new(service: Service) -> Self {
         let state = Arc::new(Mutex::new(Remote {
+            lost_reply: None,
+            hidden: BTreeSet::new(),
             versioning: "",
             versioning_failure: None,
             service,
@@ -840,4 +886,39 @@ async fn a_marker_that_never_advances_fails_after_forty_pauses() {
     expected.extend([std::time::Duration::from_millis(250); 40]);
     assert_eq!(*pauses.0.lock().unwrap(), expected);
     fixture.assert_clean();
+}
+
+async fn lost_probe_reply(failure: LostReply) {
+    let fixture = Fixture::new(RUSTFS).await;
+    fixture.state.lock().unwrap().lost_reply = Some(failure);
+    assert!(fixture.detect(None).await.is_err(), "{failure:?}");
+    let state = fixture.state.lock().unwrap();
+    assert!(
+        state.objects.is_empty(),
+        "{failure:?}: objects left after lost reply"
+    );
+    assert!(
+        state.uploads.is_empty(),
+        "{failure:?}: uploads left after lost reply"
+    );
+}
+
+#[tokio::test]
+async fn a_lost_probe_put_reply_leaves_no_object() {
+    lost_probe_reply(LostReply::Put).await;
+}
+
+#[tokio::test]
+async fn a_lost_probe_copy_reply_leaves_no_object() {
+    lost_probe_reply(LostReply::Copy).await;
+}
+
+#[tokio::test]
+async fn a_lost_probe_initiation_reply_leaves_no_native_upload() {
+    lost_probe_reply(LostReply::Initiate).await;
+}
+
+#[tokio::test]
+async fn a_lost_probe_completion_reply_leaves_no_object() {
+    lost_probe_reply(LostReply::Complete).await;
 }

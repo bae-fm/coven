@@ -101,60 +101,88 @@ impl S3Storage {
             return Err(StorageFailure::SessionIdentityUnknown.into());
         }
         let key = self.session_key(session)?;
+        self.abort_private_uploads(&key, Some(publication)).await
+    }
+
+    /// A fresh private name proves ownership of every native upload at that
+    /// exact key, including an initiation whose reply never arrived. Probes
+    /// have no sequence publication; ordinary uploads retain their gate.
+    pub(super) async fn abort_private_uploads(
+        &self,
+        key: &str,
+        publication: Option<&PublicationRequest>,
+    ) -> Result<(), StorageError> {
         let mut markers: Option<(String, String)> = None;
         let mut seen = Pagination::new();
+        let mut result = Ok(());
         loop {
-            let response = self
+            let mut request = self
                 .client
                 .list_multipart_uploads()
                 .bucket(&self.bucket)
-                .prefix(&key)
+                .prefix(key)
                 .set_key_marker(markers.as_ref().map(|(key, _)| key.clone()))
                 .set_upload_id_marker(markers.as_ref().map(|(_, id)| id.clone()))
-                .customize()
-                .interceptor(publication.clone())
-                .send()
-                .await
-                .map_err(s3_error)?;
+                .customize();
+            if let Some(publication) = publication {
+                request = request.interceptor(publication.clone());
+            }
+            let response = match request.send().await.map_err(s3_error) {
+                Ok(response) => response,
+                Err(error) => return with_cleanup(result, Err(error)),
+            };
             for upload in response.uploads() {
-                if upload.key() != Some(key.as_str()) {
+                if upload.key() != Some(key) {
                     continue;
                 }
-                let id = upload
-                    .upload_id()
-                    .filter(|id| !id.is_empty())
-                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted upload id"))?;
-                match self
+                let id = match upload.upload_id().filter(|id| !id.is_empty()) {
+                    Some(id) => id,
+                    None => {
+                        result = with_cleanup(
+                            result,
+                            Err(StorageFailure::Protocol.with_source("S3 omitted upload id")),
+                        );
+                        continue;
+                    }
+                };
+                let mut request = self
                     .client
                     .abort_multipart_upload()
                     .bucket(&self.bucket)
-                    .key(&key)
+                    .key(key)
                     .upload_id(id)
-                    .customize()
-                    .interceptor(publication.clone())
-                    .send()
-                    .await
-                {
-                    Ok(_) => tracing::debug!("aborted an unrecorded S3 upload initiation"),
-                    Err(error) if error.code() == Some("NoSuchUpload") => {}
-                    Err(error) => return Err(s3_error(error)),
+                    .customize();
+                if let Some(publication) = publication {
+                    request = request.interceptor(publication.clone());
                 }
+                let aborted = match request.send().await {
+                    Ok(_) => Ok(()),
+                    Err(error) if error.code() == Some("NoSuchUpload") => Ok(()),
+                    Err(error) => Err(s3_error(error)),
+                };
+                result = with_cleanup(result, aborted);
             }
             if !response.is_truncated().unwrap_or(false) {
-                return Ok(());
+                return result;
             }
-            let next = (
-                response
-                    .next_key_marker()
-                    .filter(|value| !value.is_empty())
-                    .ok_or(StorageFailure::Protocol.with_source("S3 omitted upload marker"))?
-                    .to_owned(),
-                response
-                    .next_upload_id_marker()
-                    .unwrap_or_default()
-                    .to_owned(),
-            );
-            seen.check(&format!("{}\n{}", next.0, next.1))?;
+            let next = match response.next_key_marker().filter(|value| !value.is_empty()) {
+                Some(key) => (
+                    key.to_owned(),
+                    response
+                        .next_upload_id_marker()
+                        .unwrap_or_default()
+                        .to_owned(),
+                ),
+                None => {
+                    return with_cleanup(
+                        result,
+                        Err(StorageFailure::Protocol.with_source("S3 omitted upload marker")),
+                    )
+                }
+            };
+            if let Err(error) = seen.check(&format!("{}\n{}", next.0, next.1)) {
+                return with_cleanup(result, Err(error));
+            }
             markers = Some(next);
         }
     }

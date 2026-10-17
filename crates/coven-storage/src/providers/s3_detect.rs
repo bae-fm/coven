@@ -79,6 +79,7 @@ pub(crate) async fn detect(
         clock,
         observations,
         written: BTreeSet::new(),
+        intended: BTreeSet::new(),
         uploads: Vec::new(),
     };
     let result = probes.run().await;
@@ -142,9 +143,12 @@ struct Probes<'a> {
     prefix: String,
     clock: ClockRef,
     observations: Vec<S3Observation>,
-    /// Every key a probe published, for deletion and listing visibility.
+    /// Every confirmed publication, for the listing visibility observations.
     written: BTreeSet<String>,
-    uploads: Vec<(String, String)>,
+    /// Names recorded before sending, whether or not publication was answered.
+    intended: BTreeSet<String>,
+    /// An unanswered initiation retains its exact private key for discovery.
+    uploads: Vec<(String, Option<String>)>,
 }
 
 impl Probes<'_> {
@@ -429,10 +433,17 @@ impl Probes<'_> {
         }
     }
 
-    /// Abort every started upload and delete every probe, tracked or listed.
+    /// Abort every initiation and delete each name recorded before sending.
     async fn cleanup(&mut self) -> Result<(), StorageError> {
         let mut result = Ok(());
         for (key, id) in std::mem::take(&mut self.uploads) {
+            let Some(id) = id else {
+                result = crate::transfer::with_cleanup(
+                    result,
+                    self.s.abort_private_uploads(&key, None).await,
+                );
+                continue;
+            };
             let aborted = match self
                 .s
                 .client
@@ -449,12 +460,7 @@ impl Probes<'_> {
             };
             result = crate::transfer::with_cleanup(result, aborted);
         }
-        let mut keys = std::mem::take(&mut self.written);
-        match self.keys(S3Listing::V1).await {
-            Ok(listed) => keys.extend(listed),
-            Err(error) => result = crate::transfer::with_cleanup(result, Err(error)),
-        }
-        for key in keys {
+        for key in std::mem::take(&mut self.intended) {
             debug_assert!(key.starts_with(&self.prefix));
             result = crate::transfer::with_cleanup(result, self.s.delete_key(&key).await);
         }
@@ -478,6 +484,7 @@ impl Probes<'_> {
         bytes: &[u8],
         condition: Option<(&'static str, &'static str)>,
     ) -> Result<(), StorageError> {
+        self.intended.insert(key.into());
         self.s
             .client
             .put_object()
@@ -504,6 +511,7 @@ impl Probes<'_> {
         condition: S3CopyCondition,
     ) -> Result<(), StorageError> {
         let (name, value) = condition.header();
+        self.intended.insert(key.into());
         self.s
             .client
             .copy_object()
@@ -545,6 +553,8 @@ impl Probes<'_> {
     }
 
     async fn start(&mut self, key: &str) -> Result<NativeUpload, StorageError> {
+        self.intended.insert(key.into());
+        self.uploads.push((key.into(), None));
         let reply = self
             .s
             .client
@@ -555,7 +565,7 @@ impl Probes<'_> {
             .await
             .map_err(s3_error)?;
         let id: String = metadata::required(reply.upload_id(), "S3 omitted upload id")?.into();
-        self.uploads.push((key.into(), id.clone()));
+        self.uploads.last_mut().expect("recorded initiation").1 = Some(id.clone());
         Ok(NativeUpload {
             key: key.into(),
             id,
