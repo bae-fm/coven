@@ -336,6 +336,12 @@ impl SequenceSync {
             {
                 Ok(_) => continue,
                 Err(SyncError::Rejected(reason)) => {
+                    // Contention may have installed an unheld pair or this
+                    // candidate. Neither permits releasing the pause here (§12.3).
+                    held_current(session, &identity)?;
+                    if session.history.state.members[&identity.member()].keys == candidate {
+                        continue;
+                    }
                     // A replacement that never became current leaves its
                     // copies, so its pair stays held as retired (§12.3).
                     self.member.persist(&identity.retire_candidate())?;

@@ -6,6 +6,7 @@ import CovenSequence.Causality
 import CovenSequence.Reload
 import CovenSequence.QueueReloadExamples
 import CovenSequence.AccessKeyReplacement
+import CovenSequence.MemberKeyReplacement
 
 /-! One case per process; malformed inputs fail on stderr with nonzero exit. -/
 namespace SequenceJson
@@ -300,6 +301,18 @@ def readAccessReplacement (j : Json) : Except String Json := do
   return Json.mkObj [("retained", toJson (result.phase != .finished)),
     ("rejection", toJson reason), ("failure", toJson failure)]
 
+def readMemberReplacement (j : Json) : Except String Json := do
+  let active ← nat j "active"
+  let candidate ← nat j "candidate"
+  if active = candidate then throw "candidate must be fresh"
+  let current ← j.getObjValAs? (Option Nat) "current"
+  let (paused, active, candidate) := match MemberKeyReplacement.resolve active candidate current with
+    | .blocked => (true, active, some candidate)
+    | .activate => (true, candidate, none)
+    | .undo => (false, active, none)
+  return Json.mkObj [("paused", toJson paused), ("active", toJson active),
+    ("candidate", toJson candidate)]
+
 def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
@@ -310,6 +323,7 @@ def run (j : Json) : Except String Json := do
   | "keys" => SequenceKeys.readKeys j
   | "keyCustody" => SequenceKeys.readCustody j
   | "accessReplacement" => readAccessReplacement j
+  | "memberReplacement" => readMemberReplacement j
   | "rotation" => SequenceKeys.readRotation j
   | "queueReload" => readQueueReload j
   | _ => throw "unknown case kind"

@@ -2165,6 +2165,12 @@ If it fails, both pairs and the recorded progress are kept for a retry. The paus
 lifts only once the undo is done and the device has confirmed that the keys it
 holds still match Ana's current keys.
 
+Ben might replace Ana's keys while her own replacement is contending. If his
+winning pair is one her device does not hold, it reports `MemberKeysReplaced`
+and keeps the pause: new writes under her old pair would not count. If he
+installed her kept candidate, her device installs that pair and finishes its
+restore code before releasing writes, as on any successful replacement.
+
 #### 12.4 Custody
 
 *Custody* is where secret keys live: the OS keychain by default, or another
@@ -6277,6 +6283,7 @@ Write-ups explain each model and state its assumptions:
 | A replacement waits until due; a due delivery can finish, and its claim's rejection reaches its undo | `not_due_unchanged`, `due_delivery_finishes`, `claim_rejection_reaches_undo` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §11.4 |
 | A failed undo keeps its rejection and cleanup failure; without admin access it stays owed, and only successful cleanup ends it | `failed_undo_keeps_both_causes`, `reopened_undo_needs_admin`, `undo_finishes_only_after_success` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
+| After a rejected self-replacement's child claim is undone, an unheld binding keeps the pause; a current candidate is installed, and undo may release the pause only under the held active pair | `unheld_keeps_pause`, `candidate_installs`, `undo_requires_active` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 

@@ -591,6 +591,14 @@ Only successful cleanup with admin access ends undo
 (`undo_finishes_only_after_success`). Provider outcomes and retry eligibility
 are inputs; this does not prove provider progress or Rust task ownership.
 
+[`MemberKeyReplacement`](sequence/CovenSequence/MemberKeyReplacement.lean)
+models the custody decision after a refused self-replacement's child claim is
+undone. `unheld_keeps_pause` retains the pause under an unheld binding;
+`candidate_installs` selects installation of a winning candidate, still owing
+its restore code. `undo_requires_active` permits release only under the held
+active pair. Public pairs are equality-preserving tokens; custody writes and
+restore-code persistence are outside this decision.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot
@@ -861,6 +869,12 @@ cause after the attempt. A finished operation has no durable pending cause.
 The Rust comparison `access_replacement_retries_and_undo_match_lean` runs real
 delivery retries and rejected-claim cleanup, including reopening without
 retained admin access, and compares these observations.
+
+**`memberReplacement`** calls `MemberKeyReplacement.resolve` with distinct
+`active` and `candidate` tokens and a nullable `current` binding. It returns
+`paused`, `active`, and nullable `candidate` after that custody decision.
+`member_replacement_binding_matches_lean` compares real competing replacements,
+including the SQL write gate and custody, with this result.
 
 **`queueReload`** supplies one of four `scenario` values. `reset` carries the
 actual queue's write numbers, schemas, authored-read slots and row keys, the

@@ -299,3 +299,144 @@ async fn run_background(ana: &Device, owner: RestoreCodes) {
     .unwrap();
     control.close().await.unwrap();
 }
+
+// §12.3: a competing binding cannot release a self-replacement's write pause.
+#[tokio::test]
+async fn a_rejected_self_replacement_keeps_writes_paused_for_an_unheld_binding() {
+    competing_replacement(false, false).await;
+}
+
+#[tokio::test]
+async fn a_competing_binding_of_the_candidate_installs_it_before_releasing_writes() {
+    competing_replacement(true, false).await;
+}
+
+async fn competing_replacement(same_candidate: bool, compare: bool) {
+    let mut group = Group::new();
+    group.passphrase_custody = true;
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let active = ana.identity.keys().public_keys();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    let compete = async {
+        observed.await.unwrap();
+        let candidate = ana
+            .sync
+            .member
+            .read()
+            .unwrap()
+            .unwrap()
+            .candidate()
+            .unwrap()
+            .public_keys();
+        let winning = if same_candidate {
+            candidate
+        } else {
+            coven_format::test_utils::keys_from_seed(12).public_keys()
+        };
+        ben.sync
+            .replace_member_keys_for(ana.identity.member(), winning)
+            .await
+            .unwrap();
+        resume.send(()).unwrap();
+        (candidate, winning)
+    };
+    let (result, (candidate, winning)) = tokio::join!(ana.sync.replace_member_keys(), compete);
+    assert_eq!(
+        ana.database().store_state().await.unwrap().members[&ana.identity.member()].keys,
+        winning
+    );
+    // Exercise the actual application write gate, including the candidate case
+    // whose binding has applied but whose restore code has not committed.
+    let paused = matches!(
+        ana.database()
+            .write(|sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('unsafe','before custody agrees')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await,
+        Err(coven_database::DbError::MemberKeysChanging)
+    );
+    assert!(
+        paused,
+        "a rejected request cannot end the custody pause: {result:?}"
+    );
+    let identity = ana.sync.member.read().unwrap().unwrap();
+    if compare {
+        use serde_json::json;
+        let actual = json!({"paused":paused,
+            "active":if identity.keys().public_keys() == active {0} else {1},
+            "candidate":identity.candidate().map(|_| 1)});
+        let input = json!({"kind":"memberReplacement", "active":0,"candidate":1,
+            "current":if same_candidate {1} else {2}});
+        assert_eq!(
+            actual,
+            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input)
+        );
+    }
+    if same_candidate {
+        assert!(result.is_ok(), "{result:?}");
+        assert_eq!(identity.keys().public_keys(), candidate);
+        assert!(identity.candidate().is_none());
+        assert!(identity.holds(&active));
+        let (owner, _) = codes(&ana, Keychain::in_memory("competing-candidate").unwrap());
+        owner.replace_member_keys().await.unwrap();
+        assert!(ana.database().operations().await.unwrap().is_empty());
+        insert(ana.database(), "after", "candidate and code installed").await;
+        owner.close().await;
+        ana.database().close().await.unwrap();
+    } else {
+        assert!(
+            matches!(result, Err(SyncError::MemberKeysReplaced { member }) if member == ana.identity.member()),
+            "{result:?}"
+        );
+        assert_eq!(identity.keys().public_keys(), active);
+        assert_eq!(identity.candidate().unwrap().public_keys(), candidate);
+        assert!(!identity.holds(&winning));
+        let ana = group.reopen(ana).await;
+        assert!(matches!(
+            ana.sync.pass().await,
+            Err(SyncError::MemberKeysReplaced { .. })
+        ));
+        assert!(matches!(
+            ana.database()
+                .write(|sql| {
+                    sql.execute("INSERT INTO notes VALUES('reopened','still unheld')", [])?;
+                    Ok(())
+                })
+                .await,
+            Err(coven_database::DbError::MemberKeysChanging)
+        ));
+        assert_eq!(
+            ana.sync
+                .member
+                .read()
+                .unwrap()
+                .unwrap()
+                .candidate()
+                .unwrap()
+                .public_keys(),
+            candidate
+        );
+        ana.database().close().await.unwrap();
+    }
+    ben.database().close().await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN"]
+async fn member_replacement_binding_matches_lean() {
+    for same_candidate in [false, true] {
+        competing_replacement(same_candidate, true).await;
+    }
+}

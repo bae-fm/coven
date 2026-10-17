@@ -60,6 +60,10 @@ import SequenceApply
 #print axioms CovenSequence.AccessKeyReplacement.undo_finishes_only_after_success
 #print axioms CovenSequence.AccessKeyReplacement.claim_rejection_reaches_undo
 
+#print axioms CovenSequence.MemberKeyReplacement.unheld_keeps_pause
+#print axioms CovenSequence.MemberKeyReplacement.candidate_installs
+#print axioms CovenSequence.MemberKeyReplacement.undo_requires_active
+
 #print axioms CovenSequence.ClaimRecord.remember_number
 #print axioms CovenSequence.Claims.witness
 #print axioms CovenSequence.Claims.ge
