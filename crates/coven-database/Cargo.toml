@@ -32,3 +32,11 @@ tokio = { workspace = true, features = ["rt-multi-thread", "macros", "time", "ne
 
 [lints]
 workspace = true
+
+[[test]]
+name = "sequence_claims"
+required-features = ["test-utils"]
+
+[[test]]
+name = "sequence_rules"
+required-features = ["test-utils"]

@@ -151,8 +151,6 @@ pub enum Group {
 pub trait RemovalView {
     /// Query failure, including the merge invariant errors checked here.
     type Error: From<MergeError>;
-    /// Every known row, including rows absent by their own generation.
-    fn rows(&self) -> Result<Vec<RowId>, Self::Error>;
     /// Facts for a row. Unknown keys are `Absent { generation: 0 }`.
     fn row(&self, row: &RowId) -> Result<RemovalRow, Self::Error>;
     /// Evaluate constraints on merged values with these resolved references.
@@ -206,9 +204,17 @@ pub struct RemovalResult {
     pub references: BTreeMap<RowId, BTreeMap<crate::ForeignKey, ReferenceValue>>,
 }
 
+/// Full row enumeration for comparison with incremental removal in tests.
+#[cfg(any(test, feature = "test-utils"))]
+pub trait FullRemovalView: RemovalView {
+    /// Every known row, including rows absent by their own generation.
+    fn rows(&self) -> Result<Vec<RowId>, Self::Error>;
+}
+
 /// Recompute every row using §8's three steps. The view controls iteration
 /// order; no choice of monotone rule order changes the result (Appendix B, B8).
-pub fn removals<V: RemovalView>(view: &V) -> Result<RemovalResult, V::Error> {
+#[cfg(any(test, feature = "test-utils"))]
+pub fn removals<V: FullRemovalView>(view: &V) -> Result<RemovalResult, V::Error> {
     let rows = view.rows()?;
     let mut seen = BTreeSet::new();
     for row in &rows {

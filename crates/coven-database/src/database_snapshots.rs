@@ -174,6 +174,7 @@ impl Database {
     /// The first own write of a snapshot's captured prefix, through its
     /// own position, not yet confirmed stored. Any snapshot, ordinary, raise
     /// or reset, is sent only once this is `None` (§15).
+    #[cfg(test)]
     pub async fn unconfirmed_own_prefix(
         &self,
         through: coven_merge::WriteId,

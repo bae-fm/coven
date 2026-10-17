@@ -2,8 +2,9 @@
 
 use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_merge::{
-    recompute, removals, Audience, Constraints, Group, MergeError, OnDelete, Parent, Reference,
-    ReferenceValue, RemovalResult, RemovalRow, RemovalView, RowId, Rule, Timestamp, UniqueClaim,
+    recompute, removals, Audience, Constraints, FullRemovalView, Group, MergeError, OnDelete,
+    Parent, Reference, ReferenceValue, RemovalResult, RemovalRow, RemovalView, RowId, Rule,
+    Timestamp, UniqueClaim,
 };
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet};
@@ -125,12 +126,13 @@ impl IndexedView {
     }
 }
 
-impl RemovalView for IndexedView {
-    type Error = MergeError;
+impl FullRemovalView for IndexedView {
     fn rows(&self) -> Result<Vec<RowId>, MergeError> {
         Ok(self.rows.keys().cloned().collect())
     }
-
+}
+impl RemovalView for IndexedView {
+    type Error = MergeError;
     fn row(&self, row: &RowId) -> Result<RemovalRow, MergeError> {
         Ok(match self.rows.get(row) {
             Some((data, _)) => data.clone(),

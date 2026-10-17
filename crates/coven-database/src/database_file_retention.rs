@@ -13,7 +13,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::ops::RangeInclusive;
 
 /// Local references read in one database transaction.
-pub struct FileRetention {
+#[cfg(test)]
+pub(crate) struct FileRetention {
     /// Fixed paths named by rows, losses, published rows, waiting writes or
     /// this device's upload queue.
     pub references: BTreeSet<(DeviceId, FileId)>,
@@ -48,7 +49,8 @@ impl Database {
         }))).await
     }
     /// Every fixed path local data protects, in one read transaction.
-    pub async fn retained_files(&self) -> Result<FileRetention, DbError> {
+    #[cfg(test)]
+    pub(crate) async fn retained_files(&self) -> Result<FileRetention, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
@@ -186,6 +188,7 @@ impl Database {
 
     /// Paths named by a retained object this device confirmed deleted: its
     /// protection ended with the object (§16.5).
+    #[cfg(test)]
     pub async fn add_file_candidates(
         &self,
         files: BTreeSet<(DeviceId, FileId)>,

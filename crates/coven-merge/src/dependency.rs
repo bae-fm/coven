@@ -1,10 +1,4 @@
-//! The shared data rule for received row changes (§8, D5; Lean
-//! `DataDependency` and `Admission.dependencies`). A change survives only if
-//! its own admission does and every change whose data it actually used
-//! survives: its generation source and each cell setter it replaced at the
-//! same row, the further sources its operations used there, and the changes in
-//! its own write whose foreign-key actions produced it. Recorded reads, later
-//! readers and loss dismissal never decide dependence.
+//! Original sources consumed by a row change (§8, D5).
 
 /// The changes one row change used, in role order: the generation source
 /// first, then each replaced setter in the authored column order, then the
@@ -37,7 +31,8 @@ impl<C> Provenance<C> {
 
 /// One row change's verdict under the shared rule.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum DataVerdict<C> {
+#[cfg(test)]
+pub(crate) enum DataVerdict<C> {
     /// It applies.
     Retained,
     /// Its own admission dropped it: a removal cut-off, schema change or
@@ -48,9 +43,10 @@ pub enum DataVerdict<C> {
     Dependent(Vec<C>),
 }
 
+#[cfg(test)]
 impl<C> DataVerdict<C> {
     /// Whether this change survives as a source for later changes.
-    pub fn retained(&self) -> bool {
+    pub(crate) fn retained(&self) -> bool {
         matches!(self, Self::Retained)
     }
 }
@@ -59,7 +55,8 @@ impl<C> DataVerdict<C> {
 /// Sources were decided first: each was authored, and so consumed, earlier.
 /// `retained` answers for one source; an unavailable source is the caller's
 /// wait or refusal, never a guess here.
-pub fn classify<C: Clone, E>(
+#[cfg(test)]
+pub(crate) fn classify<C: Clone, E>(
     admitted: bool,
     provenance: &Provenance<C>,
     mut retained: impl FnMut(&C) -> Result<bool, E>,

@@ -35,6 +35,7 @@ impl crate::Database {
     }
 
     /// Advance an invitation and its account intention atomically.
+    #[cfg(test)]
     pub async fn advance_operation_with_access<P: PendingValue>(
         &self,
         update: crate::OperationUpdate,
@@ -114,49 +115,6 @@ impl crate::Database {
                     }
                     crate::operation::advance(db, &update)?;
                     crate::pending::save(db, &pending)
-                })
-            })
-        })
-        .await
-    }
-
-    /// Rearm a failed request without hiding its pending subject. A request
-    /// interrupted in flight retains its fixed target for idempotent repetition.
-    pub async fn retry_provider_request<P: PendingValue>(
-        &self,
-        account: String,
-        id: OperationId,
-        owner: bool,
-    ) -> Result<(), DbError> {
-        self.call(move |inner| {
-            inner.access.with_writer(|db| {
-                db.transaction(|db| {
-                    let state = read(db, &account)?.ok_or(DbError::OperationChanged(id))?;
-                    let request = state.request.ok_or(DbError::OperationChanged(id))?;
-                    if request.operation != id {
-                        return Err(DbError::OperationChanged(id));
-                    }
-                    let record =
-                        crate::operation::find(db, id)?.ok_or(DbError::OperationChanged(id))?;
-                    let target = if record.last_step == 1 {
-                        request.target.ok_or(DbError::Invariant {
-                            what: "a sent provider request records its target",
-                        })?
-                    } else {
-                        db.internal_execute(
-                            "UPDATE _coven_operations SET last_step=0 WHERE id=?1",
-                            [id.0],
-                        )?;
-                        crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-                        db.internal_execute(
-                            "UPDATE _coven_provider_access SET target=NULL WHERE account=?1",
-                            [&account],
-                        )?;
-                        state.intended
-                    };
-                    // An app retry overrides the ordinary backoff (§16.5).
-                    crate::retry::clear(db, crate::RetrySubject::Operation(id))?;
-                    crate::pending::save(db, &P::provider_access(id, account, target, owner))
                 })
             })
         })

@@ -211,6 +211,7 @@ impl PreparedWrite<'_> {
     }
 
     /// Retain authenticated source evidence without changing rows or admission.
+    #[cfg(test)]
     pub(crate) fn retain_sources(
         self,
         db: &crate::sqlite::DatabaseConnection,

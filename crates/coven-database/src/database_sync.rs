@@ -69,6 +69,7 @@ impl Database {
 
     /// Authenticate and retain original source records covered by an applied slot
     /// or snapshot, without applying their data again or changing source verdicts.
+    #[cfg(test)]
     pub async fn retain_write_sources<R, F>(
         &self,
         write: crate::DownloadedWriteStream<R>,
@@ -143,6 +144,7 @@ impl Database {
         .await
     }
     /// Fix the keys of the oldest original before constructing its batch.
+    #[cfg(test)]
     pub async fn prepare_upload<F>(
         &self,
         select: F,
@@ -176,6 +178,7 @@ impl Database {
 
     /// Original plaintext of an authenticated received or confirmed published header.
     /// This establishes header facts, not the validity of a subsequently read body.
+    #[cfg(test)]
     pub async fn checked_write_header(
         &self,
         id: coven_merge::WriteId,
@@ -273,6 +276,7 @@ impl Database {
     /// its records matching `scanned` become exactly `records`, so a subject
     /// that now checks, or is no longer listed, loses its record in the same
     /// transaction. An unchanged set writes nothing.
+    #[cfg(test)]
     pub async fn replace_local_pending<P: crate::PendingValue>(
         &self,
         scanned: impl Fn(&P) -> bool + Send + 'static,
@@ -302,7 +306,7 @@ impl Database {
                 .readers
                 .acquire_reader()
                 .with_reader(|reader| {
-                    let current = crate::pending::retained::<P>(reader)?
+                    let current = crate::pending::read::<P>(reader)?
                         .into_iter()
                         .filter(|r| scanned(r))
                         .map(|r| encode(&r))
@@ -313,7 +317,7 @@ impl Database {
                 return Ok(());
             }
             inner.access.with_writer(|writer| {
-                let previous: Vec<_> = crate::pending::retained::<P>(writer)?
+                let previous: Vec<_> = crate::pending::read::<P>(writer)?
                     .into_iter()
                     .filter(|r| scanned(r))
                     .collect();
@@ -360,6 +364,7 @@ impl Database {
     /// Read the oldest waiting plaintext and its recorded sealing keys.
     /// The callback runs in a committed reader transaction; its result is `None`
     /// when the queue is empty.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn read_oldest_upload<F, R, E>(
         &self,
         consume: F,
@@ -395,6 +400,7 @@ impl Database {
     }
 
     /// Claim numbers and complete-slot digests recorded by every consumed slot, including refusals.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn last_claims(&self) -> Result<Vec<coven_format::snapshot::LastClaim>, DbError> {
         self.call(|inner| inner.access.with_committed(crate::sequence::claims))
             .await
@@ -420,6 +426,7 @@ impl Database {
     }
 
     /// Greatest locally reserved claim number, including finished journals.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn claim_counter(&self) -> Result<u64, DbError> {
         self.call(|inner| {
             inner
@@ -444,8 +451,8 @@ impl Database {
         .await
     }
 
-    /// The active claim and every durable attempted path. `read_current_attempt`
-    /// streams the current attempt's exact bytes.
+    /// The active claim and every durable attempted path. `claim_range`
+    /// reads the current attempt's exact bytes.
     pub async fn current_claim(&self) -> Result<Option<crate::Claim>, DbError> {
         self.call(|inner| inner.access.with_committed(crate::claim::current))
             .await
@@ -482,6 +489,7 @@ impl Database {
     }
 
     /// Stream the current attempt's exact ciphertext from one committed reader.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn read_current_attempt<T, E, F>(&self, consume: F) -> Result<T, E>
     where
         T: Send + 'static,
@@ -546,6 +554,7 @@ impl Database {
     }
 
     /// Whether the open claim attempted this path. Finished journals are deleted.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn attempted_claim(
         &self,
         path: coven_format::path::ObjectPath,

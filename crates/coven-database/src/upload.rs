@@ -26,6 +26,7 @@ pub struct WaitingUpload<'a> {
 
 /// A queue read failed in the database or in its consumer.
 #[derive(Debug, thiserror::Error)]
+#[cfg(any(test, feature = "test-utils"))]
 pub enum UploadReadError<E> {
     /// Reading the committed queue state failed.
     #[error(transparent)]
@@ -163,6 +164,7 @@ struct Oldest {
     keys: Option<Vec<u8>>,
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 fn oldest(database: &DatabaseConnection) -> Result<Option<Oldest>, DbError> {
     Ok(database
         .query(
@@ -202,6 +204,7 @@ fn plaintext<'a>(
     Ok((header, header_frame, bytes))
 }
 
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn read<R, E>(
     database: &DatabaseConnection,
     consume: impl FnOnce(WaitingUpload<'_>) -> Result<R, E>,
@@ -319,6 +322,7 @@ pub(crate) fn each_plaintext(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn prepare(
     database: &DatabaseConnection,
     log: &crate::StoreState,

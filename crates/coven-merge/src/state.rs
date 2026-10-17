@@ -209,7 +209,8 @@ impl<V> RowState<V> {
 
     /// §8.5: a unique claim is ordered by the latest winning setter of any of
     /// its columns. Null reference substitutions keep that setter.
-    pub fn claim_order(
+    #[cfg(test)]
+    pub(crate) fn claim_order(
         &self,
         columns: &[String],
         order: impl Fn(WriteId) -> Result<crate::ClaimOrder, MergeError>,

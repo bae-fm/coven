@@ -17,3 +17,7 @@ uuid.workspace = true
 
 [lints]
 workspace = true
+
+[[test]]
+name = "removal_region"
+required-features = ["test-utils"]

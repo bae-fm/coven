@@ -66,16 +66,8 @@ impl StoredRecord {
 }
 
 pub(crate) fn read<P: PendingValue>(db: &DatabaseConnection) -> Result<Vec<P>, DbError> {
-    read_query(db, SELECT)
-}
-
-pub(crate) fn retained<P: PendingValue>(db: &DatabaseConnection) -> Result<Vec<P>, DbError> {
-    read_query(db, SELECT)
-}
-
-fn read_query<P: PendingValue>(db: &DatabaseConnection, sql: &str) -> Result<Vec<P>, DbError> {
     let mut records = db
-        .query(sql, [], StoredRecord::read)?
+        .query(SELECT, [], StoredRecord::read)?
         .iter()
         .map(StoredRecord::decode::<P>)
         .collect::<Result<Vec<_>, _>>()?;

@@ -61,6 +61,7 @@ pub enum MergeError {
     RegionNotClosed(RowId),
     /// The removal view listed a row more than once.
     #[error("removal view lists {0:?} twice")]
+    #[cfg(any(test, feature = "test-utils"))]
     DuplicateRow(RowId),
     /// Stored generations must be contiguous from one through the current one.
     #[error("stored generation {0} is missing or out of order")]
@@ -79,8 +80,10 @@ pub enum MergeError {
     InvalidLostValue(LostKey),
     /// A required cell of a unique constraint has never been set.
     #[error("unique constraint column {0} has no winning value")]
+    #[cfg(test)]
     MissingClaimColumn(String),
     /// A unique constraint must have at least one column.
     #[error("unique constraint has no columns")]
+    #[cfg(test)]
     EmptyClaim,
 }

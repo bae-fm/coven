@@ -254,19 +254,6 @@ impl<'a> DatabaseRemovalView<'a> {
 
 impl RemovalView for DatabaseRemovalView<'_> {
     type Error = RemovalFailure;
-    fn rows(&self) -> Result<Vec<RowId>, Self::Error> {
-        let mut rows: BTreeSet<_> = self
-            .database
-            .query(
-                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name>=''",
-                [],
-                crate::row_queries::read_identity,
-            )?
-            .into_iter()
-            .collect();
-        rows.extend(self.updates.keys().cloned());
-        Ok(rows.into_iter().collect())
-    }
     fn row(&self, row: &RowId) -> Result<RemovalRow, Self::Error> {
         Ok(self.evaluated(row)?.facts)
     }

@@ -104,13 +104,15 @@ pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_merge::Slot;
 pub use coven_merge::WriteId;
 pub use database::file_database::{CacheReservation, FileDatabase};
-pub use database::file_retention::{FileCandidate, FileRetention};
+pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, UnprovenFiles,
 };
 pub use database::{discarded_operations, Database, DatabaseBuilder, DatabaseReadHandle};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
-pub use download::{ApplyOutcome, DownloadedPart, DownloadedWrite, WriteWait};
+pub use download::{ApplyOutcome, WriteWait};
+#[cfg(test)]
+use download::{DownloadedPart, DownloadedWrite};
 pub use download_stream::{DownloadedPartStream, DownloadedWriteStream, WriteAuthorship};
 pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
@@ -132,7 +134,9 @@ pub use row_key::RowKey;
 pub use snapshot_error::SnapshotError;
 pub use snapshot_reload::{LoadedSnapshot, SnapshotReload, SnapshotSource};
 pub use snapshot_write::SnapshotWriteError;
-pub use upload::{UploadBytes, UploadParts, UploadReadError, WaitingUpload};
+#[cfg(any(test, feature = "test-utils"))]
+pub use upload::UploadReadError;
+pub use upload::{UploadBytes, UploadParts, WaitingUpload};
 pub use user_file::{prepare_user_file, PreparedUserFile, UserFile};
 pub use write::SqlContext;
 pub use write_batch::{FileSource, WriteBatch};

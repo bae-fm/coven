@@ -237,8 +237,7 @@ impl MemoryView {
         view
     }
 }
-impl RemovalView for MemoryView {
-    type Error = MergeError;
+impl FullRemovalView for MemoryView {
     fn rows(&self) -> Result<Vec<RowId>, MergeError> {
         if self.order.is_empty() {
             Ok(self.data.keys().cloned().collect())
@@ -246,6 +245,9 @@ impl RemovalView for MemoryView {
             Ok(self.order.clone())
         }
     }
+}
+impl RemovalView for MemoryView {
+    type Error = MergeError;
     fn row(&self, row: &RowId) -> Result<RemovalRow, MergeError> {
         Ok(self
             .data

@@ -1,12 +1,10 @@
 //! The merge of §8 and §14, as functions with no I/O.
 //!
 //! [`apply`] implements Appendix B's incremental step. Its order-free definition
-//! is checked in tests. [`removals`] runs the three removal steps and
-//! [`recompute`] restricts that work to a closed region (Appendix B, B9).
+//! is checked in tests. [`recompute`] runs the three removal steps over a
+//! closed region (Appendix B, B9).
 //! Values are opaque to the merge. The database supplies CHECK results and
 //! unique claims after resolving references, using its own SQL semantics.
-//! [`classify`] is the shared data rule deciding which received row changes
-//! enter the merge at all.
 
 mod audience_sql;
 mod dependency;
@@ -20,7 +18,7 @@ mod removal;
 mod state;
 mod timestamp;
 
-pub use dependency::{classify, DataVerdict, Provenance};
+pub use dependency::Provenance;
 pub use error::MergeError;
 #[cfg(test)]
 use history::from_writes;
@@ -31,9 +29,11 @@ pub use input::{
     UniqueConstraint, Write, WriteId, WriteOracle, WritePast,
 };
 pub use removal::{
-    recompute, removals, resolve_reference, Constraints, Group, OnDelete, Reference,
-    ReferenceValue, RemovalResult, RemovalRow, RemovalView, Rule, UniqueClaim,
+    recompute, resolve_reference, Constraints, Group, OnDelete, Reference, ReferenceValue,
+    RemovalResult, RemovalRow, RemovalView, Rule, UniqueClaim,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use removal::{removals, FullRemovalView};
 pub use state::{apply, Cell, LostChange, LostKey, LostValue, RowState, RowUpdate};
 pub use timestamp::Timestamp;
 

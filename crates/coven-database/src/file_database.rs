@@ -603,6 +603,7 @@ impl FileDatabase {
     /// Plaintext bytes absent from this namespace's cache; headers and tags
     /// are excluded from application download progress. A file this device
     /// still has queued is wholly local.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn missing_bytes(&self, file: &FileRef) -> Result<u64, DbError> {
         let file = file.clone();
         self.run(move |db, _, _, device| {

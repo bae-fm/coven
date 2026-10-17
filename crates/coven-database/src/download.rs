@@ -1,13 +1,16 @@
 //! Authenticated, decoded writes at the sync/database boundary.
 use crate::sqlite::DatabaseConnection;
 use crate::DbError;
-use coven_format::write::{WriteHeader, WritePart, WriteRecord};
+use coven_format::write::WriteHeader;
+#[cfg(test)]
+use coven_format::write::{WritePart, WriteRecord};
 use coven_merge::Audience;
 use std::collections::BTreeSet;
 
 /// A write whose signature and opened parts sync has already authenticated.
 #[derive(Clone, Debug)]
-pub struct DownloadedWrite {
+#[cfg(test)]
+pub(crate) struct DownloadedWrite {
     /// The authenticated write header.
     pub header: WriteHeader,
     /// Every part, including ones the receiving device could not decrypt.
@@ -16,13 +19,15 @@ pub struct DownloadedWrite {
 
 /// Readable and unreadable parts belong to the same atomic slot.
 #[derive(Clone, Debug)]
-pub enum DownloadedPart {
+#[cfg(test)]
+pub(crate) enum DownloadedPart {
     /// Authenticated plaintext changes for an audience.
     Opened(WritePart),
     /// The device does not have this audience's key.
     Skipped(Audience),
 }
 
+#[cfg(test)]
 impl From<WriteRecord> for DownloadedWrite {
     fn from(record: WriteRecord) -> Self {
         Self {

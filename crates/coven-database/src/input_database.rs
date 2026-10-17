@@ -314,6 +314,7 @@ impl Database {
     /// A seekable local input for applying the current claim without a provider
     /// reread after successful creation. One cache identity is reused across
     /// claims; the journal remains the authoritative copy until settlement.
+    #[cfg(any(test, feature = "test-utils"))]
     pub async fn claim_input(&self) -> Result<RetainedBytes, DbError> {
         let (reader, reading, length) = self.call(|inner| {
             inner.access.with_committed(|source| {
@@ -329,26 +330,6 @@ impl Database {
             })
         }).await?;
         Ok(RetainedBytes::new(reader, reading, length))
-    }
-    /// Release encrypted inputs after a snapshot reload commits, before retiring
-    /// its journal record. A failed release leaves that step available to retry.
-    pub async fn release_input_ranges(&self, paths: Vec<String>) -> Result<(), DbError> {
-        self.call(move |inner| {
-            let ids = inner.inputs.read(|db| {
-                paths
-                    .into_iter()
-                    .map(|path| {
-                        observation(db, &path)?
-                            .map(|(id, _)| id)
-                            .ok_or(DbError::Invariant {
-                                what: "a retained input path has its observation",
-                            })
-                    })
-                    .collect::<Result<Vec<_>, _>>()
-            })?;
-            inner.inputs.release(ids)
-        })
-        .await
     }
     /// The retained provider observation of an exact path, if any. A drained
     /// writer's discovered objects are found here instead of by probing (§6).

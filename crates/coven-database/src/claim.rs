@@ -386,6 +386,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
 }
 
 /// Path evidence distinguishes contention from an unattempted use of this id.
+#[cfg(any(test, feature = "test-utils"))]
 pub(crate) fn attempted(db: &DatabaseConnection, path: &ObjectPath) -> Result<bool, DbError> {
     db.query_row(
         "SELECT EXISTS(SELECT 1 FROM _coven_claim_attempts WHERE path=?1)",

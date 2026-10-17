@@ -78,6 +78,7 @@ impl Database {
     }
 
     /// Clear a condition for an explicit retry; completed steps stay recorded.
+    #[cfg(test)]
     pub async fn retry_operation(&self, id: OperationId) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
@@ -88,6 +89,7 @@ impl Database {
     }
 
     /// Commit completed work and its first remaining condition in one transaction.
+    #[cfg(test)]
     pub async fn advance_operation_pending<P: crate::PendingValue>(
         &self,
         update: OperationUpdate,

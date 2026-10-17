@@ -631,9 +631,6 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
         fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
             self.0.members(group)
         }
-        fn rows(&self) -> Result<Vec<RowId>, MergeError> {
-            panic!("local recomputation must not enumerate rows")
-        }
         fn row(&self, r: &RowId) -> Result<RemovalRow, MergeError> {
             assert_ne!(r, &row(99));
             self.0.row(r)
@@ -672,6 +669,11 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
 #[test]
 fn null_substitutions_feed_checks() {
     struct Resolved(MemoryView);
+    impl FullRemovalView for Resolved {
+        fn rows(&self) -> Result<Vec<RowId>, MergeError> {
+            self.0.rows()
+        }
+    }
     impl RemovalView for Resolved {
         type Error = MergeError;
         fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
@@ -679,9 +681,6 @@ fn null_substitutions_feed_checks() {
         }
         fn members(&self, group: &Group) -> Result<BTreeSet<RowId>, MergeError> {
             view_members(self, self.0.data.keys(), group)
-        }
-        fn rows(&self) -> Result<Vec<RowId>, MergeError> {
-            self.0.rows()
         }
         fn row(&self, r: &RowId) -> Result<RemovalRow, MergeError> {
             self.0.row(r)
