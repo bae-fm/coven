@@ -198,7 +198,7 @@ impl<V> Change<V> {
 /// A decoded write's merge inputs, independent of its storage encoding.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Write<V, P = BTreeSet<WriteId>> {
-    /// Device and log number.
+    /// Device and original write number.
     pub id: WriteId,
     /// Unique total-order timestamp (§7.2).
     pub timestamp: Timestamp,
@@ -229,9 +229,8 @@ impl<V, P: WritePast> Write<V, P> {
     }
 }
 
-/// A causally closed past, represented explicitly or by device log positions.
-/// A frontier contains maximal writes covering the set: all covered writes
-/// have timestamps at most a frontier timestamp. Device logs are contiguous.
+/// A causally closed authored past. Its frontier bounds the timestamps of
+/// every covered write; sequence order itself is not timestamp order.
 pub trait WritePast {
     /// Whether the writer had consumed this write's position.
     fn contains(&self, write: &WriteId) -> bool;

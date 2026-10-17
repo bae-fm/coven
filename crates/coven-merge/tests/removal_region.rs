@@ -54,7 +54,10 @@ fn claim(value: &str, ms: u64) -> Constraints {
             ["title"].into(),
             UniqueClaim {
                 value: value.as_bytes().to_vec(),
-                timestamp: stamp(ms),
+                order: coven_merge::ClaimOrder::Published {
+                    slot: coven_merge::Slot(ms),
+                    number: 1,
+                },
             },
         )]),
         ..Constraints::default()
@@ -211,7 +214,10 @@ fn competing_claims_keep_every_reason_and_respect_each_scope() {
         ["slug"].into(),
         UniqueClaim {
             value: b"shared".to_vec(),
-            timestamp: stamp(0),
+            order: coven_merge::ClaimOrder::Published {
+                slot: coven_merge::Slot(0),
+                number: 1,
+            },
         },
     );
     let view = IndexedView::new(BTreeMap::from([

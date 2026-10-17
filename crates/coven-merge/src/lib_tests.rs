@@ -43,6 +43,22 @@ pub(crate) fn id(n: u64) -> WriteId {
 pub(crate) fn stamp(n: u64) -> Timestamp {
     Timestamp::new(n, 0, DeviceId(n)).unwrap()
 }
+pub(crate) fn claim_order(timestamp: Timestamp) -> ClaimOrder {
+    ClaimOrder::Published {
+        slot: Slot((timestamp.milliseconds() << 16) | u64::from(timestamp.counter())),
+        number: timestamp.device().0,
+    }
+}
+pub(crate) fn claim_oracle(
+    history: &History<String>,
+) -> impl Fn(WriteId) -> Result<ClaimOrder, MergeError> + '_ {
+    |id| {
+        history
+            .timestamp(id)
+            .map(claim_order)
+            .ok_or(MergeError::MissingWrite(id))
+    }
+}
 pub(crate) fn columns(values: &[(&str, &str)]) -> BTreeMap<String, ColumnValue<String>> {
     values
         .iter()
@@ -187,13 +203,13 @@ impl MemoryView {
         row: &RowId,
         columns: [&str; N],
         value: &str,
-        timestamp: Timestamp,
+        order: ClaimOrder,
     ) {
         self.checks.entry(row.clone()).or_default().unique.insert(
             columns.into(),
             UniqueClaim {
                 value: value.as_bytes().to_vec(),
-                timestamp,
+                order,
             },
         );
     }
@@ -477,7 +493,9 @@ pub(crate) fn generated_view(
                         r,
                         ["title"],
                         &(a % 3).to_string(),
-                        state.claim_timestamp(&["0".into()], history).unwrap(),
+                        state
+                            .claim_order(&["0".into()], claim_oracle(history))
+                            .unwrap(),
                     );
                 }
             }
@@ -488,7 +506,7 @@ pub(crate) fn generated_view(
                         ["folder", "title"],
                         &format!("{}/{}", a % 2, b % 3),
                         state
-                            .claim_timestamp(&["0".into(), "1".into()], history)
+                            .claim_order(&["0".into(), "1".into()], claim_oracle(history))
                             .unwrap(),
                     );
                 }
@@ -500,7 +518,9 @@ pub(crate) fn generated_view(
                         },
                         UniqueClaim {
                             value: (a % 2).to_string().into_bytes(),
-                            timestamp: state.claim_timestamp(&["0".into()], history).unwrap(),
+                            order: state
+                                .claim_order(&["0".into()], claim_oracle(history))
+                                .unwrap(),
                         },
                     );
                 }
@@ -659,7 +679,7 @@ mod differential {
                 );
                 let next = claims.len();
                 let key = *claims.entry(key).or_insert(next);
-                row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": scalar(claim.timestamp).to_string(), "other": false}));
+                row_claims.push(json!({"con": {"terms":name.terms,"partial":name.partial}, "value": key, "ts": match claim.order { ClaimOrder::Published { slot, number } => (u128::from(slot.0) << 64) | u128::from(number), ClaimOrder::Local { number } => (1u128 << 127) | u128::from(number) }.to_string(), "other": false}));
             }
             let (deleted, started) = match data {
                 RemovalRow::Present {

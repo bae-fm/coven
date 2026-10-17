@@ -222,8 +222,8 @@ fn removed_parent_takes_children_out_under_every_action_and_releases_them() {
         for n in [45, 46, 7] {
             view.present(row(n), 1, stamp(n));
         }
-        view.claim(&row(45), ["title"], "Groceries", stamp(1600));
-        view.claim(&row(46), ["title"], "Groceries", stamp(1605));
+        view.claim(&row(45), ["title"], "Groceries", claim_order(stamp(1600)));
+        view.claim(&row(46), ["title"], "Groceries", claim_order(stamp(1605)));
         view.reference(&row(7), row(46), 1, action);
         let result = removal_orders(&view);
         assert_eq!(
@@ -244,7 +244,7 @@ fn removed_parent_takes_children_out_under_every_action_and_releases_them() {
             ReferenceValue::Original { stale: false, .. }
         ));
         let before = view.clone();
-        view.claim(&row(46), ["title"], "Shopping", stamp(1700));
+        view.claim(&row(46), ["title"], "Shopping", claim_order(stamp(1700)));
         assert!(recompute(&before, &view, [row(46)])
             .unwrap()
             .removed
@@ -348,7 +348,7 @@ fn claim_uses_the_latest_column_and_ties_use_primary_key() {
             ["folder", "title"],
             "Work/Plan",
             states[&r]
-                .claim_timestamp(&["0".into(), "1".into()], &history)
+                .claim_order(&["0".into(), "1".into()], claim_oracle(&history))
                 .unwrap(),
         );
     }
@@ -356,8 +356,18 @@ fn claim_uses_the_latest_column_and_ties_use_primary_key() {
         rules(&removal_orders(&view), &row(2)),
         [Rule::Unique(["folder", "title"].into())].into()
     );
-    view.claim(&row(1), ["folder", "title"], "Work/Plan", stamp(10));
-    view.claim(&row(2), ["folder", "title"], "Work/Plan", stamp(10));
+    view.claim(
+        &row(1),
+        ["folder", "title"],
+        "Work/Plan",
+        claim_order(stamp(10)),
+    );
+    view.claim(
+        &row(2),
+        ["folder", "title"],
+        "Work/Plan",
+        claim_order(stamp(10)),
+    );
     assert_eq!(
         rules(&removal_orders(&view), &row(2)),
         [Rule::Unique(["folder", "title"].into())].into()
@@ -373,13 +383,13 @@ fn uniqueness_is_judged_once_between_the_two_other_passes() {
         view.present(row(n), 1, stamp(n));
     }
     view.reference(&row(1), row(0), 1, OnDelete::Cascade);
-    view.claim(&row(1), ["title"], "Plan", stamp(10));
-    view.claim(&row(2), ["title"], "Plan", stamp(11));
+    view.claim(&row(1), ["title"], "Plan", claim_order(stamp(10)));
+    view.claim(&row(2), ["title"], "Plan", claim_order(stamp(11)));
     assert!(!removal_orders(&view).removed.contains_key(&row(2)));
     view.present(row(1), 1, stamp(1));
     view.reference(&row(2), row(1), 1, OnDelete::Cascade);
-    view.claim(&row(1), ["title"], "Plan", stamp(11));
-    view.claim(&row(2), ["title"], "Plan", stamp(10));
+    view.claim(&row(1), ["title"], "Plan", claim_order(stamp(11)));
+    view.claim(&row(2), ["title"], "Plan", claim_order(stamp(10)));
     let result = removal_orders(&view);
     assert_eq!(
         rules(&result, &row(1)),
@@ -395,14 +405,14 @@ fn uniqueness_is_judged_once_between_the_two_other_passes() {
         .into()
     );
     // Re-inserting a removed shared key with a newer Plan clears neither reason.
-    view.claim(&row(1), ["title"], "Plan", stamp(12));
+    view.claim(&row(1), ["title"], "Plan", claim_order(stamp(12)));
     assert_eq!(removal_orders(&view).removed, result.removed);
     for n in [3, 4] {
         view.present(row(n), 1, stamp(n));
     }
     view.reference(&row(2), row(3), 1, OnDelete::Cascade);
-    view.claim(&row(3), ["title"], "Ideas", stamp(12));
-    view.claim(&row(4), ["title"], "Ideas", stamp(9));
+    view.claim(&row(3), ["title"], "Ideas", claim_order(stamp(12)));
+    view.claim(&row(4), ["title"], "Ideas", claim_order(stamp(9)));
     let result = removal_orders(&view);
     assert_eq!(
         rules(&result, &row(1)),
@@ -553,8 +563,8 @@ fn two_circles_choose_the_earlier_generation_and_unique_is_audience_scoped() {
     let mut view = MemoryView::default();
     view.present(circle(1, 1), 3, stamp(30));
     view.present(circle(1, 2), 1, stamp(20));
-    view.claim(&circle(1, 1), ["title"], "Plan", stamp(10));
-    view.claim(&circle(1, 2), ["title"], "Plan", stamp(11));
+    view.claim(&circle(1, 1), ["title"], "Plan", claim_order(stamp(10)));
+    view.claim(&circle(1, 2), ["title"], "Plan", claim_order(stamp(11)));
     let result = removal_orders(&view);
     assert_eq!(rules(&result, &circle(1, 1)), [Rule::OtherAudience].into());
     assert!(!result.removed.contains_key(&circle(1, 2)));
@@ -644,11 +654,11 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
     for n in [1, 2, 3, 99] {
         before.present(row(n), 1, stamp(n));
     }
-    before.claim(&row(1), ["label"], "Plan", stamp(10));
-    before.claim(&row(2), ["label"], "Plan", stamp(11));
+    before.claim(&row(1), ["label"], "Plan", claim_order(stamp(10)));
+    before.claim(&row(2), ["label"], "Plan", claim_order(stamp(11)));
     before.reference(&row(3), row(2), 1, OnDelete::Cascade);
     let mut after = before.clone();
-    after.claim(&row(1), ["label"], "Ideas", stamp(12));
+    after.claim(&row(1), ["label"], "Ideas", claim_order(stamp(12)));
     let patch = recompute(&Indexed(before), &Indexed(after.clone()), [row(1)]).unwrap();
     assert_eq!(patch.region, [row(1), row(2), row(3)].into());
     assert!(patch.removed.is_empty());

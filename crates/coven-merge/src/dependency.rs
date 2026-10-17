@@ -40,7 +40,7 @@ impl<C> Provenance<C> {
 pub enum DataVerdict<C> {
     /// It applies.
     Retained,
-    /// Its own admission dropped it: a retirement window, schema change or
+    /// Its own admission dropped it: a removal cut-off, schema change or
     /// reset. That policy decides whether it leaves a loss.
     Dropped,
     /// It was admitted but used data that does not survive. It becomes a

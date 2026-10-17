@@ -1,4 +1,4 @@
-use crate::{Audience, MergeError, Parent, RowId, Slot, Timestamp};
+use crate::{Audience, ClaimOrder, MergeError, Parent, RowId, Slot, Timestamp};
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 /// The foreign key's ON DELETE action (§8.4).
@@ -103,14 +103,14 @@ impl RemovalRow {
     }
 }
 
-/// One unique value and the latest timestamp of any column in its constraint.
+/// One unique value and the latest claim order of its current input setters.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct UniqueClaim {
     /// Canonical equality encoding of the whole value: text compares by bytes,
     /// since unique index terms are BINARY (§8.5). Non-conflicting nulls make no claim.
     pub value: Vec<u8>,
     /// The latest winning setter of any of the constraint's columns (§8.5).
-    pub timestamp: Timestamp,
+    pub order: ClaimOrder,
 }
 
 /// CHECK and unique results on merged values after reference substitution.
@@ -219,7 +219,7 @@ pub fn removals<V: RemovalView>(view: &V) -> Result<RemovalResult, V::Error> {
     let region = region(&[view], seen.clone())?;
     let mut order = rows;
     order.extend(region.iter().filter(|r| !seen.contains(*r)).cloned());
-    evaluate(view, region, &order, true)
+    evaluate(view, region, &order)
 }
 
 /// Recompute only the touched rows' dependency region in the union of the
@@ -238,19 +238,7 @@ pub fn recompute<E: From<MergeError>>(
 ) -> Result<RemovalResult, E> {
     let region = region(&[before, after], touched.into_iter().collect())?;
     let order: Vec<_> = region.iter().cloned().collect();
-    evaluate(after, region, &order, true)
-}
-
-/// Recompute the same closed region without cross-audience key competition.
-/// Fingerprints use this result, including its consequent foreign-key removals (§19.1).
-pub fn recompute_fingerprint<E: From<MergeError>>(
-    before: &impl RemovalView<Error = E>,
-    after: &impl RemovalView<Error = E>,
-    touched: impl IntoIterator<Item = RowId>,
-) -> Result<RemovalResult, E> {
-    let region = region(&[before, after], touched.into_iter().collect())?;
-    let order: Vec<_> = region.iter().cloned().collect();
-    evaluate(after, region, &order, false)
+    evaluate(after, region, &order)
 }
 
 fn region<E: From<MergeError>>(
@@ -289,7 +277,6 @@ fn evaluate<V: RemovalView>(
     view: &V,
     region: BTreeSet<RowId>,
     order: &[RowId],
-    other_audiences: bool,
 ) -> Result<RemovalResult, V::Error> {
     let mut raw = BTreeMap::new();
     for row in &region {
@@ -342,7 +329,7 @@ fn evaluate<V: RemovalView>(
         }
     }
     close(&facts, &children, order, &mut out);
-    let judged = judge_groups(&facts, &out, other_audiences);
+    let judged = judge_groups(&facts, &out);
     out.extend(judged.keys().cloned());
     close(&facts, &children, order, &mut out);
     let mut result = RemovalResult {
@@ -419,69 +406,61 @@ fn monotone_rules(fact: &Facts, out: &BTreeSet<RowId>) -> BTreeSet<Rule> {
 fn judge_groups(
     facts: &BTreeMap<RowId, Facts>,
     out: &BTreeSet<RowId>,
-    other_audiences: bool,
 ) -> BTreeMap<RowId, BTreeSet<Rule>> {
-    // Judge every group against the same pass-one survivors. A row losing
-    // another competition still participates in all of its groups.
-    let mut groups = BTreeMap::<Group, Vec<(&RowId, Timestamp)>>::new();
+    let mut claims = BTreeMap::<Group, Vec<(&RowId, ClaimOrder)>>::new();
+    let mut keys = BTreeMap::<(&str, &[u8]), Vec<(&RowId, Timestamp)>>::new();
     for (row, fact) in facts {
-        if !out.contains(row) {
-            for (name, claim) in fact.constraints.unique.iter() {
-                groups
-                    .entry(Group::Claim {
-                        table: row.table.clone(),
-                        audience: row.audience.clone(),
-                        constraint: name.clone(),
-                        value: claim.value.clone(),
-                    })
-                    .or_default()
-                    .push((row, claim.timestamp));
-            }
-            if other_audiences {
-                if let RemovalRow::Present { started, .. } = fact.row {
-                    groups
-                        .entry(Group::Key {
-                            table: row.table.clone(),
-                            key: row.key.clone(),
-                        })
-                        .or_default()
-                        .push((row, started));
-                }
-            }
+        if out.contains(row) {
+            continue;
+        }
+        for (name, claim) in &fact.constraints.unique {
+            claims
+                .entry(Group::Claim {
+                    table: row.table.clone(),
+                    audience: row.audience.clone(),
+                    constraint: name.clone(),
+                    value: claim.value.clone(),
+                })
+                .or_default()
+                .push((row, claim.order));
+        }
+        if let RemovalRow::Present { started, .. } = fact.row {
+            keys.entry((&row.table, &row.key))
+                .or_default()
+                .push((row, started));
         }
     }
     let mut judged = BTreeMap::<RowId, BTreeSet<Rule>>::new();
-    for (group, members) in groups {
-        match group {
-            Group::Claim { constraint, .. } => {
-                let &(winner, _) = members
-                    .iter()
-                    .min_by_key(|(row, stamp)| (*stamp, &row.key))
-                    .expect("a competition group contains at least one row");
-                for (row, _) in &members {
-                    if *row != winner {
-                        judged
-                            .entry((*row).clone())
-                            .or_default()
-                            .insert(Rule::Unique(constraint.clone()));
-                    }
-                }
+    for (group, members) in claims {
+        let Group::Claim { constraint, .. } = group else {
+            unreachable!()
+        };
+        let &(winner, _) = members
+            .iter()
+            .min_by_key(|(row, order)| (*order, &row.key))
+            .expect("a competition group contains a row");
+        for (row, _) in members {
+            if row != winner {
+                judged
+                    .entry(row.clone())
+                    .or_default()
+                    .insert(Rule::Unique(constraint.clone()));
             }
-            Group::Key { .. } => {
-                let &(winner, earliest) = members
-                    .iter()
-                    .min_by_key(|(row, stamp)| (row.audience != Audience::Store, *stamp))
-                    .expect("a competition group contains at least one row");
-                for (row, started) in &members {
-                    if matches!(row.audience, Audience::Circle(_))
-                        && (winner.audience == Audience::Store || earliest < *started)
-                    {
-                        judged
-                            .entry((*row).clone())
-                            .or_default()
-                            .insert(Rule::OtherAudience);
-                    }
-                }
+        }
+    }
+    for members in keys.values() {
+        let &(winner, earliest) = members
+            .iter()
+            .min_by_key(|(row, stamp)| (row.audience != Audience::Store, *stamp))
+            .expect("a key group contains a row");
+        for (row, started) in members {
+            if matches!(row.audience, Audience::Circle(_))
+                && (winner.audience == Audience::Store || earliest < *started)
+            {
+                judged
+                    .entry((*row).clone())
+                    .or_default()
+                    .insert(Rule::OtherAudience);
             }
         }
     }

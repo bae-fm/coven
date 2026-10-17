@@ -167,20 +167,20 @@ impl<V> RowState<V> {
         &self.lost
     }
 
-    /// §8.5: a unique claim dates from the latest winning setter of any of
+    /// §8.5: a unique claim is ordered by the latest winning setter of any of
     /// its columns. Null reference substitutions keep that setter.
-    pub fn claim_timestamp(
+    pub fn claim_order(
         &self,
         columns: &[String],
-        oracle: &impl WriteOracle,
-    ) -> Result<Timestamp, MergeError> {
+        order: impl Fn(WriteId) -> Result<crate::ClaimOrder, MergeError>,
+    ) -> Result<crate::ClaimOrder, MergeError> {
         let mut latest = None;
         for column in columns {
             let cell = self
                 .cells
                 .get(column)
                 .ok_or_else(|| MergeError::MissingClaimColumn(column.clone()))?;
-            let stamp = timestamp(oracle, cell.write)?;
+            let stamp = order(cell.write)?;
             latest = Some(match latest {
                 Some(old) => std::cmp::max(old, stamp),
                 None => stamp,

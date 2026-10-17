@@ -14,6 +14,8 @@ mod error;
 #[cfg(any(test, feature = "test-utils"))]
 mod history;
 mod input;
+mod sequence;
+pub use sequence::{had_read, ClaimOrder, SlotPast};
 mod removal;
 mod state;
 mod timestamp;
@@ -29,8 +31,8 @@ pub use input::{
     UniqueConstraint, Write, WriteId, WriteOracle, WritePast,
 };
 pub use removal::{
-    recompute, recompute_fingerprint, removals, resolve_reference, Constraints, Group, OnDelete,
-    Reference, ReferenceValue, RemovalResult, RemovalRow, RemovalView, Rule, UniqueClaim,
+    recompute, removals, resolve_reference, Constraints, Group, OnDelete, Reference,
+    ReferenceValue, RemovalResult, RemovalRow, RemovalView, Rule, UniqueClaim,
 };
 pub use state::{apply, Cell, LostChange, LostKey, LostValue, RowState, RowUpdate};
 pub use timestamp::Timestamp;

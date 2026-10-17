@@ -325,11 +325,11 @@ fn invalid_apply_preserves_its_input_and_reports_errors() {
     ));
     assert_eq!(state, original);
     assert!(matches!(
-        state.claim_timestamp(&[], &oracle),
+        state.claim_order(&[], claim_oracle(&oracle)),
         Err(MergeError::EmptyClaim)
     ));
     assert!(matches!(
-        state.claim_timestamp(&["absent".into()], &oracle),
+        state.claim_order(&["absent".into()], claim_oracle(&oracle)),
         Err(MergeError::MissingClaimColumn(_))
     ));
 }
