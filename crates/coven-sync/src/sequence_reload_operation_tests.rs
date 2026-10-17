@@ -383,3 +383,113 @@ async fn sequence_queue_reset_matches_lean() {
         )
     );
 }
+
+async fn migrate(group: &Group, device: Device) -> Device {
+    device.database().close().await.unwrap();
+    open_migrated(group, device._temp, device.identity).await
+}
+
+async fn open_migrated(
+    group: &Group,
+    temp: tempfile::TempDir,
+    identity: coven_crypto::MemberIdentity,
+) -> Device {
+    use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+    use coven_foundation::files::StoreLayout;
+    let directory = StoreLayout::new(temp.path().into()).store_dir(&group.store);
+    let database = DatabaseBuilder::new(directory)
+        .synced_tables(vec![
+            SyncedTable::new("notes", RowIdentity::SharedKey),
+            SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
+        ])
+        .migrations(vec![
+            Migration::sql(1, "notes", "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
+                CREATE TABLE pins(id TEXT PRIMARY KEY NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL)"),
+            Migration::sql(2, "titles", "CREATE INDEX titles ON notes(title);
+                INSERT INTO notes SELECT 'derived',title FROM notes WHERE id='source'").writes(|_| Ok(())),
+        ])
+        .open().await.unwrap();
+    group
+        .attach(
+            temp,
+            identity,
+            Some(group.ring.clone()),
+            group.storage.for_device(),
+            database,
+        )
+        .await
+}
+
+async fn breaking_raise() -> Value {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(ana.database(), "source", "value").await;
+    ana.sync.pass().await.unwrap();
+    // Ben migrates before reading source; Ana migrates after it. Receiving
+    // source through the converter cannot rerun the data-changing migration.
+    let ben = migrate(&group, ben).await;
+    assert!(rows(ben.database()).await.is_empty());
+    let ana = migrate(&group, ana).await;
+    read(&ben).await;
+    assert_eq!(
+        rows(ben.database()).await,
+        [("source".into(), "value".into())]
+    );
+    assert_eq!(rows(ana.database()).await.len(), 2);
+    ben.database().close().await.unwrap();
+    let copy = tempfile::tempdir().unwrap();
+    copy_tree(ben._temp.path(), copy.path());
+    let queued = open_migrated(&group, copy, ben.identity.clone()).await;
+    let ben = open_migrated(&group, ben._temp, ben.identity).await;
+    let before = queued
+        .database()
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('derived','value')", [])?;
+            Ok(())
+        })
+        .await;
+    assert!(before.is_ok(), "{before:?}");
+    let originals = queued.database().waiting_snapshot_headers().await.unwrap();
+    let new_schema = originals.last().unwrap().header.schema_version == 2;
+    assert!(new_schema);
+    ana.sync.pass().await.unwrap();
+    ana.sync.raise_schema(Audience::Store, 2).await.unwrap();
+    read(&ben).await;
+    assert_eq!(rows(ben.database()).await, rows(ana.database()).await);
+    let after = ben
+        .database()
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('derived','value')", [])?;
+            Ok(())
+        })
+        .await;
+    assert!(
+        matches!(&after, Err(DbError::Sqlite(error))
+        if error.to_string() == "UNIQUE constraint failed: notes.id"),
+        "{after:?}"
+    );
+    for device in [&ana, &ben, &queued] {
+        device.database().close().await.unwrap();
+    }
+    json!({"before_allowed": before.is_ok(), "after_allowed": after.is_ok(), "new_schema":new_schema})
+}
+
+#[tokio::test]
+async fn a_breaking_raise_changes_the_commit_key_check_even_at_the_new_schema() {
+    breaking_raise().await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_queue_breaking_raise_matches_lean() {
+    assert_eq!(
+        breaking_raise().await,
+        crate::tests::run_lean(
+            "COVEN_SEQUENCE_LEAN",
+            &json!({"kind":"queueReload", "scenario":"breakingRaise"})
+        )
+    );
+}

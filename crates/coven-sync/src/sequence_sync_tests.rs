@@ -161,6 +161,18 @@ impl Group {
             .open()
             .await
             .unwrap();
+        self.attach(temp, identity, ring, storage, database).await
+    }
+
+    pub(crate) async fn attach(
+        &self,
+        temp: tempfile::TempDir,
+        identity: MemberIdentity,
+        ring: Option<StoreKeyring>,
+        storage: MemoryStorage,
+        database: Database,
+    ) -> Device {
+        let directory = StoreLayout::new(temp.path().into()).store_dir(&self.store);
         let work = coven_database::test_utils::WorkCounter::default();
         database.test_track_work(work.clone()).await.unwrap();
         let (store_keys, member_keys) = if self.passphrase_custody {
