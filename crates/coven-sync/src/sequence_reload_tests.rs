@@ -468,3 +468,53 @@ async fn a_breaking_migration_raises_its_captured_audiences_through_passes() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// Two members migrate; Ana's raise lands while Ben's raise of the same
+/// version is under way. Ben's operation adopts the established version and
+/// claims nothing (§17.1).
+#[tokio::test]
+async fn a_raise_whose_version_is_already_established_is_satisfied() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "before the raise").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    group.version.store(2, std::sync::atomic::Ordering::SeqCst);
+    let (ana, ben) = (group.reopen(ana).await, group.reopen(ben).await);
+    // Each sends its migration marker; Ben has not read Ana's raise.
+    for device in [&ana, &ben] {
+        device.sync.pass().await.unwrap();
+    }
+    ana.sync.raise_schema(Audience::Store, 2).await.unwrap();
+    let before = ben.sync.database.applied_slot().await.unwrap();
+    ben.sync.raise_schema(Audience::Store, 2).await.unwrap();
+    assert!(ben.sync.database.operations().await.unwrap().is_empty());
+    assert!(ben
+        .sync
+        .database
+        .pending::<crate::PendingRecord>()
+        .await
+        .unwrap()
+        .is_empty());
+    ana.sync.pass().await.unwrap();
+    // Ben read Ana's slots and published none of his own.
+    assert_eq!(
+        ben.sync.database.applied_slot().await.unwrap(),
+        ana.sync.database.applied_slot().await.unwrap()
+    );
+    assert!(ben.sync.database.applied_slot().await.unwrap() > before);
+    for device in [&ana, &ben] {
+        let state = device.sync.database.store_state().await.unwrap();
+        assert_eq!(state.schema[&Audience::Store].number, 2);
+    }
+    assert_eq!(
+        rows(&ana.sync.database).await,
+        rows(&ben.sync.database).await
+    );
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

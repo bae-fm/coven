@@ -255,6 +255,16 @@ impl SequenceSync {
                 {
                     return Err(OperationRejection::NotAllowed);
                 }
+                // A raise that finds its version established adopts that
+                // state and claims nothing (§17.1).
+                if let Purpose::Raise(version) = request.purpose {
+                    return Ok(session
+                        .history
+                        .state
+                        .schema
+                        .get(&request.audience)
+                        .is_none_or(|current| current.number < version));
+                }
                 Ok(true)
             }
         }
