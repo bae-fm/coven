@@ -21,7 +21,8 @@ exactly how it is laid out.
 
 **How to read references.** A section sign (§) refers to coven.md. D1 to D14 are
 this document's sections; the code, api.md and coven.md cite them by those
-numbers, so the numbers never change.
+numbers, so the numbers never change. They are not coven.md's Appendix D, whose
+parts are written with a dot (D.1 to D.6) and always as "Appendix D".
 
 **Who implements it.** The `coven-format` crate is the byte codec. It encodes
 and decodes everything here, using `coven-crypto`'s ciphers for the sealed
@@ -503,12 +504,14 @@ write's bytes never record whether it was excluded: schema exclusion is a
 - Tried and untried uploads keep their original schema, disposition and
   plaintext. Readers derive conversion or loss from the current schema and the
   row changes' actual data sources (§9.5, §18.6).
-- Without a converter, the received interpretation keeps each original change as
-  a frozen schema lost value.
+- When a breaking migration in the write's range declares `OldWrites::Drop`
+  (§18.3), the received interpretation keeps each original change as a frozen
+  schema lost value.
+- When every breaking migration in the range declares `OldWrites::Convert`,
+  one received part can contain converted changes and frozen dependent
+  originals. The original inner write keeps the layout below.
 - Exclusion is never inherited through `read_through`, including implicit own
   reads.
-- With a converter, one received part can contain converted changes and frozen
-  dependent originals. The original inner write keeps the layout below.
 
 *Example.* Ben's untried old-schema `title` edit uploads unchanged after he
 migrates. The receiving callback can interpret it as a `name` edit without
@@ -1754,8 +1757,8 @@ label:
 - `coven/encryption/v1` for sealing objects;
 - `coven/row-authorship/v1` for authorship leaves.
 
-Every HKDF in this document works the same way: the input is a 32-byte secret, there is
-no salt, the info is a context (above), and the output is 32 bytes. Here the
+Every HKDF in this document works the same way: the input is a 32-byte secret,
+there is no salt, the info is a context (above), and the output is 32 bytes. Here the
 context holds the label alone.
 
 ### Authorship roots
