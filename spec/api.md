@@ -1539,8 +1539,9 @@ while let Ok(values) = lost.next().await {
   newly supplied credentials and checks it before preparing or claiming a
   store entry or committing local state. A fresh sealed test object must be
   created once, refuse a second create at that path, return the original bytes
-  through whole and interior ranged reads, appear with its size in a listing,
-  and disappear after deletion. Cleanup runs even after a lost create reply;
+  through whole and interior ranged reads, and disappear after deletion.
+  Listings may lag; check the probe's metadata when it appears.
+  Cleanup runs even after a lost create reply;
   a path already occupied before the check is left untouched. A failed check
   returns `StorageSetupError::ProviderCheck`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
