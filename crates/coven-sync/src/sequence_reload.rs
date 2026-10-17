@@ -68,6 +68,26 @@ impl SelectedSnapshot {
     }
 }
 
+/// Where one audience's reloaded prefix begins.
+enum ReloadStart {
+    /// A selected announced snapshot.
+    Stored(SelectedSnapshot),
+    /// Slot zero: no slot is deleted and no snapshot is announced.
+    Empty(Audience),
+    /// This device's committed prefix, applied to `Session::through`.
+    Current(Audience),
+}
+
+impl ReloadStart {
+    fn covers(&self, through: u64) -> u64 {
+        match self {
+            ReloadStart::Stored(snapshot) => snapshot.announcement().covers,
+            ReloadStart::Empty(_) => 0,
+            ReloadStart::Current(_) => through,
+        }
+    }
+}
+
 impl SequenceSync {
     pub(crate) async fn authenticate_floor(
         &self,
@@ -191,7 +211,30 @@ impl SequenceSync {
         let metadata = selected.history()?;
         let mut history = History::restore(&metadata.originals, self.store(), ring, member)?;
         selected.authenticate(&history).await?;
-        for number in (selected.announcement().covers + 1)..=floor.header.at {
+        self.advance_history(
+            &mut history,
+            selected.announcement().covers,
+            floor.header.at,
+            ring,
+            member,
+        )
+        .await?;
+        self.authenticate_floor(floor, &history, ring, member)
+            .await?;
+        Ok((history, selected))
+    }
+
+    /// Extend `history`, which holds slots through `after`, with the kept
+    /// slots through `through`.
+    async fn advance_history(
+        &self,
+        history: &mut History,
+        after: u64,
+        through: u64,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        for number in (after + 1)..=through {
             let path = self.path(number)?;
             let input = self.fetch(&path).await?.ok_or_else(|| {
                 crate::write_object::damaged(&path, Refusal::Parse { cause: None })
@@ -200,15 +243,13 @@ impl SequenceSync {
                 input.local_bytes().await?,
                 &path,
                 ring,
-                &history,
+                history,
                 member.member(),
             )?;
             history.consume(slot, member.member());
             history.acquire(ring, member)?;
         }
-        self.authenticate_floor(floor, &history, ring, member)
-            .await?;
-        Ok((history, selected))
+        Ok(())
     }
 
     pub(crate) async fn reload_floor(
@@ -227,7 +268,7 @@ impl SequenceSync {
             let (history, store_snapshot) = self
                 .floor_history(&floor, &mut tentative_ring, member)
                 .await?;
-            let mut selected = vec![store_snapshot];
+            let mut starts = vec![ReloadStart::Stored(store_snapshot)];
             for original in floor.announcements.iter().skip(1) {
                 let announcement = history
                     .announcements
@@ -238,20 +279,21 @@ impl SequenceSync {
                     &announcement.snapshot.audience,
                     &member.member(),
                 ) {
-                    selected.push(self.select(announcement.clone(), &tentative_ring).await?);
+                    starts.push(ReloadStart::Stored(
+                        self.select(announcement.clone(), &tentative_ring).await?,
+                    ));
                 }
             }
-            let target = selected
+            let target = starts
                 .iter()
-                .map(|snapshot| snapshot.announcement().covers)
+                .map(|start| start.covers(session.through))
                 .max()
                 .expect("store snapshot")
                 .max(session.through);
             match self
                 .install_selected(
                     session,
-                    selected,
-                    Vec::new(),
+                    starts,
                     target,
                     history,
                     &mut tentative_ring,
@@ -299,19 +341,21 @@ impl SequenceSync {
                     .map(Audience::Circle),
             )
             .collect();
-        let mut selected = Vec::new();
-        let mut preserved = Vec::new();
+        let mut starts = Vec::new();
         for audience in readable {
             match history.announcements.values().rev().find(|announcement| {
                 announcement.snapshot.audience == audience && history.usable(announcement)
             }) {
-                Some(announcement) => {
-                    selected.push(self.select(announcement.clone(), &ring).await?)
-                }
-                None => preserved.push(audience),
+                Some(announcement) => starts.push(ReloadStart::Stored(
+                    self.select(announcement.clone(), &ring).await?,
+                )),
+                None => starts.push(ReloadStart::Current(audience)),
             }
         }
-        if selected.is_empty() {
+        if !starts
+            .iter()
+            .any(|start| matches!(start, ReloadStart::Stored(_)))
+        {
             return Err(coven_storage::StorageFailure::NotFound
                 .with_source("no usable snapshot is announced for a readable audience")
                 .into());
@@ -320,8 +364,7 @@ impl SequenceSync {
         if let Some(newer) = self
             .install_selected(
                 &mut session,
-                selected,
-                preserved,
+                starts,
                 target,
                 history,
                 &mut ring,
@@ -337,6 +380,11 @@ impl SequenceSync {
         Ok(())
     }
 
+    /// Load the audiences an applied admin slot made `required`: a raise's or
+    /// reset's audience from its prepared body, a newly readable circle from
+    /// its newest usable snapshot. Where that start's following slots lie
+    /// below the floor's first kept slot, or a newly readable circle has
+    /// none, the floor's snapshot for that audience is the start (§15).
     pub(crate) async fn reload_activation(
         &self,
         session: &mut Session,
@@ -346,42 +394,110 @@ impl SequenceSync {
         ring: &StoreKeyring,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        let mut selected = Vec::new();
+        let mut ring = ring.clone();
+        let floor = session.floor.clone();
+        // History through the floor, read only when the floor supplies a start.
+        let mut through_floor: Option<History> = None;
+        let mut starts = Vec::new();
         for audience in required {
-            let announcement = history
+            let boundary = history.boundaries.iter().any(|coverage| {
+                coverage.boundary.entry() == slot
+                    && coverage.boundary.snapshot().audience == *audience
+            });
+            let own = history
                 .announcements
-                .iter()
+                .values()
                 .rev()
-                .find(|(_, announcement)| {
+                .find(|announcement| {
                     announcement.snapshot.audience == *audience && history.usable(announcement)
                 })
-                .map(|(_, announcement)| announcement.clone())
-                .ok_or_else(|| SyncError::Rejected(crate::OperationRejection::NotAllowed))?;
-            selected.push(self.select(announcement, ring).await?);
+                .cloned();
+            // The floor supplies the start when the audience's own start
+            // needs slots below its first kept slot, or has none.
+            let from_floor = match (&own, &floor) {
+                (Some(own), Some(floor)) if own.covers + 1 >= floor.header.first.0 => None,
+                (_, floor) => floor.as_ref(),
+            };
+            let start = match (own, from_floor) {
+                (Some(own), None) => ReloadStart::Stored(self.select(own, &ring).await?),
+                (own, Some(floor)) => {
+                    let later = match &mut through_floor {
+                        Some(later) => later,
+                        None => {
+                            let mut later = history.clone();
+                            if floor.header.at > slot.0 {
+                                self.advance_history(
+                                    &mut later,
+                                    slot.0,
+                                    floor.header.at,
+                                    &mut ring,
+                                    member,
+                                )
+                                .await?;
+                            }
+                            self.authenticate_floor(floor, &later, &mut ring, member)
+                                .await?;
+                            through_floor.insert(later)
+                        }
+                    };
+                    let named = floor
+                        .announcements
+                        .iter()
+                        .filter_map(|original| later.announcements.get(&original.slot))
+                        .find(|announcement| announcement.snapshot.audience == *audience)
+                        .cloned();
+                    match (named, own) {
+                        // A raise or reset is replaced only by a snapshot
+                        // announced after it, which covers it.
+                        (Some(named), _) if !boundary || named.covers >= slot.0 => {
+                            ReloadStart::Stored(self.select(named, &ring).await?)
+                        }
+                        (_, Some(own)) => {
+                            return Err(crate::write_object::damaged(
+                                &self.path(own.covers + 1)?,
+                                Refusal::Parse { cause: None },
+                            ))
+                        }
+                        (_, None) => {
+                            return Err(SyncError::Pending(Box::new(PendingRecord {
+                                subject: crate::PendingSubject::Slot(slot),
+                                reason: crate::PendingReason::Waits(crate::Prerequisite::Reload(
+                                    audience.clone(),
+                                )),
+                                reported_by: self.device,
+                            })))
+                        }
+                    }
+                }
+                // No slot is deleted: a newly readable circle without a
+                // snapshot loads every slot from the start.
+                (None, None) => ReloadStart::Empty(audience.clone()),
+            };
+            starts.push(start);
         }
-        let preserved = std::iter::once(Audience::Store)
-            .chain(
-                history
-                    .state
-                    .readable_circles(&member.member())
-                    .into_iter()
-                    .map(Audience::Circle),
-            )
-            .filter(|audience| !required.contains(audience))
-            .collect();
-        let target = selected
+        starts.extend(
+            std::iter::once(Audience::Store)
+                .chain(
+                    history
+                        .state
+                        .readable_circles(&member.member())
+                        .into_iter()
+                        .map(Audience::Circle),
+                )
+                .filter(|audience| !required.contains(audience))
+                .map(ReloadStart::Current),
+        );
+        let target = starts
             .iter()
-            .map(|snapshot| snapshot.announcement().covers)
+            .map(|start| start.covers(session.through))
             .max()
             .expect("required audience")
             .max(slot.0);
-        let mut ring = ring.clone();
-        let floor = session.floor.clone();
+        let history = through_floor.unwrap_or(history);
         if let Some(newer) = self
             .install_selected(
                 session,
-                selected,
-                preserved,
+                starts,
                 target,
                 history,
                 &mut ring,
@@ -407,24 +523,26 @@ impl SequenceSync {
     async fn install_selected(
         &self,
         session: &mut Session,
-        selected: Vec<SelectedSnapshot>,
-        preserved: Vec<Audience>,
+        starts: Vec<ReloadStart>,
         target: u64,
         history: History,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         previous_floor: Option<&FloorObject>,
     ) -> Result<Option<FloorObject>, SyncError> {
-        let first = selected
+        let first = starts
             .iter()
-            .map(|snapshot| snapshot.announcement().covers)
-            .chain((!preserved.is_empty()).then_some(session.through))
+            .map(|start| start.covers(session.through))
             .min()
             .expect("reload audience");
-        let (mut at_target, store_covers) = match selected
-            .iter()
-            .find(|snapshot| snapshot.announcement().snapshot.audience == Audience::Store)
-        {
+        let (mut at_target, store_covers) = match starts.iter().find_map(|start| match start {
+            ReloadStart::Stored(snapshot)
+                if snapshot.announcement().snapshot.audience == Audience::Store =>
+            {
+                Some(snapshot)
+            }
+            _ => None,
+        }) {
             Some(store_snapshot) => {
                 let metadata = store_snapshot.history()?;
                 (
@@ -486,10 +604,16 @@ impl SequenceSync {
             self.authenticate_floor(floor, &history, ring, member)
                 .await?;
         }
-        let mut sources: Vec<_> = preserved.into_iter().map(SnapshotSource::Current).collect();
-        for selected in selected {
-            let author = selected.authenticate(&history).await?;
-            sources.push(selected.into_source(author));
+        let mut sources = Vec::new();
+        for start in starts {
+            sources.push(match start {
+                ReloadStart::Current(audience) => SnapshotSource::Current(audience),
+                ReloadStart::Empty(audience) => SnapshotSource::Empty(audience),
+                ReloadStart::Stored(selected) => {
+                    let author = selected.authenticate(&history).await?;
+                    selected.into_source(author)
+                }
+            });
         }
         self.keys.persist(ring)?;
         let authorship = Arc::new(SnapshotAuthorship {
@@ -518,7 +642,6 @@ impl SequenceSync {
         Ok(None)
     }
 }
-
 fn retained_slot(
     received: ReceivedSlot,
 ) -> IncomingSlot<coven_database::DownloadedWriteStream<PartPlaintext>> {

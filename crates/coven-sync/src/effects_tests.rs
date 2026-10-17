@@ -252,3 +252,101 @@ fn a_floor_keeps_the_schema_and_reset_selected_at_its_own_prefix() {
     assert!(!history.usable_at(&ordinary, 15));
     assert!(history.usable_at(&prepared, 15));
 }
+
+fn announced(number: u64, covers: u64, purpose: Purpose) -> SnapshotAnnouncement {
+    SnapshotAnnouncement {
+        snapshot: coven_format::admin::SnapshotId {
+            audience: Audience::Store,
+            device: DeviceId(1),
+            number,
+        },
+        covers,
+        purpose,
+        digest: [number as u8; 32],
+    }
+}
+
+fn activate(
+    change: StoreChange,
+    announcements: &BTreeMap<Slot, SnapshotAnnouncement>,
+    boundaries: &[coven_database::BoundaryCoverage],
+) -> Result<Option<AdminEffect>, OperationRejection> {
+    checked_change(
+        &household(),
+        &header(1, 1, 19),
+        Slot(20),
+        &change,
+        announcements,
+        boundaries,
+    )
+}
+
+#[test]
+fn a_raise_covering_less_than_an_earlier_announcement_is_refused() {
+    let raise = StoreChange::RaiseSchema {
+        version: 2,
+        announcement: Slot(10),
+    };
+    let ordinary = |covers| {
+        BTreeMap::from([
+            (Slot(10), announced(1, 8, Purpose::Raise(2))),
+            (Slot(12), announced(2, covers, Purpose::Ordinary)),
+        ])
+    };
+    assert!(matches!(
+        activate(raise.clone(), &ordinary(11), &[]),
+        Err(OperationRejection::NotAllowed)
+    ));
+    // Equal coverage and another audience's later coverage are allowed.
+    assert!(activate(raise.clone(), &ordinary(8), &[])
+        .unwrap()
+        .is_some());
+    let mut circle = ordinary(11);
+    circle.get_mut(&Slot(12)).unwrap().snapshot.audience =
+        Audience::Circle(CircleId(uuid::Uuid::from_u128(30)));
+    assert!(activate(raise, &circle, &[]).unwrap().is_some());
+}
+
+#[test]
+fn a_reset_covering_less_than_a_preceding_raise_slot_is_refused() {
+    let announcements = BTreeMap::from([
+        (Slot(10), announced(1, 8, Purpose::Raise(2))),
+        (Slot(14), announced(2, 13, Purpose::Reset)),
+        (Slot(15), announced(3, 9, Purpose::Reset)),
+    ]);
+    let raised = coven_database::BoundaryCoverage {
+        boundary: Boundary::SchemaChange(StoreVersion {
+            number: 2,
+            snapshot: announcements[&Slot(10)].snapshot.clone(),
+            entry: Slot(11),
+        }),
+        included: 8,
+    };
+    // The reset covering 9 was captured before the raise at slot 11.
+    assert!(matches!(
+        activate(
+            StoreChange::Reset {
+                announcement: Slot(15)
+            },
+            &BTreeMap::from([
+                (Slot(10), announcements[&Slot(10)].clone()),
+                (Slot(15), announcements[&Slot(15)].clone())
+            ]),
+            std::slice::from_ref(&raised),
+        ),
+        Err(OperationRejection::NotAllowed)
+    ));
+    // Covering the raise slot and every earlier announcement, it activates.
+    assert!(activate(
+        StoreChange::Reset {
+            announcement: Slot(14)
+        },
+        &BTreeMap::from([
+            (Slot(10), announcements[&Slot(10)].clone()),
+            (Slot(14), announcements[&Slot(14)].clone())
+        ]),
+        std::slice::from_ref(&raised),
+    )
+    .unwrap()
+    .is_some());
+}

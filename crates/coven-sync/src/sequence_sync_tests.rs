@@ -26,6 +26,8 @@ pub(crate) struct Group {
     pub(crate) ring: StoreKeyring,
     pub(crate) storage: MemoryStorage,
     pub(crate) clock: Arc<coven_foundation::clock::FixedClock>,
+    /// The app schema version installations open at.
+    pub(crate) version: std::sync::atomic::AtomicU32,
 }
 impl Group {
     pub(crate) fn new() -> Self {
@@ -44,6 +46,7 @@ impl Group {
                 .build()
                 .unwrap(),
             clock,
+            version: 1.into(),
         }
     }
     pub(crate) async fn device(&self, seed: u8) -> Device {
@@ -66,6 +69,12 @@ impl Group {
         let identity = device.identity.clone();
         let original = self.open(device._temp, identity.clone()).await;
         (original, self.open(temp, identity).await)
+    }
+    /// Close `device` and open its installation again at the group's
+    /// current schema version.
+    pub(crate) async fn reopen(&self, device: Device) -> Device {
+        device.sync.database.close().await.unwrap();
+        self.open(device._temp, device.identity).await
     }
     pub(crate) async fn open(&self, temp: tempfile::TempDir, identity: MemberIdentity) -> Device {
         self.open_with(
@@ -113,12 +122,25 @@ impl Group {
     ) -> Device {
         let directory = StoreLayout::new(temp.path().into()).store_dir(&self.store);
         let database = DatabaseBuilder::new(directory.clone())
-            .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
-            .migrations(vec![Migration::sql(
-                1,
-                "notes",
-                "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL)",
-            )])
+            .synced_tables(vec![
+                SyncedTable::new("notes", RowIdentity::SharedKey),
+                SyncedTable::new("pins", RowIdentity::IndependentUuid).audience_column("audience"),
+            ])
+            .migrations(
+                [
+                    Migration::sql(
+                        1,
+                        "notes",
+                        "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
+                         CREATE TABLE pins(id TEXT PRIMARY KEY NOT NULL,audience TEXT NOT NULL,
+                           title TEXT NOT NULL)",
+                    ),
+                    Migration::sql(2, "titles", "CREATE INDEX titles ON notes(title)"),
+                ]
+                .into_iter()
+                .take(self.version.load(std::sync::atomic::Ordering::SeqCst) as usize)
+                .collect(),
+            )
             .open()
             .await
             .unwrap();
@@ -251,6 +273,33 @@ pub(crate) async fn insert(db: &Database, id: &'static str, title: &'static str)
     })
     .await
     .unwrap();
+}
+pub(crate) async fn pin(
+    db: &Database,
+    id: &'static str,
+    circle: coven_foundation::id_source::CircleId,
+    title: &'static str,
+) {
+    db.write(move |sql| {
+        sql.execute(
+            "INSERT INTO pins VALUES(?1,?2,?3)",
+            (id, circle.to_string(), title),
+        )?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+}
+pub(crate) async fn pins(db: &Database) -> Vec<(String, String)> {
+    db.read(|sql| {
+        Ok(
+            sql.query("SELECT id,title FROM pins ORDER BY id", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })?,
+        )
+    })
+    .await
+    .unwrap()
 }
 pub(crate) async fn rows(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {

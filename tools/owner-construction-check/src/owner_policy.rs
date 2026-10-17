@@ -735,6 +735,7 @@ pub(crate) const POLICY: Policy = Policy {
         "FloorObject",
         "SnapshotObject",
         "SelectedSnapshot",
+        "ReloadStart",
         "ClaimSource",
         "SnapshotUploadSource",
         "FileTransfer",

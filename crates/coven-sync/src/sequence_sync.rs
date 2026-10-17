@@ -477,6 +477,10 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         let at = incoming.slot;
+        // A reload's fixed target already installed this slot.
+        if at.0 <= session.through {
+            return Ok(());
+        }
         if let SlotContent::Admin {
             effect: Some(effect),
             ..
