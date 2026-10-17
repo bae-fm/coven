@@ -155,8 +155,9 @@ structure Rules (S : Sig) where
   boundaryAllowed : Ledger S → S.Dev → S.Aud → Boundary → Bool
   /-- Keep only each batch's writes whose authored reads include the reset. -/
   sinceReset : Nat → S.Batch → S.Batch
-  /-- The claim number a slot carries: its device's counter at the claim. -/
-  number : Slot S → Nat
+  /-- The claim number at a sequence position: its device's counter at the claim.
+  The position distinguishes repeated slots with identical decoded contents. -/
+  number : Nat → Slot S → Nat
   ledger0 : Ledger S
   aud0 : S.Aud → AudLedger S
   rows0 : S.Aud → S.Rows
@@ -229,18 +230,18 @@ def author : Slot S → S.Dev
 
 /-- Record a claimed slot's number for its device, whether or not the slot is
 valid: a refused slot was still claimed. -/
-def noteClaim (L : Ledger S) (x : Slot S) : Ledger S :=
-  { L with claims := fun e => if e = author x then max (L.claims e) (R.number x) else L.claims e }
+def noteClaim (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
+  { L with claims := fun e => if e = author x then max (L.claims e) (R.number k x) else L.claims e }
 
-@[simp] theorem noteClaim_member (L : Ledger S) (x : Slot S) : (noteClaim R L x).member = L.member := rfl
-@[simp] theorem noteClaim_deviceOf (L : Ledger S) (x : Slot S) : (noteClaim R L x).deviceOf = L.deviceOf := rfl
-@[simp] theorem noteClaim_removed (L : Ledger S) (x : Slot S) : (noteClaim R L x).removed = L.removed := rfl
-@[simp] theorem noteClaim_keyGen (L : Ledger S) (x : Slot S) : (noteClaim R L x).keyGen = L.keyGen := rfl
+@[simp] theorem noteClaim_member (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).member = L.member := rfl
+@[simp] theorem noteClaim_deviceOf (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).deviceOf = L.deviceOf := rfl
+@[simp] theorem noteClaim_removed (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).removed = L.removed := rfl
+@[simp] theorem noteClaim_keyGen (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).keyGen = L.keyGen := rfl
 
 /-- Apply slot `k` to the ledger: its effect if it is a valid admin slot or key
 copy, its refusal if invalid, and in every case its claim number. -/
 def ledgerStep (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
-  noteClaim R (if ledgerValid R L x then ledgerEffect R L k x else refuse L k) x
+  noteClaim R (if ledgerValid R L x then ledgerEffect R L k x else refuse L k) k x
 
 /-- Whether slot `x` has a part for, or announces for, audience `A`. -/
 def touches (A : S.Aud) : Slot S → Bool

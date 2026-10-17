@@ -93,7 +93,8 @@ inductive Verdict where
 /-- Settle a recorded claim of slot `i` with bytes `own`, from the floor's first
 kept slot `start`, the floor snapshot's record for this device `covered`, and
 what reading slot `i` returned. -/
-def settle (start covered : Nat) (i : Nat) (own : Rec Dev) (n : Nat) (read : Option (Rec Dev)) : Verdict :=
+def settle {Bytes : Type} [DecidableEq Bytes] (start covered : Nat) (i : Nat)
+    (own : Bytes) (n : Nat) (read : Option Bytes) : Verdict :=
   if start ≤ i then
     match read with
     | some x => if x = own then .landed else .notLanded
@@ -119,11 +120,11 @@ still empty. -/
 theorem settle_correct {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n i t v : Nat}
     (own : Own seq head d n i t v) (hsc : start ≤ c + 1) (hch : c ≤ head)
     {read : Option (Rec Dev)} (hread : start ≤ i → read = if i ≤ head then some (seq i) else none) :
-    (settle start (lastClaim seq d c) i (.claim d n t v) n read = .landed ↔
+    (settle start (lastClaim seq d c) i (Rec.claim d n t v) n read = .landed ↔
       i ≤ head ∧ seq i = .claim d n t v) ∧
-    (settle start (lastClaim seq d c) i (.claim d n t v) n read = .notLanded →
+    (settle start (lastClaim seq d c) i (Rec.claim d n t v) n read = .notLanded →
       ∀ j t' v', 1 ≤ j → j ≤ head → seq j ≠ .claim d n t' v') ∧
-    (settle start (lastClaim seq d c) i (.claim d n t v) n read = .retry → head < i) := by
+    (settle start (lastClaim seq d c) i (Rec.claim d n t v) n read = .retry → head < i) := by
   have nowhere : ¬ (i ≤ head ∧ seq i = .claim d n t v) → ∀ j t' v', 1 ≤ j → j ≤ head →
       seq j ≠ .claim d n t' v' := by
     intro hnot j t' v' h1 h2 hj
@@ -135,18 +136,18 @@ theorem settle_correct {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n
     · simp only [hih, ite_true] at hr
       subst hr
       by_cases he : seq i = .claim d n t v
-      · have hv : settle start (lastClaim seq d c) i (.claim d n t v) n (some (seq i)) = .landed := by
+      · have hv : settle start (lastClaim seq d c) i (Rec.claim d n t v) n (some (seq i)) = .landed := by
           simp [settle, hk, he]
         rw [hv]
         exact ⟨⟨fun _ => ⟨hih, he⟩, fun _ => rfl⟩, fun h => (by cases h), fun h => (by cases h)⟩
-      · have hv : settle start (lastClaim seq d c) i (.claim d n t v) n (some (seq i)) = .notLanded := by
+      · have hv : settle start (lastClaim seq d c) i (Rec.claim d n t v) n (some (seq i)) = .notLanded := by
           simp [settle, hk, he]
         rw [hv]
         exact ⟨⟨fun h => (by cases h), fun h => absurd h.2 he⟩, fun _ => nowhere (fun h => he h.2),
           fun h => (by cases h)⟩
     · simp only [hih, ite_false] at hr
       subst hr
-      have hv : settle start (lastClaim seq d c) i (.claim d n t v) n none = .retry := by
+      have hv : settle start (lastClaim seq d c) i (Rec.claim d n t v) n none = .retry := by
         simp [settle, hk]
       rw [hv]
       exact ⟨⟨fun h => (by cases h), fun h => absurd h.1 hih⟩, fun h => (by cases h), fun _ => by omega⟩
@@ -158,11 +159,11 @@ theorem settle_correct {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n
       have : m = n := by omega
       subst this
       obtain ⟨rfl, rfl, rfl⟩ := own.only_here j t' v' h1 (by omega) h3
-      have hv : settle start (lastClaim seq d c) j (.claim d m t' v') m read = .landed := by
+      have hv : settle start (lastClaim seq d c) j (Rec.claim d m t' v') m read = .landed := by
         simp [settle, hk, hn]
       rw [hv]
       exact ⟨⟨fun _ => ⟨by omega, h3⟩, fun _ => rfl⟩, fun h => (by cases h), fun h => (by cases h)⟩
-    · have hv : settle start (lastClaim seq d c) i (.claim d n t v) n read = .notLanded := by
+    · have hv : settle start (lastClaim seq d c) i (Rec.claim d n t v) n read = .notLanded := by
         simp [settle, hk, hn]
       rw [hv]
       have hnot : ¬ (i ≤ head ∧ seq i = .claim d n t v) := fun ⟨_, he⟩ =>
@@ -177,7 +178,7 @@ change lands once. -/
 theorem lands_once_never_lost {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n i t v : Nat}
     (own : Own seq head d n i t v) (hsc : start ≤ c + 1) (hch : c ≤ head) (hih : i ≤ head)
     {read : Option (Rec Dev)} (hread : start ≤ i → read = some (seq i)) (t₂ : Nat) :
-    let verdict := settle start (lastClaim seq d c) i (.claim d n t v) n read
+    let verdict := settle start (lastClaim seq d c) i (Rec.claim d n t v) n read
     let seq' : Nat → Rec Dev := fun j =>
       if j = head + 1 ∧ verdict = .notLanded then .claim d n t₂ v else seq j
     let head' := if verdict = .notLanded then head + 1 else head
@@ -276,7 +277,7 @@ def adminRules : Rules adminSig where
   resetRows := fun _ => ()
   boundaryAllowed := fun _ _ _ _ => true
   sinceReset := fun _ b => b
-  number := fun
+  number := fun _ => fun
     | .admin true _ => 1
     | .admin false (.addMember _ _) => 1
     | .admin false _ => 2
@@ -328,7 +329,7 @@ section Compose
 variable {S : Sig} (R : Rules S)
 
 theorem step_claims (L : Ledger S) (k : Nat) (x : Slot S) (e : S.Dev) :
-    (ledgerStep R L k x).claims e = if e = author x then max (L.claims e) (R.number x) else L.claims e := by
+    (ledgerStep R L k x).claims e = if e = author x then max (L.claims e) (R.number k x) else L.claims e := by
   have hin : (if ledgerValid R L x then ledgerEffect R L k x else refuse L k).claims = L.claims := by
     split
     · cases x with
@@ -341,7 +342,7 @@ theorem step_claims (L : Ledger S) (k : Nat) (x : Slot S) (e : S.Dev) :
 device up to `k` carries a claim number reaching it. -/
 theorem claims_ge (seq : Nat → Slot S) (h0 : ∀ e, R.ledger0.claims e = 0) (d : S.Dev) {n : Nat}
     (hn : 1 ≤ n) :
-    ∀ k, n ≤ (ledgerAt R seq k).claims d ↔ ∃ j, 1 ≤ j ∧ j ≤ k ∧ author (seq j) = d ∧ n ≤ R.number (seq j)
+    ∀ k, n ≤ (ledgerAt R seq k).claims d ↔ ∃ j, 1 ≤ j ∧ j ≤ k ∧ author (seq j) = d ∧ n ≤ R.number j (seq j)
   | 0 => by
     simp only [ledgerAt, h0]
     constructor
@@ -355,7 +356,7 @@ theorem claims_ge (seq : Nat → Slot S) (h0 : ∀ e, R.ledger0.claims e = 0) (d
       rw [← ha]
       constructor
       · intro h
-        by_cases hm : n ≤ R.number (seq (k + 1))
+        by_cases hm : n ≤ R.number (k + 1) (seq (k + 1))
         · exact ⟨k + 1, by omega, Nat.le_refl _, ha.symm, hm⟩
         · obtain ⟨j, h1, h2, h3, h4⟩ := ih.1 (by omega)
           exact ⟨j, h1, by omega, h3, h4⟩
@@ -381,9 +382,9 @@ holds `x`. With `claim_floor_check` for a kept slot, every claim settles
 correctly, admin entries included. -/
 theorem settle_from_floor {seq : Nat → Slot S} {st : Store S} (g : Good R st seq)
     (h0 : ∀ e, R.ledger0.claims e = 0) (A : S.Aud) {d : S.Dev} {n i : Nat} {x : Slot S}
-    (hxa : author x = d) (hxn : R.number x = n) (hn : 1 ≤ n) (hi : 1 ≤ i)
-    (hord : ∀ j, 1 ≤ j → j ≤ st.head → author (seq j) = d → R.number (seq j) ≤ n)
-    (honly : ∀ j, 1 ≤ j → j ≤ st.head → author (seq j) = d → R.number (seq j) = n → j = i ∧ seq j = x)
+    (hxa : author x = d) (hxn : R.number i x = n) (hn : 1 ≤ n) (hi : 1 ≤ i)
+    (hord : ∀ j, 1 ≤ j → j ≤ st.head → author (seq j) = d → R.number j (seq j) ≤ n)
+    (honly : ∀ j, 1 ≤ j → j ≤ st.head → author (seq j) = d → R.number j (seq j) = n → j = i ∧ seq j = x)
     (hdel : i < st.floor.start) {L : Ledger S} {P : AudLedger S} {rows : S.Rows}
     (hb : st.body (st.floor.path A) = some (L, P, rows)) :
     n ≤ L.claims d ↔ (i ≤ st.head ∧ seq i = x) := by

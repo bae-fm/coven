@@ -171,13 +171,14 @@ code_checks() {
 # no `sorry`, and no axiom beyond Lean's own.
 lean_proof() {
     local what=$1 proof=$2 lib=$3 package=$4
+    shift 4
     proof_selected "${proof#spec/proofs/}" || return 0
     step "Lean proof of $what"
     # Path dependencies are checked separately; preserve their runner binaries.
     if [ "$part" = changed ]; then
-        (cd "$proof" && lake build)
+        (cd "$proof" && lake build "$@")
     else
-        (cd "$proof" && lake clean "$package" && lake build)
+        (cd "$proof" && lake clean "$package" && lake build "$@")
     fi
     local module
     for module in "$proof/$lib"/*.lean; do
@@ -266,7 +267,8 @@ proofs() {
     lean_proof "storage identity, files and clocks" spec/proofs/storage CovenStorage covenStorage
     lean_proof "device upload queues" spec/proofs/queue CovenQueue covenQueue
     lean_proof "sync IO and discovery" spec/proofs/io CovenIO covenIO
-    lean_proof "the store sequence" spec/proofs/sequence CovenSequence covenSequence
+    lean_proof "the store sequence and its JSON runner" spec/proofs/sequence CovenSequence covenSequence \
+        CovenSequence sequenceRunner SequenceTests
 
     local runner
     if proof_selected merge || crate_selected coven-merge; then

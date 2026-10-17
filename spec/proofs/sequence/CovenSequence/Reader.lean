@@ -63,6 +63,53 @@ def rowsStep (A : S.Aud) (L : Ledger S) (P : AudLedger S) (rows : S.Rows) (k : N
     S.Rows :=
   if touches A x && audValid R L P k A x then applyWrite R A P.version P.lastReset rows x else rows
 
+/-- The ordinary apply rule's buffer and post-fetch floor check. -/
+def Reader.next {α : Type} (pos start : Nat) (buf : Nat → Option α) : Option α :=
+  if start ≤ pos + 1 then buf (pos + 1) else none
+
+theorem Reader.next_eq_some {α : Type} (pos start : Nat) (buf : Nat → Option α) (x : α) :
+    Reader.next pos start buf = some x ↔ start ≤ pos + 1 ∧ buf (pos + 1) = some x := by
+  unfold Reader.next
+  split
+  · simp_all
+  · rename_i h
+    simp only [reduceCtorEq, false_iff, not_and]
+    intro le
+    omega
+
+/-- Consume consecutive fetched slots; a gap ends the prefix. Fuel bounds the
+number of fetched records, not their numeric distance from the reader. -/
+def Reader.prefix (start : Nat) (fetched : List Nat) : Nat → Nat → List Nat
+  | _, 0 => []
+  | pos, fuel + 1 =>
+    match Reader.next pos start (fun i => if i ∈ fetched then some i else none) with
+    | none => []
+    | some i => i :: Reader.prefix start fetched i fuel
+
+/-- `none` requires a floor reload; `some []` waits for the next slot. This
+projects ordinary application with its audience key, without boundary loads. -/
+def Reader.checkedSlots (pos start : Nat) (fetched : List Nat) : Option (List Nat) :=
+  if start ≤ pos + 1 then some (Reader.prefix start fetched pos fetched.length) else none
+
+theorem Reader.prefix_sound (start : Nat) (fetched : List Nat) (pos fuel : Nat) :
+    ∀ i ∈ Reader.prefix start fetched pos fuel, i ∈ fetched ∧ start ≤ i ∧ pos < i := by
+  induction fuel generalizing pos with
+  | zero => simp [Reader.prefix]
+  | succ fuel ih =>
+    simp only [Reader.prefix]
+    split
+    · simp
+    · rename_i next h
+      have check := (Reader.next_eq_some pos start _ next).mp h
+      have same : next = pos + 1 ∧ next ∈ fetched := by
+        split at check <;> simp_all
+      obtain ⟨rfl, member⟩ := same
+      intro i hi
+      rcases List.mem_cons.mp hi with rfl | hi
+      · exact ⟨member, check.1, by omega⟩
+      · have h := ih (pos + 1) i hi
+        exact ⟨h.1, h.2.1, by omega⟩
+
 /-- A reader's steps against fixed storage, holding `A`'s key or not. -/
 inductive ReadStep (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader S → Prop
   | fetch (d : Reader S) (i : Nat) :
@@ -86,6 +133,18 @@ inductive ReadStep (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader
       (hc : d.pos < st.floor.covers A) (hk : key = true)
       (hb : st.body (st.floor.path A) = some (L, P, rows)) :
       ReadStep A key st d ⟨st.floor.covers A, L, P, rows, d.buf⟩
+
+/-- The executable check supplies exactly the ordinary apply constructor's
+buffer and floor premises; key and boundary admission remain explicit. -/
+theorem Reader.next_apply {A : S.Aud} {key : Bool} {st : Store S} (d : Reader S) (x : Slot S)
+    (next : Reader.next d.pos st.floor.start d.buf = some x)
+    (hnr : ∀ au v c p, x = .boundary au A v c p → audValid R d.ledger d.aud (d.pos + 1) A x = false)
+    (hk : touches A x = true → key = true) :
+    ReadStep R A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) x,
+      audStep R d.ledger d.aud (d.pos + 1) A x,
+      rowsStep R A d.ledger d.aud d.rows (d.pos + 1) x, d.buf⟩ :=
+  let checked := (Reader.next_eq_some _ _ _ _).mp next
+  ReadStep.apply d x checked.2 checked.1 hnr hk
 
 inductive ReadSteps (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader S → Prop
   | refl (d : Reader S) : ReadSteps A key st d d

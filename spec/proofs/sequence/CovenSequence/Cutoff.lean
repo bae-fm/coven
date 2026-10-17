@@ -102,7 +102,7 @@ theorem keyGen_mono (seq : Nat → Slot S) (m : S.Mem) (j : Nat) :
 
 /-- An applied slot's ledger is its effect, with its claim number noted. -/
 theorem applied_ledger (seq : Nat → Slot S) {j : Nat} (hj : 1 ≤ j) (h : Applied R seq j) :
-    ledgerAt R seq j = noteClaim R (ledgerEffect R (ledgerAt R seq (j - 1)) j (seq j)) (seq j) := by
+    ledgerAt R seq j = noteClaim R (ledgerEffect R (ledgerAt R seq (j - 1)) j (seq j)) j (seq j) := by
   have hjeq : j = (j - 1) + 1 := by omega
   unfold Applied at h
   rw [hjeq, ledgerAt_succ, ← hjeq]
@@ -126,7 +126,7 @@ theorem cutoff (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g
     {parts : S.Aud → Option (WPart S)} (hw : seq (k + 1) = .writes d g parts) (hcut : Cut R seq j d g)
     (A : S.Aud) {w : WPart S} (hA : parts A = some w) :
     audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (seq (k + 1)) = false ∧
-    ledgerAt R seq (k + 1) = noteClaim R (ledgerAt R seq k) (seq (k + 1)) ∧
+    ledgerAt R seq (k + 1) = noteClaim R (ledgerAt R seq k) (k + 1) (seq (k + 1)) ∧
     audAt R seq A (k + 1) = refuseAud (audAt R seq A k) (k + 1) ∧
     rowsAt R seq A (k + 1) = rowsAt R seq A k := by
   obtain ⟨hj1, happ, hcases⟩ := hcut

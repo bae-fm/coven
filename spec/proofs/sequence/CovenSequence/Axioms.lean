@@ -126,3 +126,8 @@ import CovenSequence
 #print axioms CovenSequence.RaiseQueue.late_original_converted
 #print axioms CovenSequence.RaiseQueue.reload_matches_receiver
 #print axioms CovenSequence.RaiseQueue.conversion_agreement
+
+#print axioms CovenSequence.Reader.next_eq_some
+#print axioms CovenSequence.Reader.prefix_sound
+#print axioms CovenSequence.Reader.next_apply
+#print axioms CovenSequence.Authority.withRoles_decision_eq

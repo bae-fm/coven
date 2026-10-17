@@ -1,5 +1,18 @@
 name = "covenSequence"
-defaultTargets = ["CovenSequence"]
+defaultTargets = ["CovenSequence", "sequenceRunner", "SequenceTests"]
 
 [[lean_lib]]
 name = "CovenSequence"
+
+[[lean_lib]]
+name = "SequenceApply"
+
+[[lean_lib]]
+name = "SequenceJson"
+
+[[lean_lib]]
+name = "SequenceTests"
+
+[[lean_exe]]
+name = "sequenceRunner"
+root = "SequenceRunner"

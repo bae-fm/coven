@@ -68,7 +68,7 @@ def rules : Rules sig where
   resetRows := fun _ => []
   boundaryAllowed := fun _ _ _ _ => true
   sinceReset := fun _ b => b
-  number := fun _ => 0
+  number := fun _ _ => 0
   ledger0 := ledger0
   aud0 := fun _ => aud0
   rows0 := fun _ => ([] : List Nat)

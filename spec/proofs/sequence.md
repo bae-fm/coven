@@ -503,6 +503,104 @@ sending it and creates only what it recorded, signed with its id.
   whose bytes that copy's journal never attempted was created by another copy
   using the same id.
 
+## JSON runner
+
+Build with `cd spec/proofs/sequence && lake build`; the executable is
+`.lake/build/bin/sequenceRunner`. It reads one JSON object to EOF on stdin and
+prints one JSON answer. Invalid input reports an error on stderr and exits 1.
+`SequenceTests.lean` checks cases through the JSON entry point during the build.
+All fields below are required; identifiers are natural numbers, members lie in
+`0..member_count-1`, and slots, claim numbers and write numbers are positive.
+
+**`settle`** calls `Settle.settle`. Bytes are opaque strings compared exactly;
+`current: null` means absent. `last_claims` contains `[device, number]` pairs;
+an omitted device has never claimed (number zero). The floor is read after the
+slot. Below `first_kept`, only the snapshot record decides, even if bytes match.
+
+```json
+{"kind":"settle","recorded":{"device":0,"number":2,"slot":4,"bytes":"claim-2"},"current":"claim-2","floor":{"first_kept":5,"last_claims":[[0,1]]}}
+```
+
+Answer: `"notLanded"`; the other answers are `"landed"` and `"retry"`.
+
+**`read`** calls `Reader.checkedSlots`, whose next-slot check supplies the
+buffer and floor premises of `ReadStep.apply`. It returns the consecutive
+fetched prefix after `applied`, stopping at the first gap, irrespective of
+fetch order. If the floor has passed the next slot it requests reload and
+applies nothing. This projects ordinary application with the audience key;
+key waits, prepared-body loads and snapshot contents are outside this case.
+
+```json
+{"kind":"read","applied":1,"fetched":[3,1,2,5],"first_kept":2}
+```
+
+Answer: `{"reload":false,"apply":[2,3]}`.
+
+**`apply`** evaluates `ledgerAt`, `audAt` and `rowsAt` at every prefix, using
+`Authority.withRoles` and `LiveClaims.winner`. The initial membership must
+contain an admin; initial devices refer to active members. Each audience gives
+its starting `version` and the devices allowed to write to it. The runner's
+abstract policy requires an admin for device changes and key replacement too;
+conversion is the identity. These are fixture parameters/specializations, not
+additional store rules.
+
+Slots occupy positions `1..slots.length`. Each has `device` and `claim`, with
+strictly increasing claim numbers per device. An admin slot is
+`{"kind":"admin","device":0,"claim":1,"entry":{"kind":"removeDevice","device":1}}`.
+Entry kinds are `addMember` (`member`, `role`), `removeMember` (`member`),
+`changeRole` (`member`, `role`), `addDevice` (`device`, `member`), `removeDevice`
+(`device`), and `replaceKey` (`member`); roles are `"admin"` or `"member"`.
+A writes slot carries `key_gen` and at most one part per declared audience:
+
+```json
+{"kind":"apply","member_count":1,
+ "initial":{"members":[{"member":0,"role":"admin","key_gen":0}],"devices":[{"device":0,"member":0}]},
+ "audiences":[{"audience":0,"version":1,"writers":[0]}],
+ "slots":[{"kind":"writes","device":0,"claim":1,"key_gen":0,"parts":[
+   {"audience":0,"version":1,"unique_claims":[7],"owner_claims":[9],"writes":[1],
+    "rows":[{"row":9,"live":true,"value":7,"inputs":[[1,1]]}]}]}]}
+```
+
+`unique_claims` and `owner_claims` are separate permanent first-slot claim
+namespaces. `writes` lists original write numbers in that part. `rows` supplies
+complete replacements for affected merged rows **after the first removal pass,
+before uniqueness**: `row` is also its primary-key rank, `live` is presence,
+`value` is a unique value or null, and `inputs` lists `[slot, write-number]`
+setters for all of that value's inputs. Setters must name existing writes in
+the same audience at or before the update; refused setters are excluded by
+`LiveClaims`. Empty inputs cannot claim. This instantiates the model's abstract
+merge boundary; it does not implement row conflict resolution. Losing rows stay
+live, and setting `live:false` releases the claim. No uniqueness pass deletes
+those rows from the model's merge input.
+
+The answer has `ledger`, `audiences`, and `slots`; each item of `slots` has
+`slot`, `ledger`, and `audiences` for that prefix. The ledger contains `members`
+(`[member, role]`), all registered `devices` (`[device, member]`, including
+removed devices), `removed` device ids, `key_generations` (`[member, generation]`
+for the whole member universe), nonzero `last_claims` (`[device, number]`), and
+`refused` admin slot numbers. Each audience contains `audience`, `version`,
+`unique_claims` and `owner_claims` (`[key, first-slot]`), `live_winners`
+(`[value, row-or-null]` for every value retained in merged rows), `rows` in the
+input row shape, and `refused` part slot numbers. Tables are sorted by id;
+refusals are ascending. The example yields `last_claims:[[0,1]]`,
+`unique_claims:[[7,1]]`, `owner_claims:[[9,1]]`, `live_winners:[[7,9]]`, and no
+refusals, both at the final state and slot 1. Empty `slots` returns the initial
+state and an empty prefix list.
+
+**`past`** decides `Causality.Past` for each pair of supplied writes. Each write
+has `author` (device), `number`, containing `slot`, and `read_through` at
+authorship. Input must respect `Causality.Ordered`: publication follows the
+read, own-number order never reverses slots, and authored reads never decrease.
+A slot has one author; a device/write-number pair is unique. Output lists
+zero-based input indices, preserving input order, independently of slot order:
+
+```json
+{"kind":"past","writes":[{"author":0,"number":1,"slot":1,"read_through":0},{"author":1,"number":1,"slot":2,"read_through":1},{"author":0,"number":2,"slot":3,"read_through":0}]}
+```
+
+Answer: `[[],[0],[0]]`. The last write reads its own predecessor but not the
+intervening remote write. Only supplied writes can appear in an answer.
+
 ## Assumptions and what is not modelled
 
 - Snapshot bodies are honest: ordinary bodies contain the covered state;

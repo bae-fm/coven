@@ -18,13 +18,22 @@ def membershipChange : Entry S → Bool
   | .addMember .. | .removeMember .. | .changeRole .. => true
   | _ => false
 
-noncomputable def allowed (R : Rules S) (L : Ledger S) (d : S.Dev) (e : Entry S) : Bool := by
-  classical
-  exact (if membershipChange e then isAdmin L d else R.authorized L d e) &&
+def allowed (R : Rules S) (L : Ledger S) (d : S.Dev) (e : Entry S)
+    (hasAdmin : Decidable (HasAdmin (applyEntry R L e)) := Classical.propDecidable _) : Bool :=
+  letI := hasAdmin
+  (if membershipChange e then isAdmin L d else R.authorized L d e) &&
     decide (HasAdmin (applyEntry R L e))
 
-noncomputable def withRoles (R : Rules S) : Rules S :=
-  { R with authorized := allowed R }
+def withRoles (R : Rules S)
+    (hasAdmin : (L : Ledger S) → Decidable (HasAdmin L) := fun _ => Classical.propDecidable _) : Rules S :=
+  { R with authorized := fun L d e => allowed R L d e (hasAdmin (applyEntry R L e)) }
+
+/-- Executable decisions preserve the abstract authority policy. -/
+theorem withRoles_decision_eq (R : Rules S)
+    (hasAdmin : (L : Ledger S) → Decidable (HasAdmin L)) :
+    withRoles R hasAdmin = withRoles R := by
+  have same : hasAdmin = (fun _ => Classical.propDecidable _) := funext fun _ => Subsingleton.elim _ _
+  rw [same]
 
 theorem same_effect (R : Rules S) (L : Ledger S) (e : Entry S) :
     applyEntry (withRoles R) L e = applyEntry R L e := by cases e <;> rfl

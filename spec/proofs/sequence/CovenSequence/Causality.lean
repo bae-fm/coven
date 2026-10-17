@@ -46,6 +46,10 @@ def Past (slot : Write (Dev := Dev) (Stamp := Stamp) (Bytes := Bytes) → Nat)
     (w a : Write (Dev := Dev) (Stamp := Stamp) (Bytes := Bytes)) : Prop :=
   (0 < slot a ∧ slot a ≤ w.readThrough) ∨ (a.device = w.device ∧ a.number < w.number)
 
+instance [DecidableEq Dev]
+    (slot : Write (Dev := Dev) (Stamp := Stamp) (Bytes := Bytes) → Nat) (w a : Write) :
+    Decidable (Past slot w a) := inferInstanceAs (Decidable (_ ∨ _))
+
 /-- The publication obligations: catch up before claiming, publish own writes
 in number order, and never move the local applied position backwards. -/
 structure Ordered (slot : Write (Dev := Dev) (Stamp := Stamp) (Bytes := Bytes) → Nat)
