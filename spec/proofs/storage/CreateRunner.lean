@@ -1,5 +1,6 @@
 import CovenStorage.Objects
 import CovenStorage.CopyPublication
+import CovenStorage.BucketClaim
 import Lean
 
 /-! JSON adapter for testing provider publication against the create-once model.
@@ -7,7 +8,8 @@ import Lean
 An array of creates runs `create`, or for a copy-publication profile
 (`"copy": true`) stages each create as its own session and publishes it with
 `CopyPublication.publish`. An object `{"ops": [...]}` runs staged sessions and
-publications in the given arrival order through `CopyPublication.run`. -/
+publications in the given arrival order through `CopyPublication.run`. An
+object `{"bucket": [...]}` runs setup and reconnect through `BucketClaim`. -/
 
 open Lean CovenStorage
 
@@ -69,10 +71,29 @@ private def ops (list : Array Json) : Except String Json := do
         ("bytes", toJson ((bucket.objects (.slot n)).map (·.bytes)))]).toArray),
     ("staged", toJson (sessions.filter fun s => (bucket.staging s).isSome).length)]
 
+private def bucketClaims (requests : Array Json) : Except String Json := do
+  let mut storage := emptyStorage
+  let mut results := #[]
+  for request in requests do
+    let store ← request.getObjValAs? (List Nat) "store"
+    let accepted ← match ← request.getObjValAs? String "op" with
+      | "setup" => do
+          let (after, accepted) := BucketClaim.setup storage store 0
+          storage := after
+          pure accepted
+      | "reconnect" => pure (BucketClaim.names storage store)
+      | other => throw s!"unknown bucket operation {other}"
+    results := results.push <| Json.mkObj [
+      ("accepted", toJson accepted),
+      ("bytes", toJson ((storage .bucket).map (·.bytes)))]
+  pure <| Json.arr results
+
 private def run (j : Json) : Except String Json :=
   match j with
   | .arr requests => creates requests
-  | _ => do ops (← j.getObjValAs? (Array Json) "ops")
+  | _ => match j.getObjVal? "bucket" with
+    | .ok requests => do bucketClaims (← requests.getArr?)
+    | .error _ => do ops (← j.getObjValAs? (Array Json) "ops")
 
 def main : IO UInt32 := do
   let input ← (← IO.getStdin).readToEnd

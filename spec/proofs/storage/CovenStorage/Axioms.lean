@@ -1,5 +1,9 @@
 import CovenStorage
 
+#print axioms CovenStorage.BucketClaim.at_most_one_store
+#print axioms CovenStorage.BucketClaim.retry_passes
+#print axioms CovenStorage.BucketClaim.reconnect_refuses_other
+
 #print axioms CovenStorage.Clocks.stamp_after_latest
 #print axioms CovenStorage.Clocks.stamp_value
 #print axioms CovenStorage.Clocks.representable_stamp_exists

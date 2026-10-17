@@ -413,6 +413,7 @@ impl StorageConnections {
                 self.transfers.clone(),
             )
             .await?;
+        storage.check_bucket(self.store()).await?;
         self.attach(live, storage).await
     }
 
@@ -541,6 +542,10 @@ impl StorageConnections {
                 self.transfers.clone(),
             )
             .await?;
+        let new_store = self.codes.location().await.map_err(setup_error)?.is_none();
+        if !new_store {
+            storage.check_bucket(self.store()).await?;
+        }
         let path = ObjectPath::file(self.store(), self.device, FileId(self.ids.new_id()));
         let plaintext = b"coven storage check";
         let header = coven_format::file::FileHeader::new(plaintext.len() as u64);
@@ -558,6 +563,9 @@ impl StorageConnections {
                 coven_storage::check_provider(storage.as_ref(), &path, &bytes),
             )
             .await?;
+        if new_store {
+            storage.claim_bucket(self.store()).await?;
+        }
         let access = match &credentials {
             StorageCredentials::S3(keys) => coven_format::MemberAccess::S3AccessKey {
                 access_key_id: keys.access_key_id.clone(),

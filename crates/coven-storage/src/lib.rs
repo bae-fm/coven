@@ -9,6 +9,7 @@ pub use access_admin::{AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3
 mod config;
 mod provider_access;
 pub use provider_access::*;
+mod bucket_claim;
 mod connection;
 mod connection_credentials;
 mod cooldown;

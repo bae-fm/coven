@@ -2,8 +2,9 @@ import Std
 
 namespace CovenStorage
 
-/-- D10, within one store. Snapshot audiences have independent paths. -/
+/-- D10, in one bucket. Store object paths abstract one store's namespace. -/
 inductive Path where
+  | bucket
   | slot (number : Nat)
   | snapshot (audience device number : Nat)
   | file (device id : Nat)

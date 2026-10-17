@@ -396,13 +396,30 @@ Receiving Ben's note adds its slot read.
       `StorageFailure::OwnBucketRequired { reason: Prefix }`.
     - A store's first setup, before any location is recorded, lists the
       bucket's root with delimiter `/` before detection or any other write.
-      Any object or folder other than the store's own `<store>/` refuses
-      setup with `OwnBucketRequired { reason: Occupied }`. A retried creation
-      that already wrote under `<store>/` passes. The listing margin M
-      applies: an object stored within M may be absent, so two stores
-      created in one bucket within M of each other can both pass.
+      Any object or folder other than the store's own `<store>/` and the
+      fixed root object `coven-bucket` refuses setup with
+      `OwnBucketRequired { reason: Occupied }`. The listing checks for
+      preexisting objects older than the listing margin M; objects stored
+      within M may be absent.
+    - After detection and the provider check pass, and before publishing
+      store state or recording its location, first setup creates
+      `coven-bucket` once, with the same primitive slots use. Its complete
+      bytes are this store id's canonical lowercase hyphenated UUID, 36 ASCII
+      bytes without a newline (D10). A successful create proceeds. An
+      occupied name is read exactly: equal bytes mean a retried setup and
+      proceed; any other bytes refuse with `OwnBucketRequired { reason:
+      Occupied }`. At most one store's setup passes per bucket, independent
+      of listing lag ([`at_most_one_store`](proofs/storage/CovenStorage/BucketClaim.lean)).
+      The marker is never replaced or deleted. Failed setup retains it for
+      the same store's retry. Deleting a store from a device (`delete_store`
+      or `discard_store`, E1) leaves this remote marker, like its other
+      stored objects, untouched.
     - Reconnecting, restore and joining use the recorded location and check
-      no objects outside the store's own folder.
+      only their existing checks plus an exact read of `coven-bucket`.
+      They require its bytes to name this store; a missing, malformed or
+      other-store marker refuses with `OwnBucketRequired { reason: Occupied }`.
+      They neither list the root nor create a missing marker. Read failures
+      retain their provider causes.
     - Moving a store into its own bucket at its first invite would copy all
       its data, so the rule applies from creation, including to one-member
       stores.
@@ -1000,16 +1017,18 @@ Receiving Ben's note adds its slot read.
   the object and verifies absence by exact-id read. On S3 the safety check
   above runs first. A failure names the failed check and preserves the
   previous connection ([E5](api.md#e5-storage-and-sync)).
-- Every storage path starts with the store's id, including the provider
+- Apart from the own-bucket marker `coven-bucket`, every storage path starts
+  with the store's id, including the provider
   check's temporary objects and S3 detection's reserved
   `<store>/.coven-check/` probes ([D10](format.md#d10-paths)).
   - Several stores can share one folder or zone, and one bucket prefix
     where member keys can be limited to a prefix. On an S3 service whose
     keys reach a whole bucket, each store has its own bucket (above).
   - Setup writes only this store's prefix and reads only it, apart from
-    the bucket-root listing that creates a store needing its own bucket
-    (above); other stores and unrelated objects outside it do not compete
-    with this store. S3's read-only bucket-versioning query has bucket scope
+    the own-bucket marker and the bucket-root listing for first setup
+    (above). At prefix-scoped locations, other stores and unrelated objects
+    outside this prefix do not compete with this store. S3's read-only
+    bucket-versioning query has bucket scope
     because the owner setting applies to every object; it reads no other
     store's data.
   - E.g. Ana creates Household and Ben creates Garden in the same folder.

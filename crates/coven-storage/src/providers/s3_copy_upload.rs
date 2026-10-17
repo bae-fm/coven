@@ -23,11 +23,19 @@ impl S3Storage {
         path: &ObjectPath,
         token: &SecretText,
     ) -> Result<String, StorageError> {
+        self.temporary_for_store(path.store(), token)
+    }
+
+    fn temporary_for_store(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        token: &SecretText,
+    ) -> Result<String, StorageError> {
         let id = uuid::Uuid::parse_str(token.as_str())
             .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
         Ok(format!(
             "{}{TEMPORARIES}/{id}",
-            ObjectPrefix::all(path.store()).under(&self.prefix)
+            ObjectPrefix::all(store).under(&self.prefix)
         ))
     }
 
@@ -46,11 +54,12 @@ impl S3Storage {
     /// retry after a crash or a failed deletion included, stages and deletes
     /// this same name, so the caller's record of the create, which it keeps
     /// until the create settles, records the temporary too (§4).
-    pub(super) fn create_temporary_key(
+    pub(super) fn create_temporary_key<'a>(
         &self,
-        path: &ObjectPath,
+        path: impl Into<Destination<'a>>,
         bytes: &[u8],
     ) -> Result<String, StorageError> {
+        let path = path.into();
         let mut hasher = coven_crypto::ObjectHasher::new();
         hasher.update(b"coven/copy-temporary/v1");
         hasher.update(&(path.as_str().len() as u64).to_be_bytes());
@@ -60,7 +69,7 @@ impl S3Storage {
         let mut id = [0; 16];
         id.copy_from_slice(&digest.as_bytes()[..16]);
         let token = SecretText::new(uuid::Uuid::from_bytes(id).to_string());
-        self.temporary_key(path, &token)
+        self.temporary_for_store(path.store(), &token)
     }
 
     /// Initiate a native multipart upload at `key`, carrying `token` as its
@@ -255,9 +264,9 @@ impl S3Storage {
         };
         let result = self
             .copy(
-                publication,
+                Some(publication),
                 &self.session_key(session)?,
-                &session.path,
+                Destination::Object(&session.path),
                 condition,
             )
             .await;
@@ -302,16 +311,17 @@ impl S3Storage {
     /// destination condition.
     async fn copy(
         &self,
-        publication: &PublicationRequest,
+        publication: Option<&PublicationRequest>,
         temporary: &str,
-        path: &ObjectPath,
+        path: Destination<'_>,
         condition: S3CopyCondition,
     ) -> Result<
         aws_sdk_s3::operation::copy_object::CopyObjectOutput,
         aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::copy_object::CopyObjectError>,
     > {
         let (header, value) = condition.header();
-        self.client
+        let mut request = self
+            .client
             .copy_object()
             .bucket(&self.bucket)
             .key(path.under(&self.prefix))
@@ -319,10 +329,11 @@ impl S3Storage {
             .customize()
             .mutate_request(move |request| {
                 request.headers_mut().insert(header, value);
-            })
-            .interceptor(publication.clone())
-            .send()
-            .await
+            });
+        if let Some(publication) = publication {
+            request = request.interceptor(publication.clone());
+        }
+        request.send().await
     }
 
     /// A single-request create on a profile publishing every object by copy
@@ -340,8 +351,8 @@ impl S3Storage {
     /// as an occupied path.
     pub(super) async fn create_by_copy(
         &self,
-        publication: &PublicationRequest,
-        path: &ObjectPath,
+        publication: Option<&PublicationRequest>,
+        path: Destination<'_>,
         bytes: &[u8],
         condition: S3CopyCondition,
     ) -> Result<(), StorageError> {
@@ -358,11 +369,11 @@ impl S3Storage {
             if path.is_replaceable() {
                 put = put.metadata("coven-revision", token.as_str());
             }
-            put.customize()
-                .interceptor(publication.clone())
-                .send()
-                .await
-                .map_err(s3_error)?;
+            let mut put = put.customize();
+            if let Some(publication) = publication {
+                put = put.interceptor(publication.clone());
+            }
+            put.send().await.map_err(s3_error)?;
             match self
                 .copy(publication, &temporary, path, condition)
                 .await

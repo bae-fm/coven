@@ -11,6 +11,19 @@ pub trait ProviderOps: Send + Sync {
     fn config(&self) -> StorageConfig;
     /// Largest complete body accepted by `create` or `replace`.
     fn single_request_limit(&self) -> u64;
+    /// Create D10's bucket-root marker with the provider's create-once primitive.
+    /// Only first setup on a bucket-scoped S3 location calls this operation.
+    async fn create_bucket_claim(
+        &self,
+        _store: coven_foundation::id_source::StoreId,
+    ) -> Result<(), StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+    /// Read the complete bucket marker, bounded to D10's UUID byte count.
+    /// Only bucket-scoped S3 locations call this operation.
+    async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
     /// Signed-in account; S3 has no sharing account.
     async fn account(&self) -> Result<String, StorageError> {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))

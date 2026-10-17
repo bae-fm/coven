@@ -13,12 +13,17 @@ use coven_crypto::SecretText;
 use coven_foundation::{clock::ClockRef, id_source::IdSourceRef};
 use std::fmt;
 
+#[path = "s3_bucket_claim.rs"]
+mod bucket_claim;
 #[path = "s3_clock.rs"]
 mod clock;
+#[path = "s3_destination.rs"]
+mod destination;
 #[path = "s3_error.rs"]
 mod error;
 #[path = "s3_publication.rs"]
 mod publication;
+use destination::Destination;
 use error::s3_error;
 pub(crate) use error::{response_retry_after, response_status};
 #[path = "s3_profile.rs"]
@@ -201,8 +206,8 @@ impl S3Storage {
     }
     async fn put(
         &self,
-        publication: &PublicationRequest,
-        path: &ObjectPath,
+        publication: Option<&PublicationRequest>,
+        path: Destination<'_>,
         bytes: &[u8],
         expected: Option<&str>,
     ) -> Result<(), StorageError> {
@@ -228,18 +233,30 @@ impl S3Storage {
                 token.to_owned(),
             ),
         };
-        request
-            .customize()
-            .mutate_request(move |request| {
-                request
-                    .headers_mut()
-                    .insert(condition.0, condition.1.clone());
-            })
-            .interceptor(publication.clone())
-            .send()
-            .await
-            .map_err(s3_error)?;
+        let mut request = request.customize().mutate_request(move |request| {
+            request
+                .headers_mut()
+                .insert(condition.0, condition.1.clone());
+        });
+        if let Some(publication) = publication {
+            request = request.interceptor(publication.clone());
+        }
+        request.send().await.map_err(s3_error)?;
         Ok(())
+    }
+    async fn create_at(
+        &self,
+        publication: Option<&PublicationRequest>,
+        path: Destination<'_>,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        match self.settings.copy_publication.single_request() {
+            Some(condition) => {
+                self.create_by_copy(publication, path, bytes, condition)
+                    .await
+            }
+            None => self.put(publication, path, bytes, None).await,
+        }
     }
     fn upload_id<'a>(&self, session: &'a UploadSession) -> Result<&'a str, StorageError> {
         match &session.state {
@@ -259,7 +276,7 @@ impl S3Storage {
         else {
             return Err(StorageFailure::SessionMismatch.into());
         };
-        self.confirm_marker(&session.path, session.total, token)
+        self.confirm_marker(Destination::Object(&session.path), session.total, token)
             .await
     }
     /// Whether `path` holds the object this publication's marker names: its
@@ -267,7 +284,7 @@ impl S3Storage {
     /// absent one `SessionExpired`.
     async fn confirm_marker(
         &self,
-        path: &ObjectPath,
+        path: Destination<'_>,
         total: u64,
         token: &SecretText,
     ) -> Result<(), StorageError> {
@@ -321,6 +338,20 @@ impl S3Storage {
 
 #[async_trait]
 impl ProviderOps for S3Storage {
+    async fn create_bucket_claim(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+    ) -> Result<(), StorageError> {
+        self.create_at(
+            None,
+            Destination::BucketClaim(store),
+            store.to_string().as_bytes(),
+        )
+        .await
+    }
+    async fn read_bucket_claim(&self) -> Result<Vec<u8>, StorageError> {
+        self.bucket_claim_bytes().await
+    }
     async fn set_s3_credentials(&self, credentials: S3Credentials) -> Result<(), StorageError> {
         if credentials.access_key_id.is_empty() || credentials.secret_access_key.as_str().is_empty()
         {
@@ -353,13 +384,8 @@ impl ProviderOps for S3Storage {
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError> {
         // A PUT or copy reply carries no publication time.
-        match self.settings.copy_publication.single_request() {
-            Some(condition) => {
-                self.create_by_copy(publication, path, bytes, condition)
-                    .await?
-            }
-            None => self.put(publication, path, bytes, None).await?,
-        }
+        self.create_at(Some(publication), Destination::Object(path), bytes)
+            .await?;
         Ok(None)
     }
     async fn replace(
@@ -369,9 +395,14 @@ impl ProviderOps for S3Storage {
         bytes: &[u8],
     ) -> Result<(), StorageError> {
         let path = &previous.path;
-        self.put(publication, path, bytes, Some(&previous.replace_token))
-            .await
-            .map_err(StorageError::replacement)
+        self.put(
+            Some(publication),
+            Destination::Object(path),
+            bytes,
+            Some(&previous.replace_token),
+        )
+        .await
+        .map_err(StorageError::replacement)
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         let mut request = self

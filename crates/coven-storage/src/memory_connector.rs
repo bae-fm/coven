@@ -4,6 +4,10 @@
 use super::*;
 
 impl MemoryStorage {
+    /// Replace or remove the bucket marker as an external actor, without a request.
+    pub async fn plant_bucket_claim(&self, bytes: Option<Vec<u8>>) {
+        self.provider.state.lock().await.bucket_claim = bytes;
+    }
     /// Bind a simulated installation to the real synchronization gate, preserving
     /// this provider's credentials, durable objects and request observations.
     pub fn with_publication_gate(&self, publications: Arc<dyn PublicationGate>) -> Self {

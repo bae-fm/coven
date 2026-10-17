@@ -228,8 +228,8 @@ impl CovenBuilder {
         })
         .await?;
         let storage: Option<Arc<dyn Storage>> = match data {
-            Some(data) => Some(
-                connector
+            Some(data) => {
+                let storage = connector
                     .connect(
                         data.location,
                         coven_storage::ProviderAuth::new(data.credentials, credentials),
@@ -238,8 +238,10 @@ impl CovenBuilder {
                         transfers.clone(),
                     )
                     .await
-                    .map_err(SyncError::from)?,
-            ),
+                    .map_err(SyncError::from)?;
+                storage.check_bucket(store).await.map_err(SyncError::from)?;
+                Some(storage)
+            }
             None => None,
         };
         let files = coven_sync::Files::new(

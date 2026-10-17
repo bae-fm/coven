@@ -62,9 +62,8 @@ pub(crate) async fn reset_device(
     )?;
     // Unlocking must succeed; loading acquires any store key it lacks.
     builder.keys = CustodyChoice::Session(keys);
-    // The connection is reached before the damaged files move: one status
-    // read of slot 1, which publishes nothing.
-    builder
+    // Check bucket ownership and slot 1 before the damaged files move.
+    let storage = builder
         .connector()
         .connect(
             data.location.clone(),
@@ -75,7 +74,9 @@ pub(crate) async fn reset_device(
             builder.transfers.clone(),
         )
         .await
-        .map_err(SyncError::from)?
+        .map_err(SyncError::from)?;
+    storage.check_bucket(store).await.map_err(SyncError::from)?;
+    storage
         .status(&coven_storage::ObjectPath::slot(
             store,
             std::num::NonZeroU64::MIN,

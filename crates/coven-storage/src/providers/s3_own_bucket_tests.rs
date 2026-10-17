@@ -130,7 +130,12 @@ const R2: Option<S3Profile> = Some(S3Profile::Named(S3ProfileName::R2));
 
 #[tokio::test]
 async fn an_r2_bucket_holding_only_this_store_admits_its_creation() {
-    for pages in [vec![], vec![vec![own()]], vec![vec![own()], vec![]]] {
+    for pages in [
+        vec![],
+        vec![vec![own()]],
+        vec![vec![own()], vec![]],
+        vec![vec!["coven-bucket".into()], vec![own()]],
+    ] {
         let fixture = Fixture::new(pages.clone()).await;
         fixture.check(R2, "").await.unwrap();
         // R2's profile lists with V2, following every page.
@@ -148,6 +153,8 @@ async fn an_r2_bucket_holding_anything_else_refuses_creation_before_any_write() 
         vec![vec![other()]],
         vec![vec![own(), other()]],
         vec![vec!["notes.txt".into()]],
+        vec![vec!["coven-bucket/".into()]],
+        vec![vec!["Coven-bucket".into()]],
         vec![vec![own()], vec![other()]],
     ] {
         let fixture = Fixture::new(pages.clone()).await;

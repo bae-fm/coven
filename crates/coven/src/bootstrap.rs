@@ -392,6 +392,12 @@ async fn prepare_and_load(
             )
             .await
             .map_err(SyncError::from)?;
+        if matches!(admission, Admission::Restoring) {
+            storage
+                .check_bucket(settings.id)
+                .await
+                .map_err(SyncError::from)?;
+        }
         // The loading owner's transfers end with loading; the handle's start
         // with the handle.
         let files = coven_sync::Files::new(

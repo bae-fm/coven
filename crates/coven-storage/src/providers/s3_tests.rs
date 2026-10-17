@@ -974,3 +974,6 @@ mod profile_tests;
 
 #[path = "s3_versioning_tests.rs"]
 mod versioning_tests;
+
+#[path = "s3_bucket_claim_tests.rs"]
+mod bucket_claim_tests;

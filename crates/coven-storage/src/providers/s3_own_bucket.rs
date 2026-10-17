@@ -1,17 +1,18 @@
 //! A store on a service whose member keys reach a whole bucket has the bucket
 //! to itself (§4): any member's key reaches every object in it, so a second
 //! store there would be readable and deletable by the first store's members.
-//! Validation already requires the location's base prefix to be empty; this
-//! refuses creating a store in a bucket that holds anything else.
+//! Validation already requires the location's base prefix to be empty. The
+//! root listing admits only the store folder and the ownership marker.
 use super::*;
+use crate::bucket_claim::BUCKET_CLAIM;
 use crate::s3_detection::SIGNERS;
 use crate::OwnBucketReason;
 use coven_foundation::id_source::StoreId;
 
 /// Before a store's first setup, refuse a bucket holding anything outside the
-/// store's own folder where the location's member keys reach the whole
-/// bucket. Reads only, so it runs before detection writes its probes. A
-/// location whose keys can be limited to a prefix is not checked.
+/// store's own folder, except the ownership marker, where member keys reach
+/// the whole bucket. Reads only, so it runs before detection writes its
+/// probes. Locations with prefix-scoped keys are not checked.
 pub(crate) async fn check_new_store(
     config: StorageConfig,
     credentials: S3Credentials,
@@ -69,7 +70,8 @@ pub(crate) async fn check_new_store(
 }
 
 impl S3Storage {
-    /// Whether the bucket's root holds nothing but this store's folder. The
+    /// Whether the bucket's root holds only this store's folder and the
+    /// marker, whose bytes setup checks after provider validation. The
     /// delimiter folds each store's objects into one entry, so a page never
     /// enumerates a store's contents. Objects stored within the listing
     /// margin M may be absent (§4).
@@ -87,7 +89,10 @@ impl S3Storage {
             let page = self
                 .list_page(self.settings.listing, "", Some("/"), marker, None)
                 .await?;
-            if !page.contents.is_empty()
+            if page
+                .contents
+                .iter()
+                .any(|object| object.key() != Some(BUCKET_CLAIM))
                 || page
                     .folders
                     .iter()

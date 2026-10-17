@@ -89,6 +89,7 @@ impl MemoryStorageBuilder {
             key_admin: crate::test_utils::MemoryKeyAdmin::default(),
             account: Account::Owner,
             state: Arc::new(Mutex::new(State {
+                bucket_claim: None,
                 objects: BTreeMap::new(),
                 uploads: BTreeMap::new(),
                 next: 1,

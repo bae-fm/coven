@@ -40,7 +40,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
 
     /// Refuse, without sending, while a provider cooldown is live. A refused
     /// request has not reached storage.
-    fn cooling(&self) -> Result<(), StorageError> {
+    pub(crate) fn cooling(&self) -> Result<(), StorageError> {
         match self.cooldown.remaining() {
             Some(remaining) => {
                 Err(StorageFailure::RateLimited.with_source(CoolingDown { remaining }))
@@ -57,7 +57,10 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
 
     /// Record a requested cooldown before any consumer sees the response
     /// that asked for it (SP waiting).
-    async fn observed<T>(&self, result: Result<T, StorageError>) -> Result<T, StorageError> {
+    pub(crate) async fn observed<T>(
+        &self,
+        result: Result<T, StorageError>,
+    ) -> Result<T, StorageError> {
         let error = match result {
             Ok(value) => return Ok(value),
             Err(error) => error,
@@ -283,6 +286,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         let result = async {
             invitation.check(&self.config())?;
             self.provider.join(invitation).await?;
+            self.check_bucket(store).await?;
             self.status(&ObjectPath::floor(store)).await?;
             Ok(())
         }

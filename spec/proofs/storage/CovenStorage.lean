@@ -1,4 +1,5 @@
 import CovenStorage.Objects
+import CovenStorage.BucketClaim
 import CovenStorage.Files
 import CovenStorage.Clocks
 import CovenStorage.Examples

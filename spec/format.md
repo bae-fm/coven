@@ -19,7 +19,8 @@
 
 - Integers are big-endian, signed ones two's complement; none has a
   variable length.
-- Every stored object starts in the clear with `kind:u8 | version:u16`. A
+- Every stored object except D10's unsealed bucket marker starts in the clear
+  with `kind:u8 | version:u16`. A
   reader refuses an unknown kind, and asks for an update on a newer version
   instead of calling the object damaged.
   The version for every layout in this appendix is 1, including inner frames
@@ -725,6 +726,7 @@
 
 | Path | Holds |
 | --- | --- |
+| `coven-bucket` | Bucket-root create-once ownership marker, only where member keys reach the whole bucket (§4) |
 | `<store>/seq/<n>` | One create-once sequence slot |
 | `<store>/floor` | Signed, encrypted snapshot references and first retained slot; conditional replacement |
 | `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
@@ -737,10 +739,16 @@
   objects, never discovery cursors.
 - Audience is `store` or a circle UUID. Store, member, circle, invite,
   attempt and file ids are canonical lowercase hyphenated UUIDs.
+- The bucket marker's complete bytes are the owning store id's canonical
+  lowercase hyphenated UUID: 36 ASCII bytes, with no header, newline,
+  encryption or signature. Its path has no store prefix. It is never
+  replaced or deleted, including by local store deletion; first setup alone
+  creates it, and reconnect, restore and join require an exact match (§4).
 - Every immutable path is created once and retries compare exact bytes.
   Only the floor is replaceable. A path has only this spelling and is
-  bound into its object's authentication. Bootstrap discovers creation at
-  slot 1 or in the floor's store snapshot; there is no separate creation marker.
+  bound into its encrypted object's authentication. The unsealed bucket
+  marker reserves ownership only: bootstrap discovers store creation at
+  slot 1 or in the floor's store snapshot.
 
 ### D11 Keys and contexts
 

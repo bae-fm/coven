@@ -109,7 +109,7 @@ pub enum StorageFailure {
 pub enum OwnBucketReason {
     /// The location names a base prefix; the store occupies the bucket's root.
     Prefix,
-    /// Creating the store found objects outside its own folder in the bucket.
+    /// The bucket holds foreign objects, or its marker does not name this store.
     Occupied,
 }
 

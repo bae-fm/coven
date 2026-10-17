@@ -286,6 +286,74 @@ fn own_bucket_required(error: &StorageSetupError, reason: OwnBucketReason) -> bo
     )
 }
 
+struct ConcurrentSetup {
+    storage: Arc<MemoryStorage>,
+    listed: tokio::sync::Barrier,
+}
+
+#[async_trait::async_trait]
+impl StorageConnector for ConcurrentSetup {
+    async fn connect(
+        &self,
+        config: StorageConfig,
+        auth: coven_storage::ProviderAuth,
+        publications: Arc<dyn coven_storage::PublicationGate>,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+        transfers: Arc<coven_storage::TransferBudget>,
+    ) -> Result<Arc<StorageConnection>, StorageError> {
+        self.storage
+            .connect(config, auth, publications, cooldown, transfers)
+            .await
+    }
+    async fn detect_s3(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+        store: StoreId,
+    ) -> Result<S3Detection, StorageError> {
+        self.storage.detect_s3(config, credentials, store).await
+    }
+    async fn check_new_s3_store(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+        store: StoreId,
+    ) -> Result<(), StorageError> {
+        self.storage
+            .check_new_s3_store(config, credentials, store)
+            .await?;
+        self.listed.wait().await;
+        Ok(())
+    }
+}
+
+#[tokio::test]
+async fn concurrent_setups_after_empty_root_listings_admit_exactly_one_store() {
+    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    storage
+        .set_faults(coven_storage::test_utils::Faults {
+            hide_listings: true,
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    let connector = Arc::new(ConcurrentSetup {
+        storage,
+        listed: tokio::sync::Barrier::new(2),
+    });
+    let first = open(connector.clone()).await;
+    let second = open(connector).await;
+    let results = tokio::join!(setup(&first.handle, r2("")), setup(&second.handle, r2("")));
+    let results = [results.0, results.1];
+    first.handle.close().await.unwrap();
+    second.handle.close().await.unwrap();
+    assert_eq!(results.iter().filter(|result| result.is_ok()).count(), 1);
+    let error = results.into_iter().find_map(Result::err).unwrap();
+    assert!(
+        own_bucket_required(&error, OwnBucketReason::Occupied),
+        "{error:?}"
+    );
+}
+
 #[tokio::test]
 async fn an_r2_store_is_created_only_in_a_bucket_of_its_own() {
     let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
@@ -307,7 +375,7 @@ async fn an_r2_store_is_created_only_in_a_bucket_of_its_own() {
             .unwrap(),
         None
     );
-    // Reconnecting the first store checks nothing outside its own folder.
+    // Reconnecting reads the bucket marker, without listing the root.
     first.handle.disconnect_storage().await.unwrap();
     setup(&first.handle, r2("")).await.unwrap();
     first.handle.close().await.unwrap();
@@ -343,5 +411,58 @@ async fn a_base_prefix_is_refused_where_member_keys_reach_the_whole_bucket() {
         );
     }
     assert_eq!(storage.request_count(), 0);
+    opened.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_failed_first_setup_keeps_its_bucket_claim_and_can_retry() {
+    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    let opened = open(storage.clone()).await;
+    storage
+        .set_faults(coven_storage::test_utils::Faults {
+            read_failures: std::collections::BTreeMap::from([(
+                ObjectPath::floor(opened.directory.id()),
+                StorageFailure::PermissionDenied,
+            )]),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    assert!(setup(&opened.handle, r2("")).await.is_err());
+    assert_eq!(
+        StorageSettings::new(opened.directory.clone())
+            .read()
+            .unwrap(),
+        None
+    );
+    storage.check_bucket(opened.directory.id()).await.unwrap();
+    storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    setup(&opened.handle, r2("")).await.unwrap();
+    opened.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn reconnect_refuses_a_bucket_marker_naming_another_store() {
+    let storage = Arc::new(MemoryStorage::builder().location(r2("")).build().unwrap());
+    let opened = open(storage.clone()).await;
+    setup(&opened.handle, r2("")).await.unwrap();
+    opened.handle.disconnect_storage().await.unwrap();
+    let other = StoreId(uuid::Uuid::from_bytes([0x20; 16]));
+    storage
+        .plant_bucket_claim(Some(other.to_string().into_bytes()))
+        .await;
+    let error = setup(&opened.handle, r2("")).await.unwrap_err();
+    assert!(
+        own_bucket_required(&error, OwnBucketReason::Occupied),
+        "{error:?}"
+    );
+    assert_eq!(
+        StorageSettings::new(opened.directory.clone())
+            .read()
+            .unwrap(),
+        Some(r2(""))
+    );
+    storage.check_bucket(other).await.unwrap();
     opened.handle.close().await.unwrap();
 }
