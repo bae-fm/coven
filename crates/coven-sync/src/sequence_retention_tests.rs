@@ -2,6 +2,66 @@ use crate::sequence_sync::tests::*;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage};
 
 #[tokio::test]
+async fn independent_sealings_of_the_same_floor_differ_and_both_authenticate() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + super::GRACE + std::time::Duration::from_secs(1));
+    let session = ana.sync.session.lock().await;
+    let mut sealed = Vec::new();
+    for _ in 0..2 {
+        let proposal = ana
+            .sync
+            .propose_floor(&session, &group.ring, &ana.identity)
+            .await
+            .unwrap()
+            .unwrap();
+        let super::Retention::Floor { bytes, .. } = proposal else {
+            panic!("expected a floor proposal");
+        };
+        sealed.push(bytes);
+    }
+    assert_ne!(sealed[0], sealed[1]);
+    let path = ObjectPath::floor(group.store);
+    let mut previous: Option<crate::floor_object::FloorObject> = None;
+    let mut ring = group.ring.clone();
+    for bytes in sealed {
+        match &previous {
+            Some(floor) => group.storage.replace(floor.object(), &bytes).await.unwrap(),
+            None => {
+                group.storage.create(&path, &bytes).await.unwrap();
+            }
+        }
+        let floor = crate::floor_object::FloorObject::read(
+            ana.database(),
+            &group.storage,
+            &path,
+            None,
+            &mut ring,
+            &ana.identity,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        floor.authenticate(&session.history).unwrap();
+        if let Some(previous) = &previous {
+            assert_eq!(floor.header, previous.header);
+            assert_eq!(floor.announcements, previous.announcements);
+            assert_eq!(floor.copies, previous.copies);
+        }
+        previous = Some(floor);
+    }
+    drop(session);
+    ana.database().close().await.unwrap();
+}
+
+#[tokio::test]
 async fn retention_does_not_wait_for_an_absent_device_and_returning_loads_the_floor() {
     let group = Group::new();
     let ana = group.device(1).await;

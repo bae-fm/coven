@@ -68,13 +68,25 @@ impl<R: Read> Read for SealedStream<R> {
                     .as_bytes()
                     .to_vec()
             } else {
-                let sealed = self.key.reseal_object_chunk(
-                    self.path.as_str(),
-                    &self.prefix,
-                    0,
-                    self.layout.index(),
-                    &plaintext,
-                );
+                let sealed = if self.path.slot_number().is_some() {
+                    self.key.reseal_object_chunk(
+                        self.path.as_str(),
+                        &self.prefix,
+                        0,
+                        self.layout.index(),
+                        &plaintext,
+                    )
+                } else {
+                    self.key
+                        .seal_object_chunk(
+                            self.path.as_str(),
+                            &self.prefix,
+                            0,
+                            self.layout.index(),
+                            &plaintext,
+                        )
+                        .map_err(io::Error::other)?
+                };
                 let piece = self
                     .layout
                     .encode_chunk(&sealed)
