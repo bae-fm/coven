@@ -21,6 +21,11 @@ async fn setup_key_failure_restores_the_separate_synced_values() {
         f.storage.clone(),
     )
     .with_keychain(keychain)
+    .identity_custody(IdentityCustody::Custom(Arc::new(
+        coven_crypto::custody::KeyringCustody::new(Arc::new(
+            f.app.store_keychain(f.directory.id()),
+        )),
+    )))
     .key_custody(KeyCustody::Custom(Arc::new(RefusePersist {
         keys: std::sync::Mutex::new(None),
         refuse: AtomicBool::new(true),
@@ -28,15 +33,19 @@ async fn setup_key_failure_restores_the_separate_synced_values() {
     .open(f.directory.id())
     .await
     .unwrap();
-    assert!(handle
-        .setup_s3_storage(
-            f.storage.config(),
-            "Device",
-            "replacement".into(),
-            SecretText::new("secret".into())
-        )
-        .await
-        .is_err());
+    assert!(matches!(
+        handle
+            .setup_s3_storage(
+                f.storage.config(),
+                "Device",
+                "replacement".into(),
+                SecretText::new("secret".into())
+            )
+            .await,
+        Err(StorageSetupError::SecureStorage(
+            KeyError::PassphraseAuthentication
+        ))
+    ));
     assert_eq!(
         scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
         old_code.as_bytes()

@@ -667,20 +667,18 @@ pub enum StoreLayoutError {
 
 /// Creating a store failed, with publication and rollback made explicit (E1).
 pub enum StoreCreationError {
-    /// Keeping the device-only identity failed before publication.
-    Initialization { id: StoreId, source: KeyError },
-    /// Removing that identity after an unpublished failure also failed.
-    InitializationCleanup { operation: Box<StoreCreationError>, cleanup: KeyError },
-    /// A directory or file already occupies this store id.
-    AlreadyExists(StoreId),
-    /// A file operation failed before publication.
-    File(FileError),
-    /// Writing the store's settings failed before publication.
-    Settings(SettingsError),
-    /// The store is visible, but syncing its parent directory failed.
-    Published { id: StoreId, source: std::io::Error },
-    /// Removing the unpublished directory failed too.
-    Rollback { operation: Box<StoreCreationError>, cleanup: std::io::Error },
+    /// Preparing, publishing or removing the hidden directory failed.
+    Directory(BootstrapDirectoryError),
+    /// Opening the database or custody failed.
+    Store(CovenError),
+    /// Creating or persisting the member identity failed.
+    Identity(IdentityError),
+    /// Closing connections or workers failed.
+    Sync(SyncError),
+    /// Rollback also failed; both causes remain available.
+    Cleanup { operation: Box<StoreCreationError>, cleanup: Box<StoreCreationError> },
+    /// Complete store, retaining session custody; publication durability failed.
+    Published { handle: CovenHandle, source: Box<StoreCreationError> },
 }
 
 /// Deleting the local store stopped at a step the caller may retry (E1).
@@ -816,13 +814,7 @@ impl StoreLayout {
 pub struct Coven;
 
 impl Coven {
-    /// Makes a new store with OS-random store and device ids (E5).
-    pub async fn create_store(
-        layout: &StoreLayout,
-        name: &str,
-    ) -> Result<StoreDir, StoreCreationError>;
-
-    /// Collects the choices for opening, restoring or joining a store in this layout.
+    /// Configure creating, opening, restoring or joining a store.
     pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
     /// Deletes a closed store without opening it: every keychain entry coven
@@ -878,6 +870,10 @@ impl CovenBuilder {
     /// and the app's own `MemberKeyCustody` as the last.
     pub fn identity_custody(self, custody: IdentityCustody) -> Self;
 
+    /// Creates an open store and its member in the chosen custody before
+    /// publication; cancellation does not interrupt creation or rollback.
+    pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError>;
+
     /// Opens the store for reading and writing, taking the store's lock.
     /// Opening always migrates coven's tables before the app's schema, then
     /// unlocks each configured key custody once for this handle's session,
@@ -917,12 +913,15 @@ pub enum KeyCustody {
 pub enum IdentityCustody {
     Keyring,
     Passphrase(Passphrase),
-    /// Starts empty; initialization, restore or join fills this session’s custody.
+    /// Creation, restore or join fills this session-only custody.
     InMemory,
     Custom(Arc<dyn MemberKeyCustody>),
 }
 
 impl CovenHandle {
+    /// The stable id, including before storage setup.
+    pub fn store_id(&self) -> StoreId;
+
     /// Closes the store: stops syncing, operation and file work, closes every
     /// connection, erases the unlocked custody sessions and releases the writer
     /// lock. Open file streams and outstanding file I/O
@@ -952,12 +951,10 @@ Example:
 coven::set_keyring_service("com.example.notes")?;
 
 let layout = StoreLayout::new(app_dir);
-let store_dir = Coven::create_store(&layout, "Household").await?;
-
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())                        // E2
     .migrations(migrations())                       // E13
-    .open(store_dir.id())
+    .create_store("Household")
     .await?;
 ```
 
@@ -3824,11 +3821,6 @@ impl StoreKeyring {
 }
 
 impl CovenHandle {
-    /// Generates an independent member UUID and two key pairs in identity custody,
-    /// for the person creating a store. Fails if custody already holds keys.
-    /// Joining and restoring put the keys there themselves.
-    pub fn initialize_identity(&self) -> Result<MemberId, IdentityError>;
-
     /// Finishes work using store keys, removes them from custody, erases
     /// them from the held session and drops the provider connection.
     /// A failed custody removal retains the previous session and connection.
@@ -3852,7 +3844,7 @@ impl CovenHandle {
 }
 ```
 
-- A custody owner unlocks once at open and retains the capability needed to
+- A custody owner unlocks once at creation or open and retains the capability needed to
   persist through that session. Custom custody obeys the same lifetime:
   `persist` must reuse its unlocked derivation, and `close` erases it.
   Ana adding a historical key saves the changed keyring without another
@@ -3861,7 +3853,7 @@ impl CovenHandle {
 ```rust
 /// The app's own store for the store keys and circle keys this device holds.
 pub trait StoreKeyCustody: Send + Sync {
-    /// Called once at open; None when this device has never held keys.
+    /// Called once at creation or open; None when this device has never held keys.
     /// Retains the unlocked persistence capability until close.
     fn unlock(&self) -> Result<Option<StoreKeyring>, KeyError>;
     /// Keeps `keyring`, replacing what was kept.
@@ -3874,7 +3866,7 @@ pub trait StoreKeyCustody: Send + Sync {
 
 /// The app's own store for the stable id and held member credentials.
 pub trait MemberKeyCustody: Send + Sync {
-    /// Called once at open; persistence reuses the held session capability.
+    /// Called once at creation or open; persistence reuses the held session capability.
     fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError>;
     fn persist(&self, identity: &MemberIdentity) -> Result<(), KeyError>;
     fn forget(&self) -> Result<(), KeyError>;

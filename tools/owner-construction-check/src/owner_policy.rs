@@ -469,7 +469,13 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
         ("crates/coven/src/coven.rs", "<free>", "blocking"),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
-        ("crates/coven/src/coven.rs", "Coven", "create_store"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "create_store",
+        ),
+        ("crates/coven/src/builder_creation.rs", "<free>", "create"),
+        ("crates/coven/src/builder_creation.rs", "<free>", "prepare"),
         ("crates/coven/src/coven.rs", "Coven", "discard_store"),
         ("crates/coven/src/handle.rs", "CovenHandle", "close"),
         ("crates/coven/src/handle.rs", "CovenHandle", "new"),
@@ -491,7 +497,7 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven/src/test_utils.rs",
             "TestCoven",
-            "create_store",
+            "create_closed_store",
         ),
         (
             "crates/coven/src/test_utils.rs",
@@ -567,12 +573,6 @@ pub(crate) const POLICY: Policy = Policy {
             "StoreDir",
             "lock_read_only",
             "StoreReadLock",
-        ),
-        (
-            "crates/coven-foundation/src/files/layout.rs",
-            "StoreLayout",
-            "create_store_dir_with",
-            "StoreDir",
         ),
         (
             "crates/coven-foundation/src/files/atomic_file.rs",
@@ -683,6 +683,7 @@ pub(crate) const POLICY: Policy = Policy {
     non_owner_types: &[
         // Failure transport may carry a published handle; it does not own store lifetime.
         "BootstrapError",
+        "StoreCreationError",
         "KeyCustody",
         "IdentityCustody",
         "Command",

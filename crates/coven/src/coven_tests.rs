@@ -19,10 +19,10 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
     let app = TestCoven::new();
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
     let first = app
-        .create_store(&layout, "Household", ids.clone())
+        .create_closed_store(&layout, "Household", ids.clone())
         .await
         .unwrap();
-    let second = app.create_store(&layout, "Work", ids).await.unwrap();
+    let second = app.create_closed_store(&layout, "Work", ids).await.unwrap();
     assert_eq!(
         layout
             .stores()
@@ -146,7 +146,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "private", Arc::new(UuidIds))
+        .create_closed_store(&layout, "private", Arc::new(UuidIds))
         .await
         .unwrap();
     let key_id = KeyId(UuidIds.new_id());
@@ -156,11 +156,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         .open(directory.id())
         .await
         .unwrap();
-    let member = handle.initialize_identity().unwrap();
-    assert!(matches!(
-        handle.initialize_identity(),
-        Err(IdentityError::AlreadyInitialized)
-    ));
+    let member = identity(&app, directory.id()).member();
     handle.set_host_secret("token", "the app's token").unwrap();
     handle.set_host_secret("device-id", "app secret").unwrap();
     handle.set_host_secret("discarded", "discard me").unwrap();
@@ -170,10 +166,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         .open(directory.id())
         .await
         .unwrap();
-    assert!(matches!(
-        handle.initialize_identity(),
-        Err(IdentityError::AlreadyInitialized)
-    ));
+    assert_eq!(identity(&app, directory.id()).member(), member);
     assert_eq!(
         handle.host_secret("token").unwrap().as_deref(),
         Some("the app's token")
@@ -199,7 +192,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         }
     }
     let directory = app
-        .create_store(
+        .create_closed_store(
             &layout,
             "replacement",
             Arc::new(SameStore(
@@ -220,7 +213,7 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         replacement.store_key_state().unwrap(),
         StoreKeyState::Locked
     );
-    assert_ne!(replacement.initialize_identity().unwrap(), member);
+    assert_ne!(identity(&app, directory.id()).member(), member);
     replacement.close().await.unwrap();
 }
 
@@ -231,9 +224,9 @@ async fn a_failed_device_identity_prevents_publication() {
     let app = TestCoven::new();
     app.fail_next_keychain_operation();
     assert!(matches!(
-        app.create_store(&layout, "refused", Arc::new(UuidIds))
+        app.create_closed_store(&layout, "refused", Arc::new(UuidIds))
             .await,
-        Err(StoreCreationError::Initialization { .. })
+        Err(StoreCreationError::Store(CovenError::Key(_)))
     ));
     assert!(layout.stores().await.unwrap().is_empty());
 }
@@ -246,7 +239,7 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "migrations", Arc::new(UuidIds))
+        .create_closed_store(&layout, "migrations", Arc::new(UuidIds))
         .await
         .unwrap();
     let first = || {
@@ -305,4 +298,12 @@ async fn a_breaking_migration_keeps_the_waiting_write_as_authored() {
         "Swatches"
     );
     handle.close().await.unwrap();
+}
+
+fn identity(app: &TestCoven, id: StoreId) -> MemberIdentity {
+    MemberKeyCustody::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
+        app.store_keychain(id),
+    )))
+    .unwrap()
+    .unwrap()
 }

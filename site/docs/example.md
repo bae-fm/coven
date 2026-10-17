@@ -53,7 +53,7 @@ let handle = Coven::builder(layout.clone())
             .gated_through("list_id"),
     ])
     .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
-    .open(store_dir.id()).await?;
+    .create_store("Todos").await?;
 ```
 
 Every synced table is declared `STRICT`, carries an `id` text primary key at
@@ -171,16 +171,11 @@ A fresh store has no master key yet. The atomic cloud-home setup generates one
 for an opaque home, prepares the provider connection under that proposed key,
 then commits the key, provider credentials, and replacement connection as one
 operation. A failed setup restores the previous custody state and leaves the
-previous connection installed. This store also needs its own signing identity —
-coven never mints one implicitly (see
-[Keys](/docs/keys#no-silent-identity-minting)) —
-[`initialize_identity`](rustdoc:method:coven::CovenHandle::initialize_identity)
-establishes it explicitly, the same way, for a store created fresh (joining
-or restoring an existing store establishes its identity as part of that
-instead).
+previous connection installed. Builder creation already establishes the member
+identity in the selected custody before publishing the store; joining and
+restoring establish their identity as part of admission.
 
 ```rust
-handle.initialize_identity()?;
 let connected = handle
     .setup_s3_cloud_home(cloud_home, access_key, secret_key)
     .await?;

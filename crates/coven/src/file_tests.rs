@@ -17,7 +17,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         let clock = Arc::new(coven_foundation::clock::ClosureClock(|| UNIX_EPOCH + Duration::from_secs(1000)));
         let memory = Arc::new(MemoryStorage::builder().clock(clock.clone()).transfer_limits(1024 * 1024,65536).build().unwrap());
         let layout = StoreLayout::new(root.path().into());
-        let directory = app.create_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
+        let directory = app.create_closed_store(&layout, "Files", Arc::new(UuidIds)).await.unwrap();
         let handle = app.builder(layout).clock(clock).storage_connector(memory.clone())
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
             .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
@@ -26,7 +26,7 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
             ))])
             .migrations(vec![Migration::sql(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .open(directory.id()).await.unwrap();
-        handle.initialize_identity().unwrap();
+
         handle.setup_s3_storage(memory.config(), "Test device", "key".into(), SecretText::new("secret".into())).await.unwrap();
         let mut status = handle.subscribe_sync_status();
         status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })).await.unwrap();
@@ -141,7 +141,7 @@ async fn originals_owned_copies_ranges_references_and_deletion_use_the_app_api()
     let app = TestCoven::new();
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
     let directory = app
-        .create_store(&layout, "Household", ids.clone())
+        .create_closed_store(&layout, "Household", ids.clone())
         .await
         .unwrap();
     let handle = builder(&app, layout.clone(), ids.clone())
@@ -299,7 +299,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
     let original = TestCoven::new();
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
     let directory = original
-        .create_store(&layout, "restored", ids.clone())
+        .create_closed_store(&layout, "restored", ids.clone())
         .await
         .unwrap();
     let handle = builder(&original, layout.clone(), ids.clone())
@@ -406,7 +406,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
     let ids: IdSourceRef = Arc::new(SequentialIds::new());
     let layout = StoreLayout::new(root.path().to_owned());
     let directory = app
-        .create_store(&layout, "uploaded", ids.clone())
+        .create_closed_store(&layout, "uploaded", ids.clone())
         .await
         .unwrap();
     let storage = Arc::new(
@@ -421,7 +421,7 @@ async fn uploaded_files_pins_and_read_only_ranges_use_the_composed_owner() {
         .open(directory.id())
         .await
         .unwrap();
-    handle.initialize_identity().unwrap();
+
     use coven_storage::Storage;
     handle
         .setup_s3_storage(

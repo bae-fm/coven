@@ -25,7 +25,7 @@ async fn reopening_waits_after_the_last_handle_drops_or_close_starts() {
         let layout = StoreLayout::new(root.path().into());
         let app = TestCoven::new();
         let directory = app
-            .create_store(&layout, "Reopen", Arc::new(UuidIds))
+            .create_closed_store(&layout, "Reopen", Arc::new(UuidIds))
             .await
             .unwrap();
         let handle = builder(&app, layout.clone())
@@ -82,7 +82,7 @@ async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     let app = TestCoven::new();
     let ids = Arc::new(UuidIds);
     let directory = app
-        .create_store(&layout, "keys", ids.clone())
+        .create_closed_store(&layout, "keys", ids.clone())
         .await
         .unwrap();
     let keys = StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap());
@@ -92,7 +92,7 @@ async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
         .await
         .unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
-    handle.initialize_identity().unwrap();
+
     handle.set_host_secret("token", "secret").unwrap();
     handle.close().await.unwrap();
     let handle = builder(&app, layout.clone())
@@ -105,10 +105,13 @@ async fn kept_keys_survive_reopen_and_forgetting_preserves_identity() {
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.forget_store_keys().await.unwrap();
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
-    assert!(matches!(
-        handle.initialize_identity(),
-        Err(IdentityError::AlreadyInitialized)
-    ));
+    assert!(
+        MemberKeyCustody::unlock(&coven_crypto::custody::KeyringCustody::new(Arc::new(
+            app.store_keychain(directory.id())
+        )))
+        .unwrap()
+        .is_some()
+    );
     assert_eq!(
         handle.host_secret("token").unwrap().as_deref(),
         Some("secret")
@@ -181,22 +184,19 @@ impl MemberKeyCustody for Identity {
 }
 
 #[tokio::test]
-async fn opening_unlocks_once_and_sql_callback_failures_roll_back() {
+async fn creation_unlocks_once_and_sql_callback_failures_roll_back() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
-    let directory = app
-        .create_store(&layout, "session", Arc::new(UuidIds))
-        .await
-        .unwrap();
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
     let handle = builder(&app, layout.clone())
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
-        .open(directory.id())
+        .create_store("session")
         .await
         .unwrap();
+    let directory = layout.store_dir(&handle.store_id());
     let failed: CovenResult<()> = handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('a','not committed')", [])?;
@@ -217,7 +217,7 @@ async fn opening_unlocks_once_and_sql_callback_failures_roll_back() {
         0
     );
     assert!(handle.pending().await.unwrap().is_empty());
-    let reader = builder(&app, layout)
+    let reader = builder(&app, layout.clone())
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
         .open_read_only(directory.id())
@@ -230,8 +230,6 @@ async fn opening_unlocks_once_and_sql_callback_failures_roll_back() {
         Err(CovenError::Database(DbError::StoreClosed))
     ));
     assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
-    assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
-    handle.initialize_identity().unwrap();
     assert_eq!(identity.unlocks.load(Ordering::SeqCst), 1);
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Locked);
     assert_eq!(keys.unlocks.load(Ordering::SeqCst), 1);
@@ -258,7 +256,7 @@ async fn cancelling_the_close_caller_still_closes_all_clones() {
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "closing", Arc::new(UuidIds))
+        .create_closed_store(&layout, "closing", Arc::new(UuidIds))
         .await
         .unwrap();
     let handle = builder(&app, layout.clone())
@@ -304,7 +302,7 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "closed", Arc::new(UuidIds))
+        .create_closed_store(&layout, "closed", Arc::new(UuidIds))
         .await
         .unwrap();
     let original = builder(&app, layout).open(directory.id()).await.unwrap();
@@ -381,7 +379,7 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
     let layout = StoreLayout::new(root.path().to_owned());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "members", Arc::new(UuidIds))
+        .create_closed_store(&layout, "members", Arc::new(UuidIds))
         .await
         .unwrap();
     let handle = builder(&app, layout).open(directory.id()).await.unwrap();
@@ -411,13 +409,13 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         let root = tempfile::tempdir().unwrap();
         let layout = StoreLayout::new(root.path().to_owned());
         let app = TestCoven::new();
-        let directory = app.create_store(&layout, "setup", Arc::new(UuidIds)).await.unwrap();
+        let directory = app.create_closed_store(&layout, "setup", Arc::new(UuidIds)).await.unwrap();
         let config = StorageConfig::S3 {
             bucket: "bucket".into(), region: "region".into(), prefix: "store".into(), endpoint: None, profile: None,
         };
         let storage = Arc::new(MemoryStorage::builder().location(config.clone()).clock(Arc::new(SystemClock)).build().unwrap());
         let handle = builder(&app, layout).storage_connector(storage.clone()).open(directory.id()).await.unwrap();
-        handle.initialize_identity().unwrap();
+
         let (entered, entering) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
         storage.hold_next_listing(ObjectPrefix::all(directory.id()), entered, resumed).await;
@@ -449,21 +447,17 @@ async fn workers_share_keys_across_stop_forget_and_reacquisition_until_close() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
-    let directory = app
-        .create_store(&layout, "session", Arc::new(UuidIds))
-        .await
-        .unwrap();
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
     let keys = Arc::new(Keys::default());
     let identity = Arc::new(Identity::default());
-    let handle = builder(&app, layout)
+    let handle = builder(&app, layout.clone())
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
         .storage_connector(storage.clone())
-        .open(directory.id())
+        .create_store("session")
         .await
         .unwrap();
-    let member = handle.initialize_identity().unwrap();
+    let member = identity.keys.lock().unwrap().as_ref().unwrap().member();
     handle
         .setup_s3_storage(
             storage.config(),
@@ -543,7 +537,7 @@ async fn failed_identity_unlock_releases_the_opened_store_session() {
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "session", Arc::new(UuidIds))
+        .create_closed_store(&layout, "session", Arc::new(UuidIds))
         .await
         .unwrap();
     let keys = Arc::new(Keys::default());
@@ -569,7 +563,7 @@ async fn migration_failure_precedes_custody_unlock() {
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "session", Arc::new(UuidIds))
+        .create_closed_store(&layout, "session", Arc::new(UuidIds))
         .await
         .unwrap();
     let keys = Arc::new(Keys::default());
@@ -612,10 +606,6 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let ids = Arc::new(UuidIds);
-    let directory = app
-        .create_store(&layout, "closing", ids.clone())
-        .await
-        .unwrap();
     let keys = Arc::new(Keys {
         keys: Mutex::new(Some(StoreKeyring::new(
             StoreKey::generate(KeyId(ids.new_id())).unwrap(),
@@ -623,14 +613,14 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         ..Keys::default()
     });
     let identity = Arc::new(Identity::default());
-    let handle = builder(&app, layout)
+    let handle = builder(&app, layout.clone())
         .clock(Arc::new(HeldClock))
         .key_custody(KeyCustody::Custom(keys.clone()))
         .identity_custody(IdentityCustody::Custom(identity.clone()))
-        .open(directory.id())
+        .create_store("session")
         .await
         .unwrap();
-    handle.initialize_identity().unwrap();
+
     handle.pending().await.unwrap();
     // Hold timer-driven work so closing encounters the damaged journal row.
     handle

@@ -34,7 +34,6 @@ pub struct CovenHandle {
     storage: Arc<crate::storage::StorageConnections>,
     codes: coven_sync::RestoreCodes,
     custody: Arc<Mutex<Option<StoreCustody>>>,
-    ids: IdSourceRef,
     directory: StoreDir,
     keychain: Arc<StoreKeychain>,
     device: DeviceId,
@@ -55,7 +54,6 @@ impl CovenHandle {
         sync: coven_sync::SyncLoop,
         storage: Arc<crate::storage::StorageConnections>,
         codes: coven_sync::RestoreCodes,
-        ids: IdSourceRef,
         directory: StoreDir,
         keychain: Arc<StoreKeychain>,
         device: DeviceId,
@@ -69,11 +67,15 @@ impl CovenHandle {
             storage,
             codes,
             custody: Arc::new(Mutex::new(Some(custody))),
-            ids,
             directory,
             keychain,
             device,
         }
+    }
+
+    /// The store's stable id, including before storage is configured.
+    pub fn store_id(&self) -> StoreId {
+        self.directory.id()
     }
 
     /// Limits captured when each file upload drain or pin starts.
@@ -420,18 +422,6 @@ impl CovenHandle {
         key: impl Into<RowKey>,
     ) -> Result<Option<UserFile>, DbError> {
         self.database.user_file(table, key).await
-    }
-
-    /// Generates an independent member UUID and two key pairs in identity
-    /// custody, for the person creating a store. Fails if custody already
-    /// holds keys. Joining and restoring put the keys there themselves.
-    pub fn initialize_identity(&self) -> Result<MemberId, IdentityError> {
-        self.custody
-            .lock()
-            .expect("custody lock poisoned")
-            .as_mut()
-            .ok_or(KeyError::StoreClosed)?
-            .initialize_identity(MemberId(self.ids.new_id()))
     }
 
     /// Removes the store keys from key custody. A failed removal leaves the

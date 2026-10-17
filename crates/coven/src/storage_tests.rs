@@ -31,7 +31,7 @@ impl Fixture {
                 .unwrap(),
         );
         let directory = app
-            .create_store(
+            .create_closed_store(
                 &StoreLayout::new(root.path().into()),
                 "Loop",
                 Arc::new(UuidIds),
@@ -55,7 +55,7 @@ impl Fixture {
         .open(directory.id())
         .await
         .unwrap();
-        handle.initialize_identity().unwrap();
+
         Self {
             app,
             handle,
@@ -631,14 +631,13 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
     let layout = StoreLayout::new(f._root.path().into());
     let directory = f
         .app
-        .create_store(&layout, "Garden", Arc::new(UuidIds))
+        .create_closed_store(&layout, "Garden", Arc::new(UuidIds))
         .await
         .unwrap();
     let other = builder(&f.app, layout, f.clock.clone(), f.connector.clone())
         .open(directory.id())
         .await
         .unwrap();
-    other.initialize_identity().unwrap();
     other
         .setup_s3_storage(
             f.storage.config(),

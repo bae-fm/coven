@@ -5,7 +5,48 @@ use crate::{
 };
 
 /// Creating a store failed, with publication and rollback made explicit (E1).
-pub type StoreCreationError = coven_foundation::files::StoreCreationError<KeyError>;
+#[derive(Debug, thiserror::Error)]
+pub enum StoreCreationError {
+    /// Preparing, publishing or removing the hidden directory failed.
+    #[error(transparent)]
+    Directory(#[from] coven_foundation::files::BootstrapDirectoryError),
+    /// Opening the database or custody failed.
+    #[error(transparent)]
+    Store(#[from] crate::CovenError),
+    /// Creating or persisting the member identity failed.
+    #[error(transparent)]
+    Identity(#[from] crate::IdentityError),
+    /// Closing the database or its workers failed.
+    #[error(transparent)]
+    Sync(#[from] SyncError),
+    /// Rollback also failed; both causes remain available.
+    #[error("{operation}; cleanup failed: {cleanup}")]
+    Cleanup {
+        /// The original failure.
+        operation: Box<StoreCreationError>,
+        /// A cleanup failure.
+        #[source]
+        cleanup: Box<StoreCreationError>,
+    },
+    /// The store is visible, but confirming publication durability failed.
+    #[error("store is published; durability failed: {source}")]
+    Published {
+        /// The complete open store, retaining session-only custody.
+        handle: crate::CovenHandle,
+        /// Failure after publication.
+        #[source]
+        source: Box<StoreCreationError>,
+    },
+}
+
+impl StoreCreationError {
+    pub(crate) fn with_cleanup(self, cleanup: Self) -> Self {
+        Self::Cleanup {
+            operation: Box::new(self),
+            cleanup: Box::new(cleanup),
+        }
+    }
+}
 
 /// Deleting the local store stopped at a step the caller may retry (E1).
 #[derive(Debug, thiserror::Error)]

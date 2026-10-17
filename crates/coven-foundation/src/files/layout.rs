@@ -6,10 +6,23 @@ use std::path::PathBuf;
 
 use uuid::Uuid;
 
-use crate::files::{settings, FileError, SettingsError, StoreCreationError, StoreDir};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::files::DirectoryCreationError;
+
+use crate::files::{settings, FileError, SettingsError, StoreDir};
 use crate::id_source::{IdSource, StoreId};
 
 /// The stores under `app_dir`, one directory each (E1).
+#[cfg_attr(
+    not(feature = "test-utils"),
+    doc = r#"
+Directory-only creation is a test fixture.
+```compile_fail
+use coven_foundation::{files::StoreLayout, id_source::{StoreId, UuidIds, IdSource}};
+let layout = StoreLayout::new("stores".into());
+let _ = layout.create_store_dir(StoreId(UuidIds.new_id()), "Store", &UuidIds);
+```"#
+)]
 #[derive(Clone, Debug)]
 pub struct StoreLayout {
     app_dir: PathBuf,
@@ -122,39 +135,15 @@ impl StoreLayout {
             .await
     }
 
-    /// Make and publish one store directory and its settings, with a fresh
-    /// device id from `ids`. The facade supplies a new store id for creation,
-    /// or the existing store id for restore and join. The app never supplies a
-    /// device id (§10, E1).
-    ///
-    /// Initialization takes place in an unpublished sibling. Its complete
-    /// contents are renamed into place without replacing an existing store.
+    /// Publish a directory fixture without initializing member custody.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn create_store_dir(
         &self,
         id: StoreId,
         name: &str,
         ids: &dyn IdSource,
-    ) -> Result<StoreDir, StoreCreationError> {
-        self.create_store_dir_with(id, name, ids, |_| Ok(()))
-    }
-    /// Prepare outside-directory state before publishing the store. The
-    /// initializer sees its final settings, and any failure removes the
-    /// unpublished directory. Used for a non-restored device identity (§10).
-    pub fn create_store_dir_with<E: std::error::Error + Send + Sync + 'static>(
-        &self,
-        id: StoreId,
-        name: &str,
-        ids: &dyn IdSource,
-        initialize: impl FnOnce(&crate::files::StoreSettings) -> Result<(), E>,
-    ) -> Result<StoreDir, StoreCreationError<E>> {
-        crate::files::creation::create(
-            &self.app_dir.join("stores"),
-            id,
-            name,
-            ids,
-            initialize,
-            false,
-        )
+    ) -> Result<StoreDir, DirectoryCreationError> {
+        crate::files::creation::create(&self.app_dir.join("stores"), id, name, ids, false)
     }
 }
 

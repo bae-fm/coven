@@ -6,10 +6,10 @@ use crate::{
 
 #[test]
 fn creation_failures_preserve_recursive_error_sources() {
-    let failure = StoreCreationError::<std::convert::Infallible>::Rollback {
-        operation: Box::new(StoreCreationError::AlreadyExists(
-            StoreId(uuid::Uuid::nil()),
-        )),
+    let failure = DirectoryCreationError::Rollback {
+        operation: Box::new(DirectoryCreationError::AlreadyExists(StoreId(
+            uuid::Uuid::nil(),
+        ))),
         cleanup: io::Error::other("rollback refused"),
     };
     let error: &dyn std::error::Error = &failure;
@@ -72,7 +72,7 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     ));
     assert!(matches!(
         layout.create_store_dir(id, "Collision", &UuidIds),
-        Err(StoreCreationError::AlreadyExists(_))
+        Err(DirectoryCreationError::AlreadyExists(_))
     ));
     let directory = pending.directory();
     let path = directory.database_path();
@@ -97,14 +97,14 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     assert!(matches!(
         pending.cancel(),
         Err(BootstrapDirectoryError::Create(
-            StoreCreationError::AlreadyExists(_)
+            DirectoryCreationError::AlreadyExists(_)
         ))
     ));
     drop(pending);
     assert!(matches!(
         layout.begin_bootstrap(id, "Shared", &UuidIds).await,
         Err(BootstrapDirectoryError::Create(
-            StoreCreationError::AlreadyExists(_)
+            DirectoryCreationError::AlreadyExists(_)
         ))
     ));
 }
@@ -123,7 +123,7 @@ async fn bootstrap_refuses_a_live_writer_before_reporting_an_existing_store() {
     drop(writer);
     assert!(matches!(
         layout.begin_bootstrap(id, "Store", &UuidIds).await,
-        Err(BootstrapDirectoryError::Create(StoreCreationError::AlreadyExists(found))) if found == id
+        Err(BootstrapDirectoryError::Create(DirectoryCreationError::AlreadyExists(found))) if found == id
     ));
 }
 

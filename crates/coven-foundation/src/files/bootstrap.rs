@@ -1,8 +1,8 @@
 //! Hidden stores retain interrupted bootstrap work until explicit retry or cancellation.
 
 use super::{
-    atomic_file::exists, creation, device_reset, lock, DeviceReset, FileError, StoreCreationError,
-    StoreDir, StoreLockError,
+    atomic_file::exists, creation, device_reset, lock, DeviceReset, DirectoryCreationError,
+    FileError, StoreDir, StoreLockError,
 };
 use crate::id_source::{IdSource, StoreId};
 use std::{
@@ -16,7 +16,7 @@ use std::{
 pub enum BootstrapDirectoryError {
     /// A store already exists or preparing its directory failed.
     #[error(transparent)]
-    Create(#[from] StoreCreationError),
+    Create(#[from] DirectoryCreationError),
     /// Another bootstrap or an open database prevents this operation.
     #[error(transparent)]
     Lock(#[from] StoreLockError),
@@ -76,7 +76,7 @@ impl BootstrapStore {
     pub fn publish(&self) -> Result<(), BootstrapDirectoryError> {
         let _reader = self.directory().lock_read_only()?;
         let published = |source: io::Error| -> BootstrapDirectoryError {
-            StoreCreationError::Published {
+            DirectoryCreationError::Published {
                 id: self.id,
                 source,
             }
@@ -102,7 +102,7 @@ impl BootstrapStore {
     pub fn cancel(&self) -> Result<(), BootstrapDirectoryError> {
         let guard = self.directory().lock_for_deletion()?;
         if exists("inspect bootstrap path", &self.path)? && !is_pending(&self.path)? {
-            return Err(StoreCreationError::AlreadyExists(self.id).into());
+            return Err(DirectoryCreationError::AlreadyExists(self.id).into());
         }
         if let Some(guard) = guard {
             guard.remove_directory()?;
@@ -135,7 +135,7 @@ pub(super) async fn reserve_bootstrap_directory(
     let closing = lock.closing_guard();
     let lease = Arc::new(BootstrapLease(Mutex::new(Some(lock))));
     if !exists("inspect bootstrap path", &path)? {
-        creation::create(&root, id, name, ids, |_| Ok(()), true)?;
+        creation::create(&root, id, name, ids, true)?;
     }
     let metadata = fs::symlink_metadata(&path)
         .map_err(|source| FileError::at("inspect unpublished store", &path, source))?;
@@ -158,7 +158,7 @@ pub(super) async fn reserve_bootstrap_directory(
         device_reset::begin(&path, id)?;
     }
     if !is_pending(&path)? {
-        return Err(StoreCreationError::AlreadyExists(id).into());
+        return Err(DirectoryCreationError::AlreadyExists(id).into());
     }
     let store = BootstrapStore {
         _closing: closing,
@@ -169,7 +169,7 @@ pub(super) async fn reserve_bootstrap_directory(
     store
         .directory()
         .settings()
-        .map_err(StoreCreationError::Settings)?;
+        .map_err(DirectoryCreationError::Settings)?;
     Ok(store)
 }
 

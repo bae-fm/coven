@@ -1,7 +1,7 @@
 //! The application API for coven stores (Appendix E).
 //!
-//! Declare tables and migrations, create a store directory, then open it with
-//! [`Coven::builder`]. SQL, files, keys and their capabilities remain with the
+//! Declare tables and migrations on [`Coven::builder`], then create or open
+//! the store. SQL, files, keys and their capabilities remain with the
 //! crates that own them. Opening resumes unfinished operations and committed
 //! file work without starting a sync loop; an empty journal needs no unlocked keys.
 
@@ -53,8 +53,9 @@ pub use coven_format::{IamPolicy, MemberAccess, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{
-    BootstrapDirectoryError, DeviceReset, FileError, FileName, FileNameError, SettingsError,
-    StoreDir, StoreInfo, StoreLayout, StoreLayoutError, StoreLockError,
+    BootstrapDirectoryError, DeviceReset, DirectoryCreationError, FileError, FileName,
+    FileNameError, SettingsError, StoreDir, StoreInfo, StoreLayout, StoreLayoutError,
+    StoreLockError,
 };
 pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{

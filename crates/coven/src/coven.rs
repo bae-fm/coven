@@ -1,33 +1,13 @@
 //! The calls that create, locate, open and remove device-local stores.
 
-use crate::{
-    CovenBuilder, IdSourceRef, StoreCreationError, StoreDeletionError, StoreDir, StoreId,
-    StoreLayout,
-};
+use crate::{CovenBuilder, StoreDeletionError, StoreDir, StoreLayout};
 use coven_crypto::custody::{Keychain, StoreKeychain};
 
 /// Creating, opening and deleting stores on this device (E1).
 pub struct Coven;
 
 impl Coven {
-    /// Makes a new store with OS-random store and device ids.
-    pub async fn create_store(
-        layout: &StoreLayout,
-        name: &str,
-    ) -> Result<StoreDir, StoreCreationError> {
-        let layout = layout.clone();
-        let name = name.to_owned();
-        blocking(move || {
-            let ids: IdSourceRef = std::sync::Arc::new(crate::UuidIds);
-            let id = StoreId(ids.new_id());
-            let keychain = Keychain::registered()
-                .map_err(|source| StoreCreationError::Initialization { id, source })?;
-            create(&layout, id, &name, ids, StoreKeychain::new(keychain, id))
-        })
-        .await
-    }
-
-    /// Configure opening, restoring or joining a store under this layout.
+    /// Configure creating, opening, restoring or joining a store.
     pub fn builder(layout: StoreLayout) -> CovenBuilder {
         CovenBuilder::new(layout)
     }
@@ -49,34 +29,6 @@ impl Coven {
             )
         })
         .await
-    }
-}
-
-pub(crate) fn create(
-    layout: &StoreLayout,
-    id: StoreId,
-    name: &str,
-    ids: IdSourceRef,
-    keys: StoreKeychain,
-) -> Result<StoreDir, StoreCreationError> {
-    let mut initialized = false;
-    let result = layout.create_store_dir_with(id, name, ids.as_ref(), |settings| {
-        initialized = true;
-        keys.set_device_id(settings.device_id)
-    });
-    match result {
-        Err(operation)
-            if initialized && !matches!(operation, StoreCreationError::Published { .. }) =>
-        {
-            match keys.delete_device_id() {
-                Ok(()) => Err(operation),
-                Err(cleanup) => Err(StoreCreationError::InitializationCleanup {
-                    operation: Box::new(operation),
-                    cleanup,
-                }),
-            }
-        }
-        result => result,
     }
 }
 

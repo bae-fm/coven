@@ -162,7 +162,7 @@ async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
     let app = TestCoven::new();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
     let directory = app
-        .create_store(
+        .create_closed_store(
             &StoreLayout::new(root.path().into()),
             "Loop",
             Arc::new(UuidIds),
@@ -173,7 +173,7 @@ async fn open(storage: Arc<dyn StorageConnector>) -> Opened {
         .open(directory.id())
         .await
         .unwrap();
-    handle.initialize_identity().unwrap();
+
     Opened {
         handle,
         directory,

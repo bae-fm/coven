@@ -22,21 +22,23 @@ impl TestCoven {
         }
     }
 
-    /// Create through the same publication and custody path as `Coven`.
-    pub async fn create_store(
+    /// Create through the production builder, then close for a reopening fixture.
+    pub async fn create_closed_store(
         &self,
         layout: &StoreLayout,
         name: &str,
         ids: IdSourceRef,
     ) -> Result<StoreDir, StoreCreationError> {
-        let layout = layout.clone();
-        let name = name.to_owned();
-        let keychain = self.keychain.clone();
-        crate::coven::blocking(move || {
-            let id = StoreId(ids.new_id());
-            crate::coven::create(&layout, id, &name, ids, StoreKeychain::new(keychain, id))
-        })
-        .await
+        let handle = self
+            .builder(layout.clone())
+            .id_source(ids)
+            .synced_tables(Vec::new())
+            .migrations(Vec::new())
+            .create_store(name)
+            .await?;
+        let directory = layout.store_dir(&handle.store_id());
+        handle.close().await?;
+        Ok(directory)
     }
 
     /// Build the production graph with this installation's keychain.

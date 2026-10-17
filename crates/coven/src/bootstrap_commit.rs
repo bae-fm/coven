@@ -48,7 +48,7 @@ pub(super) fn publish_bootstrap(
         Ok(()) => None,
         Err(
             error @ BootstrapError::Directory(BootstrapDirectoryError::Create(
-                coven_foundation::files::StoreCreationError::Published { .. },
+                coven_foundation::files::DirectoryCreationError::Published { .. },
             )),
         ) => Some(error),
         Err(mut error) => {

@@ -139,7 +139,7 @@ impl Network {
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
         let app = TestCoven::new();
         let directory = app
-            .create_store(
+            .create_closed_store(
                 &StoreLayout::new(root.path().join("0")),
                 "Household",
                 ids.clone(),
@@ -176,7 +176,7 @@ impl Network {
                 (builder, None)
             };
         let handle = builder.open(directory.id()).await.unwrap();
-        handle.initialize_identity().unwrap();
+
         match provider {
             CloudProvider::S3 => handle
                 .setup_s3_storage(

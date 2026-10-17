@@ -3900,13 +3900,12 @@ Carol's tablet:
   - First attempts made after learning the removal use a key eligible under
     the pass's copy observation, subject to the residual window above.
   - Devices keep the old keys, to read writes made before.
-- Each device keeps its stable member id and private key custody in the OS
-  keychain, including retained credentials needed for historical copies.
-  Keep a self-replacement's candidate durably before publication; after a
-  failed publication retain it and the previous pair for idempotent retry.
-  Select signing authority from checked replay, not the last pair saved.
-  Activating new credentials and refreshing restore-code custody must finish
-  before reporting success or resuming app writes; failures reach the caller.
+- Creation initializes the member in the chosen custody (OS keychain by default)
+  before publishing the store. Retain credentials needed for historical copies.
+  Keep a self-replacement's candidate before publication and retain both pairs
+  after failure. Checked replay selects signing authority. Activate the kept
+  pair and refresh restore-code custody before success or resumed writes;
+  failures reach the caller.
 - Storage access, not keys, is what keeps a removed device out.
 - The app can keep each of its own secrets, such as an API token, in a separate
   keychain entry, under the same access policy as coven's keys and with the

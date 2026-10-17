@@ -70,7 +70,7 @@ impl Fixture {
                 .unwrap(),
         );
         let directory = app
-            .create_store(&layout, "Guarantees", ids.clone())
+            .create_closed_store(&layout, "Guarantees", ids.clone())
             .await
             .unwrap();
         let keys = Arc::new(KeyringCustody::new(Arc::new(StoreKeychain::new(

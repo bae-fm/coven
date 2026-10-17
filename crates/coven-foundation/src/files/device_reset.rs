@@ -12,7 +12,7 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-use super::{atomic_file, settings, FileError, StoreCreationError};
+use super::{atomic_file, settings, DirectoryCreationError, FileError};
 use crate::id_source::{DeviceId, StoreId};
 
 pub(crate) const RECORD: &str = "device-reset.json";
@@ -86,7 +86,7 @@ pub(super) fn begin(
             std::io::Error::new(std::io::ErrorKind::NotFound, "no device reset is recorded"),
         )
     })?;
-    let mut current = settings::read(directory, id).map_err(StoreCreationError::Settings)?;
+    let mut current = settings::read(directory, id).map_err(DirectoryCreationError::Settings)?;
     if current.device_id == reset.new_device {
         return Ok(reset);
     }
@@ -132,7 +132,7 @@ pub(super) fn begin(
         }
     }
     current.device_id = reset.new_device;
-    settings::write(directory, &current).map_err(StoreCreationError::Settings)?;
+    settings::write(directory, &current).map_err(DirectoryCreationError::Settings)?;
     Ok(reset)
 }
 

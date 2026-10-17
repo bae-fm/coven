@@ -8,104 +8,44 @@ use crate::files::{directory, lock, FileError, SettingsError, StoreDir, StoreSet
 use crate::id_source::{IdSource, StoreId};
 
 /// A store creation failure, with publication and rollback failures explicit.
-#[derive(Debug)]
-pub enum StoreCreationError<E = std::convert::Infallible> {
-    /// Keeping state outside the directory failed before publication. The id
-    /// lets the caller remove any externally retained state before retrying.
-    Initialization {
-        /// The unpublished store.
-        id: StoreId,
-        /// The initializer's typed failure.
-        source: E,
-    },
-    /// Removing externally initialized state after an unpublished failure also failed.
-    InitializationCleanup {
-        /// The original creation failure.
-        operation: Box<StoreCreationError<E>>,
-        /// The external cleanup failure.
-        cleanup: E,
-    },
+#[derive(Debug, thiserror::Error)]
+pub enum DirectoryCreationError {
     /// A directory or file already occupies this store's id. It is untouched.
+    #[error("store {0} already exists on this device")]
     AlreadyExists(StoreId),
     /// An operation failed before publication.
-    File(FileError),
+    #[error("create store: {0}")]
+    File(#[from] FileError),
     /// Writing the new device's settings failed before publication.
-    Settings(SettingsError),
-    /// The entire store is visible, but the parent directory could not be
-    /// synced. The caller can identify and reopen the published store.
+    #[error("create store settings: {0}")]
+    Settings(#[from] SettingsError),
+    /// The entire store is visible, but syncing its parent failed.
+    #[error("store {id} was published, but its directory could not be synced: {source}")]
     Published {
         /// The store that is already visible.
         id: StoreId,
         /// The durability error.
+        #[source]
         source: io::Error,
     },
     /// Removing the unpublished directory also failed.
+    #[error("{operation}; removing unpublished directory failed: {cleanup}")]
     Rollback {
         /// The original creation failure.
-        operation: Box<StoreCreationError<E>>,
+        #[source]
+        operation: Box<DirectoryCreationError>,
         /// The error removing the directory.
         cleanup: io::Error,
     },
 }
 
-// Deriving recursive generic error bounds would require Self: Error while
-// proving that same implementation. Keep the bound on the initializer's cause.
-impl<E: std::fmt::Display> std::fmt::Display for StoreCreationError<E> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Initialization { id, source } => {
-                write!(f, "initializing store {id} failed: {source}")
-            }
-            Self::InitializationCleanup { operation, cleanup } => write!(
-                f,
-                "{operation}; removing external initialization failed: {cleanup}"
-            ),
-            Self::AlreadyExists(id) => write!(f, "store {id} already exists on this device"),
-            Self::File(error) => write!(f, "create store: {error}"),
-            Self::Settings(error) => write!(f, "create store settings: {error}"),
-            Self::Published { id, source } => write!(
-                f,
-                "store {id} was published, but its directory could not be synced: {source}"
-            ),
-            Self::Rollback { operation, cleanup } => write!(
-                f,
-                "{operation}; removing unpublished directory failed: {cleanup}"
-            ),
-        }
-    }
-}
-impl<E: std::error::Error + 'static> std::error::Error for StoreCreationError<E> {
-    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        match self {
-            Self::Initialization { source, .. } => Some(source),
-            Self::InitializationCleanup { cleanup, .. } => Some(cleanup),
-            Self::AlreadyExists(_) => None,
-            Self::File(error) => Some(error),
-            Self::Settings(error) => Some(error),
-            Self::Published { source, .. } => Some(source),
-            Self::Rollback { operation, .. } => Some(operation.as_ref()),
-        }
-    }
-}
-impl<E> From<FileError> for StoreCreationError<E> {
-    fn from(error: FileError) -> Self {
-        Self::File(error)
-    }
-}
-impl<E> From<SettingsError> for StoreCreationError<E> {
-    fn from(error: SettingsError) -> Self {
-        Self::Settings(error)
-    }
-}
-
-pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
+pub(crate) fn create(
     root: &Path,
     id: StoreId,
     name: &str,
     ids: &dyn IdSource,
-    initialize: impl FnOnce(&StoreSettings) -> Result<(), E>,
     unpublished: bool,
-) -> Result<StoreDir, StoreCreationError<E>> {
+) -> Result<StoreDir, DirectoryCreationError> {
     create_directory_tree(root)
         .map_err(|source| FileError::at("create stores directory", root, source))?;
     let root = fs::canonicalize(root)
@@ -119,7 +59,7 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
         .chain(lock::lock_paths(&destination, id))
     {
         if super::atomic_file::exists("inspect store destination", &path)? {
-            return Err(StoreCreationError::AlreadyExists(id));
+            return Err(DirectoryCreationError::AlreadyExists(id));
         }
     }
     let stage = tempfile::Builder::new()
@@ -132,18 +72,17 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
         device_id: ids.new_device_id(),
     };
     let prepare = directory::initialize(stage.path(), &settings)
-        .map_err(StoreCreationError::from)
+        .map_err(DirectoryCreationError::from)
         .and_then(|()| {
             if unpublished {
                 super::atomic_file::replace(&super::bootstrap::marker(stage.path()), b"")?;
             }
-            initialize(&settings)
-                .map_err(|source| StoreCreationError::Initialization { id, source })
+            Ok(())
         })
         .and_then(|()| {
             crate::files::atomic_file::rename_new(stage.path(), &destination).map_err(|source| {
                 if source.kind() == io::ErrorKind::AlreadyExists {
-                    StoreCreationError::AlreadyExists(id)
+                    DirectoryCreationError::AlreadyExists(id)
                 } else {
                     FileError::at("publish store directory", &destination, source).into()
                 }
@@ -152,7 +91,7 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
     if let Err(operation) = prepare {
         return match stage.close() {
             Ok(()) => Err(operation),
-            Err(cleanup) => Err(StoreCreationError::Rollback {
+            Err(cleanup) => Err(DirectoryCreationError::Rollback {
                 operation: Box::new(operation),
                 cleanup,
             }),
@@ -167,7 +106,7 @@ pub(crate) fn create<E: std::error::Error + Send + Sync + 'static>(
             // The marker still hides this directory; it has not published a store.
             FileError::at("sync unpublished store directory", &root, source).into()
         } else {
-            StoreCreationError::Published { id, source }
+            DirectoryCreationError::Published { id, source }
         }
     })?;
     Ok(StoreDir::new(destination, id))

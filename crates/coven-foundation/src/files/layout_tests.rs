@@ -86,7 +86,7 @@ async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
     ));
     assert!(matches!(
         layout.create_store_dir(StoreId(Uuid::nil()), "Store", &UuidIds),
-        Err(StoreCreationError::File(_))
+        Err(DirectoryCreationError::File(_))
     ));
 }
 

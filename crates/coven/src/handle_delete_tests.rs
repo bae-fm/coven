@@ -109,7 +109,7 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "Local", std::sync::Arc::new(UuidIds))
+        .create_closed_store(&layout, "Local", std::sync::Arc::new(UuidIds))
         .await
         .unwrap();
     let handle = app

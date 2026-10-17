@@ -128,7 +128,7 @@ fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
     ));
     assert!(matches!(
         layout.create_store_dir(id, "replacement", &UuidIds),
-        Err(crate::files::StoreCreationError::AlreadyExists(_))
+        Err(crate::files::DirectoryCreationError::AlreadyExists(_))
     ));
     drop(lock);
     store
@@ -192,7 +192,7 @@ fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
         }
         assert!(matches!(
             layout.create_store_dir(id, "replacement", &UuidIds),
-            Err(crate::files::StoreCreationError::AlreadyExists(_))
+            Err(crate::files::DirectoryCreationError::AlreadyExists(_))
         ));
         store
             .lock_for_deletion()

@@ -14,14 +14,14 @@ fn creation_never_overwrites_a_store_or_even_an_empty_directory() {
         .settings()
         .unwrap();
     assert!(
-        matches!(layout.create_store_dir(id, "Replacement", &UuidIds), Err(StoreCreationError::AlreadyExists(found)) if found == id)
+        matches!(layout.create_store_dir(id, "Replacement", &UuidIds), Err(DirectoryCreationError::AlreadyExists(found)) if found == id)
     );
     assert_eq!(layout.store_dir(&id).settings().unwrap(), original);
     let occupied = StoreId(Uuid::from_u128(2));
     fs::create_dir(directory.path().join("stores").join(occupied.to_string())).unwrap();
     assert!(matches!(
         layout.create_store_dir(occupied, "Replacement", &UuidIds),
-        Err(StoreCreationError::AlreadyExists(_))
+        Err(DirectoryCreationError::AlreadyExists(_))
     ));
     // Both refused publications remove their unpublished stages.
     assert_eq!(lock::store_entries(&directory.path().join("stores")), 2);
@@ -88,7 +88,7 @@ fn concurrent_creation_of_the_same_id_publishes_exactly_one_store() {
     assert_eq!(
         results
             .iter()
-            .filter(|r| matches!(r, Err(StoreCreationError::AlreadyExists(_))))
+            .filter(|r| matches!(r, Err(DirectoryCreationError::AlreadyExists(_))))
             .count(),
         1
     );

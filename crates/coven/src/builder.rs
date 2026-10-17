@@ -13,7 +13,7 @@ use coven_storage::{
 };
 use std::sync::Arc;
 
-/// The choices collected before opening a store (E1).
+/// The choices for creating or opening a store (E1).
 #[cfg_attr(
     not(feature = "test-utils"),
     doc = "\nProduction builders cannot replace the random id source.\n```compile_fail\nuse coven::{Coven, StoreLayout, UuidIds};\nuse std::sync::Arc;\nlet builder = Coven::builder(StoreLayout::new(\"stores\".into()));\nlet _ = builder.id_source(Arc::new(UuidIds));\n```"
@@ -152,6 +152,13 @@ impl CovenBuilder {
     pub fn identity_custody(mut self, custody: IdentityCustody) -> Self {
         self.identity = custody;
         self
+    }
+
+    /// Create and open a store, initializing its member in the chosen custody
+    /// before publication. Cancellation does not interrupt creation or rollback.
+    pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError> {
+        let name = name.to_owned();
+        crate::coven::completion(tokio::spawn(creation::create(self, name))).await
     }
 
     /// Opens the store for reading and writing, taking the store's lock.
@@ -541,7 +548,6 @@ impl OpeningOwners {
             self.connector.clone(),
             self.has_storage_credentials,
         );
-        let ids = self.ids.clone();
         let storage = Arc::new(crate::storage::StorageConnections::new(
             codes.clone(),
             self.initial_name,
@@ -566,7 +572,6 @@ impl OpeningOwners {
             sync,
             storage,
             codes,
-            ids,
             self.directory,
             self.keychain,
             self.device,
@@ -577,6 +582,9 @@ impl OpeningOwners {
 #[cfg(test)]
 #[path = "builder_tests.rs"]
 mod tests;
+
+#[path = "builder_creation.rs"]
+mod creation;
 
 #[path = "bootstrap.rs"]
 mod bootstrap;

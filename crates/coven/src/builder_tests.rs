@@ -31,7 +31,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let app = TestCoven::new();
     let ids = Arc::new(UuidIds);
     let directory = app
-        .create_store(&layout, "Household", ids.clone())
+        .create_closed_store(&layout, "Household", ids.clone())
         .await
         .unwrap();
     let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
@@ -323,7 +323,7 @@ mod recovery {
             let layout = StoreLayout::new(root.path().into());
             let app = TestCoven::new();
             let directory = app
-                .create_store(&layout, "Recovery", Arc::new(UuidIds))
+                .create_closed_store(&layout, "Recovery", Arc::new(UuidIds))
                 .await
                 .unwrap();
             let clock = Arc::new(FixedClock::new(UNIX_EPOCH));
@@ -346,7 +346,7 @@ mod recovery {
                 )
             };
             let handle = builder().open(directory.id()).await.unwrap();
-            handle.initialize_identity().unwrap();
+
             match config.provider() {
                 CloudProvider::S3 => handle
                     .setup_s3_storage(
@@ -534,7 +534,7 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
     let layout = StoreLayout::new(root.path().into());
     let app = TestCoven::new();
     let directory = app
-        .create_store(&layout, "Recipes", Arc::new(UuidIds))
+        .create_closed_store(&layout, "Recipes", Arc::new(UuidIds))
         .await
         .unwrap();
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
@@ -548,7 +548,6 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
     let handle = builder().open(directory.id()).await.unwrap();
     handle.close().await.unwrap();
     let handle = builder().open(directory.id()).await.unwrap();
-    handle.initialize_identity().unwrap();
     handle
         .setup_s3_storage(
             storage.config(),

@@ -27,7 +27,7 @@ impl Fixture {
                 .unwrap(),
         );
         let directory = app
-            .create_store(
+            .create_closed_store(
                 &StoreLayout::new(root.path().into()),
                 "Reset",
                 Arc::new(UuidIds),
@@ -38,7 +38,7 @@ impl Fixture {
             .open(directory.id())
             .await
             .unwrap();
-        handle.initialize_identity().unwrap();
+
         Self {
             app,
             handle,

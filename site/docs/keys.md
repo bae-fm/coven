@@ -112,7 +112,7 @@ default),
 [`IdentityCustody::Passphrase`](rustdoc:enum:coven::IdentityCustody) (the
 same envelope format, wrapped in a file inside the store directory —
 `identity.envelope` — alongside `master.keyring`),
-[`IdentityCustody::InMemory`](rustdoc:enum:coven::IdentityCustody) (empty session custody, filled by initialization, restore or join), and
+[`IdentityCustody::InMemory`](rustdoc:enum:coven::IdentityCustody) (empty session custody, filled by creation, restore or join), and
 [`IdentityCustody::Custom`](rustdoc:enum:coven::IdentityCustody) (a host's
 own [`DeviceIdentityCustody`](rustdoc:trait:coven::DeviceIdentityCustody)
 implementation).
@@ -128,37 +128,16 @@ passphrase. That is also its cost: the passphrase is state a host has to
 prompt the user for and the user has to remember, and losing it loses the key
 exactly as thoroughly as losing a keyring entry would.
 
-## No silent identity minting
+## Identity creation
 
-coven never mints a store's signing identity implicitly. Connect requires an
-already-established identity; its absence surfaces as
-[`KeyError::NoDeviceIdentity`](rustdoc:enum:coven::KeyError), never a
-mint-on-demand. A store's identity is established exactly once, by whichever
-of these three acts brought the store into existence on this device:
+[`CovenBuilder::create_store`](rustdoc:method:coven::CovenBuilder::create_store)
+creates the member identity in the chosen custody before publishing the store,
+then returns its open handle. A failure before publication removes the hidden
+store and its new custody entries; rollback failures are returned too.
+Existing custom identity custody is refused without overwriting it.
 
-- **Creating a store fresh** —
-  [`CovenHandle::initialize_identity`](rustdoc:method:coven::CovenHandle::initialize_identity)
-  generates and establishes it, refusing with
-  [`IdentityError::AlreadyEstablished`](rustdoc:enum:coven::IdentityError) on
-  a second call. The master key is established separately by the atomic
-  cloud-home setup that needs it.
-- **Joining a shared store** —
-  [`PreparedDevicePairing::open_or_create`](rustdoc:method:coven::PreparedDevicePairing::open_or_create)
-  opens the existing device's pairing code and mints the keypair used to sign
-  this device's request. The pending keypair remains in the platform key store,
-  addressed by its public key; the pairing journal contains no private key.
-  [`coven::join_with_device_pairing`](rustdoc:fn:coven::join_with_device_pairing)
-  promotes it into the joined store's identity custody only after activation.
-  [`PreparedDevicePairing::abandon`](rustdoc:method:coven::PreparedDevicePairing::abandon)
-  removes both the journal and pending key when the user abandons pairing.
-- **Restoring a store** —
-  [`coven::restore_from_code`](rustdoc:fn:coven::restore_from_code) imports
-  the identity the restore code carries, scoped to the one store it names.
-
-Each of these is per store: a device holds a distinct identity in every store
-it belongs to, so a restore code or a join for one store carries no authority
-in another, and the same device's pubkey never appears in more than one
-store's membership chain.
+Joining establishes the admitted member identity; restoring imports the identity
+from the restore code. Opening an existing store never generates replacement keys.
 
 ## Host secrets
 
