@@ -516,7 +516,9 @@ impl SequenceSync {
                 continue;
             }
             if let Err(error) = self.run_invite(session, ring, member, record.id).await {
-                if self.database.operation(record.id).await?.is_none() {
+                if matches!(error, SyncError::Rejected(_) | SyncError::Cleanup { .. })
+                    || self.database.operation(record.id).await?.is_none()
+                {
                     return Err(error);
                 }
             }
@@ -663,11 +665,22 @@ impl SequenceSync {
                         Ok(()) => (),
                         Err(SyncError::Rejected(reason)) => {
                             work.state = InviteState::Revoking;
-                            self.database
-                                .advance_operation(work.update(&record)?)
-                                .await?;
-                            Box::pin(self.advance_invite(session, ring, member, id)).await?;
-                            return Err(SyncError::Rejected(reason));
+                            let undo: Result<(), SyncError> = async {
+                                self.database
+                                    .advance_operation(work.update(&record)?)
+                                    .await?;
+                                Box::pin(self.advance_invite(session, ring, member, id)).await?;
+                                Ok(())
+                            }
+                            .await;
+                            let operation = SyncError::Rejected(reason);
+                            return Err(match undo {
+                                Ok(()) => operation,
+                                Err(cleanup) => SyncError::Cleanup {
+                                    operation: Box::new(operation),
+                                    cleanup: Box::new(cleanup),
+                                },
+                            });
                         }
                         Err(error) => return Err(error),
                     }

@@ -480,7 +480,9 @@ async fn an_invite_waiting_for_a_decision_still_expires() {
 // §12.2, §18 and E9: an invite cannot replace a competing binding on retry.
 #[tokio::test]
 async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry() {
-    for interrupted in [true, false] {
+    for (interrupted, failed_cleanup) in
+        [(true, false), (false, false), (false, true), (true, true)]
+    {
         let group = Group::shared();
         let ana = group.device(1).await;
         let ben = group.device(2).await;
@@ -549,12 +551,43 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
             .replace_member_keys_for(target, competing)
             .await
             .unwrap();
+        if failed_cleanup {
+            ana.storage
+                .set_faults(coven_storage::test_utils::Faults {
+                    delete_failures: [(
+                        ObjectPath::join_request(group.store, invite.id),
+                        coven_storage::StorageFailure::PermissionDenied,
+                    )]
+                    .into(),
+                    ..coven_storage::test_utils::Faults::none()
+                })
+                .await;
+        }
         let result = if interrupted {
             ana.sync.retry_pending_operation(operation).await.map(drop)
         } else {
             ana.sync.approve_join_request(&request).await
         };
-        assert!(matches!(result, Err(SyncError::Rejected(_))), "{result:?}");
+        if failed_cleanup {
+            // E6: failed undo retains both causes and its operation journal.
+            assert!(
+                matches!(
+                    &result,
+                    Err(SyncError::Cleanup { operation, cleanup })
+                        if matches!(operation.as_ref(), SyncError::Rejected(_))
+                        && matches!(cleanup.as_ref(), SyncError::Storage(error)
+                            if error.failure() == coven_storage::StorageFailure::PermissionDenied)
+                ),
+                "{result:?}"
+            );
+            assert!(ana.database().operation(operation).await.unwrap().is_some());
+            ana.storage
+                .set_faults(coven_storage::test_utils::Faults::none())
+                .await;
+            ana.sync.retry_pending_operation(operation).await.unwrap();
+        } else {
+            assert!(matches!(result, Err(SyncError::Rejected(_))), "{result:?}");
+        }
         assert!(
             ana.sync
                 .database
