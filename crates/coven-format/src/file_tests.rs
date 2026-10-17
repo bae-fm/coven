@@ -174,9 +174,24 @@ fn file_fixture_opens_and_reseals_each_chunk() {
         encoded.extend(header.seal_chunk(&key, PATH, index as u64, plain).unwrap());
     }
     assert_eq!(encoded, bytes);
-    crate::tests::mutations(&header.encode(), |changed| {
-        if let Ok(header) = FileHeader::decode(changed) {
-            assert_eq!(header.encode(), changed);
+    assert_eq!(reseal_file(&key, &bytes).unwrap(), bytes);
+    crate::tests::mutations(&bytes, |changed| {
+        if let Ok(encoded) = reseal_file(&key, changed) {
+            assert_eq!(encoded, changed);
         }
     });
+}
+
+fn reseal_file(key: &FileKey, bytes: &[u8]) -> Result<Vec<u8>, FileError> {
+    let header = FileHeader::decode(&bytes[..bytes.len().min(FILE_HEADER_LEN)])?;
+    exact_length(bytes.len() as u64, header.encrypted_size()?)?;
+    let mut encoded = header.encode().to_vec();
+    for index in 0..header.chunk_count() {
+        let chunk = header.chunk(index)?;
+        let start = chunk.offset as usize;
+        let sealed = &bytes[start..start + chunk.plaintext_length + FILE_CHUNK_TAG_LEN];
+        let plain = header.open_chunk(key, PATH, index, sealed)?;
+        encoded.extend(header.seal_chunk(key, PATH, index, &plain)?);
+    }
+    Ok(encoded)
 }
