@@ -778,7 +778,7 @@ Receiving Ben's note adds its slot read.
     document `cf-copy-destination-if-none-match`. The R2 profile does not use
     that extension because native conditional completion passed. Profile values
     come from the live suite, rather than a compatibility claim.
-  - RustFS, SeaweedFS and unversioned Ceph RGW refused occupied names with HTTP 412 on
+  - RustFS and unversioned Ceph RGW refused occupied names with HTTP 412 on
     PUT and multipart completion, preserving bytes and times, and their
     multipart `Last-Modified` fell between the completion markers, so they use
     conditional completion without a copy. That sequential refusal does not

@@ -169,9 +169,9 @@ const R2: CataloguedProfile = CataloguedProfile {
 };
 // Self-hosted services are reached at arbitrary endpoints and selected only by
 // name. The raw observations are in spec/s3-certification.md.
-// Detected by certification suite 2. RustFS and SeaweedFS refused occupied
-// names on PUT and multipart completion with HTTP 412 and timestamp multipart
-// completion, so no copy is needed. Neither returned a checksum, even when
+// Detected by certification suite 2. RustFS refused occupied names on PUT and
+// multipart completion with HTTP 412 and dated objects at completion, so no
+// copy is needed. It returned no checksum, even when
 // asked; §4's complete-byte comparison applies instead. RustFS 1.0.1 passed
 // suite 5 with versioning disabled and enabled: one conditional writer won
 // every race in both buckets.
