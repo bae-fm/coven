@@ -28,6 +28,9 @@ pub struct MemberInfo {
 }
 ```
 
+coven knows members by id and devices by name; what to call each person is up
+to the app. [Members and profiles](/docs/profiles) shows the pattern.
+
 | Action | Who may do it |
 | --- | --- |
 | Create the store | the first device, which becomes the first admin |

@@ -127,6 +127,7 @@ export default defineConfig({
                         { text: 'Files', link: '/docs/files' },
                         { text: 'Cache', link: '/docs/cache' },
                         { text: 'Sharing', link: '/docs/sharing' },
+                        { text: 'Members and profiles', link: '/docs/profiles' },
                         { text: 'Circles', link: '/docs/circles' },
                         { text: 'Snapshots and joining', link: '/docs/bootstrap' },
                         { text: 'Encryption', link: '/docs/encryption' },

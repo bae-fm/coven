@@ -194,6 +194,8 @@ In reading order; each page builds on the ones before it:
   pinning and eager downloads.
 - [Sharing](/docs/sharing): members, roles and devices; restore codes,
   invites and removal.
+- [Members and profiles](/docs/profiles): showing who is who, with a profile
+  table each member writes for themselves.
 - [Circles](/docs/circles): rows only some members can read.
 - [Snapshots and joining](/docs/bootstrap): snapshots, the floor, deleting
   old history, and how a new or returning device catches up.

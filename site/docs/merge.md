@@ -374,3 +374,6 @@ Foreign-key actions caused by an authorized change still apply. Ben deletes a
 track that Ana's review points at: with cascade, Ben's write deletes the review
 too, and every device checks that this deletion is exactly what the schema says
 Ben's delete causes. Ben can never edit Ana's review directly.
+
+[Members and profiles](/docs/profiles) uses an owner table to keep each
+member's profile in that member's hands.
