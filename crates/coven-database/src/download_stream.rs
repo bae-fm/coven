@@ -199,7 +199,13 @@ impl PreparedWrite<'_> {
             },
         )?;
         if !refused {
-            crate::download_stage::stage(database, schema, &original_header.header, &opened)?;
+            crate::download_stage::stage(
+                database,
+                schema,
+                &original_header.header,
+                &opened,
+                |audience| Ok(selected(audience)),
+            )?;
         }
         Ok(())
     }

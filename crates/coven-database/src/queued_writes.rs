@@ -53,7 +53,9 @@ pub(crate) fn stage(db: &DatabaseConnection, schema: &WriteSchema) -> Result<(),
             &crate::merge_store::MergeStore::from_staged(db, &schema.schema),
             &rows,
         )?;
-        crate::download_stage::stage(db, schema, &header.header, &opened)
+        crate::download_stage::stage(db, schema, &header.header, &opened, |audience| {
+            Ok(!crate::reload_gate::reloading(db, audience)?)
+        })
     })
 }
 

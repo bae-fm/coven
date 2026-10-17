@@ -513,3 +513,85 @@ async fn an_adopted_raise_replaces_an_unpublished_migrations_setters() {
         db.close().await.unwrap();
     }
 }
+
+/// An audience's snapshot at the applied slot, leaving the queue unpublished.
+async fn unpublished_frames(db: &Database, audience: Audience) -> SnapshotFrames {
+    let frames = Arc::new(Mutex::new(Vec::new()));
+    let metadata = Arc::new(Mutex::new(None));
+    let (output, start) = (frames.clone(), metadata.clone());
+    db.write_snapshot(
+        crate::snapshot_write::tests::id(audience),
+        move |header| {
+            *start.lock().unwrap() = Some(prefix(header));
+            Ok::<_, std::convert::Infallible>(())
+        },
+        move |frame| {
+            output.lock().unwrap().push(frame);
+            Ok(())
+        },
+    )
+    .await
+    .unwrap();
+    let prefix = metadata.lock().unwrap().take().unwrap();
+    let frames = std::mem::take(&mut *frames.lock().unwrap());
+    SnapshotFrames { prefix, frames }
+}
+
+/// A reload replays its slots only into the audiences it loads. This
+/// device's own write in its captured prefix stays applied once in the store
+/// audience the reload keeps, while the reload loads a circle (§15, §17.1).
+#[tokio::test]
+async fn a_reload_replays_a_captured_write_only_into_the_audiences_it_loads() {
+    use crate::{RowIdentity, SyncedTable};
+    const SCHEMA: &str = "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL,value INTEGER NOT NULL)";
+    let tables = || {
+        vec![SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience")]
+    };
+    let schema = || Migration::sql(1, "notes", SCHEMA);
+    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(10));
+    let store = TestStore::new();
+    let db = store
+        .builder(tables(), vec![schema()])
+        .open()
+        .await
+        .unwrap();
+    connect(&db).await;
+    store.join_circle(&db, circle);
+    sql(
+        &db,
+        "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','store',1)",
+    )
+    .await
+    .unwrap();
+    let written = records(&db).remove(0);
+    db.close().await.unwrap();
+    let index = Migration::sql(2, "index", "CREATE INDEX values_index ON notes(value)");
+    let db = store
+        .builder(tables(), vec![schema(), index])
+        .open()
+        .await
+        .unwrap();
+    // The circle's snapshot covers the slots before the write's.
+    let circle_snapshot = unpublished_frames(&db, Audience::Circle(circle)).await;
+    crate::tests::publish_through(&db, written.header.position.number)
+        .await
+        .unwrap();
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+        &db,
+        vec![circle_snapshot.input()],
+        vec![crate::snapshot_write::tests::stream(&written)],
+        Arc::new(crate::test_utils::TestAuthorship),
+    ))
+    .await
+    .unwrap();
+    let values = db
+        .read(|sql| {
+            Ok(sql.query("SELECT audience,value FROM notes", [], |r| {
+                Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
+            })?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(values, [("store".to_string(), 1)]);
+    db.close().await.unwrap();
+}

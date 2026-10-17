@@ -81,14 +81,23 @@ pub(crate) fn frame(
 }
 
 /// Judge the whole streamed write, then stage each opened part's admitted
-/// changes one record at a time, as they were retained.
+/// changes one record at a time, as they were retained. A write in the local
+/// captured prefix also stages its captured parts, but only in audiences
+/// `selected` admits: a reload replays its slots only into the audiences it
+/// loads, and the others already hold the write.
 pub(crate) fn stage(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     header: &WriteHeader,
     opened: &[Audience],
+    selected: impl Fn(&Audience) -> Result<bool, DbError>,
 ) -> Result<(), DbError> {
-    let captured = crate::captured_changes::audiences(database, header)?;
+    let mut captured = Vec::new();
+    for audience in crate::captured_changes::audiences(database, header)? {
+        if selected(&audience)? {
+            captured.push(audience);
+        }
+    }
     let audiences: Vec<_> = opened
         .iter()
         .chain(captured.iter())
