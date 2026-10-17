@@ -54,7 +54,12 @@ async fn a_self_replacement_sends_queued_writes_first_and_retires_other_holders_
         .unwrap();
     insert(&ana.sync.database, "queued", "under the old pair").await;
     let old = ana.identity.keys().public_keys();
-    let installed = ana.sync.replace_member_keys().await.unwrap();
+    let (codes, _) = codes(
+        &ana,
+        coven_crypto::custody::Keychain::in_memory("self-replacement").unwrap(),
+    );
+    codes.replace_member_keys().await.unwrap();
+    let installed = ana.sync.member.read().unwrap().unwrap();
     assert_ne!(installed.keys().public_keys(), old);
     assert!(
         installed.holds(&old),
@@ -141,4 +146,178 @@ async fn an_admin_publishes_a_prepared_pair_with_copies_for_its_member() {
     for device in [&ana, &ben, &phone] {
         device.sync.database.close().await.unwrap();
     }
+}
+
+use coven_crypto::custody::{Keychain, StoreKeychain};
+use coven_crypto::SecretBytes;
+use coven_storage::{Storage, StorageSettings};
+use std::sync::Arc;
+
+pub(crate) fn codes(
+    device: &Device,
+    keychain: Arc<Keychain>,
+) -> (RestoreCodes, Arc<StoreKeychain>) {
+    let store = Arc::new(StoreKeychain::new(keychain, device.sync.store()));
+    let settings = StorageSettings::new(device.sync.directory.clone());
+    settings.commit(&device.storage.config()).unwrap();
+    (
+        RestoreCodes::new(
+            device.sync.store(),
+            device.sync.database.clone(),
+            device.sync.member.clone(),
+            Arc::new(DeviceCredentials::new(store.clone(), None)),
+            settings,
+            Some(device.sync.clone()),
+        ),
+        store,
+    )
+}
+
+// §18.1 and E9: identity installation is unfinished until code custody commits.
+#[tokio::test]
+async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_reopening() {
+    let group = Group::new();
+    let mut ana = group.device(1).await;
+    group.create(&ana).await;
+    let keychain = Keychain::in_memory("replacement-code").unwrap();
+    let (owner, store) = codes(&ana, keychain.clone());
+    let old = owner.restore_code().await.unwrap();
+    store
+        .set_synced_restore_code(&SecretBytes::new(b"old code".to_vec()))
+        .unwrap();
+    keychain.fail_operations_after(&[0]);
+    let result = owner.replace_member_keys().await;
+    assert!(
+        matches!(result, Err(SyncError::SecureStorage(_))),
+        "{result:?}"
+    );
+    let current = ana.sync.member.read().unwrap().unwrap();
+    assert_ne!(
+        current.keys().public_keys(),
+        ana.identity.keys().public_keys()
+    );
+    let operation = ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "member-keys")
+        .expect("refresh remains in the self-replacement journal")
+        .id;
+    assert!(matches!(
+        ana.sync
+            .database
+            .write(|sql| {
+                sql.execute(
+                    "INSERT INTO notes VALUES('held','until the code commits')",
+                    [],
+                )?;
+                Ok(())
+            })
+            .await,
+        Err(coven_database::DbError::MemberKeysChanging)
+    ));
+    assert_eq!(
+        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+        b"old code"
+    );
+    owner.close().await;
+    ana.identity = current;
+    let ana = group.reopen(ana).await;
+    let (owner, store) = codes(&ana, keychain);
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
+    // Custody failures on app operations wait for the app's retry (E6).
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    run_background(&ana, owner.clone()).await;
+    let code = coven_format::codes::RestoreCode::from_bytes(
+        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        code.member_keys.public_keys(),
+        ana.identity.keys().public_keys()
+    );
+    assert_ne!(owner.restore_code().await.unwrap(), old);
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    insert(&ana.sync.database, "after", "code committed").await;
+    owner.close().await;
+    ana.sync.database.close().await.unwrap();
+}
+
+// §18.1: completing a binding in a background pass also commits its restore code.
+#[tokio::test]
+async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
+    let group = Group::new();
+    let mut ana = group.device(1).await;
+    group.create(&ana).await;
+    let keychain = Keychain::in_memory("background-replacement-code").unwrap();
+    let (owner, store) = codes(&ana, keychain.clone());
+    store
+        .set_synced_restore_code(&SecretBytes::new(b"old code".to_vec()))
+        .unwrap();
+    let next = ana.database().applied_slot().await.unwrap() + 1;
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults {
+            create_failures: [(
+                coven_storage::ObjectPath::slot(group.store, next.try_into().unwrap()),
+                (coven_storage::StorageFailure::Network, 500),
+            )]
+            .into(),
+            ..coven_storage::test_utils::Faults::none()
+        })
+        .await;
+    assert!(matches!(
+        owner.replace_member_keys().await,
+        Err(SyncError::Storage(_))
+    ));
+    ana.storage
+        .set_faults(coven_storage::test_utils::Faults::none())
+        .await;
+    owner.close().await;
+    ana.identity = ana.sync.member.read().unwrap().unwrap();
+    let ana = group.reopen(ana).await;
+    let (owner, store) = codes(&ana, keychain);
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
+    run_background(&ana, owner.clone()).await;
+    let code = coven_format::codes::RestoreCode::from_bytes(
+        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+    )
+    .unwrap();
+    assert_eq!(
+        code.member_keys.public_keys(),
+        ana.sync
+            .member
+            .read()
+            .unwrap()
+            .unwrap()
+            .keys()
+            .public_keys()
+    );
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    insert(ana.database(), "after", "code committed in background").await;
+    owner.close().await;
+    ana.database().close().await.unwrap();
+}
+
+async fn run_background(ana: &Device, owner: RestoreCodes) {
+    let mut status = ana.sync.state.subscribe_sync();
+    let control = SyncLoop::new(ana.sync.clone(), Some(owner));
+    control.start().unwrap();
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if matches!(*status.borrow_and_update(), SyncStatus::Synced { .. }) {
+                break;
+            }
+            status.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    control.close().await.unwrap();
 }

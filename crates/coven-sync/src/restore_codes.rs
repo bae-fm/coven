@@ -88,42 +88,26 @@ impl RestoreCodes {
         crate::files::join(tokio::spawn(async move {
             let guard = inner.lock().await;
             let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            let store = owner
-                .database
-                .store_state()
+            // Reject missing location before publishing a new binding.
+            owner.settings.read()?.ok_or(SyncError::NoStorage)?;
+            let sync = owner.sync.as_ref().ok_or(SyncError::NoStorage)?;
+            sync.replace_member_keys().await?;
+            Ok(sync
+                .finish_member_keys(true, |identity, store| owner.refresh_code(identity, store))
                 .await?
-                .store
-                .ok_or(SyncError::NoStorage)?;
-            let location = owner
-                .settings
-                .read()?
-                .ok_or(SyncError::NoStorage)?
-                .encode()?;
-            let identity = owner
-                .sync
-                .as_ref()
-                .ok_or(SyncError::NoStorage)?
-                .replace_member_keys()
-                .await?;
-            let code = RestoreCode {
-                store: store.id,
-                name: store.name,
-                member: identity.member(),
-                member_keys: identity.keys().clone(),
-                storage: location,
-            };
-            // The person's other Apple devices receive the code for the new pair.
-            owner.credentials.write(|keychain| {
-                if keychain.supports_synced_entries() {
-                    keychain.set_synced_restore_code(&coven_crypto::SecretBytes::new(
-                        code.to_bytes()?.to_vec(),
-                    ))?;
-                }
-                Ok(())
-            })?;
-            Ok(SecretText::new(code.to_text()?.to_string()))
+                .expect("the initiating replacement owns code completion"))
         }))
         .await
+    }
+
+    /// Finish the code step of a self-replacement resumed by a sync pass (§18.1).
+    pub(crate) async fn resume_member_keys(&self) -> Result<(), SyncError> {
+        let guard = self.inner.lock().await;
+        let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
+        let sync = owner.sync.as_ref().ok_or(SyncError::NoStorage)?;
+        sync.finish_member_keys(false, |identity, store| owner.refresh_code(identity, store))
+            .await?;
+        Ok(())
     }
 
     /// Install a manually supplied S3 key and publish its id; the code stays unchanged.
@@ -326,6 +310,34 @@ impl RestoreCodes {
 }
 
 impl RestoreCodesInner {
+    fn refresh_code(
+        &self,
+        identity: &MemberIdentity,
+        store: &coven_database::StoreIdentity,
+    ) -> Result<SecretText, SyncError> {
+        let code = RestoreCode {
+            store: store.id,
+            name: store.name.clone(),
+            member: identity.member(),
+            member_keys: identity.keys().clone(),
+            storage: self
+                .settings
+                .read()?
+                .ok_or(SyncError::NoStorage)?
+                .encode()?,
+        };
+        let text = SecretText::new(code.to_text()?.to_string());
+        self.credentials.write(|keychain| {
+            if keychain.supports_synced_entries() {
+                keychain.set_synced_restore_code(&coven_crypto::SecretBytes::new(
+                    code.to_bytes()?.to_vec(),
+                ))?;
+            }
+            Ok(())
+        })?;
+        Ok(text)
+    }
+
     fn restore_connection(
         &self,
         location: Option<StorageConfig>,

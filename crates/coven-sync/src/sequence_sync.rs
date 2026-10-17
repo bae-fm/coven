@@ -192,6 +192,10 @@ impl SequenceSync {
             self.resume_invites(&mut session, &mut ring, &member)
                 .await?;
             self.resume_member_keys(&mut session, &mut ring).await?;
+            let member = self
+                .member
+                .read()?
+                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
             self.rotate_exposed(&mut session, &mut ring, &member)
                 .await?;
             self.publish_raises(&mut session, &mut ring, &member)

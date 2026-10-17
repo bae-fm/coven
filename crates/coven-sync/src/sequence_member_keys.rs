@@ -18,24 +18,12 @@ use std::sync::Arc;
 
 pub(crate) const MEMBER_KEYS: &str = "member-keys";
 
-/// The candidate's public pair, fixed once kept in identity custody.
+/// Self-replacement keeps the write pause through the restore-code commit.
 #[derive(Serialize, Deserialize)]
-struct MemberKeysWork {
-    /// Signing and sealing keys.
-    candidate: Option<([u8; 32], [u8; 32])>,
-}
-
-impl MemberKeysWork {
-    fn candidate(&self) -> Result<Option<MemberPublicKeys>, SyncError> {
-        self.candidate
-            .map(|(signing, sealing)| {
-                Ok(MemberPublicKeys {
-                    signing: coven_crypto::SigningKey::from_bytes(signing)?,
-                    sealing: coven_crypto::SealingKey::from_bytes(sealing),
-                })
-            })
-            .transpose()
-    }
+enum MemberKeysWork {
+    Draining,
+    Replacing(#[serde(with = "crate::pending_encoding::public_keys")] MemberPublicKeys),
+    RefreshingCode,
 }
 
 /// This member's held active pair, or its kept candidate, must be its
@@ -63,7 +51,7 @@ fn held_current(session: &Session, identity: &MemberIdentity) -> Result<(), Sync
 impl SequenceSync {
     /// Replace this member's own pair and return the installed identity.
     /// App writes wait with `MemberKeysChanging` until the binding applies
-    /// and custody installs it, or the replacement fails (§10, E9).
+    /// and identity and restore-code custody finish, or replacement fails (§10, E9).
     pub async fn replace_member_keys(self: &Arc<Self>) -> Result<MemberIdentity, SyncError> {
         let mut session = self.session.lock().await;
         let identity = self
@@ -90,7 +78,7 @@ impl SequenceSync {
                 self.database
                     .start_operation(NewOperation {
                         kind: MEMBER_KEYS.into(),
-                        data: serde_json::to_vec(&MemberKeysWork { candidate: None })?,
+                        data: serde_json::to_vec(&MemberKeysWork::Draining)?,
                         started_by: "replace_member_keys".into(),
                         pauses_writes: true,
                     })
@@ -110,6 +98,66 @@ impl SequenceSync {
                     )
                     .await?;
                 }
+                Err(error)
+            }
+        }
+    }
+
+    /// Complete code custody before releasing this replacement's write pause.
+    /// Background attempts honor the operation's wait; its initiating call
+    /// reaches this step immediately after installing the selected identity.
+    pub(crate) async fn finish_member_keys(
+        &self,
+        foreground: bool,
+        refresh: impl FnOnce(
+            &MemberIdentity,
+            &coven_database::StoreIdentity,
+        ) -> Result<coven_crypto::SecretText, SyncError>,
+    ) -> Result<Option<coven_crypto::SecretText>, SyncError> {
+        let mut session = self.session.lock().await;
+        let Some(record) = self
+            .database
+            .operations()
+            .await?
+            .into_iter()
+            .find(|record| record.kind == MEMBER_KEYS)
+        else {
+            return Ok(None);
+        };
+        let work: MemberKeysWork = serde_json::from_slice(&record.data)?;
+        if !matches!(work, MemberKeysWork::RefreshingCode) {
+            return Ok(None);
+        }
+        let identity = self
+            .member
+            .read()?
+            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let ring = self.ring(&mut session, &identity).await?;
+        if !foreground && !self.operation_ready(&record, &ring).await? {
+            return Ok(None);
+        }
+        let store = session
+            .history
+            .state
+            .store
+            .as_ref()
+            .ok_or(SyncError::NoStorage)?;
+        match refresh(&identity, store) {
+            Ok(code) => {
+                self.database.finish_operation(record.id).await?;
+                self.waits.clear_evidence(record.id);
+                self.waits
+                    .forget(coven_database::RetrySubject::Operation(record.id));
+                Ok(Some(code))
+            }
+            Err(error) => {
+                self.record_operation_error(
+                    record.id,
+                    OperationKind::ReplaceMemberKeys,
+                    &error,
+                    &ring,
+                )
+                .await?;
                 Err(error)
             }
         }
@@ -197,7 +245,12 @@ impl SequenceSync {
                 .member
                 .read()?
                 .ok_or(StorageFailure::MemberKeysMissing)?;
-            let Some(candidate) = work.candidate()? else {
+            let candidate = match work {
+                MemberKeysWork::RefreshingCode => return Ok(Some(identity)),
+                MemberKeysWork::Replacing(candidate) => Some(candidate),
+                MemberKeysWork::Draining => None,
+            };
+            let Some(candidate) = candidate else {
                 // Writes fixed under the pair about to be retired must reach
                 // storage first: after the binding they count for nothing (§10).
                 if let Some(last) = self.database.waiting_snapshot_headers().await?.last() {
@@ -230,8 +283,7 @@ impl SequenceSync {
                         keys
                     }
                 };
-                work.candidate =
-                    Some((*candidate.signing.as_bytes(), *candidate.sealing.as_bytes()));
+                work = MemberKeysWork::Replacing(candidate);
                 self.database
                     .advance_operation(OperationUpdate {
                         id,
@@ -250,7 +302,7 @@ impl SequenceSync {
                 .map(|value| value.keys);
             if current == Some(candidate) {
                 // The binding applied: install its pair, keeping the previous
-                // one for copies that name it (§11), then release the pause.
+                // one for copies that name it (§11). Code custody still owns the pause.
                 let installed =
                     identity
                         .activate(&candidate)
@@ -258,7 +310,14 @@ impl SequenceSync {
                             member: identity.member(),
                         })?;
                 self.member.persist(&installed)?;
-                self.database.finish_operation(id).await?;
+                self.database
+                    .advance_operation(OperationUpdate {
+                        id,
+                        previous: record.last_step,
+                        last_step: record.last_step + 1,
+                        data: serde_json::to_vec(&MemberKeysWork::RefreshingCode)?,
+                    })
+                    .await?;
                 return Ok(Some(installed));
             }
             let change = StoreChange::ReplaceMemberKeys {

@@ -82,6 +82,7 @@ async fn pass(
 ) -> Result<Option<crate::PendingRecord>, SyncError> {
     sync.pass().await?;
     if let Some(codes) = codes {
+        codes.resume_member_keys().await?;
         let held = match codes.connection().await? {
             Some(coven_storage::ConnectionCredentials {
                 credentials: coven_storage::StorageCredentials::S3(held),
