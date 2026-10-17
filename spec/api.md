@@ -203,7 +203,7 @@ impl ObjectPath {
     pub fn parse(value: &str) -> Result<Self, StorageError>;
     /// The path bound into the object's encryption.
     pub fn as_str(&self) -> &str;
-    /// Whether this is a status or floor path, the replaceable kinds.
+    /// Whether this is the floor path, which permits conditional replacement.
     pub fn is_replaceable(&self) -> bool;
 }
 
@@ -249,7 +249,7 @@ pub struct StoredObject {
     pub size: u64,
     /// Server publication time of the complete object, not the uploading device's clock.
     /// Immutable objects retain their first stored time across retries. Replaced
-    /// status and floor objects carry their replacement time (§4).
+    /// floor objects carry their replacement time (§4).
     pub stored_at: StorageTime,
     /// Timestamp resolution; S3 uses its whole-second HEAD/GET representation (§4).
     pub time_resolution: Duration,
@@ -480,7 +480,7 @@ pub enum DbError {
     PendingEncoding(serde_json::Error),
     /// Sync's part of a database transaction failed, keeping sync's own typed
     /// cause, and the transaction did not commit: a streamed transfer's
-    /// producer or final authentication check, or the schema publication
+    /// producer or final authentication check, or the schema raise
     /// operation a migration commits with (§17.1, E13).
     SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
@@ -497,7 +497,7 @@ pub enum SnapshotError {
     Format(coven_format::Error),
     /// The snapshot needs a different app schema (§17).
     Schema { snapshot: u32, database: u32 },
-    /// Required checkpoint evidence or retained sequence slots are absent.
+    /// Required snapshot evidence or retained sequence slots are absent.
     MissingSlots { missing: Vec<Slot> },
     /// These gap writes or causal predecessors were not supplied.
     MissingWrites { missing: Vec<WriteId> },
@@ -509,14 +509,14 @@ pub enum SnapshotError {
 
 /// What a downloaded write waits for before it can apply (§6, §19.1).
 pub enum WriteWait {
-    /// The authored prefix or its authenticated checkpoint is not available.
+    /// The authored prefix or its authenticated snapshot is not available.
     SequenceThrough(Slot),
     /// Writes that must apply first, including the author's preceding write.
     Writes(Vec<WriteId>),
     /// The app must support this schema version.
     SchemaVersion(u32),
-    /// This device's breaking migration awaits publication and reload.
-    SchemaPublication(u32),
+    /// This device's breaking migration awaits its raise and reload.
+    SchemaRaise(u32),
     /// The audience's reload has not committed its replacement data.
     Reload(Audience),
 }
@@ -812,8 +812,8 @@ impl Coven {
     pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
     /// Deletes a closed store without opening it: every keychain entry coven
-    /// holds for it, then its directory. Unsent work is lost and peers keep
-    /// reading this device until it is removed; for a store that cannot open,
+    /// holds for it, then its directory. Unsent work is lost; membership stays
+    /// until this device is removed. For a store that cannot open,
     /// or to finish `CovenHandle::delete_store`. Refused while a writer,
     /// read-only handle, file stream or file I/O holds its lock; storage is
     /// untouched. Retrying finishes a deletion that failed partway.
@@ -1244,20 +1244,11 @@ handle
 - Reads run on several read-only connections at once ([§5](coven.md#5-local-database)).
 - A *live query* runs once, then again whenever a write commits that changes
   rows it read.
-- Each table-backed built-in read uses one pre-built internal query for
-  its one-shot call and `subscribe_x() -> LiveQuery<T>` counterpart:
-  - `pending`, `lost_values`, `uploads`, `device_reset` and
-    `eager_cache_fill_status` on the handle;
-  - `pin_progress`, with the same fixed file references in both calls;
-  - `members` on the handle, and `list` and `members` on `Circles`;
-  - `rows_pinned` on the handle, with the same table and keys in both calls.
-- These reads work without storage and use the app's normal read and live-query
-  machinery. Subscriptions observe committed changes to the same query inputs.
-  No app-facing channel mirrors database state in memory. Upload progress is
-  the persisted session's provider-confirmed bytes; eager and pin progress
-  come from committed cache coverage. Only non-database state such as sync
-  status and join requests uses its own stream (E5, E10). Internal caches
-  rebuilt from the database are not additional app-facing state.
+- Table-backed built-in reads work offline. Each `subscribe_x()` counterpart reports the same
+  committed data and later changes as its corresponding one-shot read.
+- Upload progress counts provider-confirmed parts; file progress counts verified bytes
+  committed to the cache. Neither reports bytes merely received or sent.
+- Sync status and join requests have their own streams (E5, E10).
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
 - Subscriptions show current results, as slots apply. Their callback
@@ -1543,7 +1534,7 @@ while let Ok(values) = lost.next().await {
   Replacing a sign-in does not change an existing storage connection; setup
   verifies the chosen account and location before attaching it.
 - Every setup, including reconnection, reaches the candidate provider with the
-  newly supplied credentials and checks it before reserving or publishing a
+  newly supplied credentials and checks it before preparing or claiming a
   store entry or committing local state. A fresh sealed test object must be
   created once, refuse a second create at that path, return the original bytes
   through whole and interior ranged reads, appear with its size in a listing,
@@ -1554,7 +1545,7 @@ while let Ok(values) = lost.next().await {
   It also checks conditional replacement for the floor: a matching revision
   succeeds and a stale revision changes nothing.
 - An S3 location's behaviors are `S3Settings` (§4). Its `S3Profile` names a
-  catalogued service or carries custom settings; with no profile, the
+  known service or carries custom settings; with no profile, the
   endpoint selects (§4): no endpoint means AWS S3; `storage.googleapis.com`
   means GCS XML, using generation conditions and conditional copy to publish
   multipart uploads. Hosts ending in `.r2.cloudflarestorage.com` select R2,
@@ -1562,8 +1553,8 @@ while let Ok(values) = lost.next().await {
   without stated scope. The self-hosted RustFS, SeaweedFS, Ceph RGW and
   Versity Gateway profiles are selected only by name; SeaweedFS publishes
   every object by conditional copy (§4). A name or custom profile contradicting a
-  catalogued host, a name other than AWS or any custom profile without an
-  endpoint, or plain `http` to a catalogued host is `InvalidConfiguration`;
+  known host, a name other than AWS or any custom profile without an
+  endpoint, or plain `http` to a known host is `InvalidConfiguration`;
   other endpoints may use `http`.
 - Where an S3 service's member keys reach a whole bucket (R2, and every
   custom profile, detected or chosen), any member's key reaches every store
@@ -1576,7 +1567,7 @@ while let Ok(values) = lost.next().await {
   `StorageSetupError::Storage`. Reconnecting checks no objects outside the
   store's folder. AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway
   keys can be limited to the store's prefix, so their stores share buckets and prefixes unchecked.
-- An endpoint matching no catalogued host and naming no profile has no AWS
+- An endpoint matching no known host and naming no profile has no AWS
   fallback: setup detects its settings and returns and records the location
   with them as a custom profile. Reconnecting with that same location and no
   profile reuses the recorded settings.
@@ -1584,12 +1575,12 @@ while let Ok(values) = lost.next().await {
   advanced settings: it probes the bucket with the supplied key, writing only
   fresh objects under the store's `.coven-check` prefix and deleting them,
   also on failure. Its `S3Detection` holds the detected settings and one
-  observation per probe; the app may prefill and override them, and
+  result per probe; the app may prefill and override them, and
   `S3Detection::check` tells whether an override agrees with what was observed.
 - Every S3 setup runs detection and checks the effective settings, detected,
-  named or custom, against its observations before the provider check:
+  named or custom, against its results before the provider check:
   `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` and `Behavior` name the
-  first failure. An override that contradicts an observation is refused, never
+  first failure. An override that contradicts a result is refused, never
   accepted. A service that no setting makes safe is refused too: a server that
   accepts writes to an occupied name, e.g. Garage, fails `CreateOnce`. Every
   connection is accepted only after all setup checks pass, including those
@@ -1621,32 +1612,18 @@ while let Ok(values) = lost.next().await {
   local write or `sync_now`, and every 30 seconds while idle, subject to
   connection backoff and provider cooldowns. Stopping and closing finish the
   active pass first.
-  - [One sync pass](sync-pass.md) reads forward, applies slots, claims pending
-    publications and performs effects. Exact next-slot and floor reads find
-    history; active-device status is read by known paths. No idle listing or
-    device-folder discovery occurs.
-  - A missing required slot covered by the floor reloads its named snapshots
-    and suffix. Returning devices retain their original queued writes (§15).
-  - Every send shares §10's identity and catch-up gate, including retries,
-    files and operation work. Catch-up must have started less than five
-    minutes ago, with sleep counted. A blocked slot invalidates the gate at
-    once; no later admin entry or outbound request passes it.
-  - The pass and file worker share session keys, checked observations,
-    transfer limits and provider backoff. The pass does not await files.
-  - Status posts only on changed canonical contents or observed absence.
-    Queue, cache and operation bookkeeping do not wake another pass; app work
-    arriving after capture retains one wake. Upload completion changes no row.
-  - `pending()` names the first unmet condition for each subject, including
-    a blocked slot, failed reload, operation undo, files and disagreement.
-    A cut-off writes slot is consumed and records `WritesRefused` permanently.
-  - `Blocked` names the next slot and cause. Local reads and eligible writes
-    continue; later slots and every send wait. Independent local work may
-    proceed. A failed peer status or file does not block the sequence.
-  - `Synced` may coexist with pending file, provider or retention work, but
-    never with an unapplied discovered slot. Fingerprints require exactly the
-    posted applied prefix and no unclaimed local writes.
-  - Neither disagreement nor silence triggers recovery. §19.1 gives retry
-    and update behavior.
+  - [One sync pass](sync-pass.md) gives the read, apply, claim and effects order.
+    An idle pass reads the next slot and the floor: two requests.
+  - A missing slot below the floor reloads its snapshots.
+    Returning devices retain eligible queued writes ([§15](coven.md#15-snapshots)).
+  - `Blocked` names a slot that cannot apply and its cause.
+    Later slots and all sends wait; local reads and eligible app writes continue.
+  - File transfers run outside the pass. Their failures appear in `pending()`
+    without blocking sequence application.
+  - `Synced` means the pass reached its read end. Files, provider effects or
+    retention may still be pending, but an unapplied discovered slot prevents this status.
+  - Each pending record names this device's first unmet condition for that subject.
+    Cut-off writes record `WritesRefused`; [§19.1](coven.md#191-noticing) specifies retries.
 
 - `Offline` describes the last failed attempt, not the connection's history.
   `Failed`: storage refused the whole pass, or coven's own operation failed;
@@ -1710,10 +1687,10 @@ pub enum StorageConfig {
         bucket: String,
         /// The signing region.
         region: String,
-        /// None is AWS's own endpoint. Catalogued hosts require https (§4).
+        /// None is AWS's own endpoint. Known hosts require https (§4).
         endpoint: Option<Url>,
-        /// A catalogued service's name or custom settings; either must agree
-        /// with a catalogued endpoint host. None selects by host:
+        /// A known service's name or custom settings; either must agree
+        /// with a known endpoint host. None selects by host:
         /// storage.googleapis.com is GCS XML, hosts ending in
         /// .r2.cloudflarestorage.com are R2, no endpoint or .amazonaws.com is
         /// AWS, and setup detects any other endpoint's settings, recording
@@ -1739,9 +1716,9 @@ pub enum StorageConfig {
     },
 }
 
-/// An S3 location's behaviors: a catalogued service's, or its own (§4).
+/// An S3 location's behaviors: a known service's, or its own (§4).
 pub enum S3Profile {
-    /// The catalogued service's settings.
+    /// The known service's settings.
     Named(S3ProfileName),
     /// Settings detected at setup or chosen by the app; restore codes carry them.
     Custom(S3Settings),
@@ -1800,10 +1777,10 @@ pub enum S3ResponseHeaders { S3, Google }
 pub struct S3Detection {
     /// Bucket versioning, or a refused/unimplemented read with its native cause.
     pub versioning: Result<S3BucketVersioning, Arc<StorageError>>,
-    /// Settings derived from the observations; prefill advanced settings with them.
+    /// Settings derived from the results; prefill advanced settings with them.
     pub settings: S3Settings,
-    /// One observation per probe, in the order run.
-    pub observations: Vec<S3Observation>,
+    /// One result per probe, in the order run.
+    pub results: Vec<S3ProbeResult>,
 }
 
 /// Bucket state read through the XML API; a failed read is not Disabled.
@@ -1818,17 +1795,17 @@ pub enum S3BucketVersioning {
 impl S3Detection {
     /// Whether this probe's behavior held; an unrun probe did not.
     pub fn held(&self, probe: S3Probe) -> bool;
-    /// Refuses settings that contradict the observations, naming the first
+    /// Refuses settings that contradict the results, naming the first
     /// failed check as setup would: CreateOnce, MultipartCreateOnce,
     /// PublicationTime, then Behavior.
     pub fn check(&self, settings: &S3Settings) -> Result<(), StorageSetupError>;
     /// The location setup records, after checking versioning support and its effective settings:
-    /// an uncatalogued endpoint naming no profile gets these settings as its
+    /// an unrecognized endpoint naming no profile gets these settings as its
     /// custom profile; any other location is kept as given.
     pub fn resolve(&self, location: StorageConfig) -> Result<StorageConfig, StorageSetupError>;
 }
 
-pub struct S3Observation {
+pub struct S3ProbeResult {
     pub probe: S3Probe,
     /// Whether the behavior held, as described on each probe.
     pub held: bool,
@@ -1870,7 +1847,7 @@ pub enum S3Probe {
     BucketList,
 }
 
-/// An S3 service whose catalogued profile a location names (§4).
+/// An S3 service whose known profile a location names (§4).
 /// Self-hosted services have arbitrary endpoints, so no hostname identifies them.
 pub enum S3ProfileName {
     /// Amazon S3.
@@ -1924,9 +1901,6 @@ pub enum StorageFailure {
     AccessNotGranted { required: OAuthAccess },
     /// Sharing an App-folder store requires relocation, outside this operation.
     DropboxAppFolderNotShareable,
-    /// No completed membership and key-copy catch-up started less than five
-    /// minutes ago; the send waits for the next pass (§10).
-    CatchUpRequired,
     /// No route to the provider, a timeout, or an interrupted response.
     Network,
     /// Credentials were refused or must be refreshed.
@@ -1986,7 +1960,7 @@ pub enum StorageFailure {
     SessionExpired,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
-    /// A status replacement exceeds this provider's single-request limit.
+    /// The request exceeds this provider's single-request limit.
     SingleRequestTooLarge {
         /// Encrypted body length in bytes.
         size: u64,
@@ -2132,9 +2106,8 @@ pub enum SyncError {
     /// The latest applied prefix no longer permits the operation; its journal
     /// undoes owned artifacts before completion (§18).
     Rejected(OperationRejection),
-    /// The sequence has no next slot, or this device no next publication id.
+    /// The sequence has no next slot.
     SequenceExhausted,
-    PublicationNumberExhausted,
     /// An object required by the change failed its checks.
     Damaged(DamagedObject),
     /// This device or its member was removed; syncing stops for good (§10).
@@ -2186,10 +2159,8 @@ pub enum SyncError {
 
 /// What showed that another copy uses this device's id (§10).
 pub enum DeviceIdEvidence {
-    /// Authenticated history has an own publication beyond local reservations.
-    StorageAhead,
-    /// The same authenticated publication identity has different content.
-    PublicationConflict,
+    /// A slot signed by this device has a path its journal never attempted.
+    UnattemptedSlot { slot: Slot },
     /// An earlier slot replaced this device's id.
     Replaced,
 }
@@ -2199,13 +2170,13 @@ pub enum DeleteAccessKeyError {
     /// The provider refused or failed the deletion.
     DeleteFailed(StorageError),
     /// No provider read followed the deletion.
-    ObservationMissing,
+    ReadMissing,
     /// The read concerned another key.
     WrongKey,
     /// The read still found the key.
     StillPresent,
     /// The read failed; a failed read is never absence.
-    ObservationFailed(StorageError),
+    ReadFailed(StorageError),
 }
 
 /// An object that failed a check when read (§19.1).
@@ -2228,24 +2199,19 @@ pub struct PendingRecord {
     pub subject: PendingSubject,
     /// The first unmet condition for this subject, kept as a typed value.
     pub reason: PendingReason,
-    /// This device for a local observation; otherwise the signed report's author.
-    pub reported_by: DeviceId,
 }
 
-/// Stable identities; a record is keyed by subject and reporting device.
+/// Stable identities; this device keeps one record per subject.
 pub enum PendingSubject {
     Write(WriteId),
     Slot(Slot),
     KeyCopy { audience: Audience, key: KeyId, member: MemberId, sealing: SealingKey },
 
     Snapshot(SnapshotId),
-    /// A replaceable device report, never a retention acknowledgement.
-    Status(DeviceId),
     File { device: DeviceId, file: FileId },
     Operation { id: OperationId, kind: OperationKind },
     Retention { path: ObjectPath },
     Audience(Audience),
-    Agreement { audience: Audience, peer: DeviceId },
     JoinRequest(InviteId),
     Connection,
 }
@@ -2257,11 +2223,10 @@ pub enum Prerequisite {
 
     Object(ObjectPath),
     DeviceRegistration(DeviceId),
-    SchemaPublication { audience: Audience, version: u32 },
+    SchemaRaise { audience: Audience, version: u32 },
     Reload(Audience),
-    Status(DeviceId),
-    /// The announced checkpoint needed for a covered prefix (§15).
-    Checkpoint(Slot),
+    /// A snapshot needed to load history below the floor (§15).
+    Snapshot(SnapshotId),
 
 }
 
@@ -2269,9 +2234,8 @@ pub enum Prerequisite {
 /// Every check that produces a native error retains it as an optional cause,
 /// using its narrowest native type. Variants whose checks never produce a
 /// native error stay unit; direct verdicts on other variants use cause: None.
-/// Immediate calls retain those causes. Persisted and peer reports retain
-/// the same variant without a native cause; equality and D8 encode the
-/// variant only, never the process-local error object.
+/// Immediate calls retain native causes. Local pending records preserve
+/// the variant without the process-local error object.
 pub enum Refusal {
     Decryption { cause: Option<Arc<CryptoError>> },
     Signature { cause: Option<Arc<CryptoError>> },
@@ -2290,7 +2254,7 @@ pub enum RequiredUpdate {
     CovenFormat { version: u16 },
 }
 
-/// A source the attaching device cannot deliver. Local paths never travel to peers.
+/// A source this device cannot deliver; only its local app receives this failure.
 pub enum FileSourceFailure {
     Missing,
     Changed,
@@ -2320,8 +2284,6 @@ pub enum PendingReason {
     NoStorage,
     Storage { provider: CloudProvider, failure: StorageFailure },
     Refused(Refusal),
-    /// Status can be replaced, unlike an immutable refused slot.
-    InvalidStatus(Refusal),
     /// Consumed without effects; a permanent lower-slot cut-off (§10).
     WritesRefused { cutoff: Slot, cause: WriteCutoff },
     ProviderPending { action: ProviderAccessAction, account: String },
@@ -2330,7 +2292,6 @@ pub enum PendingReason {
     AccessRemains { account: String, shares: Vec<RetainedAccess> },
     DeleteAccessKey(AccessKeyToDelete),
     FileUnavailable(FileMissingReason),
-    Disagrees,
     Failed(LocalFailure),
     Paused,
     /// Provider work needs the storage account's admin access again; coven
@@ -2349,8 +2310,8 @@ pub enum Retry {
 }
 
 impl PendingRecord {
-    /// Automatic: retryable reads, keys, provider work and unfinished
-    /// operation/undo work, subject to shared backoff.
+    /// Automatic: retryable reads, keys, snapshots, provider work and
+    /// unfinished operation/undo work, subject to shared backoff.
     /// AfterUpdate: refused immutable objects and unsupported formats/schema.
     /// Never: WritesRefused or this device's removal/replacement.
     /// AppAction: failures a person clears, such as required credentials;
@@ -2468,8 +2429,7 @@ impl CovenHandle {
     /// The same pre-built query, including a replacement completed during open.
     pub fn subscribe_device_reset(&self) -> LiveQuery<Option<DeviceReset>>;
 
-    /// Current local blocks and relevant authenticated peer reports, including
-    /// while disconnected. Sorted by subject, then reporting device (§19.1).
+    /// This device's pending work, sorted by subject, including offline (§19.1).
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>>;
 
     /// The same internal query as pending(), on the app's live-query mechanism.
@@ -2532,7 +2492,7 @@ Example:
 let detection = handle
     .detect_s3_settings(storage.clone(), access_key_id.clone(), SecretText::new(secret_access_key.clone()))
     .await?;
-let settings = edit_advanced_settings(detection.settings, &detection.observations);
+let settings = edit_advanced_settings(detection.settings, &detection.results);
 detection.check(&settings)?;
 let StorageConfig::S3 { profile, .. } = &mut storage else { unreachable!() };
 *profile = Some(S3Profile::Custom(settings));
@@ -2556,27 +2516,16 @@ loop {
 
 ### E6 Operations and recovery
 
-- Every administrative call uses one journaled operation path (§18), including
-  role changes, renames, removal, invites, rotation, reset and schema raises.
-  Catch up, validate, prepare the entry's prerequisites, then claim.
-- Contention reads and applies the intervening slots, then validates again.
-  An uncertain claim settles its exact destination before another attempt.
-  Success is final when the entry's slot commits; no later replay drops it.
-- If validation fails, undo every artifact still owned by the operation and
-  return `Rejected`. A failed undo retains the journal and original reason,
-  reports both causes and retries. It cannot leave an unrecorded key or
-  unannounced snapshot. Claimed prerequisite copies remain signed history.
-- `_coven_operations` records unfinished work and undo. Transient failures
-  retain typed causes and retry; the app does not decide whether to keep a
-  claimed entry or restart an invalidated one. Already-satisfied targets
-  complete without redundant entries. Member-key replacement additionally
-  requires its original expected binding still to be current.
-- Snapshot publication, reload, floor advancement and prefix deletion use
-  journals too. Provider sharing follows current members and open invites;
-  unconfirmed S3 deletions remain explicit obligations. Ordinary file
-  retention derives candidates from recorded references.
-- Immediate errors keep native causes; persisted pending records keep the
-  reason and subject. Neither failure nor reset erases an undo obligation.
+- Every administrative call follows [§18](coven.md#18-operations): validate,
+  journal, do prerequisite work, then claim. Contention reads forward and validates again.
+- On reopening or retrying, settle the recorded path and bytes before another
+  attempt ([§6](coven.md#settling-a-claim)). The floor's snapshots settle deleted slots.
+- If validation fails, undo the operation's artifacts and return `Rejected`.
+  Failed undo reports both causes and keeps the journal for retry.
+- A claimed entry is final. An already-satisfied request needs no extra entry.
+  Neither dropping the call nor resetting data erases cleanup obligations.
+- Snapshot creation, reload and retention use journals too (§15).
+  Calls retain native errors; local pending records retain the subject and category.
 
 ```rust
 /// The local integer primary key of one unfinished operation (§18).
@@ -2592,7 +2541,7 @@ pub enum OperationKind {
     RemoveDevice,
     RenameCircle,
     RemoveCircleMember,
-    /// Advertise a checkpoint, delete its covered prefix, advance the floor.
+    /// Conditionally advance the floor, then delete slots below it (§15).
     RetainSequence,
     /// Make a circle and publish its first sealed key.
     CreateCircle,
@@ -2612,7 +2561,7 @@ pub enum OperationKind {
     RotateKey,
     /// Publish a member's replacement pair and finish required custody (§11, E9).
     ReplaceMemberKeys,
-    /// Write and verify a snapshot for retention.
+    /// Upload a snapshot, then claim its announcement (§15).
     WriteSnapshot,
     /// Grant access, approve or decline a join, and settle the invite.
     Invite,
@@ -2767,8 +2716,8 @@ impl CovenHandle {
     /// file facts return `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 
-    /// Calls single-object status, then checks the uploader's current state and its signed
-    /// undeliverable-file report (§16.1). Checks the reference against its row.
+    /// Reads the fixed path's metadata and checks the uploader's current state (§16.1).
+    /// This device also knows its own source failures. Checks the reference against its row.
     /// Network failures and denied access are errors, not Missing; an object
     /// at the fixed path of any size but the file's complete one is `Integrity`.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;
@@ -2822,7 +2771,7 @@ impl CovenHandle {
     /// loading a snapshot to join or recover (§16, §19.2).
     pub async fn eager_cache_fill_status(&self) -> CovenResult<EagerCacheFillStatus>;
 
-    /// The same query over cache reservations, cancellation and verified ranges.
+    /// The same committed progress and later changes as eager_cache_fill_status.
     pub fn subscribe_eager_cache_fill_status(&self) -> LiveQuery<EagerCacheFillStatus>;
 
     /// Records cancellation of the current eager requests without stopping sync.
@@ -2845,7 +2794,7 @@ impl FileRef {
 /// Current remote availability; never persisted in the app row (§16.1).
 pub enum FileStatus {
     Available,
-    /// Confirmed absent; this active device has not reported it undeliverable.
+    /// Confirmed absent; the uploader is active, with no source failure known here.
     Uploading { device: DeviceId },
     /// Confirmed absent, with a reason the uploader cannot supply it.
     Missing { device: DeviceId, reason: FileMissingReason },
@@ -2854,6 +2803,7 @@ pub enum FileStatus {
 pub enum FileMissingReason {
     DeviceRemoved,
     DeviceReplaced,
+    /// Only known on the device that attached the file.
     Source(FileSourceFailure),
 }
 
@@ -2878,7 +2828,7 @@ impl FileRangeStream<'_> {
 pub enum FileReadError {
     /// Remote status or uncached bytes were requested with no storage connected.
     NoStorage,
-    /// Storage confirms absence; the active uploader has not reported failure.
+    /// Storage confirms absence; the uploader is active, with no local source failure.
     Uploading { id: String, device: DeviceId },
     /// Storage confirms absence and the uploader cannot supply it (§16.1).
     Missing { id: String, device: DeviceId, reason: FileMissingReason },
@@ -3014,8 +2964,8 @@ impl CovenHandle {
     /// The restore code does not change. They keep the key separately,
     /// update their other devices with update_credentials, and the old key
     /// becomes pending deletion under §13. Requires connected storage.
-    /// If publication fails, the call returns the failure and retains the new credentials:
-    /// the remote entry may already exist. Retry with the same key to finish publication.
+    /// An uncertain claim retains the new credentials and attempted bytes.
+    /// Retry with the same key to settle it before completing or undoing (§18).
     /// Member removal lists every recorded key until confirmed deleted,
     /// An invalidated operation settles any uncertain claim before undo (§18).
     pub async fn replace_access_key(
@@ -3131,7 +3081,7 @@ pub enum IamPolicy {
 }
 
 /// A service's key administration with the storage account's admin access,
-/// for one operation (§4). Coven's minters implement it per catalogued profile.
+/// for one operation (§4). Coven's minters implement it per known profile.
 #[async_trait]
 pub trait AccessKeyAdmin: Send + Sync {
     /// Create the principal and a key limited to the scope's store, under
@@ -3309,7 +3259,7 @@ pub enum ProviderSignOut {
   its owned artifacts and fails; available key bytes alone are not admission.
   Restore checks the supplied pair against the current binding and reports
   `SyncError::MemberKeysReplaced` when authenticated history shows an old
-  code. If the current checkpoint cannot be opened, report the unavailable
+  code. If the current snapshot cannot be opened, report the unavailable
   key instead of inferring membership. Restore never rebinds old keys.
 - Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
   device name, status callback and cancellation receiver, and
@@ -3865,7 +3815,7 @@ impl Circles<'_> {
 
     /// Adds a store member to the circle. They get its current and earlier
     /// keys, so they read its history. Rejoining devices reload skipped parts,
-    /// using the checkpoint and retained suffix (§14.4).
+    /// using the snapshot and retained suffix (§14.4).
     pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes someone with one entry; remaining members rotate exposed keys (§14.6).
