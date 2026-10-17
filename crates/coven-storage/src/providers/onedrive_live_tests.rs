@@ -330,10 +330,14 @@ fn onedrive_live_replacement_revision() {
     run(async |live| {
         let path = ObjectPath::floor(live.store);
         let mut etags = Vec::new();
+        let mut observations = Vec::new();
+        // The empty body goes through a deferred session's zero-body commit.
         for (label, bytes) in [
-            ("initial", b"first"),
+            ("initial", b"first".as_slice()),
             ("equal", b"first"),
             ("different_same_size", b"other"),
+            ("empty", b""),
+            ("after_empty", b"refilled"),
         ] {
             if label == "initial" {
                 live.storage.create(&path, bytes).await.unwrap();
@@ -355,6 +359,7 @@ fn onedrive_live_replacement_revision() {
             assert_eq!(read.bytes, bytes);
             assert_eq!(read.metadata, observed);
             etags.push(etag);
+            observations.push(observed);
         }
         assert_ne!(
             etags[0], etags[1],
@@ -364,6 +369,22 @@ fn onedrive_live_replacement_revision() {
             etags[1], etags[2],
             "native eTag must change on same-size replacement"
         );
+        assert_ne!(etags[2], etags[3], "native eTag must change on emptying");
+        assert_ne!(etags[3], etags[4], "native eTag must change after empty");
+        let current = live.storage.read_object(&path, None).await.unwrap();
+        for (label, stale) in [("empty", &observations[2]), ("nonempty", &observations[3])] {
+            let bytes: &[u8] = if label == "empty" { b"" } else { b"stale" };
+            let refused = live.storage.replace(stale, bytes).await.unwrap_err();
+            println!(
+                "onedrive_live revision stale_{label}: {:?}",
+                refused.failure()
+            );
+            assert_eq!(refused.failure(), StorageFailure::Conflict);
+            assert_eq!(
+                live.storage.read_object(&path, None).await.unwrap(),
+                current
+            );
+        }
     });
 }
 
