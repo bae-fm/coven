@@ -35,35 +35,6 @@ theorem non_owner_denied (P : Policy W Row Table Member) (w : W) (r : Row)
     (owned : P.owned (P.table r) = true) (other : P.author w ≠ owner P r) :
     allowed P w r = false := by simp [allowed, owned, other]
 
-/-- Use the first generation's canonical creating write, not first receipt.
-The existing merge selects its smallest timestamp before the owner filter.
-An audience transfer carries this original identity instead of creating one. -/
-theorem selected_creation {S : W → Prop} {M : Writes W Row Col}
-    (valid : Valid M) {st : St W Row Col} (correct : IsSpec M S st)
-    (r : Row) (creator : W) (selected : st.genWrite r 1 = some creator) :
-    S creator ∧ ∃ ch, M.chg creator r = some ch ∧ ch.kind = .ins ∧ ch.gen = 0 ∧
-      ∀ other, GenChange M S r other 1 → M.ts creator ≤ M.ts other := by
-  obtain ⟨⟨mem, ch, change, _, generation⟩, earliest⟩ := (correct.gw_some r 1 creator).mp selected
-  have zero : ch.gen = 0 := by omega
-  exact ⟨mem, ch, change, (valid.parity creator r ch change).mpr (by simp [zero]), zero, earliest⟩
-
-theorem creation_selection_converges (M : Writes W Row Col) (valid : Valid M)
-    {a b : List W} (ca : CausalOrder M a) (cb : CausalOrder M b)
-    (same : ∀ w, w ∈ a ↔ w ∈ b) (r : Row) :
-    (a.foldl (step M) St.init).genWrite r 1 = (b.foldl (step M) St.init).genWrite r 1 := by
-  rw [merge_converges valid ca cb same]
-
-/-- Updates, deletes and reinsertions at later generations cannot change the
-initial creator record, including after a row stops being displayed. -/
-theorem later_change_preserves_creation (M : Writes W Row Col) (st : St W Row Col)
-    (w : W) (r : Row) (later : ∀ ch, M.chg w r = some ch → ch.gen ≠ 0) :
-    (step M st w).genWrite r 1 = st.genWrite r 1 := by
-  cases hc : M.chg w r with
-  | none => simp [step, genWriteStep, hc]
-  | some ch =>
-    have positive := later ch hc
-    simp [step, genWriteStep, hc, positive]
-
 /-- Snapshot verification supplies the same owner enforced by the filter.
 The policy's authors come from authenticated write identities; creation
 selection remains a separate, permanent identity obligation. -/

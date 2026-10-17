@@ -1,7 +1,8 @@
 import CovenMerge.Snapshot
 
-/-! Reset eligibility uses the kept entry in `store_log_read` (§19.3).
-The shared snapshot merge handles positions, generations and dependencies. -/
+/-! Reset eligibility is supplied by comparing the reset's slot with the
+write's read-through slot (§19.3). The shared snapshot merge handles covered
+inputs, generations and dependencies. -/
 
 namespace CovenMerge
 

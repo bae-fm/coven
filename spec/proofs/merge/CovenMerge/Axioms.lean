@@ -1,10 +1,7 @@
 import CovenMerge
 
-/-! Run `lake env lean CovenMerge/Axioms.lean` to print the axioms each main result uses. -/
-
 open CovenMerge
 
--- merged state
 #print axioms step_spec
 #print axioms foldl_isSpec
 #print axioms merge_converges
@@ -12,7 +9,6 @@ open CovenMerge
 #print axioms run_isSpec
 #print axioms isSpec_unique
 #print axioms causalOrder_of_ts_sorted
--- a write made after seeing another wins (§3)
 #print axioms seen_replacer_not_lost
 #print axioms older_incarnation_not_current
 #print axioms cell_after_read_wins
@@ -23,7 +19,6 @@ open CovenMerge
 #print axioms write_after_read_wins
 #print axioms packed_stamp_before
 #print axioms stamp_supplies_past_ts
--- removal rules
 #print axioms newman
 #print axioms killStep_terminating
 #print axioms killStep_locallyConfluent
@@ -39,32 +34,25 @@ open CovenMerge
 #print axioms rule_order_converges
 #print axioms UniqueOnce.unique_with_others
 #print axioms UniqueOnce.judged_once
--- audiences
 #print axioms valid_project
 #print axioms fold_atRow
 #print axioms audience_converges
 #print axioms audiences_agree
 #print axioms removal_local
 #print axioms rivals_closed
-#print axioms rivalBefore_forFingerprint
-#print axioms fingerprint_local
 #print axioms Moved.agree
 #print axioms Moved.store_wins
--- the spec's examples
 #print axioms Title.example_8_1
 #print axioms Title.example_8_2
 #print axioms Delete.example_8_3
 #print axioms TwoReasons.example_8
 #print axioms FK.example_8_4
 #print axioms KeyChange.example_8_5_key
-#print axioms Stamp.example_8_5_stamp
 #print axioms Comeback.example_8_5_subnote
 #print axioms Comeback.example_8_5_step3
 #print axioms Check.example_8_6
 #print axioms DeletedCircle.example_14_7
 #print axioms SetNull.example_8_4_later
-
--- entry-named removal and recovery (§8, §14.7)
 #print axioms deleted_rule_names_entry
 #print axioms named_rules_nonempty
 #print axioms circle_entries_preserve_merge
@@ -73,10 +61,6 @@ open CovenMerge
 #print axioms entry_rule_order
 #print axioms row_returns
 #print axioms same_key_shows_once
--- migration generations and retained history (§17.1)
-#print axioms independent_rule_order
-#print axioms nonfinal_does_not_decide
-#print axioms nonfinal_only_untouched
 #print axioms hidden_generation_delete
 #print axioms migration_keeps_generation_record
 #print axioms hidden_delete_even
@@ -91,7 +75,6 @@ open CovenMerge
 #print axioms drop_preserves_all_pending
 #print axioms hidden_row_after_drop
 #print axioms dropped_column_frozen_whole
--- resets, including the author (§19.3)
 #print axioms reset_valid
 #print axioms reset_causal
 #print axioms reset_exact
@@ -101,7 +84,6 @@ open CovenMerge
 #print axioms reset_converges
 #print axioms reset_every_device
 #print axioms reset_other_audience
--- accounting and the complete boundary result (§3)
 #print axioms value_accounted
 #print axioms hidden_value_frozen
 #print axioms reset_ignored_never_schema_loss
@@ -112,13 +94,9 @@ open CovenMerge
 #print axioms boundary_rule_order
 #print axioms boundary_reset_no_loss
 #print axioms excluded_values_recorded
--- concrete histories
-#print axioms IntegrityExamples.nonfinal_parent_and_child
-#print axioms IntegrityExamples.migration_retains_reversible_rows
 #print axioms IntegrityExamples.migration_writes_valid
 #print axioms IntegrityExamples.migration_and_late_edit
 #print axioms IntegrityExamples.dropped_schema_keeps_losses
-#print axioms IntegrityExamples.same_key_after_return
 #print axioms IntegrityExamples.reset_author_and_remote
 #print axioms IntegrityExamples.reset_before_schema_exclusion
 #print axioms IntegrityExamples.reset_writes_valid
@@ -130,13 +108,10 @@ open CovenMerge
 #print axioms snapshot_valid
 #print axioms snapshot_causal
 #print axioms snapshot_inputs_converge
-
--- the missing Rust circle-deletion identity
 #print axioms EntryCounterexample.writes_valid
 #print axioms EntryCounterexample.entry_identity_gap
 #print axioms EntryCounterexample.no_row_no_gap
 #print axioms EntryCounterexample.no_entry_no_gap
--- receive order, progress, and its connection to merge (§3, §6, §7.1)
 #print axioms Receive.ready_iff
 #print axioms Receive.passed_causal
 #print axioms Receive.applied_causal
@@ -146,11 +121,7 @@ open CovenMerge
 #print axioms Receive.complete_past_eventually_passed
 #print axioms Receive.arriving_past_eventually_passed
 #print axioms Receive.eventually_applied
-#print axioms Receive.positionsReady_correct
-#print axioms Receive.window_exact
-#print axioms Receive.retired_no_effects
 #print axioms Receive.passed_not_applied
-#print axioms Receive.retired_outside_not_applied
 #print axioms Receive.receive_eventually_applied
 #print axioms Receive.receive_isSpec
 #print axioms Receive.receive_converges
@@ -159,12 +130,7 @@ open CovenMerge
 #print axioms Receive.receive_schema_loss
 #print axioms Receive.receive_reset_no_loss
 #print axioms Receive.Examples.authored_valid
-#print axioms Receive.Examples.retirement_generation_accounted
-#print axioms Receive.Examples.retirement_value_accounted
-#print axioms Receive.Examples.retirement_value_recorded
-#print axioms Receive.Examples.retirement_loss_agrees
 #print axioms Receive.Examples.receive_runs_agree
-#print axioms Receive.Examples.replay_restores_by_own_window
 #print axioms Receive.Examples.reset_independent_applies
 #print axioms DataDependency.depends_iff
 #print axioms DataDependency.retained_iff
@@ -183,32 +149,14 @@ open CovenMerge
 #print axioms Data.loss_converges
 #print axioms Data.dependent_recorded
 #print axioms Data.value_accounted
-#print axioms Receive.window_ignores_reads
-#print axioms Receive.passed_before_removal
-#print axioms Receive.retirement_verdict_final
-#print axioms Receive.send_gate_publication_bound
-
--- unread writes outside a reset snapshot
 #print axioms ResetAgreement.writes_valid
 #print axioms ResetAgreement.unread_insert_ignored
 #print axioms ResetAgreement.read_reset_applies
 #print axioms ResetAgreement.no_write_no_gap
 #print axioms ResetAgreement.no_reset_applies
-
--- migration selection without non-final circle deletions
-#print axioms MigrationCounterexample.nonfinal_retained
-#print axioms MigrationCounterexample.no_row_no_selection
-#print axioms MigrationCounterexample.no_deletion_no_selection
-#print axioms MigrationCounterexample.final_selected
-
-
--- Owner identity, direct permissions, recomputed FK effects and accounting.
 #print axioms Ownership.opt_out
 #print axioms Ownership.creator_allowed
 #print axioms Ownership.owner_fixed
-#print axioms Ownership.selected_creation
-#print axioms Ownership.creation_selection_converges
-#print axioms Ownership.later_change_preserves_creation
 #print axioms Ownership.accepted_owner_matches_filter
 #print axioms Ownership.non_owner_denied
 #print axioms Ownership.guard_recorded
@@ -254,9 +202,6 @@ open CovenMerge
 #print axioms Ownership.Admission.result_converges
 #print axioms Ownership.Admission.replay_restores_row
 #print axioms Ownership.Admission.no_rejection_cycle
-#print axioms Ownership.Examples.first_arrival_owner_diverges
-#print axioms Ownership.Examples.immutable_first_arrivals_incompatible
-#print axioms Ownership.Examples.one_creation_agrees
 #print axioms Ownership.Examples.concurrent_child_blocks
 #print axioms Ownership.Examples.concurrent_membership_blocks
 #print axioms Ownership.Examples.hidden_child_still_blocks
@@ -304,7 +249,6 @@ open CovenMerge
 #print axioms Ownership.TransientForeignKey.changed_trace_refused
 #print axioms Ownership.TransientForeignKey.applied
 #print axioms Ownership.TransientForeignKey.dropped_root_reverses
--- receivers classify steps without labels (§8.8, D5)
 #print axioms Ownership.Classification.action_iff
 #print axioms Ownership.Classification.action_classified
 #print axioms Ownership.Classification.direct_was_direct
@@ -346,18 +290,15 @@ open CovenMerge
 #print axioms Ownership.Admission.applied_root_ends_where_steps_end
 #print axioms Ownership.InconsistentCause.accepted_without_condition
 #print axioms Ownership.InconsistentCause.refused_with_condition
--- moving owned rows and what they carry (§8.8, §14.2)
 #print axioms Ownership.Moves.refused_iff
 #print axioms Ownership.Moves.carried_foreign_refuses
 #print axioms Ownership.Moves.copy_refused
 #print axioms Ownership.Moves.admitted_permitted
 #print axioms Ownership.Moves.Album.foreign_track_refuses
--- authorship a snapshot carries (§15, D7)
 #print axioms Ownership.SnapshotAuthors.own_writes_signers
 #print axioms Ownership.SnapshotAuthors.owner_true
 #print axioms Ownership.SnapshotAuthors.Replaced.valid
 #print axioms Ownership.SnapshotAuthors.Replaced.own_write_after_replacement
--- foreign keys on generated columns (§8.4)
 #print axioms GeneratedReference.grouped_cells_share_winner
 #print axioms GeneratedReference.accepted_reference_written
 #print axioms GeneratedReference.device_reference_written
@@ -365,10 +306,11 @@ open CovenMerge
 #print axioms GeneratedReference.Unwritten.unwritten_reference
 #print axioms GeneratedReference.Unwritten.orders_causal
 #print axioms GeneratedReference.Unwritten.grouped_reference_recorded
--- local children of values coven updates in place (§8.4)
 #print axioms LocalUpdate.rename_holds
 #print axioms LocalUpdate.follow_holds
 #print axioms LocalUpdate.chain_holds
 #print axioms LocalUpdate.Stuck.stuck_forever
 #print axioms LocalUpdate.Stuck.restrict_fails
 #print axioms LocalUpdate.Stuck.accepted_apply
+#print axioms Receive.unadmitted_no_effects
+#print axioms Receive.unadmitted_not_applied

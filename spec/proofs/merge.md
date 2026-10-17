@@ -16,7 +16,7 @@ checked permissions, causal records, restoration, and SQL boundary.
 ### B1 The claim
 
 - Two devices that read the same audiences and applied the same writes and
-  store log entries, each in an order that respects causality, hold the same
+  sequence entries, each in an order that respects causality, hold the same
   database:
   - the same `_coven_rows` and `_coven_cells`;
   - the same rows in the app's tables, with the same values;
@@ -34,13 +34,13 @@ checked permissions, causal records, restoration, and SQL boundary.
   [§8.3](../coven.md#83-deletes) and [§14](../coven.md#14-audiences).
 - *Row*: one table, key and audience. The store's note 1 and a circle's note
   1 are two rows, each with its own generations ([§14.2](../coven.md#142-moving-rows)).
-- *Had read*: the recorded position says the device passed `a` before making
+- *Had read*: the recorded slot prefix includes `a` before making
   `w`, including its own earlier writes. Passing a position does not mean
   applying its data ([§7.1](../coven.md#71-causality)). Actual generation and
   replaced-cell sources are separate retained evidence in B17.
 - *Causal order*: an order of applying writes in which each write comes after
   every write it had read. B17 derives this order from receive steps, with
-  consumed positions distinguished from retained effects at a boundary.
+  consumed inputs distinguished from retained effects at a boundary.
 - *Closed set*: a set of writes that holds every write any of them had read.
   The ordinary applied set is closed. After exclusions, closure refers to
   retained inputs in the original boundary model. B17 keeps consumed causal
@@ -220,7 +220,7 @@ at.
 
 ### B7 The removal rules
 
-- The removal rules' inputs come from the merged state and the store log,
+- The removal rules' inputs come from the merged state and the applied sequence,
   never from which rows are removed:
   - which rows are present: an odd generation;
   - each row's references: the parent each points at, and whether it is
@@ -228,10 +228,9 @@ at.
     ([§8.4](../coven.md#84-foreign-keys));
   - whether the row's merged values fail a CHECK ([§8.6](../coven.md#86-check-constraints));
   - the kept entry that deleted the row's circle, if any ([§14.7](../coven.md#147-deleting-a-circle));
-  - each row's unique claims, each with a stamp: the timestamp of the latest
-    write that set any column the constraint reads in it, including a partial
-    index's WHERE columns, and generated columns as set by each write that
-    changed their value ([§8.5](../coven.md#85-keys-and-uniqueness));
+  - each row's unique claims, ordered by the greatest `(slot, write number)`
+    among the setters of its current constraint inputs, including a partial
+    index's WHERE columns and changed generated columns ([§8.5](../coven.md#85-keys-and-uniqueness));
   - each key present in two audiences on the device ([§14.2](../coven.md#142-moving-rows)).
 - **Set null** for a child whose parent's generation was deleted is part
   of the merged state, not the rules ([§8.4](../coven.md#84-foreign-keys)):
@@ -258,10 +257,12 @@ at.
   - **foreign keys**: one of its references is stale, or its parent is
     absent or taken out;
   - **CHECK**: its merged values fail;
-  - **deleted circles**: it is in a circle the store log has deleted.
+  - **deleted circles**: it is in a circle the applied sequence has deleted.
 - **Unique values**: a row loses when a row still present claims the same
-  value of the same constraint with a smaller stamp, or an equal stamp and a
-  smaller primary key.
+  value of the same constraint with an earlier claim, or an equal claim and a
+  smaller primary key. The removal model's numeric `stamp` input represents
+  this claim order; [the sequence model](sequence.md) derives it from counted
+  setters and proves release to the earliest surviving live claimant.
 - **Keys in two audiences**: of two present rows with one key, the store's
   wins over a circle's, and of two circles' rows, the one whose current
   generation started with the smaller timestamp.
@@ -322,15 +323,14 @@ at.
 - **A unique loser whose value is unchanged comes back** only when the
   winner is deleted, or taken out before unique values are judged.
   - E.g. notes are unique by title, and a sub-note points at its parent
-    under cascade. Note 1 is "Ideas"; at 10:00 Ana adds note 2, "Plan", as a
-    sub-note of note 1; at 11:00 Ben, not having seen it, renames note 1 to
-    "Plan".
-    - Step 2: note 2's claim from 10:00 keeps "Plan"; note 1 is taken out.
+    under cascade. Note 1 is "Ideas"; Ana adds note 2, "Plan", as a sub-note
+    of note 1 in slot 1000; Ben's rename of note 1 to "Plan" claims slot 1100.
+    - Step 2: note 2's earlier slot keeps "Plan"; note 1 is taken out.
     - Step 3: note 2 goes with its parent, by cascade.
     - Note 1 stays out: back, it would bring note 2 back, and lose to it
       again. Lean: `example_8_5_subnote`.
-  - E.g. the same, but note 2 is a sub-note of note 3, "Ideas" since 12:00,
-    and note 4 has been "Ideas" since 09:00.
+  - E.g. the same, but note 2 is a sub-note of note 3, which claims "Ideas"
+    at slot 1200, and note 4 claims "Ideas" at slot 900.
     - Step 2: note 1 loses "Plan" to note 2, and note 3 loses "Ideas" to note
       4.
     - Step 3: note 2 goes with note 3.
@@ -345,7 +345,7 @@ at.
   device ran first. Lean: `example_8`.
 - **End to end**: the merged state converges ([B6](#b6-proof-for-the-merged-state)), and the rules, and
   therefore the app's tables and all active loss records, are functions of
-  it and the store log. `LossRecord` gives cells and removed rows one shape:
+  it and the applied sequence. `LossRecord` gives cells and removed rows one shape:
   row, generation, optional column, written values/setters and cause. Lean:
   `lossRecord`, `device_converges`,
   `rule_order_converges`.
@@ -361,17 +361,12 @@ at.
   - [§8.5](../coven.md#85-keys-and-uniqueness): Ana renames the tag "urgent" to "important" while Ben tags note 44
     "urgent". Note 42 ends tagged "important", and Ben's `(44, "urgent")` is
     taken out, naming the foreign key. Lean: `example_8_5_key`.
-  - [§8.5](../coven.md#85-keys-and-uniqueness): notes are unique by folder and title. Ana adds note 1, "Plan" in
-    Work, at 10:00; Ben renames note 2 "Plan" at 11:00; Carol moves note 2 to
-    Work at 12:00. Note 2's claim dates from 12:00, so note 1 keeps the
-    value. Lean: `example_8_5_stamp`.
   - [§8.6](../coven.md#86-check-constraints): Ana sets start 10 while Ben sets end 8: the row is taken out,
     naming the CHECK. Ben's later end of 20 brings it back. Lean:
     `example_8_6`.
   - [§14.7](../coven.md#147-deleting-a-circle): Ben's entry deletes Gifts while Ana adds note 9.
     Notes 7, 8 and 9 stay at generation 1, hidden with that entry named in
-    their losses. Dropping the entry returns all three. There is no circle
-    deletion write. Lean: `example_14_7`.
+    their losses. There is no circle deletion write. Lean: `example_14_7`.
 
 ### B9 Audiences
 
@@ -405,7 +400,7 @@ at.
   includes the audience column, and one on a descendant table includes the
   foreign key it takes its audience from, so rivals share an audience;
   constraints that could span audiences are refused. Lean: `rivals_closed`.
-- Every member's devices read the store log, so they agree on which circles
+- Every member's devices read the applied sequence, so they agree on which circles
   are deleted.
 - **Keys in two audiences** are the one rule that reads rows another device
   may not have:
@@ -416,10 +411,6 @@ at.
   - The store's row never loses, so devices agree on every store row.
   - A device in two circles can show a different circle row for one key
     than a device in only one of them, since each reads different rows.
-- **Fingerprints** ([§19.1](../coven.md#191-noticing)): computed as if the rule for keys in two audiences
-  didn't exist, removal agrees on every row of every audience both devices
-  read, so the fingerprint is the same on every device that applied the same
-  writes. Lean: `rivalBefore_forFingerprint`, `fingerprint_local`.
 
 ### B10 The spec's examples, checked
 
@@ -433,96 +424,37 @@ at.
 - [§8.4](../coven.md#84-foreign-keys): attachment 9 is taken out, then back when Ben's move arrives;
   link 6 holds null, then ends on note 44 once Dan's write arrives. Lean:
   `example_8_4`, `example_8_4_later`.
-- [§8.5](../coven.md#85-keys-and-uniqueness): a key change leaves Ben's `(44, "urgent")` taken out; note 2's claim
-  dates from 12:00; a loser whose winner leaves in step 3 stays out. Lean:
-  `example_8_5_key`, `example_8_5_stamp`, `example_8_5_subnote`,
+- [§8.5](../coven.md#85-keys-and-uniqueness): a key change leaves Ben's `(44, "urgent")` taken out;
+  a loser whose winner leaves in step 3 stays out. Lean:
+  `example_8_5_key`, `example_8_5_subnote`,
   `example_8_5_step3`.
 - [§8.6](../coven.md#86-check-constraints): the row is taken out, then back when Ben sets end 20. Lean:
   `example_8_6`.
 - [§14.2](../coven.md#142-moving-rows): the store's note 1 wins over the circle's. Lean: `Moved.agree`,
   `Moved.store_wins`.
 - [§14.7](../coven.md#147-deleting-a-circle): existing and late circle rows keep their
-  generations and setters, are hidden by the named entry, and return when
-  it drops. Lean: `example_14_7`.
+  generations and setters and are hidden by the named entry. Lean: `example_14_7`.
 
 ### B11 What Lean checks, and what is outside the model
 
-**§3 coverage:** this model proves merge convergence, causal winners and value
-accounting for valid causal inputs and supplied boundary verdicts (B6, B8,
-B12–B14). B17 derives causal application from receive steps and filters
-changes by their actual data sources. Retirement never regains a write
-because another write read it; dependent changes become recorded losses.
-Applying those results to stored objects assumes correct authentication
-and sealing; it proves neither confidentiality nor signature or cipher security.
-Atomic SQLite installation and §2's provider behavior are assumed, not proved.
-Delivery and the other §3 guarantees belong to the [separate models and their
-limits](../coven.md#3-guarantees), not this convergence theorem.
+The merge proofs assume valid authored changes, authenticated inputs, supplied
+schema and admission verdicts, and a sound snapshot. They prove convergence,
+causal winners, rule-order independence and value accounting under those
+assumptions. The [sequence model](sequence.md) supplies ordered prefixes,
+claim settlement, cut-off, first-slot ownership and unique claims, snapshot
+selection and retention. This package does not prove provider behavior,
+cryptography, SQL extraction or atomic SQLite installation.
 
-Lean checks the theorems named in this appendix. `CovenMerge/Axioms.lean`
-prints their axioms; only Lean's `propext`, `Classical.choice` and
-`Quot.sound` are allowed. `scripts/check.sh` rebuilds the package, audits
-these axioms, and runs the Boolean, entry-aware and schema differentials and the
-fixed reset and migration counterexamples in B16. Strict comparisons that find
-those remaining discrepancies stay out of the check script.
+Values are represented by their setters and cells. Frozen records retain old
+column identities and original causes; they are not fed back into live removal
+rules. References, CHECK results, claim ranks and schema consequences are inputs.
+The foreign-key proofs below state the corresponding SQL extraction boundary.
 
-Values are identified by their setters and cells. A column can be its old
-name, so a frozen record does not require that column in the new schema.
-`freeze_preserves_values` also proves preservation under any fixed mapping
-from these identities to scalar values. The model does not execute SQL,
-compare schemas, rename columns, convert write payloads, or encode snapshots.
-It has no live parent links in loss records; clearing serialized parent maps
-is outside it. Frozen records are held separately from the merge state and
-are never supplied to current removal rules.
-
-The rules take references, CHECK results and claims as inputs. CHECK expression
-normalization and rule names are outside Lean's Boolean CHECK result; the
-`unnamed_check_sqlite_differential` compares the database evaluator with SQLite
-constraint enforcement, including failures that SQLite abbreviates to one token.
-A multi-column reference is one input: capture sets all its components together, so the
-ordinary cell rule selects the same setter for each. The database differential
-`composite_reference_differential` compares captured whole-tuple setters and
-losses with `MergeRunner` in both arrival and timestamp orders, including NULL
-components. SQL capture and generated-input expansion remain outside Lean.
-Computing those inputs from SQL, reference null substitution, and local insert-to-update
-normalization remain outside the general proofs. The examples compute the
-inputs they use. Same-key uniqueness assumes the ordered audience claims
-specified by §14.2; the proof does not establish those claims from SQL.
-
-Store-log replay supplies the kept entry, its snapshot, and which deletions
-are final. Selecting these is outside this package. Schema eligibility and
-conversion verdicts are also inputs:
-the original `boundaryDevice` applies supplied whole-write verdicts for the
-existing Rust differential. `Data` in `Boundary.lean` and B17 additionally apply the
-shared per-change data rule. The queue package derives schema admission and
-conversion decisions; recorded reads are not data dependencies.
-
-As in B3, convergence assumes valid writes. At a reset it additionally
-requires a correct selected snapshot and `ResetGenerations`: a retained
-change's generation was reached by a retained input. This states the
-requirement that authoring uses the reloaded state, rather than discarded
-local generations. `reset_valid` and `reset_causal` then derive the ordinary
-merge's validity and causal-order conditions. The reset example checks its
-write validity, retained generation witnesses and snapshot correctness.
-
-Files, encryption, network transfer, atomic SQLite installation, retention
-until finality, loss dismissal, fingerprint hashing and trigger execution are outside
-this model. The functions describe a completed atomic reload; they do not
-model a partially installed database. Rust's merge functions retain the kept
-circle-deletion entry in each cause. The Boolean and entry-aware differentials
-pass, including replacement and removal of those causes (B16). The reset differential
-calls the database snapshot reload and exposes a separate eligibility
-discrepancy there. The schema-boundary differential passes on its generated
-histories; version/conversion verdicts are supplied as described below.
-The migration differential exposes retirement caused solely by a non-final
-circle deletion; its comparison stops at row selection.
-The Boolean inputs and existing merge functions also remain available to
-the separate store-log/data package.
-
-B17 models a retained receive queue and checks Rust's causal prerequisite
-decision separately. It derives causal order rather than assuming it at the
-receive boundary. Retirement can remove a generation's source. B17 records
-each dependent change as a loss and proves validity of the surviving merge without assuming
-that retirement preserves generation witnesses.
+`CovenMerge/Axioms.lean` audits the retained results. `scripts/check.sh` builds
+all modules, rejects unfinished proofs and custom axioms, and runs the current
+Rust differentials described in B16 and B18. Only `propext`, `Classical.choice`
+and `Quot.sound` are allowed. A green model build establishes these Lean
+statements; Rust agreement is a separate check.
 
 ### B12 Circle entries, migration deletes and frozen losses
 
@@ -534,16 +466,9 @@ record. `row_returns` proves a present row returns when no reason remains.
 `entry_device_converges` includes the named losses; `entry_device_rule_order`
 allows every order within §8's three passes.
 
-For [§17.1](../coven.md#171-host-application), `independentInputs` removes
-non-final circle causes and reruns all three passes. This also removes their
-effect on children. `nonfinal_only_untouched` proves that a row hidden only
-by those causes is left out of the entire migration write, preserving all
-its merge records and creating no frozen loss. `independent_rule_order` proves
-that decision independent of rule order; `nonfinal_does_not_decide` proves that
-stripping those causes again cannot change it. The checked
-`nonfinal_parent_and_child` history keeps
-a parent and child hidden only by the entry, but deletes a row with an
-independent CHECK failure. Final circle deletions can cause migration deletes.
+For [§17.1](../coven.md#171-host-application), `migrationRemoves` uses the
+current three-pass removal result. Circle deletions in the applied sequence
+are permanent; migration selection has no finality input.
 
 `withHiddenDeletes` gives the migration write an ordinary delete at each
 selected row's generation. `hidden_generation_delete`, `hidden_delete_even`
@@ -567,9 +492,7 @@ edit is a separate cell loss. If several writes delete that incarnation,
 migration and concurrent edits. The migration is authored from fixed inputs;
 receivers do not recompute its delete generations from their arrival prefix.
 `migration_capture_converges` proves equal author input sets also produce
-equal frozen records. `migration_retains_reversible_rows` checks that dropping
-a non-final deletion returns retained rows, while an independently invalid
-row stays deleted with its frozen loss.
+equal frozen records.
 
 Dropping a table or column calls `freezeDropped` on each affected pending
 loss. `drop_freezes_affected`, `drop_preserves_pending` and
@@ -582,23 +505,23 @@ color value and a whole-row loss.
 migration drops the loss's table, the column of a cell loss, or a column a
 whole-row loss's values name. `dropSchema` is the merge state the drop
 leaves: a dropped table's rows lose their merge history, a dropped column
-its cells and cell losses. A row hidden only by reversible causes stays
-hidden, so it keeps a live removed-row record. `hidden_row_after_drop`
+its cells and cell losses. During this schema-drop substep, a hidden row keeps its live removed-row record. `hidden_row_after_drop`
 proves that record is the old one without the dropped columns' values, and
 `dropped_column_frozen_whole` that a record naming a dropped column is
 frozen whole, that value included, while the live record no longer holds
-it.
+it. The completed breaking migration then deletes hidden rows and replaces
+their active records with the frozen records proved above.
 
 ### B13 Reset contents on every device
 
 For [§19.3](../coven.md#193-resetting-a-store), `ResetBoundary` distinguishes
-positions consumed by the snapshot from writes that contributed to its merge
-state. Ignored and excluded writes can have consumed positions without
+writes consumed by the snapshot's slot prefix from writes that contributed to its merge
+state. Ignored and excluded writes can have consumed slots without
 contributing values, as [format D7](../format.md#d7-snapshots) requires.
 `consumed_is_not_input` checks that distinction through a later reload.
 
 `reloadReset` starts with the snapshot and applies only uncovered writes
-whose `store_log_read` includes the kept reset. `reset_exact` gives that
+whose `read_through` includes the reset slot. `reset_exact` gives that
 complete state equality. `reset_covered_not_reapplied` and
 `reset_ignored_no_effect` prove that covered writes and unread pre-reset
 writes add nothing, including no merge losses. `post_reset_ignores_old_dependency`
@@ -646,405 +569,76 @@ proof about the model's values and supplied schema verdicts, not a proof of
 an arbitrary application's SQL migration.
 
 `same_key_shows_once` proves two rows with ordered other-audience claims
-cannot both be shown. `same_key_after_return` checks putting a circle row
-into the store with the same key: when the deletion drops, the store row
-still shows and the circle row is hidden by the other-audience rule.
+cannot both be shown. Other removal rules can hide both.
 
 ### B15 Checked counterexamples and readings
 
-The retirement histories in B17 use each write's own landing window. Their
-dependent row changes become frozen losses; the dropped creation stays
-dropped. The receive results agree in both legal orders.
-`UniqueOnce.unique_with_others` remains a checked counterexample to running
-uniqueness in an unrestricted loop: a deleted folder with two notes sharing
-a title can leave one note or neither, depending on rule order. The spec's
-three passes avoid that result; this is not a counterexample to §8.
+`UniqueOnce.unique_with_others` shows why uniqueness cannot run in an
+unrestricted loop with foreign-key removal: rule order can change the result.
+The three passes in §8 avoid that ambiguity. Timestamps choose cells; supplied
+claim ranks choose unique winners. These are different orders.
 
-The readings used are:
+Snapshot coverage represents consumed inputs, which can include writes with
+no data effects. Reset eligibility is checked before schema exclusion.
+Original generation and setter evidence determines data dependence; a write's
+recorded reads alone never make another change count.
 
-- “Wins over” compares changes to the same cell and incarnation, or a delete
-  of that incarnation. It does not overwrite unrelated cells or promise that
-  no third write wins. Re-insertion advances the generation; old setters and
-  the old delete cannot affect its cells. This concerns retained merge inputs;
-  resets and schema exclusions use the separate boundary rules below.
-- “Any arrival order” permits transport arrival in any order; application
-  still obeys causality. “Any rule order” stays within §8's three passes.
-- Migration judges independent causes by rerunning all three passes without
-  non-final circle deletions, including unique and other-audience claims.
-  Finality and the responsible kept entry are supplied by store-log replay.
-- A late edit that is eligible after schema handling follows the generation
-  delete path. An excluded old-schema edit follows the frozen schema-loss path.
-- Snapshot coverage means consumed positions; contributing inputs are
-  separate. A kept reset filters uncovered writes before schema exclusion;
-  with no reset, only schema eligibility restricts them.
-- “The same key shows once” means at most once: another removal rule may
-  hide both rows. The store copy wins when it survives the other rules.
-- Setter-and-cell identity stands for the written scalar. Freezing captures
-  that identity and the old column name; it never substitutes a current
-  foreign-key value into a loss.
+### B16 Rust differentials
 
-### B16 Rust differentials and checked discrepancies
+`MergeRunner.lean` compares the core merge, Boolean and entry-named removal,
+frozen losses, and foreign-key permissions. `ReceiveRunner.lean` compares the
+shared per-change data classifier. The check script names each existing Rust
+test exactly and fails if any named test is absent.
 
-`MergeRunner.lean` accepts Boolean removal inputs or `EntryInputs`. Both
-modes run the same core merge; the entry-aware mode returns each named
-circle-deletion cause without discarding its entry. The Rust adapter calls
-`apply` and `removals` and reports the rule Rust actually returns. It does
-not supply a missing identity from the test input.
+The merge crate's `lean_differential`, `entry_differential_histories` and
+`entry_differential_agreement` compare merge fields and removal causes.
+`dependency::tests::mg_differential_data_dependency` compares retained and
+excluded changes, source chains and repeated sources. The database's
+`composite_reference_differential` compares captured whole-tuple setters and
+losses; `freeze_differential_histories` and `freeze_differential_agreement`
+compare records preserved when a migration drops schema, after an earlier
+breaking migration has frozen hidden rows. B18 describes the
+foreign-key comparisons. The sequence package owns first-slot creation,
+cut-off and claim settlement.
 
-`entry_differential_histories` generates causal writes, random application
-orders and prefixes, and changes to kept circle-deletion entries. A mismatch
-stops the comparison. The reducer removes writes, changes, values and entries
-while retaining a history accepted by Rust's `History::new`.
-
-The entry-aware comparison runs 128 generated histories, eight changes to
-the selected deletion entries per history, and three causal application orders
-at each sampled prefix (3,072 comparisons). Entry identities vary in both
-device and log number. The adapter translates the identity returned by Rust's
-`Rule::DeletedCircle(entry)`; it does not reconstruct a cause from the row's
-audience.
-
-`entry_differential_agreement` also checks one key-only circle row and one
-kept deletion. Both implementations retain generation 1 and its insertion
-identity, hide the row, and name the deleting entry. Removing either the insert
-or the deletion also agrees. This exercises the entry identity required by
-[§14.7](../coven.md#147-deleting-a-circle), not merely Boolean visibility.
-
-`scripts/check.sh` runs the Boolean differential, the strict entry histories,
-and the fixed agreement case. SQLite persistence, atomic rollback and
-restoration after reopening are checked separately by Rust database tests.
-
-From the repository root, after building `mergeRunner`:
-
-```sh
-COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
-  cargo test -p coven-merge --all-features entry_differential -- --ignored --nocapture
-```
-
-The reset mode calls `reloadReset` on the selected snapshot inputs and incoming
-writes. `reset_differential_histories` calls the real database
-`load_snapshots`, which installs the snapshot and replays writes through
-`snapshot_writes::apply`, `interpretation::accepted` and `WriteBoundary::excludes`.
-It compares generations, generation setters, cell setters, cell losses and
-frozen losses, and checks that every supplied write position is consumed.
-Store-log selection is supplied to both sides; this is not a test of replay
-selection, encryption or partially installed state.
-
-The deterministic generator samples causal histories, arrival orders and
-prefixes, with inserts, updates and deletes. Authors obtain their row state
-from Rust's merge, retaining the selected snapshot inputs after observing the
-reset. The reducer removes writes, changes, non-key values, reset reads and
-snapshot coverage while preserving format validity, causal closure and the
-merge's generation witnesses.
-
-Rust's reset predicate is §19.3's: an uncovered part of the reset audience is
-ignored when its write's `store_log_read` lacks the kept reset entry, even if
-it read every write in the snapshot. All 128 seeds pass, each in three causal
-arrival orders at both a full history and a random prefix (768 comparisons).
-`reset_differential_agreement` fixes the former seed-0 history: an empty reset
-snapshot and one key-only insert that did not read the reset. Both sides leave
-generation 0 and no cells or loss; removing the reset or making the write read
-it applies the insert on both sides, and removing the write or covering it
-also agrees. Lean's `ResetAgreement` checks the specified results and write
-validity.
-
-`scripts/check.sh` runs the strict reset comparison and the fixed agreement
-case. Run them separately with:
-
-```sh
-COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
-  cargo test -p coven-database reset_differential -- --ignored --nocapture
-```
-
-The generated authors here retain only snapshot inputs and post-reset data, so
-these histories never build on an ignored change. The queue comparison
-[`queue_reset_differential_histories`](queue.md) covers authors that read the
-reset before reloading: each change using ignored data becomes a dependency
-loss there, while its write's other changes apply.
-
-The schema mode calls `boundaryDevice`, including `receivedLoss` and the
-selected snapshot's frozen records. `schema_differential_histories` also
-calls `load_snapshots`, with a schema-raise boundary and no reset. It compares
-the same merge records and frozen whole-row records: row, generation, column
-and setter identities, breaking version and excluded-write identity. Values
-have the model's setter-and-cell meaning; scalar conversion is not tested.
-
-All 128 seeds pass, each in three causal arrival orders at both a full history
-and a random prefix (768 comparisons). The histories include covered ordinary
-writes, covered frozen losses, uncovered old-version writes, admitted
-new-version writes, deletes without old values, and migration log records
-with no row changes. A covered frozen loss comes from an old-version write
-the snapshot's author excluded under its own raise; no write carries a lost
-disposition (format D5). Frozen rows also carry an old column absent from
-the current SQL schema. Covered excluded positions do not become snapshot
-merge inputs. The reducer preserves these distinctions while removing
-writes, changes, values, coverage and the schema raise; it can also return
-an author-excluded write to the snapshot's merge inputs.
-
-The reading is [§17.1](../coven.md#171-host-application): “S already determines
-the effects of writes it covers” and “An old-version write outside S is
-excluded: keep its values as frozen losses, and pass its position without
-applying its changes.” The adapter supplies the eligibility verdict from the
-write's version, and tests the boundary's use of it.
-Conversion callbacks, per-change data dependencies, and competing
-store-log selection remain outside this comparison. Schema tests use no reset.
-
-`scripts/check.sh` runs the strict schema comparison. Run it separately with:
-
-```sh
-COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
-  cargo test -p coven-database schema_differential_histories -- --ignored --nocapture
-```
-
-
-The migration mode calls `migrationRemoves`, which reruns all three removal
-passes through `independentInputs` and `entryView`. The Rust differential
-applies generated writes and the circle deletion to a real database, then
-opens it with a breaking index migration. This invokes `migration_run::run`
-and `migration_state::carry`; it does not reconstruct retirement in the test.
-References, CHECK results and unique claims come from `DatabaseRemovalView`
-and its SQL evaluators. The generator includes competing insertions, store
-and circle audiences, references, CHECK failures and unique rivals, sampled
-in causal orders and prefixes. Replay supplies the deleting entry and its
-finality; selecting or proving that finality remains outside this family.
-
-The comparison observes which rows the migration deletes, by their changed
-generations: Rust's migration write deletes each selected row at its
-generation, as `withHiddenDeletes` does, so the selection and the generation
-change are the same observation. Finality comes from the store-log horizon:
-a final deletion is stored before it. The reducer removes writes, optional
-values, references and the deletion, retaining valid causal histories and
-schema-required insert cells.
-
-Rust follows [§17.1](../coven.md#171-host-application): with every deletion
-final it deletes the rows removal rules hide; with a non-final deletion it
-reruns the three passes on the migrated state with and without that
-deletion, leaves out each hidden row the deletion decides, and includes each
-row that loses only once it is absent. All 128 seeds pass, each in three
-causal application orders at both a full history and a random prefix (768
-comparisons). Earlier histories stopped at seed 0 (one insert in a circle,
-its non-final deletion, and the breaking migration), where Rust retired the
-row; `migration_differential_agreement` now checks that both sides leave it
-out, and agree with the insert removed, the deletion removed, or the
-deletion final (then both delete it). `MigrationCounterexample` keeps the
-corresponding Lean results. Database tests check the migration write's
-deletes, frozen whole-row losses with original setters and old names, a
-returning parent and child after the deletion drops, and late edits losing
-to the retained delete on the migrating device and on a device that loads
-its snapshot. For `freezeDropped`, they check that dropping a table or a
-column freezes each affected pending cell or removed-row loss with its old
-names, setters and cause, through name reuse, renames, snapshot reload with
-equal fingerprints, and dismissal.
-
-`freeze_differential_histories`
-([`migration_hidden_tests.rs`](../../crates/coven-database/src/migration_hidden_tests.rs))
-compares the real migration with `freezeDropped` over generated stores. Two
-devices edit the same store-row and tag cells concurrently, so the subject
-holds cell losses; circle rows, some setting the droppable columns, are
-hidden by a non-final circle deletion, so it holds removed-row losses. One
-or two later migrations then drop column `c`, rename `d` to `e`, drop `d`
-or `e`, and drop table `tags`, in random combinations. Before each step
-the runner's `freeze` mode receives every stored loss, as rows, columns and
-setters numbered from the old names, with the tables and columns that step
-drops. It applies `freezeDropped` with `droppedBy` and returns the frozen
-records, the cell losses still active, and each kept hidden row's live
-record under `dropSchema` (`lossRecord`). After the step Rust's stored
-losses must equal them, frozen ones under their old names and active ones
-under the new. Values are compared by setter, as the model identifies them.
-All 48 seeds agree over 69 steps, comparing 57 frozen cell losses, 33
-frozen whole rows and 69 live removed-row records; the test requires each
-kind to occur. With `droppedBy` ignoring whole-row values it fails at one
-hidden row and a dropped `d`. `freeze_differential_agreement` checks one migration with each
-kind of record. Rows the migration deletes (`captureHidden`), and losses
-under other migration changes, are outside this comparison.
-
-`scripts/check.sh` runs the strict comparisons and the agreement cases:
-
-```sh
-COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
-  cargo test -p coven-database migration_ -- --ignored --nocapture
-```
-
-<a id="b17-receive-order-progress-and-the-retirement-gap"></a>
+Build the runners with `lake build` in `spec/proofs/merge`. Rust tests read
+`COVEN_MERGE_LEAN` for `mergeRunner` and `COVEN_RECEIVE_LEAN` for
+`receiveRunner`; `scripts/check.sh` supplies their absolute paths.
 
 ### B17 Receive order, progress, and dropping by data
 
-This models the data rule in [§8](../coven.md#8-merge): building on a dropped
-change does not make that change count. Rust's remaining implementation
-obligations are listed below and in [queue.md](queue.md).
+`DataDependency.dependsOnDropped` examines a change's original generation
+source and replaced-cell setters at that row. `Authored` requires those
+sources to exist, precede the change and match the generation, incarnation
+and cell they support. `dependencyDecision` implements that predicate;
+`depends_iff` proves its meaning. Missing or malformed evidence cannot become
+an independent change. SQL capture and snapshot encoding must preserve it.
 
-**One data definition.** `DataDependency.dependsOnDropped` asks whether the
-change's recorded generation source or any cell setter it replaced has a
-non-retained change at that row. A row includes table, key and audience. The
-unit of loss is the D5 row change, not its entire write or audience part; a
-multi-column row change is one unit. Deletes retain their change identity
-even without scalar values. A source whose change was itself lost cannot
-support another change, even if that source's write kept other changes.
-
-`DataDependency.State` is retained merge evidence: source identities, original
-change presence, their timestamp order and their own admission verdicts.
-`retained` follows only those sources and terminates by strictly decreasing
-authored timestamps. `dependencyDecision` is an executable decision of the
-source predicate; `depends_iff` gives its exact meaning. There is no read
-frontier, future-reader set, device-local observation or loss-dismissal state
-in this decision. `state_alone` proves equal evidence gives equal decisions.
-Retirement and schema exclusion supply their own base verdicts to this same
-function. A theft policy can supply its verdicts there too; this package
-does not define theft admission.
-
-This is an extension of retained merge state, not a claim that the existing
-compact `St` or D5 records already contain this evidence. `Authored` requires
-an actual generation source and the original setters the change replaced.
-It checks source reads, timestamp descent, generation advancement, setter
-incarnation and cell identity. Capturing the *actual* author-state choice,
-including all replaced cells, is an authoring/validation obligation: a numeric
-generation, old scalar equality or a plausible timestamp cannot establish it.
-The current canonical generation setter may differ from the author's source.
-Malformed or unavailable evidence fails validation or waits; it is not treated
-as an independent change. Snapshots and conversions must preserve this evidence
-separately from dismissible losses.
-
-**No rescue, and no missing generation premise.** `effective` leaves recorded
-causal metadata intact and removes only non-retained changes.
+`effective` leaves causal metadata intact and removes non-retained changes.
 `dropped_stays_dropped`, `dependent_not_retained` and `independent_retained`
-prove the three decisions. `effective_valid` derives `Valid` for this merge:
-if a retained change needs a generation source, that source's change also
-survived. No retained-witness hypothesis is assumed for retirement, schema
-exclusion or reset. Sources are required to be valid in the original authored
-history, before any exclusion.
+prove the decisions. `effective_valid` derives valid surviving generations:
+a retained change's required generation source survived too. `Data.loss`
+records dependent changes with their original values, generation and sources,
+including empty-valued deletes. `dependent_recorded`,
+`dependent_loss_preserves` and `Data.value_accounted` prove that accounting.
 
-`Data.loss` captures dependent changes as `FrozenLoss`, preserving
-their generation, written values and original write identity. Its dependency
-cause lists the failed source identities in authored role order; a write may
-occur twice when it supplied both generation and old cell. Direct schema
-exclusions instead keep their schema cause. A later ordinary replacement never
-acknowledges these frozen values away. `dependent_recorded` covers every
-change, including an empty-valued delete; `dependent_loss_preserves` keeps the
-written values. Base retirement drops and reset-ignored writes create no
-schema loss. Their otherwise admitted dependent changes do create data losses.
-
-`Data.ValueAccounted` extends the ordinary four outcomes with a
-frozen loss of the original change. `Data.value_accounted` and
-`Receive.receive_value_accounted` quantify over original setters, including
-ones removed before merge. Direct schema-excluded changes are covered by
-`receive_schema_loss`. `Data.converges` and `loss_converges` prove agreement
-of merge fields and recorded losses. `receive_converges` and
-`receive_result_converges` derive causal order from actual receive runs and
-include the app view, rule losses and snapshot-frozen records. The remaining
-premises are valid authored evidence, the same admission facts and consumed
-sets, and a correct snapshot with causally closed **consumed** coverage.
-An empty snapshot needs no retained-generation or safe-reader premise.
-
-**The four retirement histories.** `ReceiveExamples` uses the same creation,
-active edit, concurrent delete, first publication times and legal receive
-runs as the original failures. Retirement was temporarily dropped when the
-creation landed and the other devices used it; it then returns before
-finality. The creation is one second outside its window and remains dropped.
-
-- `retirement_generation_accounted` proves the filtered merge is valid and
-  omits the dependent edit, despite the original generation being unavailable.
-- `retirement_value_recorded` proves that edit's original value and generation
-  are held in a dependency loss naming the creation;
-  `retirement_value_accounted` checks the original setter's accounting predicate.
-- `retirement_loss_agrees` proves edit-then-delete and delete-then-edit record
-  the same edit loss; the dependent delete gets its own record too. Neither
-  dependent change alters generations, cells or ordinary merge losses.
-- `receive_runs_agree` proves exact equality of both complete receive results,
-  for any common rule-input function. It applies the general theorem without
-  a retained-witness hypothesis.
-
-`replay_restores_by_own_window` separately checks that dropping the retirement
-restores the creation and edit through an atomic rebuild. Receiving or losing
-a later reader cannot change the creation's own verdict.
-
-**Finality and the send gate.** `window_exact` checks every kept retirement,
-including replacement and member/device removal, using first complete provider
-publication times. Exactly thirty days counts. `retired_no_effects` applies
-also to snapshot contributions rebuilt under a changed retirement decision.
-The window compares storage times only: `window_ignores_reads` shows that
-what the write read plays no part. Exclusion by reading belongs to the
-receive gate: `Policy.viewRetired` says whether the replay of the write's own
-`store_log_read` retires its device, and `passed_before_removal` proves that
-no such write passes when the gate refuses them. A write past a window is
-consumed without changes. Which retirements a write's own replay keeps is
-proved per object in [storage](storage.md#each-object-judged-in-its-own-view).
-
-`retirement_verdict_final` uses the final kept retiring entry and the stable
-preceding store-log prefix supplied by §9, including storage-time ties.
-Retirements after that prefix may appear or disappear. Each is stored after
-the final entry, so those changes cannot reverse either window verdict: an
-admitted write already meets the final entry's earlier deadline. The proof
-needs no assumption about what the write read. No premise concerns future
-readers, their admission, or draining their logs. This proves retirement
-admission finality; another independent schema/reset policy can still change
-its own verdict.
-
-`send_gate_publication_bound` proves that a catch-up started after finality
-blocks an old-id send, and an earlier catch-up plus the strict five-minute
-freshness gate and one-day provider request bound cannot publish at or after
-finality plus one day and five minutes. This supplies a discovery drain bound,
-not an extra admission exception. The store-log finality theorem, completeness
-of catch-up, honest sends and the provider-duration bound remain inputs.
-
-**Receive order and progress.** `Receive.lean` separates downloaded bytes from
-consumed positions. Each device log downloads a contiguous prefix. Attempts
-require retained bytes, other prerequisite checks and every recorded position
-to be consumed; a failed attempt changes nothing. `passed_causal` derives the
-order for every run. `positionsReady_correct` proves frontier readiness,
-including implicit own predecessors, equivalent to checking the expanded past.
-Passing an excluded position can release an unrelated change without applying
-the excluded data.
-
+`Receive.lean` is an abstract downloaded/consumed-input model over a supplied
+past relation, without per-device download constraints. `passed_causal` derives causal application;
 `complete_past_eventually_passed`, `arriving_past_eventually_passed` and
-`receive_eventually_applied` retain their progress results: required inputs
-must eventually arrive or be covered, scheduling must retry retained work,
-other checks must eventually stay open, and admission facts must stabilize.
-Here `applied` identifies base-admitted writes; each one's changes are separately
-filtered and accounted. Arrival alone does not imply progress; `starved` checks
-a downloaded write never attempted. Every changed replay decision requires an
-atomic rebuild of rows, provenance verdicts and losses; these functions model
-the completed transaction, not recovery by a later pass.
+`receive_eventually_applied` require eventual inputs, successful prerequisites
+and fair retry scheduling. The concrete slot-prefix past and reader progress
+are proved in [the sequence package](sequence.md), not by a per-device
+frontier adapter.
 
-**Normative rule and encoding.** §8 specifies per-change data dependence and
-original-change accounting. The Lean evidence is not an assertion that Rust's
-current write and snapshot encodings already retain those sources. Consumed
-frontiers remain separate from retained data; [queue.md](queue.md) describes
-the encoding and conversion obligations.
-
-**Rust obligations for the queue work.** Thread provider publication times and
-all kept retirements into admission. Capture and validate data provenance at
-authoring; store and snapshot it independently of losses, preserving original
-row identity and column names through conversions. Classify each change with
-the shared rule, record its loss before advancing the consumed position, and
-install replay rebuilds atomically. Never infer a source from a frontier or
-from the current canonical generation setter. Check both retirement receive
-orders, independent changes in the same write, source-change chains, snapshot
-reload, dismissal and finality. Concrete conversion obligations are in
-[queue.md](queue.md).
-
-**Rust comparison.** `ReceiveRunner.lean` still calls the proved frontier
-readiness function. `lean_differential_receive` calls the real database
-prerequisite function across three logs and consumed prefixes. Its `window`
-check runs `withinWindow` for `mg_differential_retirement_window`, which
-compares coven-database's retirement window over every subset of kept
-retirements, reads of them, which both sides ignore, and publication times at
-and around thirty days. For each case with a kept retirement, read or not, it
-also keeps the final prefix through
-the earliest one, adds a later retirement, and checks both runs agree, as
-`retirement_verdict_final` states. Its `dependency` check runs
-`DataDependency.retained` and `droppedSources` for
-`mg_differential_data_dependency`, which compares coven-merge's shared
-classifier over generated rows with dropped bases, chains and repeated
-sources; the database receives every change through that classifier. The Boolean, reset and schema runners
-retain their existing paths and comparison scope.
-The database's per-change data losses under retirement replay are compared
-with the queue model's `Retired.lean` composition of `withinWindow` and the
-shared classifier ([queue.md](queue.md), `queue_retirement_differential_histories`):
-the real receiver keeps and drops retiring entries between arrivals and must
-end, after its replay rebuilds, with the model's rows, verdicts and dependency
-losses for the final kept retirements in both arrival orders. Database tests
-check the four histories above after a retirement returns to replay, the
-setter-only variant, schema precedence, dismissal, release after finality,
-rollback of a failed rebuild and a snapshot loaded under another verdict.
+`ReceiveMerge.Policy.admitted` supplies the sequence's base admission decision.
+`unadmitted_no_effects` and `unadmitted_not_applied` keep refused inputs out of
+the data merge. Schema and reset decisions remain separate inputs.
+`receive_converges` and `receive_result_converges` compose causal receipt,
+per-change classification, merge records and losses. Their premises include
+valid authored evidence, equal admission facts and consumed inputs, and a
+sound snapshot. `receive_value_accounted` includes original setters removed
+before the merge. These are completed atomic results; SQLite transactions
+are outside the Lean model.
 
 ### B18 Owner tables and row authenticity
 
@@ -1055,14 +649,11 @@ There is no owner-specific delete trial, removal-set veto or schema predicate.
 
 **Identity and direct permission.** `Policy` opts tables in and derives each
 row's owner from its original creating write's authenticated member.
-`selected_creation` uses the smallest timestamp among generation-zero
-creations, before filtering owners; `creation_selection_converges` proves
-agreement. `later_change_preserves_creation` and `owner_fixed` retain that
-identity across reinsertions and copies. First receipt cannot choose the
-owner: `immutable_first_arrivals_incompatible` checks why that would conflict
-with convergence for concurrent shared-key creations. A newly found earlier
-creation can change the selected original creation, after which the affected
-changes are checked again. It does not change any creation's author.
+The creator is supplied by the applied sequence's first counted creation,
+ordered by slot and then write number; [the sequence ownership
+proof](sequence/CovenSequence/Owners.lean) establishes that choice and its
+preservation. `owner_fixed` retains the authenticated creator across copies
+and reinsertions. The cell merge's generation setter does not select ownership.
 
 `Admission.statement_authorized` proves the direct-target permission, including
 a row whose direct and derived effects coalesce;
@@ -1326,7 +917,7 @@ proves admitted copies mean a permitted move.
 **Authorship a snapshot carries.** `OwnerSnapshotAuthors.lean` models what a
 loader knows about a snapshot's author: its device, the key its signature
 verified with and, once registered, the device's member. A device belongs to
-one member for good and every key binding is kept (§9, §10). D7 section 7
+one member for good and its authenticated key history is retained (§9, §10). D7 section 7
 needs evidence for a write unless it is from the snapshot's own device or,
 with the signer's member known, from that member's device.
 `own_writes_signers` proves such a write's author is the snapshot's signer and
@@ -1357,12 +948,7 @@ parents each step names: `Trace.refs` and `Step.parents` are inputs, and the
 receiver must check that a step's named parent holds the written key at that
 moment, as B18 already requires resolved row identities.
 
-**Rust differentials.** `MergeRunner`'s `creation` mode reports each row's
-`genWrite r 1`, the creation `selected_creation` characterizes.
-`creation_differential_histories` receives generated concurrent creations,
-updates, deletes and reinserts of owner-table rows in several causal orders
-through the real database and compares each row's retained creation with it.
-The `effects` mode evaluates `resolvedSchema` derivations with `evaluate` and
+**Rust differentials.** The `effects` mode evaluates `resolvedSchema` derivations with `evaluate` and
 `verifies`. `captured_actions_are_the_models_consequences` runs SQL deletes,
 referenced-key updates and compound and transitive actions on SQLite,
 rebuilds each captured foreign-key action's `Reference` from the schema and
@@ -1409,7 +995,6 @@ model's comparison is in [storage.md](storage.md#signed-roots-and-row-authorship
 ```sh
 COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   cargo test -p coven-database -- --ignored --exact \
-  ownership::tests::creation_differential_histories \
   execution_capture::tests::lean::captured_actions_are_the_models_consequences \
   author_judgement::tests::local_admission_matches_the_model \
   judge_view::tests::receipt_matches_the_model \

@@ -429,7 +429,7 @@ async fn lean_differential_clocks() {
                     db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
                         &db,
                         vec![snapshot.input()],
-                        writes.iter().map(stream).collect(),
+                        Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
                         std::sync::Arc::new(crate::test_utils::TestAuthorship),
                     ))
                     .await

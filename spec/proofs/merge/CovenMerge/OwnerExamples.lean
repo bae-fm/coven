@@ -3,31 +3,6 @@ import CovenMerge.OwnerProtection
 namespace CovenMerge.Ownership.Examples
 
 
-/-- First receipt is not creation identity. Two independent creations of a
-shared key cannot both establish an immutable owner before their conflict is
-resolved and still yield one owner on every device. -/
-def firstCreator (old : Option Bool) (author : Bool) : Option Bool :=
-  match old with
-  | none => some author
-  | some member => some member
-
-theorem first_arrival_owner_diverges :
-    [false, true].foldl firstCreator none = some false ∧
-    [true, false].foldl firstCreator none = some true := by decide
-
-example : [false, true].foldl firstCreator none ≠ [true, false].foldl firstCreator none := by decide
-
-theorem immutable_first_arrivals_incompatible (select : List Bool → Option Bool)
-    (ana : select [false] = some false) (ben : select [true] = some true)
-    (keepAna : select [false, true] = select [false])
-    (keepBen : select [true, false] = select [true])
-    (converges : select [false, true] = select [true, false]) : False := by
-  rw [keepAna, keepBen, ana, ben] at converges
-  cases converges
-
-theorem one_creation_agrees (member : Bool) :
-    [member].foldl firstCreator none = some member := rfl
-
 /-- Ben's parent, Ana's concurrent child. The rows are merged facts, before
 removals. Destination membership is the replayed result, not the mover's read. -/
 def moving (child readable : Bool) : MoveState Nat Nat Nat where

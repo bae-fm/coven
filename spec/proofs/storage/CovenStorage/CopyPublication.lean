@@ -61,7 +61,7 @@ this session's marker means its copy landed (§4). -/
 def confirm (b : Bucket) (session : Nat) (dest : Path) : Settlement :=
   match b.published dest with
   | none => .absent
-  | some p => if p.session = session then .stored else .reset
+  | some p => if p.session = session then .stored else .occupied
 
 theorem stage_hidden (b : Bucket) (session : Nat) (bytes : Bytes) :
     (stage b session bytes).published = b.published := rfl
@@ -247,10 +247,10 @@ theorem lost_reply_settles (b : Bucket) (s : Nat) (dest : Path) (time : Nat) (op
   obtain ⟨x, hx, hs⟩ := held
   simp [confirm, run_preserves _ ops dest x hx, hs]
 
-/-- Another session's object settles as `reset`: the occupied name is not
-this session's publication (§10). -/
+/-- Another session's marker reports an occupied path; the caller must compare
+its complete bytes before accepting it (§10). -/
 theorem other_marker_refuses (b : Bucket) (s : Nat) (dest : Path) (x : Published)
-    (held : b.published dest = some x) (other : x.session ≠ s) : confirm b s dest = .reset := by
+    (held : b.published dest = some x) (other : x.session ≠ s) : confirm b s dest = .occupied := by
   simp [confirm, held, other]
 
 /-- The marker settles bytes: a session's temporary is fixed when it is
@@ -281,10 +281,10 @@ def checkThenWrite (b : Bucket) (racers : List (Nat × Bytes)) (dest : Path) (ti
   (last, outcomes)
 
 theorem check_then_write_two_winners :
-    let after := checkThenWrite empty [(1, [1]), (2, [2])] (.write 31 1) 0
+    let after := checkThenWrite empty [(1, [1]), (2, [2])] (.slot 1) 0
     after.2 = [.copied, .copied] ∧
-      after.1.objects (.write 31 1) = some ⟨[2], 0⟩ ∧
-      confirm after.1 1 (.write 31 1) = .reset := by
+      after.1.objects (.slot 1) = some ⟨[2], 0⟩ ∧
+      confirm after.1 1 (.slot 1) = .occupied := by
   decide
 
 /-! ## Every object by copy
@@ -416,12 +416,12 @@ the PUT replaces the copy's object, so the copy's session no longer finds its
 marker. SeaweedFS 4.48's unversioned bucket accepted both writers of this
 race in 14 of 200 suite 5 trials. -/
 theorem put_racing_copy_two_winners :
-    let dest := Path.write 31 1
+    let dest := Path.slot 1
     let staged := stage empty 2 [2]
     let copied := publish staged 2 dest 0
     let put := putWrite copied.1 (putCheck staged dest) 1 dest [1] 0
     copied.2 = .copied ∧ put.2 = true ∧ put.1.objects dest = some ⟨[1], 0⟩ ∧
-      confirm put.1 2 dest = .reset := by
+      confirm put.1 2 dest = .occupied := by
   decide
 
 /-! ## Every staged temporary is recorded
@@ -570,7 +570,7 @@ own, and the record is dropped: the first temporary stays, and no record
 names it. A multipart session initiated before it was recorded is the same
 history with the native upload for the temporary. -/
 theorem attempt_naming_strands :
-    let c : Create := ⟨.write 31 1, [7]⟩
+    let c : Create := ⟨.slot 1, [7]⟩
     let after := run false start
       [.record (.create c), .stage (.attempt 0) c.bytes 0,
        .stage (.attempt 1) c.bytes 1, .copy (.attempt 1) c.dest 0, .delete (.attempt 1),
@@ -771,7 +771,7 @@ copies and deletes the shared temporary, and attempt 2's copy finds no source.
 Without the rule it is a hard error though the destination holds the create's
 bytes; with it, an occupied path holding those bytes. -/
 theorem shared_temporary_missing :
-    let c : Create := ⟨.write 31 1, [7]⟩
+    let c : Create := ⟨.slot 1, [7]⟩
     let w : World := { start with recorded := [.create c] }
     let acts := [Act.stage 2, .stage 1, .copy 0 1, .delete, .copy 0 2]
     (runActs false c w acts).2 = [.stored, .failed] ∧
@@ -783,7 +783,7 @@ attempt 1's bytes before attempt 1 copies, attempt 1's copy publishes attempt
 2's marker, and attempt 2's copy, finding no source, reads its own marker.
 Both answer stored, which is what equal bytes settle to anyway (§10). -/
 theorem shared_temporary_both_stored :
-    let c : Create := ⟨.write 31 1, [7]⟩
+    let c : Create := ⟨.slot 1, [7]⟩
     let w : World := { start with recorded := [.create c] }
     (runActs true c w [.stage 1, .stage 2, .copy 0 1, .delete, .copy 0 2]).2 =
       [.stored, .stored] := by

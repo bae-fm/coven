@@ -1,4 +1,4 @@
-import CovenStorage.Identity
+import CovenStorage.Objects
 
 namespace CovenStorage.Files
 
@@ -284,7 +284,7 @@ def finish (s : State) (r : Reference) (expected : Bytes)
     | _ => s
   (state, result)
 
-/-- The initiator receives errors and collisions, including the reset request. -/
+/-- The initiator receives errors and collisions; a mismatch refuses this file attempt. -/
 theorem finish_reports_result (s : State) (r : Reference) (expected : Bytes)
     (remote : Except ReadFailure (Option Object)) :
     (finish s r expected remote).2 = compareOccupied expected remote := rfl
@@ -307,7 +307,7 @@ theorem completion_idempotent (s : State) (r : Reference) :
 
 theorem unequal_bytes_keep_queue (s : State) (r : Reference) (expected : Bytes)
     (o : Object) (h : o.bytes ≠ expected) :
-    finish s r expected (.ok (some o)) = (s, .reset) := by
+    finish s r expected (.ok (some o)) = (s, .occupied) := by
   simp [finish, compareOccupied, h]
 
 /-- An app write deleting a row: an ordinary recorded write. The upload queue

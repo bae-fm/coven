@@ -776,10 +776,8 @@ mod differential {
                         {
                             "pending"
                         }
-                        Err(UploadFailure::Storage(error))
-                            if error.failure() == StorageFailure::AlreadyExists =>
-                        {
-                            "reset"
+                        Err(UploadFailure::Refused(crate::Refusal::WrongIdentity { .. })) => {
+                            "refused"
                         }
                         other => panic!("unexpected attempt result {other:?}"),
                     };

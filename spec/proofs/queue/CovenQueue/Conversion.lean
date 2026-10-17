@@ -1,4 +1,4 @@
-import CovenQueue.Upload
+import CovenQueue.Pending
 
 namespace CovenQueue
 

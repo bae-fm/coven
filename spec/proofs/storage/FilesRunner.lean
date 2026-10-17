@@ -39,7 +39,7 @@ private def settlementJson : Settlement → Json
   | .stored => "stored"
   | .pending _ => "pending"
   | .absent => "absent"
-  | .reset => "reset"
+  | .occupied => "refused"
 
 private def runCase (j : Json) : Except String Json := do
   let events ← j.getObjValAs? (Array Json) "events"

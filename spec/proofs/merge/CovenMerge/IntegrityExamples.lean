@@ -3,49 +3,6 @@ import CovenMerge.Examples
 
 namespace CovenMerge.IntegrityExamples
 
-/-! §17.1: a non-final deletion hides a parent and its child; a third row
-also fails CHECK. Independent removal must leave the first two intact. -/
-
-def circleInputs (deleted : Option Nat) : EntryInputs Nat Nat where
-  rows := [7, 8, 9]
-  present r := r ∈ [7, 8, 9]
-  refs r := if r = 9 then [⟨7, false⟩] else []
-  checkFails r := r = 8
-  inDeletedCircle r := if r = 7 ∨ r = 8 then deleted else none
-  claims _ := []
-  rank := id
-
-theorem nonfinal_parent_and_child :
-    (entryView (circleInputs (some 4))).removed 7 = true ∧
-    (entryView (circleInputs (some 4))).rules 9 = [.foreignKey] ∧
-    migrationRemoves (circleInputs (some 4)) (fun _ => false) 7 = false ∧
-    migrationRemoves (circleInputs (some 4)) (fun _ => false) 9 = false ∧
-    migrationRemoves (circleInputs (some 4)) (fun _ => false) 8 = true ∧
-    migrationRemoves (circleInputs (some 4)) (fun _ => true) 7 = true ∧
-    migrationRemoves (circleInputs (some 4)) (fun _ => true) 9 = true := by decide
-
-def circleState : St Nat Nat Nat := [1, 5].foldl (step DeletedCircle.M) St.init
-
-def migratedCircle := migrateHidden DeletedCircle.M circleState
-  (circleInputs (some 4)) (fun _ => false) 6 2
-
-def afterMigration (deletion : Option Nat) : EntryInputs Nat Nat :=
-  { circleInputs deletion with present := fun r => migratedCircle.merged.gen r % 2 == 1 }
-
-theorem migration_retains_reversible_rows :
-    migratedCircle.merged.gen 7 = 1 ∧ migratedCircle.merged.cell 7 0 = some 1 ∧
-    migratedCircle.merged.gen 9 = 1 ∧ migratedCircle.merged.cell 9 0 = some 5 ∧
-    migratedCircle.merged.gen 8 = 2 ∧ migratedCircle.merged.cell 8 0 = none ∧
-    migratedCircle.merged.genWrite 8 2 = some 6 ∧
-    (migratedCircle.frozen 8).map (fun loss =>
-      (loss.record.column, loss.record.values 0, loss.record.cause)) =
-      some (none, some 1, LossCause.schemaChange 2 6) ∧
-    (migratedCircle.frozen 7).isNone = true ∧
-    (migratedCircle.frozen 9).isNone = true ∧
-    (entryView (afterMigration none)).shown 7 = true ∧
-    (entryView (afterMigration none)).shown 9 = true ∧
-    (entryView (afterMigration none)).shown 8 = false := by decide
-
 /-! Three writes are sufficient: insert, migration delete, concurrent edit.
 The migration read the insert; the later-stamped edit did not read migration. -/
 
@@ -86,7 +43,7 @@ def hidden : EntryInputs Unit Unit where
   claims _ := []
   rank _ := 0
 
-def captured := migrateHidden migrationWrites beforeMigration hidden (fun _ => false) 1 2
+def captured := migrateHidden migrationWrites beforeMigration hidden 1 2
 
 theorem migration_and_late_edit :
     let early := ([0, 2, 1] : List (Fin 3)).foldl (step migrationWrites) (St.init : St (Fin 3) Unit Unit)
@@ -140,24 +97,6 @@ theorem dropped_schema_keeps_losses :
     (freezeDropped (fun _ => true) (.active blueLoss)).record.cause = .write 3 ∧
     (freezeDropped (fun _ => true) (.active wholeLoss)).record.values "title" = some 1 ∧
     (freezeDropped (fun _ => true) (.active wholeLoss)).record.cause = .rules [.check] := by decide
-
-/-! §8: put the removed circle row into the store under the same key. The
-store copy remains the only shown row when the deletion drops. -/
-
-def copies (deleted : Option Nat) : EntryInputs Nat Nat where
-  rows := [0, 1]
-  present _ := true
-  refs _ := []
-  checkFails _ := false
-  inDeletedCircle r := if r = 1 then deleted else none
-  claims r := [⟨⟨[], none⟩, 7, r, true⟩]
-  rank := id
-
-theorem same_key_after_return :
-    (entryView (copies (some 4))).shown 0 = true ∧
-    (entryView (copies (some 4))).shown 1 = false ∧
-    (entryView (copies none)).shown 0 = true ∧
-    (entryView (copies none)).rules 1 = [.otherAudience] := by decide
 
 /-! §19.3: snapshot covers 0, writes 1 and 2 read only old history, and write
 3 read the kept reset as well as write 2. The author can have applied 1 and 2

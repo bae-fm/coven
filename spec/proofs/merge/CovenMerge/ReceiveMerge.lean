@@ -1,59 +1,21 @@
 import CovenMerge.Receive
 
-/-! Application for one audience under fixed kept store-log decisions.
-Changing a boundary or retirement requires an atomic rebuild from retained
-inputs (§9, §10); it starts another run, not an edit to a running prefix. -/
+/-! Application for one audience under fixed sequence admission and snapshot
+boundaries. The sequence model supplies the admitted writes; this model
+composes their data dependencies with the merge. -/
 
 namespace CovenMerge.Receive
 
-structure Retirement where
-  device : Nat
-  entry : Nat
-  stored : Nat
-  deriving DecidableEq, Repr
-
-/-- Every kept retirement of the write's device bounds it by storage time,
-whether or not the write read it (§10). Exclusion by the write's own view is
-the receive gate's, through `viewRetired`. -/
-def retirementAllows {W : Type} (logs : Logs W)
-    (stored : W → Nat) (retirements : List Retirement) (w : W) : Bool :=
-  retirements.all fun e =>
-    if e.device = logs.device w then decide (stored w ≤ e.stored + 30 * 86400)
-    else true
-
 structure Policy (W : Type) where
   boundary : SnapshotBoundary W
-  logs : Logs W
   reset : Option Nat
   readEntry : W → Nat → Bool
   schema : W → SchemaDisposition
-  retirements : List Retirement
-  stored : W → Nat
-  /-- The replay of the write's own `store_log_read` retires its device:
-  removal of it or its member, or a replacement that replay keeps (§7.1, §10;
-  storage's `acceptsView`). -/
-  viewRetired : W → Bool
-
-/-- Storage times are seconds; exactly thirty days counts (§10). Only kept
-retirements are supplied. The caller's gate must refuse writes whose own view
-retires their device (`beforeRemoval`). -/
-def withinWindow {W : Type} (P : Policy W) (w : W) : Bool :=
-  retirementAllows P.logs P.stored P.retirements w
+  /-- Authority and cut-off verdict supplied by the sequence prefix. -/
+  admitted : W → Bool
 
 def eligible {W : Type} (P : Policy W) (w : W) : Bool :=
-  withinWindow P w && boundaryEligible P.reset P.readEntry P.schema w
-
-theorem window_exact {W : Type} (P : Policy W) (w : W) :
-    withinWindow P w = true ↔ ∀ e ∈ P.retirements, e.device = P.logs.device w →
-      P.stored w ≤ e.stored + 30 * 86400 := by
-  simp only [withinWindow, retirementAllows, List.all_eq_true]
-  constructor
-  · intro h e he hd
-    simpa [hd] using h e he
-  · intro h e he
-    by_cases hd : e.device = P.logs.device w
-    · simpa [hd] using h e he hd
-    · simp [hd]
+  P.admitted w && boundaryEligible P.reset P.readEntry P.schema w
 
 section
 variable {W Row Col K : Type} [DecidableEq W]
@@ -61,18 +23,17 @@ variable {W Row Col K : Type} [DecidableEq W]
 def applied (P : Policy W) (s : State W) : List W :=
   s.passed.filter (afterSnapshot P.boundary (eligible P))
 
-/-- Own write admission has no reader input. Snapshot contributions still
-obey the retirement window when replay rebuilds the selected boundary. -/
+/-- Admission is fixed by the write's slot, independently of its readers. -/
 def base (P : Policy W) (w : W) (_r : Row) : Bool :=
-  withinWindow P w && snapshotRetains P.boundary
+  P.admitted w && snapshotRetains P.boundary
     (boundaryEligible P.reset P.readEntry P.schema) w
 
 def effective (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored M)
     (P : Policy W) : Writes W Row Col := DataDependency.effective M valid p (base P)
 
-theorem retired_no_effects (M : Writes W Row Col) (valid : Valid M)
+theorem unadmitted_no_effects (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W) (w : W)
-    (outside : withinWindow P w = false) : ∀ r, (effective M valid p P).chg w r = none := by
+    (outside : P.admitted w = false) : ∀ r, (effective M valid p P).chg w r = none := by
   intro r
   have dropped := DataDependency.dropped_stays_dropped
     (DataDependency.authoredState M valid p (base P)) w r (by simp [DataDependency.authoredState, base, outside])
@@ -91,8 +52,8 @@ theorem passed_not_applied (P : Policy W) (s : State W) (w : W)
     consumed P.boundary s w = true ∧ w ∉ applied P s := by
   simp [consumed, passed, applied, afterSnapshot, excluded]
 
-theorem retired_outside_not_applied (P : Policy W) (s : State W) (w : W)
-    (outside : withinWindow P w = false) : w ∉ applied P s := by
+theorem unadmitted_not_applied (P : Policy W) (s : State W) (w : W)
+    (outside : P.admitted w = false) : w ∉ applied P s := by
   simp [applied, afterSnapshot, eligible, outside]
 
 /-- Every counting write in an eventually available, causally closed history
@@ -100,7 +61,7 @@ is eventually applied. This uses authored timestamp order to discharge the
 well-foundedness condition of the queue's progress proof. -/
 theorem receive_eventually_applied {M : Writes W Row Col} (valid : Valid M) (P : Policy W)
     (past : W → List W) (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
-    (gate : Nat → W → Bool) (run : Run P.boundary P.logs past gate) (fair : Fair run)
+    (gate : Nat → W → Bool) (run : Run P.boundary past gate) (fair : Fair run)
     (S : W → Prop) (closed : Closed M S)
     (arrives : ∀ w, S w → P.boundary.covered w = true ∨ ∃ t, w ∈ (run.state t).downloaded)
     (opens : ∀ w, S w → ∃ t, ∀ u, t ≤ u → gate u w = true)
@@ -114,7 +75,7 @@ theorem receive_eventually_applied {M : Writes W Row Col} (valid : Valid M) (P :
 theorem receive_isSpec (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W)
     (past : W → List W) (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
-    (gate : Nat → W → Bool) (run : Run P.boundary P.logs past gate)
+    (gate : Nat → W → Bool) (run : Run P.boundary past gate)
     (closed : Closed M (fun w => P.boundary.covered w = true))
     (snapshot : St W Row Col)
     (correct : IsSpec (effective M valid p P) (fun w => P.boundary.covered w = true) snapshot)
@@ -122,15 +83,15 @@ theorem receive_isSpec (M : Writes W Row Col) (valid : Valid M)
       (merged M valid p P snapshot (run.state t)) ∧
       Closed (effective M valid p P) (inputs P (run.state t)) :=
   Data.isSpec M valid p (base P) _ closed snapshot correct _
-    (passed_causal P.boundary P.logs past exactPast gate run t)
+    (passed_causal P.boundary past exactPast gate run t)
 
-/-- No retained-generation premise, for retirement or schema exclusion.
+/-- No retained-generation premise, for cut-off or schema exclusion.
 The provenance contract names the actual authored source, before any drop. -/
 theorem receive_converges (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W)
     (past : W → List W) (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
     (gateA gateB : Nat → W → Bool)
-    (a : Run P.boundary P.logs past gateA) (b : Run P.boundary P.logs past gateB)
+    (a : Run P.boundary past gateA) (b : Run P.boundary past gateB)
     (closed : Closed M (fun w => P.boundary.covered w = true))
     (snapshot : St W Row Col)
     (correct : IsSpec (effective M valid p P) (fun w => P.boundary.covered w = true) snapshot)
@@ -150,7 +111,7 @@ def result (M : Writes W Row Col) (valid : Valid M) (p : DataDependency.Authored
   let v := entryView (rules st)
   ⟨⟨st, v, lossRecord st v⟩, snapshot.frozen,
     Data.loss M valid p (base P)
-      (fun w r => if withinWindow P w then
+      (fun w r => if P.admitted w then
         receivedLoss M P.boundary P.reset P.readEntry P.schema values s.passed w r else none)
       values s.passed⟩
 
@@ -158,7 +119,7 @@ theorem receive_result_converges (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W)
     (past : W → List W) (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
     (gateA gateB : Nat → W → Bool)
-    (a : Run P.boundary P.logs past gateA) (b : Run P.boundary P.logs past gateB)
+    (a : Run P.boundary past gateA) (b : Run P.boundary past gateB)
     (closed : Closed M (fun w => P.boundary.covered w = true))
     (snapshot : MergeSnapshot W Row Col)
     (correct : IsSpec (effective M valid p P) (fun w => P.boundary.covered w = true) snapshot.merged)
@@ -178,7 +139,7 @@ theorem receive_result_converges (M : Writes W Row Col) (valid : Valid M)
 theorem receive_value_accounted (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W)
     (past : W → List W) (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
-    (gate : Nat → W → Bool) (run : Run P.boundary P.logs past gate)
+    (gate : Nat → W → Bool) (run : Run P.boundary past gate)
     (closed : Closed M (fun w => P.boundary.covered w = true))
     (snapshot : MergeSnapshot W Row Col)
     (correct : IsSpec (effective M valid p P) (fun w => P.boundary.covered w = true) snapshot.merged)
@@ -194,17 +155,17 @@ theorem receive_value_accounted (M : Writes W Row Col) (valid : Valid M)
       (rules (merged M valid p P snapshot.merged (run.state t)))
       (result M valid p P snapshot values rules (run.state t)).excluded r c w k :=
   Data.value_accounted M valid p (base P)
-    (fun w r => if withinWindow P w then
+    (fun w r => if P.admitted w then
       receivedLoss M P.boundary P.reset P.readEntry P.schema values (run.state t).passed w r else none)
     values _ closed snapshot.merged correct _
-    (passed_causal P.boundary P.logs past exactPast gate run t) _ present w r c k mem setter admitted written
+    (passed_causal P.boundary past exactPast gate run t) _ present w r c k mem setter admitted written
 
 theorem receive_schema_loss (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W)
     (snapshot : MergeSnapshot W Row Col) (values : W → Row → Col → Option W)
     (rules : St W Row Col → EntryInputs Row K) (s : State W) (w : W) (r : Row)
     (ch : Change Col) (v : Nat) (passed : w ∈ s.passed) (change : M.chg w r = some ch)
-    (window : withinWindow P w = true) (uncovered : P.boundary.covered w = false)
+    (admitted : P.admitted w = true) (uncovered : P.boundary.covered w = false)
     (reset : resetAllows P.reset P.readEntry w = true) (schema : P.schema w = .excluded v) :
     (result M valid p P snapshot values rules s).excluded w r =
       some (excludedLoss w r ch.gen (values w r) v) := by
@@ -213,7 +174,7 @@ theorem receive_schema_loss (M : Writes W Row Col) (valid : Valid M)
     · rfl
     · have := P.boundary.inputs_covered w hi; simp [uncovered] at this
   simp [result, Data.loss, base, snapshotRetains, boundaryEligible, schema, notInput,
-    receivedLoss, passed, change, window, boundaryLoss, disposition, uncovered, reset]
+    receivedLoss, passed, change, admitted, boundaryLoss, disposition, uncovered, reset]
 
 theorem receive_reset_no_loss (M : Writes W Row Col) (valid : Valid M)
     (p : DataDependency.Authored M) (P : Policy W)

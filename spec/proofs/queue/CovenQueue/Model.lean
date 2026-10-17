@@ -16,7 +16,9 @@ structure WriteId where
 structure Identity where
   id : WriteId
   timestamp : Nat
+  /-- Expanded causal past, derived from the slot prefix and own predecessors. -/
   read : List WriteId
+  /-- Applied admin slots in that prefix; not a separate stored frontier. -/
   storeRead : List Nat
   deriving DecidableEq, Repr
 
@@ -59,7 +61,7 @@ structure Record where
   body : List RowChange
   deriving DecidableEq, Repr
 
-/-- Own earlier numbers are read even though D5 omits them from `had_read`. -/
+/-- Own earlier numbers are read in addition to the expanded slot prefix. -/
 def reads (w a : Identity) : Bool :=
   a.id ∈ w.read || (w.id.device == a.id.device && a.id.number < w.id.number)
 
@@ -69,7 +71,7 @@ theorem own_earlier_read (w a : Identity)
 
 structure Boundary where
   entry : Nat
-  /-- Authenticated positions of the chosen boundary snapshot (§15), not storage. -/
+  /-- Writes in the chosen snapshot's covered slot prefix (§15). -/
   covers : List WriteId
   deriving DecidableEq, Repr
 
@@ -77,8 +79,8 @@ structure Raise extends Boundary where
   version : Nat
   deriving DecidableEq, Repr
 
-/-- One audience's selected boundaries. Selection and store-log finality are
-inputs; replay may replace this view and rebuild from retained records (§9). -/
+/-- One audience's boundaries selected by its applied sequence prefix.
+The sequence model proves selection; this model interprets the supplied view. -/
 structure View where
   raise : Option Raise
   reset : Option Boundary

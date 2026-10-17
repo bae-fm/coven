@@ -37,7 +37,7 @@ crates=()
 proof_packages=()
 select_all() {
     crates=(all)
-    proof_packages=(merge storelog storelog-data storage queue io sequence)
+    proof_packages=(storage merge queue io sequence)
 }
 select_changed() {
     local files
@@ -75,14 +75,14 @@ print("\n".join(sorted(chosen)))
     # requires one through a lakefile path dependency.
     local package required changed=1
     proof_packages=()
-    for package in merge storelog storelog-data storage queue io sequence; do
+    for package in storage merge queue io sequence; do
         if printf '%s\n' "$files" | grep -q "^spec/proofs/$package/"; then
             proof_packages+=("$package")
         fi
     done
     while [ "$changed" = 1 ]; do
         changed=0
-        for package in merge storelog storelog-data storage queue io sequence; do
+        for package in storage merge queue io sequence; do
             proof_selected "$package" && continue
             for required in $(grep -A2 '\[\[require\]\]' "spec/proofs/$package/lakefile.toml" | sed -n 's/.*path = "\.\.\/\(.*\)"/\1/p'); do
                 if proof_selected "$required"; then
@@ -158,12 +158,6 @@ code_checks() {
     step "cargo test --no-default-features"
     # shellcheck disable=SC2086
     cargo test $packages --no-default-features
-
-    if crate_selected coven-sync; then
-        step "release store-log replay cost (2,000 entries)"
-        exact_ignored coven-sync --release -- --nocapture replay::tests::replay_cost \
-            replay_cache::tests::read_view_replay_cost
-    fi
 }
 
 # A Lean proof, built from scratch in a full run and incrementally in a changed
@@ -257,60 +251,36 @@ exact_ignored() {
     cargo test -p "$package" ${flags[@]+"${flags[@]}"} -- --ignored --exact "$@"
 }
 
-# Merge, replay, access visibility, clocks and create-once uploads have Rust differential tests.
-# Data coupling also has checked counterexamples (spec/proofs/storelog-data.md).
-# Each runs when its Lean package or the Rust crate it compares is selected.
+# Each differential runs when its model or the Rust crate it compares is selected.
 proofs() {
+    lean_proof "storage publication, files and clocks" spec/proofs/storage CovenStorage covenStorage
     lean_proof "the merge" spec/proofs/merge CovenMerge covenMerge
-    lean_proof "the store log" spec/proofs/storelog CovenStorelog covenStorelog
-    lean_proof "store-log data effects" spec/proofs/storelog-data CovenStorelogData covenStorelogData
-    lean_proof "storage identity, files and clocks" spec/proofs/storage CovenStorage covenStorage
-    lean_proof "device upload queues" spec/proofs/queue CovenQueue covenQueue
-    lean_proof "sync IO and discovery" spec/proofs/io CovenIO covenIO
+    lean_proof "queued originals and conversion" spec/proofs/queue CovenQueue covenQueue
+    lean_proof "file IO, retries and wakes" spec/proofs/io CovenIO covenIO
     lean_proof "the store sequence and its JSON runner" spec/proofs/sequence CovenSequence covenSequence \
         CovenSequence sequenceRunner SequenceTests
 
     local runner
     if proof_selected merge || crate_selected coven-merge; then
         runner=$(runner merge mergeRunner)
-        step "Rust / Lean Boolean merge differential"
+        step "Rust / Lean merge and circle-entry differentials"
         COVEN_MERGE_LEAN="$runner" exact_ignored coven-merge --all-features -- \
-            tests::differential::lean_differential
-
-        step "Rust / Lean circle-entry differential"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-merge --all-features -- \
+            tests::differential::lean_differential \
             tests::differential::entry_differential_histories \
             tests::differential::entry_differential_agreement
+        runner=$(runner merge receiveRunner)
+        step "Rust / Lean data dependency"
+        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-merge --all-features -- \
+            dependency::tests::mg_differential_data_dependency
     fi
 
     if proof_selected merge || crate_selected coven-database; then
         runner=$(runner merge mergeRunner)
-        step "Rust / Lean composite reference differential"
+        step "Rust / Lean composite references, frozen losses and owner permissions"
         COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            download::tests::streams::composite_reference_differential
-
-        step "Rust / Lean reset differential"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            write_boundary::tests::differential::reset_differential_histories \
-            write_boundary::tests::differential::reset_differential_agreement
-
-        step "Rust / Lean schema-boundary differential"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            snapshot_writes::tests::differential::schema_differential_histories
-
-        step "Rust / Lean migration selection"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            migration_state::tests::migration_differential_histories \
-            migration_state::tests::migration_differential_agreement
-
-        step "Rust / Lean frozen losses under dropped schema"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            download::tests::streams::composite_reference_differential \
             migration_hidden::tests::freeze_differential_histories \
-            migration_hidden::tests::freeze_differential_agreement
-
-        step "Rust / Lean owner creation, foreign-key effects, local admission and receipt"
-        COVEN_MERGE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            ownership::tests::creation_differential_histories \
+            migration_hidden::tests::freeze_differential_agreement \
             execution_capture::tests::lean::captured_actions_are_the_models_consequences \
             author_judgement::tests::local_admission_matches_the_model \
             judge_view::tests::receipt_matches_the_model \
@@ -323,112 +293,17 @@ proofs() {
         COVEN_AUTHORSHIP_LEAN="$runner" exact_ignored coven-database --all-features -- \
             authorship::tests::multiproofs_match_the_storage_model \
             authorship::tests::retained_openings_match_the_cell_proof_model
+        runner=$(runner storage clockRunner)
+        step "Rust / Lean hybrid timestamps"
+        COVEN_CLOCK_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            write_encoding::tests::lean_differential_clocks
     fi
 
-    if proof_selected merge || proof_selected queue || crate_selected coven-database; then
+    if proof_selected queue || crate_selected coven-database; then
         runner=$(runner queue authoredRunner)
         step "Rust / Lean authored source evidence and data validity"
         COVEN_AUTHORED_LEAN="$runner" exact_ignored coven-database --all-features -- \
             write_sources::tests::authored_sources_differential
-
-        runner=$(runner queue queueRunner)
-        step "Rust / Lean queue change verdicts and row merge"
-        COVEN_QUEUE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            interpretation::tests::queue_reset_differential_histories \
-            interpretation::tests::queue_conversion_differential_histories \
-            interpretation::tests::retire::queue_retirement_differential_histories
-    fi
-
-    if proof_selected queue || crate_selected coven-sync; then
-        runner=$(runner queue queueRunner)
-        step "Rust / Lean upload queue and raise publication"
-        COVEN_QUEUE_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            device_log_sync::tests::schema::raise_publication::differential::queue_raise_differential_histories
-    fi
-
-    if proof_selected storelog || crate_selected coven-sync; then
-        runner=$(runner storelog storelogRunner)
-        step "Rust / Lean CurrentReplay agreement"
-        COVEN_STORELOG_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            tests::lean_differential_generated \
-            tests::lean_differential_checked_examples \
-            tests::lean_differential_circle_replay \
-            tests::lean_differential_online_administration \
-            replay::landing::tests::lean_differential_storage_admission \
-            tests::lean_differential_rejects_invalid_inputs \
-            store_log_sync::store_log_batch::tests::lean_differential_batch_partitions \
-            key_introductions::tests::lean_differential_introductions \
-            key_introductions::tests::lean_differential_accepted_copies \
-            key_introductions::tests::lean_differential_first_attempts \
-            finality::tests::lean_differential_finality_horizon
-    fi
-
-    if proof_selected storelog-data || crate_selected coven-sync; then
-        runner=$(runner storelog-data accessRunner)
-        step "Rust / Lean serialized provider access and pending visibility"
-        COVEN_ACCESS_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::tests::operations::access::lean_differential_access_phases \
-            store_log_sync::tests::operations::pending_records::lean_differential_access_pending \
-            store_log_sync::tests::operations::pending_records::lean_differential_access_rejects_invalid_inputs
-    fi
-
-    if proof_selected storelog-data || crate_selected coven-sync; then
-        runner=$(runner storelog-data rotationRunner)
-        step "Rust / Lean durable rotation and first-send phases"
-        COVEN_ROTATION_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::key_rotation::tests::lean_differential_rotation_phases
-    fi
-
-    if proof_selected storelog-data || crate_selected coven-sync; then
-        runner=$(runner storelog-data memberKeyRunner)
-        step "Rust / Lean stable member ids, entry signers and copy credentials"
-        COVEN_MEMBER_KEY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            entry_signature::tests::lean_differential_member_keys
-        step "Rust / Lean member-key replacements, old-key write windows, copy credentials, joins and calls"
-        COVEN_MEMBER_KEY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            object_author::tests::lean_differential_member_key_replacements \
-            store_log_sync::tests::member_credentials::lean_differential_member_key_credentials \
-            store_log_sync::tests::operations::join_admission::lean_differential_join_admission \
-            store_log_sync::tests::operations::member_keys_replacement::lean_differential_member_key_calls
-    fi
-
-    if proof_selected storelog-data || crate_selected coven-sync; then
-        runner=$(runner storelog-data accessKeyRunner)
-        step "Rust / Lean S3 key deletion journal"
-        COVEN_ACCESS_KEY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            access_keys::tests::lean_differential_access_keys
-    fi
-
-    if proof_selected storelog-data || crate_selected coven-sync || crate_selected coven-database; then
-        runner=$(runner storelog-data storelogDataRunner)
-        step "Rust / Lean replay-selected boundaries"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::tests::snapshots::boundaries::data_differential_boundaries
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            entry_inputs::tests::data_differential_entry_effects \
-            entry_inputs::tests::data_differential_entry_effects_circles \
-            file_write::sources::tests::data_differential_local_sources
-        step "Rust / Lean circles readable again"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::snapshots::reload::tests::data_differential_circle_returns
-        step "Rust / Lean first unmet condition per subject"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            pending::tests::data_differential_pending_records
-        step "Rust / Lean reload choice and wait records"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::snapshots::reload::tests::data_differential_reload_choice
-        step "Rust / Lean uploaded-file deletion"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            files::tests::retention::data_differential_file_deletion
-        step "Rust / Lean snapshot pruning from the catalog"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::tests::snapshots::selection::data_differential_snapshot_pruning
-        step "Rust / Lean retention records and deletion"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::tests::snapshots::retention_waits::data_differential_retention_record
-        step "Rust / Lean which entries a deletion depends on"
-        COVEN_STORELOG_DATA_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            store_log_sync::tests::snapshots::retention_dependencies::data_differential_retention_dependencies
     fi
 
     if proof_selected io || crate_selected coven-sync; then
@@ -436,77 +311,21 @@ proofs() {
         step "Rust / Lean eager download retry classes"
         COVEN_DOWNLOAD_RETRY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             files::tests::cache::retries::io_differential_download_retries
-        runner=$(runner io finalityRunner)
-        step "Rust / Lean finality observation endpoint"
-        COVEN_IO_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            finality::tests::io_differential_finality_observation \
-            finality::tests::io_differential_finality_requires_the_old_prefix_even_when_the_window_is_quiet \
-            store_log_sync::store_log_finality::tests::listing::io_differential_finality_discovery_receipts
         runner=$(runner io ioRunner)
-        step "Rust / Lean numbered discovery, snapshot selection and recent returns"
+        step "Rust / Lean retained byte ranges and retry waits"
         COVEN_IO_RUNNER="$runner" exact_ignored coven-sync --all-features -- \
-            discovery::tests::io_differential_discovery \
-            store_log_sync::tests::snapshots::selection::io_differential_snapshot_counts \
-            store_log_sync::tests::snapshots::selection::io_differential_catalog_current \
-            store_log_sync::tests::snapshots::retention_waits::io_differential_deletable \
-            store_log_sync::tests::snapshots::retention_waits::io_differential_refresh_due \
-            store_log_sync::tests::snapshots::witnesses::io_differential_retain_writes \
-            store_log_sync::tests::snapshots::witnesses::io_differential_storage_deadline \
-            recent_return::tests::io_differential_needs_snapshots \
-            recent_return::tests::io_differential_recent_return \
-            device_log_sync::tests::validation::io_differential_streaming_download_dispositions \
-            device_log_sync::positions::tests::io_differential_positions \
             object_input::tests::io_differential_retained_ranges_and_refusal_eviction \
-            send_gate::tests::io_differential_send_gate \
-            device_log_sync::drain::tests::io_differential_retired_drain \
-            operations::pass::tests::io_differential_pass_phases \
-            device_log_sync::tests::schema::raise_publication::differential::io_differential_snapshot_writes \
-            store_log_sync::tests::snapshots::publication::io_differential_publication \
-            store_log_sync::tests::snapshots::publication::io_differential_ordinary_snapshot_writes \
-            store_log_sync::tests::snapshots::held::io_differential_held \
-            store_log_sync::tests::snapshots::held::io_differential_boundary_select \
-            store_log_sync::tests::snapshots::common_point::io_differential_common_point \
-            retry_waits::tests::io_differential_waiting \
-            store_log_sync::tests::operations::evidence::io_differential_waiting_evidence \
-            store_log_sync::tests::operations::evidence::io_differential_wait_rows \
-            files::tests::upload_retry::io_differential_upload_worker \
-            store_log_sync::snapshots::file_scan::tests::io_differential_file_scan \
-            store_log_sync::snapshots::file_scan::tests::io_differential_folder_restore \
-            write_object::tests::io_differential_dropped_registration \
-            write_object::tests::io_differential_dropped_registration_retires \
-            store_log_landing::tests::io_differential_late_registration_retires
+            retry_waits::tests::io_differential_waiting
     fi
 
     if proof_selected io || crate_selected coven-database; then
         runner=$(runner io ioRunner)
-        step "Rust / Lean write-queue wakes and prerequisite rows"
+        step "Rust / Lean write-queue wakes"
         COVEN_IO_RUNNER="$runner" exact_ignored coven-database --all-features -- \
-            database_changes::tests::io_differential_wakes \
-            prerequisite_rows::tests::io_differential_prerequisite_rows
-    fi
-
-    if proof_selected merge || crate_selected coven-sync; then
-        runner=$(runner merge receiveRunner)
-        step "Rust / Lean send-gate publication bound"
-        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            send_gate::tests::mg_differential_send_gate_publication_bound
-    fi
-
-    if proof_selected storage || crate_selected coven-database; then
-        runner=$(runner storage clockRunner)
-        step "Rust / Lean differential clock test"
-        COVEN_CLOCK_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            write_encoding::tests::lean_differential_clocks
+            database_changes::tests::io_differential_wakes
     fi
 
     if proof_selected storage || crate_selected coven-sync; then
-        runner=$(runner storage identityRunner)
-        step "Rust / Lean identity check and replacement read"
-        COVEN_IDENTITY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
-            identity::tests::st_differential_identity \
-            identity::tests::st_differential_replacement_read \
-            identity::tests::st_differential_replacement_admission \
-            store_log_sync::store_log_identity::tests::st_differential_snapshot_sequence
         runner=$(runner storage filesRunner)
         step "Rust / Lean file attachment, upload completion and status"
         COVEN_FILES_LEAN="$runner" exact_ignored coven-sync --all-features -- \
@@ -514,32 +333,12 @@ proofs() {
             files::tests::status::st_differential_file_status
     fi
 
-    if proof_selected storage || crate_selected coven; then
-        runner=$(runner storage identityRunner)
-        step "Rust / Lean device reset boundary"
-        COVEN_IDENTITY_LEAN="$runner" exact_ignored coven --all-features -- \
-            builder::bootstrap::reset::tests::st_differential_reset_boundary
-    fi
-
     if proof_selected storage || crate_selected coven-storage; then
         runner=$(runner storage createRunner)
-        step "Rust / Lean differential provider create-once tests"
+        step "Rust / Lean provider create-once tests"
         COVEN_CREATE_LEAN="$runner" exact_ignored coven-storage --all-features -- \
             providers::s3::tests::gcs::lean_differential_s3_create \
             providers::onedrive::tests::upload_tests::lean_differential_onedrive_create
-    fi
-
-    if proof_selected merge || crate_selected coven-database; then
-        runner=$(runner merge receiveRunner)
-        step "Rust / Lean differential causal receive test"
-        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            download::tests::lean_differential_receive
-        step "Rust / Lean retirement window"
-        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-database --all-features -- \
-            write_landing::tests::mg_differential_retirement_window
-        step "Rust / Lean data dependency"
-        COVEN_RECEIVE_LEAN="$runner" exact_ignored coven-merge -- \
-            dependency::tests::mg_differential_data_dependency
     fi
 }
 

@@ -1,7 +1,7 @@
 import CovenMerge.Audience
 
 /-! Entry-named circle removal (§8, §14.7, API E4). The Boolean rule engine
-is shared with the compatibility runner; current inputs carry the kept entry. -/
+is shared with the Boolean differential runner; current inputs carry the applied entry. -/
 
 namespace CovenMerge
 
@@ -13,7 +13,7 @@ def EntryInputs.erase {Row K : Type} (I : EntryInputs Row K) : Inputs Row K :=
 section
 variable {W Row Col K : Type} [DecidableEq W] [DecidableEq Row] [DecidableEq K]
 
-/-- Replace the compatibility rule's tag with the responsible entry. -/
+/-- Replace the Boolean rule's tag with the responsible entry. -/
 def namedRule (entry : Option Nat) : Rule → Option Rule
   | .deletedCircle => entry.map Rule.deletedCircleEntry
   | rule => some rule
@@ -60,7 +60,7 @@ theorem named_rules_nonempty (I : EntryInputs Row K) {r : Row}
   rw [hempty] at this
   exact List.not_mem_nil this
 
-/-- Applying or dropping a circle entry only recomputes the view. -/
+/-- Applying a circle deletion only recomputes the view. -/
 def observeEntries (st : St W Row Col) (I : EntryInputs Row K) : St W Row Col × View Row :=
   (st, entryView I)
 
@@ -94,7 +94,7 @@ theorem entry_rule_order (I : EntryInputs Row K) {D : Row → Bool}
     (h : Stratified I.rows (FiresP (fires I.erase)) (rivalBefore I.erase)
       (start I.erase) D) : D = removal I.erase := any_order_removal I.erase h
 
-/-- If replay removes the last applicable cause, the row returns. -/
+/-- A present row with no applicable removal rule is shown. -/
 theorem row_returns (I : EntryInputs Row K) {r : Row}
     (hp : I.present r = true) (h : (entryView I).rules r = []) :
     (entryView I).shown r = true := by

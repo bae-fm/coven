@@ -1,8 +1,8 @@
 //! Rust / Lean `Migration.freezeDropped` (§17.1, D7): a migration that drops
 //! tables and columns, compared over generated losses with the merge model's
-//! frozen records and the live records the dropped schema leaves. A hidden
-//! row's whole-row copy is `Hidden::freeze_dropped`'s; a dropped table's or
-//! column's losses are `migration_state::freeze`'s.
+//! frozen records and the live records the dropped schema leaves. Hidden
+//! rows are already frozen by an earlier breaking migration; schema drops
+//! preserve them while `migration_state::freeze` freezes affected cell losses.
 
 use crate::migration_state::tests::{circle_id, migration_insert};
 use crate::test_utils::tests::{run_lean, Generator};
@@ -39,7 +39,7 @@ struct FreezeHistory {
     store_rows: usize,
     tags: usize,
     edits: Vec<Edit>,
-    /// Circle rows the non-final deletion hides; `true` sets `c` and `d`.
+    /// Circle rows frozen before the schema drops; `true` sets `c` and `d`.
     circle_rows: Vec<bool>,
     /// Each later migration's changes, in version order.
     steps: Vec<Vec<Op>>,
@@ -163,7 +163,10 @@ impl FreezeHistory {
     }
 
     fn migrations(&self, through: usize) -> Vec<Migration> {
-        let mut migrations = vec![Migration::sql(1, "rows and tags", SCHEMA)];
+        let mut migrations = vec![
+            Migration::sql(1, "rows and tags", SCHEMA),
+            Migration::sql(2, "freeze hidden rows", "UPDATE rows SET a=a"),
+        ];
         for (i, step) in self.steps[..through].iter().enumerate() {
             let (d, _) = self.names(i);
             let mut statements = Vec::new();
@@ -181,7 +184,7 @@ impl FreezeHistory {
             // Renaming precedes dropping the renamed column.
             statements.sort_by_key(|s| !s.contains("RENAME"));
             let statements = statements.join("; ");
-            migrations.push(Migration::run(i as u32 + 2, "drop schema", move |sql| {
+            migrations.push(Migration::run(i as u32 + 3, "drop schema", move |sql| {
                 sql.execute_batch(&statements)?;
                 Ok(())
             }));
@@ -232,7 +235,12 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
         execute(&a, format!("INSERT INTO tags VALUES('t{i}','label {i}')")).await;
     }
     for write in records(&a) {
-        b.receive(write.into()).await.unwrap();
+        for db in [&a, &b] {
+            assert_eq!(
+                db.receive(write.clone().into()).await.unwrap(),
+                crate::ApplyOutcome::Applied
+            );
+        }
     }
     for (n, edit) in history.edits.iter().enumerate() {
         let statement = |side: &str| match edit {
@@ -244,6 +252,9 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
         };
         execute(&b, statement("b")).await;
         execute(&a, statement("a")).await;
+        a.receive(records(&a).last().unwrap().clone().into())
+            .await
+            .unwrap();
         a.receive(records(&b).last().unwrap().clone().into())
             .await
             .unwrap();
@@ -269,9 +280,17 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
     if !history.circle_rows.is_empty() {
         crate::tests::delete_circle(&a, circle_id()).await.unwrap();
     }
-    let mut all = vec![read(&a)];
     a.close().await.unwrap();
     b.close().await.unwrap();
+    // Circle deletion is permanent. A breaking migration freezes every hidden
+    // row before the schema-drop comparisons, which preserve those records.
+    let a = stores[0]
+        .builder(tables(true), history.migrations(0))
+        .open()
+        .await
+        .unwrap();
+    let mut all = vec![read(&a)];
+    a.close().await.unwrap();
     for through in 1..=history.steps.len() {
         let (_, tags) = history.names(through);
         let a = stores[0]
@@ -480,7 +499,7 @@ async fn compare(
 #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh runs the frozen-loss histories"]
 async fn freeze_differential_histories() {
     let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
-    // Frozen cell losses, frozen whole rows, and live removed-row records.
+    // Frozen cell losses, frozen whole rows, and unaffected active cell losses.
     let mut seen = [0; 3];
     for seed in 0..48 {
         let mut history = FreezeHistory::generate(&mut Generator::new(seed + 70_000));
@@ -492,7 +511,7 @@ async fn freeze_differential_histories() {
                         seen[usize::from(frozen["column"].is_null())] += 1;
                     }
                     for active in result["active"].as_array().unwrap() {
-                        seen[2] += usize::from(active["column"].is_null());
+                        seen[2] += usize::from(active["column"].is_number());
                     }
                 }
             }
@@ -517,10 +536,9 @@ async fn freeze_differential_histories() {
     assert!(seen.iter().all(|n| *n > 0), "{seen:?}");
 }
 
-/// Every kind of affected loss in one migration: a dropped column's cell
-/// loss, a dropped table's cell loss, and a hidden row whose removal record
-/// names the dropped column, frozen whole while its live record follows the
-/// new schema; an unaffected cell loss and hidden row stay active.
+/// A dropped column's cell loss and a dropped table's cell loss become frozen.
+/// Whole-row losses from the preceding migration remain frozen, including old
+/// column names, while an unaffected cell loss stays active.
 #[tokio::test]
 #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh runs the frozen-loss agreement"]
 async fn freeze_differential_agreement() {
@@ -544,7 +562,7 @@ async fn freeze_differential_agreement() {
     };
     let all = losses(&history).await;
     let (input, rust) = case(&history, &all, 0);
-    assert_eq!(rust["frozen"].as_array().unwrap().len(), 3, "{rust}");
-    assert_eq!(rust["active"].as_array().unwrap().len(), 3, "{rust}");
+    assert_eq!(rust["frozen"].as_array().unwrap().len(), 4, "{rust}");
+    assert_eq!(rust["active"].as_array().unwrap().len(), 1, "{rust}");
     assert_eq!(lean(&runner, &input), rust, "{input}");
 }

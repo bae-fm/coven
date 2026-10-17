@@ -18,8 +18,6 @@ the rest as applied (§14.4).
   have, closed under parents and rivals.
 * `rivals_closed`: when every unique claim includes the audience, unique
   rivals share an audience (§14.1).
-* `fingerprint_local`: without the rule for a key in two audiences, removal
-  agrees on every audience both devices read (§19.1).
 * `Moved.agree`, `Moved.store_wins`: Ana moves note 1 into her circle while
   Ben re-adds it in the store; devices in and out of the circle agree on the
   store's note 1, which wins over the circle's.
@@ -198,43 +196,6 @@ theorem rivals_closed {A V : Type} [DecidableEq A] [DecidableEq V] (G : Inputs R
   obtain ⟨_, c, hc, hco, c', hc', ⟨⟨⟨hco', _⟩, hk⟩, _⟩⟩ := h
   rw [← hkey y c' hc' hco', ← hkey x c hc hco, hk]
 
-/-- The inputs a fingerprint uses: the claims of keys present in two
-audiences left out, since which row shows for such a key depends on which
-circles a device reads (§14.2, §19.1). -/
-def forFingerprint (G : Inputs Row K) : Inputs Row K :=
-  { G with claims := fun x => (G.claims x).filter (fun c => !c.other) }
-
-/-- Without the claims of keys in two audiences, a rival is a unique rival. -/
-theorem rivalBefore_forFingerprint {G : Inputs Row K} {x y : Row} :
-    rivalBefore (forFingerprint G) y x = rivalOf G false y x := by
-  have h : rivalOf (forFingerprint G) true y x = false := by
-    unfold rivalOf
-    simp only [forFingerprint, Bool.and_eq_false_iff, List.any_eq_false, List.mem_filter]
-    right
-    intro c ⟨_, hc⟩ h
-    simp only [Bool.not_eq_true'] at hc
-    simp [hc] at h
-  have h2 : rivalOf (forFingerprint G) false y x = rivalOf G false y x := by
-    have nb : ∀ (b t : Bool), (!b && (decide (b = false) && t)) = (decide (b = false) && t) := by
-      intro b t; cases b <;> rfl
-    unfold rivalOf
-    simp only [forFingerprint, List.any_filter, Bool.and_assoc, nb]
-    rfl
-  unfold rivalBefore
-  rw [h, h2, Bool.or_false]
-
-/-- **Fingerprints agree.** Two devices end with the same removals, computed
-for the fingerprint, on any set of rows both have that is closed under
-parents and unique rivals: every row of an audience both read, by §14.5 and
-`rivals_closed`. -/
-theorem fingerprint_local {G : Inputs Row K} {visA visB R : Row → Bool}
-    (hvis : ∀ x, R x = true → visA x = true ∧ visB x = true)
-    (hpar : ∀ x, R x = true → ∀ r ∈ G.refs x, R r.parent = true)
-    (hriv : ∀ x, R x = true → ∀ y ∈ G.rows,
-      rivalBefore (forFingerprint G) y x = true → R y = true) :
-    ∀ x, R x = true → removal (restrict (forFingerprint G) visA) x =
-      removal (restrict (forFingerprint G) visB) x :=
-  removal_local ⟨hvis, hpar, hriv⟩
 
 end
 

@@ -7,7 +7,7 @@ import CovenMerge.Converge
 What the rules read from the merged state is collected in `Inputs`: which
 rows are present, each row's references, whether its merged values fail a
 CHECK, whether it is in a deleted circle, and its claims. `Inputs` is computed
-from the merged state and the store log; nothing in it depends on which rows
+from the merged state and the applied sequence; nothing in it depends on which rows
 the rules remove.
 
 * `fires`: the rules other than the unique ones: foreign keys, CHECK, and
@@ -46,21 +46,22 @@ structure UniqueConstraint where
   predicate : Option String
   deriving DecidableEq, Repr
 
-/-- One claim: the constraint, the value claimed, the claim's stamp, and
+/-- One claim: the constraint, the value claimed, the claim's order rank, and
 whether it is a key present in two audiences (§8.5, §14.2). -/
 structure Claim (K : Type) where
   con : UniqueConstraint
   key : K
+  /-- Unique claims use slot/write order; other-audience claims use §14.2. -/
   ts : Nat
   other : Bool
 
-/-- What the removal rules read, computed from the merged state and the store
-log.
+/-- What the removal rules read, computed from the merged state and the applied
+sequence.
 * `rows`: the synced rows the device has;
 * `present`: the row's generation is odd;
 * `refs`: its references;
 * `checkFails`: its merged values fail a CHECK (§8.6);
-* `inDeletedCircle`: its audience is a circle the store log has deleted
+* `inDeletedCircle`: its audience is a circle the applied sequence has deleted
   (§14.7);
 * `claims`: its claims (§8.5, §14.2);
 * `rank`: its primary key's order, which breaks ties between claims. -/
@@ -73,8 +74,7 @@ structure RemovalInputs (Row K Deletion : Type) where
   claims : Row → List (Claim K)
   rank : Row → Nat
 
-/-- Boolean deletion inputs retained for the Rust differential runner and the
-store-log/data compatibility model. Entry-aware inputs use `RemovalInputs`
+/-- Boolean deletion inputs used by the Rust differential runner. Entry-aware inputs use `RemovalInputs`
 with `Option Nat` (§14.7). -/
 abbrev Inputs (Row K : Type) := RemovalInputs Row K Bool
 
@@ -91,7 +91,7 @@ def fires (D : Row → Bool) (x : Row) : Bool :=
   I.checkFails x || fkFires I D x || I.inDeletedCircle x
 
 /-- Row `y`'s claim of kind `other` comes before row `x`'s: same constraint,
-same value, smaller stamp, or equal stamps and smaller key. -/
+same value, earlier rank, or equal ranks and smaller key. -/
 def rivalOf (other : Bool) (y x : Row) : Bool :=
   decide (y ≠ x) && (I.claims x).any (fun c => decide (c.other = other) && (I.claims y).any (fun c' =>
     decide (c'.other = other) && decide (c'.con = c.con) && decide (c'.key = c.key) &&

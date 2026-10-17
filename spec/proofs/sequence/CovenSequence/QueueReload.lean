@@ -58,7 +58,7 @@ def canCommit (s : State S Stamp) (p : Plan S) (bytes : S.Aud → Option S.Batch
 def consumed (slot : Write S Stamp → Option Nat) (target : Nat) (w : Write S Stamp) : Bool :=
   match slot w with | none => false | some n => decide (n ≤ target)
 
-/-- Base admission covers authenticated membership, retirement and change
+/-- Base admission covers authenticated membership, slot cut-off and change
 eligibility. Reset admission is explicit and precedes conversion. -/
 def eligible (slot : Write S Stamp → Option Nat) (admitted : S.Aud → Write S Stamp → Bool)
     (A : S.Aud) (loaded : Reader S) (w : Write S Stamp) : Bool :=

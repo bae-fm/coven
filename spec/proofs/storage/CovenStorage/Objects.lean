@@ -4,12 +4,9 @@ namespace CovenStorage
 
 /-- D10, within one store. Snapshot audiences have independent paths. -/
 inductive Path where
-  | write (device number : Nat)
-  | entry (device number : Nat)
+  | slot (number : Nat)
   | snapshot (audience device number : Nat)
   | file (device id : Nat)
-  /-- The store's create-once creation marker, claimed before setup writes. -/
-  | created
   deriving DecidableEq, Repr
 
 /-- Exact symbolic bytes; encryption and encoding are outside this model. -/
@@ -73,14 +70,15 @@ inductive Settlement where
   | stored
   | pending (failure : ReadFailure)
   | absent
-  | reset
+  /-- The comparison found a different occupant; this alone says nothing about device identity. -/
+  | occupied
   deriving DecidableEq, Repr
 
 /-- §6, §10: an occupied path is not an acknowledgement. -/
 def compareOccupied (expected : Bytes) : Except ReadFailure (Option Object) → Settlement
   | .error e => .pending e
   | .ok none => .absent
-  | .ok (some o) => if o.bytes = expected then .stored else .reset
+  | .ok (some o) => if o.bytes = expected then .stored else .occupied
 
 theorem settled_iff_equal (b : Bytes) (r : Except ReadFailure (Option Object)) :
     compareOccupied b r = .stored ↔ ∃ o, r = .ok (some o) ∧ o.bytes = b := by

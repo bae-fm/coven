@@ -123,7 +123,7 @@ theorem bad_conversion (mode : Bool) :
     simp [root_other_kept, bad_dropped]
 
 /-- The same write converts its retained row and freezes its dependent row.
-No store-log adoption marker is needed, despite its implicit read of write 1. -/
+Its implicit read of write 1 does not determine schema eligibility. -/
 theorem mixed_write (mode : Bool) :
     (receive conversion raised (history mode) (valid mode) 2).1.body =
       [edit 0 0 0 111,

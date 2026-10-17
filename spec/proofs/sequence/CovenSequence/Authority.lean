@@ -2,7 +2,7 @@ import CovenSequence.Cutoff
 
 /-! Concrete membership and role admission. Other admin actions keep their
 own authority policy; membership and role changes require a current admin.
-The candidate state must retain an admin, as in storelog's checkedEffect. -/
+The candidate state must retain an admin. -/
 namespace CovenSequence.Authority
 
 variable {S : Sig}

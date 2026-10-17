@@ -1,8 +1,8 @@
 import CovenMerge.Circles
 import CovenMerge.DataDependency
 
-/-! Breaking migrations (§17.1). Re-evaluate all removal rules without
-non-final circle deletions, then use the ordinary generation delete. Capture
+/-! Breaking migrations (§17.1). Use the current removal rules
+and the ordinary generation delete. Capture
 the whole written row even though the migration had read its setters. -/
 
 namespace CovenMerge
@@ -10,39 +10,16 @@ namespace CovenMerge
 section
 variable {W Row Col K : Type} [DecidableEq W] [DecidableEq Row] [DecidableEq K]
 
-def independentInputs (I : EntryInputs Row K) (final : Nat → Bool) : EntryInputs Row K :=
-  { I with inDeletedCircle := fun r => (I.inDeletedCircle r).filter final }
-
-def migrationRemoves (I : EntryInputs Row K) (final : Nat → Bool) : Row → Bool :=
-  (entryView (independentInputs I final)).removed
-
-theorem independent_rule_order (I : EntryInputs Row K) (final : Nat → Bool)
-    {D : Row → Bool}
-    (h : let J := (independentInputs I final).erase
-      Stratified J.rows (FiresP (fires J)) (rivalBefore J) (start J) D) :
-    D = removal (independentInputs I final).erase := entry_rule_order _ h
-
-/-- Inputs differing only in non-final deletions yield the same migration
-decision, including children and unique claims, because all three passes rerun. -/
-theorem nonfinal_does_not_decide (I : EntryInputs Row K) (final : Nat → Bool) :
-    migrationRemoves (independentInputs I final) final = migrationRemoves I final := by
-  have he : independentInputs (independentInputs I final) final = independentInputs I final := by
-    cases I
-    simp only [independentInputs, RemovalInputs.mk.injEq]
-    refine ⟨trivial, trivial, trivial, trivial, ?_, trivial, trivial⟩
-    funext r
-    simp [Option.filter_filter]
-  unfold migrationRemoves
-  rw [he]
+def migrationRemoves (I : EntryInputs Row K) : Row → Bool :=
+  (entryView I).removed
 
 /-- The immutable row-change record authored by the migration. Other changed
 cells use the supplied migration write; hidden rows become ordinary deletes. -/
 def withHiddenDeletes (M : Writes W Row Col) (st : St W Row Col)
-    (I : EntryInputs Row K) (final : Nat → Bool) (migration : W) : Writes W Row Col :=
+    (I : EntryInputs Row K) (migration : W) : Writes W Row Col :=
   { M with chg := fun w r =>
       if w = migration then
-        if migrationRemoves I final r then some ⟨.del, st.gen r, fun _ => false⟩
-        else if (entryView I).removed r then none
+        if migrationRemoves I r then some ⟨.del, st.gen r, fun _ => false⟩
         else M.chg w r
       else M.chg w r }
 
@@ -159,9 +136,9 @@ theorem dropped_column_frozen_whole [DecidableEq Col] (cols : List Col) (st : St
   rw [hidden_row_after_drop st v table column r kept hidden]
   simp [dropped]
 
-def captureHidden (st : St W Row Col) (I : EntryInputs Row K) (final : Nat → Bool)
+def captureHidden (st : St W Row Col) (I : EntryInputs Row K)
     (migration : W) (version : Nat) (r : Row) : Option (FrozenLoss W Row Col) :=
-  if migrationRemoves I final r then
+  if migrationRemoves I r then
     some (freeze ⟨r, st.gen r, none, st.cell r, .schemaChange version migration⟩)
   else none
 
@@ -170,53 +147,43 @@ structure Migrated (W Row Col : Type) where
   frozen : Row → Option (FrozenLoss W Row Col)
 
 def migrateHidden (M : Writes W Row Col) (st : St W Row Col)
-    (I : EntryInputs Row K) (final : Nat → Bool) (migration : W) (version : Nat) :
+    (I : EntryInputs Row K) (migration : W) (version : Nat) :
     Migrated W Row Col :=
-  ⟨step (withHiddenDeletes M st I final migration) st migration,
-    captureHidden st I final migration version⟩
-
-/-- A row hidden only by reversible causes is excluded from every part of
-the migration write, not merely from its generated deletes (§17.1). -/
-theorem nonfinal_only_untouched (M : Writes W Row Col) (st : St W Row Col)
-    (I : EntryInputs Row K) (final : Nat → Bool) (m : W) (v : Nat) {r : Row}
-    (hidden : (entryView I).removed r = true) (independent : migrationRemoves I final r = false) :
-    atRow (migrateHidden M st I final m v).merged r = atRow st r ∧
-    (migrateHidden M st I final m v).frozen r = none := by
-  simp [migrateHidden, withHiddenDeletes, captureHidden, hidden, independent,
-    atRow, step, genStep, genWriteStep, cellStep]
+  ⟨step (withHiddenDeletes M st I migration) st migration,
+    captureHidden st I migration version⟩
 
 theorem hidden_generation_delete (M : Writes W Row Col) (st : St W Row Col)
-    (I : EntryInputs Row K) (final : Nat → Bool) (m : W) (v : Nat) {r : Row}
-    (h : migrationRemoves I final r = true) :
-    (migrateHidden M st I final m v).merged.gen r = st.gen r + 1 ∧
-    (∀ c, (migrateHidden M st I final m v).merged.cell r c = none) ∧
-    (migrateHidden M st I final m v).frozen r =
+    (I : EntryInputs Row K) (m : W) (v : Nat) {r : Row}
+    (h : migrationRemoves I r = true) :
+    (migrateHidden M st I m v).merged.gen r = st.gen r + 1 ∧
+    (∀ c, (migrateHidden M st I m v).merged.cell r c = none) ∧
+    (migrateHidden M st I m v).frozen r =
       some (freeze ⟨r, st.gen r, none, st.cell r, .schemaChange v m⟩) := by
   simp [migrateHidden, withHiddenDeletes, captureHidden, h, step, genStep, cellStep]
 
 theorem migration_keeps_generation_record (M : Writes W Row Col) (st : St W Row Col)
-    (I : EntryInputs Row K) (final : Nat → Bool) (m : W) (v : Nat) {r : Row}
-    (h : migrationRemoves I final r = true) (fresh : st.genWrite r (st.gen r + 1) = none) :
-    (migrateHidden M st I final m v).merged.genWrite r (st.gen r + 1) = some m := by
+    (I : EntryInputs Row K) (m : W) (v : Nat) {r : Row}
+    (h : migrationRemoves I r = true) (fresh : st.genWrite r (st.gen r + 1) = none) :
+    (migrateHidden M st I m v).merged.genWrite r (st.gen r + 1) = some m := by
   simp [migrateHidden, step, withHiddenDeletes, h, genWriteStep, fresh, minBy]
 
 theorem hidden_delete_even (M : Writes W Row Col) (st : St W Row Col)
-    (I : EntryInputs Row K) (final : Nat → Bool) (m : W) (v : Nat) {r : Row}
-    (h : migrationRemoves I final r = true) (odd : st.gen r % 2 = 1) :
-    (migrateHidden M st I final m v).merged.gen r % 2 = 0 := by
-  rw [(hidden_generation_delete M st I final m v h).1]
+    (I : EntryInputs Row K) (m : W) (v : Nat) {r : Row}
+    (h : migrationRemoves I r = true) (odd : st.gen r % 2 = 1) :
+    (migrateHidden M st I m v).merged.gen r % 2 = 0 := by
+  rw [(hidden_generation_delete M st I m v h).1]
   omega
 
 /-- No live removed-row record survives an even generation. -/
 theorem migration_removes_live_loss [DecidableEq Col]
     (M : Writes W Row Col) (st : St W Row Col) (I : EntryInputs Row K)
-    (final : Nat → Bool) (m : W) (v : Nat) {r : Row}
-    (h : migrationRemoves I final r = true) (odd : st.gen r % 2 = 1)
+    (m : W) (v : Nat) {r : Row}
+    (h : migrationRemoves I r = true) (odd : st.gen r % 2 = 1)
     (after : EntryInputs Row K)
     (present : after.present r = decide
-      ((migrateHidden M st I final m v).merged.gen r % 2 = 1)) :
-    lossRecord (migrateHidden M st I final m v).merged (entryView after) r none = none := by
-  have he := hidden_delete_even M st I final m v h odd
+      ((migrateHidden M st I m v).merged.gen r % 2 = 1)) :
+    lossRecord (migrateHidden M st I m v).merged (entryView after) r none = none := by
+  have he := hidden_delete_even M st I m v h odd
   simp [lossRecord, entryView, view, EntryInputs.erase, present, he]
 
 /-- A late, eligible edit of an already deleted incarnation leaves the row
@@ -236,23 +203,23 @@ theorem late_edit_recorded (M : Writes W Row Col) (st : St W Row Col)
 not deletes recomputed from each arrival prefix. Thus the core convergence
 theorem includes its deletes and every concurrent/late edit. -/
 theorem migration_converges (M : Writes W Row Col) (st : St W Row Col)
-    (I : EntryInputs Row K) (final : Nat → Bool) (m : W)
-    (valid : Valid (withHiddenDeletes M st I final m)) {a b : List W}
-    (ha : CausalOrder (withHiddenDeletes M st I final m) a)
-    (hb : CausalOrder (withHiddenDeletes M st I final m) b)
+    (I : EntryInputs Row K) (m : W)
+    (valid : Valid (withHiddenDeletes M st I m)) {a b : List W}
+    (ha : CausalOrder (withHiddenDeletes M st I m) a)
+    (hb : CausalOrder (withHiddenDeletes M st I m) b)
     (same : ∀ w, w ∈ a ↔ w ∈ b) :
-    a.foldl (step (withHiddenDeletes M st I final m)) St.init =
-      b.foldl (step (withHiddenDeletes M st I final m)) St.init :=
+    a.foldl (step (withHiddenDeletes M st I m)) St.init =
+      b.foldl (step (withHiddenDeletes M st I m)) St.init :=
   merge_converges valid ha hb same
 
 /-- Capturing a migration's snapshot also agrees: equal author input sets
 produce equal generation deletes and equal frozen whole-row records. -/
 theorem migration_capture_converges (M : Writes W Row Col) (valid : Valid M)
-    (inputs : St W Row Col → EntryInputs Row K) (final : Nat → Bool) (m : W) (v : Nat)
+    (inputs : St W Row Col → EntryInputs Row K) (m : W) (v : Nat)
     {a b : List W} (ha : CausalOrder M a) (hb : CausalOrder M b)
     (same : ∀ w, w ∈ a ↔ w ∈ b) :
-    migrateHidden M (a.foldl (step M) St.init) (inputs (a.foldl (step M) St.init)) final m v =
-      migrateHidden M (b.foldl (step M) St.init) (inputs (b.foldl (step M) St.init)) final m v := by
+    migrateHidden M (a.foldl (step M) St.init) (inputs (a.foldl (step M) St.init)) m v =
+      migrateHidden M (b.foldl (step M) St.init) (inputs (b.foldl (step M) St.init)) m v := by
   rw [merge_converges valid ha hb same]
 
 end

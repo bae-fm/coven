@@ -1,7 +1,7 @@
 import CovenMerge.Accounting
 
 /-! The selected boundary snapshot and incoming parts, together (§8, §17.1,
-§19.3). Selection of the kept store-log entry and schema conversion verdicts
+§19.3). Selection of the applied sequence boundary and schema conversion verdicts
 are inputs; the effects below do not depend on the device or arrival order. -/
 
 namespace CovenMerge
@@ -136,7 +136,7 @@ theorem boundary_value_accounted {M : Writes W Row Col} (valid : Valid M)
 end
 
 /-! Per-change boundary application. The whole-write boundary functions above
-remain the inputs of the Rust differential. This path carries actual data
+and this path share the same selected boundary inputs. This path carries actual data
 provenance and derives validity after drops rather than assuming witnesses. -/
 namespace Data
 

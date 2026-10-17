@@ -20,7 +20,7 @@ private def creates (requests : Array Json) : Except String Json := do
     let number ← request.getObjValAs? Nat "path"
     let bytes ← request.getObjValAs? (List Nat) "bytes"
     let copy := (request.getObjValAs? Bool "copy").toOption.getD false
-    let path := Path.write 31 number
+    let path := Path.slot number
     if copy then
       session := session + 1
       let (after, outcome) :=
@@ -53,20 +53,20 @@ private def ops (list : Array Json) : Except String Json := do
     match ← op.getObjValAs? String "op" with
     | "stage" => pure (CopyPublication.Op.stage session (← op.getObjValAs? (List Nat) "bytes"))
     | "publish" =>
-        pure (CopyPublication.Op.publish session (.write 31 (← op.getObjValAs? Nat "path")) 0)
+        pure (CopyPublication.Op.publish session (.slot (← op.getObjValAs? Nat "path")) 0)
     | other => throw s!"unknown copy operation {other}"
   let sessions := parsed.filterMap fun
     | .stage s _ => some s
     | .publish _ _ _ => none
   let (bucket, outcomes) := CopyPublication.run CopyPublication.empty parsed
   let paths := (parsed.filterMap fun
-    | .publish _ (.write _ n) _ => some n
+    | .publish _ (.slot n) _ => some n
     | _ => none).eraseDups
   pure <| Json.mkObj [
     ("outcomes", toJson (outcomes.map outcomeName)),
     ("objects", Json.arr (paths.map fun n =>
       Json.mkObj [("path", toJson n),
-        ("bytes", toJson ((bucket.objects (.write 31 n)).map (·.bytes)))]).toArray),
+        ("bytes", toJson ((bucket.objects (.slot n)).map (·.bytes)))]).toArray),
     ("staged", toJson (sessions.filter fun s => (bucket.staging s).isSome).length)]
 
 private def run (j : Json) : Except String Json :=

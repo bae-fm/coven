@@ -8,7 +8,6 @@ import Lean
     the existing model; this file changes no theorem or proof. Values in the
     model are setter identities. Reference substitution and SQL constraint
     evaluation are inputs, as in Appendix B's stated proof boundary. The
-    `creation` mode reports each row's selected original creation and the
     `effects` mode recomputes foreign-key consequences from resolved
     references (B18). -/
 
@@ -106,86 +105,6 @@ private def mergedJson (st : St Nat Nat Nat) (writes : Array InputWrite)
     (rows : Array Nat) (cols : Nat) : Json :=
   toJson (rows.map fun r => Json.mkObj (mergedFields st writes r cols))
 
-private def readBoundary (j : Json) (writes : Array InputWrite) :
-    Except String (SnapshotBoundary Nat × Array Nat) := do
-  let covered ← j.getObjValAs? (Array Nat) "covered"
-  let snapshotInputs ← j.getObjValAs? (Array Nat) "snapshot"
-  for w in covered ++ snapshotInputs do
-    if !(writes.any (·.id == w)) then throw "boundary names an unknown write"
-  for w in snapshotInputs do
-    if !covered.contains w then throw "snapshot input is not covered"
-  let B : SnapshotBoundary Nat := {
-    covered := covered.contains
-    inputs := fun w => snapshotInputs.contains w && covered.contains w
-    inputs_covered := by intro w h; simp only [Bool.and_eq_true] at h; exact h.2 }
-  pure (B, snapshotInputs)
-
-private def runReset (j : Json) (M : Writes Nat Nat Nat)
-    (writes : Array InputWrite) (order : Array Nat) : Except String Json := do
-  let (B, snapshotInputs) ← readBoundary j writes
-  let read ← j.getObjValAs? (Array Nat) "read"
-  let reset ← j.getObjValAs? (Option Nat) "reset"
-  let rows ← j.getObjValAs? (Array Nat) "rowIds"
-  let cols ← natField j "columns"
-  for w in read do
-    if !(writes.any (·.id == w)) then throw "reset read names an unknown write"
-  let snapshot := snapshotInputs.toList.foldl (step M) (St.init : St Nat Nat Nat)
-  let st := match reset with
-    | some entry => reloadReset M { B with entry } (fun w _ => read.contains w) snapshot order.toList
-    | none => reloadSnapshot M B (fun _ => true) snapshot order.toList
-  pure (Json.mkObj [("rows", mergedJson st writes rows cols), ("frozen", toJson ([] : List Json))])
-
-private def frozenJson (loss : FrozenLoss Nat Nat Nat) (cols : Nat) : Json :=
-  let r := loss.record
-  let values := (List.range cols).filterMap fun c => (r.values c).map fun w => toJson [c, w]
-  let cause := match r.cause with
-    | .schemaChange version write => Json.mkObj [("schema", toJson version), ("write", toJson write)]
-    | .write write => Json.mkObj [("write", toJson write)]
-    | .dependency write sources => Json.mkObj [("write", toJson write), ("sources", toJson sources)]
-    | .rules rules => Json.mkObj [("rules", toJson (rules.map namedRuleJson))]
-  Json.mkObj [("row", toJson r.row), ("gen", toJson r.generation),
-    ("values", toJson values), ("cause", cause)]
-
-private def runSchema (j : Json) (M : Writes Nat Nat Nat)
-    (writes : Array InputWrite) (order : Array Nat) : Except String Json := do
-  let (B, snapshotInputs) ← readBoundary j writes
-  let rows ← j.getObjValAs? (Array Nat) "rowIds"
-  let cols ← natField j "columns"
-  let verdicts ← (← j.getObjValAs? (Array Json) "schema").mapM fun v => do
-    let id ← natField v "id"
-    let verdict ← match ← natField v "kind" with
-      | 0 => pure SchemaDisposition.eligible
-      | 1 => do pure (SchemaDisposition.excluded (← natField v "version"))
-      | 2 => pure SchemaDisposition.losingMigration
-      | _ => throw "unknown schema disposition"
-    pure (id, verdict)
-  for w in writes do
-    if !(verdicts.any (·.1 == w.id)) then throw "missing schema disposition"
-  let supplied ← (← j.getObjValAs? (Array Json) "values").mapM fun v => do
-    pure (← natField v "write", ← natField v "row", ← v.getObjValAs? (Array Nat) "cols")
-  let values := fun w r c =>
-    if (supplied.find? (fun v => v.1 == w && v.2.1 == r)).any (fun v => v.2.2.contains c)
-    then some w else none
-  let schema := fun w => match verdicts.find? (·.1 == w) with
-    | some (_, s) => s
-    | none => .eligible -- outside the finite write domain
-  let frozen ← (← j.getObjValAs? (Array Json) "snapshotFrozen").mapM fun loss => do
-    let row ← natField loss "row"
-    let gen ← natField loss "gen"
-    let version ← natField loss "version"
-    let write ← natField loss "write"
-    pure (excludedLoss write row gen (values write row) version)
-  let snapshot : MergeSnapshot Nat Nat Nat :=
-    ⟨snapshotInputs.toList.foldl (step M) St.init, frozen.toList⟩
-  let inputs := fun (st : St Nat Nat Nat) => ({
-    rows := rows.toList, present := fun r => decide (st.gen r % 2 = 1),
-    refs := fun _ => [], checkFails := fun _ => false, inDeletedCircle := fun _ => none,
-    claims := fun _ => [], rank := id } : EntryInputs Nat Nat)
-  let result := boundaryDevice M B none (fun _ _ => false) schema values inputs snapshot order.toList
-  let excluded := writes.toList.flatMap fun w => rows.toList.filterMap fun r => result.excluded w.id r
-  pure (Json.mkObj [("rows", mergedJson result.current.merged writes rows cols),
-    ("frozen", toJson ((result.snapshotFrozen ++ excluded).map (fun loss => frozenJson loss cols)))])
-
 private def readEntries (j : Json) (I : Inputs Nat Nat) : Except String (EntryInputs Nat Nat) := do
   let entries ← j.getObjValAs? (Array (Nat × Nat)) "entries"
   for (r, _) in entries do
@@ -250,10 +169,11 @@ private def lossJson (cols : Nat) (r : LossRecord Nat Nat Nat) : Json :=
   Json.mkObj [("row", toJson r.row), ("gen", toJson r.generation), ("column", toJson r.column),
     ("values", toJson values), ("cause", causeJson r.cause)]
 
-/-- A migration that drops tables and columns: `freezeDropped` over the
+/-- The schema-drop substep: `freezeDropped` over the
 stored losses with `droppedBy`, then the live records the dropped state
 leaves. A cell loss stays active unless affected; a hidden row of a kept
-table keeps its removed-row record under `dropSchema`, whatever was frozen. -/
+table keeps its removed-row record under `dropSchema`, before generation
+deletes. The Rust comparison prepares hidden rows as frozen records first. -/
 private def runFreeze (j : Json) : Except String Json := do
   let cols ← natField j "columns"
   let droppedRows ← j.getObjValAs? (Array Nat) "droppedRows"
@@ -553,12 +473,6 @@ private def run (j : Json) : Except String Json := do
   if mode == "admission" then return ← runAdmission j
   if mode == "receive" then return ← runReceive j
   if mode == "classify" then return ← runClassify j
-  if mode == "migration" then
-    let (rows, I) ← readInputs j
-    let named ← readEntries j I
-    let final ← j.getObjValAs? (Array Nat) "final"
-    let selected := migrationRemoves named final.contains
-    return toJson (rows.map fun r => Json.mkObj [("id", toJson r.id), ("selected", toJson (selected r.id))])
   let writes ← (← j.getObjValAs? (Array Json) "writes").mapM readWrite
   let order ← j.getObjValAs? (Array Nat) "order"
   for w in order do
@@ -574,13 +488,6 @@ private def run (j : Json) : Except String Json := do
       let x ← writes.find? (·.id == w)
       let c ← x.changes.find? (·.row == r)
       some c.change }
-  if mode == "reset" then return ← runReset j M writes order
-  if mode == "creation" then
-    let rows ← j.getObjValAs? (Array Nat) "rowIds"
-    let st := order.toList.foldl (step M) (St.init : St Nat Nat Nat)
-    return toJson (rows.map fun r =>
-      Json.mkObj [("id", toJson r), ("creator", toJson (st.genWrite r 1))])
-  if mode == "schema" then return ← runSchema j M writes order
   let (rows, I) ← readInputs j
   let cols ← natField j "columns"
   let st := order.toList.foldl (step M) (St.init : St Nat Nat Nat)

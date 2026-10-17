@@ -1,13 +1,17 @@
 import CovenIO.Waiting
 import CovenStorage.Files
-import CovenStorelogData.Pending
 
 namespace CovenIO.Downloads
+
+/-- How a provider failure clears (E5). -/
+inductive Clears where
+  | byItself | byPerson | never
+  deriving DecidableEq, Repr
 
 /-- Provider failures use the shared three classes (§16.5; Rust `storage_clears`). -/
 inductive Reason where
   | noStorage | network | disk | database
-  | storage (clears : CovenStorelogData.Pending.Clears)
+  | storage (clears : Clears)
   | object (path : Path)
   | range (path : Path) (index : Nat)
   | unavailable (reason : CovenStorage.Files.MissingReason)

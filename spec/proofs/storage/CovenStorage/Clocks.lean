@@ -160,35 +160,11 @@ structure StorageTime where
 def aged (stored observed : StorageTime) (duration : Nat) : Bool :=
   decide (stored.value + duration ≤ observed.value)
 
-/-- §9: time-based entry rejection is strictly beyond the duration. -/
-def landedTooLate (unread landing : StorageTime) (duration : Nat) : Bool :=
-  decide (unread.value + duration < landing.value)
-
-/-- §9: older prefix is strict; the recent window includes both ends. -/
-def oldForFinality (stored observed : StorageTime) (duration : Nat) : Bool :=
-  decide (stored.value + duration < observed.value)
-
-def recentForFinality (stored observed : StorageTime) (duration : Nat) : Bool :=
-  decide (observed.value ≤ stored.value + duration ∧ stored.value ≤ observed.value)
-
 theorem age_never_early (stored observed actual : StorageTime) (duration : Nat)
     (lowerBound : observed.value ≤ actual.value) (h : aged stored observed duration = true) :
     stored.value + duration ≤ actual.value := by
   simp only [aged, decide_eq_true_eq] at h
   omega
-
-theorem finality_age_never_early (stored observed actual : StorageTime) (duration : Nat)
-    (lowerBound : observed.value ≤ actual.value)
-    (h : oldForFinality stored observed duration = true) :
-    stored.value + duration < actual.value := by
-  simp only [oldForFinality, decide_eq_true_eq] at h
-  omega
-
-theorem finality_window_partition (stored observed : StorageTime) (duration : Nat)
-    (landed : stored.value ≤ observed.value) :
-    oldForFinality stored observed duration = !recentForFinality stored observed duration := by
-  apply Bool.eq_iff_iff.mpr
-  simp [oldForFinality, recentForFinality, landed]
 
 structure Maintenance where
   wall : Int

@@ -5,9 +5,9 @@ open Lean CovenIO
 
 private def retry (j : Json) : Except String Json := do
   let clears ← match ← j.getObjValAs? String "clears" with
-    | "byItself" => pure CovenStorelogData.Pending.Clears.byItself
-    | "byPerson" => pure CovenStorelogData.Pending.Clears.byPerson
-    | "never" => pure CovenStorelogData.Pending.Clears.never
+    | "byItself" => pure Downloads.Clears.byItself
+    | "byPerson" => pure Downloads.Clears.byPerson
+    | "never" => pure Downloads.Clears.never
     | other => throw s!"unknown failure class {other}"
   let now ← j.getObjValAs? Nat "now"
   let provider ← j.getObjValAs? Nat "provider"

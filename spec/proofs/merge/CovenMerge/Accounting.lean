@@ -56,10 +56,10 @@ theorem value_accounted (valid : Valid M) (closed : Closed M S) (correct : IsSpe
 
 /-- A migration deletion cannot erase a captured hidden value, including one
 that an ordinary delete would omit because it had read its setter. -/
-theorem hidden_value_frozen (I : EntryInputs Row K) (final : Nat → Bool)
+theorem hidden_value_frozen (I : EntryInputs Row K)
     (migration : W) (version : Nat) {r : Row} {c : Col} {a : W}
-    (hidden : migrationRemoves I final r = true) (cell : st.cell r c = some a) :
-    ∃ loss, captureHidden st I final migration version r = some loss ∧
+    (hidden : migrationRemoves I r = true) (cell : st.cell r c = some a) :
+    ∃ loss, captureHidden st I migration version r = some loss ∧
       loss.record.values c = some a ∧ loss.record.column = none ∧
       loss.record.cause = .schemaChange version migration := by
   refine ⟨freeze ⟨r, st.gen r, none, st.cell r, .schemaChange version migration⟩,

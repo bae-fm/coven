@@ -1,10 +1,10 @@
 import CovenMerge.Boundary
 
-/-! Receive and application (§6, §7.1). Download progress and consumed
-positions are separate. Each attempt checks the recorded past against
-consumed positions, including positions passed without applying their data.
-The other checks (store log, keys, schema support, authentication) are an
-explicit gate. All state changes below are completed atomic transactions. -/
+/-! Abstract causal application (§7.1). Each attempt checks a supplied past
+against consumed inputs, including inputs consumed without applying data.
+Other admission checks are an explicit gate. Download order is unrestricted;
+the sequence model establishes the concrete slot reader's order. All state
+changes below are completed atomic transactions. -/
 
 namespace CovenMerge.Receive
 
@@ -13,10 +13,6 @@ def ready {W : Type} (past : List W) (passed : W → Bool) : Bool :=
 
 theorem ready_iff {W : Type} (past : List W) (passed : W → Bool) :
     ready past passed = true ↔ ∀ a ∈ past, passed a = true := List.all_eq_true
-
-structure Logs (W : Type) where
-  device : W → Nat
-  number : W → Nat
 
 structure State (W : Type) where
   downloaded : List W
@@ -44,27 +40,23 @@ inductive Action (W : Type) where
   | attempt (w : W)
   | idle
 
-/-- Independent logs may be interleaved arbitrarily. A download commits
-only after every earlier number in its own log is retained or covered.
-Misses, failed reads, and work still in flight cannot advance this prefix. -/
-inductive Step (B : SnapshotBoundary W) (logs : Logs W) (past : W → List W)
+/-- Downloads add available inputs. Only an attempt with a complete causal
+past can consume them; unavailable or in-flight inputs do not count. -/
+inductive Step (B : SnapshotBoundary W) (past : W → List W)
     (gate : W → Bool) : Action W → State W → State W → Prop where
   | download {s : State W} {w : W} (fresh : w ∉ s.downloaded)
-      (uncovered : B.covered w = false) (positive : 0 < logs.number w)
-      (earlierNumbers : ∀ n, 0 < n → n < logs.number w →
-        ∃ a, logs.device a = logs.device w ∧ logs.number a = n ∧
-          (B.covered a = true ∨ a ∈ s.downloaded)) :
-      Step B logs past gate (.download w) s { s with downloaded := s.downloaded ++ [w] }
+      (uncovered : B.covered w = false) :
+      Step B past gate (.download w) s { s with downloaded := s.downloaded ++ [w] }
   | attempt (s : State W) (w : W) :
-      Step B logs past gate (.attempt w) s (Receive.attempt B past s gate w)
-  | idle (s : State W) : Step B logs past gate .idle s s
+      Step B past gate (.attempt w) s (Receive.attempt B past s gate w)
+  | idle (s : State W) : Step B past gate .idle s s
 
-structure Run (B : SnapshotBoundary W) (logs : Logs W) (past : W → List W)
+structure Run (B : SnapshotBoundary W) (past : W → List W)
     (gate : Nat → W → Bool) where
   state : Nat → State W
   action : Nat → Action W
   start : state 0 = initial
-  next : ∀ t, Step B logs past (gate t) (action t) (state t) (state (t + 1))
+  next : ∀ t, Step B past (gate t) (action t) (state t) (state (t + 1))
 
 theorem attempt_causal {M : Writes W Row Col} (B : SnapshotBoundary W)
     (past : W → List W) (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
@@ -83,10 +75,10 @@ theorem attempt_causal {M : Writes W Row Col} (B : SnapshotBoundary W)
   · exact causal
 
 theorem step_causal {M : Writes W Row Col} {B : SnapshotBoundary W}
-    {logs : Logs W} {past : W → List W}
+    {past : W → List W}
     (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
     {gate : W → Bool} {action : Action W} {s s' : State W}
-    (h : Step B logs past gate action s s')
+    (h : Step B past gate action s s')
     (causal : CausalFrom M (fun a => B.covered a = true) s.passed) :
     CausalFrom M (fun a => B.covered a = true) s'.passed := by
   cases h with
@@ -94,15 +86,15 @@ theorem step_causal {M : Writes W Row Col} {B : SnapshotBoundary W}
   | attempt s w => exact attempt_causal B past exactPast s gate w causal
   | idle => exact causal
 
-theorem step_attempt {B : SnapshotBoundary W} {logs : Logs W} {past : W → List W}
+theorem step_attempt {B : SnapshotBoundary W} {past : W → List W}
     {gate : W → Bool} {s s' : State W} {w : W}
-    (h : Step B logs past gate (.attempt w) s s') : s' = attempt B past s gate w := by
+    (h : Step B past gate (.attempt w) s s') : s' = attempt B past s gate w := by
   cases h; rfl
 
 theorem passed_causal {M : Writes W Row Col} (B : SnapshotBoundary W)
-    (logs : Logs W) (past : W → List W)
+    (past : W → List W)
     (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
-    (gate : Nat → W → Bool) (run : Run B logs past gate) (t : Nat) :
+    (gate : Nat → W → Bool) (run : Run B past gate) (t : Nat) :
     CausalFrom M (fun a => B.covered a = true) (run.state t).passed := by
   induction t with
   | zero => rw [run.start]; exact .nil
@@ -111,12 +103,12 @@ theorem passed_causal {M : Writes W Row Col} (B : SnapshotBoundary W)
 /-- This is the causal sequence of changes that actually count, including
 snapshot inputs; consumed exclusions do not become merge inputs. -/
 theorem applied_causal {M : Writes W Row Col} (B : SnapshotBoundary W)
-    (logs : Logs W) (past : W → List W)
+    (past : W → List W)
     (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
-    (eligible : W → Bool) (gate : Nat → W → Bool) (run : Run B logs past gate) (t : Nat) :
+    (eligible : W → Bool) (gate : Nat → W → Bool) (run : Run B past gate) (t : Nat) :
     CausalFrom (snapshotWrites M B eligible) (fun a => B.inputs a = true)
       ((run.state t).passed.filter (afterSnapshot B eligible)) :=
-  snapshot_causal B eligible (passed_causal B logs past exactPast gate run t)
+  snapshot_causal B eligible (passed_causal B past exactPast gate run t)
 
 omit [DecidableEq W] in
 theorem causalOrder_of_empty_coverage {M : Writes W Row Col} {L : List W}
@@ -126,25 +118,25 @@ theorem causalOrder_of_empty_coverage {M : Writes W Row Col} {L : List W}
   | snoc _ _ fresh hp ih => exact .snoc ih fresh (fun a ha => (hp a ha).resolve_left id)
 
 theorem applied_causalOrder {M : Writes W Row Col} (B : SnapshotBoundary W)
-    (logs : Logs W) (past : W → List W)
+    (past : W → List W)
     (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
     (empty : ∀ a, B.inputs a = false) (eligible : W → Bool)
-    (gate : Nat → W → Bool) (run : Run B logs past gate) (t : Nat) :
+    (gate : Nat → W → Bool) (run : Run B past gate) (t : Nat) :
     CausalOrder (snapshotWrites M B eligible)
       ((run.state t).passed.filter (afterSnapshot B eligible)) := by
-  have h := applied_causal B logs past exactPast eligible gate run t
+  have h := applied_causal B past exactPast eligible gate run t
   have eq : (fun a => B.inputs a = true) = (fun _ => False) := by
     funext a; simp [empty a]
   rw [eq] at h
   exact causalOrder_of_empty_coverage h
 
 theorem received_causalOrder {M : Writes W Row Col} (B : SnapshotBoundary W)
-    (logs : Logs W) (past : W → List W)
+    (past : W → List W)
     (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true)
     (empty : ∀ a, B.covered a = false)
-    (gate : Nat → W → Bool) (run : Run B logs past gate) (t : Nat) :
+    (gate : Nat → W → Bool) (run : Run B past gate) (t : Nat) :
     CausalOrder M (run.state t).passed := by
-  have h := passed_causal B logs past exactPast gate run t
+  have h := passed_causal B past exactPast gate run t
   have eq : (fun a => B.covered a = true) = (fun _ => False) := by
     funext a; simp [empty a]
   rw [eq] at h
@@ -153,17 +145,17 @@ theorem received_causalOrder {M : Writes W Row Col} (B : SnapshotBoundary W)
 /-- Ordinary receive, before any exclusions or snapshots: the existing merge
 theorem needs only valid authored writes and equal consumed sets. -/
 theorem ordinary_receive_converges {M : Writes W Row Col} (valid : Valid M)
-    (B : SnapshotBoundary W) (logs : Logs W) (past : W → List W)
+    (B : SnapshotBoundary W) (past : W → List W)
     (exactPast : ∀ w a, a ∈ past w ↔ M.past w a = true) (empty : ∀ a, B.covered a = false)
-    (gateA gateB : Nat → W → Bool) (a : Run B logs past gateA) (b : Run B logs past gateB)
+    (gateA gateB : Nat → W → Bool) (a : Run B past gateA) (b : Run B past gateB)
     (ta tb : Nat) (same : ∀ w, w ∈ (a.state ta).passed ↔ w ∈ (b.state tb).passed) :
     (a.state ta).passed.foldl (step M) St.init = (b.state tb).passed.foldl (step M) St.init :=
-  merge_converges valid (received_causalOrder B logs past exactPast empty gateA a ta)
-    (received_causalOrder B logs past exactPast empty gateB b tb) same
+  merge_converges valid (received_causalOrder B past exactPast empty gateA a ta)
+    (received_causalOrder B past exactPast empty gateB b tb) same
 
-theorem step_monotone {B : SnapshotBoundary W} {logs : Logs W} {past : W → List W}
+theorem step_monotone {B : SnapshotBoundary W} {past : W → List W}
     {gate : W → Bool} {action : Action W} {s s' : State W}
-    (h : Step B logs past gate action s s') :
+    (h : Step B past gate action s s') :
     (∀ w, w ∈ s.downloaded → w ∈ s'.downloaded) ∧
     (∀ w, w ∈ s.passed → w ∈ s'.passed) := by
   cases h with
@@ -175,8 +167,8 @@ theorem step_monotone {B : SnapshotBoundary W} {logs : Logs W} {past : W → Lis
     · exact ⟨fun _ h => h, fun _ h => h⟩
   | idle => exact ⟨fun _ h => h, fun _ h => h⟩
 
-theorem run_monotone {B : SnapshotBoundary W} {logs : Logs W} {past : W → List W}
-    {gate : Nat → W → Bool} (run : Run B logs past gate) {t u : Nat} (le : t ≤ u) :
+theorem run_monotone {B : SnapshotBoundary W} {past : W → List W}
+    {gate : Nat → W → Bool} (run : Run B past gate) {t u : Nat} (le : t ≤ u) :
     (∀ w, w ∈ (run.state t).downloaded → w ∈ (run.state u).downloaded) ∧
     (∀ w, w ∈ (run.state t).passed → w ∈ (run.state u).passed) := by
   induction le with
@@ -185,8 +177,8 @@ theorem run_monotone {B : SnapshotBoundary W} {logs : Logs W} {past : W → List
     have next := step_monotone (run.next u)
     exact ⟨fun w h => next.1 w (ih.1 w h), fun w h => next.2 w (ih.2 w h)⟩
 
-theorem consumed_monotone {B : SnapshotBoundary W} {logs : Logs W} {past : W → List W}
-    {gate : Nat → W → Bool} (run : Run B logs past gate) {t u : Nat} (le : t ≤ u)
+theorem consumed_monotone {B : SnapshotBoundary W} {past : W → List W}
+    {gate : Nat → W → Bool} (run : Run B past gate) {t u : Nat} (le : t ≤ u)
     (w : W) (h : consumed B (run.state t) w = true) : consumed B (run.state u) w = true := by
   simp only [consumed, Bool.or_eq_true, decide_eq_true_eq] at h ⊢
   exact h.elim Or.inl (fun h => Or.inr ((run_monotone run le).2 w h))
@@ -194,13 +186,13 @@ theorem consumed_monotone {B : SnapshotBoundary W} {logs : Logs W} {past : W →
 /-- An unconsumed retained write is eventually reconsidered. Nothing
 requires retrying a completed write. Fairness assumes only an attempt,
 not its success, and places no bound on unrelated arrivals. -/
-def Fair {B : SnapshotBoundary W} {logs : Logs W} {past : W → List W}
-    {gate : Nat → W → Bool} (run : Run B logs past gate) : Prop :=
+def Fair {B : SnapshotBoundary W} {past : W → List W}
+    {gate : Nat → W → Bool} (run : Run B past gate) : Prop :=
   ∀ w t, w ∈ (run.state t).downloaded → consumed B (run.state t) w = false →
     ∃ u, t ≤ u ∧ run.action u = .attempt w
 
-theorem eventually_ready {B : SnapshotBoundary W} {logs : Logs W} {past : W → List W}
-    {gate : Nat → W → Bool} (run : Run B logs past gate) (ws : List W)
+theorem eventually_ready {B : SnapshotBoundary W} {past : W → List W}
+    {gate : Nat → W → Bool} (run : Run B past gate) (ws : List W)
     (eventually : ∀ a ∈ ws, ∃ t, consumed B (run.state t) a = true) :
     ∃ t, ∀ u, t ≤ u → ready ws (consumed B (run.state u)) = true := by
   induction ws with
@@ -215,8 +207,8 @@ theorem eventually_ready {B : SnapshotBoundary W} {logs : Logs W} {past : W → 
 
 /-- Once the finite recorded past is complete, a retained write cannot be
 held forever by the causal queue. Other checks must eventually stay open. -/
-theorem complete_past_eventually_passed {B : SnapshotBoundary W} {logs : Logs W}
-    {past : W → List W} {gate : Nat → W → Bool} (run : Run B logs past gate)
+theorem complete_past_eventually_passed {B : SnapshotBoundary W}
+    {past : W → List W} {gate : Nat → W → Bool} (run : Run B past gate)
     (fair : Fair run) (w : W) (arrives : ∃ t, w ∈ (run.state t).downloaded)
     (opens : ∃ t, ∀ u, t ≤ u → gate u w = true)
     (complete : ∀ a ∈ past w, ∃ t, consumed B (run.state t) a = true) :
@@ -241,8 +233,8 @@ theorem complete_past_eventually_passed {B : SnapshotBoundary W} {logs : Logs W}
 /-- Eventual arrival of a dependency-closed set suffices: induction on the
 authored timestamp turns arrival into consumption, without assuming that
 the causes were already applied. -/
-theorem arriving_past_eventually_passed {B : SnapshotBoundary W} {logs : Logs W}
-    {past : W → List W} {gate : Nat → W → Bool} (run : Run B logs past gate)
+theorem arriving_past_eventually_passed {B : SnapshotBoundary W}
+    {past : W → List W} {gate : Nat → W → Bool} (run : Run B past gate)
     (fair : Fair run) (rank : W → Nat)
     (earlier : ∀ w a, a ∈ past w → rank a < rank w) (S : W → Prop)
     (closed : ∀ w, S w → ∀ a ∈ past w, S a)
@@ -260,8 +252,8 @@ theorem arriving_past_eventually_passed {B : SnapshotBoundary W} {logs : Logs W}
       intro a ha
       exact ih (rank a) (by have := earlier w a ha; omega) a rfl (closed w hw a ha)
 
-theorem eventually_applied {B : SnapshotBoundary W} {logs : Logs W}
-    {past : W → List W} {gate : Nat → W → Bool} (run : Run B logs past gate)
+theorem eventually_applied {B : SnapshotBoundary W}
+    {past : W → List W} {gate : Nat → W → Bool} (run : Run B past gate)
     (eligible : W → Bool) (w : W) (counts : afterSnapshot B eligible w = true)
     (eventually : ∃ t, consumed B (run.state t) w = true) :
     ∃ t, w ∈ (run.state t).passed.filter (afterSnapshot B eligible) := by

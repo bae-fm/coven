@@ -206,59 +206,6 @@ theorem example_8_5_key :
 
 end KeyChange
 
-/-! ## §8.5: a claim dates from the latest write that set its columns
-
-Notes are unique by `(folder, title)`. Cell 0 is the folder, cell 1 the title.
-Folders: 1 Home, 2 Work. Titles: 5 "Draft", 7 "Plan".
-
-* write 0, 09:00: note 2 is "Draft" in Home.
-* write 1, Ana, 10:00: add note 1, "Plan" in Work.
-* write 2, Ben, 11:00, had read write 0: rename note 2 to "Plan".
-* write 3, Carol, 12:00, had read write 0: move note 2 to Work. -/
-
-namespace Stamp
-
-def M : Writes Nat Nat Nat where
-  ts w := if w = 0 then 900 else if w = 1 then 1000 else if w = 2 then 1100 else 1200
-  past w a := (w = 2 || w = 3) && a = 0
-  chg w r :=
-    if w = 0 ∧ r = 2 then some ⟨.ins, 0, fun _ => true⟩
-    else if w = 1 ∧ r = 1 then some ⟨.ins, 0, fun _ => true⟩
-    else if w = 2 ∧ r = 2 then some ⟨.upd, 1, fun c => c = 1⟩
-    else if w = 3 ∧ r = 2 then some ⟨.upd, 1, fun c => c = 0⟩
-    else none
-
-/-- The value each write sets in each cell. -/
-def val (w r c : Nat) : Nat :=
-  if r = 2 ∧ w = 0 then (if c = 0 then 1 else 5)
-  else if r = 2 ∧ w = 2 then 7
-  else if r = 2 ∧ w = 3 then 2
-  else if c = 0 then 2 else 7
-
-def claimOf (st : St Nat Nat Nat) (r : Nat) : List (Claim Nat) :=
-  match st.cell r 0, st.cell r 1 with
-  | some a, some b => [⟨⟨["folder", "title"], none⟩, val a r 0 * 100 + val b r 1, max (M.ts a) (M.ts b), false⟩]
-  | _, _ => []
-
-def inputs (st : St Nat Nat Nat) : Inputs Nat Nat where
-  rows := [1, 2]
-  present r := st.gen r % 2 == 1
-  refs _ := []
-  checkFails _ := false
-  inDeletedCircle _ := false
-  claims := claimOf st
-  rank r := r
-
-/-- Note 2's claim dates from 12:00, note 1's from 10:00: note 1 keeps "Plan"
-in Work, in either arrival order. -/
-theorem example_8_5_stamp :
-    (device M inputs [0, 1, 2, 3]).view.shown 1 = true ∧
-    (device M inputs [0, 1, 2, 3]).view.rules 2 = [Rule.unique] ∧
-    (device M inputs [0, 3, 2, 1]).view.shown 1 = true ∧
-    (device M inputs [0, 3, 2, 1]).view.rules 2 = [Rule.unique] := by decide
-
-end Stamp
-
 /-! ## §8.5: when a unique loser comes back
 
 Notes are unique by title, and a sub-note points at its parent under
@@ -266,7 +213,7 @@ cascade. -/
 
 namespace Comeback
 
-/-- Note 2, "Plan" from 10:00, is a sub-note of note 1, "Plan" from 11:00. -/
+/-- Note 2 claims "Plan" at slot 1000; its parent, note 1, claims it at slot 1100. -/
 def subNote : Inputs Nat Nat where
   rows := [1, 2]
   present _ := true
@@ -282,8 +229,8 @@ theorem example_8_5_subnote :
     (view subNote).rules 1 = [Rule.unique] ∧ (view subNote).rules 2 = [Rule.foreignKey] := by
   decide
 
-/-- Note 2, "Plan" from 10:00, is a sub-note of note 3, "Ideas" from 12:00;
-note 4 is "Ideas" from 09:00; note 1 is "Plan" from 11:00. Note 3 loses to
+/-- Note 2 claims "Plan" at slot 1000; its parent, note 3, claims "Ideas" at slot 1200.
+Note 4 claims "Ideas" at slot 900; note 1 claims "Plan" at slot 1100. Note 3 loses to
 note 4, note 2 goes with it, and note 1, which lost to note 2 in the same
 judgment, stays removed. -/
 def otherLoser : Inputs Nat Nat where
@@ -372,21 +319,15 @@ def inputs (st : St Nat Nat Nat) : EntryInputs Nat Nat where
   claims _ := []
   rank r := r
 
-def returned (st : St Nat Nat Nat) : EntryInputs Nat Nat :=
-  { inputs st with inDeletedCircle := fun _ => none }
-
-/-- Existing and late rows keep generation 1 and their values. Dropping the
-entry returns all three without applying any row write. -/
+/-- Existing and late rows keep generation 1 and their values, with the
+circle deletion named in their loss records. -/
 theorem example_14_7 :
     let st := [1, 5].foldl (step M) (St.init : St Nat Nat Nat)
     st.gen 7 = 1 ∧ st.gen 8 = 1 ∧ st.gen 9 = 1 ∧
     (entryView (inputs st)).rules 7 = [.deletedCircleEntry 4] ∧
     (entryView (inputs st)).rules 8 = [.deletedCircleEntry 4] ∧
     ((entryDevice M inputs [1, 5]).losses 9 none).map (fun l => (l.values 0, l.cause)) =
-      some (some 5, LossCause.rules [.deletedCircleEntry 4]) ∧
-    (entryView (returned st)).shown 7 = true ∧
-    (entryView (returned st)).shown 8 = true ∧
-    (entryView (returned st)).shown 9 = true := by decide
+      some (some 5, LossCause.rules [.deletedCircleEntry 4]) := by decide
 
 end DeletedCircle
 

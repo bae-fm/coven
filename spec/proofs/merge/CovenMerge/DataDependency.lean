@@ -43,8 +43,8 @@ theorem retained_eq (s : State W Row Col) (w : W) (r : Row) :
   simp
 
 /-- The shared definition: this change used a generation or replaced a cell
-setter whose own change does not survive. Retirement, schema and other direct
-drop policies supply `base`; none changes this dependency relation. -/
+setter whose own change does not survive. Cut-off, schema and other direct
+exclusion policies supply `base`; none changes this dependency relation. -/
 def dependsOnDropped (s : State W Row Col) (w : W) (r : Row) : Bool :=
   (s.provenance w r).sources.any (fun a => !retained s a r)
 

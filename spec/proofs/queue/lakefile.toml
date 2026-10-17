@@ -1,5 +1,5 @@
 name = "covenQueue"
-defaultTargets = ["CovenQueue", "authoredRunner", "queueRunner"]
+defaultTargets = ["CovenQueue", "authoredRunner"]
 
 [[require]]
 name = "covenMerge"
@@ -11,7 +11,3 @@ name = "CovenQueue"
 [[lean_exe]]
 name = "authoredRunner"
 root = "AuthoredRunner"
-
-[[lean_exe]]
-name = "queueRunner"
-root = "QueueRunner"

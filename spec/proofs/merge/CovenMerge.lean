@@ -20,12 +20,9 @@ import CovenMerge.Boundary
 import CovenMerge.IntegrityExamples
 import CovenMerge.EntryCounterexample
 import CovenMerge.Receive
-import CovenMerge.ReceivePositions
 import CovenMerge.ReceiveMerge
 import CovenMerge.ReceiveExamples
-import CovenMerge.Retirement
 import CovenMerge.ResetAgreement
-import CovenMerge.MigrationCounterexample
 import CovenMerge.Ownership
 import CovenMerge.OwnerProtection
 import CovenMerge.OwnerExamples
