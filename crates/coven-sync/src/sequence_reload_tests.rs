@@ -100,3 +100,35 @@ async fn loading_a_snapshot_checks_its_announced_digest_before_its_signature() {
     ana.sync.database.close().await.unwrap();
     ben.sync.database.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_app_reload_rebuilds_from_the_newest_snapshot_and_keeps_waiting_writes() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "a", "in the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    insert(&ana.sync.database, "b", "after the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    insert(&ben.sync.database, "c", "waiting on Ben").await;
+    let through = ben.sync.database.applied_slot().await.unwrap();
+    ben.sync.reload_from_snapshot().await.unwrap();
+    assert_eq!(ben.sync.database.applied_slot().await.unwrap(), through);
+    assert_eq!(rows(&ben.sync.database).await.len(), 3);
+    ben.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        rows(&ana.sync.database).await,
+        rows(&ben.sync.database).await
+    );
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}

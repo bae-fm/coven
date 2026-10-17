@@ -251,3 +251,123 @@ async fn approval_after_the_approver_lost_its_role_undoes_and_fails() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let carol_id = coven_crypto::MemberIdentity::new(
+        coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(91)),
+        coven_format::test_utils::keys_from_seed(3),
+    );
+    ana.sync
+        .administer(coven_format::admin::StoreChange::AddMember {
+            member: carol_id.member(),
+            keys: carol_id.keys().public_keys(),
+            role: MemberRole::Member,
+            access: MemberAccess::ProviderAccount("carol@example.org".into()),
+        })
+        .await
+        .unwrap();
+    let invite = ana
+        .sync
+        .create_invite(
+            InviteTarget::ReplaceMemberKeys {
+                member: carol_id.member(),
+            },
+            InviteAccess::ProviderAccount {
+                email: "carol@example.org".into(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(invite.member, carol_id.member());
+    let carol = join(&group, &invite.code, "Carol's new phone").await;
+    ana.sync.pass().await.unwrap();
+    let requests = ana.sync.join_requests().await.unwrap();
+    ana.sync.approve_join_request(&requests[0]).await.unwrap();
+    let state = ana.sync.database.store_state().await.unwrap();
+    assert_eq!(
+        state.members[&carol_id.member()].keys,
+        carol.request.identity().keys().public_keys()
+    );
+    assert_eq!(
+        carol
+            .device
+            .sync
+            .join_outcome(&carol.request)
+            .await
+            .unwrap(),
+        JoinOutcome::Admitted
+    );
+    carol
+        .device
+        .sync
+        .register_device("Carol's new phone".into(), None)
+        .await
+        .unwrap();
+    assert!(
+        ana.sync
+            .database
+            .provider_access("carol@example.org".into())
+            .await
+            .unwrap()
+            .unwrap()
+            .intended
+    );
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_explicit_retry_reads_a_request_before_its_backoff_is_due() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let invite = invite(&ana).await;
+    ana.sync.pass().await.unwrap();
+    let operation = ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == "invite")
+        .unwrap()
+        .id;
+    let pending = ana
+        .sync
+        .database
+        .operation_pending::<PendingRecord>(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(pending.reason, PendingReason::Missing { .. }));
+    let carol = join(&group, &invite.code, "Carol's phone").await;
+    let count = ana.storage.request_count();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        ana.storage.request_count() - count,
+        2,
+        "the request poll backs off"
+    );
+    assert!(ana.sync.join_requests().await.unwrap().is_empty());
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert_eq!(ana.sync.join_requests().await.unwrap().len(), 1);
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}
