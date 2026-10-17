@@ -136,7 +136,7 @@ theorem any_order_removal {D : Row → Bool}
     (h : Stratified I.rows (FiresP (fires I)) (rivalBefore I) (start I) D) : D = removal I :=
   stratified_unique (fires_monotone I) h (removal_stratified I)
 
-/-- A rule a removed row's `_coven_lost` row names (§8.4, Appendix F.6). -/
+/-- A rule a removed row's `_coven_lost` row names (§8.4, Appendix B.3, format.md D7.2). -/
 inductive Rule where
   | foreignKey
   | check

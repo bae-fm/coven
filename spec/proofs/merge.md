@@ -186,7 +186,7 @@ at.
 - **Timestamp order** is one causal order, by assumption 2, so every causal
   order gives the state applying the writes in timestamp order gives. Lean:
   `causalOrder_of_ts_sorted`.
-- **A write made after seeing another wins over it** ([§2.2](../coven.md#22-convergence)):
+- **A write made after seeing another wins over it** ([§7.2](../coven.md#72-timestamps), [§8.1](../coven.md#81-cells)):
   `write_after_read_wins` quantifies over every causal application order.
   When a write sets the same cell in the same incarnation, or deletes that
   incarnation, having read the earlier setter, the earlier value is neither

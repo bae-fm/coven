@@ -42,8 +42,9 @@ def begin (w : World) (i : Nat) : World :=
     w.put i (some ⟨d, some ⟨none⟩⟩)
   | _ => w
 
-/-- A successful mint creates a fresh principal and checks the member key
-before recording its secret. A failed mint that rolls back has no step. -/
+/-- A successful mint creates a fresh principal. The member-side check before
+its secret is recorded (§20.10) is not modelled. A failed mint that rolls back
+has no step. -/
 def mint (w : World) (i : Nat) : World :=
   match w.copies i with
   | some ⟨d, some ⟨none⟩⟩ =>

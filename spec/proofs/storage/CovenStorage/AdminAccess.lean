@@ -40,7 +40,7 @@ inductive Step where
   | discard
   deriving DecidableEq, Repr
 
-/-- T241's rules: a failed step releases admin access; a replacement keeps
+/-- The rules: a failed step releases admin access; a replacement keeps
 it past the check, to delete the old key, until the operation ends. -/
 def step (w : World) : Step → World
   | .supply => { w with admin := true }
@@ -132,7 +132,7 @@ theorem check_keeps_admin (w : World) (k : Nat) (hr : w.row = some ⟨some k, fa
   simp only at hr ha; subst hr ha
   simp [step]
 
-/-! ### Checked counterexample: the rule before T241
+/-! ### Checked counterexample: the earlier rule
 
 A failed replacement step kept the admin access it was given. -/
 
@@ -145,7 +145,7 @@ def oldRun (w : World) (steps : List Step) : World := steps.foldl oldStep w
 
 /-- Ana's desktop begins replacing Ben's key with admin access, and the mint
 fails. Under the old rule the automatic retry mints key 0 with admin access
-Ana never supplied again; under T241's it waits for her. -/
+Ana never supplied again; under the current rule it waits for her. -/
 def ana : World := ⟨some ⟨none, false⟩, false, [], 0⟩
 
 theorem old_rule_mints_without_supply :

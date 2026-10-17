@@ -1,9 +1,10 @@
 import CovenMerge.Converge
 import CovenStorage.Clocks
 
-/-! §2.2: a write made after seeing another wins over it. This is a statement
-about competing values, not about unrelated cells or a third, later write.
-Generation changes keep a deleted incarnation out after re-insertion. -/
+/-! §7.2 and §8.1: a write made after seeing another wins over it. This is a
+statement about competing values, not about unrelated cells or a third, later
+write. Generation changes keep a deleted incarnation out after re-insertion
+(§8.3). -/
 
 namespace CovenMerge
 
@@ -35,7 +36,7 @@ theorem older_incarnation_not_current (hS : IsSpec M S st)
   have same := setter_inc_eq value ((hS.cell_some r c a).1 current).1
   omega
 
-/-- §2.2(a), for every state satisfying the merge definition: a setter that
+/-- §7.2 and §8.1, for every state satisfying the merge definition: a setter that
 read another setter of the same cell and incarnation beats it. This remains
 true after further writes, deletion, or re-insertion. -/
 theorem cell_after_read_wins (valid : Valid M) (hS : IsSpec M S st)
@@ -103,7 +104,7 @@ theorem reinsert_after_delete_wins (valid : Valid M) (hS : IsSpec M S st)
   · intro c a value
     exact older_incarnation_not_current hS value (by omega)
 
-/-- §2.2(a) on every device, quantified over arbitrary causal application
+/-- §7.2, §8.1 and §8.3 on every device, quantified over arbitrary causal application
 orders containing the competing cell writes or the later delete. -/
 theorem write_after_read_wins (valid : Valid M) {L : List W}
     (causal : CausalOrder M L) (value : Setter M (fun x => x ∈ L) r c a k)

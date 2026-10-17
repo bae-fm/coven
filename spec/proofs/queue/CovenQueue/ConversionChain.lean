@@ -264,7 +264,7 @@ def lateEdit : Record :=
 
 /-- Classified by rows changed, Ana converts the late edit and Ben, with no
 step to convert through, applies it unchanged: the two devices hold different
-rows (E-D1). -/
+rows. -/
 theorem row_classification_diverges :
     ((plan byRows (fun _ => true) [slug] 2 lateEdit).record (fun _ => none) lateEdit).body ≠
       ((plan byRows (fun _ => false) [slug] 2 lateEdit).record (fun _ => none) lateEdit).body := by

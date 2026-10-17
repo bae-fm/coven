@@ -427,10 +427,10 @@ theorem put_racing_copy_two_winners :
 /-! ## Every staged temporary is recorded
 
 A temporary, or a native multipart upload that will assemble one, is the
-publisher's to remove. Under T208 a single-request create staged under a
-fresh attempt id and a multipart session was recorded only after its upload
-was initiated, so a crash in between left one that no record named and no
-later step removes. The rule (T218): stage only under a name the caller has
+publisher's to remove. Under an earlier rule a single-request create staged
+under a fresh attempt id and a multipart session was recorded only after its
+upload was initiated, so a crash in between left one that no record named and
+no later step removes. The rule: stage only under a name the caller has
 already recorded, and drop the record only once nothing is staged under it.
 A single-request create's temporary is named by the create itself (its
 destination and bytes), which the caller keeps until the create settles; a
@@ -473,8 +473,8 @@ inductive Step where
   deriving DecidableEq, Repr
 
 /-- `strict` is the rule: staging needs a recorded name, and a record is
-dropped only with nothing staged under it. Otherwise (T208) staging and
-dropping are unguarded. A crash is a step that never comes: every step
+dropped only with nothing staged under it. Otherwise, as under the earlier
+rule, staging and dropping are unguarded. A crash is a step that never comes: every step
 leaves durable state as it stands. -/
 def step (strict : Bool) (w : World) : Step → World
   | .record n => { w with recorded := n :: w.recorded }
@@ -563,7 +563,7 @@ theorem failed_deletion_retry_accepted (c : Create) (time time' marker marker' :
       retry.staging n = none := by
   simp [run, step, start]
 
-/-- Why names must be recorded first: under T208's naming a single-request
+/-- Why names must be recorded first: under the earlier naming a single-request
 create stages under a fresh attempt id, and a crash before its deletion
 strands it. The retry stages under another id, publishes and deletes its
 own, and the record is dropped: the first temporary stays, and no record
@@ -578,7 +578,7 @@ theorem attempt_naming_strands :
     (after.staging (.attempt 0)).isSome ∧ after.recorded = [] := by
   decide
 
-/-! ### Attempts of one create share its temporary (T232)
+/-! ### Attempts of one create share its temporary
 
 Two creators of one path with identical bytes are attempts of one create:
 they stage, copy and delete one name. One can delete the temporary between
@@ -608,7 +608,7 @@ def confirmDest (w : World) (dest : Path) (marker : Nat) : CreateAnswer :=
   | some p => if p.session = marker then .stored else .occupied p.object.bytes
   | none => .retry
 
-/-- One attempt's conditional copy and its answer. `settles` is T232's rule:
+/-- One attempt's conditional copy and its answer. `settles` is the rule:
 a copy whose temporary is gone is settled by reading the destination; without
 it, the provider's not-found answer is returned as a hard error. -/
 def attemptCopy (settles : Bool) (w : World) (n : Name) (dest : Path) (time marker : Nat) :
@@ -766,7 +766,7 @@ theorem retry_publishes (c : Create) (w : World) (m t : Nat) (recorded : .create
     (runActs true c w [.stage m, .copy t m]).2 = [.stored] := by
   simp [runActs, attemptCopy, step, recorded, empty]
 
-/-- The interleaving T232 found: attempt 2 stages, attempt 1 stages over it,
+/-- The interleaving the rule settles: attempt 2 stages, attempt 1 stages over it,
 copies and deletes the shared temporary, and attempt 2's copy finds no source.
 Without the rule it is a hard error though the destination holds the create's
 bytes; with it, an occupied path holding those bytes. -/
