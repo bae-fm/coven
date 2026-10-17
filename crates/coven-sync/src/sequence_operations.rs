@@ -165,9 +165,17 @@ impl SequenceSync {
             if let Request::Change(StoreChange::AddDevice { .. }) = &request {
                 super::sequence_bootstrap::restorable(owner.admission(&session, &member), &member)?;
             }
-            owner
+            let creation = matches!(request, Request::Change(StoreChange::CreateStore { .. }));
+            match owner
                 .start_request(&mut session, &mut ring, &member, request, "operation")
                 .await
+            {
+                // Another creation claimed slot 1 first (§9).
+                Err(SyncError::Rejected(_)) if creation => {
+                    Err(coven_storage::StorageFailure::StoreExists.into())
+                }
+                result => result,
+            }
         })
         .await
         .map_err(|error| SyncError::disk(std::io::Error::other(error)))?

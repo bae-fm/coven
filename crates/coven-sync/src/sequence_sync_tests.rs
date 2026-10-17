@@ -183,6 +183,16 @@ impl Group {
         ana: &Device,
         access: coven_format::MemberAccess,
     ) {
+        self.create_as(ana, access).await.unwrap();
+    }
+    pub(crate) async fn create_result(&self, ana: &Device) -> Result<(), SyncError> {
+        self.create_as(ana, access("ana")).await
+    }
+    async fn create_as(
+        &self,
+        ana: &Device,
+        access: coven_format::MemberAccess,
+    ) -> Result<(), SyncError> {
         let key = self.ring.store_key_ids().next().unwrap();
         ana.sync
             .administer(StoreChange::CreateStore {
@@ -195,7 +205,6 @@ impl Group {
                 key_hash: self.ring.store_key(key).unwrap().hash(),
             })
             .await
-            .unwrap();
     }
     pub(crate) async fn admit(&self, ana: &Device, ben: &Device) {
         ana.sync

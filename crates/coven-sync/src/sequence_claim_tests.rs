@@ -204,3 +204,43 @@ async fn equal_claim_numbers_from_two_copies_at_one_slot_are_not_contention() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+#[tokio::test]
+async fn a_competing_first_setup_reports_that_the_store_exists() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_creation(coven_storage::ObjectPrefix::all(group.store), started, held)
+        .await;
+    let first = group.create_result(&ana);
+    let second = async {
+        observed.await.unwrap();
+        group.create(&ben).await;
+        resume.send(()).unwrap();
+    };
+    let (result, ()) = tokio::join!(first, second);
+    assert!(
+        matches!(&result, Err(SyncError::Storage(error)) if error.failure() == coven_storage::StorageFailure::StoreExists),
+        "{result:?}"
+    );
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        ana.sync
+            .database
+            .store_state()
+            .await
+            .unwrap()
+            .members
+            .keys()
+            .copied()
+            .collect::<Vec<_>>(),
+        [ben.identity.member()]
+    );
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
