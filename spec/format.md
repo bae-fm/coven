@@ -55,8 +55,8 @@
 | `SealingKey` | 32 bytes | An X25519 public key. |
 | `Timestamp` | `ms:u48 \| counter:u16 \| device:u64` | 16 bytes; byte order is timestamp order ([§7.2](coven.md#72-timestamps)). |
 | `StorageTime` | `seconds:u64 \| nanos:u32` | Unix seconds plus a nanosecond fraction from 0 through 999,999,999; retain the provider sample's precision without rounding forward. |
-| `WriteId`, `EntryId` | `device:u64 \| number:u64` | Number at least 1. |
-| `WritePositions`, `EntryPositions` | `[device:u64 \| number:u64]` | Strictly increasing by device; zero positions left out. |
+| `WriteId`, `PublicationId` | `device:u64 \| number:u64` | Number at least 1; separate local counters. |
+| `Slot`, `EntryId` | `u64` | Slot at least 1; a consumed cursor may be zero. |
 | `Audience` | `0`, or `1 \| circle:uuid` | The store sorts first, then circles by id. |
 | `Value` | `0` NULL, `1 \| i64`, `2 \| u64` (IEEE 754 bits), `3 \| text`, `4 \| bytes` | NaN and negative zero refused. |
 | `RowId` | `table:name \| key:bytes \| audience:Audience` | `key` is an ordered key (D3). |
@@ -69,12 +69,12 @@
 | `MemberAccess` | `0 \| account:text`, or `1 \| access_key_id:text \| principal:S3Principal` | A provider account, or an S3 key's public id and who holds it; each text at most 1,024 UTF-8 bytes. |
 | `S3Principal` | `0` console; `1 \| user:text \| policy`, policy `0 \| name:text` inline or `1 \| arn:text` managed; `2 \| project:text \| email:text \| managed_folder:text`; `3 \| account:text`; `4 \| parent:text` | The non-secret handles deleting the key needs (§13): none for a key made in the console; an IAM user and its prefix policy (AWS, Ceph RGW, SeaweedFS); a GCS service account and its managed folder, the HMAC access id being the key id; a Cloudflare account, the token id being the key id; RustFS's parent user, the service account's access key being the key id. Each text at most 1,024 UTF-8 bytes. |
 
-- A complete sealed store-log entry, including its cleartext prefix, chunk
-  framing, nonce, authentication tag and signature, is at most 4 MiB
-  (4,194,304 bytes). D6's bounded names, member access and positions ensure
-  every valid entry fits. Reject an oversized change before reserving its
-  entry number or key copies. This bound permits one-request publication on
-  every provider, including CloudKit's 8 MiB asset limit.
+- A complete admin, key-copy or announcement slot is at most 4 MiB,
+  including its prefix, framing, authentication and signature. Reject an
+  oversized operation before preparing artifacts. A writes slot has no
+  format-wide size limit; its individual writes and frames retain their
+  bounds. Provider transfer limits still apply (§4).
+
 - Identifiers order as their bytes, except where a row says otherwise. Names
   order by UTF-8 bytes; `RowId` orders by table, encoded key, then audience.
   A `Value` retains its SQLite storage class: an integer and an integral real
@@ -126,15 +126,19 @@
 | 1 | Write header | D5 |
 | 2 | Row change | D5 |
 | 3 | Dismissal | D5 |
-| 4 | Store log entry | D6 |
+| 4 | Admin entry | D6 |
 | 5 | Snapshot header | D7 |
 | 6 | Snapshot record | D7 |
 | 7 | Snapshot end | empty |
-| 8 | Posted positions | D8 |
+| 8 | Device status | D8 |
 | 9 | Join request | D8 |
 | 10 | Restore code | D13 |
 | 11 | Invite code | D13 |
-| 12 | Clock observation | D8 |
+| 12 | Floor | D8 |
+| 13 | Execution record | D5 |
+| 14 | Slot header | D9 |
+| 15 | Snapshot announcement | D9 |
+| 16 | Key-copy acknowledgement | empty; the box is in D9’s prefix |
 
 ### D5 Writes
 
@@ -144,8 +148,7 @@
   ```
   position        WriteId
   timestamp       Timestamp          its device is the write's
-  had_read        WritePositions     other devices' logs
-  store_log_read  EntryPositions     the store log, own entries included
+  read_through    u64                last applied slot when authored
   schema_version  u32
   disposition     u8                 0 apply · 2 migration
   parts           [audience:Audience | rows:u64 | length:u64]
@@ -154,39 +157,33 @@
   - Schema version zero is representable. Schema exclusion is a received
     interpretation, never a transmitted disposition: tried and untried
     uploads keep their original schema, disposition and plaintext, and
-    readers derive conversion or loss from the kept boundary and the
+    readers derive conversion or loss from the current schema and the
     row changes' actual data sources (§8, §17.1;
     [`conversions_preserve_uploads`, `receive_losses_converge`](proofs/queue/CovenQueue/Conversion.lean)).
     Without a converter, the received interpretation retains each original
     change as a frozen schema loss. Exclusion is never inherited through
-    `had_read`, including implicit own reads. With a converter, one received
+    `read_through`, including implicit own reads. With a converter, one received
     part can contain converted changes and frozen dependent originals;
-    the original log object retains the layout below.
+    the original inner write retains the layout below.
   - E.g. Ben's untried old-schema `title` edit uploads unchanged after he
     migrates; the receiving callback can interpret it as a `name` edit
     without rewriting that object
     ([`conversions_preserve_untried`, `receive_agreement`](proofs/queue/CovenQueue/Conversion.lean)).
   - Parts are in increasing audience order, each with at least one record.
-    `rows` counts row changes, execution records and dismissals. Own earlier writes are
-    implicit in `had_read`; an explicit own-device position is refused.
+    `rows` counts row changes, execution records and dismissals. Own earlier writes are implicit reads. The containing slot follows
+    `read_through`; an earlier own write is in an earlier slot or this batch.
   - A migration write has no parts; every other write has at least one
     ([§17.1](coven.md#171-host-application)).
-- Retain the write's first complete publication time from provider metadata.
-  For each kept removal or replacement retiring its device, §10 requires
-  `store_log_read` not to contain that entry and publication no more than
-  30 storage days after it. Exactly 30 days is allowed. A too-late write's
-  position is consumed without effects or losses; later readers cannot
-  rescue it. Otherwise eligible dependent changes have their own frozen
-  losses (§8). Replay recomputes admission, source verdicts and losses
-  atomically. Retirement admission is final with its deciding kept entry
-  and §10's send gate. Publication time remains provider metadata.
-- Authenticate a write with the current signing key of the path device's
-  stable owner in the replay of `store_log_read`; add no author or key field.
-  Each unread kept member-key replacement installing a different signing
-  key imposes the same inclusive 30-day deadline, including for a signer
-  from a losing replacement. A replacement already read cannot retire a
-  later key current in that past (§10). Later readers, including implicit
-  own predecessors, cannot rescue an excluded write or entry.
+- The containing slot supplies publication order. A lower-slot device or
+  member removal, or replacement of this author's signing credential,
+  consumes the writes without effects or losses and records the refusal
+  (§10). No storage-time deadline applies.
+- Authenticate the original write with its device owner's signing key at
+  `read_through`, with §7.1’s creation-binding exception for the first
+  device’s pre-setup writes at zero. Retain historical bindings and source
+  evidence. Claim
+  retries, conversion and checkpoint reload never alter this authored past.
+
 - A part's stream is its records, one frame each, in increasing `RowId`
   order, each of the part's audience; `length` counts every byte of them,
   including each seven-byte frame prefix. Record counts and total stream
@@ -257,9 +254,9 @@
     never enter conversion callbacks or current removal rules. Their values
     and original causes survive later raises and snapshot reloads.
     Source identities and per-change verdicts remain separate from dismissible
-    losses and consumed positions. Snapshot records, fingerprints and the loss
+    losses and consumed slots. Snapshot records, fingerprints and the loss
     API must preserve that evidence and dependency causes (§8, §17.1);
-    the compact D7 layout alone does not supply this evidence either.
+    D7 carries this evidence separately from losses.
   - `creator` is present only on a generation-zero insert that copies a row
     from another audience (§14.2): it names the copied row's original
     creation, at the same table and key in another audience, which the
@@ -323,27 +320,14 @@
 - A part's record count and byte length must match its header. A frame
   announced beyond the part's end is refused before allocation.
 
-### D6 Store log entries
+<a id="d6-store-log-entries"></a>
 
-- An entry (kind 4):
+### D6 Admin entries
 
-  ```
-  position   EntryId
-  timestamp  Timestamp
-  author     MemberId
-  had_read   EntryPositions   other devices' entries; its own device's are implicit
-  change     u8, then its fields
-  ```
-
-- The storage time is provider metadata, not an author-supplied field.
-  Readers retain the first complete publication time with the entry and
-  compare its `had_read`, including implicit own entries, with the complete
-  stored history for §9's landing rule. A retry keeps both bytes and time.
-- “Landed too late” excludes the entry's change from replay, not its identity
-  from consumed positions. This drop is permanent and compares against any
-  unread stored entry, kept or dropped. Unlike D5's write deadline, dropping
-  the retiring entry never restores a too-late entry. The drop and finality
-  are derived from storage times and recorded reads; neither changes these bytes.
+- An admin frame (kind 4) is `change:u8 | fields`. Its containing slot gives
+  its `EntryId`, author and publication identity (D9). Validate against the
+  state immediately before that slot. Every claimed entry is final; there
+  is no timestamp selection or landing-time admission.
 
 | Tag | Change | Fields |
 | --- | --- | --- |
@@ -358,85 +342,63 @@
 | 8 | Delete circle | `circle:uuid` |
 | 9 | Add circle member | `circle:uuid \| member:MemberId` |
 | 10 | Remove circle member | `circle:uuid \| member:MemberId` |
-| 11 | Raise schema | `version:u32 \| snapshot:SnapshotId \| caught_at:StorageTime` |
-| 13 | Reset | `snapshot:SnapshotId` |
+| 11 | Raise schema | `version:u32 \| announcement:Slot` |
+| 13 | Reset | `announcement:Slot` |
 | 14 | Set access | `member:MemberId \| access:MemberAccess` |
 | 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
-| 16 | Replace member keys | `member:MemberId \| keys:MemberKeys` |
+| 16 | Replace member keys | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys` |
 
-- Tag 12 is unused. The other tags retain their numbers.
-- A role is `0` admin or `1` member. `SnapshotId` is
-  `audience:Audience | device:DeviceId | number:u64`, its path's parts (D10).
-  Its number is positive and belongs to the device's snapshot sequence.
-  The entry's timestamp names its writing device.
-- The create-store entry is number 1 of its device and reads nothing.
-  Its 16-byte header `author` is the first admin's stable id; `admin` supplies
-  that member's public pair, with no duplicate id. Verify creation with its
-  supplied signing key and require its store id to match the path. The device
-  it adds is the one writing it. For every other entry replay `had_read`,
-  including implicit own entries, resolve `author` there, and verify with
-  that member's current signing key. The proof model's signer is verified
-  evidence, not an additional wire field.
-- Creation and addition establish keys. Only tag 16 changes an active
-  member's keys; it carries no audience keys, role, access or device changes.
-  Neither signing nor sealing key may reuse a previously established key.
-  Its target must exist in its recorded view and at its replay position.
-  Authority and equal-payload replacement conflicts follow §9: self is
-  classified by author equal to target even for an admin, another admin
-  wins over self, then the earlier timestamp wins; member removal wins.
-- Add-device carries no member id; create-circle carries no member list.
-- An add-device replacement names an older device of the same member,
-  distinct from the added device. It carries no log ends. Concurrent
-  replacements each keep their new id and mark the old id replaced (§10).
-  An old-id write counts only before it read a kept replacement, by D5's
-  `store_log_read`, and within §10's write landing deadline; an entry uses
-  `had_read` with implicit own entries and §9's permanent landing rule.
-  Ordinary authority and admission checks still apply. Replacement introduces no key.
-- Set-access names the member whose access it records: its author, or
-  another member when an admin records a replacement S3 key (§9). Both must
-  be members in its recorded view, and the target at its replay position.
-  An admin's entry for another member must carry an S3 key. Concurrent
-  set-access entries conflict when they name the same member; equal ones
-  name the same account or key id.
-- `key` and `key_hash` occur only on creation and rotation: the id and
-  SHA-256 of the exact 32 key bytes ([§11](coven.md#11-keys)). The hash is
-  inside the encrypted entry, never a cleartext path component. Key ids
-  have no numerical ordering or succession. Removals contain neither keys
-  nor a deleted-circle list; the author's recorded view determines deletion.
-- A rotation changes no membership. Its author must be a member of the
-  audience in the entry's recorded past and it conflicts with no entry.
-  An outside store admin cannot introduce a circle key. Concurrent rotations
-  coexist (§11).
-- Raised versions are at least 1, and a raise names a snapshot of the
-  audience it raises; a reset names the audience it resets. A raise's
-  `caught_at` is its snapshot's signed `T_c` (D9): replay drops a raise
-  landing more than one day after it (§9), and a boundary whose named
-  snapshot's prefix has another `T_c` refuses that snapshot (§15). A creation's
-  store id must agree with its path (D9).
+- Tag 12 is unused. A role is `0` admin or `1` member. `SnapshotId` is
+  `audience:Audience | device:DeviceId | number:u64`, naming D10's path;
+  its number is positive and only identifies an object.
+- Creation occupies slot 1. Its slot header's author is the first admin's
+  stable id, its device is the first device, and its payload supplies the
+  signing key. Check that signature and the path's store id.
+- Other entries use the signing binding immediately before their slot.
+  Add-device registers the slot's writing device. A replacement retires a
+  distinct older device of the same member; it has no log ends.
+- Replace-member-keys requires the target's current binding to equal
+  `expected`; both new public keys must be unused. Only this change alters
+  an existing member's binding. A competing completed replacement requires
+  a new call, not an automatic overwrite (§9).
+- Set-access changes its author's access, or an admin's target member's S3
+  key. The named member must be active. Remove and circle changes use the
+  immediately preceding state, including last-member circle deletion.
+- `key` and `key_hash` name the introduced key and SHA-256 of its exact 32
+  bytes, inside encryption. Rotation changes no membership; the author must
+  belong to that audience. Successive rotations take effect in slot order.
+- A raise names an earlier announcement for its audience and positive schema
+  version; a reset names its reset announcement. Verify purpose, coverage,
+  schema and authorization under §15 and §17 before claiming. A later
+  reader checks the same facts.
 
 ### D7 Snapshots
 
 - A snapshot's plaintext is a header frame, its record frames in order,
   then an end frame (kind 7).
-- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:8×u64`,
-  one count per section below. Its positions are in its sealed prefix (D9).
+- The header (kind 5): `id:SnapshotId | schema_version:u32 | counts:12×u64`,
+  one count per section below. Its covered slot is in its sealed prefix (D9).
 - Records (kind 6) are `section:u8 | record`, sections in order, each
   ordered as shown:
 
   | Section | Record | Order |
   | --- | --- | --- |
   | 0 | Synced row: `row:RowId \| columns:map<name, ColumnValue>` | `RowId` |
-  | 1 | Applied write: `id:WriteId \| timestamp:Timestamp \| had_read:WritePositions` | `WriteId` |
+  | 1 | Applied write: `id:WriteId \| slot:Slot \| timestamp:Timestamp \| read_through:u64` | `WriteId` |
   | 2 | Synced column: `table:name \| column:name` | table, column |
   | 3 | Merge row: `row:RowId \| generations:map<u64, WriteId> \| cells:map<name, Cell>` | `RowId` |
   | 4 | Loss: `row:RowId \| generation:u64 \| frozen:bool \| values \| cause` | identity below |
   | 5 | Authored change: `header:WriteHeader \| complete:bool \| change:record \| verdict` | `ChangeId` |
   | 6 | Creation: `row:RowId \| write:WriteId \| creator:ChangeId` | `RowId` |
   | 7 | Write evidence: `write:WriteId \| prefix:bytes \| header:bytes \| roots:[32 bytes] \| header_signature:64 bytes \| proof:Multiproof` | `WriteId` |
+  | 8 | Original admin slot: `slot:Slot \| object:bytes` | slot |
+  | 9 | Original key-copy slot: `slot:Slot \| object:bytes` | slot |
+  | 10 | Original announcement slot: `slot:Slot \| object:bytes` | slot |
+  | 11 | Publication receipt: `id:PublicationId \| slot:Slot \| digest:32 bytes \| writes:[WriteId]` | `PublicationId` |
 
   Empty sections emit nothing. `Cell` is `write:WriteId | value:ColumnValue`.
   Synced-row columns are nonempty. Applied-write timestamps name their
-  devices; had-read positions name other devices only, with own earlier
+  devices; `read_through` is below the containing slot, with own earlier
   writes implicit.
 - Every loss uses section 4, whether a cell lost concurrently, removal rules
   hid a row, a schema change excluded a write, or a breaking
@@ -496,7 +458,7 @@
   there is no abbreviated-name decoding form. Another audience's row names
   no winner and imposes no ordering on which circle can win. Deleted-circle and
   other-audience rules require a circle. A deleted-circle rule names the
-  kept entry that deleted it, covered by the snapshot's store-log positions.
+  entry that deleted it, at or below the snapshot's covered slot.
   A delete-circle entry has no companion write or row list (D6).
 - Synced-row references obey merge's written-parent checks. A merge row must
   have contiguous generations, valid transition and cell timestamps, no
@@ -508,55 +470,72 @@
   exactly when it has no active removed-row loss. Frozen losses need no
   live cells or current schema columns. A migration-deleted row still
   carries its advanced even generation in section 3 (§17.1).
-- All rows and the plaintext header have the sealed prefix's audience.
-  Every named write ID and applied write's read positions are covered by
-  the prefix's write positions. Positions describe consumed writes,
-  including excluded writes and ignored pre-reset writes. Reset eligibility
-  uses D5's `store_log_read`, not its write positions. A position that passed
-  an unreadable circle's parts does not prove they were loaded; rejoining
-  loads that audience's snapshot and skipped history (§14.4). Excluded writes'
-  headers and dependencies are not retained in loss records.
+- Rows and the plaintext header have the prefix's audience. Every named
+  published write and source has a containing slot at or below coverage.
+  The consumed prefix includes cut-off and reset-ignored writes; their
+  verdicts remain. Reset eligibility uses `read_through`. Passing unreadable
+  circle parts does not prove they were loaded; rejoining reloads them.
+- Sections 8–11 occur only in the store snapshot. Keep the exact signed
+  admin, copy and announcement slots through coverage, including creation,
+  so a loader can verify historical bindings, key introductions, exposure
+  and announcements. They are authentication history, not replayable data
+  slots. Each `object` retains its original path's slot for authentication.
+  Derive the current admin state from this ordered evidence. Retained suffix
+  admin slots supply any later binding needed to verify the floor signer.
+- Section 11 carries every covered publication's identity, slot and SHA-256
+  of its complete stored bytes. `writes` is empty except for writes slots;
+  it names their writes in number order. A writes batch can exceed a frame's
+  collection limit: encode consecutive receipt records for the same
+  publication, with consecutive nonempty groups of at most 65,536 ids;
+  every group but the last is full and repeats the same slot and digest.
+  Other duplicate receipt identities are refused. The snapshot signature
+  authenticates receipts before a sender uses one to settle an uncertain
+  claim. Receipts identify the original logical occupant after physical
+  deletion; a late create at a reclaimed path cannot replace it. Check the
+  floor after reading a slot or receiving a claim response (§6). Write headers, source verdicts and authorship evidence remain in
+  their audience sections; a digest is not a replacement for that evidence.
+
 - The decoder refuses incorrect section/record order, duplicate identities,
-  mismatched counts, audiences and coverage. EOF without the end marker is
+  mismatched counts, audiences and coverage; section 11 permits only its
+  specified consecutive receipt groups. EOF without the end marker is
   truncation; no records may follow the marker.
-- No local row ids, uploads, operations or storage paths occur in a snapshot.
-  Retained inputs for undoing a non-final entry's effects are local state;
-  they are not lost merely because a snapshot replaces the visible state.
-  `LostValue.pending_entries` is computed from replay and finality, not encoded.
+- No local row ids, upload queues, operation journals or local paths occur
+  in a snapshot. Loading leaves these local obligations intact.
+
 - Section 5 holds every original row change of the audience whose write
-  the snapshot's positions cover and which this device holds: the D5 header
+  the snapshot's covered slot includes and which this device holds: the D5 header
   of its part, whether that part's every change is known (so a named row's
   absence is proof), the original D5 row change with its generation source
   and replaced setters, and the author's verdict. `verdict` is
   `0` unjudged (its effects arrived in an earlier snapshot), `1` applied,
   `2 | version:u32` excluded by the breaking change to that version, `3`
-  dropped by its own retirement window, `4 | sources:[ChangeId]` dependent,
-  `5 | entry:EntryId` ignored by that kept reset (§19.3), which it had not
+  refused by the earlier retirement or credential-replacement slot, `4 | sources:[ChangeId]` dependent,
+  `5 | entry:EntryId` ignored by that reset (§19.3), which it had not
   read, `6 | reason` unauthorized, with loss cause 4's `reason`, or
   `7 | causes:[ChangeId]` applied as the exact foreign-key effect of those
   changes of its own write: each action's root, then its intermediate
   causes, in execution order (§8.8). Only unjudged, applied and derived
   changes survive as sources. Its write and every source it names must be
-  covered by the positions; dismissing a loss never changes a verdict.
+  covered by its consumed prefix; dismissing a loss never changes a verdict.
   A loader keeps the same original bytes for one identity and adopts the
   snapshot's verdicts with its data.
 - Snapshot evidence must preserve original change identities, actual
   generation/setter sources and their own admission facts independently of
-  dismissible losses and consumed positions. Old-key window exclusions feed
+  dismissible losses and consumed slots. Old-credential cut-offs feed
   the same per-change rule as schema and device-retirement exclusions (D5).
   Dependent changes retain their original generation, operation, column names
   and values, even an empty-valued delete. Their dependency cause names failed
   sources in generation-then-setter role order, retaining repeated ids.
   A later reader, conversion, loss dismissal or snapshot reload cannot turn
-  that excluded source into retained data. Preserve originals until deciding
-  replacement prefixes are final and the other retention checks pass.
+  that excluded source into retained data. Preserve originals in successor snapshots while they support source
+  verdicts or current authorship; physical deletion follows §15.
   Section 5 and loss cause 3 supply that evidence for
   [B17](proofs/merge.md#b17-receive-order-progress-and-dropping-by-data).
 - A section 5 `record` is `0 | row change` or `1 | execution record`,
   each the D5 frame body without its envelope: an execution record is
   source evidence too, and its steps can cause foreign-key actions (§8.8).
 - Section 6 holds each row's selected creation (§8.8): `write` is the
-  generation-zero insert with the smallest timestamp, and `creator` the
+  generation-zero insert with the lowest slot, then lowest write number, and `creator` the
   creation it names, `write` and `row` themselves unless that insert copied
   the row from another audience. `creator` has the row's key, and names
   its table as its own write did, before any later rename; it is in another
@@ -586,7 +565,7 @@
     its authenticated header's disposition shows it is one.
   - The loader opens the header with the store key its prefix names,
     verifies the header signature with the signing key of the write
-    device's owner in the header's `store_log_read`, and checks `proof`
+    device's owner in the header's `read_through`, and checks `proof`
     against the root of this audience's part. A key not yet held waits; any
     other failure refuses the snapshot. Then every creation and present cell
     it attributes to another member must be among the opened leaves, at the
@@ -595,50 +574,34 @@
   - A loader keeps the openings: its own later snapshot reuses them for the
     same writes, so it can carry evidence for parts it never held.
 
-### D8 Small frames
+<a id="d8-small-frames"></a>
 
-- Posted positions (kind 8):
+### D8 Status, floor and join frames
+
+- Device status (kind 8):
 
   ```
   device          DeviceId
-  writes          WritePositions
-  store_log       EntryPositions
+  applied         u64
   schema_version  u32
-  fingerprints    [audience:Audience | key:uuid | fingerprint:32 bytes]   store first, increasing
+  fingerprints    [audience:Audience | key:uuid | fingerprint:32 bytes]
   pending         [subject | reason]
   ```
 
-- Positions describe a causally closed applied past, with own writes
-  uploaded. Consumed store-log entries include dropped ones, including
-  those that landed too late (§6, §9).
-  - Pending reports can change while write positions stay at the last
-    publishable past; store-log positions are the applied ones. Omit
-    fingerprints unless they describe exactly those positions.
-  - Positions are not finality acknowledgements. Their provider-assigned
-    replacement time, observed after a changed post, can supply the storage
-    sample T for §9's subsequent store-log check. That check uses
-    `T′ = T - M - δ`, with one common `M = one hour` and positive provider
-    time unit δ, as its inclusive endpoint. Underflow cannot advance finality.
-    Unchanged posts are not replaced to observe time; a quiet store instead
-    replaces its clock object (§9).
-  - Positions are not a log discovery index. A writer can crash after
-    uploading an object and before posting; readers GET the next log number
-    regardless of what any positions object says (§6).
-  - Drop reasons remain local: each device computes an entry's permanent
-    “landed too late” verdict from D6 and storage metadata, and a write's
-    replay-dependent retirement deadline from D5 and kept entries.
-- A report's subject has one of these tags:
+  Fingerprints are ordered by audience and describe exactly this published
+  prefix; omit them while local queued writes prevent comparison. Status
+  never discovers slots or acknowledges retention. A blocked sequence sends
+  no status. Reports are only the poster's observations, ordered by subject,
+  at most one first unmet condition per subject.
 
   | Tag | Subject | Fields |
   | --- | --- | --- |
-  | 0 | Write | `WriteId` |
-  | 1 | Entry | `EntryId` |
+  | 0 | Slot | `Slot` |
+  | 1 | Write | `WriteId` |
   | 2 | Key copy | `audience:Audience \| key:uuid \| member:MemberId \| sealing:SealingKey` |
   | 3 | File | `device:DeviceId \| file:uuid` |
   | 4 | Snapshot | `SnapshotId` |
-  | 5 | Positions | `DeviceId` |
-
-- A report's reason has one of these tags:
+  | 5 | Status | `DeviceId` |
 
   | Tag | Reason | Fields |
   | --- | --- | --- |
@@ -648,93 +611,156 @@
   | 3 | Key unavailable | `audience:Audience \| key:uuid` |
   | 4 | Update required | `kind:u8 \| version:u32` |
   | 5 | File unavailable | `failure:u8` |
-  | 6 | Invalid positions | `failure:u8` |
+  | 6 | Invalid status | `failure:u8` |
+  | 7 | Writes refused | `cutoff:Slot \| cause:u8` |
 
-- Refusal tags: 0 decryption/authentication, 1 signature, 2 parse,
-  3 invalid write, 4 not authorized, 5 invalid causality, 6 wrong identity,
-  7 file content hash. Content-hash refusal applies only to File.
-- Wire prerequisites are 0 followed by an object path as `text`, or
-  1 followed by a device id whose registration is missing. Other waits
-  remain local because they name no object or member key copy a peer can supply.
-- Update kind 0 means app schema; kind 1 means coven format and its version
-  must fit u16. File-failure tags are 0 missing, 1 changed, 2 integrity.
-- Every path is canonical D10 text for this store. Refused applies only to
-  immutable subjects. Invalid positions applies only to Positions.
-  File unavailable applies only to File, whose device must be the poster.
-  Its wire failure is the local `FileMissingReason::Source` case; uploader
-  removal or replacement is derived from the store log and is not posted
-  as someone else's source report.
-- Reports order by subject tag, then its fields in D2 order, with at most
-  one first unmet condition per subject. The posting device is `reported_by`;
-  that field is not repeated in each record.
-  - Only observations made by the poster travel. Never forward a peer's report.
-  - Key-copy reports concern copies sealed to the poster's member.
-    Order their fields by audience, key id, member id, then sealing key.
-    A report for an old credential never satisfies a wait for its replacement.
-  - No local times, paths to user files, attempt counts, operation ids or
-    coven package versions travel.
-  - The signature authenticates the complete list (§19.1). A list exceeding
-    D1/D2 or the provider's replacement limit fails publication and records
-    a pending Positions record; it is never silently truncated.
-
-- A clock observation (kind 12) is
-  `device:DeviceId | store_log_read:EntryPositions`, with the device matching
-  its path. It asserts no device time. Its sealed object's provider-assigned
-  publication time is T. A subsequent complete store-log scan uses
-  `T′ = T - M - δ` for finality, with `M = one hour` and δ from §4. The
-  inclusive endpoint precedes the strict listing boundary `T - M` (§9);
-  underflow cannot advance finality. T and T′ are provider metadata and
-  derived local evidence, not fields in this object.
-  On return, T also supplies §15's elapsed-time check against the last
-  completed pass's saved storage time. That check does not substitute T′.
-
-- A join request (kind 9):
+- Refusal tags: 0 authentication, 1 signature, 2 parse, 3 invalid write,
+  4 unauthorized, 5 invalid causality, 6 wrong identity, 7 file content hash.
+  The last applies only to files. Wire prerequisites are 0 plus an object
+  path, or 1 plus an unregistered device id. Other waits stay local.
+- Update kind 0 is app schema, 1 coven format (version fits u16). File failure
+  0 is missing, 1 changed, 2 integrity; only a file's uploader posts this
+  source report. Invalid status applies only to Status. Writes refused
+  applies to Slot or Write; cause 0 device removed, 1 member removed,
+  2 member keys replaced. The slot is consumed, unlike a refused object.
+- Key-copy reports name the poster's member and exact sealing credential.
+  Paths are canonical D10 paths. No local paths, times, attempt counts,
+  operation ids or package versions travel. An oversized report fails
+  publication with a local pending Status record, never truncates.
+- Floor (kind 12): `author:DeviceId | at:u64 | first:Slot | covered:u64 |
+  snapshots:[announcement:Slot]`.
+  References are ordered by audience (store first) as resolved from the
+  announcements; one per required audience. `covered` is the minimum of
+  their coverages and `first <= covered + 1`. The store snapshot carries
+  those signed announcements as checkpoint evidence. Its own announcement,
+  made after its capture, is carried in D9's floor evidence instead.
+- A floor is conditionally replaced under §15. Its encrypted body is a
+  stream of frames: this header, then one kind-6 frame for each original
+  announcement (`slot:Slot | object:bytes`) required by the bundle, then
+  kind-7 end. Every announcement occurs exactly once in header order.
+  The floor has no fixed total-size bound; each frame retains D1's bound.
+- A join request (kind 9) is
   `invite:uuid | member:MemberId | keys:MemberKeys | device_name:name`.
-  Verify with the supplied signing key and require the id fixed by the invite.
+  Verify with the supplied key and require the invite's fixed member id.
 
 ### D9 Sealed objects
 
-- Every object in storage but a file and the creation marker is sealed:
-
-  ```
-  kind:u8 | version:u16 | prefix | chunks | signature
-  ```
+- Stored objects use `kind:u8 | version:u16 | prefix | chunks | signature`,
+  except D12 files. Inner writes use the same framing but are not separate
+  storage objects.
 
   | Kind | Object | Prefix |
   | --- | --- | --- |
-  | 32 | Write | `header_key:uuid \| part_keys:[uuid]` |
-  | 33 | Store log entry | `key:uuid` |
-  | 34 | Snapshot | `audience:Audience \| key:uuid \| caught_at:StorageTime \| raise:Option<u32> \| writes:WritePositions \| store_log:EntryPositions` |
-  | 35 | Posted positions | `key:uuid` |
-  | 36 | Join request | nothing |
-  | 39 | Clock observation | `key:uuid` |
+  | 32 | Inner write | `header_key:uuid \| part_keys:[uuid]` |
+  | 33 | Sequence slot | `slot_kind:u8 \| key:uuid \| copy:Option<CopyBox>` |
+  | 34 | Snapshot | `audience:Audience \| key:uuid \| covers:u64 \| purpose:Purpose` |
+  | 35 | Device status | `key:uuid` |
+  | 36 | Join request | empty |
+  | 39 | Floor | `key:uuid \| copies:[slot:Slot \| object:bytes]` |
 
-- A sealed key copy uses the anonymous box framing of D11 instead of
-  chunks and an author signature:
+- `Purpose` is `0` ordinary, `1 | version:u32` raise, or `2`
+  reset. A raise's version is positive and equals its snapshot schema.
+  The admin entry names the exact announcement activating its prepared state.
+- Slot kinds are 0 admin, 1 writes, 2 key copy, 3 snapshot announcement.
+  `copy` is present exactly for kind 2. The key id opens the slot's encrypted
+  body; a prerequisite copy uses the currently usable store key.
+- Every slot starts its encrypted body with a kind-14 header:
+  `publication:PublicationId | author:MemberId | after:u64`.
+  `after` is exactly its slot minus one. Admin, copy and announcement slots
+  use the device owner's current key in this prefix; creation supplies it
+  in D6. A new device's add-device entry uses its existing member's key.
+  A writes slot uses the signing credential shared by its inner writes,
+  resolved from their authored views. Check that historical signature before
+  consuming a batch cut off by an earlier retirement or replacement (§10).
+- After this header, the plaintext body is:
+  - admin: one D6 frame;
+  - writes: `count:u64`, then `length:u64 | inner write` for each queued
+    write, in strictly increasing write-number order, all by the header's
+    device, with no omitted unconfirmed predecessor;
+  - key copy: one empty kind-16 frame;
+  - announcement: one kind-15 frame:
+    `snapshot:SnapshotId | covers:u64 | purpose:Purpose | digest:32 bytes`.
+    Its coverage is below this slot. The digest is SHA-256 of the complete
+    snapshot, and its signed prefix must agree on coverage and purpose.
+    Readers check the digest when reading the body; application and coverage
+    can use the verified prefix and announcement without another body read.
+- A writes slot's body streams across 64-KiB chunks; there is no enclosing
+  bounded collection or frame. Check every length before allocation and
+  stream each inner write. Every other slot holds its two frames in one
+  chunk, subject to D2's complete-slot limit. Atomic publication includes
+  all uploaded parts; a partial slot is never visible (§4).
+- `CopyBox` is `audience:Audience | key:uuid | member:MemberId |
+  sealing:SealingKey | ephemeral:32 bytes | nonce:24 bytes |
+  ciphertext:bytes | tag:16 bytes`. Its ciphertext is 48 bytes for a store
+  key or 64 for a circle key (D11). Kind and routing remain clear; the
+  anonymous box and the slot's final signature authenticate them. The box
+  may be opened tentatively before the store key is held, but membership,
+  introduction and slot signatures must verify before applying anything.
+  Its box context uses the slot prefix through `sealing`, excluding the
+  ephemeral key and ciphertext. D11 adds the ephemeral key separately.
+- A floor's `copies` retain the exact complete original key-copy slots
+  needed to open its key, in slot order. They are evidence, not newly sealed
+  copies. Verify each with its original slot path and historical binding
+  from the authenticated checkpoint. The floor's signer is `author` in the
+  state at `at`; `at` covers all referenced announcements. The encrypted
+  author and `at` fields have no authority until verification. Verify the
+  floor, checkpoint and historical
+  evidence together before committing a reload.
+- Snapshots have a 64-byte prefix signature immediately after their prefix,
+  before chunks. It signs `context("coven/prefix-signature/v1", path,
+  kind | version | prefix)`. Check it before using coverage; verify the final
+  signature before loading. Resolve the snapshot device's key at `covers`
+  from local history or its store checkpoint. An unknown author waits.
+- Status has one chunk holding its D8 frame. Resolve its device owner's key
+  at `applied`, then verify its signature before using any report. Bad status
+  is `InvalidStatus`, not applied evidence. A historical signature remains
+  valid after key replacement; it grants no current authority to send.
+- An inner write carries its authorship roots and header signature between
+  its header chunk and part chunks:
 
   ```
-  kind:u8 (37) | version:u16 | audience:Audience | key:uuid | member:MemberId |
-  sealing:SealingKey | ephemeral:32 bytes | nonce:24 bytes | ciphertext | tag:16 bytes
+  kind (32) | version | prefix | header chunk | roots:(32 bytes)×parts |
+  header_signature:64 bytes | part chunks | signature:64 bytes
   ```
 
-  The clear prefix is `kind | version | audience | key | member | sealing`. Discovery
-  reads the whole copy at `keys/<writer>/<n>`; routing, sharing and exposure
-  use that prefix, including when the reader is not the recipient. Audience,
-  key id, recipient id and exact sealing credential are public routing facts; the key and its hash are
-  not exposed. D11 binds this prefix into the box's authentication.
-
-- The creation marker is neither sealed nor signed:
-
-  ```
-  kind:u8 (41) | version:u16 | store:uuid | device:DeviceId
-  ```
-
-  A setup compares the stored bytes with its own claim's exact bytes
-  ([§10](coven.md#10-device-identity)); storage that forges or damages a
-  marker can only make setups refuse.
-
-- A delivered S3 key ([§13](coven.md#13-removing-members-and-devices)) is
-  sealed to its member with the same box, then signed by its author:
+  Its context identity is UTF-8 `coven/write/<store>/<device>/<number>`, with
+  D10's canonical id spellings. This is not a storage path. Both signatures,
+  chunk authentication and nonce derivation use this identity where other
+  objects use their path. Claiming another slot changes only the outer
+  envelope; the inner bytes and authored `read_through` stay fixed.
+- Each root is D11's keyed authorship root for that part. The header signature
+  signs the context `coven/write-header-signature/v1`, identity, exact clear
+  prefix, complete sealed header chunk and concatenated roots. Resolve its
+  signing key at `read_through`; check each opened part against its root.
+  The final signature covers the roots and header signature too.
+- A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes` under
+  the named key's derived XChaCha20-Poly1305 key. `length` is plaintext size.
+  A frame chunk holds 7 bytes through 16 MiB; stream chunks hold 1 through
+  65,536 bytes, with only the last in a section shorter. Empty chunks fail.
+- Sections are: inner write header at 0 under `header_key`, each part at
+  `i+1` under `part_keys[i]`; all other objects have section 0. Snapshots,
+  floors and writes slots stream; admin/copy/announcement slots, status and
+  join requests use one chunk. Inner part counts and lengths come from D5.
+  Unreadable parts are hashed and passed over without opening them.
+- Chunk associated data is D11's context of `coven/object-chunk/v1`, path or
+  inner identity, complete clear prefix, section and chunk index. Snapshot
+  prefix signatures are outside this context. Derive deterministic nonces
+  for inner writes and slots as D11 specifies; other objects retain random
+  nonces and their sealed bytes across retries.
+- The final signature is Ed25519 over the context of
+  `coven/object-signature/v1`, path or inner identity, and SHA-256 of every
+  preceding byte. It authenticates lengths, headers and skipped ciphertext.
+  Check the complete signature before committing a slot or snapshot.
+- A snapshot or floor stream's encrypted length follows from the complete
+  object's length minus its prefix and signatures. With `c = 65536 + 44`,
+  `n = ceil(sealed_length / c)` and plaintext size is `sealed_length - 44*n`.
+  Require a nonempty stream, a final chunk of 45 through c bytes, and the
+  plaintext end frame. A length observation never authenticates its body.
+- An uncertain create keeps its path and exact bytes. On `AlreadyExists`,
+  compare the whole slot. Equal confirms the claim; different bytes require
+  applying the winning prefix, revalidating and resealing for a new slot.
+  Do not try another path until the uncertain destination is settled (§6).
+- A delivered S3 key keeps its signed anonymous box:
 
   ```
   kind:u8 (40) | version:u16 | member:MemberId | sealing:SealingKey | author:MemberId |
@@ -742,193 +768,34 @@
   signature:64 bytes
   ```
 
-  - The clear prefix is `kind | version | member | sealing | author`; D11
-    binds it into the box. `box_length` counts the bytes from `ephemeral`
-    through `tag` and is at most 8 KiB plus the box's 72 bytes of overhead.
-  - The plaintext is `access_key_id:text | secret_access_key:text |
-    principal:S3Principal` (D6), each text at most 1,024 bytes and the whole at
-    most 8 KiB.
-  - `signature` is the author's `coven/object-signature/v1` signature over
-    every preceding byte. The recipient verifies it with the author's current
-    signing key, then opens the box only when `member` and `sealing` are its
-    own. It uses the key only if the author also authored a kept `SetAccess`
-    recording that key id as the member's current access.
-
-- Every store-log entry has the same 19-byte prefix including kind and
-  version. The create-store frame supplies the first admin's signing key;
-  decrypt it, verify the signature with that key, and require its store id
-  to match the path. Creation is entry 1 of its authoring device (D6).
-- A snapshot has two 64-byte Ed25519 signatures:
-
-  ```
-  kind:u8 (34) | version:u16 | prefix | prefix_signature:64 bytes | chunks | signature:64 bytes
-  ```
-
-  - `caught_at` is §15's `T_c`, the provider storage sample taken before
-    the publication catch-up's reads; it is fixed with the captured prefix,
-    not the author's wall clock or the upload's start or completion time.
-    [`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
-    `prepare_preserves_sample`, `land_preserves_sample`](proofs/io/CovenIO/SnapshotTiming.lean)
-    prove the model's sampling and preservation; they do not prove the
-    signed encoding or exact-byte retries.
-  - Compare the complete object's first publication time from provider
-    metadata with `caught_at + 86,400 seconds`: equality counts, a later
-    landing is ignored for loading, selection and coverage
-    ([`late_snapshot_ignored`, `Snapshot.counts`](proofs/io/CovenIO/Retention.lean)).
-  - E.g. `caught_at = (100, 0)` admits a landing at `(86500, 0)`, but not
-    `(86501, 0)` ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
-  - `raise` is the positive version a raise snapshot raises its audience to
-    (§17.1), absent for every other snapshot; the header's `schema_version`
-    must equal it. Retention reads it before any entry names the snapshot,
-    and a raise entry's boundary refuses a named snapshot without its own
-    version here (§15).
-  - `prefix_signature` signs the D11 context of `coven/prefix-signature/v1`,
-    the path, and the exact cleartext `kind | version | prefix` bytes. The
-    separate label distinguishes this message from a whole-object digest.
-  - Verify it before using any prefix field to choose a snapshot, establish
-    required history, or decide retention coverage, including reset and
-    version-raise boundaries. Bounded ranged reads fetch the routing bytes,
-    counted positions and prefix signature without fetching encrypted chunks;
-    their keys are unnecessary. Unverified counts may delimit these reads,
-    subject to D2's bounds, but no prefix field has authority until verified.
-  - The final signature uses `coven/object-signature/v1` as below, hashing
-    every preceding byte, including `prefix_signature`. Verify it when loading,
-    before applying any snapshot data.
-  - For both signatures, replay the snapshot's signed `store_log` coverage,
-    resolve the device's stable owner there, and use its current signing key
-    in that view. Unverified positions are lookup hints only: they can request
-    prerequisite entries but cannot establish coverage, finality or authority.
-    An unknown device waits for its registration. A missing signature or wrong signer
-    is a permanent refusal once the author is known (§19.1).
-- Posted positions have exactly one chunk followed by the author's 64-byte
-  `coven/object-signature/v1` signature. Every read verifies it against the
-  current signing key of the path device's member in the replay of the
-  object's signed `store_log`, before using
-  positions, fingerprints or pending reports. An unknown device waits for
-  registration; a missing or wrong signature has reason InvalidPositions
-  and does not count as posted (§19.1).
-- Clock observations use the same one-chunk framing and author signature.
-  Replay their `store_log_read` to find the path device's member and current
-  signing key. They contain no write positions, fingerprints or reports;
-  the time probe reads their provider metadata through status, not their body.
-- A write has its parts' authorship roots and a second signature right
-  after its sealed header chunk, so another member's authorship can be
-  checked without its parts (D7 section 7):
-
-  ```
-  kind:u8 (32) | version:u16 | prefix | header chunk | roots:(32 bytes)×parts |
-  header_signature:64 bytes | part chunks | signature:64 bytes
-  ```
-
-  - `roots[i]` is part `i`'s D11 authorship root, cleartext; it has one root
-    per prefix part key and is never empty for a part with records.
-  - `header_signature` signs the context of `coven/write-header-signature/v1`,
-    the path, the exact cleartext `kind | version | prefix`, the complete
-    sealed header chunk with its length field, and the roots concatenated in
-    part order. Its signer is the whole object's.
-  - A reader verifies it with the same key as the final signature, after
-    resolving the author from the opened header, and checks each part it
-    opens against its root; a mismatch refuses the write like a bad
-    signature. The final signature still covers every preceding byte,
-    including the roots and header signature.
-  - Retries reproduce both signatures: the roots follow from the fixed
-    plaintext and keys, and Ed25519 signing is deterministic.
-- Write signatures use the device owner's signing key current in the
-  header's `store_log_read`; entry signatures use D6's `had_read` lookup.
-  Retain historical public bindings. All unverified view fields are lookup
-  hints until verification. Join requests use their supplied new keys;
-  creation uses D6's supplied initial pair.
-- Historical snapshot, positions and clock signatures remain valid when
-  their key was current in the signed view. Replacing keys alone does not
-  invalidate them or add a 30-day landing deadline. Snapshot admission still
-  requires its signed catch-up time, coverage and §15's other checks; loading
-  rebuilds replay-dependent effects before commit. Positions retain their
-  causality and fingerprint checks and never establish finality. Clock time
-  remains provider metadata under §9. None grants current signing authority.
-  These are explicit object policies outside the checked entry/write window
-  theorem; every new send or retry still obeys §10's current-credential gate.
-- A chunk is `length:u32 | nonce:24 bytes | ciphertext | tag:16 bytes`:
-  XChaCha20-Poly1305 under the encryption key derived from the named key.
-  Writes and store log entries derive the nonce with HMAC-SHA256 from that
-  encryption key, path, cleartext prefix, section, chunk index and chunk
-  plaintext hash (D11); other objects use
-  random nonces. Readers use the nonce field as stored. `length` is the
-  ciphertext's, which is the plaintext's, so the chunk takes `length + 44` bytes. Empty chunks are
-  refused. A chunk holding one frame has 7 bytes to 16 MiB of plaintext; a
-  stream chunk has 1 byte to 64 KiB, and only its section's last may be shorter
-  than 64 KiB.
-- Chunks are grouped in *sections*, each sealed with one key:
-  - a write: section 0 is the header frame, one chunk with the prefix's
-    `header_key`; section `i + 1` is part `i`'s stream, with
-    `part_keys[i]`, cut into 64 KiB chunks, the last shorter;
-  - a snapshot: one section, its frames cut into 64 KiB chunks, to the end
-    of the encrypted data, before the final signature;
-  - an entry, positions, clock observation or a join request: one section of one chunk
-    holding its frame.
-  - The write prefix has exactly one key per declared part, including no
-    part keys for a migration write.
-  - A write's parts' chunk counts come from its header; a device that
-    can't open a part still finds its end.
-- A snapshot's plaintext length is determined by its listed object length.
-  Subtract the cleartext prefix length and both 64-byte signatures to get
-  `s`, the sealed section length. With `c = 65536 + 44`, it has
-  `n = ceil(s / c)` chunks and `s - 44*n` plaintext bytes. Require `s > 0`
-  and a final chunk of 45 through `c` bytes. This computes a size without
-  opening the section; loading still checks every chunk and the end frame.
-- Each chunk's associated data binds, as in D11's context encoding, the
-  label `coven/object-chunk/v1`, the object's path, its whole cleartext
-  `kind | version | prefix`, the section and the chunk's index in it.
-  A snapshot's prefix signature is not part of this associated data.
-  - So a provider can't change the prefix, swap, drop or reorder chunks, or
-    move an object to another path, unnoticed.
-  - A truncated snapshot lacks its end frame.
-- The signature is 64 bytes of Ed25519, by the author's member key, over
-  the context of the label `coven/object-signature/v1`, the path, and the
-  SHA-256 of every byte of the object before the signature.
-  - A join request is signed by the requester's new member key, the one
-    its frame carries.
-- E.g. Ana's write 12, with a store part and a Gifts part:
-
-  ```
-  20 0001                       kind 32, version 1
-  <store key id>                header_key
-  00000002 <store key id> <Gifts key id>    part_keys
-  <length><nonce><header frame sealed><tag>                 section 0
-  <store part root><Gifts part root><64-byte header signature>
-  <length><nonce><notes row 47 sealed><tag>                 section 1, chunk 0
-  <length><nonce><pins row 4 sealed><tag>                   section 2, chunk 0
-  <64-byte signature>
-  ```
+  Its prefix ends at `author`; plaintext is `access_key_id:text |
+  secret_access_key:text | principal:S3Principal`, at most 8 KiB, each text
+  at most 1,024 bytes. `box_length` includes 72 bytes of box overhead.
+  Verify the author's signature, open only the matching recipient box and
+  use it only after that author's claimed SetAccess makes this key current.
+  D11 binds its path and prefix into the box.
 
 ### D10 Paths
 
 | Path | Holds |
 | --- | --- |
-| `<store>/devices/<device>/<n>` | A device's write `n` |
-| `<store>/store-log/<device>/<n>` | A device's store log entry `n` |
-| `<store>/snapshots/<audience>/<device>/<n>` | A device's snapshot `n` of an audience: `store`, or a circle's id |
-| `<store>/clock/<device>` | A signed, sealed clock observation, replaced only for a due storage-time check |
-| `<store>/positions/<device>` | A device's posted positions and pending records, replaced as either changes |
-| `<store>/keys/<writer>/<n>` | A sealed store or circle key copy; audience, key and recipient are in its clear prefix |
-| `<store>/access-keys/<member>/<attempt>` | An S3 key delivered to a member, one per replacement attempt |
-| `<store>/files/<device>/<file>` | An uploaded file |
-| `<store>/join-requests/<invite>` | A join request |
-| `<store>/created` | The store's creation marker (D9), claimed create-once by the first setup ([§10](coven.md#10-device-identity)) |
+| `<store>/seq/<n>` | One create-once sequence slot |
+| `<store>/floor` | Signed, encrypted checkpoint references and first retained slot; conditional replacement |
+| `<store>/snapshots/<audience>/<device>/<n>` | One snapshot, discovered by its announcement |
+| `<store>/status/<device>` | Device status, replaced only when contents change |
+| `<store>/access-keys/<member>/<attempt>` | S3 key delivery owned by its operation |
+| `<store>/files/<device>/<file>` | Uploaded file |
+| `<store>/join-requests/<invite>` | Join request |
 
-- Device and key-copy writer ids and `n` are decimal, with no leading zeros;
-  `n` is at least 1. Each sealed-copy path belongs to its named writer.
-- Writes, store-log entries and key copies each have their own gap-free
-  publication sequence per writer, starting at 1. Key copies use one
-  sequence across audiences and recipients. Store-log entries and key
-  copies are never deleted. Snapshot numbers identify snapshots but are
-  never discovery cursors; list their audience folder (§15).
-- Store, member, circle, key, invite, attempt and file ids are canonical
-  lowercase hyphenated UUIDs. A delivered key's path is written once and never
-  replaced; its attempt id is the replacement operation's. A member spelling
-  never encodes a public key.
-  Replacing keys starts no second writer log and overwrites no old copy.
-- A path is used exactly as written here, with no other spelling, and is
-  bound into its object's authentication.
+- Device ids and numbers are decimal without leading zeros; n starts at 1.
+  The sequence has no gaps before retention. Snapshot numbers identify
+  objects, never discovery cursors. No per-device log or key-copy path exists.
+- Audience is `store` or a circle UUID. Store, member, circle, invite,
+  attempt and file ids are canonical lowercase hyphenated UUIDs.
+- Every immutable path is created once and retries compare exact bytes.
+  Floor and status are replaceable. A path has only this spelling and is
+  bound into its object's authentication. Bootstrap discovers creation at
+  slot 1 or in the floor's checkpoint; there is no separate creation marker.
 
 ### D11 Keys, contexts and fingerprints
 
@@ -967,7 +834,7 @@
     An insert has its creation leaf even when it sets no other column, and
     it carries no values, so ownership stays checkable after every inserted
     value is overwritten. Generations are the row's before the change.
-- For each write or store-log chunk, derive its 24-byte nonce as:
+- For each inner-write or slot chunk, derive its 24-byte nonce as:
 
   ```
   HMAC-SHA256(encryption_key,
@@ -976,11 +843,11 @@
   ```
 
   Here `encryption_key` is the 32-byte key derived with `coven/encryption/v1`,
-  `path` is the exact D10 path, `prefix` is the exact cleartext
+  `path` is the exact D10 path or D9 inner-write identity, `prefix` is the exact cleartext
   `kind | version | prefix` from D9, and `plaintext` is this chunk's complete
   plaintext, including any frame bytes. The numbers are big-endian eight-byte
   strings, each context field length-prefixed as above. Sections and indices
-  start at zero as in D9; an entry uses section 0, index 0. The label separates
+  start at zero as in D9. The label separates
   nonce derivation from other contexts. Hashing bounds the content field at
   32 bytes and uses the existing SHA-256 primitive. Neither plaintext nor its
   unkeyed hash is published; only the keyed nonce reaches storage.
@@ -991,12 +858,12 @@
   format and sealing key ids remain fixed for retries; deterministic sealing
   and Ed25519 signing reproduce the complete object byte for byte.
 
-  This derivation does not apply to snapshots, sealed keys, positions,
-  clock observations or join requests; snapshots and sealed keys retain
+  This derivation does not apply to snapshots, anonymous boxes, status,
+  floors or join requests; snapshots and sealed keys retain
   their originally sealed bytes.
 - An invite's secret derives its join request's key with
   `coven/join-request/v1`.
-- A sealed key at `<store>/keys/<writer>/<n>` has D9's clear prefix and box:
+- A sealed audience key in a sequence slot has D9's clear routing prefix and box:
   - The shared secret is X25519 of a fresh ephemeral key and the member's
     exact sealing key named in D9's prefix; a contribution of all zeros is
     refused. The prefix must match the recipient key actually used by the box.
@@ -1085,14 +952,15 @@
     may carry the S3 key alongside the code (§12.1), outside this frame.
 - An invite code (kind 11): `store:uuid | name:name | invite:uuid | member:MemberId |
   secret:32 bytes | initial_key:uuid | inviting_writer:DeviceId |
-  key_copy_number:u64 | storage:bytes`.
-  The key is the one introduced by creation. `key_copy_number` is the
-  inviting writer's last published copy number at invite time, zero if none.
-  The joiner starts at the next number in that writer's D10 key-copy log
-  and reads forward until her initial-key copy arrives (§12.2).
+  read_through:u64 | storage:bytes`.
+  The key is the one introduced by creation. `read_through` is the inviting
+  device's applied slot when issuing the invite. A joiner checks subsequent
+  slot routing for its copy, or follows the floor when that prefix is gone
+  (§12.2). Routing scans establish no applied progress or authority.
+
   The admin fixes `member`: a fresh id for addition, or an existing active id
   for replacement. The signed request must repeat that id. Approval publishes
-  its exact pair, after prerequisite copies; bootstrap requires a kept matching
+  its exact pair, after prerequisite copies; bootstrap requires a claimed matching
   id-and-pair binding from the approving writer named in the invite, never
   merely an active id, another writer's equal pair or an available key copy.
 - As text, a code is `CVR1-` (restore) or `CVI1-` (invite), then unpadded
@@ -1108,50 +976,31 @@
 
 ### D14 What the fixtures pin
 
-- Each supported format keeps its own fixtures. The current format's
-  `coven-format` fixtures must hold, as hex, one of each frame, sealed object,
-  sealed key, file and code, including:
-  - a write with a store part and a circle part, the first spanning three
-    chunks, with both parts' authorship roots and its header signature,
-    row changes with steps and an execution record;
-  - every store-log change tag, including stable 16-byte author/member ids,
-    signing and sealing public pairs, tag 16, and both member-access variants
-    across creation and addition, key-free removals, and all three kinds of
-    key introduction with their key hashes;
-  - a dismissal frame;
-  - a snapshot with its signed catch-up storage time and raised version,
-    every section and active, frozen and excluded losses;
-  - a migration write;
-  - a clock frame and sealed clock object, with its path, `store_log_read`
-    and author signature;
-  - re-binding invites and signed requests for an existing id, a restore
-    code naming that id without storage credentials, and old/new credential
-    key copies and distinct key-copy reports for the same member.
+- Each supported format requires fixtures of every frame, slot kind, sealed
+  object, file and code. Format 1 includes:
+  - a writes slot containing store and circle parts, streaming chunks,
+    authorship roots, SQL execution records and a migration write;
+  - every admin tag and first-slot creation, stable member ids, expected and
+    replacement member keys, access principals and key introductions;
+  - key copies for old and current credentials, with signed clear routing;
+  - snapshot announcements and snapshots with every evidence section,
+    active/frozen losses, first-slot creations and publication receipts;
+  - a floor bundle with original boxes and announcements, and status reports;
+  - restore and invite codes, signed join requests and delivered S3 keys.
+
 - Every successful decode re-encodes to the same bytes; tests decode every
   truncation and single-bit change of every fixture without panicking.
 
-- `v1.hex` pins the plaintext frames, then write prefix/header/part chunks
-  and snapshot prefix/plaintext chunks. Frame mutations exercise the payload decoder,
-  including dismissal and migration frames; a successful mutation must
-  re-encode to exactly the mutated bytes.
-- The sealed fixtures are `sealed-write.hex`, `sealed-store-log.hex`,
-  `sealed-snapshot.hex`, `sealed-positions.hex` and `sealed-join-request.hex`;
-  `sealed-store-key.hex` and `sealed-circle-key.hex` hold the two key boxes.
-  `file.hex` has a full 64-KiB chunk and a 29-byte last chunk; `file-reference.txt`
-  pins its device-qualified path and fixed row reference. `creation-marker.hex`
-  pins the creation marker. The code frames
-  are `restore-code.hex` and `invite-code.hex`, with their text in `codes.txt`.
-  All key material and fixed nonces in these fixtures are public test data.
-  Ciphertext, HKDF and signatures must be calculated independently using
-  Python hashlib/hmac and libsodium; tests open them through the Rust APIs.
-  Snapshot fixtures pin both signatures and the positions fixture pins its
-  author signature. Tests reject every truncation and every single-bit change
-  of those signatures, and verify their path, stable author and recorded-view
-  key bindings. Mutating either recipient field in a key copy must fail box
-  authentication; pin copies to both historical and current credentials.
-  Creation's author id is not a public key and has no duplicate payload id.
-  Fixtures and mutation tests must be regenerated for format 1; changing a
-  fixture's version bytes without recalculating its crypto is not sufficient.
+- Fixture keys and nonces are public test data. Independently calculate
+  ciphertext, derivation and signatures using Python hashlib/hmac and
+  libsodium, then open through Rust. Mutations must reject changed paths,
+  routing credentials, slot order, authored views, roots and signatures.
+  A retry at the same slot repeats every byte; a different slot changes its
+  outer authentication while retaining each inner write exactly.
+- Fixtures must pin a two-stage floor replacement interrupted during
+  deletion, lost-reply claim confirmation from a receipt, and rejection of
+  a mismatched receipt. A new layout requires regenerated format-1 crypto,
+  not a version-byte edit.
 
 - Fixtures must pin D11's content-bound nonce recipe:
   Ana retries an identical chunk, changes its plaintext at the same path,
