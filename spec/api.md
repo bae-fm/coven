@@ -1,4 +1,4 @@
-## Appendix E. API
+# API
 
 - The API is what apps call, listed as Rust declarations with their doc
   comments. What one coven crate offers another is documented in its code,

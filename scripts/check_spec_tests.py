@@ -43,7 +43,7 @@ See §1 and [§1.1](coven.md#11-a-part).
 """
 
 API = """\
-## Appendix E. API
+# API
 
 ### E1 Opening
 """

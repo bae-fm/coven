@@ -15,7 +15,7 @@ on:
       - "Cargo.lock"
       - "clippy.toml"
       - "rust-toolchain.toml"
-      - "spec/proofs/**"
+      - "spec/**"
       - ".github/workflows/ci.yml"
   pull_request:
     paths: *code_paths
