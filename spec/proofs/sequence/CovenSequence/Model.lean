@@ -115,6 +115,8 @@ inductive Slot (S : Sig) where
 /-- What admin slots decide. -/
 structure Ledger (S : Sig) where
   member : S.Mem → Bool
+  /-- Removed member ids remain unavailable forever. -/
+  retired : S.Mem → Bool
   role : S.Mem → Role
   /-- The member each device was registered to. Never changes once set. -/
   deviceOf : S.Dev → Option S.Mem
@@ -194,7 +196,7 @@ def adminAuthor (L : Ledger S) (d : S.Dev) (e : Entry S) : Bool :=
 /-- The checks of an entry that do not depend on roles. Only an installation
 itself can register its id, including when the member is an admin. -/
 def structural (L : Ledger S) (author : S.Dev) : Entry S → Bool
-  | .addMember m _ => !L.member m
+  | .addMember m _ => !L.member m && !L.retired m
   | .removeMember m => L.member m
   | .changeRole m _ => L.member m
   | .addDevice d m => decide (author = d) && (L.deviceOf d).isNone && L.member m
@@ -202,8 +204,7 @@ def structural (L : Ledger S) (author : S.Dev) : Entry S → Bool
   | .replaceKey m => L.member m
   | .other _ => true
 
-/-- An entry's effect. Removing a member removes every device registered to
-it, so re-adding the member does not revive them. -/
+/-- An entry's effect. Removal retires the member id and every device bound to it. -/
 def applyEntry (L : Ledger S) : Entry S → Ledger S
   | .addMember m role =>
     { L with member := fun x => if x = m then true else L.member x
@@ -211,6 +212,7 @@ def applyEntry (L : Ledger S) : Entry S → Ledger S
   | .removeMember m =>
     { L with
       member := fun x => if x = m then false else L.member x
+      retired := fun x => x == m || L.retired x
       removed := fun d => L.removed d || L.deviceOf d == some m }
   | .changeRole m role => { L with role := fun x => if x = m then role else L.role x }
   | .addDevice d m => { L with deviceOf := fun x => if x = d then some m else L.deviceOf x }

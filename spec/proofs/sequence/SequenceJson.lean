@@ -73,15 +73,17 @@ def readPart (c : Config n) (k : Nat) (j : Json) : Except String (Nat × WPart (
   let a ← nat j "audience"
   if !c.audiences.any (fun x => x.id == a) then throw "part has undeclared audience"
   let uniques ← j.getObjValAs? (List Nat) "unique_claims"
-  let owners ← j.getObjValAs? (List Nat) "owner_claims"
+  let owners ← (← j.getObjValAs? (List Json) "owner_creations").mapM pair
   distinct uniques "unique claim"
-  distinct owners "owner claim"
+  distinct owners "owner creation"
   let writes ← j.getObjValAs? (List Nat) "writes"
   distinct writes "write number"
   if writes.any (· == 0) then throw "write numbers must be positive"
+  for (_, w) in owners do
+    if w ∉ writes then throw "owner creation names no write in its part"
   let rows ← (← j.getObjValAs? (List Json) "rows").mapM (readRow k)
   distinct (rows.map (·.id)) "row update"
-  return (a, ⟨← nat j "version", uniques.map Sum.inl ++ owners.map Sum.inr, ⟨writes, rows⟩⟩)
+  return (a, ⟨← nat j "version", uniques.map Sum.inl ++ (owners.map (fun p => Sum.inr p.1)).eraseDups, ⟨writes, rows, owners⟩⟩)
 
 def readSlot (c : Config n) (k : Nat) (j : Json) : Except String (ClaimRecord String × Slot (sig n)) := do
   let claim ← positive j "claim"

@@ -244,3 +244,139 @@ async fn a_competing_first_setup_reports_that_the_store_exists() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+mod differential {
+    use crate::sequence_sync::tests::*;
+    use crate::{slot_object, SyncError};
+    use coven_database::{ClaimAttempt, ClaimSettlement, ClaimWork};
+    use coven_format::{
+        admin::StoreChange,
+        sealed_slot::{SlotKind, SlotObjectPrefix},
+        sequence::{SlotFrame, SlotHeader},
+    };
+    use coven_storage::{ObjectPath, Storage};
+    use serde_json::json;
+    use std::io::Cursor;
+
+    async fn compare(prior: usize, current: usize, offset: u64) {
+        let group = Group::new();
+        let ana = group.device(1).await;
+        group.create(&ana).await;
+        for i in 0..prior {
+            ana.sync
+                .administer(StoreChange::SetAccess {
+                    member: ana.identity.member(),
+                    access: access(&format!("prior-{i}")),
+                })
+                .await
+                .unwrap();
+        }
+        let after = ana.sync.database.applied_slot().await.unwrap();
+        let number = ana.sync.database.claim_counter().await.unwrap() + 1;
+        let path = ObjectPath::slot(group.store, (after + 1).try_into().unwrap());
+        let seal = |n, name: &str| {
+            slot_object::seal_bounded(
+                &path,
+                &SlotHeader {
+                    device: ana.sync.device,
+                    claim: n,
+                    author: ana.identity.member(),
+                    after,
+                },
+                &SlotFrame::Admin(StoreChange::SetAccess {
+                    member: ana.identity.member(),
+                    access: access(name),
+                }),
+                SlotObjectPrefix {
+                    format: coven_format::FormatVersion::CURRENT,
+                    key: group.ring.store_key_ids().next().unwrap(),
+                    kind: SlotKind::Admin,
+                },
+                &group.ring,
+                &ana.identity,
+            )
+            .unwrap()
+        };
+        let own = seal(number, "own");
+        let mut hash = coven_crypto::ObjectHasher::new();
+        hash.update(&own);
+        let digest = format!("{:?}", hash.finish().as_bytes());
+        let journal = own.clone();
+        let attempted = path.clone();
+        ana.sync
+            .database
+            .begin_claim(ClaimWork::Writes(0), move |n| {
+                assert_eq!(n, number);
+                Ok(ClaimAttempt {
+                    path: attempted,
+                    bytes: Cursor::new(journal),
+                })
+            })
+            .await
+            .unwrap();
+        let incoming_number = if current == 3 {
+            number + offset
+        } else {
+            number
+        };
+        let current_json = match current {
+            0 => serde_json::Value::Null,
+            1 => {
+                group.storage.create(&path, &own).await.unwrap();
+                json!({"device":ana.sync.device.0,"number":number,"bytes":"own"})
+            }
+            2 | 3 => {
+                group
+                    .storage
+                    .create(&path, &seal(incoming_number, "copy"))
+                    .await
+                    .unwrap();
+                json!({"device":ana.sync.device.0,"number":incoming_number,"bytes":"different"})
+            }
+            _ => unreachable!(),
+        };
+        let input = json!({"kind":"settle","recorded":{"device":ana.sync.device.0,"number":number,"slot":after+1,"bytes":"own","digest":digest},
+            "current":current_json,"floor":{"first_kept":1,"last_claims":[]}});
+        let result = {
+            let mut session = ana.sync.session.lock().await;
+            ana.sync
+                .settle_open(&mut session, &mut group.ring.clone(), &ana.identity)
+                .await
+        };
+        let verdict = match result {
+            Ok(Some(ClaimSettlement::Landed)) => "landed",
+            Ok(Some(ClaimSettlement::Retry)) => "retry",
+            Err(SyncError::DeviceIdInUse(_)) => "copy",
+            other => panic!("unexpected settlement {other:?}: {input}"),
+        };
+        assert_eq!(
+            json!(verdict),
+            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+            "{input}"
+        );
+        ana.sync.database.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+    async fn sequence_kept_settlement_matches_lean() {
+        for prior in 0..3 {
+            for current in 0..4 {
+                compare(prior, current, 1).await;
+            }
+        }
+        let mut rng = 0xc01d_u64;
+        for _ in 0..16 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            compare(
+                (rng % 6) as usize,
+                ((rng >> 8) % 4) as usize,
+                1 + ((rng >> 16) % 100),
+            )
+            .await;
+        }
+        eprintln!("sequence settle: 12 exhaustive + 16 seeded authenticated kept-slot cases");
+    }
+}

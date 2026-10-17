@@ -128,7 +128,8 @@ def writes (device claim generation : Nat) (parts : List Json) : Json := json% {
   "key_gen":$(generation),"parts":$(parts)}
 
 def part (audience version : Nat) (unique owners numbers : List Nat) (rows : List Json) : Json := json% {
-  "audience":$(audience),"version":$(version),"unique_claims":$(unique),"owner_claims":$(owners),
+  "audience":$(audience),"version":$(version),"unique_claims":$(unique),
+  "owner_creations":$(owners.flatMap fun r => numbers.map fun w => [r,w]),
   "writes":$(numbers),"rows":$(rows)}
 
 def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat)) : Json := json% {
@@ -149,6 +150,8 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["audiences","0","unique_claims"] (json% [[7,1]])
   checkField result ["audiences","0","owner_claims"] (json% [[7,1]])
   checkField result ["audiences","1","owner_claims"] (json% [[7,4]])
+  checkField result ["audiences","0","owner_creations"] (json% [[7,1,1,0,0]])
+  checkField result ["audiences","1","owner_creations"] (json% [[7,4,4,0,0]])
   checkField result ["ledger","last_claims"] (json% [[0,3,"0:3"],[1,1,"1:1"]])
 
 -- first_after_release without a surviving loser, and disjoint permanent
@@ -165,6 +168,14 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["audiences","0","owner_claims"] (json% [[7,2]])
   checkField result ["audiences","0","refused"] (json% [])
   checkField result ["audiences","1","refused"] (json% [3])
+
+-- Ownership selects the lower original number even when candidates arrive reversed.
+#eval do
+  let result ← run (applyCase [
+    writes 0 1 0 [part 0 1 [] [7] [2,1] []],
+    writes 1 1 0 [part 0 1 [] [7] [1] []]])
+  checkField result ["slots","0","audiences","0","owner_creations"] (json% [[7,1,1,0,0]])
+  checkField result ["audiences","0","owner_creations"] (json% [[7,1,1,0,0]])
 
 -- All three cut-offs consume refused parts without taking claims or rows.
 #eval do
@@ -184,7 +195,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["audiences","0","live_winners"] (json% [[8,1]])
   checkField result ["ledger","key_generations"] (json% [[0,0],[1,1],[2,0]])
 
--- Re-adding membership never revives a removed device; a new device counts.
+-- A removed member id cannot return, even through a fresh device.
 #eval do
   let result ← run (applyCase [admin 0 1 (json% {"kind":"removeMember","member":1}),
     admin 0 2 (json% {"kind":"addMember","member":1,"role":"member"}),
@@ -192,8 +203,23 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
     writes 1 1 0 [part 0 1 [7] [] [] []],
     writes 2 2 0 [part 0 1 [7] [] [] []]])
   checkField result ["ledger","removed"] (json% [1])
-  checkField result ["audiences","0","refused"] (json% [4])
-  checkField result ["audiences","0","unique_claims"] (json% [[7,5]])
+  checkField result ["ledger","retired"] (json% [1])
+  checkField result ["ledger","refused"] (json% [2,3])
+  checkField result ["audiences","0","refused"] (json% [4,5])
+  checkField result ["audiences","0","unique_claims"] (json% [])
+
+-- Re-inviting a removed person uses a member id with no prior membership.
+#eval do
+  let result ← run (applyCase [
+    admin 0 1 (json% {"kind":"removeMember","member":1}),
+    admin 0 2 (json% {"kind":"addMember","member":2,"role":"member"}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":2}),
+    writes 2 2 0 [part 0 1 [7] [] [] []]])
+  checkField result ["ledger","members"] (json% [[0,"admin"],[2,"member"]])
+  checkField result ["ledger","retired"] (json% [1])
+  checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,2]])
+  checkField result ["ledger","refused"] (json% [])
+  checkField result ["audiences","0","unique_claims"] (json% [[7,4]])
 
 -- A member whose last device was removed registers from the fresh device.
 #eval do
@@ -387,6 +413,8 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   rejects (applyCase [admin 0 0 (json% {"kind":"removeMember","member":1})])
   rejects (applyCase [admin 0 1 (json% {"kind":"removeMember","member":3})])
   rejects (applyCase [writes 0 1 0 [part 4 0 [] [] [] []]])
+  rejects (applyCase [writes 0 1 0 [json% {"audience":0,"version":1,
+    "unique_claims":[],"owner_creations":[[7,2]],"writes":[1],"rows":[]}]])
   rejects (applyCase [writes 0 1 0 [part 0 1 [] [] [1] [row 1 true (some 7) [[1,2]]]]])
   rejects (json% {"kind":"past","writes":[
     {"author":0,"number":1,"slot":1,"read_through":1}]})

@@ -197,3 +197,7 @@ impl<R: std::io::Read> IncomingSlot<crate::DownloadedWriteStream<R>> {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_apply_tests.rs"]
+mod tests;

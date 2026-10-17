@@ -41,8 +41,8 @@ Checked counterexamples explain the rules:
 - **Undo after every artifact request ends.** Otherwise a late create leaves
   an artifact behind.
 - **Settle from the per-device claim number and slot digest.** Settling a deleted slot's claim
-  from the snapshot's state alone loses or duplicates writes, and re-applies
-  undone admin changes. A number without a digest can confirm another copy's
+  from the snapshot's state alone loses or duplicates writes, and misreports
+  a completed admin operation. A number without a digest can confirm another copy's
   bytes after deletion
   ([Settling a claim](#settling-a-claim-whose-slot-was-deleted)).
 
@@ -59,8 +59,8 @@ and the database part of a migration.
 For each audience `A`, a device's state has three parts:
 
 - **The ledger** holds what admin slots and key copies decide, the same for
-  every audience. That is members and roles, devices and their removal, member key
-  generations, `aux`, key copies and refused admin slots. It also holds, per
+  every audience. That is active members and roles, retired member ids, devices
+  and their removal, member key generations, `aux`, key copies and refused admin slots. It also holds, per
   device, the greatest included claim number and the SHA-256 of that slot's
   complete bytes. Later slots replace the digest on an equal number; lower
   numbers preserve the existing record. A device with no included claim has
@@ -79,8 +79,9 @@ Only admin slots and key copies change the ledger, besides the claim evidence
 every slot records, and only slots with a part or announcement for `A` change
 `A`'s other two parts. A slot or part invalid at
 its position is refused: it is consumed, and only its refusal is recorded.
-Removing a member removes every device registered to it, so re-adding the
-member does not revive them.
+Removing a member retires its id permanently and removes every device registered
+to it. Re-inviting that person requires a fresh member id. An active member
+whose devices were all removed keeps its member id when registering a fresh device.
 
 These are the validity rules:
 
@@ -89,7 +90,8 @@ These are the validity rules:
   an id with no historical binding. Only the installation itself may register
   that id, even when its member is an admin. The member's current-key signature
   authenticating the fresh device is checked outside the model. Other entries
-  still require an active device and the supplied authority policy.
+  still require an active device and the supplied authority policy. Adding a
+  member requires an id that is neither active nor retired.
 - **A part counts** when its device is registered and not removed, its member
   is a member, the part was made under that member's current key generation,
   the device may write to `A`, and the part's version is one `A` has reached.
@@ -255,6 +257,21 @@ specializes this to the runner's per-member policy: after any prefix, a current
 member with no active device can register a fresh one. It becomes active, while
 all of that member's previously registered devices stay inactive. The initial
 ledger must contain an admin; no active admin device is required.
+
+[`Membership`](sequence/CovenSequence/Membership.lean) proves permanent retirement
+independently of the authority policy:
+
+- `retired_member_refused`: no valid addition reuses a retired member id.
+- `step_retired_member`, `retired_member_stays`: retirement and absence hold
+  together after every subsequent slot and at every later prefix.
+- `removed_member_never_active`: once a positive slot applies a member removal,
+  that id is retired and absent at every later prefix, including after attempted
+  additions, role changes, registrations and key replacements.
+
+The ledger retains retirement history, and member addition checks it regardless
+of the supplied authority policy. The runner examples refuse both reuse and a
+fresh device registration for the retired id; separate examples admit a fresh
+member id and preserve recovery for an active member without devices.
 
 ## Snapshots and deletion
 
@@ -541,8 +558,9 @@ Three checked counterexamples explain the evidence:
   only at that state can duplicate a landed batch or drop an unlanded one.
 - `admin_state_cannot_settle`: a member addition followed by removal leaves
   the same membership whether this device's addition landed or another
-  device's did. Settling by presence can apply the addition again against the
-  removal. The per-device records distinguish the histories.
+  device's did. Settling by presence loses the successful outcome of the original
+  addition. Retrying cannot reuse the retired id. The per-device records
+  distinguish the histories.
 
 **Another copy using this device id.** Each copy records an attempt before
 sending it and creates only what it recorded, signed with its id.
@@ -602,7 +620,8 @@ their own devices and replace their own keys. Admins may also remove another
 member's device or replace that member's keys; only admins add or remove members
 and change roles. Registration must be authored by the fresh device itself,
 including for admins. Other admin entries need an active author. Membership
-must retain an admin. Conversion is the identity; audience writer lists and
+must retain an admin, and an added member id must never have been a member.
+Conversion is the identity; audience writer lists and
 conversion are fixture parameters, not additional store rules.
 
 Slots occupy positions `1..slots.length`. Each has `device`, positive `claim`,
@@ -628,12 +647,16 @@ A writes slot carries `key_gen` and at most one part per declared audience:
  "initial":{"members":[{"member":0,"role":"admin","key_gen":0}],"devices":[{"device":0,"member":0}]},
  "audiences":[{"audience":0,"version":1,"writers":[0]}],
  "slots":[{"kind":"writes","device":0,"claim":1,"digest":"slot-1-hash","key_gen":0,"parts":[
-   {"audience":0,"version":1,"unique_claims":[7],"owner_claims":[9],"writes":[1],
+   {"audience":0,"version":1,"unique_claims":[7],"owner_creations":[[9,1]],"writes":[1],
     "rows":[{"row":9,"live":true,"value":7,"inputs":[[1,1]]}]}]}]}
 ```
 
-`unique_claims` and `owner_claims` are separate permanent first-slot claim
-namespaces. `writes` lists original write numbers in that part. `rows` supplies
+`unique_claims` and the row ids in `owner_creations` supply separate permanent
+first-slot claim namespaces. Each `owner_creations` pair `[row, write-number]`
+names an original generation-zero creation, before permission filtering; its
+number must occur in the part's `writes`. `Owners.establish` chooses among
+counted creations by slot and then write number, retaining the original author
+and its bound member. `writes` lists original write numbers in that part. `rows` supplies
 complete replacements for affected merged rows **after the first removal pass,
 before uniqueness**: `row` is also its primary-key rank, `live` is presence,
 `value` is a unique value or null, and `inputs` lists `[slot, write-number]`
@@ -646,15 +669,17 @@ those rows from the model's merge input.
 
 The answer has `ledger`, `audiences`, and `slots`; each item of `slots` has
 `slot`, `ledger`, and `audiences` for that prefix. The ledger contains `members`
-(`[member, role]`), all registered `devices` (`[device, member]`, including
-removed devices), `removed` device ids, `key_generations` (`[member, generation]`
+(`[member, role]`), `retired` member ids, all registered `devices`
+(`[device, member]`, including removed devices), `removed` device ids, `key_generations` (`[member, generation]`
 for the whole member universe), included `last_claims` (`[device, number, digest]`), and
 `refused` admin slot numbers. Each audience contains `audience`, `version`,
-`unique_claims` and `owner_claims` (`[key, first-slot]`), `live_winners`
+`unique_claims` and `owner_claims` (`[key, first-slot]`), `owner_creations`
+(`[row, slot, write-number, device, member]`), `live_winners`
 (`[value, row-or-null]` for every value retained in merged rows), `rows` in the
 input row shape, and `refused` part slot numbers. Tables are sorted by id;
 refusals are ascending. The example yields `last_claims:[[0,1,"slot-1-hash"]]`,
-`unique_claims:[[7,1]]`, `owner_claims:[[9,1]]`, `live_winners:[[7,9]]`, and no
+`unique_claims:[[7,1]]`, `owner_claims:[[9,1]]`,
+`owner_creations:[[9,1,1,0,0]]`, `live_winners:[[7,9]]`, and no
 refusals, both at the final state and slot 1. Empty `slots` returns the initial
 state and an empty prefix list.
 
@@ -671,6 +696,42 @@ zero-based input indices, preserving input order, independently of slot order:
 
 Answer: `[[],[0],[0]]`. The last write reads its own predecessor but not the
 intervening remote write. Only supplied writes can appear in an answer.
+
+## Rust comparisons
+
+The ignored differential tests use `COVEN_SEQUENCE_LEAN` to run the same JSON
+cases through `sequenceRunner`. `scripts/check.sh` selects each comparison when
+its Rust crate or the sequence package changes and checks the exact test names.
+Every comparison enumerates bounded cases and adds deterministic seeded cases.
+
+- `coven-database` calls the durable claim settlement API and checks its saved
+  verdict. Complete-byte digests are computed in Rust; the kept-slot inputs have
+  passed the separate sync authentication boundary. `coven-sync` also exercises
+  kept-slot settlement with signed equal bytes, missing slots and different
+  same-id bytes at equal or higher claim numbers.
+- `coven-sync` reads real stored slots while retention publishes a floor, with
+  every fetched slot still present. An unavailable required snapshot body exposes
+  the reload decision before installation: the applied slot must remain unchanged.
+  At or above the floor the reader applies its consecutive fetched prefix without
+  reading that body. These cases compare the floor gate, not snapshot contents or
+  progress under missing-body storage failures.
+- `coven-database` applies write slots and compares visible unique winners,
+  permanent owner creations (slot, write number, author and member) and consumed
+  cut-off refusals at every prefix.
+  Histories include competing rows, deletion releasing a value, batches and all
+  three cut-offs. `coven-sync` checks administrative admission and then applies
+  the result through the database, comparing member/device/key state after each
+  slot, including attempted reuse of a removed member id. Already-satisfied operations
+  have no effect in Rust; the corresponding structurally refused model slots
+  also leave state unchanged. Registration targets the slot author in Rust's
+  format, so cross-device registrations are tested in the Lean JSON tests.
+- `coven-merge` calls `SlotPast::contains` for every pair of supplied writes,
+  including batches and shuffled input order. Histories satisfy the model's
+  own-number publication and monotone authored-read premises.
+
+Authentication, row/source validation and the merge are outside the sequence
+runner's abstraction. The comparisons supply their inputs at those boundaries;
+they do not replace the separate byte-format, merge or queue tests.
 
 ## Assumptions and what is not modelled
 

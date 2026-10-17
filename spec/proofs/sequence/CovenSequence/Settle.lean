@@ -356,7 +356,7 @@ def adminRules : Rules adminSig where
     | .admin false _ => 2
     | _ => 0
   digest := fun k _ => k
-  ledger0 := ⟨fun m => m, fun _ => .admin, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
+  ledger0 := ⟨fun m => m, fun _ => false, fun _ => .admin, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
     fun _ => none⟩
   aud0 := fun _ => ⟨fun _ => none, [], 0, 0, 0, [], 0, fun _ => false⟩
   rows0 := fun _ => ()
@@ -380,9 +380,9 @@ open CovenSequence in
 recorded its claim 1, of slot 1, adding member `false`. Whether it landed or
 another device's identical change took the slot, the ledger after slot 2 is the
 same apart from the claim numbers: the change was undone. Settling by presence
-says "not landed" in both, so in the first history the device adds the member
-again, against the removal. The claim numbers tell the two apart: device
-`true`'s last claim is 1 in the first and none in the second. -/
+says "not landed" in both, losing the first history's successful outcome. The
+claim numbers tell the two apart: device `true`'s last claim is 1 in the first
+and none in the second. -/
 theorem admin_state_cannot_settle :
     { ledgerAt adminRules adminLanded 2 with claims := fun _ => none } =
       { ledgerAt adminRules adminLost 2 with claims := fun _ => none } ∧

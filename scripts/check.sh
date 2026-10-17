@@ -261,6 +261,28 @@ proofs() {
         CovenSequence sequenceRunner SequenceTests
 
     local runner
+    if proof_selected sequence || crate_selected coven-merge; then
+        runner=$(runner sequence sequenceRunner)
+        step "Rust / Lean sequence causality"
+        COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-merge --all-features -- --nocapture \
+            sequence::tests::differential::sequence_past_matches_lean
+    fi
+    if proof_selected sequence || crate_selected coven-database; then
+        runner=$(runner sequence sequenceRunner)
+        step "Rust / Lean sequence settlement, first-slot claims and cut-off"
+        COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-database --all-features -- --nocapture \
+            claim::tests::sequence_settlement_matches_lean \
+            sequence_apply::tests::sequence_rows_match_lean
+    fi
+    if proof_selected sequence || crate_selected coven-sync; then
+        runner=$(runner sequence sequenceRunner)
+        step "Rust / Lean sequence floor checks, authenticated settlement and administration"
+        COVEN_SEQUENCE_LEAN="$runner" exact_ignored coven-sync --all-features -- --nocapture \
+            sequence_sync::tests::differential::sequence_floor_matches_lean \
+            sequence_sync::sequence_claim::tests::differential::sequence_kept_settlement_matches_lean \
+            effects::tests::sequence_differential::sequence_admin_matches_lean
+    fi
+
     if proof_selected merge || crate_selected coven-merge; then
         runner=$(runner merge mergeRunner)
         step "Rust / Lean merge and circle-entry differentials"

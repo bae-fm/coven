@@ -773,4 +773,4 @@ pub(crate) mod sync_loop;
 
 #[cfg(test)]
 #[path = "sequence_sync_tests.rs"]
-mod tests;
+pub(crate) mod tests;

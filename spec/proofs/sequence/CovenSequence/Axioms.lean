@@ -156,3 +156,8 @@ import SequenceApply
 #print axioms CovenSequence.registration_never_repeated
 #print axioms CovenSequence.registration_at_most_once
 #print axioms SequenceApply.member_without_active_device_can_register
+
+#print axioms CovenSequence.retired_member_refused
+#print axioms CovenSequence.step_retired_member
+#print axioms CovenSequence.retired_member_stays
+#print axioms CovenSequence.removed_member_never_active

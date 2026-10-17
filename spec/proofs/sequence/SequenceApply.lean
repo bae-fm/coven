@@ -1,5 +1,5 @@
 import CovenSequence.Registration
-import CovenSequence.LiveClaims
+import CovenSequence.Owners
 import Lean
 
 /-! Concrete inputs at the model's abstract merge boundary. Row updates are
@@ -16,6 +16,7 @@ structure Row where
 structure Batch where
   writes : List Nat
   rows : List Row
+  creations : List (Nat × Nat)
 
 /-- The two permanent claim namespaces cannot collide. -/
 abbrev Key := Sum Nat Nat
@@ -49,6 +50,7 @@ def merge (rows : List Row) (batch : Batch) : List Row :=
 
 def initialLedger (c : Config n) : Ledger (sig n) where
   member := fun m => c.members.any (fun x => x.1 == m)
+  retired := fun _ => false
   role := fun m => match c.members.find? (fun x => x.1 == m) with
     | some x => x.2.1
     | none => .member
@@ -155,6 +157,8 @@ def ledgerJson (L : Ledger (sig n)) (devices : List Nat) (through : Nat) : Json 
   Json.mkObj [
     ("members", toJson ((List.finRange n).filterMap fun m =>
       if L.member m then some (Json.arr #[toJson m.val, roleJson (L.role m)]) else none)),
+    ("retired", toJson ((List.finRange n).filterMap fun m =>
+      if L.retired m then some m.val else none)),
     ("devices", toJson (devices.filterMap fun d =>
       (L.deviceOf d).map fun m => toJson [d, m.val])),
     ("removed", toJson (devices.filter L.removed)),
@@ -168,7 +172,7 @@ def rowJson (r : Row) : Json := Json.mkObj [
   ("inputs", toJson (r.inputs.map fun (s, w) => [s, w]))]
 
 def audienceJson (entries : List (ClaimRecord String × Slot (sig n))) (a through : Nat)
-    (P : AudLedger (sig n)) (rows : List Row) : Json := Id.run do
+    (L : Ledger (sig n)) (P : AudLedger (sig n)) (rows : List Row) : Json := Id.run do
   let slots := (List.range through).map (· + 1)
   let parts := (entries.take through).filterMap fun (_, s) => match s with
     | .writes _ _ parts => parts a
@@ -176,6 +180,19 @@ def audienceJson (entries : List (ClaimRecord String × Slot (sig n))) (a throug
   let keys := parts.flatMap (·.claims)
   let uniques := sorted (keys.filterMap fun k => match k with | .inl v => some v | _ => none)
   let owners := sorted (keys.filterMap fun k => match k with | .inr r => some r | _ => none)
+  let creations : List (Nat × Owners.Creation Nat Unit Nat Nat) :=
+    ((entries.take through).zipIdx).flatMap fun ((_, s), i) =>
+      match s with
+      | .writes d _ ps =>
+        if P.refused (i + 1) then [] else
+        match ps a, L.deviceOf d with
+        | some p, some m => p.batch.creations.map fun (row, number) =>
+            (row, ⟨⟨d, number, (), 0, 0, i + 1⟩, i + 1, m.val⟩)
+        | _, _ => []
+      | _ => []
+  let creators := (sorted (creations.map (·.1))).filterMap fun row =>
+    (Owners.establish none (creations.filterMap fun (r,c) => if r == row then some c else none)).map fun c =>
+      [row, c.slot, c.original.number, c.original.device, c.member]
   let rows := rows.mergeSort (fun a b => a.id ≤ b.id)
   let inputs : LiveClaims.Inputs Row Nat := {
     rows, live := Row.live, value := Row.value, inputs := Row.inputs, keyRank := Row.id
@@ -192,6 +209,7 @@ def audienceJson (entries : List (ClaimRecord String × Slot (sig n))) (a throug
     ("audience", toJson a), ("version", toJson P.version),
     ("unique_claims", toJson (uniques.filterMap fun v => (P.owner (.inl v)).map fun k => [v, k])),
     ("owner_claims", toJson (owners.filterMap fun r => (P.owner (.inr r)).map fun k => [r, k])),
+    ("owner_creations", toJson creators),
     ("live_winners", toJson (values.map fun v => Json.arr #[toJson v,
       toJson ((LiveClaims.winner inputs v).map (·.id))])),
     ("rows", toJson (rows.map rowJson)),
@@ -217,7 +235,7 @@ def run (c : Config n) (entries : List (ClaimRecord String × Slot (sig n))) : J
     let (L, audiencesAt, rowsAt) := state k
     [("ledger", ledgerJson L devices k),
      ("audiences", toJson (audiences.map fun a =>
-       audienceJson entries a.id k (audiencesAt a.id) (rowsAt a.id)))]
+       audienceJson entries a.id k L (audiencesAt a.id) (rowsAt a.id)))]
   return Json.mkObj (fields entries.length ++ [
     ("slots", toJson ((List.range entries.length).map fun k =>
       Json.mkObj (("slot", toJson (k + 1)) :: fields (k + 1))))])

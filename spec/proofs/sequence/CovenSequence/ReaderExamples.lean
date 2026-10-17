@@ -39,6 +39,7 @@ abbrev sig : Sig where
 
 def ledger0 : Ledger sig where
   member := fun _ => true
+  retired := fun _ => false
   role := fun _ => .admin
   deviceOf := fun _ => some ()
   removed := fun _ => false

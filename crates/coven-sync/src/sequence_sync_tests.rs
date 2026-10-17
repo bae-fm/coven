@@ -19,6 +19,11 @@ pub(crate) struct Device {
     pub(crate) storage: MemoryStorage,
     pub(crate) identity: MemberIdentity,
 }
+impl Device {
+    pub(crate) fn database(&self) -> &Database {
+        &self.sync.database
+    }
+}
 #[cfg(test)]
 pub(crate) struct Group {
     pub(crate) ids: Arc<SequentialIds>,
@@ -561,5 +566,165 @@ async fn a_slot_this_copy_never_attempted_shows_another_copy_of_its_device_id() 
     );
     for device in [&ana, &copy] {
         device.sync.database.close().await.unwrap();
+    }
+}
+
+mod differential {
+    use crate::sequence_sync::tests::*;
+    use crate::{SequenceSync, SyncError};
+    use coven_merge::Audience;
+    use coven_storage::{test_utils::Faults, ObjectPath, Storage, StorageFailure};
+    use serde_json::json;
+
+    async fn compare(count: usize, already: usize, publish: bool) {
+        let group = Group::new();
+        let ana = group.device(1).await;
+        let ben = group.device(2).await;
+        group.create(&ana).await;
+        group.admit(&ana, &ben).await;
+        for i in 0..count {
+            ana.sync
+                .database
+                .write(move |sql| {
+                    sql.execute(
+                        "INSERT INTO notes VALUES(?1,?2)",
+                        (i.to_string(), format!("note {i}")),
+                    )?;
+                    Ok(())
+                })
+                .await
+                .unwrap();
+            ana.sync.pass().await.unwrap();
+            if i < already {
+                ben.sync.pass().await.unwrap();
+            }
+        }
+        let covers = ana.sync.database.applied_slot().await.unwrap();
+        let announcement = ana.sync.snapshot(Audience::Store).await.unwrap();
+        let last = ana.sync.database.applied_slot().await.unwrap();
+        if already > count {
+            ben.sync.pass().await.unwrap();
+        }
+        let applied = ben.sync.database.applied_slot().await.unwrap();
+        let snapshot = ana.sync.session.lock().await.history.announcements[&announcement]
+            .snapshot
+            .clone();
+        let snapshot_path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+        let fetched: Vec<_> = (applied + 1..=last).collect();
+        let input = json!({"kind":"read","applied":applied,"fetched":fetched,
+            "first_kept":if publish {covers+1} else {1}});
+        let expected = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
+        // Hold the last input while another device publishes a floor. Losing the
+        // floor reply leaves every old slot available, so existence alone cannot
+        // tell the reader that its fetched prefix must be discarded.
+        let retention = async {
+            if publish {
+                group.clock.set(
+                    std::time::UNIX_EPOCH
+                        + crate::sequence_sync::sequence_retention::GRACE
+                        + std::time::Duration::from_secs(1),
+                );
+                ana.storage
+                    .set_faults(Faults {
+                        lose_completion_reply: true,
+                        ..Faults::none()
+                    })
+                    .await;
+                let mut session = ana.sync.session.lock().await;
+                ana.sync
+                    .retain_sequence(&mut session, &mut group.ring.clone(), &ana.identity)
+                    .await
+                    .unwrap();
+                drop(session);
+                assert!(group
+                    .storage
+                    .status(&ObjectPath::floor(group.store))
+                    .await
+                    .unwrap()
+                    .is_some());
+                for n in &fetched {
+                    assert!(group
+                        .storage
+                        .status(&ObjectPath::slot(group.store, (*n).try_into().unwrap()))
+                        .await
+                        .unwrap()
+                        .is_some());
+                }
+                // A missing required snapshot exposes the reload branch before
+                // it can install a replacement prefix. Ordinary forward reading
+                // never opens an announcement's body.
+                group.storage.delete(&snapshot_path).await.unwrap();
+            }
+        };
+        let read = async {
+            let mut session = ben.sync.session.lock().await;
+            let mut ring = group.ring.clone();
+            SequenceSync::read_forward(&ben.sync, &mut session, &mut ring, &ben.identity).await
+        };
+        let result = if fetched.is_empty() {
+            retention.await;
+            read.await
+        } else {
+            let (stalled, observed) = tokio::sync::oneshot::channel();
+            let (resume, held) = tokio::sync::oneshot::channel();
+            group
+                .storage
+                .hold_body_at(
+                    ObjectPath::slot(group.store, last.try_into().unwrap()),
+                    1,
+                    stalled,
+                    held,
+                )
+                .await;
+            let publish_after_read = async {
+                observed.await.unwrap();
+                retention.await;
+                resume.send(()).unwrap();
+            };
+            let (result, ()) = tokio::join!(read, publish_after_read);
+            result
+        };
+        let reload = match result {
+            Ok(()) => false,
+            Err(SyncError::Storage(error)) if error.failure() == StorageFailure::NotFound => true,
+            Err(error) => panic!("unexpected read error: {error:?}; {input}"),
+        };
+        let through = ben.sync.database.applied_slot().await.unwrap();
+        assert_eq!(
+            json!({"reload":reload,"apply":(applied+1..=through).collect::<Vec<_>>()}),
+            expected,
+            "{input}"
+        );
+        for device in [&ana, &ben] {
+            device.sync.database.close().await.unwrap();
+        }
+    }
+
+    #[tokio::test]
+    #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+    async fn sequence_floor_matches_lean() {
+        let mut exhaustive = 0;
+        for count in 0..=4 {
+            for already in 0..=count + 1 {
+                for publish in [false, true] {
+                    compare(count, already, publish).await;
+                    exhaustive += 1;
+                }
+            }
+        }
+        let mut rng = 0x51eade_u64;
+        for _ in 0..24 {
+            rng ^= rng << 13;
+            rng ^= rng >> 7;
+            rng ^= rng << 17;
+            let count = (rng % 12) as usize;
+            compare(
+                count,
+                ((rng >> 8) as usize) % (count + 2),
+                (rng >> 16) & 1 == 1,
+            )
+            .await;
+        }
+        eprintln!("sequence read: {exhaustive} exhaustive + 24 seeded storage passes");
     }
 }

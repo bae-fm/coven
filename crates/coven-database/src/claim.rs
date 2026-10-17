@@ -452,3 +452,7 @@ pub(crate) fn range(
     }
     Ok(bytes)
 }
+
+#[cfg(test)]
+#[path = "claim_tests.rs"]
+mod tests;
