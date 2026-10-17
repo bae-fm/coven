@@ -10,16 +10,15 @@ use coven_crypto::custody::{Keychain, StoreKeychain};
 pub struct Coven;
 
 impl Coven {
-    /// Makes a new store on this device, named `name`: its directory, its id
-    /// and this device's id, both from `ids`. Storage is set up after opening.
+    /// Makes a new store with OS-random store and device ids.
     pub async fn create_store(
         layout: &StoreLayout,
         name: &str,
-        ids: IdSourceRef,
     ) -> Result<StoreDir, StoreCreationError> {
         let layout = layout.clone();
         let name = name.to_owned();
         blocking(move || {
+            let ids: IdSourceRef = std::sync::Arc::new(crate::UuidIds);
             let id = StoreId(ids.new_id());
             let keychain = Keychain::registered()
                 .map_err(|source| StoreCreationError::Initialization { id, source })?;

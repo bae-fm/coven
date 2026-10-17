@@ -125,7 +125,7 @@ impl Clock for SystemClock {
     fn now(&self) -> SystemTime;
 }
 
-/// The source of fresh ids, supplied when creating or opening a store (§20.2).
+/// Test-injected ids; production uses OS randomness (§20.2).
 pub trait IdSource: Send + Sync {
     /// A fresh UUID; distinct calls must yield distinct ids.
     fn new_id(&self) -> Uuid;
@@ -813,13 +813,10 @@ impl StoreLayout {
 pub struct Coven;
 
 impl Coven {
-    /// Makes a new store on this device, named `name`: its directory, its id
-    /// and this device's id, both from `ids`. Storage is set up after opening
-    /// (E5).
+    /// Makes a new store with OS-random store and device ids (E5).
     pub async fn create_store(
         layout: &StoreLayout,
         name: &str,
-        ids: IdSourceRef,
     ) -> Result<StoreDir, StoreCreationError>;
 
     /// Collects the choices for opening, restoring or joining a store in this layout.
@@ -845,7 +842,8 @@ impl CovenBuilder {
     /// The wall clock that timestamps use (§7.2). Defaults to the system clock.
     pub fn clock(self, clock: ClockRef) -> Self;
 
-    /// The source of new ids (§20.2). Defaults to `UuidIds`, random UUIDs.
+    /// Replace OS-random ids in tests (§20.2).
+    #[cfg(feature = "test-utils")]
     pub fn id_source(self, ids: IdSourceRef) -> Self;
 
     /// The app's own OAuth clients for Dropbox, OneDrive and Google's GCS
@@ -951,7 +949,7 @@ Example:
 coven::set_keyring_service("com.example.notes")?;
 
 let layout = StoreLayout::new(app_dir);
-let store_dir = Coven::create_store(&layout, "Household", Arc::new(UuidIds)).await?;
+let store_dir = Coven::create_store(&layout, "Household").await?;
 
 let handle = Coven::builder(layout.clone())
     .synced_tables(tables())                        // E2
@@ -3719,8 +3717,7 @@ let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
-    .clock(clock.clone())
-    .id_source(ids.clone());
+    .clock(clock.clone());
 if let Some(access) = info.oauth_access {
     builder.authenticate(access).await?;
 }

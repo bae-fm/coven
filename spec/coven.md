@@ -6573,9 +6573,8 @@ holds failures and rejected entries, without making either wait look completed.
 
 - Everything else reaches a capability through the object that owns it,
   given to it when it is built.
-  - The clock, the id source, key custody and the
-    OAuth clients and presenter are all set on the builder ([E1](api.md#e1-opening)), so
-    a test replaces each one.
+  - The builder configures the clock, custody and OAuth. Ids use OS randomness;
+    only `test-utils` permits replacing their source ([E1](api.md#e1-opening)).
   - E.g. the snapshot writer never calls the system clock; it asks the
     clock it was given, and a test gives it a fixed one.
 - A method never takes a raw capability as a parameter, such as a store

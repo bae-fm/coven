@@ -14,6 +14,10 @@ use coven_storage::{
 use std::sync::Arc;
 
 /// The choices collected before opening a store (E1).
+#[cfg_attr(
+    not(feature = "test-utils"),
+    doc = "\nProduction builders cannot replace the random id source.\n```compile_fail\nuse coven::{Coven, StoreLayout, UuidIds};\nuse std::sync::Arc;\nlet builder = Coven::builder(StoreLayout::new(\"stores\".into()));\nlet _ = builder.id_source(Arc::new(UuidIds));\n```"
+)]
 pub struct CovenBuilder {
     tables: Option<Vec<SyncedTable>>,
     migrations: Option<Vec<Migration>>,
@@ -73,7 +77,8 @@ impl CovenBuilder {
         self.clock = clock;
         self
     }
-    /// The source of new ids (§20.2). Defaults to `UuidIds`, random UUIDs.
+    /// Replace OS-random ids in tests (§20.2).
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn id_source(mut self, ids: IdSourceRef) -> Self {
         self.ids = ids;
         self
