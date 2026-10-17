@@ -62,14 +62,14 @@ fn wrong_key_lengths_are_refused_before_opening_the_box() {
     let sealed = seal_box(
         b"store",
         &recipient,
-        "10101010-1010-1010-1010-101010101010/keys/7/9",
+        "10101010-1010-1010-1010-101010101010/seq/9",
         b"clear routing prefix",
         &store_bytes,
     )
     .unwrap();
     assert!(matches!(
         member.open_store_key(
-            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            "10101010-1010-1010-1010-101010101010/seq/9",
             b"clear routing prefix",
             &sealed
         ),
@@ -81,14 +81,14 @@ fn wrong_key_lengths_are_refused_before_opening_the_box() {
     let sealed = seal_box(
         b"circle",
         &recipient,
-        "10101010-1010-1010-1010-101010101010/keys/7/9",
+        "10101010-1010-1010-1010-101010101010/seq/9",
         b"clear routing prefix",
         &circle_bytes,
     )
     .unwrap();
     assert!(matches!(
         member.open_circle_key(
-            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            "10101010-1010-1010-1010-101010101010/seq/9",
             b"clear routing prefix",
             &sealed
         ),
@@ -343,7 +343,7 @@ fn invalid_and_weak_signing_keys_are_rejected() {
 fn sealed_box_domains_are_checked_even_when_payload_lengths_match() {
     let member = MemberKeys::generate().unwrap();
     let recipient = member.public_keys().sealing;
-    let path = "10101010-1010-1010-1010-101010101010/keys/7/9";
+    let path = "10101010-1010-1010-1010-101010101010/seq/9";
     let prefix = b"clear routing prefix";
     let key = StoreKey::from_bytes(KeyId(Uuid::from_u128(3)), [17; 32]);
     let mut plaintext = Zeroizing::new(Vec::with_capacity(48));
@@ -372,7 +372,7 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     let member = MemberKeys::generate().unwrap();
     let foreign = MemberKeys::generate().unwrap();
     let store = StoreKey::generate(KeyId(key_ids.new_id())).unwrap();
-    let path = "10101010-1010-1010-1010-101010101010/keys/7/9".to_owned();
+    let path = "10101010-1010-1010-1010-101010101010/seq/9".to_owned();
     let sealed = seal_store_key(
         &store,
         &member.public_keys().sealing,
@@ -396,12 +396,24 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
     assert_eq!(opened.id(), store.id());
     let ciphertext = store
         .derive()
-        .seal_object_chunk("write", b"cleartext prefix", 0, 0, b"secret")
+        .seal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/seq/11",
+            b"cleartext prefix",
+            0,
+            0,
+            b"secret",
+        )
         .unwrap();
     assert_eq!(
         opened
             .derive()
-            .open_object_chunk("write", b"cleartext prefix", 0, 0, &ciphertext)
+            .open_object_chunk(
+                "10101010-1010-1010-1010-101010101010/seq/11",
+                b"cleartext prefix",
+                0,
+                0,
+                &ciphertext
+            )
             .unwrap(),
         b"secret"
     );
@@ -410,7 +422,7 @@ fn anonymous_store_boxes_bind_recipient_path_and_all_ciphertext_bytes() {
         .is_err());
     assert!(member
         .open_store_key(
-            "10101010-1010-1010-1010-101010101010/keys/8/9",
+            "10101010-1010-1010-1010-101010101010/seq/10",
             b"clear routing prefix",
             &sealed
         )
@@ -444,13 +456,13 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
     let sealed = seal_circle_key(
         &circle,
         &member.public_keys().sealing,
-        "10101010-1010-1010-1010-101010101010/keys/7/9",
+        "10101010-1010-1010-1010-101010101010/seq/9",
         b"clear routing prefix",
     )
     .unwrap();
     let opened = member
         .open_circle_key(
-            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            "10101010-1010-1010-1010-101010101010/seq/9",
             b"clear routing prefix",
             &sealed,
         )
@@ -459,25 +471,37 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
     assert_eq!(opened.id(), circle.id());
     let ciphertext = circle
         .derive()
-        .seal_object_chunk("write", b"cleartext prefix", 0, 0, b"circle secret")
+        .seal_object_chunk(
+            "10101010-1010-1010-1010-101010101010/seq/11",
+            b"cleartext prefix",
+            0,
+            0,
+            b"circle secret",
+        )
         .unwrap();
     assert_eq!(
         opened
             .derive()
-            .open_object_chunk("write", b"cleartext prefix", 0, 0, &ciphertext)
+            .open_object_chunk(
+                "10101010-1010-1010-1010-101010101010/seq/11",
+                b"cleartext prefix",
+                0,
+                0,
+                &ciphertext
+            )
             .unwrap(),
         b"circle secret"
     );
     assert!(member
         .open_circle_key(
-            "10101010-1010-1010-1010-101010101010/keys/7/10",
+            "10101010-1010-1010-1010-101010101010/seq/10",
             b"clear routing prefix",
             &sealed
         )
         .is_err());
     assert!(member
         .open_store_key(
-            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            "10101010-1010-1010-1010-101010101010/seq/9",
             b"clear routing prefix",
             &sealed
         )
@@ -486,7 +510,7 @@ fn anonymous_circle_boxes_preserve_circle_and_id() {
     tampered[64] ^= 1;
     assert!(matches!(
         member.open_circle_key(
-            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            "10101010-1010-1010-1010-101010101010/seq/9",
             b"clear routing prefix",
             &tampered
         ),
@@ -506,7 +530,7 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
             seal_store_key(
                 &store,
                 &SealingKey::from_bytes(low),
-                "10101010-1010-1010-1010-101010101010/keys/7/9",
+                "10101010-1010-1010-1010-101010101010/seq/9",
                 b"clear routing prefix"
             ),
             Err(CryptoError::WeakSealingKey)
@@ -514,14 +538,14 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
         let mut sealed = seal_store_key(
             &store,
             &member.public_keys().sealing,
-            "10101010-1010-1010-1010-101010101010/keys/7/9",
+            "10101010-1010-1010-1010-101010101010/seq/9",
             b"clear routing prefix",
         )
         .unwrap();
         sealed[..32].copy_from_slice(&low);
         assert!(matches!(
             member.open_store_key(
-                "10101010-1010-1010-1010-101010101010/keys/7/9",
+                "10101010-1010-1010-1010-101010101010/seq/9",
                 b"clear routing prefix",
                 &sealed
             ),
@@ -534,32 +558,21 @@ fn low_order_x25519_keys_are_rejected_in_both_directions() {
 fn access_key_boxes_open_only_for_their_member_path_and_prefix() {
     let ana = MemberKeys::generate().unwrap();
     let ben = MemberKeys::generate().unwrap();
+    let path = "10101010-1010-1010-1010-101010101010/access-keys/42424242-4242-4242-4242-424242424242/00000000-0000-0000-0000-000000000001";
     let plaintext = b"key id, secret and principal";
-    let sealed = seal_access_key(
-        plaintext,
-        &ana.public_keys().sealing,
-        "s/access-keys/a/1",
-        b"prefix",
-    )
-    .unwrap();
+    let sealed = seal_access_key(plaintext, &ana.public_keys().sealing, path, b"prefix").unwrap();
     assert_eq!(
-        ana.open_access_key("s/access-keys/a/1", b"prefix", &sealed)
+        ana.open_access_key(path, b"prefix", &sealed)
             .unwrap()
             .as_slice(),
         plaintext
     );
-    assert!(ben
-        .open_access_key("s/access-keys/a/1", b"prefix", &sealed)
-        .is_err());
+    assert!(ben.open_access_key(path, b"prefix", &sealed).is_err());
     assert!(ana
-        .open_access_key("s/access-keys/a/2", b"prefix", &sealed)
+        .open_access_key("10101010-1010-1010-1010-101010101010/access-keys/42424242-4242-4242-4242-424242424242/00000000-0000-0000-0000-000000000002", b"prefix", &sealed)
         .is_err());
-    assert!(ana
-        .open_access_key("s/access-keys/a/1", b"other", &sealed)
-        .is_err());
-    assert!(ana
-        .open_access_key("s/access-keys/a/1", b"prefix", &sealed[..40])
-        .is_err());
+    assert!(ana.open_access_key(path, b"other", &sealed).is_err());
+    assert!(ana.open_access_key(path, b"prefix", &sealed[..40]).is_err());
     assert!(seal_access_key(
         &vec![0; MAX_ACCESS_KEY_BOX + 1],
         &ana.public_keys().sealing,
@@ -573,7 +586,7 @@ fn access_key_boxes_open_only_for_their_member_path_and_prefix() {
 fn write_header_signatures_bind_path_prefix_header_and_every_root() {
     let member = MemberKeys::generate().unwrap();
     let signing = member.public_keys().signing;
-    let path = "10101010-1010-1010-1010-101010101010/devices/1/1";
+    let path = "coven/write/10101010-1010-1010-1010-101010101010/1/1";
     let roots = [[3; 32], [4; 32]];
     let signature = member.sign_write_header(path, b"prefix", b"sealed header", &roots);
     signing
@@ -581,7 +594,7 @@ fn write_header_signatures_bind_path_prefix_header_and_every_root() {
         .unwrap();
     for (path, prefix, header, roots) in [
         (
-            "10101010-1010-1010-1010-101010101010/devices/1/2",
+            "coven/write/10101010-1010-1010-1010-101010101010/1/2",
             &b"prefix"[..],
             &b"sealed header"[..],
             &roots[..],

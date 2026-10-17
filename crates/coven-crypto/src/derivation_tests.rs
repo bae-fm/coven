@@ -71,12 +71,12 @@ fn a_join_request_is_bound_to_its_invite_and_path() {
 #[test]
 fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
     let key = DerivedKeys::new(&[17; 32]);
-    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let path = "10101010-1010-1010-1010-101010101010/seq/3";
     let sealed = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
     // Independently calculated with Python's hashlib/hmac and D11's encoding.
     assert_eq!(
         hex::encode(&sealed[..24]),
-        "9ee2b2bf9cdd2e4b609f10628507dd610a44c6e5185d5781"
+        "6937153010e285848a3a4d14a7e4761eb816d5f788c554ca"
     );
     assert_eq!(
         sealed,
@@ -89,21 +89,21 @@ fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
     );
     for other in [
         key.reseal_object_chunk(
-            "20202020-2020-2020-2020-202020202020/devices/1/3",
+            "20202020-2020-2020-2020-202020202020/seq/3",
             b"prefix",
             1,
             2,
             b"payload",
         ),
         key.reseal_object_chunk(
-            "10101010-1010-1010-1010-101010101010/devices/1/4",
+            "10101010-1010-1010-1010-101010101010/seq/4",
             b"prefix",
             1,
             2,
             b"payload",
         ),
         key.reseal_object_chunk(
-            "10101010-1010-1010-1010-101010101010/store-log/1/3",
+            "10101010-1010-1010-1010-101010101010/seq/5",
             b"prefix",
             1,
             2,
@@ -124,26 +124,26 @@ fn retry_nonces_are_pinned_and_separate_keys_paths_sections_and_chunks() {
 #[test]
 fn changed_plaintext_at_the_same_chunk_position_changes_the_nonce() {
     let key = DerivedKeys::new(&[17; 32]);
-    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let path = "10101010-1010-1010-1010-101010101010/seq/3";
     let first = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
     let changed = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payloae");
     assert_ne!(first[..24], changed[..24]);
     assert_eq!(
         hex::encode(&changed[..24]),
-        "555e6c3798346d2671ef7e89dc86dd9ac45d38b2749aa311"
+        "9159e342d4e4d0241ffa8c5d885ec5065d3f112ec21195cc"
     );
 }
 
 #[test]
 fn changed_clear_prefix_at_the_same_chunk_position_changes_the_nonce() {
     let key = DerivedKeys::new(&[17; 32]);
-    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let path = "10101010-1010-1010-1010-101010101010/seq/3";
     let first = key.reseal_object_chunk(path, b"prefix", 1, 2, b"payload");
     let changed = key.reseal_object_chunk(path, b"prefiy", 1, 2, b"payload");
     assert_ne!(first[..24], changed[..24]);
     assert_eq!(
         hex::encode(&changed[..24]),
-        "15aa0a84d82e41793b0361ad13837207b80c002b87596d0c"
+        "0bd21fa3d5170233b47aadb17e0fbab5a4f0a88ed209d5aa"
     );
 }
 
@@ -152,21 +152,21 @@ fn retry_nonce_vectors_pin_binary_fields_and_big_endian_u64_coordinates() {
     // Independently calculated with Python hashlib/hmac, including SHA-256
     // of the complete plaintext and each field's separate u64 length prefix.
     let key = DerivedKeys::new(&[17; 32]);
-    let path = "10101010-1010-1010-1010-101010101010/devices/1/3";
+    let path = "10101010-1010-1010-1010-101010101010/seq/3";
     for (prefix, section, index, plain, expected) in [
         (
             b"\x20\x00\x01\xff\x00".as_slice(),
             0x0102030405060708,
             0x1112131415161718,
             b"\x00\xff\x80\x00".as_slice(),
-            "8c886b9f9901c6fcbda0e3cbf502b915a41bfd2c9e6c5dc3",
+            "5da7d8cebe6ac3700d3cf511b810043c4572c38e456d2267",
         ),
         (
             b"",
             0,
             0,
             b"",
-            "a5983baa739401fe568e54f7adf6422ea949d0783f6097a6",
+            "68e341050a63886979f6da7a5cbc819f83b3b1357134f45d",
         ),
     ] {
         let sealed = key.reseal_object_chunk(path, prefix, section, index, plain);
@@ -218,13 +218,13 @@ fn authorship_leaves_are_keyed_and_branches_are_pinned() {
 #[test]
 fn identified_headers_authenticate_the_selected_identity_before_returning_plaintext() {
     let key = DerivedKeys::new(&[17; 32]);
-    let plain = b"000007 body";
-    let path = "coven/write/store/1/000007";
-    let sealed = key.reseal_object_chunk(path, b"prefix", 0, 0, plain);
-    let route = |hint: &[u8; 6]| {
+    let plain = [7u64.to_be_bytes().as_slice(), b" body"].concat();
+    let path = "coven/write/10101010-1010-1010-1010-101010101010/1/7";
+    let sealed = key.reseal_object_chunk(path, b"prefix", 0, 0, &plain);
+    let route = |hint: &[u8; 8]| {
         Ok(format!(
-            "coven/write/store/1/{}",
-            std::str::from_utf8(hint).map_err(|_| CryptoError::Authentication)?
+            "coven/write/10101010-1010-1010-1010-101010101010/1/{}",
+            u64::from_be_bytes(*hint)
         ))
     };
     assert_eq!(
@@ -233,7 +233,7 @@ fn identified_headers_authenticate_the_selected_identity_before_returning_plaint
         plain
     );
     assert!(key
-        .open_identified_header::<6>(b"prefix", &sealed, |_| Ok("another identity".into()))
+        .open_identified_header::<8>(b"prefix", &sealed, |_| Ok("another identity".into()))
         .is_err());
     for position in [0, 24, sealed.len() - 1] {
         let mut changed = sealed.clone();

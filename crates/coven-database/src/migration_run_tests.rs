@@ -47,8 +47,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
             assert_eq!(setters(&db, "notes", "n")["name"], 1);
             assert_eq!(setters(&db, "notes", "n")["slug"], 2);
         } else {
-            // An addition reads only the merge state of the table it widened:
-            // each row's agreement leaf covers its app-visible columns (D11).
+            // An addition reads only the merge state of the table it widened.
             assert!(
                 loads.keys().all(|table| table == "notes"),
                 "an addition read another table's merge state: {loads:?}"

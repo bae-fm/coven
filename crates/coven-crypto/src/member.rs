@@ -161,7 +161,7 @@ impl MemberKeys {
     /// ```compile_fail
     /// use coven_crypto::{ContentHasher, MemberKeys};
     /// let member = MemberKeys::generate().unwrap();
-    /// member.sign_object("10101010-1010-1010-1010-101010101010/devices/1/1", &ContentHasher::new().finish());
+    /// member.sign_object("10101010-1010-1010-1010-101010101010/seq/1", &ContentHasher::new().finish());
     /// ```
     pub fn sign_object(&self, path: &str, digest: &ObjectDigest) -> Signature {
         self.sign(&object_message(path, digest))
