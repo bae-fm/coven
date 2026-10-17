@@ -78,19 +78,19 @@ def settlement (slot start : Nat) (covered : Option (Nat × String)) (read : Opt
 
 -- checked_genuine and strict order: fetched arrival order does not skip gaps.
 #eval do
-  check (json% {"kind":"read","applied":0,"fetched":[1,2],"first_kept":0})
+  check (json% {"kind":"read","stopped":false,"applied":0,"fetched":[1,2],"first_kept":0})
     (json% {"reload":false,"apply":[1,2]})
-  check (json% {"kind":"read","applied":0,"fetched":[1,2],"first_kept":2})
+  check (json% {"kind":"read","stopped":false,"applied":0,"fetched":[1,2],"first_kept":2})
     (json% {"reload":true,"apply":[]})
-  check (json% {"kind":"read","applied":1,"fetched":[3,1,2,5],"first_kept":2})
+  check (json% {"kind":"read","stopped":false,"applied":1,"fetched":[3,1,2,5],"first_kept":2})
     (json% {"reload":false,"apply":[2,3]})
-  check (json% {"kind":"read","applied":1,"fetched":[3,4],"first_kept":1})
+  check (json% {"kind":"read","stopped":false,"applied":1,"fetched":[3,4],"first_kept":1})
     (json% {"reload":false,"apply":[]})
-  check (json% {"kind":"read","applied":4,"fetched":[2,3,4],"first_kept":5})
+  check (json% {"kind":"read","stopped":false,"applied":4,"fetched":[2,3,4],"first_kept":5})
     (json% {"reload":false,"apply":[]})
-  check (json% {"kind":"read","applied":0,"fetched":[],"first_kept":1})
+  check (json% {"kind":"read","stopped":false,"applied":0,"fetched":[],"first_kept":1})
     (json% {"reload":false,"apply":[]})
-  check (json% {"kind":"read","applied":0,"fetched":[],"first_kept":2})
+  check (json% {"kind":"read","stopped":false,"applied":0,"fetched":[],"first_kept":2})
     (json% {"reload":true,"apply":[]})
 
 def reselection (old floorAt : Nat) (covers : List Nat) (missing : Option Json)
@@ -435,8 +435,8 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   rejects (json% {"kind":"settle",
     "recorded":{"device":0,"number":1,"slot":1,"bytes":"a","digest":"h"},
     "current":{"device":1,"number":1,"bytes":"a"},"floor":{"first_kept":1,"last_claims":[]}})
-  rejects (json% {"kind":"read","applied":0,"fetched":[1,1],"first_kept":1})
-  rejects (json% {"kind":"read","applied":0,"fetched":[0],"first_kept":1})
+  rejects (json% {"kind":"read","stopped":false,"applied":0,"fetched":[1,1],"first_kept":1})
+  rejects (json% {"kind":"read","stopped":false,"applied":0,"fetched":[0],"first_kept":1})
   rejects (applyCase [admin 0 0 (json% {"kind":"removeMember","member":1})])
   rejects (applyCase [admin 0 1 (json% {"kind":"removeMember","member":3})])
   rejects (applyCase [writes 0 1 0 [part 4 0 [] [] [] []]])
@@ -538,5 +538,8 @@ def keyCase (slots held current : List Json) : Json := json% {
   check (json% {"kind":"floor","coverage":[10,null]}) Json.null
   check (json% {"kind":"floor","coverage":[10,8]}) (toJson (9 : Nat))
   check (json% {"kind":"floor","coverage":[]}) Json.null
+
+#eval check (json% {"kind":"read","stopped":true,"applied":0,"fetched":[1],"first_kept":10})
+  (json% {"reload":false,"apply":[]})
 
 end SequenceTests

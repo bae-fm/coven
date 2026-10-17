@@ -252,3 +252,5 @@ import SequenceApply
 #print axioms CovenSequence.Retention.complete_coverage_advances
 #print axioms CovenSequence.Retention.floor_covered
 #print axioms CovenSequence.Retention.idle_audience_blocks_floor
+#print axioms CovenSequence.missing_key_blocks_reload
+#print axioms CovenSequence.Device.stopped_checks_nothing

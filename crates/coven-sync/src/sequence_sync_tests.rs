@@ -800,7 +800,7 @@ mod differential {
             .clone();
         let snapshot_path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
         let fetched: Vec<_> = (applied + 1..=last).collect();
-        let input = json!({"kind":"read","applied":applied,"fetched":fetched,
+        let input = json!({"kind":"read","stopped":false,"applied":applied,"fetched":fetched,
             "first_kept":if publish {covers+1} else {1}});
         let expected = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
         // Hold the last input while another device publishes a floor. Losing the

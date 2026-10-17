@@ -3,6 +3,7 @@ import SequenceInput
 import SequenceKeys
 import CovenSequence.Settle
 import CovenSequence.Causality
+import CovenSequence.Device
 import CovenSequence.Retention
 import CovenSequence.Reload
 import CovenSequence.QueueReloadExamples
@@ -149,7 +150,7 @@ def readRead (j : Json) : Except String Json := do
   distinct fetched "fetched slot"
   if fetched.any (· == 0) then throw "fetched slots must be positive"
   let start ← nat j "first_kept"
-  match Reader.checkedSlots applied start fetched with
+  match Device.checkedSlots (← j.getObjValAs? Bool "stopped") applied start fetched with
   | none => return Json.mkObj [("reload", toJson true), ("apply", toJson ([] : List Nat))]
   | some slots => return Json.mkObj [("reload", toJson false), ("apply", toJson slots)]
 

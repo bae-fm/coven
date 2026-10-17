@@ -7,8 +7,8 @@ A device belongs to some audiences: the store and the circles its member is
 in. It runs one reader per audience it follows and holds a key per audience.
 A reader may apply a slot only while no other of the device's readers is
 behind it, so when one reader stops at a slot it should read but cannot, the
-device applies nothing after that slot. Loading a floor snapshot is gated the
-same way.
+device applies nothing after that slot. Loading a floor snapshot also requires
+every followed audience key, so it cannot bypass a reader waiting for its key.
 
 A device outside a circle has no reader for it. Its readers apply the circle's
 slots without reading their circle parts, and reach the right state for every
@@ -50,7 +50,7 @@ reader's next slot, checked against the floor, is its audience's and the device
 has no key for it. -/
 inductive DevStep (st : Store S) : Device S → Device S → Prop
   | step (dv : Device S) (hrun : dv.stopped = false) (A : S.Aud) (hA : A ∈ dv.follows) (d' : Reader S)
-      (hs : ReadStep R A (dv.keys A) st (dv.reader A) d')
+      (hs : ReadStep R (dv.follows.all dv.keys) A (dv.keys A) st (dv.reader A) d')
       (hgate : d'.pos ≠ (dv.reader A).pos → ∀ B ∈ dv.follows, (dv.reader A).pos ≤ (dv.reader B).pos) :
       DevStep st dv (dv.set A d')
   | stop (dv : Device S) (B : S.Aud) (hB : B ∈ dv.follows) (hkey : dv.keys B = false) (x : Slot S)
@@ -200,7 +200,10 @@ theorem device_reaches_head {st : Store S} {seq : Nat → Slot S} (g : Good R st
     have run1 := lift_fetch R st dv hrun a ha lo n
     have hs' := DevStep.step (R := R) (st := st) (dv.set a (fetched st (dv.reader a) lo n))
       (by simpa using hrun) a
-      (by simpa using ha) d' (by rw [Device.set_same, Device.set_keys, hkeys a ha]; exact hs)
+      (by simpa using ha) d' (by
+        rw [Device.set_same, Device.set_keys, hkeys a ha, Device.set_follows]
+        rw [show dv.follows.all dv.keys = true from List.all_eq_true.mpr hkeys]
+        exact hs)
       (by
         intro _ B hB
         rw [Device.set_same, fetched_pos]
@@ -225,30 +228,30 @@ theorem device_reaches_head {st : Store S} {seq : Nat → Slot S} (g : Good R st
       (by simpa using hkeys)
     exact ⟨dv'', DevSteps.trans R run2 run3, hok3, by simpa using hpos3⟩
 
-theorem read_pos {A : S.Aud} {key : Bool} {st : Store S} {d d' : Reader S}
-    (s : ReadStep R A key st d d') : d'.pos = d.pos ∨ d'.pos = d.pos + 1 ∨ d'.pos = st.floor.covers A := by
+theorem read_pos {reloadAllowed : Bool} {A : S.Aud} {key : Bool} {st : Store S} {d d' : Reader S}
+    (s : ReadStep R reloadAllowed A key st d d') : d'.pos = d.pos ∨ d'.pos = d.pos + 1 ∨ d'.pos = st.floor.covers A := by
   cases s <;> simp
 
 /-- **A device stops at a slot it should read but cannot.** A device that
 follows `B` without `B`'s key, with `B`'s reader sound and its next slot
 having a part or announcement for `B`, never moves that reader. Every other
-reader applies at most up to that slot, or loads its own floor snapshot. -/
+reader applies at most up to that slot. No audience can reload past it. -/
 theorem device_stops {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {dv : Device S}
     {B : S.Aud} (hB : B ∈ dv.follows) (hkey : dv.keys B = false) (hok : DevOk R st seq dv)
     (htouch : touches B (seq ((dv.reader B).pos + 1)) = true) :
     ∀ dv', DevSteps R st dv dv' →
       (dv'.reader B).pos = (dv.reader B).pos ∧
       ∀ A ∈ dv.follows, (dv'.reader A).pos ≤
-        max (dv.reader A).pos (max ((dv.reader B).pos + 1) (st.floor.covers A)) := by
+        max (dv.reader A).pos ((dv.reader B).pos + 1) := by
   intro dv' run
   -- Strengthen to an invariant over every intermediate device.
   suffices h : ∀ d₁ d₂, DevSteps R st d₁ d₂ → d₁.follows = dv.follows → d₁.keys = dv.keys →
       DevOk R st seq d₁ → (d₁.reader B).pos = (dv.reader B).pos →
       (∀ A ∈ dv.follows, (d₁.reader A).pos ≤
-        max (dv.reader A).pos (max ((dv.reader B).pos + 1) (st.floor.covers A))) →
+        max (dv.reader A).pos ((dv.reader B).pos + 1)) →
       (d₂.reader B).pos = (dv.reader B).pos ∧
       ∀ A ∈ dv.follows, (d₂.reader A).pos ≤
-        max (dv.reader A).pos (max ((dv.reader B).pos + 1) (st.floor.covers A)) from
+        max (dv.reader A).pos ((dv.reader B).pos + 1) from
     h dv dv' run rfl rfl hok rfl (fun A _ => by omega)
   intro d₁ d₂ run
   induction run with
@@ -283,8 +286,37 @@ theorem device_stops {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {
             rcases read_pos R hs with h | h | h
             · exact absurd h hm
             · rw [h]; rw [hb] at hg; omega
-            · rw [h]; omega
+            · cases hs with
+              | fetch => simp at hm
+              | apply => simp only; rw [hb] at hg; omega
+              | boundary => simp only; rw [hb] at hg; omega
+              | reload L P rows hc hkA hload hbdy =>
+                have := List.all_eq_true.mp hload B (by rw [hf]; exact hB)
+                rw [hk, hkey] at this
+                cases this
         · rw [Device.set_other _ _ hCA]; exact hall C hC
+
+/-- Missing a followed audience key forbids every floor reload, even before
+its unread slot has set the device's stopped flag. -/
+theorem missing_key_blocks_reload {dv : Device S} {B : S.Aud}
+    (followed : B ∈ dv.follows) (missing : dv.keys B = false) :
+    dv.follows.all dv.keys = false := by
+  cases h : dv.follows.all dv.keys with
+  | false => rfl
+  | true =>
+    have := List.all_eq_true.mp h B followed
+    rw [missing] at this
+    cases this
+
+namespace Device
+/-- A stopped device does not apply fetched slots or request a floor reload. -/
+def checkedSlots (stopped : Bool) (pos first : Nat) (fetched : List Nat) : Option (List Nat) :=
+  if stopped then some [] else Reader.checkedSlots pos first fetched
+
+theorem stopped_checks_nothing (pos first : Nat) (fetched : List Nat) :
+    checkedSlots true pos first fetched = some [] := rfl
+
+end Device
 
 /-! ## Storage and devices together -/
 

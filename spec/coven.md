@@ -2965,8 +2965,8 @@ and again before committing the slots it read; §6.1 and §6.2 give those rules.
 One more case belongs here. Applying a schema raise sometimes means replaying
 slots. If the replay needs a slot below `first`, the device instead reloads that
 audience from the floor's snapshot. That snapshot was announced after the raise,
-so it covers the raise. A device behind a floor snapshot's coverage can always
-reload.
+so it covers the raise. A device behind a floor snapshot's coverage can reload
+unless it is stopped (§5.4).
 
 **A new device starts from the floor.** It opens its key copy, checks the
 historical entry that bound that key to its member and the floor's signature,
@@ -6252,7 +6252,7 @@ Write-ups explain each model and state its assumptions:
 | With the journal order and the floor's coverage, settling tells apart a claim that landed, one absent from the sequence, and one whose slot is still empty | `settle_correct` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | A settled claim, kept or claimed again after it didn't land (the model's `notLanded`), ends in exactly one slot (no bound on contention or time) | `lands_once_never_lost` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | A snapshot's per-device claim numbers settle claims of every kind after deletion; they don't describe surviving effects | `claims_ge` | `proofs/sequence/CovenSequence/Settle.lean` | §16.1 |
-| A device already stopped takes no apply or reload step | `stopped_stays` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
+| A device missing a followed audience key cannot reload any audience past its blocked slot, even before noticing the block; a stopped device applies and reloads nothing | `device_stops`, `missing_key_blocks_reload`, `stopped_stays`, `Device.stopped_checks_nothing` | `proofs/sequence/CovenSequence/Device.lean` | §5.4, §22 |
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |
 | A wait is due when its delay passes or a commit changes the prerequisite it names; a commit changing another prerequisite leaves it waiting, and being woken doesn't reset the backoff. Every start after the first is paid for by a full delay or by such a commit, so a wait nothing changes starts at most 1 + ⌊t / d⌋ times in t seconds, and n of them at most n times that | `evidence_rate`, `unrelated_commit_ignored`, `evidence_keeps_backoff`, `unchanged_rate`, `unchanged_waits_rate` | `proofs/io/CovenIO/WaitingEvidence.lean` | §6.7, §21.2 |
 | A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |

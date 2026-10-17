@@ -480,8 +480,8 @@ has no key for it, the device stops entirely.
   moves.
 - `device_stops`: a device following `B` without `B`'s key, whose `B` reader's
   next slot is `B`'s, never moves that reader. Even before it notices, every
-  other reader applies at most up to that slot, or loads its own floor
-  snapshot.
+  other reader applies at most up to that slot. `missing_key_blocks_reload`
+  forbids every floor reload until all followed audience keys are held.
 - `stopped_stays`: once the device has stopped, nothing moves: no reader
   applies a slot and none reloads.
 - `dev_ok`: device steps keep every followed reader sound.
@@ -722,15 +722,16 @@ the slot. Below `first_kept`, only the snapshot record decides.
 
 Answer: `"copy"`; the other answers are `"landed"`, `"notLanded"`, and `"retry"`.
 
-**`read`** calls `Reader.checkedSlots`, whose next-slot check supplies the
-buffer and floor premises of `ReadStep.apply`. It returns the consecutive
+**`read`** calls `Device.checkedSlots`. When `stopped` is true it applies
+nothing and requests no reload. Otherwise it uses `Reader.checkedSlots`, whose
+next-slot check supplies the buffer and floor premises of `ReadStep.apply`. It returns the consecutive
 fetched prefix after `applied`, stopping at the first gap, irrespective of
 fetch order. If the floor has passed the next slot it requests reload and
 applies nothing. This projects ordinary application with the audience key;
 key waits, prepared-body loads and snapshot contents are outside this case.
 
 ```json
-{"kind":"read","applied":1,"fetched":[3,1,2,5],"first_kept":2}
+{"kind":"read","stopped":false,"applied":1,"fetched":[3,1,2,5],"first_kept":2}
 ```
 
 Answer: `{"reload":false,"apply":[2,3]}`.

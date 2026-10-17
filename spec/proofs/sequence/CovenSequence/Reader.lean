@@ -111,14 +111,14 @@ theorem Reader.prefix_sound (start : Nat) (fetched : List Nat) (pos fuel : Nat) 
         exact ⟨h.1, h.2.1, by omega⟩
 
 /-- A reader's steps against fixed storage, holding `A`'s key or not. -/
-inductive ReadStep (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader S → Prop
+inductive ReadStep (reloadAllowed : Bool) (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader S → Prop
   | fetch (d : Reader S) (i : Nat) :
-      ReadStep A key st d { d with buf := fun j => if j = i then st.slot i else d.buf j }
+      ReadStep reloadAllowed A key st d { d with buf := fun j => if j = i then st.slot i else d.buf j }
   | apply (d : Reader S) (x : Slot S) (hb : d.buf (d.pos + 1) = some x)
       (hf : st.floor.start ≤ d.pos + 1)
       (hnr : ∀ au v c p, x = .boundary au A v c p → audValid R d.ledger d.aud (d.pos + 1) A x = false)
       (hk : touches A x = true → key = true) :
-      ReadStep A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) x,
+      ReadStep reloadAllowed A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) x,
         audStep R d.ledger d.aud (d.pos + 1) A x, rowsStep R A d.ledger d.aud d.rows (d.pos + 1) x, d.buf⟩
   | boundary (d : Reader S) (au : S.Dev) (v : Boundary) (c : Nat) (p : S.Path)
       (hb : d.buf (d.pos + 1) = some (.boundary au A v c p)) (hf : st.floor.start ≤ d.pos + 1)
@@ -126,13 +126,13 @@ inductive ReadStep (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader
       (L' : Ledger S) (P' : AudLedger S) (rows : S.Rows) (hbody : st.body p = some (L', P', rows))
       (get : Nat → Slot S)
       (hget : ∀ i, c < i → i ≤ d.pos → d.buf i = some (get i) ∧ st.floor.start ≤ i) :
-      ReadStep A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) (.boundary au A v c p),
+      ReadStep reloadAllowed A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) (.boundary au A v c p),
         audStep R d.ledger d.aud (d.pos + 1) A (.boundary au A v c p),
         finishBoundary R A get d.aud.refused v d.aud.lastReset rows (c + 1) (d.pos - c), d.buf⟩
   | reload (d : Reader S) (L : Ledger S) (P : AudLedger S) (rows : S.Rows)
-      (hc : d.pos < st.floor.covers A) (hk : key = true)
+      (hc : d.pos < st.floor.covers A) (hk : key = true) (hload : reloadAllowed = true)
       (hb : st.body (st.floor.path A) = some (L, P, rows)) :
-      ReadStep A key st d ⟨st.floor.covers A, L, P, rows, d.buf⟩
+      ReadStep reloadAllowed A key st d ⟨st.floor.covers A, L, P, rows, d.buf⟩
 
 /-- The executable check supplies exactly the ordinary apply constructor's
 buffer and floor premises; key and boundary admission remain explicit. -/
@@ -140,7 +140,7 @@ theorem Reader.next_apply {A : S.Aud} {key : Bool} {st : Store S} (d : Reader S)
     (next : Reader.next d.pos st.floor.start d.buf = some x)
     (hnr : ∀ au v c p, x = .boundary au A v c p → audValid R d.ledger d.aud (d.pos + 1) A x = false)
     (hk : touches A x = true → key = true) :
-    ReadStep R A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) x,
+    ReadStep R true A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) x,
       audStep R d.ledger d.aud (d.pos + 1) A x,
       rowsStep R A d.ledger d.aud d.rows (d.pos + 1) x, d.buf⟩ :=
   let checked := (Reader.next_eq_some _ _ _ _).mp next
@@ -148,7 +148,7 @@ theorem Reader.next_apply {A : S.Aud} {key : Bool} {st : Store S} (d : Reader S)
 
 inductive ReadSteps (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader S → Prop
   | refl (d : Reader S) : ReadSteps A key st d d
-  | step {d d' d'' : Reader S} : ReadStep R A key st d d' → ReadSteps A key st d' d'' →
+  | step {d d' d'' : Reader S} : ReadStep R true A key st d d' → ReadSteps A key st d' d'' →
       ReadSteps A key st d d''
 
 theorem ReadSteps.trans {A : S.Aud} {key : Bool} {st : Store S} {d d' d'' : Reader S}
@@ -264,8 +264,8 @@ theorem checked_genuine {st : Store S} {seq : Nat → Slot S} {A : S.Aud} {d : R
 
 /-- **Reading is sound.** Every reader step from a sound reader on good storage
 gives a sound reader, whatever was deleted or recreated below the floor. -/
-theorem read_ok {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S.Aud} {key : Bool}
-    {d d' : Reader S} (hd : ReaderOk R st seq A d) (step : ReadStep R A key st d d') :
+theorem read_ok {reloadAllowed : Bool} {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S.Aud} {key : Bool}
+    {d d' : Reader S} (hd : ReaderOk R st seq A d) (step : ReadStep R reloadAllowed A key st d d') :
     ReaderOk R st seq A d' := by
   cases step with
   | fetch i =>
@@ -322,7 +322,7 @@ theorem read_ok {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S
     intro i h1 h2
     obtain ⟨hgi, hfi⟩ := hget i (by omega) (by omega)
     exact (checked_genuine R hd hgi hfi).2.2
-  | reload L P rows hc hk hb =>
+  | reload L P rows hc hk hload hb =>
     rw [g.floor_body A] at hb
     have := Option.some.inj hb
     simp only [stateAt, Prod.mk.injEq] at this
@@ -392,12 +392,12 @@ theorem fetch_run (A : S.Aud) (key : Bool) (st : Store S) (d : Reader S) (lo : N
 and then step forward. -/
 theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S.Aud}
     {d : Reader S} (hd : ReaderOk R st seq A d) (hlt : d.pos < st.head) :
-    ∃ lo n d', ReadStep R A true st (fetched st d lo n) d' ∧ d.pos < d'.pos := by
+    ∃ lo n d', ReadStep R true A true st (fetched st d lo n) d' ∧ d.pos < d'.pos := by
   by_cases hfc : d.pos < st.floor.covers A
   · refine ⟨0, 0, ⟨st.floor.covers A, ledgerAt R seq (st.floor.covers A),
       audAt R seq A (st.floor.covers A), rowsAt R seq A (st.floor.covers A), d.buf⟩, ?_, hfc⟩
     rw [fetched_zero]
-    exact ReadStep.reload d _ _ _ hfc rfl (g.floor_body A)
+    exact ReadStep.reload d _ _ _ hfc rfl rfl (g.floor_body A)
   have hst := g.start_le A
   have hslot : ∀ i, st.floor.covers A < i → i ≤ st.head → st.slot i = some (seq i) := by
     intro i h1 h2
@@ -405,7 +405,7 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
   -- The plain case: fetch the next slot and apply it.
   have plain : (∀ au v c p, seq (d.pos + 1) = .boundary au A v c p →
       audValid R d.ledger d.aud (d.pos + 1) A (seq (d.pos + 1)) = false) →
-      ∃ lo n d', ReadStep R A true st (fetched st d lo n) d' ∧ d.pos < d'.pos := by
+      ∃ lo n d', ReadStep R true A true st (fetched st d lo n) d' ∧ d.pos < d'.pos := by
     intro hnr
     refine ⟨d.pos + 1, 1, _, ReadStep.apply (fetched st d (d.pos + 1) 1) (seq (d.pos + 1)) ?_ ?_ ?_
       (fun _ => rfl), by simp⟩
@@ -523,8 +523,8 @@ theorem readers_agree {st₁ st₂ : Store S} {seq : Nat → Slot S} {A : S.Aud}
 /-- **A reader without the key passes only slots that are not its audience's.**
 Every step that moves a reader of `A` without `A`'s key applies exactly the next
 slot, and that slot has no part or announcement for `A`. -/
-theorem keyless_passes_only_others {st : Store S} {seq : Nat → Slot S} {A : S.Aud}
-    {d d' : Reader S} (hd : ReaderOk R st seq A d) (step : ReadStep R A false st d d')
+theorem keyless_passes_only_others {reloadAllowed : Bool} {st : Store S} {seq : Nat → Slot S} {A : S.Aud}
+    {d d' : Reader S} (hd : ReaderOk R st seq A d) (step : ReadStep R reloadAllowed A false st d d')
     (hmove : d'.pos ≠ d.pos) : d'.pos = d.pos + 1 ∧ touches A (seq (d.pos + 1)) = false := by
   cases step with
   | fetch => exact absurd rfl hmove

@@ -788,3 +788,84 @@ async fn a_reload_preserves_a_refused_body_until_an_applicable_update() {
         ben.database().close().await.unwrap();
     }
 }
+
+async fn blocked_floor(compare: bool) {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember {
+            circle,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    let applied = ben.database().applied_slot().await.unwrap();
+    insert(ana.database(), "new", "unread").await;
+    pin(ana.database(), PIN_1, circle, "unread gift").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    let broken = ObjectPath::slot(group.store, (applied + 1).try_into().unwrap());
+    group.storage.corrupt_byte(&broken, 0).await.unwrap();
+    assert!(ben.sync.pass().await.is_err());
+    assert!(ben.sync.session.lock().await.blocked.is_some());
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    {
+        let mut session = ana.sync.session.lock().await;
+        let mut ring = ana.sync.ring(&mut session, &ana.identity).await.unwrap();
+        ana.sync
+            .retain_sequence(&mut session, &mut ring, &ana.identity)
+            .await
+            .unwrap();
+    }
+    let mut session = ben.sync.session.lock().await;
+    let mut ring = ben.sync.ring(&mut session, &ben.identity).await.unwrap();
+    let floor = stored_floor(&ben).await;
+    let first = floor.header.first.0;
+    assert!(first > applied + 1);
+    let requests = ben.storage.request_count();
+    let result = ben
+        .sync
+        .reload_floor(&mut session, floor, &mut ring, &ben.identity)
+        .await;
+    assert!(matches!(result, Err(SyncError::Pending(_))));
+    assert_eq!(
+        ben.storage.request_count(),
+        requests,
+        "blocked reload opens no audience"
+    );
+    assert_eq!(ben.database().applied_slot().await.unwrap(), applied);
+    if compare {
+        let input = serde_json::json!({"kind":"read","stopped":true,"applied":applied,
+            "fetched":[applied + 1],"first_kept":first});
+        assert_eq!(
+            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+            serde_json::json!({"reload":false,"apply":[]})
+        );
+    }
+    drop(session);
+    assert!(rows(ben.database()).await.is_empty());
+    assert!(pins(ben.database()).await.is_empty());
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn blocked_device_reloads_no_audience() {
+    blocked_floor(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_blocked_floor_matches_lean() {
+    blocked_floor(true).await;
+}
