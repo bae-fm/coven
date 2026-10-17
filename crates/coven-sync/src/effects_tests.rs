@@ -88,6 +88,54 @@ fn apply(
     )
 }
 #[test]
+fn repeating_an_active_member_requires_the_exact_binding() {
+    use coven_format::{MemberAccess, S3Principal};
+    for recorded in [
+        access(2),
+        MemberAccess::ProviderAccount("Ben@example.com".into()),
+    ] {
+        let mut state = household();
+        state.members.get_mut(&id(2)).unwrap().access = recorded.clone();
+        let request = |keys, role, access| StoreChange::AddMember {
+            member: id(2),
+            keys,
+            role,
+            access,
+        };
+        assert!(apply(
+            &state,
+            1,
+            request(keys(2), MemberRole::Admin, recorded.clone())
+        )
+        .unwrap()
+        .is_none());
+        let different_access = match &recorded {
+            MemberAccess::S3AccessKey { access_key_id, .. } => MemberAccess::S3AccessKey {
+                access_key_id: access_key_id.clone(),
+                principal: S3Principal::IamUser {
+                    user: "Ben".into(),
+                    policy: coven_format::IamPolicy::Inline {
+                        name: "store".into(),
+                    },
+                },
+            },
+            MemberAccess::ProviderAccount(_) => {
+                MemberAccess::ProviderAccount("ben@example.com".into())
+            }
+        };
+        for change in [
+            request(keys(3), MemberRole::Admin, recorded.clone()),
+            request(keys(2), MemberRole::Member, recorded),
+            request(keys(2), MemberRole::Admin, different_access),
+        ] {
+            assert!(matches!(
+                apply(&state, 1, change),
+                Err(OperationRejection::TargetGone(EntryTarget::Member(member))) if member == id(2)
+            ));
+        }
+    }
+}
+#[test]
 fn removal_preserves_bindings_and_refuses_a_later_action_by_the_removed_author() {
     let state = household();
     let next = apply(&state, 1, StoreChange::RemoveMember { member: id(2) })

@@ -186,7 +186,7 @@ pub(crate) fn checked_change(
                 if !existing.removed
                     && existing.keys == *keys
                     && existing.role == *role
-                    && existing.access.same_credential(access)
+                    && existing.access == *access
                 {
                     return Ok(None);
                 }
