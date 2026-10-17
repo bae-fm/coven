@@ -360,12 +360,21 @@ async fn cloudkit_live_create_once_race() {
                 },
                 left: false,
             };
-            let native = CloudKitStorage::new(invitation.location().clone(), ids.clone())
-                .await
-                .unwrap();
-            let joined = StorageConnection::from_provider(Arc::new(native));
+            let native = Arc::new(
+                CloudKitStorage::new(invitation.location().clone(), ids.clone())
+                    .await
+                    .unwrap(),
+            );
+            let joined = StorageConnection::from_provider(native.clone());
             joined.join(store, &invitation).await.unwrap();
-            assert!(joined.account().await.unwrap().eq_ignore_ascii_case(&email));
+            println!(
+                "recipient current participant: {}",
+                current_participant(&native).await
+            );
+            assert_eq!(
+                joined.account().await.unwrap().to_ascii_lowercase(),
+                email.to_ascii_lowercase()
+            );
             let most = STAGES.iter().map(|stage| stage.writers / 2).max().unwrap();
             let writers = Writer::connect("recipient", invitation.location(), &ids, most).await;
             recipient.rendezvous.put("joined", &());
@@ -389,5 +398,54 @@ async fn cloudkit_live_create_once_race() {
             std::fs::remove_file(handoff).unwrap();
         }
         _ => panic!("COVEN_CLOUDKIT_TEST_ROLE must be single, owner or recipient"),
+    }
+}
+
+/// What `account()` reads from the share on a recipient: the current user
+/// participant's role and every identity field it could name the account by.
+/// The share URL is not read.
+async fn current_participant(storage: &CloudKitStorage) -> String {
+    use objc2::AnyThread;
+    let name = unsafe {
+        objc2_cloud_kit::CKShare::initWithRecordZoneID(
+            objc2_cloud_kit::CKShare::alloc(),
+            &storage.zone_id(),
+        )
+        .recordID()
+        .recordName()
+        .to_string()
+    };
+    let mut share = storage.fetch(&name, &[]).wait().await.unwrap();
+    unsafe {
+        let Some(person) = share.share().unwrap().currentUserParticipant() else {
+            return "none".to_owned();
+        };
+        let identity = person.userIdentity();
+        let lookup = identity.lookupInfo();
+        format!(
+            "role={:?} acceptance={:?} permission={:?} user record={:?} \
+             has iCloud account={} lookup info present={} lookup email={:?} \
+             lookup phone={:?} lookup user record={:?}",
+            person.role(),
+            person.acceptanceStatus(),
+            person.permission(),
+            identity
+                .userRecordID()
+                .map(|id| id.recordName().to_string()),
+            identity.hasiCloudAccount(),
+            lookup.is_some(),
+            lookup
+                .as_ref()
+                .and_then(|lookup| lookup.emailAddress())
+                .map(|email| email.to_string()),
+            lookup
+                .as_ref()
+                .and_then(|lookup| lookup.phoneNumber())
+                .map(|phone| phone.to_string()),
+            lookup
+                .as_ref()
+                .and_then(|lookup| lookup.userRecordID())
+                .map(|id| id.recordName().to_string()),
+        )
     }
 }
