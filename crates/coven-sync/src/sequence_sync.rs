@@ -202,7 +202,8 @@ impl SequenceSync {
                 .await?;
             self.retain_sequence(&mut session, &mut ring, &member)
                 .await?;
-            self.retain_snapshots(&session).await?;
+            self.retain_snapshots(&mut session, &mut ring, &member)
+                .await?;
             self.request_snapshots(&mut session, &mut ring, &member)
                 .await?;
             self.sweep_stray_access_keys(&mut session, &member).await?;

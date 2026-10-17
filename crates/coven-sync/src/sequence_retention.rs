@@ -26,6 +26,9 @@ pub(crate) const GRACE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 #[derive(Serialize, Deserialize)]
 enum Retention {
+    Snapshot(
+        #[serde(with = "crate::pending_encoding::snapshot_id")] coven_format::admin::SnapshotId,
+    ),
     Floor {
         previous: Option<StoredObject>,
         first: u64,
@@ -117,6 +120,15 @@ impl SequenceSync {
                     .await?;
             }
         }
+        self.resume_retention(session, ring, member).await
+    }
+
+    async fn resume_retention(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
         for record in self.database.operations().await? {
             if record.kind != "sequence-retention" || !self.operation_ready(&record, ring).await? {
                 continue;
@@ -142,7 +154,12 @@ impl SequenceSync {
     /// floor or pending floor snapshot, not the body of a raise or reset
     /// applied after the floor's coverage, and replaced by a newer usable
     /// announcement covering at least as much whose slot has passed grace.
-    pub(crate) async fn retain_snapshots(&self, session: &Session) -> Result<(), SyncError> {
+    pub(crate) async fn retain_snapshots(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
         if !session
             .history
             .state
@@ -158,12 +175,17 @@ impl SequenceSync {
             .as_ref()
             .map(|floor| floor.header.snapshots.iter().copied().collect())
             .unwrap_or_default();
+        let mut pending_snapshots = Vec::new();
         for record in self.database.operations().await? {
             if record.kind != "sequence-retention" {
                 continue;
             }
-            if let Retention::Floor { announcements, .. } = serde_json::from_slice(&record.data)? {
-                kept.extend(announcements.into_iter().map(Slot));
+            match serde_json::from_slice(&record.data)? {
+                Retention::Floor { announcements, .. } => {
+                    kept.extend(announcements.into_iter().map(Slot))
+                }
+                Retention::Snapshot(id) => pending_snapshots.push(id),
+                Retention::Delete { .. } => (),
             }
         }
         let floor_covers = |audience: &Audience| {
@@ -183,7 +205,7 @@ impl SequenceSync {
         };
         for (slot, announcement) in &history.announcements {
             let id = &announcement.snapshot;
-            if id.device != self.device || kept.contains(slot) {
+            if id.device != self.device || kept.contains(slot) || pending_snapshots.contains(id) {
                 continue;
             }
             if history.boundaries.iter().any(|coverage| {
@@ -210,15 +232,16 @@ impl SequenceSync {
             if !self.past_grace(&self.immutable_metadata(&self.path(replacement.0)?).await?) {
                 continue;
             }
-            self.state.check()?;
-            self.storage
-                .delete(&crate::snapshot_object::path(self.store(), id)?)
-                .await?;
             self.database
-                .record_absent_snapshot(id.clone(), BTreeSet::new())
+                .start_operation(NewOperation {
+                    kind: "sequence-retention".into(),
+                    data: serde_json::to_vec(&Retention::Snapshot(id.clone()))?,
+                    started_by: "coven".into(),
+                    pauses_writes: false,
+                })
                 .await?;
         }
-        Ok(())
+        self.resume_retention(session, ring, member).await
     }
 
     async fn propose_floor(
@@ -359,6 +382,17 @@ impl SequenceSync {
         mut record: OperationRecord,
     ) -> Result<(), SyncError> {
         let mut work: Retention = serde_json::from_slice(&record.data)?;
+        if let Retention::Snapshot(id) = work {
+            self.state.check()?;
+            self.storage
+                .delete(&crate::snapshot_object::path(self.store(), &id)?)
+                .await?;
+            self.database
+                .record_absent_snapshot(id, BTreeSet::new())
+                .await?;
+            self.database.finish_operation(record.id).await?;
+            return Ok(());
+        }
         if let Retention::Floor {
             previous,
             first,

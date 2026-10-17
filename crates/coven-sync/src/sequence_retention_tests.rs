@@ -132,3 +132,74 @@ async fn superseded_snapshots_wait_for_replacement_grace_and_floor_release() {
     assert_eq!(ana.storage.request_count() - count, 2);
     ana.sync.database.close().await.unwrap();
 }
+
+// §15 and E6: failed superseded-body deletion remains journaled and retryable.
+#[tokio::test]
+async fn a_failed_snapshot_deletion_resumes_its_recorded_body_after_reopening() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let first = ana
+        .sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    let old = ana.sync.session.lock().await.history.announcements[&first]
+        .snapshot
+        .clone();
+    let path = crate::snapshot_object::path(group.store, &old).unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.storage
+        .set_faults(Faults {
+            delete_failures: [(
+                path.clone(),
+                coven_storage::StorageFailure::PermissionDenied,
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    let records = ana.database().operations().await.unwrap();
+    let operation = records
+        .iter()
+        .find(|record| record.kind == "sequence-retention")
+        .expect("failed snapshot deletion must retain its journal")
+        .id;
+    let pending = ana
+        .database()
+        .operation_pending::<crate::PendingRecord>(operation)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        pending.reason,
+        crate::PendingReason::Storage {
+            failure: coven_storage::StorageFailure::PermissionDenied,
+            ..
+        }
+    ));
+    assert!(ana.storage.status(&path).await.unwrap().is_some());
+    let ana = group.reopen(ana).await;
+    ana.storage.set_faults(Faults::none()).await;
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert!(ana.storage.status(&path).await.unwrap().is_none());
+    assert!(ana.database().snapshot_absent(old).await.unwrap());
+    assert!(ana.database().operation(operation).await.unwrap().is_none());
+    assert!(ana
+        .database()
+        .operation_pending::<crate::PendingRecord>(operation)
+        .await
+        .unwrap()
+        .is_none());
+    ana.database().close().await.unwrap();
+}
