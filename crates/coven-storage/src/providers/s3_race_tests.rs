@@ -113,20 +113,30 @@ async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions
         let remote = state.clone();
         let refused = Arc::new(AtomicBool::new(false));
         let first = refused.clone();
+        let publications = Arc::new(tokio::sync::Barrier::new(2));
         let server = TestServer::new(Router::new().fallback(
             move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
                 let remote = remote.clone();
                 let first = first.clone();
+                let publications = publications.clone();
                 async move {
-                    let selected = if preparation {
-                        method == Method::POST && query(&uri).contains_key("uploads")
-                    } else if matches!(race, Race::Replace) {
+                    let publication = if matches!(race, Race::Replace) {
                         method == Method::PUT
                             && headers
                                 .get("x-goog-if-generation-match")
                                 .is_some_and(|value| value != "0")
                     } else {
                         headers.contains_key("x-goog-copy-source")
+                    };
+                    // Preparation is serial; only the publication requests
+                    // race. Neither may answer before both reach this fake.
+                    if publication {
+                        publications.wait().await;
+                    }
+                    let selected = if preparation {
+                        method == Method::POST && query(&uri).contains_key("uploads")
+                    } else {
+                        publication
                     };
                     if selected && !first.swap(true, Ordering::SeqCst) {
                         let mut reply = response(429, "<Error><Code>SlowDown</Code></Error>");

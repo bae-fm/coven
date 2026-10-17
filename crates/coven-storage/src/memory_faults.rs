@@ -37,6 +37,8 @@ pub struct Faults {
     pub retry_after: Option<u64>,
     /// Delay each call without blocking its executor.
     pub delay: Duration,
+    /// Hold each create, including injected failures, until all writers arrive.
+    pub creation_barrier: Option<std::sync::Arc<tokio::sync::Barrier>>,
     /// Drop the next part before it is stored.
     pub drop_part: bool,
     /// Store the next part, but lose the reply before advancing the caller's session.
@@ -70,6 +72,7 @@ impl Faults {
             response: None,
             retry_after: None,
             delay: Duration::ZERO,
+            creation_barrier: None,
             drop_part: false,
             lose_part_reply: false,
             lose_completion_reply: false,

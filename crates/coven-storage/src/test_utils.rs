@@ -309,7 +309,7 @@ impl MemoryStorage {
     pub fn subscribe_requests(&self) -> tokio::sync::watch::Receiver<u64> {
         self.provider.requests.subscribe()
     }
-    /// Greatest number of requests overlapping the injected network delay.
+    /// Greatest number of requests overlapping an injected delay or barrier.
     pub fn peak_requests(&self) -> usize {
         self.provider
             .peak_requests
@@ -424,7 +424,7 @@ impl MemoryProvider {
             return Err(StorageFailure::Network
                 .with_source(std::io::Error::from(std::io::ErrorKind::NotConnected)));
         }
-        let (delay, failure) = {
+        let (delay, failure, barrier) = {
             let mut state = self.state.lock().await;
             if std::mem::replace(&mut state.faults.expire_uploads, false) {
                 state.uploads.clear();
@@ -439,8 +439,15 @@ impl MemoryProvider {
             } else {
                 None
             };
-            (state.faults.delay, failure)
+            let barrier = match &request {
+                MemoryRequest::Create(_) => state.faults.creation_barrier.clone(),
+                _ => None,
+            };
+            (state.faults.delay, failure, barrier)
         };
+        if let Some(barrier) = barrier {
+            barrier.wait().await;
+        }
         if !delay.is_zero() {
             self.clock.sleep(delay).await;
         }

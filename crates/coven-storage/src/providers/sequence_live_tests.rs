@@ -1,4 +1,19 @@
 use super::*;
+use std::sync::atomic::{AtomicU64, Ordering};
+
+/// Order interval observations independently of the host clock's resolution.
+/// Backoff still uses the runtime's paused timers.
+struct RaceClock(AtomicU64);
+
+impl Clock for RaceClock {
+    fn now(&self) -> std::time::SystemTime {
+        std::time::UNIX_EPOCH
+    }
+
+    fn elapsed(&self) -> Duration {
+        Duration::from_micros(self.0.fetch_add(1, Ordering::SeqCst))
+    }
+}
 
 #[test]
 fn judge_rejects_double_success_wrong_bytes_unexpected_failures_and_disjoint_requests() {
@@ -56,38 +71,49 @@ async fn lost_replies_are_settled_through_the_storage_connection() {
 
 #[tokio::test(start_paused = true)]
 async fn throttled_slot_round_is_retried_without_counting_it() {
-    let storage = Arc::new(
-        crate::test_utils::MemoryStorage::builder()
-            .clock(Arc::new(coven_foundation::clock::SystemClock))
-            .build()
-            .unwrap(),
-    );
-    let mut faults = crate::test_utils::Faults::none();
-    faults.fail_next = 1;
-    faults.failure = StorageFailure::RateLimited;
-    faults.retry_after = Some(7);
-    faults.delay = Duration::from_millis(1);
-    storage.set_faults(faults).await;
-    let writers: Vec<Arc<dyn Storage>> = (0..8)
-        .map(|_| storage.clone() as Arc<dyn Storage>)
-        .collect();
-    let started = tokio::time::Instant::now();
-    slots(
-        &coven_foundation::clock::SystemClock,
-        &writers,
-        crate::test_utils::STORE_ID,
-    )
-    .await
-    .unwrap();
-    assert!(started.elapsed() >= Duration::from_secs(7));
-    assert_eq!(
-        storage
-            .list(&crate::ObjectPrefix::all(crate::test_utils::STORE_ID))
+    for (width, trials) in STAGES {
+        let clock = Arc::new(RaceClock(AtomicU64::new(0)));
+        let storage = Arc::new(
+            crate::test_utils::MemoryStorage::builder()
+                .clock(clock.clone())
+                .build()
+                .unwrap(),
+        );
+        let mut faults = crate::test_utils::Faults::none();
+        faults.fail_next = 1;
+        faults.failure = StorageFailure::RateLimited;
+        faults.retry_after = Some(7);
+        faults.creation_barrier = Some(Arc::new(Barrier::new(width)));
+        storage.set_faults(faults).await;
+        let writers: Vec<Arc<dyn Storage>> = (0..width)
+            .map(|_| storage.clone() as Arc<dyn Storage>)
+            .collect();
+        let started = tokio::time::Instant::now();
+        let throttled = rounds(clock.as_ref(), "create", trials, async |trial, attempt| {
+            run(
+                clock.as_ref(),
+                &writers,
+                &ObjectPath::slot(crate::test_utils::STORE_ID, attempt.try_into().unwrap()),
+                None,
+                trial,
+                attempt,
+            )
             .await
-            .unwrap()
-            .len(),
-        251
-    );
+        })
+        .await
+        .unwrap();
+        assert!(started.elapsed() >= Duration::from_secs(7));
+        assert_eq!(throttled, 1);
+        assert_eq!(storage.peak_requests(), width);
+        assert_eq!(
+            storage
+                .list(&crate::ObjectPrefix::all(crate::test_utils::STORE_ID))
+                .await
+                .unwrap()
+                .len() as u64,
+            trials + throttled
+        );
+    }
 }
 
 fn throttled(seconds: u64) -> StorageError {
