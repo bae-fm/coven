@@ -377,7 +377,7 @@ pub enum DbError {
     /// A write puts a row in a circle this member isn't in, or a circle
     /// absent from this device's applied membership (§14.5, §14.6).
     NotInCircle(CircleId),
-    /// A required reset, schema or skipped-history reload has not committed.
+    /// A reset, schema raise or newly readable circle is still loading (§15).
     AudienceReloading(Audience),
     /// This device has exhausted its local write identities (§6).
     WriteNumberExhausted,
@@ -1103,6 +1103,10 @@ fn tables() -> Vec<SyncedTable> {
 
 - App SQL runs in one transaction; errors roll back rows and files
   ([§5](coven.md#5-local-database)).
+- Ordinary reload queues app writes with their original authored view.
+  Required audience reloads return `AudienceReloading`; self-replacement returns
+  `MemberKeysChanging`. Retry after installation to author against its state
+  ([§10](coven.md#10-device-identity), [§15](coven.md#15-snapshots)).
 
 ```rust
 /// App-provided files staged for one write; a failure discards them (E3).
@@ -2950,8 +2954,8 @@ impl CovenHandle {
     pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>>;
 
     /// Replaces this member's pair and returns its restore code (§9, §11).
-    /// Refuses app writes with MemberKeysChanging while confirming queued
-    /// writes and entries, then keeps the candidate before claiming its copies
+    /// Refuses app writes with MemberKeysChanging while confirming writes
+    /// made under the old binding, then keeps the candidate before claiming its copies
     /// and binding. Success follows the claimed binding, custody and synced-code
     /// refresh. Failure retains both pairs and progress; other devices holding
     /// the old pair report MemberKeysReplaced.

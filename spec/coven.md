@@ -130,12 +130,12 @@ cryptographic and environmental assumptions.
 
 - **Local reads and writes:** app commits need no network and never wait for sync.
   Uncached file reads need storage (§16.3); admin operations need online catch-up (§9).
-- A reset, breaking raise or skipped history can require an audience reload.
-  That audience refuses writes with `AudienceReloading` until reload commits (§15).
+- Reset, breaking raise and newly readable circle reloads refuse writes into
+  that audience with `AudienceReloading` until installation commits (§15).
 - Other audiences remain writable. Ordinary snapshot reloads permit app writes throughout.
-  The [queue model's `reloading_blocks_commit`](proofs/queue.md#availability-and-commit-refusals) proves the reload gate.
 - Membership, audience and row-key checks use locally applied state (§8.5, §14).
-  They can refuse an app write, but never request a network check at commit.
+  They never wait for a reload or check its future state; preserving a queued
+  original does not preserve its verdict after installation (§15).
 - Schema and migration checks can refuse opening or migration (§17).
   SQL constraints, triggers and coven's SQL access rules can refuse local writes (§5, §8).
 - A migrated app can commit writes before its raise claims a slot.
@@ -2489,6 +2489,9 @@ No removal of Ana enters the sequence.
   It does not rescue the old installation's queue.
 - Self-replacement pauses app writes with `MemberKeysChanging` while it confirms
   queued writes, claims the new binding, and installs custody and the restore code (§18).
+  An original authored before replacement requires the old signing key; that
+  key is cut off afterward, and the new key cannot authenticate its old prefix
+  ([`self_replacement_counterexample`, `later_replacement_counterexample`](proofs/sequence/CovenSequence/QueueReloadExamples.lean)).
 - `reset_device` discards the local database and unsent work, creates a fresh
   id, loads storage, and registers that id as replacing the old one.
 - Only the same member may replace its device id.
@@ -2631,7 +2634,8 @@ No removal of Ana enters the sequence.
 - An unfinished installation is hidden from listings and refused by ordinary
   opens. It stays at its permanent path while loading. Only after loading does
   coven commit final keys and credentials and publish it, without closing or
-  moving the database. Cancellation closes it and removes its local work;
+  moving the database. App commits therefore start against installed membership
+  and rows (§3). Cancellation closes it and removes its local work;
   dropping a waiting join preserves its encrypted request for an explicit retry.
 - Dropping a bootstrap marks its installation as closing. Its locks remain held
   until its in-flight blocking work finishes. A bootstrap or open of the same
@@ -3172,9 +3176,11 @@ Before a floor exists, the sequence starts at slot 1.
   ([`queued_exactly_once`, `covered_not_reapplied`, `install_twice`](proofs/sequence/CovenSequence/QueueReload.lean)).
 - Reset, breaking raise and newly readable circle reloads refuse writes into that
   audience with `AudienceReloading`. Other audiences stay locally writable.
-  Ordinary reload admits commits to followed audiences; an affected audience's
-  gate refuses a commit containing its part
-  ([`ordinary_commit_allowed`, `affected_commit_refused`](proofs/sequence/CovenSequence/QueueReload.lean)).
+  Preserving originals and replaying eligible ones exactly once does not make
+  their outcomes equal to writes authored after installation: an unread reset
+  excludes the write; a breaking migration can introduce a conflicting key;
+  newly loaded circle membership and rows change authorization and key checks
+  ([`reset_counterexample`, `breaking_raise_counterexample`, `newly_readable_counterexample`](proofs/sequence/CovenSequence/QueueReloadExamples.lean)).
 - For a changed followed set, each audience, including a newly readable circle,
   must supply its own sound loaded prefix at the common target. Installation
   then rebuilds each from its eligible queued originals. Eligibility requires an
@@ -3921,8 +3927,9 @@ This model retains sequence slots and proves safety, not eventual completion;
   then claim its introduction. Adding a circle member first supplies historical keys (§11).
 - An invite records its fixed target and new access before showing the code.
   Approval and undo follow [§12.2](#122-adding-a-person).
-- Self-replacement pauses app writes, confirms its queue, keeps the new pair,
-  then claims copies and replacement. Success installs custody and refreshes the restore code.
+- Self-replacement pauses app writes, confirms its existing queue before
+  replacement (§10), then claims the kept pair's copies and binding.
+  Success installs custody and refreshes the restore code before releasing writes.
 - A failed self-replacement releases the pause only after undo and confirmation
   that held credentials still match the current binding.
 - A schema raise confirms captured writes and its marker, uploads and announces
