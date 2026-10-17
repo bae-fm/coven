@@ -339,9 +339,21 @@ theorem nothing_applied_twice (s : Materialized) (h : s.Valid) (arrivals : List 
     | cons x xs ih => exact ih _ (consume_valid _ _ _ h)
   exact hv.1
 
+/-- §16.5: reset, breaking-raise and newly-readable reloads refuse local writes. -/
+inductive ReloadReason where
+  | ordinary
+  | reset
+  | breakingRaise
+  | newlyReadable
+  deriving DecidableEq, Repr
+
+def ReloadReason.blocksWrites : ReloadReason → Bool
+  | .ordinary => false
+  | .reset | .breakingRaise | .newlyReadable => true
+
 inductive AudienceState where
   | ready (adopted : View) (data : Materialized)
-  | reloading (target : View) (previous : Materialized)
+  | reloading (reason : ReloadReason) (adopted target : View) (previous : Materialized)
   deriving DecidableEq, Repr
 
 inductive CommitResult where
@@ -351,28 +363,36 @@ inductive CommitResult where
 
 def commitInto : AudienceState → CommitResult
   | .ready v _ => .accepted v
-  | .reloading _ _ => .audienceReloading
+  | .reloading reason adopted _ _ =>
+      if reason.blocksWrites then .audienceReloading else .accepted adopted
 
 /-- All audiences touched by the commit are supplied by its row records. -/
 def AudiencesReady (audiences : List AudienceState) : Prop :=
   ∀ audience ∈ audiences, ∃ view, commitInto audience = .accepted view
 
-theorem reloading_blocks_commit (audiences : List AudienceState) (v : View)
-    (old : Materialized) (h : AudiencesReady audiences) :
-    .reloading v old ∉ audiences := by
+theorem reloading_blocks_commit (audiences : List AudienceState) (reason : ReloadReason)
+    (adopted target : View) (old : Materialized) (blocked : reason.blocksWrites = true)
+    (h : AudiencesReady audiences) :
+    .reloading reason adopted target old ∉ audiences := by
   intro member
   obtain ⟨view, ready⟩ := h _ member
-  cases ready
+  simp [commitInto, blocked] at ready
 
 /-- Download or rebuilding failure retains the previous state. Only successful
 atomic replacement changes which boundary a new write may claim (§16.5, E3). -/
 def finishReload (s : AudienceState) (loaded : Option Materialized) : AudienceState :=
   match s, loaded with
-  | .reloading v _, some data => .ready v data
+  | .reloading _ _ target _, some data => .ready target data
   | _, _ => s
 
-theorem reloading_refused (v : View) (old : Materialized) :
-    commitInto (.reloading v old) = .audienceReloading := rfl
+theorem reloading_refused (reason : ReloadReason) (adopted target : View)
+    (old : Materialized) :
+    commitInto (.reloading reason adopted target old) = .audienceReloading ↔
+      reason = .reset ∨ reason = .breakingRaise ∨ reason = .newlyReadable := by
+  cases reason <;> simp [commitInto, ReloadReason.blocksWrites]
+
+theorem ordinary_reload_accepts (adopted target : View) (old : Materialized) :
+    commitInto (.reloading .ordinary adopted target old) = .accepted adopted := rfl
 
 theorem failed_reload_unchanged (s : AudienceState) : finishReload s none = s := by
   cases s <;> rfl

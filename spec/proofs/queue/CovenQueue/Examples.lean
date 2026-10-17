@@ -61,9 +61,9 @@ example : (Materialized.load [0]).consume 0 .applied = Materialized.load [0] ∧
     ((Materialized.load []).consume 0 .applied).consume 0 .applied =
       (Materialized.load []).consume 0 .applied := by decide
 
-example : commitInto (.reloading raised (.load [])) = .audienceReloading ∧
-    finishReload (.reloading raised (.load [])) none = .reloading raised (.load []) ∧
-    commitInto (finishReload (.reloading raised (.load [])) (some (.load [0]))) =
+example : commitInto (.reloading .breakingRaise resetView raised (.load [])) = .audienceReloading ∧
+    finishReload (.reloading .breakingRaise resetView raised (.load [])) none = .reloading .breakingRaise resetView raised (.load []) ∧
+    commitInto (finishReload (.reloading .breakingRaise resetView raised (.load [])) (some (.load [0]))) =
       .accepted raised := by decide
 
 def rename : Conversion := ⟨2, .convert (fun xs => 99 :: xs)⟩

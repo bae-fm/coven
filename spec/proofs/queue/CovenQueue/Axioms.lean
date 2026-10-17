@@ -14,6 +14,7 @@ import CovenQueue
 #print axioms CovenQueue.consume_idempotent
 #print axioms CovenQueue.covered_not_applied_again
 #print axioms CovenQueue.nothing_applied_twice
+#print axioms CovenQueue.ordinary_reload_accepts
 #print axioms CovenQueue.reloading_refused
 #print axioms CovenQueue.reloading_blocks_commit
 #print axioms CovenQueue.failed_reload_unchanged

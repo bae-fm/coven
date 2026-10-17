@@ -88,11 +88,13 @@ cryptography of the resulting ciphertext.
 
 ## Availability and commit refusals
 
-`reloading_blocks_commit` in [Verdicts.lean](queue/CovenQueue/Verdicts.lean)
-proves that a write touching an audience being reloaded is refused. A failed
-reload leaves that audience unavailable; a completed load supplies its whole
-materialized state. Ordinary reads and writes outside the affected audience
-are governed by the API and sequence reload model.
+`reloading_refused` in [Verdicts.lean](queue/CovenQueue/Verdicts.lean)
+characterizes the three reloads that refuse writes: resets, breaking raises
+and newly readable circles. `reloading_blocks_commit` excludes these from a
+commit's touched audiences. `ordinary_reload_accepts` lets ordinary reloads
+accept writes against the adopted view, including after the floor passes the
+next slot. A failed reload preserves that view and its gate; successful
+installation adopts the target view and its complete materialized state.
 
 [AtomicReceive.lean](queue/CovenQueue/AtomicReceive.lean) models a local
 transaction: changes are staged before the consumed number advances.
