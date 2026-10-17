@@ -4232,10 +4232,12 @@ Listings are used for files and setup checks, and they follow three rules:
   found.
 
 Listings may lag behind publication. The *listing margin*, M, is how long after
-an object is stored a listing may still omit it. The measured lag is a fact about the
-provider, recorded at setup, not a rule the sequence depends on. Exact reads and
-status must reflect completed publication. Deleting orphaned files needs a
-complete listing taken after the provider cut-off, independent of ordinary lag
+an object is stored a listing may still omit it. Certification measures observed
+lag (Appendix E.6); setup records no lag measurement. A finite observation cannot
+establish a maximum lag, and the sequence depends on neither that observation
+nor a listing. Exact reads and status must reflect completed publication.
+Deleting orphaned files needs a complete listing taken after the provider cut-off,
+independent of ordinary lag
 (§17.8). The setup check (§20.8) and the own-bucket check (§20.7) allow for the
 margin.
 
