@@ -3,7 +3,7 @@
 
 use super::event_capture::{Event, EventCapture};
 use super::transaction_capture::ChangeCapture;
-use super::{DatabaseConnection, SqlTransaction};
+use super::DatabaseConnection;
 use crate::DbError;
 use coven_foundation::id_source::DeviceId;
 use std::collections::BTreeSet;
@@ -93,13 +93,7 @@ impl DatabaseConnection {
         &self,
         run: impl FnOnce(&Self, &mut LocalPhase<'_>) -> Result<T, E>,
     ) -> Result<T, E> {
-        self.batch("BEGIN IMMEDIATE")?;
-        self.streaming.set(false);
-        let mut guard = SqlTransaction {
-            database: self,
-            active: true,
-        };
-        let result = (|| {
+        self.write_transaction(false, || {
             let mut phase = LocalPhase {
                 database: self,
                 recording: Some(EventCapture::begin(self)?),
@@ -110,26 +104,8 @@ impl DatabaseConnection {
             self.require_transaction()?;
             let changes = phase.changes()?;
             drop(phase);
-            self.batch("COMMIT")?;
-            #[cfg(any(test, feature = "test-utils"))]
-            self.record_work(|work| work.commits += 1);
-            #[cfg(any(test, feature = "test-utils"))]
-            self.checkpoint(crate::test_utils::WriteCheckpoint::Committed);
-            if let Some(handle) = &self.handle {
-                handle.commit(changes, crate::commit_scope::committing());
-            }
-            #[cfg(any(test, feature = "test-utils"))]
-            self.checkpoint(crate::test_utils::WriteCheckpoint::Observed);
-            Ok(result)
-        })();
-        guard.active = false;
-        match result {
-            Ok(result) => Ok(result),
-            Err(operation) => match self.roll_back() {
-                Ok(()) => Err(operation),
-                Err(rollback) => Err(operation.with_rollback(rollback)),
-            },
-        }
+            Ok(((), result, changes))
+        })
     }
 }
 

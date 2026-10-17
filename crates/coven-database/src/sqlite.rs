@@ -802,13 +802,7 @@ impl DatabaseConnection {
         streaming: bool,
         run: impl FnOnce(&Self) -> Result<T, E>,
     ) -> Result<T, E> {
-        self.batch("BEGIN IMMEDIATE")?;
-        self.streaming.set(streaming);
-        let mut guard = SqlTransaction {
-            database: self,
-            active: true,
-        };
-        let result = (|| {
+        self.write_transaction(streaming, || {
             // The write-record session ends before materialization; this session
             // covers app SQL, merge metadata, materialization and local tables.
             let mut capture = match &self.observation {
@@ -830,6 +824,25 @@ impl DatabaseConnection {
                     None => Vec::new(),
                 },
             };
+            // Keep both captures through commit, then drop the stream hook first.
+            Ok(((tables, capture), result, changes))
+        })
+    }
+
+    fn write_transaction<T, E: crate::WriteFailure, C>(
+        &self,
+        streaming: bool,
+        run: impl FnOnce() -> Result<(C, T, Vec<crate::observation::RowChange>), E>,
+    ) -> Result<T, E> {
+        self.batch("BEGIN IMMEDIATE")?;
+        self.streaming.set(streaming);
+        let mut guard = SqlTransaction {
+            database: self,
+            active: true,
+        };
+        let result = (|| {
+            // Capture drops after commit/notification, or after the result on failure.
+            let (_capture, result, changes) = run()?;
             self.batch("COMMIT")?;
             #[cfg(any(test, feature = "test-utils"))]
             self.record_work(|work| work.commits += 1);
