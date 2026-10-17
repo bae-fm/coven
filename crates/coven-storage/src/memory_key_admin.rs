@@ -9,9 +9,10 @@ pub struct MemoryKeyAdmin {
     state: Arc<std::sync::Mutex<KeyAdminState>>,
 }
 
-/// A user and the store and minting device its name carries.
+/// A user, its key if it holds one, and the store and minting device its
+/// name carries.
 struct MemoryUser {
-    key: String,
+    key: Option<String>,
     store: coven_foundation::id_source::StoreId,
     device: coven_foundation::id_source::DeviceId,
 }
@@ -23,6 +24,7 @@ struct KeyAdminState {
     next: u32,
     calls: Vec<&'static str>,
     fail_mint: bool,
+    stop_mint: bool,
     fail_probe: bool,
     fail_delete: bool,
     fail_list: bool,
@@ -38,9 +40,13 @@ impl MemoryKeyAdmin {
     pub fn users(&self) -> Vec<String> {
         self.state.lock().unwrap().users.keys().cloned().collect()
     }
-    /// The next mint fails after creating its user.
+    /// The next mint fails after creating its user and key.
     pub fn fail_next_mint(&self) {
         self.state.lock().unwrap().fail_mint = true;
+    }
+    /// The next mint fails after creating its user, before its key.
+    pub fn stop_next_mint_before_key(&self) {
+        self.state.lock().unwrap().stop_mint = true;
     }
     /// The next member-side check fails.
     pub fn fail_next_probe(&self) {
@@ -67,15 +73,17 @@ impl crate::AccessKeyAdmin for MemoryKeyAdmin {
         state.calls.push("mint");
         state.next += 1;
         let id = format!("minted-{}", state.next);
+        let stop = std::mem::take(&mut state.stop_mint);
         state.users.insert(
             scope.key_name.clone(),
             MemoryUser {
-                key: id.clone(),
+                key: (!stop).then(|| id.clone()),
                 store: scope.store,
                 device: scope.device,
             },
         );
-        if std::mem::take(&mut state.fail_mint) {
+        let fail = std::mem::take(&mut state.fail_mint);
+        if stop || fail {
             return Err(StorageFailure::Network.into());
         }
         Ok(crate::S3MemberKey {
@@ -102,7 +110,7 @@ impl crate::AccessKeyAdmin for MemoryKeyAdmin {
             return Err(StorageFailure::KeyBeyondStore.into());
         }
         match state.users.get(&scope.key_name) {
-            Some(user) if user.key == key.access_key_id => Ok(()),
+            Some(user) if user.key.as_ref() == Some(&key.access_key_id) => Ok(()),
             _ => Err(StorageFailure::Authentication.into()),
         }
     }
@@ -130,7 +138,7 @@ impl crate::AccessKeyAdmin for MemoryKeyAdmin {
             && state
                 .users
                 .get(user)
-                .is_some_and(|held| held.key == access_key_id)
+                .is_some_and(|held| held.key.as_deref() == Some(access_key_id))
         {
             state.users.remove(user);
         }
@@ -149,31 +157,54 @@ impl crate::AccessKeyAdmin for MemoryKeyAdmin {
         Ok(state
             .users
             .get(user)
-            .is_some_and(|held| held.key == access_key_id))
+            .is_some_and(|held| held.key.as_deref() == Some(access_key_id)))
     }
     async fn list_keys(
         &self,
         store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<crate::ListedKey>, StorageError> {
+    ) -> Result<crate::StoreListing, StorageError> {
         let mut state = self.state.lock().unwrap();
         state.calls.push("list_keys");
         if std::mem::take(&mut state.fail_list) {
             return Err(StorageFailure::Network.into());
         }
-        Ok(state
-            .users
-            .iter()
-            .filter(|(_, user)| user.store == store)
-            .map(|(name, user)| crate::ListedKey {
-                access_key_id: user.key.clone(),
-                principal: coven_format::S3Principal::IamUser {
-                    user: name.clone(),
-                    policy: coven_format::IamPolicy::Inline {
-                        name: "coven-member".into(),
+        let mut listed = crate::StoreListing::default();
+        for (name, user) in state.users.iter().filter(|(_, user)| user.store == store) {
+            match &user.key {
+                Some(key) => listed.keys.push(crate::ListedKey {
+                    access_key_id: key.clone(),
+                    principal: coven_format::S3Principal::IamUser {
+                        user: name.clone(),
+                        policy: coven_format::IamPolicy::Inline {
+                            name: "coven-member".into(),
+                        },
                     },
-                },
-                device: user.device,
-            })
-            .collect())
+                    device: user.device,
+                }),
+                None => listed.unkeyed.push(crate::UnkeyedPrincipal {
+                    name: name.clone(),
+                    device: user.device,
+                }),
+            }
+        }
+        Ok(listed)
+    }
+    async fn remove_unkeyed(
+        &self,
+        store: coven_foundation::id_source::StoreId,
+        principal: &crate::UnkeyedPrincipal,
+    ) -> Result<(), StorageError> {
+        let mut state = self.state.lock().unwrap();
+        state.calls.push("remove_unkeyed");
+        if std::mem::take(&mut state.fail_delete) {
+            return Err(StorageFailure::PermissionDenied.into());
+        }
+        if state.users.get(&principal.name).is_some_and(|user| {
+            user.store != store || user.device != principal.device || user.key.is_some()
+        }) {
+            return Err(StorageFailure::Conflict.into());
+        }
+        state.users.remove(&principal.name);
+        Ok(())
     }
 }

@@ -3,7 +3,9 @@
 //! account's admin access. The key is checked from the member's side before
 //! the caller delivers it.
 use super::*;
-use crate::{AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey};
+use crate::{
+    AccessKeyAdmin, AdminCredential, MintScope, S3MemberKey, StoreListing, UnkeyedPrincipal,
+};
 use coven_format::S3Principal;
 use coven_foundation::id_source::StoreId;
 use std::{future::Future, pin::Pin, time::Duration};
@@ -11,6 +13,17 @@ use url::Url;
 
 /// A minter's pending provider work, borrowing its context.
 pub(crate) type Pending<'a, T> = Pin<Box<dyn Future<Output = Result<T, StorageError>> + Send + 'a>>;
+
+/// R2 tokens and RustFS service accounts are their keys; neither can be keyless.
+pub(super) fn reject_unkeyed_principal<'a>(
+    _: &'a AdminRequest,
+    _: StoreId,
+    _: &'a UnkeyedPrincipal,
+) -> Pending<'a, ()> {
+    Box::pin(std::future::ready(Err(
+        StorageFailure::InvalidConfiguration.with_source("this service's principal is its key"),
+    )))
+}
 
 /// One service's admin key operations.
 #[derive(Clone, Copy, Debug)]
@@ -26,8 +39,11 @@ pub(crate) struct KeyMinter {
     /// Read whether the provider still has this exact key.
     pub(super) key_exists:
         for<'a> fn(&'a AdminRequest, &'a str, &'a S3Principal) -> Pending<'a, bool>,
-    /// Every key under a name coven made for the store, with its minting device.
-    pub(super) list: for<'a> fn(&'a AdminRequest, StoreId) -> Pending<'a, Vec<ListedKey>>,
+    /// Keys and principals holding none under coven's store-and-device names.
+    pub(super) list: for<'a> fn(&'a AdminRequest, StoreId) -> Pending<'a, StoreListing>,
+    /// Remove a listed principal only while it holds no key.
+    pub(super) remove_unkeyed:
+        for<'a> fn(&'a AdminRequest, StoreId, &'a UnkeyedPrincipal) -> Pending<'a, ()>,
     /// How long the member-side check retries authentication and permission
     /// failures, and admin calls a NotFound for a principal not yet seen.
     pub(super) propagation: Duration,
@@ -248,12 +264,25 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
     ) -> Result<bool, StorageError> {
         (self.minter.key_exists)(&self.request(), access_key_id, principal).await
     }
-    async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+    async fn list_keys(&self, store: StoreId) -> Result<StoreListing, StorageError> {
         let mut waited = Duration::ZERO;
         loop {
             match (self.minter.list)(&self.request(), store).await {
                 Err(error) => self.unseen(&mut waited, error).await?,
                 listed => return listed,
+            }
+        }
+    }
+    async fn remove_unkeyed(
+        &self,
+        store: StoreId,
+        principal: &UnkeyedPrincipal,
+    ) -> Result<(), StorageError> {
+        let mut waited = Duration::ZERO;
+        loop {
+            match (self.minter.remove_unkeyed)(&self.request(), store, principal).await {
+                Err(error) => self.unseen(&mut waited, error).await?,
+                removed => return removed,
             }
         }
     }

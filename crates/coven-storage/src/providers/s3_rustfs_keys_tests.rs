@@ -386,7 +386,7 @@ async fn a_store_listing_returns_its_service_accounts_with_their_minting_device(
         ours.label()
     );
     assert_eq!(
-        admin.list_keys(ours.store).await.unwrap(),
+        admin.list_keys(ours.store).await.unwrap().keys,
         [crate::ListedKey {
             access_key_id: mine.credentials.access_key_id.clone(),
             principal: mine.principal.clone(),
@@ -417,9 +417,11 @@ async fn malformed_key_listings_are_errors() {
         );
     }
     state.lock().unwrap().listing = Some(serde_json::json!({"accounts": []}));
-    assert!(admin
-        .list_keys(StoreId(uuid::Uuid::from_u128(3)))
-        .await
-        .unwrap()
-        .is_empty());
+    assert_eq!(
+        admin
+            .list_keys(StoreId(uuid::Uuid::from_u128(3)))
+            .await
+            .unwrap(),
+        crate::StoreListing::default()
+    );
 }

@@ -138,6 +138,26 @@ pub struct ListedKey {
     pub device: DeviceId,
 }
 
+/// An IAM user or GCS service account coven named for a store that holds no
+/// key: a mint call stopped between the two, and its rollback failed or never
+/// ran (§4, §13).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnkeyedPrincipal {
+    /// The IAM user's name or the service account's email.
+    pub name: String,
+    /// The device whose operation made it.
+    pub device: DeviceId,
+}
+
+/// What the provider holds under the names coven made for a store (§13).
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StoreListing {
+    /// Every key, with its principal.
+    pub keys: Vec<ListedKey>,
+    /// Every principal holding no key.
+    pub unkeyed: Vec<UnkeyedPrincipal>,
+}
+
 /// A member's S3 key and who holds it. The secret is erased on drop and
 /// never formatted.
 #[derive(Clone, Serialize, Deserialize)]
@@ -169,7 +189,7 @@ pub trait AccessKeyAdmin: Send + Sync {
     /// retried within the service's propagation bound, and a listing outside
     /// the store's prefix, which must be refused.
     async fn probe(&self, scope: &MintScope, key: &S3Credentials) -> Result<(), StorageError>;
-    /// Remove whatever an attempt with this scope created; absence succeeds.
+    /// Remove whatever a failed call with this scope created; absence succeeds.
     async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError>;
     /// Delete the key and the principal coven made to hold it. A key or
     /// principal already absent succeeds, so a retry is safe.
@@ -185,10 +205,19 @@ pub trait AccessKeyAdmin: Send + Sync {
         access_key_id: &str,
         principal: &S3Principal,
     ) -> Result<bool, StorageError>;
-    /// Every key the provider holds under a name coven made for this store,
-    /// with the minting device that name carries. A failed or incomplete
-    /// listing is an error, never a shorter list.
-    async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError>;
+    /// Every key, and every principal holding none, under a name coven made
+    /// for this store, with the minting device that name carries. A failed or
+    /// incomplete listing is an error, never a shorter list.
+    async fn list_keys(&self, store: StoreId) -> Result<StoreListing, StorageError>;
+    /// Remove a listed principal of a retired device, with its policy or
+    /// bindings. Refuse a principal that now holds a key or no longer matches
+    /// the listed device; absence succeeds. The caller establishes retirement
+    /// from its applied state (§13).
+    async fn remove_unkeyed(
+        &self,
+        store: StoreId,
+        principal: &UnkeyedPrincipal,
+    ) -> Result<(), StorageError>;
 }
 
 #[cfg(test)]

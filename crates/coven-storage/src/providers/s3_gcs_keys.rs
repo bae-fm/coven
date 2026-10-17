@@ -10,7 +10,7 @@
 //! stays. Absence is read from the key itself.
 use super::minting::{AdminRequest, KeyMinter, Pending};
 use super::*;
-use crate::{access_admin::named_device, ListedKey};
+use crate::{access_admin::named_device, ListedKey, StoreListing, UnkeyedPrincipal};
 use coven_format::S3Principal;
 use coven_foundation::id_source::StoreId;
 use reqwest::Method;
@@ -49,8 +49,15 @@ fn key_present<'a>(
 ) -> Pending<'a, bool> {
     Box::pin(key_exists(context, key, principal))
 }
-fn list_keys<'a>(context: &'a AdminRequest, store: StoreId) -> Pending<'a, Vec<ListedKey>> {
+fn list_keys<'a>(context: &'a AdminRequest, store: StoreId) -> Pending<'a, StoreListing> {
     Box::pin(list(context, store))
+}
+fn remove_unkeyed<'a>(
+    context: &'a AdminRequest,
+    store: StoreId,
+    principal: &'a UnkeyedPrincipal,
+) -> Pending<'a, ()> {
+    Box::pin(remove_empty(context, store, principal))
 }
 
 pub(super) const GCS_KEYS: KeyMinter = KeyMinter {
@@ -60,6 +67,7 @@ pub(super) const GCS_KEYS: KeyMinter = KeyMinter {
     revoke: revoke_key,
     key_exists: key_present,
     list: list_keys,
+    remove_unkeyed,
     // Google documents up to 60 seconds before a new HMAC key works.
     propagation: Duration::from_secs(60),
     separate_iam: false,
@@ -348,6 +356,12 @@ impl<'a> Gcs<'a> {
                 self.delete_hmac(project, &key).await?;
             }
         }
+        self.remove_principal(project, email).await
+    }
+
+    /// Remove only the bindings and account; this path never deletes a key.
+    async fn remove_principal(&self, project: &str, email: &str) -> Result<(), StorageError> {
+        let account = self.iam(&format!("projects/{project}/serviceAccounts/{email}"));
         self.bind(Grant::Folder, email, false).await?;
         self.bind(Grant::Bucket, email, false).await?;
         self.call(Method::DELETE, account, None, &[404]).await?;
@@ -425,6 +439,33 @@ async fn roll_back(context: &AdminRequest, scope: &MintScope) -> Result<(), Stor
         .await
 }
 
+async fn remove_empty(
+    context: &AdminRequest,
+    store: StoreId,
+    principal: &UnkeyedPrincipal,
+) -> Result<(), StorageError> {
+    let gcs = Gcs::new(context, store)?;
+    let project = gcs.project().await?;
+    let email = &principal.name;
+    let account = gcs.iam(&format!("projects/{project}/serviceAccounts/{email}"));
+    if let Some(account) = gcs.call(Method::GET, account, None, &[404]).await? {
+        if account["description"]
+            .as_str()
+            .and_then(|label| named_device(label, store))
+            != Some(principal.device)
+        {
+            return Err(StorageFailure::Conflict
+                .with_source("the listed service account no longer matches its store and device"));
+        }
+        if !gcs.hmac_keys(&project, email).await?.is_empty() {
+            return Err(
+                StorageFailure::Conflict.with_source("the listed service account now holds a key")
+            );
+        }
+    }
+    gcs.remove_principal(&project, email).await
+}
+
 fn account(principal: &S3Principal) -> Result<(&str, &str), StorageError> {
     match principal {
         S3Principal::GcsServiceAccount { project, email, .. } => Ok((project, email)),
@@ -483,12 +524,12 @@ async fn key_exists(
 }
 
 /// Every HMAC key of a service account whose description names this store,
-/// with the minting device it names (§13). Accounts are read from the bucket's
-/// project, every page.
-async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+/// and every such account holding none, with the minting device it names
+/// (§13). Accounts are read from the bucket's project, every page.
+async fn list(context: &AdminRequest, store: StoreId) -> Result<StoreListing, StorageError> {
     let gcs = Gcs::new(context, store)?;
     let project = gcs.project().await?;
-    let mut listed = Vec::new();
+    let mut listed = StoreListing::default();
     let mut token: Option<String> = None;
     let mut pages = crate::providers::pagination::Pagination::new();
     loop {
@@ -508,8 +549,16 @@ async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, 
             else {
                 continue;
             };
-            for access_key_id in gcs.hmac_keys(&project, &email).await? {
-                listed.push(ListedKey {
+            let keys = gcs.hmac_keys(&project, &email).await?;
+            if keys.is_empty() {
+                listed.unkeyed.push(UnkeyedPrincipal {
+                    name: email,
+                    device,
+                });
+                continue;
+            }
+            for access_key_id in keys {
+                listed.keys.push(ListedKey {
                     access_key_id,
                     principal: S3Principal::GcsServiceAccount {
                         project: project.clone(),

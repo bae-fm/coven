@@ -539,6 +539,8 @@ impl SequenceSync {
     /// retired devices could have made stray ones, and keep each key a
     /// retired device made that no admin entry names pending deletion (§13).
     /// A live device's key, recorded or still being made, is never taken.
+    /// Keyless principals of retired devices grant nothing and are removed
+    /// directly; a failed removal fails this sweep before it is marked complete.
     pub(crate) async fn sweep_stray_access_keys(
         &self,
         session: &mut Session,
@@ -571,9 +573,9 @@ impl SequenceSync {
         if retired.is_empty() || session.swept.as_ref() == Some(&retired) {
             return Ok(());
         }
-        let deletions = admin
-            .list_keys(self.store())
-            .await?
+        let listed = admin.list_keys(self.store()).await?;
+        let deletions = listed
+            .keys
             .into_iter()
             .filter(|key| {
                 retired.contains(&key.device)
@@ -600,6 +602,11 @@ impl SequenceSync {
         self.database
             .record_access_key_deletions::<PendingRecord>(None, deletions)
             .await?;
+        for principal in listed.unkeyed {
+            if retired.contains(&principal.device) {
+                admin.remove_unkeyed(self.store(), &principal).await?;
+            }
+        }
         session.swept = Some(retired);
         Ok(())
     }

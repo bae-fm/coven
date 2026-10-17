@@ -1,6 +1,30 @@
 use super::*;
 
 #[tokio::test]
+async fn an_absent_user_is_not_listed_as_keyless() {
+    for profile in [
+        S3ProfileName::Aws,
+        S3ProfileName::SeaweedFs,
+        S3ProfileName::CephRgw,
+        S3ProfileName::VersityGw,
+    ] {
+        let fake = Fake::new().await;
+        let admin = fake.admin(profile);
+        let scope = scope();
+        let name = &scope.key_name;
+        fake.state.lock().unwrap().listings.insert(
+            "ListUsers".into(),
+            format!("<ListUsersResponse><ListUsersResult><IsTruncated>false</IsTruncated><Users><member><UserName>{name}</UserName></member></Users></ListUsersResult></ListUsersResponse>").into_bytes(),
+        );
+        assert_eq!(
+            admin.list_keys(scope.store).await.unwrap_err().failure(),
+            StorageFailure::NotFound,
+            "{profile:?}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn malformed_key_listings_are_errors() {
     for profile in [
         S3ProfileName::Aws,

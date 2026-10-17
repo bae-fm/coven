@@ -2831,6 +2831,11 @@ No removal of Ana enters the sequence.
   and queues keys neither recorded in the sequence or store snapshot nor current.
   Later entries by the retired device cannot make such a key current.
   A live device's unrecorded key remains protected by its operation.
+  The listing also includes IAM users and GCS service accounts matching
+  coven's store-and-device naming that hold no key; once that device's
+  retirement is applied, reclaim removes them without a deletion record
+  because they grant nothing.
+  A failed removal fails the reclaim call, and absence succeeds on retry.
   The ordinary file-folder orphan scan still requires confirmed provider
   cut-off, including in-flight uploads (§16.5).
 - Member-key replacement changes neither access records nor device ids.

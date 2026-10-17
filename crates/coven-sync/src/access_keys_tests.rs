@@ -4,7 +4,8 @@ use coven_database::{AccessKeyDeletion, AccessKeyToDelete, NewOperation};
 use coven_format::S3Principal;
 use coven_foundation::id_source::StoreId;
 use coven_storage::{
-    AccessKeyAdmin, ListedKey, MintScope, S3Credentials, S3MemberKey, StorageFailure,
+    AccessKeyAdmin, MintScope, S3Credentials, S3MemberKey, StorageFailure, StoreListing,
+    UnkeyedPrincipal,
 };
 use std::sync::Mutex;
 
@@ -25,8 +26,11 @@ impl AccessKeyAdmin for Admin {
     async fn roll_back(&self, _: &MintScope) -> Result<(), StorageError> {
         panic!("deletion does not roll back a mint")
     }
-    async fn list_keys(&self, _: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+    async fn list_keys(&self, _: StoreId) -> Result<StoreListing, StorageError> {
         panic!("deletion reads only its exact key")
+    }
+    async fn remove_unkeyed(&self, _: StoreId, _: &UnkeyedPrincipal) -> Result<(), StorageError> {
+        panic!("key deletion does not remove keyless principals")
     }
     async fn revoke(&self, key: &str, principal: &S3Principal) -> Result<(), StorageError> {
         self.calls

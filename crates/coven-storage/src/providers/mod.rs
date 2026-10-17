@@ -74,3 +74,27 @@ mod tests;
 
 mod connector;
 pub use connector::{ProviderConnector, StorageConnector};
+
+/// Construct the production S3 key administrator against an in-process API.
+#[cfg(any(test, feature = "test-utils"))]
+pub fn s3_key_admin_at(
+    config: crate::StorageConfig,
+    admin: crate::AdminCredential,
+    endpoint: url::Url,
+    clock: coven_foundation::clock::ClockRef,
+    ids: coven_foundation::id_source::IdSourceRef,
+) -> Result<std::sync::Arc<dyn crate::AccessKeyAdmin>, crate::StorageError> {
+    s3::minting::key_admin(
+        config,
+        admin,
+        s3::minting::AdminEndpoints {
+            aws_iam: endpoint.clone(),
+            gcs_storage: endpoint.clone(),
+            gcs_iam: endpoint.clone(),
+            gcs_projects: endpoint.clone(),
+            cloudflare: endpoint,
+        },
+        clock,
+        ids,
+    )
+}

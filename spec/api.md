@@ -3109,10 +3109,13 @@ pub trait AccessKeyAdmin: Send + Sync {
     async fn revoke(&self, access_key_id: &str, principal: &S3Principal) -> Result<(), StorageError>;
     /// Read whether this exact key remains; a failed read is never absence.
     async fn key_exists(&self, access_key_id: &str, principal: &S3Principal) -> Result<bool, StorageError>;
-    /// Every key held under a name coven made for this store, with the
-    /// minting device that name carries (§4, §13). A failed or incomplete
-    /// listing is an error, never a shorter list.
-    async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError>;
+    /// Every key and principal holding none under a name coven made for this
+    /// store, with the minting device that name carries (§4, §13). A failed
+    /// or incomplete listing is an error, never a shorter list.
+    async fn list_keys(&self, store: StoreId) -> Result<StoreListing, StorageError>;
+    /// Remove a listed principal of a retired device only while it holds no
+    /// key, with its policy or bindings; absence succeeds.
+    async fn remove_unkeyed(&self, store: StoreId, principal: &UnkeyedPrincipal) -> Result<(), StorageError>;
 }
 
 /// Where admin access comes from (§4). The CLI and browser sources exist on
@@ -3170,6 +3173,11 @@ pub struct MintScope {
 
 /// A key a store's listing found, with the device whose name it carries.
 pub struct ListedKey { pub access_key_id: String, pub principal: S3Principal, pub device: DeviceId }
+
+/// Keys and principals holding none, under coven's names for a store.
+pub struct StoreListing { pub keys: Vec<ListedKey>, pub unkeyed: Vec<UnkeyedPrincipal> }
+/// An IAM user (by name) or GCS service account (by email) holding no key.
+pub struct UnkeyedPrincipal { pub name: String, pub device: DeviceId }
 
 /// A member's S3 key and who holds it.
 pub struct S3MemberKey { pub credentials: S3Credentials, pub principal: S3Principal }

@@ -146,7 +146,7 @@ async fn lifecycle(
         return Err(StorageFailure::Protocol.with_source("the minted key is not listed"));
     }
     // The store's listing names the key with its minting device (§13).
-    let listed = admin.list_keys(scope.store).await?;
+    let listed = admin.list_keys(scope.store).await?.keys;
     let found = listed.iter().any(|listed| {
         listed.access_key_id == id
             && listed.device == scope.device
@@ -242,8 +242,12 @@ async fn lifecycle(
     admin.revoke(id, &key.principal).await?;
     println!("revoke_again PASS");
     let listed = admin.list_keys(scope.store).await?;
-    println!("store_listing_after_revoke={}", listed.len());
-    if !listed.is_empty() {
+    println!(
+        "store_listing_after_revoke={} unkeyed={}",
+        listed.keys.len(),
+        listed.unkeyed.len()
+    );
+    if listed != crate::StoreListing::default() {
         return Err(StorageFailure::Protocol.with_source("the store's listing keeps a revoked key"));
     }
     // The provider must stop honoring the key, within propagation.

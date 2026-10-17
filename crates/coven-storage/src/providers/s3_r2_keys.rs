@@ -5,7 +5,7 @@
 //! token; absence is read from the token itself.
 use super::minting::{AdminRequest, KeyMinter, Pending};
 use super::*;
-use crate::{access_admin::named_device, ListedKey};
+use crate::{access_admin::named_device, ListedKey, StoreListing};
 use coven_format::S3Principal;
 use coven_foundation::id_source::StoreId;
 use reqwest::Method;
@@ -36,8 +36,13 @@ fn key_present<'a>(
 ) -> Pending<'a, bool> {
     Box::pin(key_exists(context, key, principal))
 }
-fn list_keys<'a>(context: &'a AdminRequest, store: StoreId) -> Pending<'a, Vec<ListedKey>> {
-    Box::pin(list(context, store))
+fn list_keys<'a>(context: &'a AdminRequest, store: StoreId) -> Pending<'a, StoreListing> {
+    Box::pin(async move {
+        Ok(StoreListing {
+            keys: list(context, store).await?,
+            unkeyed: Vec::new(),
+        })
+    })
 }
 
 pub(super) const R2_TOKENS: KeyMinter = KeyMinter {
@@ -47,6 +52,7 @@ pub(super) const R2_TOKENS: KeyMinter = KeyMinter {
     revoke: revoke_key,
     key_exists: key_present,
     list: list_keys,
+    remove_unkeyed: super::minting::reject_unkeyed_principal,
     // Cloudflare states no bound; new tokens usually work within seconds.
     propagation: Duration::from_secs(30),
     separate_iam: false,

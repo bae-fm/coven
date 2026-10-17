@@ -68,7 +68,10 @@ pub use coven_storage::providers::{AdminAccessSource, DeviceSignInPresenter};
 pub use coven_storage::providers::{
     DropboxClients, OAuthClients, OAuthError, OAuthPresenter, OAuthRedirectError, ProviderResponse,
 };
-pub use coven_storage::{AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey};
+pub use coven_storage::{
+    AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey, StoreListing,
+    UnkeyedPrincipal,
+};
 pub use coven_storage::{
     ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, OAuthAccess,
     ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, PathError, S3BucketVersioning,

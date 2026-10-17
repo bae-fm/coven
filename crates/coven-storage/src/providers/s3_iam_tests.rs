@@ -919,7 +919,7 @@ async fn a_store_listing_returns_its_users_keys_with_their_minting_device() {
             },
         );
         assert_eq!(
-            admin.list_keys(ours.store).await.unwrap(),
+            admin.list_keys(ours.store).await.unwrap().keys,
             [crate::ListedKey {
                 access_key_id: mine.credentials.access_key_id.clone(),
                 principal: mine.principal.clone(),
@@ -937,3 +937,64 @@ async fn a_store_listing_returns_its_users_keys_with_their_minting_device() {
 
 #[path = "s3_iam_listing_tests.rs"]
 mod listing;
+
+#[tokio::test]
+async fn a_failed_mints_user_is_removed_only_while_keyless() {
+    for profile in [
+        S3ProfileName::Aws,
+        S3ProfileName::SeaweedFs,
+        S3ProfileName::CephRgw,
+        S3ProfileName::VersityGw,
+    ] {
+        for gain_key in [false, true] {
+            let fake = Fake::new().await;
+            let admin = fake.admin(profile);
+            let scope = scope();
+            fake.state.lock().unwrap().fail_action = Some("CreateAccessKey");
+            assert_eq!(
+                admin.mint(&scope).await.unwrap_err().failure(),
+                StorageFailure::PermissionDenied
+            );
+            fake.state.lock().unwrap().fail_action = Some("ListAccessKeys");
+            assert_eq!(
+                admin.roll_back(&scope).await.unwrap_err().failure(),
+                StorageFailure::PermissionDenied
+            );
+            fake.state.lock().unwrap().fail_action = None;
+            let listed = admin.list_keys(scope.store).await.unwrap();
+            let principal = crate::UnkeyedPrincipal {
+                name: scope.key_name.clone(),
+                device: scope.device,
+            };
+            assert!(listed.keys.is_empty());
+            assert_eq!(listed.unkeyed, std::slice::from_ref(&principal));
+            if gain_key {
+                let key = admin.mint(&scope).await.unwrap();
+                fake.state.lock().unwrap().actions.clear();
+                assert_eq!(
+                    admin
+                        .remove_unkeyed(scope.store, &principal)
+                        .await
+                        .unwrap_err()
+                        .failure(),
+                    StorageFailure::Conflict
+                );
+                let remote = fake.state.lock().unwrap();
+                assert_eq!(
+                    remote.users[&principal.name].keys[0].0,
+                    key.credentials.access_key_id
+                );
+                assert_eq!(remote.actions.len(), 1);
+                assert_eq!(remote.actions[0].1, "ListAccessKeys");
+            } else {
+                admin.remove_unkeyed(scope.store, &principal).await.unwrap();
+                admin.remove_unkeyed(scope.store, &principal).await.unwrap();
+                let remote = fake.state.lock().unwrap();
+                assert!(
+                    remote.users.is_empty() && remote.policies.is_empty(),
+                    "{profile:?}"
+                );
+            }
+        }
+    }
+}

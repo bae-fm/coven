@@ -141,7 +141,7 @@ fn api(
         // One account per page, so a listing must follow every page.
         let index: usize = q.get("pageToken").map_or(0, |token| token.parse().unwrap());
         let Some(email) = state.accounts.get(index) else {
-            return json(serde_json::json!({}));
+            return json(serde_json::json!({"accounts": []}));
         };
         let mut page = serde_json::json!({"accounts": [{
             "email": email,
@@ -172,7 +172,9 @@ fn api(
         let email = decode(email);
         if method == HttpMethod::GET {
             return if state.accounts.contains(&email) {
-                json(serde_json::json!({"email": email}))
+                json(
+                    serde_json::json!({"email": email, "description": state.descriptions.get(&email)}),
+                )
             } else {
                 response(404, "{}")
             };
@@ -529,7 +531,7 @@ async fn a_store_listing_returns_its_accounts_keys_with_their_minting_device() {
     }
     let listed = admin.list_keys(ours.store).await.unwrap();
     assert_eq!(
-        listed,
+        listed.keys,
         [crate::ListedKey {
             access_key_id: mine.credentials.access_key_id.clone(),
             principal: mine.principal.clone(),
@@ -599,7 +601,108 @@ async fn malformed_key_listings_are_errors() {
             .unwrap()
             .listings
             .insert(path.into(), serde_json::json!({field: []}));
-        assert!(admin.list_keys(scope.store).await.unwrap().is_empty());
+        let listed = admin.list_keys(scope.store).await.unwrap();
+        assert!(listed.keys.is_empty());
+        let unkeyed = if field == "items" {
+            vec![crate::UnkeyedPrincipal {
+                name: format!("{}@household.iam.gserviceaccount.com", scope.name),
+                device: scope.device,
+            }]
+        } else {
+            vec![]
+        };
+        assert_eq!(listed.unkeyed, unkeyed);
         state.lock().unwrap().listings.remove(path);
     }
+}
+
+#[tokio::test]
+async fn a_keyless_account_is_removed_only_while_its_device_and_keys_still_match() {
+    let (state, _server, admin) = fake(true).await;
+    let scope = scope();
+    // The account and bindings exist, but HMAC creation never succeeds.
+    state.lock().unwrap().unseen_key_creates = 61;
+    assert_eq!(
+        admin.mint(&scope).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
+    let listed = admin.list_keys(scope.store).await.unwrap();
+    let principal = crate::UnkeyedPrincipal {
+        name: format!("{}@household.iam.gserviceaccount.com", scope.name),
+        device: scope.device,
+    };
+    assert_eq!(
+        listed,
+        crate::StoreListing {
+            keys: vec![],
+            unkeyed: vec![principal.clone()]
+        }
+    );
+    let folder = format!("base/{}/", scope.store);
+    let member = format!("serviceAccount:{}", principal.name);
+    let key = admin.mint(&scope).await.unwrap();
+    for status in ["ACTIVE", "INACTIVE"] {
+        state
+            .lock()
+            .unwrap()
+            .hmac
+            .get_mut(&key.credentials.access_key_id)
+            .unwrap()
+            .1 = status.into();
+        assert_eq!(
+            admin
+                .remove_unkeyed(scope.store, &principal)
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Conflict
+        );
+        let remote = state.lock().unwrap();
+        assert_eq!(remote.accounts, std::slice::from_ref(&principal.name));
+        assert_eq!(remote.hmac[&key.credentials.access_key_id].1, status);
+        assert_eq!(remote.policies[&folder].1, std::slice::from_ref(&member));
+        assert_eq!(remote.bucket_viewers.1, std::slice::from_ref(&member));
+    }
+    // Deleted HMAC metadata may remain, but supplies no credential.
+    state
+        .lock()
+        .unwrap()
+        .hmac
+        .get_mut(&key.credentials.access_key_id)
+        .unwrap()
+        .1 = "DELETED".into();
+    let changed = MintScope::new(
+        scope.store,
+        "member",
+        coven_foundation::id_source::DeviceId(4),
+        uuid::Uuid::from_u128(0x99),
+    );
+    state
+        .lock()
+        .unwrap()
+        .descriptions
+        .insert(principal.name.clone(), changed.label());
+    assert_eq!(
+        admin
+            .remove_unkeyed(scope.store, &principal)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Conflict
+    );
+    assert_eq!(
+        state.lock().unwrap().policies[&folder].1,
+        std::slice::from_ref(&member)
+    );
+    state
+        .lock()
+        .unwrap()
+        .descriptions
+        .insert(principal.name.clone(), scope.label());
+    admin.remove_unkeyed(scope.store, &principal).await.unwrap();
+    admin.remove_unkeyed(scope.store, &principal).await.unwrap();
+    let remote = state.lock().unwrap();
+    assert!(remote.accounts.is_empty());
+    assert!(remote.policies[&folder].1.is_empty() && remote.bucket_viewers.1.is_empty());
+    assert_eq!(remote.folders, [folder]);
 }

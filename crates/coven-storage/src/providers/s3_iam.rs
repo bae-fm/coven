@@ -7,7 +7,7 @@
 use super::minting::{member_policy, AdminRequest, KeyMinter, Pending};
 use super::*;
 use crate::providers::s3_admin_query::{elements, send, QueryService};
-use crate::{access_admin::named_device, ListedKey};
+use crate::{access_admin::named_device, ListedKey, StoreListing, UnkeyedPrincipal};
 use coven_format::{IamPolicy, S3Principal};
 use coven_foundation::id_source::StoreId;
 use std::{collections::BTreeMap, time::Duration};
@@ -87,8 +87,15 @@ macro_rules! minter {
             fn list_keys<'a>(
                 context: &'a AdminRequest,
                 store: StoreId,
-            ) -> Pending<'a, Vec<ListedKey>> {
+            ) -> Pending<'a, StoreListing> {
                 Box::pin(list(context, store, $flavor))
+            }
+            fn remove_unkeyed<'a>(
+                context: &'a AdminRequest,
+                _store: StoreId,
+                principal: &'a UnkeyedPrincipal,
+            ) -> Pending<'a, ()> {
+                Box::pin(remove_empty(context, principal, $flavor))
             }
             KeyMinter {
                 name: $label,
@@ -97,6 +104,7 @@ macro_rules! minter {
                 revoke: revoke_key,
                 key_exists: key_present,
                 list: list_keys,
+                remove_unkeyed,
                 propagation: $propagation,
                 separate_iam: matches!($flavor.api, IamApi::Separate),
             }
@@ -298,6 +306,15 @@ impl<'a> Iam<'a> {
     /// Remove the user's keys, its policy and the user, each already absent or not.
     async fn remove(&self, user: &str, policy: Option<&IamPolicy>) -> Result<(), StorageError> {
         self.delete_keys(user).await?;
+        self.remove_principal(user, policy).await
+    }
+
+    /// Remove only the policy and user; this path never deletes a key.
+    async fn remove_principal(
+        &self,
+        user: &str,
+        policy: Option<&IamPolicy>,
+    ) -> Result<(), StorageError> {
         match policy {
             Some(IamPolicy::Inline { name }) => {
                 self.tolerating(
@@ -415,16 +432,37 @@ async fn roll_back(
     flavor: Flavor,
 ) -> Result<(), StorageError> {
     let iam = Iam::new(context, flavor)?;
-    let policy = match flavor.inline {
+    let policy = named_policy(&iam, &scope.key_name, flavor).await?;
+    iam.remove(&scope.key_name, policy.as_ref()).await
+}
+
+async fn named_policy(
+    iam: &Iam<'_>,
+    user: &str,
+    flavor: Flavor,
+) -> Result<Option<IamPolicy>, StorageError> {
+    Ok(match flavor.inline {
         true => Some(IamPolicy::Inline {
             name: INLINE_POLICY.into(),
         }),
         false => iam
-            .policy_arn(&scope.key_name)
+            .policy_arn(user)
             .await?
             .map(|arn| IamPolicy::Managed { arn }),
-    };
-    iam.remove(&scope.key_name, policy.as_ref()).await
+    })
+}
+
+async fn remove_empty(
+    context: &AdminRequest,
+    principal: &UnkeyedPrincipal,
+    flavor: Flavor,
+) -> Result<(), StorageError> {
+    let iam = Iam::new(context, flavor)?;
+    if !iam.keys(&principal.name).await?.is_empty() {
+        return Err(StorageFailure::Conflict.with_source("the listed IAM user now holds a key"));
+    }
+    let policy = named_policy(&iam, &principal.name, flavor).await?;
+    iam.remove_principal(&principal.name, policy.as_ref()).await
 }
 
 fn user(principal: &S3Principal) -> Result<(&str, &IamPolicy), StorageError> {
@@ -466,23 +504,26 @@ async fn key_exists(
     Ok(iam.keys(name).await?.iter().any(|key| key == access_key_id))
 }
 
-/// Every key held by a user whose name coven made for this store, with the
-/// minting device the name carries (§13).
+/// Every key held by a user whose name coven made for this store, and every
+/// such user holding none, with the minting device the name carries (§13).
 async fn list(
     context: &AdminRequest,
     store: StoreId,
     flavor: Flavor,
-) -> Result<Vec<ListedKey>, StorageError> {
+) -> Result<StoreListing, StorageError> {
     let iam = Iam::new(context, flavor)?;
     let mut managed = None;
-    let mut listed = Vec::new();
+    let mut listed = StoreListing::default();
     for user in iam.users(flavor.inline).await? {
         let Some(device) = named_device(&user, store) else {
             continue;
         };
-        // A user removed since the listing holds no key.
-        let keys = iam.keys(&user).await?;
+        // Only a complete key listing establishes that a listed user is keyless.
+        let keys = iam
+            .pages(&listing::KEYS, &[("UserName", &user)], None)
+            .await?;
         if keys.is_empty() {
+            listed.unkeyed.push(UnkeyedPrincipal { name: user, device });
             continue;
         }
         let policy = match flavor.inline {
@@ -504,7 +545,7 @@ async fn list(
             }
         };
         for access_key_id in keys {
-            listed.push(ListedKey {
+            listed.keys.push(ListedKey {
                 access_key_id,
                 principal: S3Principal::IamUser {
                     user: user.clone(),
