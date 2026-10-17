@@ -38,18 +38,43 @@ impl OAuthAccess {
         }
     }
 
-    pub(crate) fn granted(self, scope: Option<&str>) -> Result<Self, StorageError> {
+    /// Check a token reply against this access. `refreshable` says whether
+    /// the resulting tokens hold a refresh token, issued by this reply or kept
+    /// from the one it refreshed.
+    pub(crate) fn granted(
+        self,
+        scope: Option<&str>,
+        refreshable: bool,
+    ) -> Result<Self, StorageError> {
+        let refused = || Err(StorageFailure::AccessNotGranted { required: self }.into());
+        // Microsoft's reply lists only the Graph permissions the access token
+        // carries, never `offline_access`; that grant is the refresh token,
+        // "only provided if offline_access scope was requested"
+        // (learn.microsoft.com/entra/identity-platform/v2-oauth2-auth-code-flow).
+        if self == Self::OneDrive && !refreshable {
+            return refused();
+        }
         // OAuth 2.0 defines omission as the requested scope, not an empty grant.
         let Some(scope) = scope else { return Ok(self) };
-        let scopes: Vec<_> = scope.split_ascii_whitespace().collect();
+        let scopes: Vec<_> = scope
+            .split_ascii_whitespace()
+            .map(|granted| match self {
+                // An unqualified permission names Microsoft Graph (scopes-oidc).
+                Self::OneDrive => granted
+                    .strip_prefix("https://graph.microsoft.com/")
+                    .unwrap_or(granted),
+                Self::Dropbox(_) => granted,
+            })
+            .collect();
         if self
             .scope()
             .split_ascii_whitespace()
+            .filter(|required| !(self == Self::OneDrive && *required == "offline_access"))
             .all(|required| scopes.contains(&required))
         {
             Ok(self)
         } else {
-            Err(StorageFailure::AccessNotGranted { required: self }.into())
+            refused()
         }
     }
 }

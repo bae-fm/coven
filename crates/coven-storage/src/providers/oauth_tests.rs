@@ -13,9 +13,12 @@ struct Provider {
 }
 async fn token(State(state): State<Arc<Mutex<Provider>>>, body: Bytes) -> axum::response::Response {
     let mut state = state.lock().unwrap();
-    state
-        .requests
-        .push(url::form_urlencoded::parse(&body).into_owned().collect());
+    let request: BTreeMap<String, String> =
+        url::form_urlencoded::parse(&body).into_owned().collect();
+    // Both providers issue a refresh token for the offline access every
+    // sign-in requests; this fake never rotates it on refresh.
+    let issues_refresh = request["grant_type"] == "authorization_code";
+    state.requests.push(request);
     if let Some((status, body)) = &state.error_response {
         let mut reply = response(*status, body.clone());
         reply
@@ -30,6 +33,9 @@ async fn token(State(state): State<Arc<Mutex<Provider>>>, body: Bytes) -> axum::
         serde_json::json!({"access_token":"new-token","token_type":"Bearer","expires_in":3600});
     if let Some(scope) = &state.scope {
         reply["scope"] = serde_json::json!(scope);
+    }
+    if issues_refresh {
+        reply["refresh_token"] = serde_json::json!("issued");
     }
     json(reply)
 }
@@ -663,6 +669,14 @@ async fn token_parsing_preserves_provider_and_admin_refresh_policies() {
                 Some(expected) => assert!(
                     matches!(result, Err(OAuthError::Storage(error)) if error.failure() == expected)
                 ),
+                // Microsoft grants offline access only as a refresh token.
+                None if provider == CloudProvider::OneDrive && !body.contains("refresh_token") => {
+                    assert!(matches!(
+                        result,
+                        Err(OAuthError::Storage(error))
+                            if error.failure() == StorageFailure::AccessNotGranted { required: OAuthAccess::OneDrive }
+                    ));
+                }
                 None => {
                     let tokens = result.unwrap();
                     assert_eq!(tokens.access_token.as_str(), "new-token");
@@ -699,4 +713,86 @@ async fn token_parsing_preserves_provider_and_admin_refresh_policies() {
         .requests
         .iter()
         .all(|request| !request.contains_key("client_secret")));
+}
+
+/// Microsoft's token replies list the Graph permissions without
+/// `offline_access`, whose grant is the refresh token itself.
+#[tokio::test]
+async fn onedrive_accepts_microsofts_reply_and_refuses_insufficient_grants() {
+    let state = Arc::new(Mutex::new(Provider::default()));
+    let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+    let flow = OAuthFlow::new(
+        clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+            .with_token_endpoint(server.url.clone()),
+        presenter("https://callback.example?code=code&state=STATE"),
+    );
+    let reply = |scope: &str, refresh: bool| {
+        let mut reply = serde_json::json!({
+            "token_type": "Bearer",
+            "scope": scope,
+            "expires_in": 3600,
+            "ext_expires_in": 3600,
+            "access_token": "graph-token",
+        });
+        if refresh {
+            reply["refresh_token"] = serde_json::json!("graph-refresh");
+        }
+        reply.to_string()
+    };
+    let held = |refresh: &str| OAuthTokens {
+        client_id: "onedrive".into(),
+        access: OAuthAccess::OneDrive,
+        access_token: SecretText::new("old".into()),
+        refresh_token: Some(SecretText::new(refresh.into())),
+    };
+    for scope in [
+        "Files.ReadWrite.All User.Read",
+        "User.Read Files.ReadWrite.All openid profile email",
+        "https://graph.microsoft.com/Files.ReadWrite.All https://graph.microsoft.com/User.Read",
+    ] {
+        state.lock().unwrap().error_response = Some((200, reply(scope, true)));
+        let tokens = flow.authenticate(OAuthAccess::OneDrive).await.unwrap();
+        assert_eq!(tokens.access, OAuthAccess::OneDrive, "{scope}");
+        assert_eq!(tokens.refresh_token.unwrap().as_str(), "graph-refresh");
+        let refreshed = flow.clients.refresh(&held("held")).await.unwrap();
+        assert_eq!(refreshed.refresh_token.unwrap().as_str(), "graph-refresh");
+        // A refresh reply without a new refresh token keeps the held one.
+        state.lock().unwrap().error_response = Some((200, reply(scope, false)));
+        let refreshed = flow.clients.refresh(&held("held")).await.unwrap();
+        assert_eq!(refreshed.refresh_token.unwrap().as_str(), "held");
+        assert!(matches!(
+            flow.authenticate(OAuthAccess::OneDrive).await,
+            Err(OAuthError::Storage(error))
+                if error.failure() == StorageFailure::AccessNotGranted { required: OAuthAccess::OneDrive }
+        ));
+    }
+    for scope in [
+        "User.Read",
+        "Files.Read.All User.Read",
+        "Files.ReadWrite.All",
+        "",
+    ] {
+        state.lock().unwrap().error_response = Some((200, reply(scope, true)));
+        assert!(
+            matches!(
+                flow.authenticate(OAuthAccess::OneDrive).await,
+                Err(OAuthError::Storage(error))
+                    if error.failure() == StorageFailure::AccessNotGranted { required: OAuthAccess::OneDrive }
+            ),
+            "{scope}"
+        );
+        assert!(
+            matches!(
+                flow.clients.refresh(&held("held")).await,
+                Err(error)
+                    if error.failure() == StorageFailure::AccessNotGranted { required: OAuthAccess::OneDrive }
+            ),
+            "{scope}"
+        );
+    }
+    let requests = &state.lock().unwrap().requests;
+    assert!(requests
+        .iter()
+        .filter(|request| request["grant_type"] == "authorization_code")
+        .all(|request| request["client_id"] == "onedrive"));
 }

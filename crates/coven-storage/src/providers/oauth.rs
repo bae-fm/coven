@@ -328,6 +328,7 @@ impl OAuthClients {
                 ("client_id", client_id),
                 ("code_verifier", request.verifier.as_str()),
             ],
+            None,
         )
         .await
     }
@@ -422,25 +423,23 @@ impl OAuthClients {
                 .with_source("refresh client differs from the held authorization")
                 .into());
         }
-        let mut replacement = self
-            .tokens(
-                access,
-                &[
-                    ("grant_type", "refresh_token"),
-                    ("refresh_token", refresh_token.as_str()),
-                    ("client_id", id),
-                ],
-            )
-            .await?;
-        if replacement.refresh_token.is_none() {
-            replacement.refresh_token = Some(refresh_token.clone());
-        }
-        Ok(replacement)
+        self.tokens(
+            access,
+            &[
+                ("grant_type", "refresh_token"),
+                ("refresh_token", refresh_token.as_str()),
+                ("client_id", id),
+            ],
+            Some(refresh_token),
+        )
+        .await
     }
+    /// Request tokens; a reply omitting its refresh token keeps `held`.
     async fn tokens(
         &self,
         access: OAuthAccess,
         params: &[(&str, &str)],
+        held: Option<&SecretText>,
     ) -> Result<OAuthTokens, OAuthError> {
         let provider = access.provider();
         let (client_id, _, token, _) = self.config(access)?;
@@ -456,11 +455,12 @@ impl OAuthClients {
                 (&tokens.access_token, tokens.token_type.as_str())
             })
             .await?;
+        let refresh_token = tokens.refresh_token.or_else(|| held.cloned());
         Ok(OAuthTokens {
             client_id: client_id.to_owned(),
-            access: access.granted(tokens.scope.as_deref())?,
+            access: access.granted(tokens.scope.as_deref(), refresh_token.is_some())?,
             access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
+            refresh_token,
         })
     }
     async fn token_response<T: serde::de::DeserializeOwned>(

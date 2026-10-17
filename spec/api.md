@@ -3631,7 +3631,12 @@ pub enum OAuthAccess {
   registered client, including the chosen Dropbox key, and preserves granted
   access only when the provider omits a scope field. A returned scope field is
   authoritative: a missing required scope is `AccessNotGranted`, never a
-  successful upgrade.
+  successful upgrade. Microsoft's scope field lists only the Graph
+  permissions (`Files.ReadWrite.All`, `User.Read`, bare or under
+  `https://graph.microsoft.com/`); it grants the requested `offline_access`
+  by issuing a refresh token, so OneDrive tokens holding none are
+  `AccessNotGranted`. A refresh reply without a new refresh token keeps the
+  one it used.
 
 Example, adding Ana's laptop. On her phone:
 
