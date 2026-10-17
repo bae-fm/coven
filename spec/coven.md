@@ -2738,9 +2738,11 @@ of the Gifts parts his devices consumed without opening while he was outside. Hi
 overall applied slot is no evidence that he read them.
 
 So Dan's laptop loads Gifts' announced snapshot and the slots after it, up to the
-common target §16.5 describes, then commits Gifts' data and position together.
-Until that commits, writes into Gifts fail with `AudienceReloading`. Other
-audiences stay usable meanwhile. A missing key or snapshot is reported.
+common target §16.5 describes. If Gifts has no announced snapshot and the store
+has no floor, it starts empty and replays all Gifts' history: nothing has been
+deleted. It then commits Gifts' data and position together. Until that commits,
+writes into Gifts fail with `AudienceReloading`. Other audiences stay usable
+meanwhile. A missing key or required snapshot is reported.
 
 The same holds when Ben is added back after leaving (§15.8): his laptop consumed
 Gifts' parts unopened while he was out, and loads that history before writing to
@@ -3044,10 +3046,15 @@ That is why these reloads refuse writes instead of queueing them
 
 **Newly reading a circle.** When the set of audiences a device reads changes, for
 example when Ben is added to Gifts, each audience, the new circle included,
-loads its own snapshot and slots up to the common target. Then each is rebuilt
-from its eligible queued writes. With good storage and every audience's key, all
-of them can be loaded to any target between the selected floor snapshots'
-coverage and the end of the sequence.
+loads its own snapshot and slots up to the common target. If Gifts has no
+snapshot and no floor exists, Ben starts it empty and reads every slot from the
+start through that target. No history has been deleted, so those slots supply
+all its state. Once a floor exists, a missing snapshot cannot be replaced by an
+empty start: the floor supplies the required snapshot instead.
+
+Then each audience is rebuilt from its eligible queued writes. With good storage
+and every audience's key, all of them can be loaded to any target between the
+selected floor snapshots' coverage and the end of the sequence.
 
 #### 16.6 Deleting history
 
