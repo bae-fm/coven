@@ -50,21 +50,9 @@ struct Needs {
 }
 
 fn object_rows(path: &ObjectPath) -> Vec<PrerequisiteRows> {
-    if let Some((device, number)) = path.store_log_position() {
-        vec![PrerequisiteRows::Entry(coven_database::EntryId {
-            device,
-            number: number.get(),
-        })]
-    } else if let Some((writer, number)) = path.key_copy_position() {
-        vec![PrerequisiteRows::KeyCopy {
-            writer,
-            number: number.get(),
-        }]
-    } else if let Some(write) = path.write_id() {
-        vec![PrerequisiteRows::Write(write)]
+    if path.slot_number().is_some() {
+        vec![PrerequisiteRows::Slot]
     } else {
-        // A snapshot, file, request or other object arrives only in storage:
-        // its wait ends by time.
         Vec::new()
     }
 }
@@ -79,17 +67,16 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
     let mut needs = match reason {
         PendingReason::Missing { path } => rows(object_rows(path)),
         PendingReason::Waits(prerequisite) => match prerequisite {
-            Prerequisite::StoreLogCatchUp | Prerequisite::WriteLogCatchUp => Needs::default(),
+            Prerequisite::SequenceCatchUp => rows(vec![PrerequisiteRows::Slot]),
             Prerequisite::Object(path) => rows(object_rows(path)),
             Prerequisite::DeviceRegistration(device) => {
                 rows(vec![PrerequisiteRows::Device(*device)])
             }
-            Prerequisite::SchemaPublication { .. } => rows(vec![PrerequisiteRows::Boundaries]),
+            Prerequisite::SchemaRaise { .. } => rows(vec![PrerequisiteRows::Boundaries]),
+            Prerequisite::Snapshot(_) => Needs::default(),
             Prerequisite::Reload(audience) => {
                 rows(vec![PrerequisiteRows::Reload(audience.clone())])
             }
-            Prerequisite::Positions(device) => rows(vec![PrerequisiteRows::PeerPositions(*device)]),
-            Prerequisite::EntryFinality(_) => rows(vec![PrerequisiteRows::Finality]),
         },
         PendingReason::KeyUnavailable { audience, key } => Needs {
             key: Some((audience.clone(), *key)),
@@ -134,7 +121,7 @@ impl RetryWaits {
             if pending.retry() == Retry::Automatic {
                 let reload = match pending.reason {
                     PendingReason::Waits(Prerequisite::Reload(_)) => database
-                        .first_operation(crate::operation_data::Data::RELOAD_KIND)
+                        .first_operation("sequence")
                         .await?
                         .map(|record| record.id),
                     _ => None,

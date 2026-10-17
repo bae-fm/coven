@@ -2,14 +2,38 @@
 
 use super::pending_encoding as encoding;
 use crate::{OperationId, OperationKind, Refusal};
-use coven_database::{DropReason, PendingValue};
-use coven_format::{path::ObjectPath, store_log::SnapshotId, value::EntryId};
+use coven_database::PendingValue;
+use coven_format::{admin::SnapshotId, path::ObjectPath};
 use coven_foundation::id_source::{DeviceId, FileId, InviteId, KeyId, MemberId};
-use coven_merge::{Audience, WriteId};
+use coven_merge::{Audience, Slot, WriteId};
 use coven_storage::{CloudProvider, RetainedAccess, StorageFailure};
 use serde::{Deserialize, Serialize};
 
-pub use coven_format::pending::{FileSourceFailure, RequiredUpdate};
+/// The software version required to decode or apply an input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RequiredUpdate {
+    /// The application's schema.
+    AppSchema {
+        /// Required application schema version.
+        version: u32,
+    },
+    /// Coven's stored-object format.
+    CovenFormat {
+        /// Required object format version.
+        version: u16,
+    },
+}
+
+/// The attaching device cannot supply the original file bytes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum FileSourceFailure {
+    /// The original file is absent.
+    Missing,
+    /// The original changed after attachment.
+    Changed,
+    /// The original fails its retained content checks.
+    Integrity,
+}
 
 /// One first unmet condition, identified by its subject and reporting device.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -27,12 +51,12 @@ pub struct PendingRecord {
 pub enum PendingSubject {
     /// A numbered write.
     Write(#[serde(with = "encoding::write")] WriteId),
-    /// A numbered membership entry.
-    Entry(#[serde(with = "encoding::entry")] EntryId),
+    /// A position in the store sequence.
+    Slot(#[serde(with = "encoding::slot")] Slot),
     /// A sealed key addressed to a member.
     KeyCopy {
         /// The key's audience.
-        #[serde(with = "crate::snapshot_data::audience")]
+        #[serde(with = "crate::pending_encoding::audience")]
         audience: Audience,
         /// The key identity.
         key: KeyId,
@@ -42,16 +66,8 @@ pub enum PendingSubject {
         #[serde(with = "encoding::sealing")]
         sealing: coven_crypto::SealingKey,
     },
-    /// A key-copy object whose clear prefix does not decode. It names no
-    /// audience, key or recipient, so its path identifies it (§19.1).
-    KeyCopyPath {
-        /// The copy's storage path.
-        path: ObjectPath,
-    },
     /// A numbered snapshot.
-    Snapshot(#[serde(with = "crate::snapshot_data::snapshot_id")] SnapshotId),
-    /// A device's replaceable positions.
-    Positions(DeviceId),
+    Snapshot(#[serde(with = "crate::pending_encoding::snapshot_id")] SnapshotId),
     /// A file and its uploader.
     File {
         /// The uploading device.
@@ -72,15 +88,7 @@ pub enum PendingSubject {
         path: ObjectPath,
     },
     /// An audience that requires dependent work.
-    Audience(#[serde(with = "crate::snapshot_data::audience")] Audience),
-    /// Comparable state that disagrees with a peer.
-    Agreement {
-        /// The compared audience.
-        #[serde(with = "crate::snapshot_data::audience")]
-        audience: Audience,
-        /// The compared device.
-        peer: DeviceId,
-    },
+    Audience(#[serde(with = "crate::pending_encoding::audience")] Audience),
     /// A joining request.
     JoinRequest(InviteId),
     /// The local storage connection.
@@ -90,30 +98,24 @@ pub enum PendingSubject {
 /// A fact required before processing can continue.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Prerequisite {
-    /// The next completed store-log catch-up (§10, §15).
-    StoreLogCatchUp,
-    /// The next completed write-log catch-up, step 6 of a pass (§15).
-    WriteLogCatchUp,
+    /// A completed read and apply through the current sequence end.
+    SequenceCatchUp,
     /// A storage object must arrive.
     Object(ObjectPath),
     /// The author's device must be registered.
     DeviceRegistration(DeviceId),
     /// A migrated schema must be published.
-    SchemaPublication {
+    SchemaRaise {
         /// The schema's audience.
-        #[serde(with = "crate::snapshot_data::audience")]
+        #[serde(with = "crate::pending_encoding::audience")]
         audience: Audience,
         /// The migrated version.
         version: u32,
     },
     /// This audience must reload.
-    Reload(#[serde(with = "crate::snapshot_data::audience")] Audience),
-    /// A reader must post positions.
-    Positions(DeviceId),
-    /// This entry must become final (§9): physical cleanup retains its
-    /// reversal inputs, or a snapshot would cover a write it can still retire
-    /// and waits to be prepared (§15).
-    EntryFinality(#[serde(with = "encoding::entry")] EntryId),
+    Reload(#[serde(with = "crate::pending_encoding::audience")] Audience),
+    /// A snapshot needed to load history below the floor.
+    Snapshot(#[serde(with = "encoding::snapshot_id")] SnapshotId),
 }
 
 /// A local invariant or resource failure; immediate calls retain the native cause.
@@ -148,7 +150,7 @@ pub enum FileMissingReason {
     /// Another installation replaced the uploader.
     DeviceReplaced,
     /// Its local source is unavailable.
-    Source(#[serde(with = "encoding::SourceFailure")] FileSourceFailure),
+    Source(FileSourceFailure),
 }
 
 /// A typed current condition, never an error's display string.
@@ -164,13 +166,13 @@ pub enum PendingReason {
     /// No usable copy of a required key has arrived.
     KeyUnavailable {
         /// The key's audience.
-        #[serde(with = "crate::snapshot_data::audience")]
+        #[serde(with = "crate::pending_encoding::audience")]
         audience: Audience,
         /// The missing key.
         key: KeyId,
     },
     /// Processing requires a supported schema or format.
-    UpdateRequired(#[serde(with = "encoding::Update")] RequiredUpdate),
+    UpdateRequired(RequiredUpdate),
     /// No storage is connected.
     NoStorage,
     /// A classified provider failure.
@@ -181,11 +183,15 @@ pub enum PendingReason {
         failure: StorageFailure,
     },
     /// Complete immutable bytes failed a check.
-    Refused(#[serde(with = "encoding::refusal")] Refusal),
-    /// Replaceable positions failed a check.
-    InvalidPositions(#[serde(with = "encoding::refusal")] Refusal),
-    /// Replay rejected this entry or write.
-    Dropped(#[serde(with = "encoding::Drop")] DropReason),
+    Refused(Refusal),
+    /// Writes consumed after a permanent lower-slot cut-off.
+    WritesRefused {
+        /// The removal or replacement slot.
+        #[serde(with = "encoding::slot")]
+        cutoff: Slot,
+        /// The event that excluded the original author.
+        cause: coven_database::WriteCutoff,
+    },
     /// A provider has accepted work that is still waiting.
     ProviderPending {
         /// The intended change.
@@ -214,8 +220,6 @@ pub enum PendingReason {
     DeleteAccessKey(#[serde(with = "encoding::AccessKey")] crate::AccessKeyToDelete),
     /// The uploading device cannot supply this file.
     FileUnavailable(FileMissingReason),
-    /// Comparable fingerprints differ.
-    Disagrees,
     /// A local failure prevented progress.
     Failed(LocalFailure),
     /// Work awaits the app’s next action, such as approval or resuming a transfer.
@@ -242,26 +246,13 @@ pub enum Retry {
     AfterUpdate,
     /// A person must act.
     AppAction,
-    /// Recompute on replay, without retrying the subject.
+    /// A permanent cut-off or removal never retries.
     Never,
 }
 impl PendingRecord {
-    /// Derive retry policy from the reason and its subject. A dropped entry or
-    /// write is recomputed by replay. An operation whose attempt replay
-    /// dropped runs again, validating against the current replay: coven's
-    /// own under backoff, the app's on an explicit retry (§18). Coven's own
-    /// operation retries as its failure clears: by itself under backoff,
-    /// after a person acts once that is resolved, or never (storelog-data
-    /// `operationRetry`). Files use the same failure classes; an uploader's
-    /// unavailable source retries under backoff (§16.5).
+    /// Retry according to the cause and the owner of the unfinished work.
     pub fn retry(&self) -> Retry {
         match (&self.subject, &self.reason) {
-            (PendingSubject::Operation { kind, .. }, PendingReason::Dropped(_))
-                if kind.coven_owned() =>
-            {
-                Retry::Automatic
-            }
-            (PendingSubject::Operation { .. }, PendingReason::Dropped(_)) => Retry::AppAction,
             (
                 PendingSubject::File { device, .. },
                 PendingReason::FileUnavailable(FileMissingReason::Source(_)),
@@ -349,11 +340,12 @@ impl PendingReason {
             | Self::KeyUnavailable { .. }
             | Self::ProviderPending { .. }
             | Self::PendingOwner { .. }
-            | Self::AccountInUse { .. }
-            | Self::InvalidPositions(_) => Retry::Automatic,
+            | Self::AccountInUse { .. } => Retry::Automatic,
             Self::Storage { failure, .. } if automatic_storage(*failure) => Retry::Automatic,
             Self::Refused(_) | Self::UpdateRequired(_) => Retry::AfterUpdate,
-            Self::Dropped(_) | Self::Removed => Retry::Never,
+            Self::WritesRefused { .. } | Self::Removed | Self::MemberKeysReplaced { .. } => {
+                Retry::Never
+            }
             _ => Retry::AppAction,
         }
     }
@@ -404,17 +396,15 @@ impl PendingValue for PendingRecord {
             reported_by,
         }
     }
-    fn dropped_entry(entry: EntryId, reason: DropReason) -> Self {
+    fn writes_refused(
+        slot: Slot,
+        cutoff: Slot,
+        cause: coven_database::WriteCutoff,
+        reporter: DeviceId,
+    ) -> Self {
         Self {
-            subject: PendingSubject::Entry(entry),
-            reason: PendingReason::Dropped(reason),
-            reported_by: entry.device,
-        }
-    }
-    fn dropped_write(write: coven_merge::WriteId, reason: DropReason, reporter: DeviceId) -> Self {
-        Self {
-            subject: PendingSubject::Write(write),
-            reason: PendingReason::Dropped(reason),
+            subject: PendingSubject::Slot(slot),
+            reason: PendingReason::WritesRefused { cutoff, cause },
             reported_by: reporter,
         }
     }
@@ -431,17 +421,16 @@ impl PendingValue for PendingRecord {
             _ => None,
         }
     }
-    fn log_object(&self) -> Option<coven_database::LogObject> {
+    fn slot(&self) -> Option<Slot> {
         match self.subject {
-            PendingSubject::Write(id) => Some(coven_database::LogObject::Write(id)),
-            PendingSubject::Entry(id) => Some(coven_database::LogObject::Entry(id)),
+            PendingSubject::Slot(slot) => Some(slot),
             _ => None,
         }
     }
     fn ends_when_covered(&self) -> bool {
         !matches!(
             self.reason,
-            PendingReason::Refused(_) | PendingReason::Dropped(_)
+            PendingReason::Refused(_) | PendingReason::WritesRefused { .. }
         )
     }
     fn can_retry(&self, recorded_version: &str, schema_version: u32) -> bool {
@@ -462,16 +451,13 @@ impl PendingSubject {
     fn tag(&self) -> u8 {
         match self {
             Self::Write(_) => 0,
-            Self::Entry(_) => 1,
+            Self::Slot(_) => 1,
             Self::KeyCopy { .. } => 2,
-            Self::KeyCopyPath { .. } => 3,
             Self::Snapshot(_) => 4,
-            Self::Positions(_) => 5,
             Self::File { .. } => 6,
             Self::Operation { .. } => 7,
             Self::Retention { .. } => 8,
             Self::Audience(_) => 9,
-            Self::Agreement { .. } => 10,
             Self::JoinRequest(_) => 11,
             Self::Connection => 12,
         }
@@ -481,7 +467,7 @@ impl Ord for PendingSubject {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
         match (self, other) {
             (Self::Write(a), Self::Write(b)) => a.cmp(b),
-            (Self::Entry(a), Self::Entry(b)) => a.cmp(b),
+            (Self::Slot(a), Self::Slot(b)) => a.cmp(b),
             (
                 Self::KeyCopy {
                     audience: a,
@@ -496,11 +482,9 @@ impl Ord for PendingSubject {
                     sealing: bsl,
                 },
             ) => (a, ak, am, asl).cmp(&(b, bk, bm, bsl)),
-            (Self::KeyCopyPath { path: a }, Self::KeyCopyPath { path: b }) => a.cmp(b),
             (Self::Snapshot(a), Self::Snapshot(b)) => {
                 (&a.audience, a.device, a.number).cmp(&(&b.audience, b.device, b.number))
             }
-            (Self::Positions(a), Self::Positions(b)) => a.cmp(b),
             (
                 Self::File {
                     device: a,
@@ -516,16 +500,6 @@ impl Ord for PendingSubject {
             }
             (Self::Retention { path: a }, Self::Retention { path: b }) => a.cmp(b),
             (Self::Audience(a), Self::Audience(b)) => a.cmp(b),
-            (
-                Self::Agreement {
-                    audience: a,
-                    peer: ap,
-                },
-                Self::Agreement {
-                    audience: b,
-                    peer: bp,
-                },
-            ) => (a, ap).cmp(&(b, bp)),
             (Self::JoinRequest(a), Self::JoinRequest(b)) => a.cmp(b),
             _ => self.tag().cmp(&other.tag()),
         }

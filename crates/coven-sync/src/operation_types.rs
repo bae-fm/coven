@@ -1,7 +1,7 @@
 //! Application values for operations, members, circles and invitations (Appendix E).
 
 use coven_crypto::SecretText;
-use coven_format::store_log::MemberRole;
+use coven_format::admin::MemberRole;
 use coven_foundation::id_source::{InviteId, MemberId};
 use std::time::SystemTime;
 
@@ -16,6 +16,26 @@ pub type OperationError = crate::SyncError;
     Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
 )]
 pub enum OperationKind {
+    /// Create the store's first slot.
+    CreateStore,
+    /// Register this installation.
+    AddDevice,
+    /// Set a member's role.
+    SetRole,
+    /// Replace provider access.
+    SetAccess,
+    /// Remove a member.
+    RemoveMember,
+    /// Remove an installation.
+    RemoveDevice,
+    /// Rename a circle.
+    RenameCircle,
+    /// Remove a circle member.
+    RemoveCircleMember,
+    /// Advance the floor and delete the covered prefix.
+    RetainSequence,
+    /// Delete unreferenced files after establishing retained-object protection.
+    RetainFiles,
     /// Write and verify a maintenance snapshot.
     WriteSnapshot,
     /// Publish the app's migrated schema and its audience snapshots.
@@ -49,12 +69,14 @@ pub enum OperationKind {
 }
 
 impl OperationKind {
-    /// Coven's own work, which no app call retries or discards: a failed or
-    /// dropped attempt retries under the shared backoff (§18, E5).
+    /// Coven's own work, which no app call retries or discards: a failed
+    /// attempt retries under the shared backoff (§18, E5).
     pub(crate) fn coven_owned(self) -> bool {
         matches!(
             self,
             Self::WriteSnapshot
+                | Self::RetainSequence
+                | Self::RetainFiles
                 | Self::RequiredReload
                 | Self::RotateKey
                 | Self::RevokeAccess

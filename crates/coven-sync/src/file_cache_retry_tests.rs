@@ -293,11 +293,6 @@ async fn io_differential_download_retries() {
         }
     }
     let output = crate::tests::run_lean("COVEN_DOWNLOAD_RETRY_LEAN", &serde_json::json!(inputs));
-    assert!(
-        output.status.success(),
-        "{}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    let expected: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).unwrap();
+    let expected: Vec<serde_json::Value> = serde_json::from_value(output).unwrap();
     assert_eq!(actual, expected, "cases: {inputs:?}");
 }

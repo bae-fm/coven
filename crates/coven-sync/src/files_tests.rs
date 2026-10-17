@@ -12,14 +12,12 @@ use coven_storage::test_utils::MemoryStorage;
 use std::time::{Duration, SystemTime};
 
 const CHUNK: usize = 64 * 1024;
-#[path = "snapshot_file_retention_tests.rs"]
-mod retention;
 struct Fixture {
     root: tempfile::TempDir,
     directory: StoreDir,
     ids: IdSourceRef,
     clock: ClockRef,
-    send: Arc<crate::SendGate>,
+    send: Arc<crate::SyncState>,
     database: Database,
     files: Files,
     storage: Arc<MemoryStorage>,
@@ -74,7 +72,7 @@ impl Fixture {
                 .build()
                 .unwrap(),
         );
-        let send = completed_send_gate(clock.clone());
+        let send = ready_state();
         let waits = Arc::new(
             crate::RetryWaits::open(database.clone(), clock.clone())
                 .await
@@ -114,7 +112,7 @@ impl Fixture {
             .open()
             .await
             .unwrap();
-        self.send = completed_send_gate(self.clock.clone());
+        self.send = ready_state();
         let waits = Arc::new(
             crate::RetryWaits::open(self.database.clone(), self.clock.clone())
                 .await
@@ -333,12 +331,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
     let file = f.uploaded("first", bytes.clone()).await;
     let second = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     for write in f.database.test_queued_writes().await.unwrap() {
-        second
-            .database
-            .apply_downloaded::<crate::PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
+        crate::tests::apply_write(&second.database, write)
             .await
             .unwrap();
     }
@@ -562,13 +555,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
                 }
             }
         }
-        b.database
-            .apply_downloaded::<crate::PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     let files = Files::new(
         FileDatabase::new(b.database.clone()),
@@ -762,15 +749,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         assert_eq!(a.upload_reason(&local).await, None);
         let attaching = a.database.test_queued_writes().await.unwrap();
         for write in attaching.clone() {
-            b.database
-                .apply_downloaded::<crate::PendingRecord>(
-                    write.into(),
-                    coven_database::test_utils::published(
-                        coven_format::value::StorageTime::UNIX_EPOCH,
-                    ),
-                )
-                .await
-                .unwrap();
+            crate::tests::apply_write(&b.database, write).await.unwrap();
         }
         let remote = b.database.file_ref("files", "waiting").await.unwrap();
         assert_eq!((remote.uploader(), remote.id()), (device, local.id()));
@@ -832,10 +811,9 @@ impl Files {
     }
 }
 
-fn completed_send_gate(clock: ClockRef) -> Arc<crate::SendGate> {
-    let send = Arc::new(crate::SendGate::new(clock));
-    send.begin();
-    send.complete(crate::send_gate::Binding::Device, Vec::new())
-        .unwrap();
-    send
+fn ready_state() -> Arc<crate::SyncState> {
+    let state = Arc::new(crate::SyncState::new());
+    state.registered(true);
+    state.set(crate::SyncStatus::Synced { through: 0 });
+    state
 }

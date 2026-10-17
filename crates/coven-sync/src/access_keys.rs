@@ -1,103 +1,6 @@
-//! S3 deletion obligations recorded with each store-log application, and the
-//! evidence that clears one (§13, E9).
-//!
-//! Every S3 key a received entry records, kept or dropped, is the member's
-//! current access, pending deletion, or confirmed deleted. Recording a
-//! replacement also retires the key it replaced in its author's view, even
-//! if the replacement later loses. Only an explicit confirmation or a
-//! deletion with admin access followed by a read of that exact key's absence
-//! clears an obligation; replay, time and retries never do.
+//! Confirmed provider deletion of an S3 access key.
 
-use crate::{effects, operation_data::Data, AccessKeyToDelete, SyncError};
-use coven_database::{AccessKeyDeletion, ReplayEntry, StoreLogCheck, StoreLogReplay};
-use coven_format::{
-    store_log::{StoreChange, StoreLogEntry},
-    MemberAccess,
-};
-use coven_foundation::id_source::MemberId;
 use coven_storage::StorageError;
-
-/// The access an entry records and its member: creation's first admin, an
-/// addition's new member, or a set-access entry's named member.
-pub(crate) fn recorded(entry: &StoreLogEntry) -> Option<(&MemberId, &MemberAccess)> {
-    match &entry.change {
-        StoreChange::CreateStore { access, .. } => Some((&entry.author, access)),
-        StoreChange::AddMember { member, access, .. } => Some((member, access)),
-        StoreChange::SetAccess { member, access } => Some((member, access)),
-        _ => None,
-    }
-}
-
-/// The deletion obligation for one S3 key; shared accounts have none.
-pub(crate) fn deletion(
-    access: &MemberAccess,
-    member: Option<MemberId>,
-) -> Option<Result<AccessKeyDeletion, SyncError>> {
-    let MemberAccess::S3AccessKey {
-        access_key_id,
-        principal,
-    } = access
-    else {
-        return None;
-    };
-    let key = AccessKeyToDelete {
-        access_key_id: access_key_id.clone(),
-        principal: principal.clone(),
-        member,
-    };
-    Some(
-        Data::DeleteAccessKey(key.clone())
-            .new_operation("coven")
-            .map(|operation| AccessKeyDeletion { key, operation }),
-    )
-}
-
-/// The obligations a batch creates, from the complete log and its new replay.
-/// `previous` holds the entries already applied, `incoming` the batch. The
-/// database skips keys already pending or confirmed, so repeating one is harmless.
-pub(crate) fn deletions(
-    previous: &[ReplayEntry],
-    incoming: &[ReplayEntry],
-    replay: &StoreLogReplay,
-) -> Result<Vec<AccessKeyDeletion>, SyncError> {
-    let all: Vec<ReplayEntry> = previous.iter().chain(incoming).cloned().collect();
-    let mut keys: Vec<(MemberAccess, MemberId)> = Vec::new();
-    let mut add = |access: &MemberAccess, member: &MemberId| {
-        if matches!(access, MemberAccess::S3AccessKey { .. })
-            && !keys.iter().any(|(known, _)| known.same_credential(access))
-        {
-            keys.push((access.clone(), *member));
-        }
-    };
-    // A key stops being intended when its member is no longer active or no
-    // longer uses it, whatever the fate of the entry that recorded it.
-    for entry in &all {
-        if let Some((member, access)) = recorded(&entry.entry) {
-            let current = effects::member(&replay.state, member);
-            if current.is_none_or(|current| !current.access.same_credential(access)) {
-                add(access, member);
-            }
-        }
-    }
-    // A replacement retires the key its author saw, even if it later drops.
-    for entry in incoming {
-        if let StoreChange::SetAccess { member, access } = &entry.entry.change {
-            let positions = crate::replay::author_positions(&entry.entry);
-            let view = crate::replay::at_entries(&all, &positions).state;
-            if effects::check(&view, &entry.entry) == StoreLogCheck::NotAllowed {
-                continue;
-            }
-            if let Some(old) = effects::member(&view, member) {
-                if !old.access.same_credential(access) {
-                    add(&old.access, member);
-                }
-            }
-        }
-    }
-    keys.into_iter()
-        .filter_map(|(access, member)| deletion(&access, Some(member)))
-        .collect()
-}
 
 /// Whether a provider read found a key.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,3 +62,56 @@ pub(crate) fn verify_deletion(
 #[cfg(test)]
 #[path = "access_keys_tests.rs"]
 mod tests;
+
+#[derive(serde::Serialize, serde::Deserialize)]
+pub(crate) struct Deletion {
+    #[serde(with = "crate::pending_encoding::AccessKey")]
+    pub(crate) key: coven_database::AccessKeyToDelete,
+}
+
+impl crate::SequenceSync {
+    /// Delete a journaled S3 credential and verify its absence before clearing it.
+    pub async fn delete_access_key(
+        &self,
+        id: coven_database::OperationId,
+        admin: &dyn coven_storage::AccessKeyAdmin,
+    ) -> Result<(), crate::SyncError> {
+        let record = self
+            .database
+            .operation(id)
+            .await?
+            .ok_or(crate::SyncError::NotPending(id))?;
+        if record.kind != "delete-access-key" {
+            return Err(crate::SyncError::NotPending(id));
+        }
+        let Deletion { key } = serde_json::from_slice(&record.data)?;
+        let deleted = admin.revoke(&key.access_key_id, &key.principal).await;
+        let observation = match &deleted {
+            Ok(()) => Some(KeyObservation {
+                access_key_id: key.access_key_id.clone(),
+                reply: admin
+                    .key_exists(&key.access_key_id, &key.principal)
+                    .await
+                    .map(|present| {
+                        if present {
+                            KeyPresence::Present
+                        } else {
+                            KeyPresence::Absent
+                        }
+                    }),
+            }),
+            Err(_) => None,
+        };
+        verify_deletion(&key.access_key_id, deleted, observation)?;
+        self.database.clear_access_key(key.access_key_id).await?;
+        Ok(())
+    }
+
+    /// Record the application's explicit confirmation of console-side deletion.
+    pub async fn confirm_access_key_deleted(
+        &self,
+        access_key_id: String,
+    ) -> Result<(), crate::SyncError> {
+        Ok(self.database.clear_access_key(access_key_id).await?)
+    }
+}

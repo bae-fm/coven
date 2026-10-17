@@ -41,7 +41,7 @@ fn restore_metadata_retains_the_creation_access_choice() {
         let code = RestoreCode {
             store: StoreId(uuid::Uuid::from_u128(1)),
             name: "Personal".into(),
-            member: crate::store_log_sync::tests::member(1).member(),
+            member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)),
             member_keys: coven_crypto::MemberKeys::generate().unwrap(),
             storage: location.encode().unwrap(),
         }
@@ -61,7 +61,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     let restore = RestoreCode {
         store: StoreId(uuid::Uuid::from_u128(1)),
         name: "Household".into(),
-        member: crate::store_log_sync::tests::member(1).member(),
+        member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)),
         member_keys: coven_crypto::MemberKeys::generate().unwrap(),
         storage: location().encode().unwrap(),
     };
@@ -71,11 +71,11 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         name: restore.name.clone(),
         invite: InviteId(uuid::Uuid::from_u128(2)),
         // The admin's chosen id for the invited person, not the inviter's.
-        member: crate::store_log_sync::tests::member(2).member(),
+        member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(2)),
         secret: InviteSecret::generate().unwrap(),
         initial_key: KeyId(uuid::Uuid::from_u128(3)),
         inviting_writer: DeviceId(4),
-        key_copy_number: 12,
+        read_through: 12,
         storage: InviteStorage::S3 {
             invitation: StorageInvitation::for_account(location()).unwrap(),
             credentials: credentials(),
@@ -87,7 +87,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     let decoded = read_invite_code(&invite_text).unwrap();
     assert_eq!(decoded.initial_key, invite.initial_key);
     assert_eq!(decoded.inviting_writer, invite.inviting_writer);
-    assert_eq!(decoded.key_copy_number, invite.key_copy_number);
+    assert_eq!(decoded.read_through, invite.read_through);
     for (text, kind, member) in [
         (&restore_text, CodeKind::Restore, restore.member),
         (&invite_text, CodeKind::Invite, invite.member),

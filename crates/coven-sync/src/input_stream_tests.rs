@@ -1,6 +1,5 @@
 use super::*;
-use crate::store_log_sync::tests::{device, member, store};
-use coven_foundation::id_source::DeviceId;
+use crate::object_input::tests::{store, Fixture};
 use coven_storage::{
     test_utils::{BodyFailure, Faults, MemoryRequest, MemoryStorage},
     ObjectPath,
@@ -9,16 +8,18 @@ use std::sync::Arc;
 
 /// The whole retained object and its missing suffix through one stream.
 async fn whole(input: &ObjectInput, storage: &dyn Storage) -> Result<Vec<u8>, SyncError> {
-    let stream = input.stream(storage).await;
-    input.collect(stream).await
+    input.receive(storage).await?;
+    let mut bytes = Vec::new();
+    input.local_bytes().await?.read_to_end(&mut bytes).unwrap();
+    Ok(bytes)
 }
 
 #[tokio::test]
 async fn split_transport_frames_share_one_response_and_bounded_received_buffers() {
     for chunk in [1, 3, 65_535, 65_536, 65_537] {
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-        let receiver = device(storage.clone(), 9, member(1), store(1)).await;
-        let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+        let receiver = Fixture::new().await;
+        let path = ObjectPath::slot(store(), 1.try_into().unwrap());
         let bytes: Vec<_> = (0..200_003).map(|i| (i % 251) as u8).collect();
         storage.create(&path, &bytes).await.unwrap();
         let object = storage.status(&path).await.unwrap().unwrap();
@@ -54,8 +55,8 @@ async fn failed_transport_eof_cannot_be_recovered_from_a_complete_cached_body() 
         BodyFailure::ExtraByte,
     ] {
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-        let mut receiver = device(storage.clone(), 9, member(1), store(1)).await;
-        let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+        let mut receiver = Fixture::new().await;
+        let path = ObjectPath::slot(store(), 1.try_into().unwrap());
         let bytes = vec![7; 150_000];
         storage.create(&path, &bytes).await.unwrap();
         let object = storage.status(&path).await.unwrap().unwrap();
@@ -74,7 +75,7 @@ async fn failed_transport_eof_cannot_be_recovered_from_a_complete_cached_body() 
             assert!(!input.received().await.unwrap());
             assert_eq!(receiver.db.input_budget().await.unwrap().retained, retained);
         }
-        receiver.reopen(storage.clone(), vec![], vec![]).await;
+        receiver.reopen().await;
         storage.set_faults(Faults::none()).await;
         let before = storage.reads().await.len();
         let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
@@ -88,8 +89,8 @@ async fn failed_transport_eof_cannot_be_recovered_from_a_complete_cached_body() 
 #[tokio::test]
 async fn empty_response_completion_survives_reopen_without_a_second_request() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-    let mut receiver = device(storage.clone(), 9, member(1), store(1)).await;
-    let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+    let mut receiver = Fixture::new().await;
+    let path = ObjectPath::slot(store(), 1.try_into().unwrap());
     storage.create(&path, &[]).await.unwrap();
     let object = storage.status(&path).await.unwrap().unwrap();
     let before = storage.reads().await.len();
@@ -97,7 +98,7 @@ async fn empty_response_completion_survives_reopen_without_a_second_request() {
     assert!(whole(&input, storage.as_ref()).await.unwrap().is_empty());
     assert!(input.received().await.unwrap());
     drop(input);
-    receiver.reopen(storage.clone(), vec![], vec![]).await;
+    receiver.reopen().await;
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
     assert!(whole(&input, storage.as_ref()).await.unwrap().is_empty());
     assert_eq!(storage.reads().await.len() - before, 1);
@@ -106,9 +107,9 @@ async fn empty_response_completion_survives_reopen_without_a_second_request() {
 #[tokio::test]
 async fn failed_input_commit_preserves_neither_completion_nor_bytes() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
+    let receiver = Fixture::new().await;
     receiver.db.set_input_budget(0).await.unwrap();
-    let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+    let path = ObjectPath::slot(store(), 1.try_into().unwrap());
     storage.create(&path, b"content").await.unwrap();
     let object = storage.status(&path).await.unwrap().unwrap();
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
@@ -149,24 +150,8 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
             uuid::Uuid::from_u128(2),
         )),
         key,
-        caught_at: coven_format::value::StorageTime::new(0, 0).unwrap(),
-        raise: Some(std::num::NonZeroU32::MAX),
-        writes: coven_format::value::WritePositions(
-            (0..65_536)
-                .map(|i| coven_merge::WriteId {
-                    device: DeviceId(i),
-                    number: 1,
-                })
-                .collect(),
-        ),
-        store_log: coven_format::value::EntryPositions(
-            (0..65_536)
-                .map(|i| coven_format::value::EntryId {
-                    device: DeviceId(i),
-                    number: 1,
-                })
-                .collect(),
-        ),
+        covers: u64::MAX,
+        purpose: coven_format::sequence::Purpose::Raise(u32::MAX),
     };
     let mut signed = snapshot.encode().unwrap();
     signed.extend([0; 64]);
@@ -185,8 +170,8 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
         ),
     ] {
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-        let receiver = device(storage.clone(), 9, member(1), store(1)).await;
-        let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+        let receiver = Fixture::new().await;
+        let path = ObjectPath::slot(store(), 1.try_into().unwrap());
         let mut bytes = expected.clone();
         bytes.extend([7; 1000]);
         storage.create(&path, &bytes).await.unwrap();
@@ -220,8 +205,8 @@ async fn maximum_header_vectors_use_two_ranges_and_preserve_every_overread_byte(
 #[tokio::test]
 async fn retaining_the_rest_continues_over_local_input_without_another_request() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
-    let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+    let receiver = Fixture::new().await;
+    let path = ObjectPath::slot(store(), 1.try_into().unwrap());
     let bytes: Vec<_> = (0..150_001).map(|i| (i % 253) as u8).collect();
     storage.create(&path, &bytes).await.unwrap();
     let object = storage.status(&path).await.unwrap().unwrap();
@@ -240,58 +225,4 @@ async fn retaining_the_rest_continues_over_local_input_without_another_request()
     drop(stream);
     input.receive(storage.as_ref()).await.unwrap();
     assert_eq!(storage.request_count(), requests);
-}
-
-/// SP 481–482: a write whose second chunk stalls in storage must not keep an
-/// app write waiting for the database writer (§3.1).
-#[tokio::test]
-async fn a_stalled_write_body_does_not_hold_the_database_writer() {
-    use crate::device_log_sync::tests::{group, sql};
-    let storage = crate::device_log_sync::tests::storage();
-    let mut devices = group(storage.clone(), 2).await;
-    let body = "x".repeat(150_000);
-    devices[0]
-        .db
-        .write(move |sql| {
-            sql.execute("INSERT INTO notes VALUES('large','title',?1)", [&body])?;
-            Ok(())
-        })
-        .await
-        .unwrap();
-    devices[0].writes.upload_writes().await.unwrap();
-    let path = ObjectPath::device_log(
-        crate::device_log_sync::tests::STORE_ID,
-        DeviceId(1),
-        1.try_into().unwrap(),
-    );
-    let size = storage.status(&path).await.unwrap().unwrap().size;
-    assert!(size > 2 * BUFFER as u64);
-    let (stalled, observed) = tokio::sync::oneshot::channel();
-    let (resume, held) = tokio::sync::oneshot::channel();
-    storage
-        .hold_body_at(path, BUFFER as u64 + 1, stalled, held)
-        .await;
-    let receiver = &mut devices[1];
-    let db = receiver.db.clone();
-    let app = async move {
-        observed.await.unwrap();
-        tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            sql(
-                &db,
-                "INSERT INTO notes VALUES('local','while','downloading')",
-            ),
-        )
-        .await
-        .expect("an app write waited for network input");
-        resume.send(()).unwrap();
-    };
-    let (downloaded, ()) = tokio::join!(receiver.writes.download_writes(), app);
-    downloaded.unwrap();
-    let ids: Vec<String> = receiver
-        .db
-        .read(|sql| Ok(sql.query("SELECT id FROM notes ORDER BY id", [], |r| r.get(0))?))
-        .await
-        .unwrap();
-    assert!(ids.contains(&"large".to_string()) && ids.contains(&"local".to_string()));
 }

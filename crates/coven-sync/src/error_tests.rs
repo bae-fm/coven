@@ -7,9 +7,15 @@ use std::error::Error;
 #[test]
 fn newer_key_envelopes_require_an_update_at_the_sync_boundary() {
     for version in [coven_format::FORMAT_VERSION + 1, 0] {
-        let mut bytes = vec![37];
-        bytes.extend_from_slice(&version.to_be_bytes());
-        let error = coven_format::sealed_key::SealedKey::decode(&bytes).unwrap_err();
+        let mut bytes = coven_format::sealed_slot::SlotObjectPrefix {
+            format: coven_format::FormatVersion::CURRENT,
+            key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(1)),
+            kind: coven_format::sealed_slot::SlotKind::Admin,
+        }
+        .encode()
+        .unwrap();
+        bytes[1..3].copy_from_slice(&version.to_be_bytes());
+        let error = coven_format::sealed_slot::SlotObjectPrefix::decode(&bytes).unwrap_err();
         let error = SyncError::from(error);
         if version == 0 {
             assert!(matches!(
@@ -28,9 +34,8 @@ fn merge_causality_refusal_preserves_its_native_cause() {
         device: DeviceId(1),
         number: 2,
     };
-    let path = ObjectPath::device_log(
-        crate::device_log_sync::tests::STORE_ID,
-        write.device,
+    let path = ObjectPath::slot(
+        coven_storage::test_utils::STORE_ID,
         write.number.try_into().unwrap(),
     );
     let error = crate::write_object::database_failure(
@@ -44,8 +49,8 @@ fn merge_causality_refusal_preserves_its_native_cause() {
         panic!("{error:?}")
     };
     assert_eq!(
-        u8::from(coven_format::pending::RefusalCode::from(&object.failure)),
-        5
+        object.failure,
+        crate::Refusal::InvalidCausality { cause: None }
     );
     assert_eq!(object.path, path.as_str());
     assert_eq!(
@@ -64,9 +69,8 @@ fn object_validation_keeps_causes_and_local_failures_stay_local() {
         device: DeviceId(1),
         number: 1,
     };
-    let path = ObjectPath::device_log(
-        crate::device_log_sync::tests::STORE_ID,
-        write.device,
+    let path = ObjectPath::slot(
+        coven_storage::test_utils::STORE_ID,
         write.number.try_into().unwrap(),
     );
     for error in [
@@ -107,25 +111,9 @@ fn object_validation_keeps_causes_and_local_failures_stay_local() {
 
 #[test]
 fn refusals_of_syncs_own_requests_fail_internally_and_keep_their_native_cause() {
-    let write = WriteId {
-        device: DeviceId(1),
-        number: 2,
-    };
-    let entry = coven_database::EntryId {
-        device: DeviceId(1),
-        number: 3,
-    };
     let internal = [
         DbError::Invariant {
             what: "a broken rule of coven's own code",
-        },
-        DbError::StoreLogEntriesChanged,
-        DbError::StoreLogEntryChanged(entry),
-        DbError::UploadNotOldest { write },
-        DbError::UploadNotAttempted { write },
-        DbError::KeyUploadChanged {
-            writer: DeviceId(1),
-            number: std::num::NonZeroU64::MIN,
         },
         DbError::OperationChanged(coven_database::OperationId(4)),
     ];
@@ -145,18 +133,14 @@ fn refusals_of_syncs_own_requests_fail_internally_and_keep_their_native_cause() 
         );
     }
     // Conditions an app can see stay database failures.
-    for condition in [
-        DbError::StoreLogUploadPending(entry),
-        DbError::StoreLogNumberExhausted,
-        DbError::KeyCopyNumberExhausted,
-    ] {
+    for condition in [DbError::ClaimPending, DbError::ClaimNumberExhausted] {
         assert!(matches!(SyncError::from(condition), SyncError::Database(_)));
     }
 }
 
 #[test]
 fn local_file_and_lock_failures_are_disk_failures_with_their_cause() {
-    let store = crate::device_log_sync::tests::STORE_ID;
+    let store = coven_storage::test_utils::STORE_ID;
     let missing = std::path::PathBuf::from("snapshot.tmp");
     let file = || coven_foundation::files::FileError::Io {
         operation: "append",
@@ -232,9 +216,8 @@ fn removal_and_required_updates_stop_the_pass_as_themselves() {
 
 #[test]
 fn stored_damage_an_invariant_and_a_remote_refusal_stay_distinct() {
-    let path = coven_storage::ObjectPath::device_log(
+    let path = coven_storage::ObjectPath::slot(
         coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(1)),
-        DeviceId(1),
         std::num::NonZeroU64::MIN,
     );
     // Decoding stored facts failed: the database is damaged.

@@ -13,12 +13,8 @@ fn clock() -> Arc<FixedClock> {
 }
 
 /// Pass `seconds` and keep §10's catch-up fresh for any upload in between.
-fn advance(f: &Fixture, clock: &FixedClock, seconds: u64) {
+fn advance(_f: &Fixture, clock: &FixedClock, seconds: u64) {
     clock.set(clock.now() + Duration::from_secs(seconds));
-    f.send.begin();
-    f.send
-        .complete(crate::send_gate::Binding::Device, Vec::new())
-        .unwrap();
 }
 
 /// A device eager for `files` that reads `a`'s storage through its own
@@ -46,15 +42,7 @@ async fn connect(b: &Fixture, a: &Fixture) {
 
 async fn apply_all(a: &Fixture, b: &Fixture) {
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database
-            .apply_downloaded::<crate::PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(
-                    coven_format::value::StorageTime::since_epoch(std::time::Duration::ZERO),
-                ),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
 }
 
@@ -86,13 +74,7 @@ async fn eager_commit_observation_handles_download_apply() {
     );
     let mut status = b.database.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database
-            .apply_downloaded::<crate::PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     tokio::time::timeout(Duration::from_secs(20), async {
         loop {
@@ -172,13 +154,7 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
                 }
             }
         }
-        b.database
-            .apply_downloaded::<crate::PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     b.files.sync_files().await.unwrap();
     // The last file completed although every earlier one failed.
@@ -276,13 +252,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     a.storage.set_online(false);
     let mut status = b.database.subscribe_eager_cache_fill_status();
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database
-            .apply_downloaded::<crate::PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     // The network failure is the file's pending record, not a fill state.
     b.files.sync_files().await.unwrap();
@@ -311,13 +281,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     // A newly observed version is eligible; cancel after its first request.
     let second = a.uploaded("another", vec![73; CHUNK * 2]).await;
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database
-            .apply_downloaded::<crate::PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     while !matches!(
         status.next().await.unwrap(),

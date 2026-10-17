@@ -298,16 +298,6 @@ pub(crate) const POLICY: Policy = Policy {
             "for_recipient",
         ),
         (
-            "crates/coven-sync/src/device_log_sync.rs",
-            "DeviceLogSync",
-            "disconnected",
-        ),
-        (
-            "crates/coven-sync/src/device_log_sync.rs",
-            "DeviceLogSync",
-            "new",
-        ),
-        (
             "crates/coven-sync/src/file_read.rs",
             "FileStream",
             "read_at",
@@ -327,68 +317,25 @@ pub(crate) const POLICY: Policy = Policy {
             "RetryWaits",
             "in_memory",
         ),
-        // One sending gate per opened installation, injected into every sender.
-        ("crates/coven-sync/src/send_gate.rs", "SendGate", "new"),
-        ("crates/coven-sync/src/operations.rs", "Operations", "new"),
-        // Setup stages its candidate connection's keys without changing custody.
-        (
-            "crates/coven-sync/src/storage_setup.rs",
-            "StoreLogSync",
-            "catch_up_setup",
-        ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
-            "replace_member_keys",
-        ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
-            "new",
-        ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
-            "replace_access_key",
-        ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
-            "update_credentials",
-        ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
-            "install_oauth",
-        ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
-            "adopt_delivered_key",
-        ),
-        (
-            "crates/coven-sync/src/store_log_sync.rs",
-            "StoreLogSync",
-            "disconnected",
-        ),
-        (
-            "crates/coven-sync/src/store_log_sync.rs",
-            "StoreLogSync",
-            "new",
-        ),
-        // A sign-in's custody: device custody once per opened installation,
-        // session custody per completed sign-in until publication (§4).
-        (
-            "crates/coven-sync/src/sign_in.rs",
-            "DeviceCredentials",
-            "new",
-        ),
-        ("crates/coven-sync/src/sign_in.rs", "SessionSignIn", "new"),
         ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "new"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "setup"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "unlock"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncRun", "connect"),
-        ("crates/coven-sync/src/sync_loop.rs", "SyncRun", "setup"),
+        // The sequence owner composes its file transfers and pass state.
+        (
+            "crates/coven-sync/src/sequence_sync.rs",
+            "SequenceSync",
+            "open",
+        ),
+        // An operation's call runs as its own task, so a dropped app future
+        // cannot abandon a provider request already sent (§18).
+        (
+            "crates/coven-sync/src/sequence_operations.rs",
+            "SequenceSync",
+            "submit",
+        ),
+        (
+            "crates/coven-sync/src/sequence_keys.rs",
+            "SequenceSync",
+            "change_key",
+        ),
         (
             "crates/coven/src/bootstrap.rs",
             "<free>",
@@ -687,23 +634,29 @@ pub(crate) const POLICY: Policy = Policy {
         "DatabaseConnection",
     ],
     non_owner_types: &[
+        // A cursor over retained provider bytes names the input connection,
+        // whose lifetime the database owns: closing it invalidates the cursor.
+        "RetainedBytes",
         // Failure transport may carry a published handle; it does not own store lifetime.
         "BootstrapError",
         "StoreCreationError",
         "KeyCustody",
         "IdentityCustody",
         "Command",
-        "SyncCommand",
         "Request",
     ],
     // Writes borrow the database's retained connection and id source; app
     // SQL receives none of those dependencies.
     borrowed_facade_types: &[
-        // A setup or admission exception borrows the gate for exact paths.
-        "PublicationScope",
         "SnapshotMetadata",
         // These readers borrow a connection for one committed read or transaction.
         "DatabaseMetadata",
+        "PreparedBytes",
+        "PreparedInputs",
+        "PreparedRecords",
+        "PreparedWrite",
+        "PreparedPart",
+        "PreparedSnapshot",
         "ClaimBytes",
         "Circles",
         "FileWrite",
@@ -729,23 +682,21 @@ pub(crate) const POLICY: Policy = Policy {
         "PreWrite",
     ],
     task_types: &[
-        "PublicationScope",
         "OpenFile",
         "LocalFileReader",
         "LockedWriter",
-        "SyncRun",
-        "OperationRun",
-        "RunningOperations",
         "Circles",
         "CacheReservation",
         "UploadedFile",
-        "SnapshotInput",
         "RetainedInput",
         "ObjectInput",
         "InputStream",
-        "SnapshotWriteParts",
-        "SnapshotTransfer",
-        "ReloadReads",
+        // One floor observation, snapshot read or upload source.
+        "FloorObject",
+        "SnapshotObject",
+        "SelectedSnapshot",
+        "ClaimSource",
+        "SnapshotUploadSource",
         "FileTransfer",
         "FileRangeStream",
         "FileWorker",

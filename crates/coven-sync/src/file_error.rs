@@ -13,7 +13,7 @@ use std::path::PathBuf;
 pub enum FileReadError {
     /// This file uses a newer coven format (§17.2).
     #[error("an update is required to read this file")]
-    UpdateRequired(coven_format::pending::RequiredUpdate),
+    UpdateRequired(crate::RequiredUpdate),
     /// No storage capability is connected.
     #[error("no storage connected")]
     NoStorage,
@@ -110,6 +110,9 @@ impl From<LocalFileError> for FileReadError {
 /// native cause stays in this process's log.
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum UploadFailure {
+    /// The immutable destination contains different bytes.
+    #[error("file upload was refused: {0:?}")]
+    Refused(crate::Refusal),
     /// Reading or checking the source failed.
     #[error(transparent)]
     File(#[from] FileReadError),

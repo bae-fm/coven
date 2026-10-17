@@ -1,4 +1,6 @@
 //! Local serde adapters for domain values whose owning crates define wire encodings.
+use coven_foundation::id_source::DeviceId;
+use coven_merge::Audience;
 use serde::{Deserialize, Serialize};
 
 pub(crate) mod sealing {
@@ -17,7 +19,7 @@ pub(crate) mod sealing {
         ))
     }
 }
-macro_rules! log_id {
+macro_rules! write_id {
     ($module:ident, $ty:path) => {
         pub(crate) mod $module {
             use super::*;
@@ -32,7 +34,7 @@ macro_rules! log_id {
             ) -> Result<$ty, D::Error> {
                 let (device, number) = Deserialize::deserialize(d)?;
                 if number == 0 {
-                    return Err(serde::de::Error::custom("zero log number"));
+                    return Err(serde::de::Error::custom("zero write number"));
                 }
                 type Id = $ty;
                 Ok(Id { device, number })
@@ -40,56 +42,22 @@ macro_rules! log_id {
         }
     };
 }
-log_id!(write, coven_merge::WriteId);
-log_id!(entry, coven_format::value::EntryId);
-
-pub(crate) mod refusal {
+write_id!(write, coven_merge::WriteId);
+pub(crate) mod slot {
     use super::*;
     pub(crate) fn serialize<S: serde::Serializer>(
-        v: &crate::Refusal,
+        value: &coven_merge::Slot,
         s: S,
     ) -> Result<S::Ok, S::Error> {
-        u8::from(coven_format::pending::RefusalCode::from(v)).serialize(s)
+        value.0.serialize(s)
     }
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
         d: D,
-    ) -> Result<crate::Refusal, D::Error> {
-        coven_format::pending::RefusalCode::try_from(u8::deserialize(d)?)
-            .map(Into::into)
-            .map_err(serde::de::Error::custom)
+    ) -> Result<coven_merge::Slot, D::Error> {
+        Ok(coven_merge::Slot(u64::deserialize(d)?))
     }
 }
 
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "coven_format::pending::RequiredUpdate")]
-pub(crate) enum Update {
-    AppSchema { version: u32 },
-    CovenFormat { version: u16 },
-}
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "coven_format::pending::FileSourceFailure")]
-pub(crate) enum SourceFailure {
-    Missing,
-    Changed,
-    Integrity,
-}
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "coven_database::EntryTarget")]
-pub(crate) enum Target {
-    Member(coven_foundation::id_source::MemberId),
-    Device(coven_foundation::id_source::DeviceId),
-    Circle(coven_foundation::id_source::CircleId),
-}
-#[derive(Serialize, Deserialize)]
-#[serde(remote = "coven_database::DropReason")]
-pub(crate) enum Drop {
-    LandedTooLate,
-    BeatenBy(#[serde(with = "entry")] coven_format::value::EntryId),
-    TargetGone(#[serde(with = "Target")] coven_database::EntryTarget),
-    NoAdminLeft,
-    KeysAlreadyUsed,
-    NotAllowed,
-}
 #[derive(Serialize, Deserialize)]
 #[serde(remote = "crate::AccessKeyToDelete")]
 pub(crate) struct AccessKey {
@@ -98,28 +66,62 @@ pub(crate) struct AccessKey {
     member: Option<coven_foundation::id_source::MemberId>,
 }
 
-/// A member's public pair as its two 32-byte keys; decoding refuses an
-/// invalid or weak signing point as the format does.
-pub(crate) mod member_keys {
+pub(crate) mod audience {
     use super::*;
     pub(crate) fn serialize<S: serde::Serializer>(
-        v: &Option<coven_crypto::MemberPublicKeys>,
-        s: S,
+        value: &Audience,
+        serializer: S,
     ) -> Result<S::Ok, S::Error> {
-        v.map(|keys| (*keys.signing.as_bytes(), *keys.sealing.as_bytes()))
-            .serialize(s)
+        match value {
+            Audience::Store => serializer.serialize_str("store"),
+            Audience::Circle(id) => serializer.serialize_str(&id.to_string()),
+        }
     }
     pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
-        d: D,
-    ) -> Result<Option<coven_crypto::MemberPublicKeys>, D::Error> {
-        Option::<([u8; 32], [u8; 32])>::deserialize(d)?
-            .map(|(signing, sealing)| {
-                Ok(coven_crypto::MemberPublicKeys {
-                    signing: coven_crypto::SigningKey::from_bytes(signing)
-                        .map_err(serde::de::Error::custom)?,
-                    sealing: coven_crypto::SealingKey::from_bytes(sealing),
-                })
-            })
-            .transpose()
+        deserializer: D,
+    ) -> Result<Audience, D::Error> {
+        let value = String::deserialize(deserializer)?;
+        if value == "store" {
+            Ok(Audience::Store)
+        } else {
+            Ok(Audience::Circle(coven_foundation::id_source::CircleId(
+                value.parse().map_err(serde::de::Error::custom)?,
+            )))
+        }
+    }
+}
+
+mod audiences {
+    use super::*;
+    #[derive(Serialize, Deserialize)]
+    pub(super) struct Item(#[serde(with = "audience")] pub(super) Audience);
+}
+
+pub(crate) mod snapshot_id {
+    use super::*;
+    use coven_format::admin::SnapshotId;
+    pub(crate) fn serialize<S: serde::Serializer>(
+        value: &SnapshotId,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        let number = std::num::NonZeroU64::new(value.number)
+            .ok_or_else(|| serde::ser::Error::custom("zero snapshot number"))?;
+        (
+            audiences::Item(value.audience.clone()),
+            value.device,
+            number,
+        )
+            .serialize(serializer)
+    }
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<SnapshotId, D::Error> {
+        let (audience, device, number) =
+            <(audiences::Item, DeviceId, std::num::NonZeroU64)>::deserialize(deserializer)?;
+        Ok(SnapshotId {
+            audience: audience.0,
+            device,
+            number: number.get(),
+        })
     }
 }

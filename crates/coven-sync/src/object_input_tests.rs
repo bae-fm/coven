@@ -1,6 +1,8 @@
 use super::*;
-use crate::store_log_sync::tests::{device, member, store};
-use coven_foundation::id_source::DeviceId;
+use coven_foundation::{
+    files::{StoreDir, StoreLayout},
+    id_source::{SequentialIds, StoreId},
+};
 use coven_storage::{
     test_utils::{MemoryRequest, MemoryStorage},
     ObjectPath,
@@ -10,8 +12,8 @@ use std::sync::Arc;
 #[tokio::test]
 async fn overlapping_ranges_reopen_and_changed_native_ids_do_not_fetch_retained_bytes() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-    let mut receiver = device(storage.clone(), 9, member(1), store(1)).await;
-    let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+    let mut receiver = Fixture::new().await;
+    let path = ObjectPath::slot(store(), 1.try_into().unwrap());
     storage.create(&path, b"abcdefghij").await.unwrap();
     let object = storage.status(&path).await.unwrap().unwrap();
     let input = ObjectInput::observe(&receiver.db, &object).await.unwrap();
@@ -38,7 +40,7 @@ async fn overlapping_ranges_reopen_and_changed_native_ids_do_not_fetch_retained_
         })
         .collect();
     assert_eq!(reads, [(0, 2), (6, 8)]);
-    receiver.reopen(storage.clone(), vec![], vec![]).await;
+    receiver.reopen().await;
     let before = storage.request_trace().len();
     let mut native = object.clone();
     native.object_id.push_str("-listing");
@@ -59,11 +61,11 @@ async fn overlapping_ranges_reopen_and_changed_native_ids_do_not_fetch_retained_
 }
 
 #[tokio::test]
-async fn same_size_same_time_positions_replacement_fetches_the_new_revision() {
+async fn same_size_same_time_floor_replacement_fetches_the_new_revision() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
-    let path = ObjectPath::positions(store(1), DeviceId(1));
-    storage.replace(&path, b"a").await.unwrap();
+    let receiver = Fixture::new().await;
+    let path = ObjectPath::floor(store());
+    storage.create(&path, b"a").await.unwrap();
     let first = storage.status(&path).await.unwrap().unwrap();
     let input = ObjectInput::observe(&receiver.db, &first).await.unwrap();
     assert_eq!(
@@ -73,7 +75,7 @@ async fn same_size_same_time_positions_replacement_fetches_the_new_revision() {
             .unwrap(),
         b"a"
     );
-    storage.replace(&path, b"b").await.unwrap();
+    storage.replace(&first, b"b").await.unwrap();
     let second = storage.status(&path).await.unwrap().unwrap();
     assert_eq!(first.stored_at, second.stored_at);
     assert_ne!(first.revision, second.revision);
@@ -87,60 +89,11 @@ async fn same_size_same_time_positions_replacement_fetches_the_new_revision() {
     );
 }
 
-/// A peer replaces its post between this device's listing and its GET. The
-/// response is the newer observation, not a protocol failure, and its bytes
-/// are retained under that revision rather than the listed one.
-#[tokio::test]
-async fn positions_replaced_after_listing_are_read_as_the_newer_revision() {
-    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
-    let path = ObjectPath::positions(store(1), DeviceId(1));
-    storage.replace(&path, b"listed").await.unwrap();
-    let listed = storage.status(&path).await.unwrap().unwrap();
-    storage.replace(&path, b"newer!").await.unwrap();
-    let newer = storage.status(&path).await.unwrap().unwrap();
-    assert_ne!(listed.revision, newer.revision);
-    let before = storage.request_trace().len();
-    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &listed, 6)
-        .await
-        .unwrap();
-    assert_eq!(bytes.unwrap(), b"newer!");
-    assert_eq!(input.object().revision, newer.revision);
-    assert_eq!(
-        storage.request_trace()[before..],
-        [MemoryRequest::Read(path.clone(), None)]
-    );
-    // The next listing names the revision already read: no request.
-    let before = storage.request_trace().len();
-    let (input, bytes) = ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), &newer, 6)
-        .await
-        .unwrap();
-    assert_eq!(bytes.unwrap(), b"newer!");
-    assert_eq!(input.object().revision, newer.revision);
-    assert_eq!(storage.request_trace().len(), before);
-    // A revision longer than its format's bound is settled by its size alone,
-    // whether listed or met in the GET's response.
-    storage.replace(&path, b"fresh!").await.unwrap();
-    let fresh = storage.status(&path).await.unwrap().unwrap();
-    storage.replace(&path, b"longest").await.unwrap();
-    let longest = storage.status(&path).await.unwrap().unwrap();
-    for (listed, requests) in [(&fresh, 1), (&longest, 0)] {
-        let before = storage.request_trace().len();
-        let (input, bytes) =
-            ObjectInput::whole_replaceable(&receiver.db, storage.as_ref(), listed, 6)
-                .await
-                .unwrap();
-        assert!(bytes.is_none());
-        assert_eq!(input.object().revision, longest.revision);
-        assert_eq!(storage.request_trace().len(), before + requests);
-    }
-}
-
 #[tokio::test]
 async fn simultaneous_consumers_share_the_in_flight_range() {
     let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-    let receiver = device(storage.clone(), 9, member(1), store(1)).await;
-    let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+    let receiver = Fixture::new().await;
+    let path = ObjectPath::slot(store(), 1.try_into().unwrap());
     storage.create(&path, b"abcdefghij").await.unwrap();
     let object = storage.status(&path).await.unwrap().unwrap();
     let first = ObjectInput::observe(&receiver.db, &object).await.unwrap();
@@ -163,17 +116,16 @@ async fn io_differential_retained_ranges_and_refusal_eviction() {
     let mut results = Vec::new();
     for start in 0..4u64 {
         let storage = Arc::new(MemoryStorage::builder().build().unwrap());
-        let mut receiver = device(storage.clone(), 9, member(1), store(1)).await;
-        let path = ObjectPath::device_log(store(1), DeviceId(1), 1.try_into().unwrap());
+        let mut receiver = Fixture::new().await;
+        let path = ObjectPath::slot(store(), 1.try_into().unwrap());
         storage.create(&path, b"abcdefghij").await.unwrap();
         let object = storage.status(&path).await.unwrap().unwrap();
-        let refusal = coven_database::LogRefusal {
-            object: coven_database::LogObject::Write(path.write_id().unwrap()),
-            failure: coven_format::pending::RefusalCode::Signature,
+        let refusal = crate::PendingRecord {
+            subject: crate::PendingSubject::Slot(coven_merge::Slot(1)),
+            reported_by: receiver.directory.settings().unwrap().device_id,
+            reason: crate::PendingReason::Refused(crate::Refusal::Signature { cause: None }),
         };
-        crate::pending_logs::record_refusal(&receiver.db, refusal)
-            .await
-            .unwrap();
+        receiver.db.record_pending(refusal.clone()).await.unwrap();
         let actions = vec![
             json!({"op":"read","start":start,"end":start+3}),
             json!({"op":"read","start":0,"end":8}),
@@ -202,7 +154,7 @@ async fn io_differential_retained_ranges_and_refusal_eviction() {
                         .await
                         .unwrap();
                 }
-                "reopen" => receiver.reopen(storage.clone(), vec![], vec![]).await,
+                "reopen" => receiver.reopen().await,
                 "evict" => {
                     ObjectInput::observe(&receiver.db, &object)
                         .await
@@ -224,7 +176,9 @@ async fn io_differential_retained_ranges_and_refusal_eviction() {
                 })
                 .sum();
             let budget = receiver.db.input_budget().await.unwrap();
-            let refused = crate::pending_logs::local_refusals(&receiver.db)
+            let refused = receiver
+                .db
+                .pending::<crate::PendingRecord>()
                 .await
                 .unwrap()
                 .contains(&refusal);
@@ -233,5 +187,43 @@ async fn io_differential_retained_ranges_and_refusal_eviction() {
         cases.push(json!({"check":"retained","actions":actions}));
         results.push(json!(output));
     }
-    assert_eq!(results, crate::discovery::tests::io_runner(&cases));
+    assert_eq!(results, crate::tests::io_runner(&cases));
+}
+
+pub(crate) fn store() -> StoreId {
+    coven_storage::test_utils::STORE_ID
+}
+#[cfg(test)]
+pub(crate) struct Fixture {
+    _temp: tempfile::TempDir,
+    directory: StoreDir,
+    pub(crate) db: Database,
+}
+impl Fixture {
+    pub(crate) async fn new() -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = StoreLayout::new(temp.path().into())
+            .create_store_dir(store(), "input", &SequentialIds::new())
+            .unwrap();
+        let db = coven_database::DatabaseBuilder::new(directory.clone())
+            .synced_tables(vec![])
+            .migrations(vec![])
+            .open()
+            .await
+            .unwrap();
+        Self {
+            _temp: temp,
+            directory,
+            db,
+        }
+    }
+    pub(crate) async fn reopen(&mut self) {
+        self.db.close().await.unwrap();
+        self.db = coven_database::DatabaseBuilder::new(self.directory.clone())
+            .synced_tables(vec![])
+            .migrations(vec![])
+            .open()
+            .await
+            .unwrap();
+    }
 }

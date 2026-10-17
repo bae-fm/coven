@@ -24,10 +24,6 @@ fn fail_next(failure: StorageFailure, retry_after: Option<u64>) -> Faults {
     }
 }
 
-fn catch_up() -> PendingReason {
-    PendingReason::Waits(Prerequisite::StoreLogCatchUp)
-}
-
 fn network() -> PendingReason {
     PendingReason::Storage {
         provider: coven_storage::CloudProvider::Dropbox,
@@ -35,13 +31,9 @@ fn network() -> PendingReason {
     }
 }
 
-/// Keep §10's catch-up fresh while the test clock passes retry delays.
-fn advance(f: &Fixture, clock: &FixedClock, seconds: u64) {
+/// Advance the retry clock.
+fn advance(_f: &Fixture, clock: &FixedClock, seconds: u64) {
     clock.set(clock.now() + Duration::from_secs(seconds));
-    f.send.begin();
-    f.send
-        .complete(crate::send_gate::Binding::Device, Vec::new())
-        .unwrap();
 }
 
 /// How long until the worker's next timed drain, by the waits' deadlines.
@@ -247,7 +239,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
     f.files.set_uploads_paused(false).await.unwrap();
     observed.await.unwrap();
-    clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(300));
+    f.send.set(crate::SyncStatus::Opening);
     resume.send(()).unwrap();
     // The second file waits for the next catch-up; that wait is its record.
     tokio::time::timeout(Duration::from_secs(5), async {
@@ -256,7 +248,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
             .await
             .unwrap()
             .iter()
-            .any(|record| record.reason == PendingReason::Waits(Prerequisite::StoreLogCatchUp))
+            .any(|record| record.reason == PendingReason::Waits(Prerequisite::SequenceCatchUp))
         {
         }
     })
@@ -266,10 +258,8 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     let second = f.database.file_ref("files", "second").await.unwrap();
     assert!(!f.queued(&first).await);
     assert!(f.queued(&second).await);
-    f.send.begin();
-    f.send
-        .complete(crate::send_gate::Binding::Device, Vec::new())
-        .unwrap();
+    f.send.set(crate::SyncStatus::Opening);
+    f.send.set(crate::SyncStatus::Synced { through: 0 });
     tokio::time::timeout(Duration::from_secs(5), async {
         loop {
             uploads.next().await.unwrap();
@@ -284,7 +274,7 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
 }
 
 /// The upload worker's storage, traced: each call first moves the clock
-/// `step` seconds, then records its time and whether the shared send gate let
+/// `step` seconds, then records its time and whether the shared sync state let
 /// it through. A create can also lose its reply after publishing.
 struct StepStorage {
     storage: Arc<MemoryStorage>,
@@ -317,12 +307,11 @@ impl StepStorage {
         self.trace.lock().unwrap().push((event, true));
     }
     /// A completed catch-up: its phase begins now and completes a second later.
-    fn catch_up(&self, send: &crate::SendGate) {
-        send.begin();
+    fn catch_up(&self, send: &crate::SyncState) {
+        send.set(crate::SyncStatus::Opening);
         self.note(serde_json::json!({"op":"begin","time":self.seconds()}));
         self.clock.set(self.clock.now() + Duration::from_secs(1));
-        send.complete(crate::send_gate::Binding::Device, Vec::new())
-            .unwrap();
+        send.set(crate::SyncStatus::Synced { through: 0 });
         self.note(
             serde_json::json!({"op":"checked","time":self.seconds(),"send":true,"retired":false}),
         );
@@ -387,7 +376,7 @@ impl coven_storage::Storage for StepStorage {
     }
     async fn replace(
         &self,
-        path: &coven_storage::ObjectPath,
+        path: &coven_storage::StoredObject,
         bytes: &[u8],
     ) -> Result<(), coven_storage::StorageError> {
         self.storage.replace(path, bytes).await
@@ -414,12 +403,6 @@ impl coven_storage::Storage for StepStorage {
         prefix: &coven_storage::ObjectPrefix,
     ) -> Result<Vec<coven_storage::StoredObject>, coven_storage::StorageError> {
         self.storage.list(prefix).await
-    }
-    async fn list_writers(
-        &self,
-        store: coven_foundation::id_source::StoreId,
-    ) -> Result<Vec<coven_foundation::id_source::DeviceId>, coven_storage::StorageError> {
-        self.storage.list_writers(store).await
     }
     async fn delete(
         &self,
@@ -525,27 +508,6 @@ async fn confirmed(f: &Fixture) -> u64 {
         })
 }
 
-/// Drain until the file is stored, completing a new catch-up after each
-/// drain the gate stopped. Returns the catch-ups it took.
-async fn drain_through_expiry(f: &Fixture, storage: &StepStorage, file: &FileRef) -> usize {
-    let mut catch_ups = 0;
-    while f.queued(file).await {
-        assert!(catch_ups < 6, "the upload made no progress");
-        if !f.send.can_send() {
-            storage.catch_up(&f.send);
-            catch_ups += 1;
-        }
-        let before = confirmed(f).await;
-        if drained(f.files.inner.drain_uploads(false).await.unwrap()) == 1 {
-            break;
-        }
-        assert_eq!(f.upload_reason(file).await, Some(catch_up()));
-        // Expiry keeps every confirmed part: the next catch-up resumes there.
-        assert!(confirmed(f).await >= before);
-    }
-    catch_ups
-}
-
 fn provider_parts(f: &Fixture) -> usize {
     f.storage
         .request_trace()
@@ -557,43 +519,6 @@ fn provider_parts(f: &Fixture) -> usize {
             )
         })
         .count()
-}
-
-#[tokio::test]
-async fn freshness_expiring_between_parts_keeps_progress_until_the_next_catch_up() {
-    let (f, _clock, storage) = stepping(100).await;
-    let file = f.attach("files", "large", three_parts()).await;
-    // Second 300 ends the catch-up from second 0 before the second part.
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
-    assert_eq!(f.upload_reason(&file).await, Some(catch_up()));
-    assert_eq!(confirmed(&f).await, CHUNK as u64);
-    assert_eq!(
-        provider_parts(&f),
-        1,
-        "the refused part never reached the provider"
-    );
-    // Waiting for the next pass changes neither the path nor the key, and
-    // until a catch-up completes the worker sends nothing at all.
-    assert_eq!(
-        f.files.inner.database.uploads().await.unwrap()[0].file,
-        file
-    );
-    let requests = f.storage.request_trace().len();
-    let Err(waiting) = f.files.inner.drain_uploads(false).await else {
-        panic!("an expired catch-up let the worker drain");
-    };
-    assert!(
-        matches!(&waiting, crate::SyncError::Storage(error) if error.failure() == StorageFailure::CatchUpRequired)
-    );
-    assert_eq!(f.storage.request_trace().len(), requests);
-    drain_through_expiry(&f, &storage, &file).await;
-    // Each part reached the provider once; none was sent again.
-    assert_eq!(provider_parts(&f), 3);
-    assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
-    f.close().await;
 }
 
 #[tokio::test]
@@ -626,7 +551,7 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
         DrainOutcome::Paused
     ));
     // Reconnecting forgets the catch-up: nothing is sent until a new one.
-    f.send.invalidate();
+    f.send.set(crate::SyncStatus::Opening);
     let reconnected = StepStorage::new(&f, &clock, 0);
     f.files
         .set_storage(Some(reconnected.clone()), std::future::ready(Ok(())))
@@ -636,93 +561,17 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
     let requests = f.storage.request_trace().len();
     assert!(f.files.inner.drain_uploads(false).await.is_err());
     assert_eq!(f.storage.request_trace().len(), requests);
-    assert_eq!(drain_through_expiry(&f, &reconnected, &file).await, 1);
+    reconnected.catch_up(&f.send);
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        1
+    );
     // The session continued at its confirmed part on the new connection.
     assert_eq!(reconnected.calls("resume"), 1);
     assert_eq!(reconnected.calls("begin"), 0);
     assert_eq!(provider_parts(&f), 3);
     assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
     f.close().await;
-}
-
-/// A lost create reply leaves the worker's own bytes at the path. Comparing
-/// them is a worker request too: at the expired second it reads nothing.
-async fn lost_reply_and_stale_comparison(f: &Fixture, clock: &FixedClock, storage: &StepStorage) {
-    use coven_storage::test_utils::MemoryRequest;
-    let file = f.attach("files", "photo", b"photo".to_vec()).await;
-    storage
-        .lose_create_reply
-        .store(true, std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
-    let path = f.path(&file);
-    assert!(f.storage.status(&path).await.unwrap().is_some());
-    // The retry's create is checked at second 299 and refused as occupied;
-    // the comparison would read at second 300.
-    clock.set(SystemTime::UNIX_EPOCH + Duration::from_secs(299));
-    storage
-        .after_create
-        .store(1, std::sync::atomic::Ordering::SeqCst);
-    let reads = |f: &Fixture| {
-        f.storage
-            .request_trace()
-            .iter()
-            .filter(|request| matches!(request, MemoryRequest::Read(read, _) if *read == path))
-            .count()
-    };
-    assert_eq!(drained(f.files.retry_uploads_now().await.unwrap()), 0);
-    assert_eq!(f.upload_reason(&file).await, Some(catch_up()));
-    assert_eq!(reads(f), 0);
-    assert!(f.queued(&file).await);
-    storage
-        .after_create
-        .store(0, std::sync::atomic::Ordering::SeqCst);
-    storage.catch_up(&f.send);
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        1
-    );
-    assert_eq!(reads(f), 1);
-    assert!(!f.queued(&file).await);
-}
-
-#[tokio::test]
-async fn the_occupied_paths_comparison_waits_for_a_fresh_catch_up() {
-    let (f, clock, storage) = stepping(0).await;
-    lost_reply_and_stale_comparison(&f, &clock, &storage).await;
-    f.close().await;
-}
-
-/// The worker's actual requests against Trace's `gateStep` with the upload
-/// actor (`upload_worker_gated`, `upload_parts_use_gate`): parts crossing the
-/// five-minute boundary, resumption after each new catch-up, and the
-/// comparison read after a lost create reply.
-#[tokio::test]
-#[ignore = "requires COVEN_IO_RUNNER"]
-async fn io_differential_upload_worker() {
-    let mut cases = Vec::new();
-    let mut results = Vec::new();
-    let mut trace = |storage: &StepStorage| {
-        let events = std::mem::take(&mut *storage.trace.lock().unwrap());
-        let (actions, allowed): (Vec<_>, Vec<_>) = events.into_iter().unzip();
-        cases.push(serde_json::json!({"check":"send_gate","actions":actions}));
-        results.push(serde_json::json!(allowed));
-    };
-    for step in [1, 60, 100, 149] {
-        let (f, _clock, storage) = stepping(step).await;
-        let file = f.attach("files", "large", three_parts()).await;
-        drain_through_expiry(&f, &storage, &file).await;
-        assert_eq!(provider_parts(&f), 3);
-        trace(&storage);
-        f.close().await;
-    }
-    let (f, clock, storage) = stepping(0).await;
-    lost_reply_and_stale_comparison(&f, &clock, &storage).await;
-    trace(&storage);
-    f.close().await;
-    assert_eq!(results, crate::discovery::tests::io_runner(&cases));
 }
 
 /// Bytes the provider holds are progress only once its confirmation is
@@ -789,6 +638,50 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     assert_eq!(f.queue().await, before);
     let mut live = f.subscribe_queue();
     assert_eq!(live.next().await.unwrap(), before);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn elapsed_time_does_not_expire_an_applied_device_between_parts() {
+    let (f, _, storage) = stepping(600).await;
+    let file = f.attach("files", "large", three_parts()).await;
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        1
+    );
+    assert_eq!(storage.calls("begin"), 1);
+    assert_eq!(storage.calls("finish"), 1);
+    assert_eq!(provider_parts(&f), 3);
+    assert_eq!(f.files.read_file(&file).await.unwrap(), three_parts());
+    f.close().await;
+}
+
+#[tokio::test]
+async fn other_bytes_at_an_own_file_path_refuse_only_that_upload() {
+    let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
+    let f = fixture(&clock).await;
+    let file = f.attach("files", "first", b"ours".to_vec()).await;
+    let path = coven_storage::ObjectPath::file(f.directory.id(), file.uploader(), file.id());
+    f.storage
+        .plant(&path, b"different complete object")
+        .await
+        .unwrap();
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        0
+    );
+    assert!(matches!(
+        f.upload_reason(&file).await,
+        Some(PendingReason::Refused(_))
+    ));
+    assert!(f.send.files_allowed());
+    let other = f.attach("files", "second", b"next".to_vec()).await;
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        1
+    );
+    assert!(!f.queued(&other).await);
+    assert!(f.queued(&file).await);
     f.close().await;
 }
 

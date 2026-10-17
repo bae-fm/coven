@@ -124,7 +124,7 @@ impl FilesInner {
         if waiting.is_empty() {
             return Ok(DrainOutcome::QueueEmpty);
         }
-        if !self.send.can_send() {
+        if !self.send.files_allowed() {
             return Err(coven_storage::StorageFailure::CatchUpRequired.into());
         }
         // An app retry overrides ordinary backoff, never a provider cooldown.
@@ -266,10 +266,7 @@ impl FilesInner {
             .map_err(FileReadError::from)?;
         Ok(true)
     }
-    /// A file path is this device's own: different occupant bytes mean another
-    /// copy uses its id, which stops every send from this owner (§10).
-    /// The comparison read is an upload-worker request, so it passes the same
-    /// fresh catch-up check as a send (SP, file uploads outside the pass).
+    /// Different bytes at a file path fail this upload attempt (§10).
     async fn settle_occupied(
         &self,
         storage: &dyn coven_storage::Storage,
@@ -277,12 +274,10 @@ impl FilesInner {
         expected: (u64, coven_crypto::ObjectDigest),
     ) -> Result<(), UploadFailure> {
         coven_storage::PublicationGate::check(self.send.as_ref(), path)?;
-        match crate::identity::settle_occupied(storage, &self.send, path, expected).await {
+        match crate::identity::settle_occupied(storage, path, expected).await {
             Ok(()) => Ok(()),
             Err(SyncError::Storage(error)) => Err(error.into()),
-            Err(SyncError::DeviceIdInUse(_)) => Err(coven_storage::StorageFailure::AlreadyExists
-                .with_source("another copy of this device published different bytes")
-                .into()),
+            Err(SyncError::Damaged(object)) => Err(UploadFailure::Refused(object.failure)),
             Err(error) => Err(coven_storage::StorageFailure::Protocol
                 .with_source(error)
                 .into()),
@@ -361,6 +356,6 @@ impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
         Ok(())
     }
     fn keep_going(&self) -> bool {
-        !self.owner.paused()
+        !self.owner.paused() && self.owner.send.files_allowed()
     }
 }

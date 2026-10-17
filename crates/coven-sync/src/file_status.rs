@@ -1,12 +1,13 @@
 //! Remote file availability, derived from one storage observation and the
 //! uploader's replayed state and signed reports; never written to a row (§16.1).
 
+use crate::FileSourceFailure;
 use crate::{
     files::{Files, FilesInner},
     FileMissingReason, FileReadError, PendingReason, PendingRecord, PendingSubject,
 };
 use coven_database::{DeviceState, FileRef};
-use coven_format::{file::FileHeader, pending::FileSourceFailure};
+use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, StoredObject};
 

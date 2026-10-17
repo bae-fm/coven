@@ -1,7 +1,8 @@
 //! Failures of store-log publication, file uploads and sync steps (E5, E7).
 
+use crate::OperationRejection;
 use coven_crypto::{custody::KeyError, CryptoError, MaterialError};
-use coven_database::{DbError, DropReason};
+use coven_database::DbError;
 use coven_foundation::files::{FileError, ObservationError, StoreLockError};
 use coven_foundation::id_source::{KeyId, StoreId};
 use coven_storage::{StorageError, StorageFailure};
@@ -45,7 +46,7 @@ pub enum SyncError {
     /// The requested journal row is not failed app work available for retry or discard.
     #[error("operation {0:?} is not pending")]
     NotPending(crate::OperationId),
-    /// Store-log and snapshot publication wait for the retained reload (§18).
+    /// Administrative and snapshot publication wait for the retained reload (§18).
     #[error("snapshot reload {0:?} must finish before publishing entries or snapshots")]
     ReloadPending(crate::OperationId),
     /// Decoding persisted operation data failed; its cause remains available.
@@ -54,7 +55,10 @@ pub enum SyncError {
     /// Deleting an S3 key with admin access did not establish its absence;
     /// its pending deletion stays (§13).
     #[error(transparent)]
-    AccessKeyNotDeleted(#[from] crate::access_keys::DeleteAccessKeyError),
+    AccessKeyNotDeleted(#[from] crate::sequence_sync::access_keys::DeleteAccessKeyError),
+    /// No greater positive store slot remains.
+    #[error("the store sequence is exhausted")]
+    SequenceExhausted,
     /// Storage refused or failed a request.
     #[error(transparent)]
     Storage(#[from] StorageError),
@@ -80,8 +84,8 @@ pub enum SyncError {
     #[error("key identity {0} has already been used")]
     KeyAlreadyUsed(KeyId),
     /// The proposed change is already invalid in the author's applied view.
-    #[error("store-log change rejected: {0:?}")]
-    Rejected(DropReason),
+    #[error("administrative change rejected: {0:?}")]
+    Rejected(OperationRejection),
     /// A required object failed authentication or parsing.
     #[error(transparent)]
     Damaged(#[from] crate::DamagedObject),
@@ -132,14 +136,7 @@ impl From<DbError> for SyncError {
             // The database refusing sync's own requests out of order or
             // against changed state is an internal invariant, not a database
             // failure an app can act on.
-            error @ (DbError::InvalidStoreLogEntry { .. }
-            | DbError::StoreLogEntriesChanged
-            | DbError::StoreLogEntryChanged(_)
-            | DbError::UploadNotOldest { .. }
-            | DbError::UploadNotAttempted { .. }
-            | DbError::KeyUploadChanged { .. }
-            | DbError::OperationChanged(_)
-            | DbError::Invariant { .. }) => Self::Failed {
+            error @ (DbError::OperationChanged(_) | DbError::Invariant { .. }) => Self::Failed {
                 failure: crate::LocalFailure::Database,
                 source: Arc::new(error),
             },
@@ -169,8 +166,7 @@ impl SyncError {
         }
     }
 
-    /// Splits a failure for delivery to several receivers: its local category
-    /// and the original as one shared cause, so each receives the same `Failed`.
+    #[cfg(test)]
     pub(crate) fn into_shared(
         self,
     ) -> (
@@ -226,8 +222,8 @@ pub enum SyncFailure {
     Other(#[source] Arc<dyn std::error::Error + Send + Sync>),
 }
 
-impl From<DropReason> for SyncError {
-    fn from(reason: DropReason) -> Self {
+impl From<OperationRejection> for SyncError {
+    fn from(reason: OperationRejection) -> Self {
         Self::Rejected(reason)
     }
 }

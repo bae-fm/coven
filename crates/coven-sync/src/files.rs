@@ -67,7 +67,7 @@ struct FilesInner {
     database: FileDatabase,
     directory: StoreDir,
     storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
-    send: Arc<crate::SendGate>,
+    send: Arc<crate::SyncState>,
     waits: Arc<crate::RetryWaits>,
     /// Failures observed on this connection that require a new connection.
     /// Reopening creates a new connection and permits one attempt again.
@@ -102,13 +102,13 @@ impl Files {
         database: FileDatabase,
         directory: StoreDir,
         storage: Option<Arc<dyn Storage>>,
-        send: Arc<crate::SendGate>,
+        send: Arc<crate::SyncState>,
         waits: Arc<crate::RetryWaits>,
         ids: IdSourceRef,
         limits: TransferLimits,
     ) -> Self {
         let mut changes = database.queued_work_changes();
-        let mut sending = send.changes();
+        let mut sending = send.subscribe();
         let (cancel_eager, _) = watch::channel(0);
         let (stop, mut stopping) = watch::channel(false);
         let inner = Arc::new(FilesInner {
@@ -237,7 +237,7 @@ impl Files {
 
     /// Finish transfers before verifying and committing a connection change.
     /// A failed setup leaves the current connection installed.
-    pub(crate) async fn set_storage(
+    pub async fn set_storage(
         &self,
         storage: Option<Arc<dyn Storage>>,
         ready: impl std::future::Future<Output = Result<(), SyncError>>,

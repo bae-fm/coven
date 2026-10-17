@@ -1,5 +1,6 @@
 //! Upload failures and the pending record and retry wait they commit together.
 
+use crate::FileSourceFailure;
 use crate::{
     files::file_error::{FileReadError, UploadFailure},
     files::FilesInner,
@@ -7,18 +8,17 @@ use crate::{
     Retry, SyncError,
 };
 use coven_database::{FileUpload, RetrySubject};
-use coven_format::pending::FileSourceFailure;
 use coven_storage::StorageFailure;
 
 impl FilesInner {
     /// The first unmet condition a failed attempt leaves for its file (§19.1):
-    /// a missing or changed source is the uploader's own `FileUnavailable`,
-    /// which its positions publish.
+    /// a missing or changed source is the uploader's own `FileUnavailable`.
     fn upload_reason(&self, error: &UploadFailure) -> PendingReason {
         match error {
+            UploadFailure::Refused(reason) => PendingReason::Refused(reason.clone()),
             UploadFailure::Storage(error) | UploadFailure::File(FileReadError::Storage(error)) => {
                 if error.failure() == StorageFailure::CatchUpRequired {
-                    return PendingReason::Waits(Prerequisite::StoreLogCatchUp);
+                    return PendingReason::Waits(Prerequisite::SequenceCatchUp);
                 }
                 match self.storage.read().expect("storage lock poisoned").as_ref() {
                     Some(storage) => PendingReason::Storage {
@@ -51,7 +51,7 @@ impl FilesInner {
 
     /// Record a failed attempt as the file's pending record with its next
     /// wait, persisting T and W before the upload waits. A catch-up wait is
-    /// woken by the send gate; connection waits and permanent failures keep no timer.
+    /// woken by the sync state; connection waits and permanent failures keep no timer.
     /// A wait that cannot be persisted holds the upload until the app retries.
     pub(super) async fn record_failure(
         &self,
@@ -72,7 +72,7 @@ impl FilesInner {
         }
         .retry()
             == Retry::Automatic
-            && reason != PendingReason::Waits(Prerequisite::StoreLogCatchUp);
+            && reason != PendingReason::Waits(Prerequisite::SequenceCatchUp);
         let record = move |reported_by| PendingRecord {
             subject: file,
             reason,

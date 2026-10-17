@@ -1,0 +1,134 @@
+use crate::sequence_sync::tests::*;
+use coven_storage::{test_utils::Faults, ObjectPath, Storage};
+
+#[tokio::test]
+async fn retention_does_not_wait_for_an_absent_device_and_returning_loads_the_floor() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(&ana.sync.database, "published", "kept by snapshot").await;
+    ana.sync.pass().await.unwrap();
+    let covered = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(group.store, covered.try_into().unwrap()))
+        .await
+        .unwrap()
+        .is_none());
+    assert!(group
+        .storage
+        .status(&ObjectPath::floor(group.store))
+        .await
+        .unwrap()
+        .is_some());
+    insert(&ben.sync.database, "offline", "original queue").await;
+    ben.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        rows(&ana.sync.database).await,
+        rows(&ben.sync.database).await
+    );
+    assert_eq!(rows(&ben.sync.database).await.len(), 2);
+    ana.sync.database.close().await.unwrap();
+    ben.sync.database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_lost_floor_reply_deletes_nothing_until_the_floor_is_observed() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(&ana.sync.database, "published", "retained").await;
+    ana.sync.pass().await.unwrap();
+    let covered = ana.sync.database.applied_slot().await.unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.storage
+        .set_faults(Faults {
+            lose_completion_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    ana.sync.pass().await.unwrap();
+    assert!(group
+        .storage
+        .status(&ObjectPath::floor(group.store))
+        .await
+        .unwrap()
+        .is_some());
+    let path = ObjectPath::slot(group.store, covered.try_into().unwrap());
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    assert!(ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .any(|record| record.kind == "sequence-retention"));
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(5),
+    );
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_none());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    ana.sync.database.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn superseded_snapshots_wait_for_replacement_grace_and_floor_release() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let first = ana
+        .sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    let old = ana.sync.session.lock().await.history.announcements[&first]
+        .snapshot
+        .clone();
+    let path = crate::snapshot_object::path(group.store, &old).unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&path).await.unwrap().is_some());
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert!(
+        group.storage.status(&path).await.unwrap().is_none(),
+        "superseded snapshot survives floor release"
+    );
+    let count = ana.storage.request_count();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.storage.request_count() - count, 2);
+    ana.sync.database.close().await.unwrap();
+}

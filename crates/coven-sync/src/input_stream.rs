@@ -2,7 +2,7 @@
 
 use super::{identity, ObjectInput};
 use crate::SyncError;
-use coven_storage::{ByteRange, ObjectStream, Storage, StorageFailure, StoredObject};
+use coven_storage::{ByteRange, ObjectStream, Storage, StorageFailure};
 use std::io::{Cursor, Read};
 
 const BUFFER: usize = coven_format::chunks::CHUNK_SIZE;
@@ -45,16 +45,9 @@ impl<'a> InputStream<'a> {
         self.response = Some(response);
     }
 
+    #[cfg(test)]
     pub(crate) fn position(&self) -> u64 {
         self.position
-    }
-
-    pub(crate) fn object(&self) -> &StoredObject {
-        &self.input.object
-    }
-
-    pub(crate) async fn keep_metadata(&mut self, bytes: Vec<u8>) -> Result<(), SyncError> {
-        self.input.keep_metadata(bytes).await
     }
 
     pub(crate) async fn read_exact(&mut self, length: usize) -> Result<Vec<u8>, SyncError> {
@@ -160,6 +153,7 @@ impl<'a> InputStream<'a> {
     /// Receive and retain every remaining byte, then continue from the same
     /// position over local input: a consumer holding the database writer
     /// never waits for the provider (§3.1).
+    #[cfg(test)]
     pub(crate) async fn retain_rest(&mut self) -> Result<(), SyncError> {
         let resume = self.position;
         self.drain().await?;
@@ -186,26 +180,6 @@ impl<'a> InputStream<'a> {
             self.complete = true;
         }
         Ok(())
-    }
-
-    /// Complete an already opened response before classifying object contents.
-    /// Transport and local I/O failures remain retryable and are never drained
-    /// through a replacement response.
-    pub(crate) async fn checked<T>(
-        &mut self,
-        result: Result<T, SyncError>,
-    ) -> Result<T, SyncError> {
-        if matches!(
-            &result,
-            Err(SyncError::Damaged(_)
-                | SyncError::Crypto(_)
-                | SyncError::Format(_)
-                | SyncError::KeyUnavailable(_)
-                | SyncError::UpdateRequired(_))
-        ) {
-            self.drain().await?;
-        }
-        result
     }
 }
 

@@ -1,7 +1,7 @@
 //! When queued uploads retry (§16.5, E7): each failure is the file's pending
 //! record. Recoverable source, disk and provider failures wait their persisted
 //! delay; sign-in and access failures wait for a new connection. A catch-up
-//! wait is woken by the send gate; a provider cooldown holds the whole queue.
+//! wait is woken by the sync state; a provider cooldown holds the whole queue.
 
 use crate::{files::FilesInner, PendingReason, PendingRecord, Retry};
 use coven_database::{FileUpload, RetrySubject};
@@ -30,7 +30,7 @@ impl FilesInner {
             .read()
             .expect("storage lock poisoned")
             .is_some();
-        let uploads = connected && !self.paused() && self.send.can_send();
+        let uploads = connected && !self.paused() && self.send.files_allowed();
         self.waits
             .next_wake(|subject| match subject {
                 RetrySubject::Upload(_) => uploads,

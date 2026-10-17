@@ -47,9 +47,8 @@ fn causes_survive_cloning_but_do_not_change_equality_or_recorded_tags() {
                 Refusal::NotAuthorized | Refusal::ContentHash
             ));
         }
-        let wire = RefusalCode::from(failure);
-        assert_eq!(u8::from(wire), tag as u8);
-        let restored = Refusal::from(RefusalCode::try_from(tag as u8).unwrap());
+        let wire = serde_json::to_vec(failure).unwrap();
+        let restored: Refusal = serde_json::from_slice(&wire).unwrap();
         assert_eq!(failure, &restored);
         assert!(restored.source().is_none());
         for (other_tag, other) in failures.iter().enumerate() {

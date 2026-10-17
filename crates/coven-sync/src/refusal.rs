@@ -2,32 +2,35 @@
 
 use coven_crypto::CryptoError;
 use coven_database::DbError;
-use coven_format::pending::RefusalCode;
 use coven_merge::MergeError;
 use std::{error::Error, fmt, sync::Arc};
 
 /// One vocabulary for refused objects. Native causes survive immediate calls;
 /// persisted and peer reports retain only the variant. Equality ignores causes.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub enum Refusal {
     /// Opening the object or its authenticated path failed.
     Decryption {
         /// The native check failure, absent on a recorded report.
+        #[serde(skip)]
         cause: Option<Arc<CryptoError>>,
     },
     /// The author's signature did not verify.
     Signature {
         /// The native signature failure, absent on a recorded report.
+        #[serde(skip)]
         cause: Option<Arc<CryptoError>>,
     },
     /// The bytes violate their format.
     Parse {
         /// The native decoder failure, absent on a recorded report.
+        #[serde(skip)]
         cause: Option<Arc<dyn Error + Send + Sync>>,
     },
     /// The authenticated write failed merge or application-schema checks.
     InvalidWrite {
         /// The native validation failure, absent on a recorded report.
+        #[serde(skip)]
         cause: Option<Arc<DbError>>,
     },
     /// The author's recorded view does not authorize this object.
@@ -35,11 +38,13 @@ pub enum Refusal {
     /// The timestamp or recorded past violates causality.
     InvalidCausality {
         /// The native merge failure, if this check produced one.
+        #[serde(skip)]
         cause: Option<Arc<MergeError>>,
     },
     /// The object's identity disagrees with its path, author or key material.
     WrongIdentity {
         /// The native format, merge or key-material failure, if one was produced.
+        #[serde(skip)]
         cause: Option<Arc<dyn Error + Send + Sync>>,
     },
     /// Authenticated file plaintext disagrees with the row's content hash.
@@ -112,49 +117,6 @@ impl From<coven_format::Error> for Refusal {
             error => Self::Parse {
                 cause: Some(Arc::new(error)),
             },
-        }
-    }
-}
-
-impl Refusal {
-    /// A parse failure from a newer format is no verdict on the bytes: it is
-    /// the update this version needs before it can check them (§19.1).
-    pub(crate) fn required_update(&self) -> Option<crate::RequiredUpdate> {
-        match self {
-            Self::Parse { cause: Some(error) } => crate::error::required_format(error.as_ref()),
-            _ => None,
-        }
-    }
-}
-
-// The format crate cannot depend on DbError's owning crate. Its wire
-// value represents exactly the same variants without process-local causes.
-impl From<&Refusal> for RefusalCode {
-    fn from(failure: &Refusal) -> Self {
-        match failure {
-            Refusal::Decryption { .. } => Self::Decryption,
-            Refusal::Signature { .. } => Self::Signature,
-            Refusal::Parse { .. } => Self::Parse,
-            Refusal::InvalidWrite { .. } => Self::InvalidWrite,
-            Refusal::NotAuthorized => Self::NotAuthorized,
-            Refusal::InvalidCausality { .. } => Self::InvalidCausality,
-            Refusal::WrongIdentity { .. } => Self::WrongIdentity,
-            Refusal::ContentHash => Self::ContentHash,
-        }
-    }
-}
-
-impl From<RefusalCode> for Refusal {
-    fn from(failure: RefusalCode) -> Self {
-        match failure {
-            RefusalCode::Decryption => Self::Decryption { cause: None },
-            RefusalCode::Signature => Self::Signature { cause: None },
-            RefusalCode::Parse => Self::Parse { cause: None },
-            RefusalCode::InvalidWrite => Self::InvalidWrite { cause: None },
-            RefusalCode::NotAuthorized => Self::NotAuthorized,
-            RefusalCode::InvalidCausality => Self::InvalidCausality { cause: None },
-            RefusalCode::WrongIdentity => Self::WrongIdentity { cause: None },
-            RefusalCode::ContentHash => Self::ContentHash,
         }
     }
 }

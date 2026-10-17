@@ -264,9 +264,7 @@ impl UploadedFile {
             coven_format::Error::UnsupportedVersion(version)
                 if version > coven_format::FORMAT_VERSION =>
             {
-                FileReadError::UpdateRequired(coven_format::pending::RequiredUpdate::CovenFormat {
-                    version,
-                })
+                FileReadError::UpdateRequired(crate::RequiredUpdate::CovenFormat { version })
             }
             _ => self.integrity(),
         })?;

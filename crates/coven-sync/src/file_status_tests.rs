@@ -1,8 +1,9 @@
 use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_status::{status, FileStatus};
-use crate::{FileMissingReason, FileReadError, PendingReason, PendingRecord, PendingSubject};
+use crate::FileSourceFailure;
+use crate::{FileMissingReason, FileReadError};
 use coven_database::{CacheFill, DeviceState, FileRef, Provenance};
-use coven_format::{file::FileHeader, pending::FileSourceFailure};
+use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{test_utils::MemoryRequest, Storage, StorageFailure};
 use serde_json::{json, Value};
@@ -15,13 +16,7 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
         .await
         .unwrap();
     for write in a.database.test_queued_writes().await.unwrap() {
-        b.database
-            .apply_downloaded::<PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     let remote = b.database.file_ref("files", "photo").await.unwrap();
     assert_eq!(
@@ -31,22 +26,8 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
     (b, remote)
 }
 
-async fn report(b: &Fixture, file: &FileRef, failure: FileSourceFailure) {
-    b.database
-        .replace_pending_reports(vec![PendingRecord {
-            subject: PendingSubject::File {
-                device: file.uploader(),
-                file: file.id(),
-            },
-            reason: PendingReason::FileUnavailable(FileMissingReason::Source(failure)),
-            reported_by: file.uploader(),
-        }])
-        .await
-        .unwrap();
-}
-
 #[tokio::test]
-async fn absence_is_judged_by_the_uploaders_state_and_signed_report() {
+async fn absence_is_judged_by_the_uploaders_applied_state() {
     let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = a.attach("files", "photo", vec![61; CHUNK + 9]).await;
     let (b, remote) = receiver(&a, &file).await;
@@ -58,18 +39,6 @@ async fn absence_is_judged_by_the_uploaders_state_and_signed_report() {
     );
     assert!(matches!(b.files.read_file(&remote).await,
         Err(FileReadError::Uploading { device: d, .. }) if d == device));
-    // A's signed report that its source changed makes the file missing.
-    report(&b, &remote, FileSourceFailure::Changed).await;
-    let changed = FileMissingReason::Source(FileSourceFailure::Changed);
-    assert_eq!(
-        b.files.file_status(&remote).await.unwrap(),
-        FileStatus::Missing {
-            device,
-            reason: changed.clone()
-        }
-    );
-    assert!(matches!(b.files.read_file(&remote).await,
-        Err(FileReadError::Missing { device: d, reason, .. }) if d == device && reason == changed));
     // The uploader's state takes precedence over its source report.
     for (state, reason) in [
         (DeviceState::Removed, FileMissingReason::DeviceRemoved),
@@ -175,13 +144,7 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
                 }
             }
         }
-        b.database
-            .apply_downloaded::<PendingRecord>(
-                write.into(),
-                coven_database::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-            )
-            .await
-            .unwrap();
+        crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     let remote = b.database.file_ref("files", "photo").await.unwrap();
     assert_eq!(remote.id(), file.id());
@@ -354,15 +317,11 @@ async fn st_differential_file_status() {
     let ranges = record(observe(&a, &b, &remote, &original).await);
     a.storage.set_online(true);
     case("error", None, evidence, ranges);
-    report(&b, &remote, FileSourceFailure::Changed).await;
-    evidence = ("active", Some("changed"));
-    let ranges = record(observe(&a, &b, &remote, &original).await);
-    case("absent", None, evidence, ranges);
     b.database
         .test_device_state(device, DeviceState::Removed)
         .await
         .unwrap();
-    evidence = ("removed", Some("changed"));
+    evidence = ("removed", None);
     let ranges = record(observe(&a, &b, &remote, &original).await);
     case("absent", None, evidence, ranges);
     // Present: the complete object, then a longer one and truncated ones.

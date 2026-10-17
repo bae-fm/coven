@@ -1,0 +1,110 @@
+//! Operation waits use their own prerequisites and persisted retry deadlines.
+use crate::{
+    sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry, SyncError,
+};
+use coven_crypto::StoreKeyring;
+use coven_database::{OperationId, OperationRecord, RetrySubject};
+use coven_merge::Audience;
+
+impl SequenceSync {
+    pub(crate) async fn operation_ready(
+        &self,
+        record: &OperationRecord,
+        ring: &StoreKeyring,
+    ) -> Result<bool, SyncError> {
+        let subject = RetrySubject::Operation(record.id);
+        let woken = self
+            .waits
+            .evidence_woken(record.id, |audience, key| Ok(holds(ring, audience, key)))?;
+        if let Some(pending) = self
+            .database
+            .operation_pending::<PendingRecord>(record.id)
+            .await?
+        {
+            if !self
+                .database
+                .pending_can_retry::<PendingRecord>(pending.subject)
+                .await?
+            {
+                self.waits.seen(subject);
+                return Ok(false);
+            }
+        }
+        let wait = self.database.retry_wait(subject).await?;
+        Ok(self.waits.due(subject, wait.as_ref())
+            || (woken && wait.is_some() && self.waits.cooldown().is_none()))
+    }
+
+    pub(crate) fn error_reason(&self, error: &SyncError) -> PendingReason {
+        match error {
+            SyncError::Pending(record) => record.reason.clone(),
+            SyncError::Storage(error) => PendingReason::Storage {
+                provider: self.storage.config().provider(),
+                failure: error.failure(),
+            },
+            SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
+            SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
+            SyncError::Removed => PendingReason::Removed,
+            SyncError::MemberKeysReplaced { member } => {
+                PendingReason::MemberKeysReplaced { member: *member }
+            }
+            SyncError::KeyUnavailable(key) => PendingReason::KeyUnavailable {
+                audience: Audience::Store,
+                key: *key,
+            },
+            SyncError::Cleanup { cleanup, .. } => self.error_reason(cleanup),
+            _ => PendingReason::Failed(error.local_failure()),
+        }
+    }
+
+    pub(crate) async fn record_operation_error(
+        &self,
+        id: OperationId,
+        kind: crate::OperationKind,
+        error: &SyncError,
+        ring: &StoreKeyring,
+    ) -> Result<(), SyncError> {
+        self.waits
+            .attempt_scope(id)
+            .run(async {
+                let pending = PendingRecord {
+                    subject: PendingSubject::Operation { id, kind },
+                    reported_by: self.device,
+                    reason: self.error_reason(error),
+                };
+                let subject = RetrySubject::Operation(id);
+                if pending.retry() == Retry::Automatic {
+                    let held = crate::RetryWaits::lacks_key(&pending.reason)
+                        .map(|(audience, key)| holds(ring, &audience, key));
+                    self.waits.arm_evidence(id, &pending.reason, held, None);
+                    let prior = self.database.retry_wait(subject).await?;
+                    let wait = self.waits.next(prior.as_ref())?;
+                    if let Err(error) = self
+                        .database
+                        .record_operation_retry(pending, Some(wait))
+                        .await
+                    {
+                        self.waits.hold(subject);
+                        return Err(error.into());
+                    }
+                    self.waits.arm(subject, &wait);
+                } else {
+                    self.database.record_operation_retry(pending, None).await?;
+                    self.waits.forget(subject);
+                    self.waits.clear_evidence(id);
+                }
+                Ok(())
+            })
+            .await
+    }
+}
+fn holds(
+    ring: &StoreKeyring,
+    audience: &Audience,
+    key: coven_foundation::id_source::KeyId,
+) -> bool {
+    match audience {
+        Audience::Store => ring.store_key_ids().any(|id| id == key),
+        Audience::Circle(circle) => ring.circle_key_ids(*circle).any(|id| id == key),
+    }
+}

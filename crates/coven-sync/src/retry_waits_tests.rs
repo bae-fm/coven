@@ -33,7 +33,12 @@ impl Fixture {
     }
 
     async fn open(&self) -> (Database, RetryWaits) {
-        let database = crate::tests::open(self.directory.clone()).await;
+        let database = coven_database::DatabaseBuilder::new(self.directory.clone())
+            .synced_tables(vec![])
+            .migrations(vec![coven_database::Migration::sql(1, "local", "SELECT 1")])
+            .open()
+            .await
+            .unwrap();
         let waits = RetryWaits::open(database.clone(), self.clock.clone())
             .await
             .unwrap();
@@ -47,35 +52,6 @@ impl Fixture {
 }
 
 const JOIN: RetrySubject = RetrySubject::Join;
-
-/// The store's retry waits and its connection, bound to the send gate and
-/// the shared cooldown as opening composes them.
-pub(crate) async fn connected(
-    storage: &coven_storage::test_utils::MemoryStorage,
-    database: &Database,
-    clock: &Arc<FixedClock>,
-    send: &Arc<crate::SendGate>,
-) -> (
-    Arc<RetryWaits>,
-    Arc<coven_storage::test_utils::MemoryStorage>,
-) {
-    let waits = Arc::new(
-        RetryWaits::open(database.clone(), clock.clone())
-            .await
-            .unwrap(),
-    );
-    let storage = storage
-        .with_publication_gate(send.clone())
-        .with_cooldown(waits.clone());
-    (waits, Arc::new(storage))
-}
-
-/// Advance `clock` until every armed retry wait in `waits` is due.
-pub(crate) fn elapse_retry_delays(waits: &RetryWaits, clock: &FixedClock) {
-    while let Some(wait) = waits.next_due(|_| true).filter(|wait| !wait.is_zero()) {
-        clock.set(clock.now() + wait);
-    }
-}
 
 async fn due(database: &Database, waits: &RetryWaits, subject: RetrySubject) -> bool {
     let persisted = database.retry_wait(subject).await.unwrap();
@@ -254,7 +230,7 @@ async fn io_differential_waiting() {
             "retried": retried,
         }));
     }
-    assert_eq!(actual, crate::discovery::tests::io_runner(&cases));
+    assert_eq!(actual, crate::tests::io_runner(&cases));
 }
 
 #[tokio::test]
