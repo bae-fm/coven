@@ -3482,12 +3482,13 @@ after the change, and Ben's edits made in the old shape have to land somewhere.
 Every write records the schema version it was made with. Coven sorts each
 migration into one of two kinds by comparing the schema before and after:
 
-- **An addition** only adds tables or columns. Devices on the old version keep
-  working, and their writes apply everywhere. A device holds a newer-version
-  write it can't read until its app updates.
-- **A breaking change** is anything else: renaming, retyping or dropping, a new
-  constraint, or a migration that changes rows. It raises the store's schema
-  version.
+- **An addition** only adds tables, including their own indexes, constraints and
+  triggers, or adds columns without new constraints to existing tables. Devices
+  on the old version keep working, and their writes apply everywhere. A device
+  holds a newer-version write it can't read until its app updates.
+- **A breaking change** is anything else: renaming, retyping or dropping, adding
+  an index, constraint or trigger to an existing table, or changing rows. It
+  raises the store's schema version.
 
 This section covers how coven tells them apart (§18.1), additions (§18.2), raising
 the version (§18.3), the write a migration makes (§18.4), the migrating device's
@@ -3500,10 +3501,14 @@ format (§18.9).
 Coven compares the schema before and after the migration, as SQLite lists it,
 together with the app's declarations.
 
+Ana adds a `gifts` table with its own index and trigger. This is an addition:
+Ben's old-version writes cannot touch a table that did not exist in his schema.
+Adding the same index or trigger to the existing `notes` table is breaking.
+
 | The migration | Kind |
 |---|---|
-| adds only new tables or new columns | addition |
-| adds an index, constraint or foreign key, or anything else | breaking |
+| adds only new tables with their own indexes, constraints and triggers, or new columns without new constraints | addition |
+| adds an index, constraint (including a foreign key) or trigger to an existing synced table, or anything else | breaking |
 | changes an existing table's `owner_only` declaration | breaking (so declarations are compared too, not only SQLite's schema) |
 | drops or renames a table | breaking, since it may have synced |
 | inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
