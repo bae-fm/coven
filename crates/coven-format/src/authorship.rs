@@ -646,8 +646,8 @@ impl WriteEvidence {
 }
 
 /// A row's selected original creation (D7 section 6): the generation-zero
-/// insert with the smallest timestamp, and the creation it names as its
-/// owner, which differs only for an audience copy (§8.8).
+/// insert with the lowest claimed slot, then lowest write number, and the
+/// creation it names as its owner, which differs only for an audience copy (§8.8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Creation {
     /// The row.
