@@ -52,10 +52,25 @@ pub(crate) enum SlotBody {
 }
 
 pub(crate) fn read_exact(
-    input: &mut impl Read,
+    input: &mut (impl Read + Seek),
     length: usize,
     path: &ObjectPath,
 ) -> Result<Vec<u8>, SyncError> {
+    let position = input
+        .stream_position()
+        .map_err(|error| read_error(path, error))?;
+    let end = input
+        .seek(SeekFrom::End(0))
+        .map_err(|error| read_error(path, error))?;
+    input
+        .seek(SeekFrom::Start(position))
+        .map_err(|error| read_error(path, error))?;
+    if end
+        .checked_sub(position)
+        .is_none_or(|remaining| length as u64 > remaining)
+    {
+        return Err(damaged(path, Refusal::from(coven_format::Error::Truncated)));
+    }
     let mut bytes = vec![0; length];
     input
         .read_exact(&mut bytes)

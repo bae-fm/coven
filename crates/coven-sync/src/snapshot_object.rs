@@ -173,7 +173,10 @@ impl SnapshotObject {
     }
 }
 
-pub(crate) fn frame(input: &mut impl Read, path: &ObjectPath) -> Result<Vec<u8>, SyncError> {
+pub(crate) fn frame(
+    input: &mut (impl Read + Seek),
+    path: &ObjectPath,
+) -> Result<Vec<u8>, SyncError> {
     let mut bytes = read_exact(input, coven_format::FRAME_PREFIX_LEN, path)?;
     let length = checked(path, coven_format::frame_length(&bytes))?;
     bytes.extend(read_exact(input, length - bytes.len(), path)?);
@@ -278,3 +281,7 @@ pub(crate) fn open_routing(
         None => Ok(()),
     }
 }
+
+#[cfg(test)]
+#[path = "snapshot_object_tests.rs"]
+mod tests;
