@@ -825,30 +825,14 @@ copied key. Output contains the exact copy/introduction `slots`, final
 `through`, and the key observations `after`. Membership is fixed across this
 plan; interleaved membership changes require another prefix and selection.
 
-**`queueReload`** takes only `scenario`, one of `reset`, `breakingRaise`,
-`newlyReadable` and `selfReplacement`, and reads no other input. Each answer is
-computed from the fixed histories in
-[`QueueReloadExamples`](sequence/CovenSequence/QueueReloadExamples.lean) that the
-four counterexample theorems use. So a Rust test that sends it compares its own
-reload with these fixed values; the model never runs on Rust's inputs.
-
-- `reset` answers `retained`, the queued originals the reset reload keeps;
-  `replayed`, how many of them are eligible to apply over the loaded rows; and
-  `after_replayed`, how many are when the same write is made after the reload:
-  `{"retained":1,"replayed":0,"after_replayed":1}`.
-- `breakingRaise` answers whether the queued write's new key passes the commit
-  check before the raise loads (`before_allowed`) and after (`after_allowed`),
-  and whether every queued original is at the raised version (`new_schema`):
-  `{"before_allowed":true,"after_allowed":false,"new_schema":true}`.
-- `newlyReadable` answers whether a fresh key may be written to the circle
-  before its membership entry loads and after, and, after it, whether key 7
-  passes against empty rows and against the loaded rows:
-  `{"before_allowed":false,"after_allowed":true,"empty_key_allowed":true,"loaded_key_allowed":false}`.
-- `selfReplacement` answers whether the old and new signing keys authenticate
-  the queued original's authored prefix, whether each still counts after the
-  replacement, whether a write made after it can be sent, and whether the new key
-  still counts after a further replacement:
-  `{"old_authenticates":true,"new_authenticates":false,"old_counts":false,"new_counts":true,"after_send":true,"later_counts":false}`.
+**`queueReload`** supplies one of four `scenario` values. `reset` carries the
+actual queue's write numbers, schemas, authored-read slots and row keys, the
+installed rows and reset, and a subsequent write. `breakingRaise` carries the
+rows before and after loading, a candidate key and the queued schema versions.
+`newlyReadable` carries membership and row keys before and after loading.
+`selfReplacement` carries counted replacement slots, authored-read prefixes and
+credential generations. The runner evaluates `QueueReload` with these inputs;
+SQL execution, signature checks and extraction from snapshots happen in Rust.
 
 ## Rust comparisons
 
@@ -882,6 +866,12 @@ and settlement comparisons also include deterministic seeded cases.
 - `coven-merge` calls `SlotPast::contains` for every pair of supplied writes,
   including batches and shuffled input order. Histories satisfy the model's
   own-number publication and monotone authored-read premises.
+- The four `sequence_queue_*` tests pass their actual reload inputs to the
+  runner. Reset cases vary queue length; the other cases compare write
+  permission after a breaking raise, newly readable circle rows, and original
+  authentication across two credential replacements. JSON tests also vary
+  authored-read prefixes, candidate keys and membership to check that those
+  inputs affect the result.
 - `coven-sync`'s `history::tests::sequence_key_selection_matches_lean` compares
   the actual history selectors, acceptance and exposure over custody subsets,
   introduction prefixes, opposite id/introduction ordering, repeated copies,

@@ -309,16 +309,20 @@ async fn during_load(
 
 // An original authored without the reset has the same past whether queued
 // before the reload gate or admitted through a hypothetical gate-free commit.
-async fn reset() -> Value {
+async fn reset(count: usize) -> (Value, Value) {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ana.sync.reset(Audience::Store).await.unwrap();
-    insert(ben.database(), "queued", "value").await;
+    let applied = ben.database().applied_slot().await.unwrap();
+    let loaded_rows = rows(ana.database()).await;
+    for key in ["queued0", "queued1", "queued2"].into_iter().take(count) {
+        insert(ben.database(), key, "value").await;
+    }
     let originals = ben.database().waiting_snapshot_headers().await.unwrap();
-    let snapshot = ana
+    let boundary = ana
         .sync
         .session
         .lock()
@@ -328,8 +332,9 @@ async fn reset() -> Value {
         .last()
         .unwrap()
         .boundary
-        .snapshot()
         .clone();
+    let reset_at = boundary.entry().0;
+    let snapshot = boundary.snapshot().clone();
     let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
     during_load(&ben, path, async {
         assert!(matches!(
@@ -350,11 +355,13 @@ async fn reset() -> Value {
     let replayed = rows(ben.database()).await.len();
     assert_eq!(replayed, 0);
     assert!(ben.database().lost_values().await.unwrap().is_empty());
-    insert(ben.database(), "queued", "value").await;
+    let target = ben.database().applied_slot().await.unwrap();
+    let version = ben.database().schema_version().await.unwrap();
+    insert(ben.database(), "queued0", "value").await;
     let after = rows(ben.database()).await;
-    assert_eq!(after, [("queued".into(), "value".into())]);
+    assert_eq!(after, [("queued0".into(), "value".into())]);
     let waiting = ben.database().waiting_snapshot_headers().await.unwrap();
-    assert_eq!(waiting.len(), 2);
+    assert_eq!(waiting.len(), count + 1);
     ben.sync.reload_from_snapshot().await.unwrap();
     assert_eq!(rows(ben.database()).await, after);
     assert_eq!(
@@ -364,24 +371,38 @@ async fn reset() -> Value {
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }
-    json!({"retained": originals.len(), "replayed": replayed, "after_replayed": after.len()})
+    let header = |h: &coven_format::write_stream::WriteHeaderFrame, key: String| {
+        json!({
+        "number": h.header.position.number, "schema": h.header.schema_version,
+        "read_through": h.header.read_through, "key": key})
+    };
+    let input = json!({"kind":"queueReload", "scenario":"reset", "applied":applied,
+        "target":target, "reset":reset_at, "version":version,
+        "loaded_rows":loaded_rows.into_iter().map(|r| r.0).collect::<Vec<_>>(),
+        "queue":originals.iter().enumerate().map(|(key,h)| header(h,format!("queued{key}"))).collect::<Vec<_>>(),
+        "after":header(waiting.last().unwrap(),"queued0".into())});
+    (
+        input,
+        json!({"retained": originals.len(), "replayed": replayed, "after_replayed": after.len()}),
+    )
 }
 
 #[tokio::test]
 async fn reset_queue_preservation_does_not_make_an_unread_reset_writable() {
-    reset().await;
+    reset(1).await;
 }
 
 #[tokio::test]
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_queue_reset_matches_lean() {
-    assert_eq!(
-        reset().await,
-        crate::tests::run_lean(
-            "COVEN_SEQUENCE_LEAN",
-            &json!({"kind":"queueReload", "scenario":"reset"})
-        )
-    );
+    for count in [1, 3] {
+        let (input, actual) = reset(count).await;
+        assert_eq!(
+            actual,
+            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+            "{input}"
+        );
+    }
 }
 
 async fn migrate(group: &Group, device: Device) -> Device {
@@ -421,7 +442,7 @@ async fn open_migrated(
         .await
 }
 
-async fn breaking_raise() -> Value {
+async fn breaking_raise() -> (Value, Value) {
     let group = Group::new();
     let ana = group.device(1).await;
     let ben = group.device(2).await;
@@ -445,6 +466,8 @@ async fn breaking_raise() -> Value {
     copy_tree(ben._temp.path(), copy.path());
     let queued = open_migrated(&group, copy, ben.identity.clone()).await;
     let ben = open_migrated(&group, ben._temp, ben.identity).await;
+    let before_rows = rows(queued.database()).await;
+    let loaded_rows = rows(ana.database()).await;
     let before = queued
         .database()
         .write(|sql| {
@@ -454,7 +477,9 @@ async fn breaking_raise() -> Value {
         .await;
     assert!(before.is_ok(), "{before:?}");
     let originals = queued.database().waiting_snapshot_headers().await.unwrap();
-    let new_schema = originals.last().unwrap().header.schema_version == 2;
+    let version = ana.database().schema_version().await.unwrap();
+    let queued_version = originals.last().unwrap().header.schema_version;
+    let new_schema = queued_version == version;
     assert!(new_schema);
     ana.sync.pass().await.unwrap();
     ana.sync.raise_schema(Audience::Store, 2).await.unwrap();
@@ -475,7 +500,13 @@ async fn breaking_raise() -> Value {
     for device in [&ana, &ben, &queued] {
         device.database().close().await.unwrap();
     }
-    json!({"before_allowed": before.is_ok(), "after_allowed": after.is_ok(), "new_schema":new_schema})
+    (
+        json!({"kind":"queueReload", "scenario":"breakingRaise", "candidate":"derived",
+        "before_rows":before_rows.into_iter().map(|r|r.0).collect::<Vec<_>>(),
+        "loaded_rows":loaded_rows.into_iter().map(|r|r.0).collect::<Vec<_>>(),
+        "queued_versions":[queued_version], "version":version}),
+        json!({"before_allowed": before.is_ok(), "after_allowed": after.is_ok(), "new_schema":new_schema}),
+    )
 }
 
 #[tokio::test]
@@ -486,12 +517,11 @@ async fn a_breaking_raise_changes_the_commit_key_check_even_at_the_new_schema() 
 #[tokio::test]
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_queue_breaking_raise_matches_lean() {
+    let (input, actual) = breaking_raise().await;
     assert_eq!(
-        breaking_raise().await,
-        crate::tests::run_lean(
-            "COVEN_SEQUENCE_LEAN",
-            &json!({"kind":"queueReload", "scenario":"breakingRaise"})
-        )
+        actual,
+        crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+        "{input}"
     );
 }
 
@@ -531,7 +561,7 @@ async fn circle_device(group: &Group, seed: u8) -> Device {
         .await
 }
 
-async fn newly_readable() -> Value {
+async fn newly_readable() -> (Value, Value) {
     use coven_format::admin::StoreChange;
     let group = Group::new();
     let ana = circle_device(&group, 1).await;
@@ -543,6 +573,14 @@ async fn newly_readable() -> Value {
     ana.sync.pass().await.unwrap();
     let snapshot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
     read(&ben).await;
+    let before_member = ben
+        .database()
+        .store_state()
+        .await
+        .unwrap()
+        .reads_circle(circle, &ben.identity.member());
+    let before_rows = pins(ben.database()).await;
+    let loaded_rows = pins(ana.database()).await;
     let before = ben
         .database()
         .write(move |sql| {
@@ -603,6 +641,12 @@ async fn newly_readable() -> Value {
         );
     })
     .await;
+    let after_member = ben
+        .database()
+        .store_state()
+        .await
+        .unwrap()
+        .reads_circle(circle, &ben.identity.member());
     let loaded = ben
         .database()
         .write(move |sql| {
@@ -636,8 +680,14 @@ async fn newly_readable() -> Value {
     for device in [&ana, &ben] {
         device.database().close().await.unwrap();
     }
-    json!({"before_allowed":before.is_ok(),"after_allowed":after.is_ok(),
-        "empty_key_allowed":empty_key_allowed,"loaded_key_allowed":loaded.is_ok()})
+    (
+        json!({"kind":"queueReload", "scenario":"newlyReadable", "candidate":"8", "existing":"7",
+        "before_member":before_member,"after_member":after_member,
+        "before_rows":before_rows.into_iter().map(|r|r.0).collect::<Vec<_>>(),
+        "loaded_rows":loaded_rows.into_iter().map(|r|r.0).collect::<Vec<_>>()}),
+        json!({"before_allowed":before.is_ok(),"after_allowed":after.is_ok(),
+        "empty_key_allowed":empty_key_allowed,"loaded_key_allowed":loaded.is_ok()}),
+    )
 }
 
 #[tokio::test]
@@ -648,16 +698,15 @@ async fn a_new_circle_changes_membership_and_key_checks_when_history_installs() 
 #[tokio::test]
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_queue_newly_readable_matches_lean() {
+    let (input, actual) = newly_readable().await;
     assert_eq!(
-        newly_readable().await,
-        crate::tests::run_lean(
-            "COVEN_SEQUENCE_LEAN",
-            &json!({"kind":"queueReload", "scenario":"newlyReadable"})
-        )
+        actual,
+        crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+        "{input}"
     );
 }
 
-async fn self_replacement() -> Value {
+async fn self_replacement() -> (Value, Value) {
     let group = Group::new();
     let ana = group.device(1).await;
     group.create(&ana).await;
@@ -688,6 +737,7 @@ async fn self_replacement() -> Value {
     new.as_ref().unwrap();
     assert!(old_authenticates);
     assert!(!new_authenticates);
+    let current_slot = session.through;
     drop(session);
     // Pre-existing originals drained before replacement; the same immutable
     // read-through on a new tail would demand that now-retired credential.
@@ -724,12 +774,36 @@ async fn self_replacement() -> Value {
         matches!(&later, Err(crate::SyncError::MemberKeysReplaced { .. })),
         "{later:?}"
     );
+    let replacements: Vec<_> = session.history.cutoffs.iter().filter_map(|(slot,change)|
+        matches!(change, StoreChange::ReplaceMemberKeys { member, .. } if *member == ana.identity.member()).then_some(slot.0)).collect();
+    let later_slot = session.through;
+    let generations: Vec<_> = session
+        .history
+        .bindings
+        .iter()
+        .filter(|b| b.member == ana.identity.member())
+        .map(|b| b.keys.signing)
+        .collect();
+    let old_generation = generations
+        .iter()
+        .position(|k| *k == ana.identity.keys().public_keys().signing)
+        .unwrap();
+    let new_generation = generations
+        .iter()
+        .position(|k| *k == current.keys().public_keys().signing)
+        .unwrap();
     drop(session);
     assert_eq!(rows(ana.database()).await.len(), 2);
     codes.close().await;
     ana.database().close().await.unwrap();
-    json!({"old_authenticates":old_authenticates,"new_authenticates":new_authenticates,
-        "old_counts":old.is_ok(),"new_counts":new.is_ok(),"after_send":after_send,"later_counts":later.is_ok()})
+    (
+        json!({"kind":"queueReload", "scenario":"selfReplacement", "replacements":replacements,
+        "read_through":original.header.read_through, "after_read_through":after.header.read_through,
+        "after_number":after.header.position.number,"after_schema":after.header.schema_version,
+        "current":current_slot, "later":later_slot, "old_generation":old_generation,"new_generation":new_generation}),
+        json!({"old_authenticates":old_authenticates,"new_authenticates":new_authenticates,
+        "old_counts":old.is_ok(),"new_counts":new.is_ok(),"after_send":after_send,"later_counts":later.is_ok()}),
+    )
 }
 
 #[tokio::test]
@@ -740,11 +814,10 @@ async fn a_replaced_binding_cannot_send_an_original_authored_before_it() {
 #[tokio::test]
 #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
 async fn sequence_queue_self_replacement_matches_lean() {
+    let (input, actual) = self_replacement().await;
     assert_eq!(
-        self_replacement().await,
-        crate::tests::run_lean(
-            "COVEN_SEQUENCE_LEAN",
-            &json!({"kind":"queueReload", "scenario":"selfReplacement"})
-        )
+        actual,
+        crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+        "{input}"
     );
 }

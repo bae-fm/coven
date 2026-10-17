@@ -156,7 +156,7 @@ async fn simultaneous_consumers_share_the_in_flight_range() {
 }
 
 #[tokio::test]
-#[ignore = "requires COVEN_IO_RUNNER"]
+#[ignore = "requires COVEN_IO_LEAN"]
 async fn io_differential_retained_ranges_and_refusal_eviction() {
     use serde_json::json;
     let mut cases = Vec::new();

@@ -131,3 +131,7 @@ fn holds(
         Audience::Circle(circle) => ring.circle_key_ids(*circle).any(|id| id == key),
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_retry_tests.rs"]
+mod tests;

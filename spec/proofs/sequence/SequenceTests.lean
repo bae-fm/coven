@@ -505,19 +505,33 @@ def keyCase (slots held current : List Json) : Json := json% {
   rejects (json% {"kind":"rotation","slots":$([old,copied]),"held":$(held),"current":$(current),
     "writer":1,"store":0,"audiences":[],"keys":[],
     "rotation":{"audience":0,"key":1,"hash":20,"members":[1]}})
--- Each gate-free witness refutes equivalence even though queue bookkeeping
--- preserves the originals. These are executable projections, not axioms.
+-- Input-driven projections: changing a queue, row key or authored prefix
+-- changes the verdict, even when the scenario name stays the same.
 #eval do
-  check (json% {"kind":"queueReload","scenario":"reset"})
-    (json% {"retained":1,"replayed":0,"after_replayed":1})
-  check (json% {"kind":"queueReload","scenario":"breakingRaise"})
-    (json% {"before_allowed":true,"after_allowed":false,"new_schema":true})
-  check (json% {"kind":"queueReload","scenario":"newlyReadable"})
-    (json% {"before_allowed":false,"after_allowed":true,
-      "empty_key_allowed":true,"loaded_key_allowed":false})
-  check (json% {"kind":"queueReload","scenario":"selfReplacement"})
-    (json% {"old_authenticates":true,"new_authenticates":false,
-      "old_counts":false,"new_counts":true,"after_send":true,"later_counts":false})
+  for (through, expected) in ([(2, 0), (3, 2)] : List (Nat × Nat)) do
+    check (json% {"kind":"queueReload","scenario":"reset", "applied":2,
+      "target":3,"reset":3,"version":1,"loaded_rows":[],
+      "queue":[{"number":1,"schema":1,"read_through":$(through),"key":"a"},
+               {"number":2,"schema":1,"read_through":$(through),"key":"b"}],
+      "after":{"number":3,"schema":1,"read_through":3,"key":"c"}})
+      (json% {"retained":2,"replayed":$(expected),"after_replayed":$(expected + 1)})
+  for (key, allowed) in [("derived", false), ("other", true)] do
+    check (json% {"kind":"queueReload","scenario":"breakingRaise","candidate":$(key),
+      "before_rows":["source"],"loaded_rows":["source","derived"],
+      "queued_versions":[2],"version":2})
+      (json% {"before_allowed":true,"after_allowed":$(allowed),"new_schema":true})
+  for member in [false, true] do
+    check (json% {"kind":"queueReload","scenario":"newlyReadable", "candidate":"8","existing":"7",
+      "before_member":false,"after_member":$(member),"before_rows":[],"loaded_rows":["7"]})
+      (json% {"before_allowed":false,"after_allowed":$(member),
+        "empty_key_allowed":$(member),"loaded_key_allowed":false})
+  for (through, sends) in ([(3, false), (4, true)] : List (Nat × Bool)) do
+    check (json% {"kind":"queueReload","scenario":"selfReplacement","replacements":[4,7],
+      "read_through":2,"after_read_through":$(through),"after_number":2,"after_schema":1,
+      "current":6,"later":8,"old_generation":0,"new_generation":1})
+      (json% {"old_authenticates":true,"new_authenticates":false,
+        "old_counts":false,"new_counts":true,"after_send":$(sends),"later_counts":false})
+  rejects (json% {"kind":"queueReload","scenario":"reset"})
   rejects (json% {"kind":"queueReload","scenario":"unknown"})
 
 end SequenceTests

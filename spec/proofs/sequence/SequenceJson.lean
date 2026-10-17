@@ -188,42 +188,83 @@ def readPast (j : Json) : Except String Json := do
   return toJson (writes.map fun w => writes.zipIdx.filterMap fun (a, i) =>
     if Causality.Past (·.bytes) w a then some i else none)
 
-open QueueReload QueueReloadExamples ReaderExamples in
-/-- Directed witnesses use the same definitions as the counterexample
-theorems. Rust compares these projections with real reloads, SQL checks and
-historical signature verification; row payloads and slot numbers are omitted. -/
+open QueueReload ReaderExamples in
+/-- Rust supplies original headers, installed rows and membership, and counted
+replacement slots. Keys are numbered injectively for the model's SQL-key
+projection; cryptography and SQL extraction remain outside this adapter. -/
 def readQueueReload (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "scenario" with
   | "reset" =>
+    let queue ← j.getObjValAs? (List Json) "queue"
+    let after ← j.getObjVal? "after"
+    let rows ← j.getObjValAs? (List String) "loaded_rows"
+    let keys := (rows ++ (← (queue ++ [after]).mapM (·.getObjValAs? String "key"))).eraseDups
+    let read (h : Json) : Except String (Write sig Unit) := do
+      let key ← h.getObjValAs? String "key"
+      return ⟨(), ← positive h "number", (), ← nat h "schema", ← nat h "read_through",
+        fun _ => some (keys.idxOf key)⟩
+    let originals ← queue.mapM read
+    let appended ← read after
+    let target ← nat j "target"
+    let reset ← nat j "reset"
+    let version ← nat j "version"
+    let loaded : Reader sig := ⟨target, ledger0, { aud0 with lastReset := reset, version },
+      rows.map keys.idxOf, fun _ => none⟩
+    let state : State sig Unit := ⟨⟨← nat j "applied", appended.number, originals⟩, [()], fun _ => []⟩
+    let plan : Plan sig := ⟨target, [()], fun _ => some .reset⟩
+    let installed := install rules (fun _ => none) (fun _ _ => true) state plan (fun _ => loaded)
     return Json.mkObj [
-      ("retained", toJson (install rules unclaimed admitted resetQueued (plan .reset)
-        (fun _ => resetLoaded)).authored.queue.length),
-      ("replayed", toJson (reapplied unclaimed admitted () resetLoaded resetQueued.authored.queue).length),
-      ("after_replayed", toJson (reapplied unclaimed admitted () resetLoaded [resetAfter]).length)]
+      ("retained", toJson installed.authored.queue.length),
+      ("replayed", toJson (installed.rows ()).length),
+      ("after_replayed", toJson (rebuild rules (fun _ => none) (fun _ _ => true) () loaded
+        (originals ++ [appended])).length)]
   | "breakingRaise" =>
+    let before ← j.getObjValAs? (List String) "before_rows"
+    let loaded ← j.getObjValAs? (List String) "loaded_rows"
+    let candidate ← j.getObjValAs? String "candidate"
+    let keys := (candidate :: before ++ loaded).eraseDups
+    let versions ← j.getObjValAs? (List Nat) "queued_versions"
+    let version ← nat j "version"
     return Json.mkObj [
-      ("before_allowed", toJson (permission raiseRules freshKey
-        (ledgerAt raiseRules raiseHistory 2) (raiseBefore.rows ()) () () 7)),
-      ("after_allowed", toJson (permission raiseRules freshKey raiseLoaded.ledger raiseLoaded.rows () () 7)),
-      ("new_schema", toJson (raiseQueued.authored.queue.all (fun w => w.schema == raiseLoaded.aud.version)))]
+      ("before_allowed", toJson (permission rules QueueReloadExamples.freshKey
+        ledger0 (before.map keys.idxOf) () () (keys.idxOf candidate))),
+      ("after_allowed", toJson (permission rules QueueReloadExamples.freshKey
+        ledger0 (loaded.map keys.idxOf) () () (keys.idxOf candidate))),
+      ("new_schema", toJson (versions.all (· == version)))]
   | "newlyReadable" =>
+    let before ← j.getObjValAs? (List String) "before_rows"
+    let loaded ← j.getObjValAs? (List String) "loaded_rows"
+    let candidate ← j.getObjValAs? String "candidate"
+    let existing ← j.getObjValAs? String "existing"
+    let keys := (candidate :: existing :: before ++ loaded).eraseDups
+    let oldLedger := { QueueReloadExamples.circleLedger with aux := ← j.getObjValAs? Bool "before_member" }
+    let newLedger := { QueueReloadExamples.circleLedger with aux := ← j.getObjValAs? Bool "after_member" }
+    let check := permission QueueReloadExamples.circleRules QueueReloadExamples.freshKey
     return Json.mkObj [
-      ("before_allowed", toJson (permission circleRules freshKey
-        (ledgerAt circleRules circleHistory 1) [] true () 8)),
-      ("after_allowed", toJson (permission circleRules freshKey circleLoaded.ledger circleLoaded.rows true () 8)),
-      ("empty_key_allowed", toJson (permission circleRules freshKey circleLoaded.ledger [] true () 7)),
-      ("loaded_key_allowed", toJson (permission circleRules freshKey circleLoaded.ledger circleLoaded.rows true () 7))]
+      ("before_allowed", toJson (check oldLedger (before.map keys.idxOf) true () (keys.idxOf candidate))),
+      ("after_allowed", toJson (check newLedger (loaded.map keys.idxOf) true () (keys.idxOf candidate))),
+      ("empty_key_allowed", toJson (check newLedger (before.map keys.idxOf) true () (keys.idxOf existing))),
+      ("loaded_key_allowed", toJson (check newLedger (loaded.map keys.idxOf) true () (keys.idxOf existing)))]
   | "selfReplacement" =>
-    let old := ledgerAt rules replacementHistory 2
-    let current := ledgerAt rules replacementHistory 3
-    let later := applyEntry rules current (.replaceKey ())
+    let replacements ← j.getObjValAs? (List Nat) "replacements"
+    distinct replacements "replacement slot"
+    let history : Nat → Slot sig := fun slot =>
+      if slot ∈ replacements then .admin () (.replaceKey ()) else .writes () 0 (fun _ => none)
+    let old := ledgerAt rules history (← nat j "read_through")
+    let currentSlot ← nat j "current"
+    let current := ledgerAt rules history currentSlot
+    let later := ledgerAt rules history (← nat j "later")
+    let oldGeneration ← nat j "old_generation"
+    let newGeneration ← nat j "new_generation"
+    let after : Write sig Unit := ⟨(), ← positive j "after_number", (), ← nat j "after_schema",
+      ← nat j "after_read_through", fun _ => none⟩
     return Json.mkObj [
-      ("old_authenticates", toJson (counts old () 0)),
-      ("new_authenticates", toJson (counts old () 1)),
-      ("old_counts", toJson (counts current () 0)),
-      ("new_counts", toJson (counts current () 1)),
-      ("after_send", toJson (canSendOriginal rules replacementHistory 3 replacementAfter 1)),
-      ("later_counts", toJson (counts later () 1))]
+      ("old_authenticates", toJson (counts old () oldGeneration)),
+      ("new_authenticates", toJson (counts old () newGeneration)),
+      ("old_counts", toJson (counts current () oldGeneration)),
+      ("new_counts", toJson (counts current () newGeneration)),
+      ("after_send", toJson (canSendOriginal rules history currentSlot after newGeneration)),
+      ("later_counts", toJson (counts later () newGeneration))]
   | _ => throw "unknown queue reload scenario"
 
 def run (j : Json) : Except String Json := do

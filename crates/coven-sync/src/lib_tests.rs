@@ -1,5 +1,5 @@
 pub(crate) fn io_runner(cases: &[serde_json::Value]) -> Vec<serde_json::Value> {
-    serde_json::from_value(run_lean("COVEN_IO_RUNNER", &serde_json::json!(cases))).unwrap()
+    serde_json::from_value(run_lean("COVEN_IO_LEAN", &serde_json::json!(cases))).unwrap()
 }
 
 pub(crate) fn run_lean(variable: &str, cases: &serde_json::Value) -> serde_json::Value {

@@ -10,7 +10,7 @@ pub(crate) fn io_runner(cases: &[Value]) -> Vec<Value> {
         io::Write,
         process::{Command, Stdio},
     };
-    let runner = std::env::var("COVEN_IO_RUNNER").expect("Lean IO runner");
+    let runner = std::env::var("COVEN_IO_LEAN").expect("Lean IO runner");
     let mut child = Command::new(runner)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -31,7 +31,7 @@ pub(crate) fn io_runner(cases: &[Value]) -> Vec<Value> {
 /// reports whether an app write committed since the previous start; the
 /// pass's own attempts and confirmations never count (§6.7).
 #[tokio::test]
-#[ignore = "requires COVEN_IO_RUNNER"]
+#[ignore = "requires COVEN_IO_LEAN"]
 async fn io_differential_wakes() {
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut pick = |n: u64| {

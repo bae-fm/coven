@@ -26,6 +26,9 @@ exercises the real file reader with controlled failures and compares its
 retry disposition with Lean. `ioRunner` also exposes retained-range and
 download cases; `object_input::tests::io_differential_retained_ranges_and_refusal_eviction`
 compares the retained-range behavior.
+`files::tests::cache::retries::io_differential_download` sends controlled
+network, authentication, content-hash and disk outcomes to the download case
+and compares completion and the reader's persisted retry disposition.
 
 ## Waiting and reopening
 
@@ -42,6 +45,12 @@ automatic retry. It assumes durable transactions and the clock values
 supplied at the boundary. It does not promise elapsed real-time cooldowns
 under arbitrary wall-clock jumps. `retry_waits::tests::io_differential_waiting`
 compares Rust's decisions with `ioRunner`.
+`sequence_sync::sequence_retry::tests::io_differential_waiting_evidence`
+runs the operation owner's readiness and error recording across relevant,
+unrelated, racing and own commits, then reopens the database both while
+waiting and during an attempt. It compares readiness and persisted failure
+counts after each attempted retry, including capped waits and a backward
+wall-clock change.
 
 ## Work notifications
 
@@ -62,6 +71,11 @@ uploads, revocations and restored access. `retention_forgetting_counterexample`
 shows why waiting until the next retention pass to forget a scan can miss a
 file uploaded between a restore and another revocation. `revoked_listing_completes`
 proves that a successful listing after cut-off records completion.
+`sequence_sync::sequence_files::tests::io_differential_file_scan` runs the
+real uploader scan through failed and successful listings, including empty
+folders and repeated retention. `io_differential_folder` interleaves uploads,
+listings and provider access transactions, checking that restored access
+invalidates the scan in the restoring transaction.
 
 The premises matter: cut-off prevents further publication, including
 in-flight sessions, and a successful listing is complete. These are provider
@@ -73,5 +87,5 @@ still determine whether any file can be deleted.
 Run `lake build` in `spec/proofs/io`. The root imports every retained module;
 [Axioms.lean](io/CovenIO/Axioms.lean) audits the results. `scripts/check.sh`
 rejects unfinished proofs and custom axioms and runs the exact Rust tests
-above with `COVEN_IO_RUNNER` or `COVEN_DOWNLOAD_RETRY_LEAN` pointing to the
+above with `COVEN_IO_LEAN` or `COVEN_DOWNLOAD_RETRY_LEAN` pointing to the
 built runner. These models do not specify serialized object bytes.

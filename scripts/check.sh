@@ -349,16 +349,20 @@ proofs() {
         COVEN_DOWNLOAD_RETRY_LEAN="$runner" exact_ignored coven-sync --all-features -- \
             files::tests::cache::retries::io_differential_download_retries
         runner=$(runner io ioRunner)
-        step "Rust / Lean retained byte ranges and retry waits"
-        COVEN_IO_RUNNER="$runner" exact_ignored coven-sync --all-features -- \
+        step "Rust / Lean downloads, retained ranges, retry evidence and retired file scans"
+        COVEN_IO_LEAN="$runner" exact_ignored coven-sync --all-features -- \
+            files::tests::cache::retries::io_differential_download \
             object_input::tests::io_differential_retained_ranges_and_refusal_eviction \
-            retry_waits::tests::io_differential_waiting
+            retry_waits::tests::io_differential_waiting \
+            sequence_sync::sequence_retry::tests::io_differential_waiting_evidence \
+            sequence_sync::sequence_files::tests::io_differential_file_scan \
+            sequence_sync::sequence_files::tests::io_differential_folder
     fi
 
     if proof_selected io || crate_selected coven-database; then
         runner=$(runner io ioRunner)
         step "Rust / Lean write-queue wakes"
-        COVEN_IO_RUNNER="$runner" exact_ignored coven-database --all-features -- \
+        COVEN_IO_LEAN="$runner" exact_ignored coven-database --all-features -- \
             database_changes::tests::io_differential_wakes
     fi
 

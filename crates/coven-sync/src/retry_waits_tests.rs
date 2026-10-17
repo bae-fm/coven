@@ -176,7 +176,7 @@ async fn a_wait_that_cannot_be_persisted_holds_until_the_app_retries() {
 /// `WaitingEvidence` runs through the operation owner
 /// (`io_differential_waiting_evidence`).
 #[tokio::test]
-#[ignore = "requires COVEN_IO_RUNNER"]
+#[ignore = "requires COVEN_IO_LEAN"]
 async fn io_differential_waiting() {
     let mut cases = Vec::new();
     let mut actual = Vec::new();
