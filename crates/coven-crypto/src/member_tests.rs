@@ -4,6 +4,38 @@ use coven_foundation::id_source::{IdSource, KeyId, MemberId};
 use uuid::Uuid;
 
 #[test]
+fn custody_preserves_more_than_255_retired_credentials() {
+    let mut identity = MemberIdentity::generate(MemberId(Uuid::from_u128(9))).unwrap();
+    let mut public = vec![identity.keys().public_keys()];
+    for _ in 0..257 {
+        let candidate = MemberKeys::generate().unwrap();
+        public.push(candidate.public_keys());
+        identity = identity.with_candidate(candidate).retire_candidate();
+    }
+    let candidate = MemberKeys::generate().unwrap();
+    let candidate_public = candidate.public_keys();
+    identity = identity.with_candidate(candidate);
+    let encoded = identity.to_secret_bytes();
+    let restored = MemberIdentity::from_secret_bytes(encoded.as_bytes()).unwrap();
+    assert_eq!(restored.member(), identity.member());
+    assert_eq!(
+        restored.candidate().unwrap().public_keys(),
+        candidate_public
+    );
+    for keys in public {
+        let held = restored.credential(&keys.sealing).unwrap();
+        keys.signing
+            .verify(b"held credential", &held.sign(b"held credential"))
+            .unwrap();
+    }
+    let active = restored.activate(&candidate_public).unwrap();
+    let active = MemberIdentity::from_secret_bytes(active.to_secret_bytes().as_bytes()).unwrap();
+    assert_eq!(active.keys().public_keys(), candidate_public);
+    assert!(active.candidate().is_none());
+    assert_eq!(active.retained.len(), 258);
+}
+
+#[test]
 fn member_identity_is_independent_of_its_public_keys() {
     assert_eq!(std::mem::size_of::<MemberId>(), 16);
     assert_eq!(std::mem::size_of::<SigningKey>(), 32);
@@ -140,7 +172,8 @@ fn identity_custody_pins_the_id_before_the_unchanged_private_pair() {
     expected.extend_from_slice(member.0.as_bytes());
     expected.extend_from_slice(&pair);
     // No retired pair and no candidate.
-    expected.extend_from_slice(&[0, 0]);
+    expected.extend_from_slice(&0_u64.to_le_bytes());
+    expected.push(0);
     assert_eq!(identity.to_secret_bytes().as_bytes(), expected);
     let restored = MemberIdentity::from_secret_bytes(&expected).unwrap();
     assert_eq!(restored.member(), member);
@@ -188,7 +221,7 @@ fn identity_custody_keeps_retired_and_candidate_pairs() {
     let mut expected = b"CVMI\x01".to_vec();
     expected.extend_from_slice(member.0.as_bytes());
     expected.extend_from_slice(old.to_secret_bytes().as_bytes());
-    expected.push(0);
+    expected.extend_from_slice(&0_u64.to_le_bytes());
     expected.push(1);
     expected.extend_from_slice(new.to_secret_bytes().as_bytes());
     assert_eq!(identity.to_secret_bytes().as_bytes(), expected);
@@ -200,7 +233,7 @@ fn identity_custody_keeps_retired_and_candidate_pairs() {
     let mut expected = b"CVMI\x01".to_vec();
     expected.extend_from_slice(member.0.as_bytes());
     expected.extend_from_slice(new.to_secret_bytes().as_bytes());
-    expected.push(1);
+    expected.extend_from_slice(&1_u64.to_le_bytes());
     expected.extend_from_slice(old.to_secret_bytes().as_bytes());
     expected.push(0);
     let bytes = installed.to_secret_bytes();
@@ -218,7 +251,7 @@ fn identity_custody_keeps_retired_and_candidate_pairs() {
     let mut twice = b"CVMI\x01".to_vec();
     twice.extend_from_slice(member.0.as_bytes());
     twice.extend_from_slice(old.to_secret_bytes().as_bytes());
-    twice.push(0);
+    twice.extend_from_slice(&0_u64.to_le_bytes());
     twice.push(1);
     twice.extend_from_slice(old.to_secret_bytes().as_bytes());
     assert!(MemberIdentity::from_secret_bytes(&twice).is_err());

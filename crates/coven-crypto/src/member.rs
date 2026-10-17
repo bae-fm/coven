@@ -417,13 +417,13 @@ impl MemberIdentity {
     /// active pair, the retired ones, then the candidate if any. This custody
     /// encoding is not a restore code (D13).
     pub fn to_secret_bytes(&self) -> SecretBytes {
-        let mut bytes = Zeroizing::new(Vec::new());
+        // Allocate once so growth cannot leave an unerased copy of the seeds.
+        let pairs = 1 + self.retained.len() + usize::from(self.candidate.is_some());
+        let mut bytes = Zeroizing::new(Vec::with_capacity(30 + pairs * MEMBER_KEYS_LENGTH));
         bytes.extend_from_slice(b"CVMI\x01");
         bytes.extend_from_slice(self.member.0.as_bytes());
         bytes.extend_from_slice(self.keys.to_secret_bytes().as_bytes());
-        let retained =
-            u8::try_from(self.retained.len()).expect("a member holds fewer than 256 retired pairs");
-        bytes.push(retained);
+        bytes.extend_from_slice(&(self.retained.len() as u64).to_le_bytes());
         for keys in &self.retained {
             bytes.extend_from_slice(keys.to_secret_bytes().as_bytes());
         }
@@ -445,7 +445,10 @@ impl MemberIdentity {
         wire::prefix(&mut bytes, b"CVMI\x01")?;
         let member = MemberId(uuid::Uuid::from_bytes(wire::array(&mut bytes)?));
         let keys = pair(&mut bytes)?;
-        let [count] = wire::array(&mut bytes)?;
+        let count = wire::number(&mut bytes)?;
+        if count > (bytes.len() / MEMBER_KEYS_LENGTH) as u64 {
+            return Err(MaterialError::Encoding);
+        }
         let retained = (0..count)
             .map(|_| pair(&mut bytes))
             .collect::<Result<Vec<_>, _>>()?;
