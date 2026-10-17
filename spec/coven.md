@@ -3108,6 +3108,10 @@ Before a floor exists, the sequence starts at slot 1.
   then loads the snapshots and applies the retained slots. Without a floor, bootstrap starts at slot 1.
 - A device missing its next slot reads the floor.
   If the missing slot is below `first`, reload from the floor's snapshots.
+- Applying a raise whose replay needs a slot below `first` reloads that audience
+  from the floor's snapshot instead. That snapshot was announced after the raise,
+  so it covers it; a reader below a floor snapshot's coverage may always reload
+  ([`read_progress`](proofs/sequence/CovenSequence/Reader.lean)).
 - A gap at or above `first`, before a known later slot, is damage.
   A failed floor read proves neither absence nor permission to skip history.
 - A reader also reads the floor after the pass's slots and before committing them.
