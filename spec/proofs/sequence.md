@@ -81,6 +81,12 @@ member does not revive them.
 
 These are the validity rules:
 
+- **An admin entry** requires an active author, except that a fresh device may
+  author its own `addDevice` entry. Registration requires a current member and
+  an id with no historical binding. Only the installation itself may register
+  that id, even when its member is an admin. The member's current-key signature
+  authenticating the fresh device is checked outside the model. Other entries
+  still require an active device and the supplied authority policy.
 - **A part counts** when its device is registered and not removed, its member
   is a member, the part was made under that member's current key generation,
   the device may write to `A`, and the part's version is one `A` has reached.
@@ -224,6 +230,28 @@ without changing entry effects or the ordered ledger.
   was authored by an active admin in the preceding slot state.
 - `store_reset_authorized`: a store reset requires an admin in that state;
   circle resets and schema raises retain their own audience authority policy.
+
+[`Registration`](sequence/CovenSequence/Registration.lean) proves the device
+rules independently of the supplied authority policy:
+
+- `self_registration_valid`, `self_registration_applied`: a fresh device can
+  register itself to a current member when that policy authorizes the entry;
+  no previously active device of the member is required.
+- `registration_self_authored`: every applied registration is authored by the
+  device it registers, for every authority policy.
+- `registration_at_most_once`: two applied registrations of one id have the
+  same positive slot number. `registration_never_repeated` and
+  `initial_registration_never_repeated` also cover subsequent attempts after
+  removal and ids already bound by store creation. Refused attempts do not
+  reserve an id; historical bindings never disappear.
+- `unregistered_unremoved`: starting without removed unregistered ids, every
+  prefix preserves that property. A fresh id therefore has no removal to undo.
+
+[`SequenceApply.member_without_active_device_can_register`](sequence/SequenceApply.lean)
+specializes this to the runner's per-member policy: after any prefix, a current
+member with no active device can register a fresh one. It becomes active, while
+all of that member's previously registered devices stay inactive. The initial
+ledger must contain an admin; no active admin device is required.
 
 ## Snapshots and deletion
 
@@ -539,10 +567,14 @@ Answer: `{"reload":false,"apply":[2,3]}`.
 **`apply`** evaluates `ledgerAt`, `audAt` and `rowsAt` at every prefix, using
 `Authority.withRoles` and `LiveClaims.winner`. The initial membership must
 contain an admin; initial devices refer to active members. Each audience gives
-its starting `version` and the devices allowed to write to it. The runner's
-abstract policy requires an admin for device changes and key replacement too;
-conversion is the identity. These are fixture parameters/specializations, not
-additional store rules.
+its starting `version` and the devices allowed to write to it. The runner uses
+§9's per-member authority: members register their own fresh devices, remove
+their own devices and replace their own keys. Admins may also remove another
+member's device or replace that member's keys; only admins add or remove members
+and change roles. Registration must be authored by the fresh device itself,
+including for admins. Other admin entries need an active author. Membership
+must retain an admin. Conversion is the identity; audience writer lists and
+conversion are fixture parameters, not additional store rules.
 
 Slots occupy positions `1..slots.length`. Each has `device` and `claim`, with
 strictly increasing claim numbers per device. An admin slot is
@@ -550,6 +582,15 @@ strictly increasing claim numbers per device. An admin slot is
 Entry kinds are `addMember` (`member`, `role`), `removeMember` (`member`),
 `changeRole` (`member`, `role`), `addDevice` (`device`, `member`), `removeDevice`
 (`device`), and `replaceKey` (`member`); roles are `"admin"` or `"member"`.
+For example, device 2 registers itself to current member 1 with
+`{"kind":"admin","device":2,"claim":1,"entry":{"kind":"addDevice","device":2,"member":1}}`.
+Device 2 must have no existing binding, even a removed one. It may register when
+member 1 has no active devices. The enclosing `device` must equal the entry's
+`device`; another author is consumed as a refused admin slot. The JSON input
+supplies already-authenticated entries: it carries no signatures, and the
+current member-key signature proving device 2 speaks for member 1 is assumed
+verified before this call. A refused registration records its claim number but
+does not bind the id; a subsequent valid self-registration can succeed.
 A writes slot carries `key_gen` and at most one part per declared audience:
 
 ```json
@@ -603,6 +644,12 @@ intervening remote write. Only supplied writes can appear in an answer.
 
 ## Assumptions and what is not modelled
 
+- Entry signatures are checked outside the model against the member's current
+  signing key before the slot. In particular, a fresh device's self-registration
+  is authenticated as speaking for the member named by `addDevice`; naming a
+  member alone does not prove that authority. The JSON runner assumes this
+  check has succeeded and does not model signatures. Store creation supplies
+  the initial member and device bindings.
 - Snapshot bodies are honest: ordinary bodies contain the covered state;
   raise bodies contain migrated rows; reset bodies contain the chosen rows.
   Floor reload uses ordinary snapshots; prepared bodies are consumed at their
@@ -624,7 +671,8 @@ intervening remote write. Only supplied writes can appear in an answer.
   device's numbers increase is a hypothesis of `settle_from_floor`, not
   derived from a device's counter.
 - Not modelled:
-  - concrete authority policies beyond membership, role changes and store resets;
+  - concrete authority policies beyond membership, role changes, the runner's
+    device/key actions and store resets;
   - Drive's head file and its compare-and-swap;
   - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;

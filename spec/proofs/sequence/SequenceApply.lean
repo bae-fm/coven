@@ -1,4 +1,4 @@
-import CovenSequence.Authority
+import CovenSequence.Registration
 import CovenSequence.LiveClaims
 import Lean
 
@@ -70,7 +70,14 @@ def initialAudiences (c : Config n) (a : Nat) : AudLedger (sig n) :=
     | none => 0)
 
 def baseRules (c : Config n) (numbers : Nat → Nat) : Rules (sig n) where
-  authorized := fun L d _ => Authority.isAdmin L d
+  authorized := fun L d e => match e with
+    | .addDevice _ m => L.member m
+    | .removeDevice target => Authority.isAdmin L d ||
+        match L.deviceOf d with
+        | some m => L.deviceOf target == some m
+        | none => false
+    | .replaceKey m => Authority.isAdmin L d || L.deviceOf d == some m
+    | _ => Authority.isAdmin L d
   applyOp := fun _ op => nomatch op
   copyOk := fun _ _ _ _ => false
   mayWrite := fun _ d a => c.audiences.any (fun x => x.id == a && decide (d ∈ x.writers))
@@ -91,6 +98,50 @@ def hasAdmin (L : Ledger (sig n)) : Decidable (Authority.HasAdmin L) :=
 
 def rules (c : Config n) (numbers : Nat → Nat) : Rules (sig n) :=
   Authority.withRoles (baseRules c numbers) hasAdmin
+
+/-- An existing member can register from a fresh installation even when none
+of that member's registered devices is active. Its older devices stay inactive.
+The current member-key signature is an external authentication premise. -/
+theorem member_without_active_device_can_register (c : Config n) (numbers : Nat → Nat)
+    (seq : Nat → Slot (sig n)) (k : Nat) (m : Fin n) (d : Nat)
+    (initial : Authority.HasAdmin (initialLedger c))
+    (member : (ledgerAt (rules c numbers) seq k).member m = true)
+    (noActive : ∀ old, (ledgerAt (rules c numbers) seq k).deviceOf old = some m →
+      active (ledgerAt (rules c numbers) seq k) old = false)
+    (fresh : (ledgerAt (rules c numbers) seq k).deviceOf d = none) :
+    let R := rules c numbers
+    let L := ledgerAt R seq k
+    let next := ledgerStep R L (k + 1) (.admin d (.addDevice d m))
+    ledgerValid R L (.admin d (.addDevice d m)) = true ∧
+      next.deviceOf d = some m ∧ active next d = true ∧
+      ∀ old, L.deviceOf old = some m → active next old = false := by
+  let R := rules c numbers
+  let L := ledgerAt R seq k
+  change L.member m = true at member
+  have admin : Authority.HasAdmin L := by
+    have h := Authority.every_prefix_has_admin (baseRules c numbers) seq initial k
+    simpa [L, R, rules, Authority.withRoles_decision_eq] using h
+  have authorized : R.authorized L d (.addDevice d m) = true := by
+    simp [R, rules, Authority.withRoles, Authority.allowed, Authority.membershipChange,
+      baseRules, applyEntry, Authority.HasAdmin] at admin ⊢
+    exact ⟨member, admin⟩
+  have valid := self_registration_valid R L d m fresh member authorized
+  have unremoved : L.removed d = false :=
+    unregistered_unremoved R seq (fun _ _ => rfl) k d fresh
+  have effect : ledgerStep R L (k + 1) (.admin d (.addDevice d m)) =
+      noteClaim R (applyEntry R L (.addDevice d m)) (k + 1) (.admin d (.addDevice d m)) := by
+    simp [ledgerStep, valid, ledgerEffect]
+  change ledgerValid R L _ = true ∧ _
+  refine ⟨valid, self_registration_applied R L _ d m fresh member authorized, ?_, ?_⟩
+  · rw [effect]
+    simp [active, applyEntry, member, unremoved]
+  · intro old owned
+    have different : old ≠ d := by
+      intro same
+      subst old
+      simp [fresh] at owned
+    rw [effect]
+    simpa [active, applyEntry, different] using noActive old owned
 
 def sorted (xs : List Nat) : List Nat := xs.eraseDups.mergeSort (fun a b => a ≤ b)
 

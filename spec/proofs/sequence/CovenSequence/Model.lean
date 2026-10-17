@@ -177,12 +177,21 @@ def counts (L : Ledger S) (d : S.Dev) (g : Nat) : Bool :=
   | some m => !L.removed d && L.member m && L.keyGen m == g
   | none => false
 
-/-- The checks of an entry that do not depend on roles. -/
-def structural (L : Ledger S) : Entry S → Bool
+/-- An admin author is active, or is the fresh installation registering itself.
+The member's current-key signature authenticating that installation is checked
+outside the model. -/
+def adminAuthor (L : Ledger S) (d : S.Dev) (e : Entry S) : Bool :=
+  active L d || match e with
+    | .addDevice target _ => decide (d = target) && (L.deviceOf d).isNone
+    | _ => false
+
+/-- The checks of an entry that do not depend on roles. Only an installation
+itself can register its id, including when the member is an admin. -/
+def structural (L : Ledger S) (author : S.Dev) : Entry S → Bool
   | .addMember m _ => !L.member m
   | .removeMember m => L.member m
   | .changeRole m _ => L.member m
-  | .addDevice d m => (L.deviceOf d).isNone && L.member m
+  | .addDevice d m => decide (author = d) && (L.deviceOf d).isNone && L.member m
   | .removeDevice d => (L.deviceOf d).isSome && !L.removed d
   | .replaceKey m => L.member m
   | .other _ => true
@@ -206,7 +215,7 @@ def applyEntry (L : Ledger S) : Entry S → Ledger S
 /-- Whether an admin slot or key copy is valid; every other kind is left to
 its audiences. -/
 def ledgerValid (L : Ledger S) : Slot S → Bool
-  | .admin d e => active L d && R.authorized L d e && structural L e
+  | .admin d e => adminAuthor L d e && R.authorized L d e && structural L d e
   | .keyCopy d m g => active L d && R.copyOk L d m g
   | _ => true
 

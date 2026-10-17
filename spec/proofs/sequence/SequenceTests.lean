@@ -168,12 +168,114 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
 #eval do
   let result ← run (applyCase [admin 0 1 (json% {"kind":"removeMember","member":1}),
     admin 0 2 (json% {"kind":"addMember","member":1,"role":"member"}),
-    admin 0 3 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
     writes 1 1 0 [part 0 1 [7] [] [] []],
-    writes 2 1 0 [part 0 1 [7] [] [] []]])
+    writes 2 2 0 [part 0 1 [7] [] [] []]])
   checkField result ["ledger","removed"] (json% [1])
   checkField result ["audiences","0","refused"] (json% [4])
   checkField result ["audiences","0","unique_claims"] (json% [[7,5]])
+
+-- A member whose last device was removed registers from the fresh device.
+#eval do
+  let result ← run (applyCase [
+    admin 1 1 (json% {"kind":"removeDevice","device":1}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
+    writes 2 2 0 [part 0 1 [7] [] [] []]])
+  checkField result ["slots","0","ledger","removed"] (json% [1])
+  checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1]])
+  checkField result ["ledger","refused"] (json% [])
+  checkField result ["ledger","last_claims"] (json% [[1,1],[2,2]])
+  checkField result ["audiences","0","unique_claims"] (json% [[7,3]])
+
+-- The admin role survives removal of all devices. Either member can recover
+-- with its current key; an inactive former device cannot authorize entries.
+#eval do
+  let result ← run (applyCase [
+    admin 0 1 (json% {"kind":"removeDevice","device":0}),
+    admin 1 1 (json% {"kind":"removeDevice","device":1}),
+    admin 0 2 (json% {"kind":"addMember","member":2,"role":"member"}),
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 3 1 (json% {"kind":"addDevice","device":3,"member":0}),
+    admin 3 2 (json% {"kind":"addMember","member":2,"role":"member"}),
+    admin 4 1 (json% {"kind":"addDevice","device":4,"member":2})])
+  checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1],[3,0],[4,2]])
+  checkField result ["ledger","removed"] (json% [0,1])
+  checkField result ["ledger","refused"] (json% [3])
+
+-- Neither an admin nor a member may register another installation's id,
+-- even for their own member. A refused attempt leaves that id available.
+#eval do
+  for (device, member) in ([(0,0), (0,1), (1,1)] : List (Nat × Nat)) do
+    let result ← run (applyCase [
+      admin device 1 (json% {"kind":"addDevice","device":2,"member":$(member)}),
+      admin 2 1 (json% {"kind":"addDevice","device":2,"member":$(member)})])
+    checkField result ["slots","0","ledger","devices"] (json% [[0,0],[1,1]])
+    checkField result ["ledger","refused"] (json% [1])
+    checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,$(member)]])
+
+-- Registered ids cannot register again, including initial ids, removed ids,
+-- and attempts to bind the id to another member.
+#eval do
+  for member in [0,1] do
+    let result ← run (applyCase [
+      admin 1 1 (json% {"kind":"addDevice","device":1,"member":$(member)}),
+      admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
+      admin 2 2 (json% {"kind":"addDevice","device":2,"member":$(member)}),
+      admin 0 1 (json% {"kind":"removeDevice","device":2}),
+      admin 2 3 (json% {"kind":"addDevice","device":2,"member":$(member)})])
+    checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1]])
+    checkField result ["ledger","removed"] (json% [2])
+    checkField result ["ledger","refused"] (json% [1,3,5])
+
+-- Registration needs current membership; a removed member cannot return by
+-- registering a new device, and other unregistered admin authors are refused.
+#eval do
+  let result ← run (applyCase [
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":2}),
+    admin 0 1 (json% {"kind":"removeMember","member":1}),
+    admin 2 2 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 2 3 (json% {"kind":"replaceKey","member":0}),
+    admin 2 4 (json% {"kind":"removeDevice","device":0}),
+    admin 2 5 (json% {"kind":"addMember","member":2,"role":"admin"})])
+  checkField result ["ledger","devices"] (json% [[0,0],[1,1]])
+  checkField result ["ledger","removed"] (json% [1])
+  checkField result ["ledger","refused"] (json% [1,3,4,5,6])
+  checkField result ["ledger","key_generations"] (json% [[0,0],[1,0],[2,0]])
+
+-- Members replace their own keys and remove their own devices; an active
+-- admin can do both for another member. Replaced-key writes remain refused.
+#eval do
+  for device in [0,1] do
+    let result ← run (applyCase [
+      admin device 1 (json% {"kind":"replaceKey","member":1}),
+      writes 1 2 0 [part 0 1 [7] [] [] []],
+      writes 1 3 1 [part 0 1 [8] [] [] []],
+      admin device 4 (json% {"kind":"removeDevice","device":1})])
+    checkField result ["ledger","key_generations"] (json% [[0,0],[1,1],[2,0]])
+    checkField result ["ledger","removed"] (json% [1])
+    checkField result ["ledger","refused"] (json% [])
+    checkField result ["audiences","0","refused"] (json% [2])
+    checkField result ["audiences","0","unique_claims"] (json% [[8,3]])
+  let result ← run (applyCase [
+    admin 2 1 (json% {"kind":"addDevice","device":2,"member":1}),
+    admin 1 1 (json% {"kind":"removeDevice","device":2})])
+  checkField result ["ledger","removed"] (json% [2])
+  checkField result ["ledger","refused"] (json% [])
+
+-- Other members' devices and keys, membership and roles require an admin.
+#eval do
+  let result ← run (applyCase [
+    admin 1 1 (json% {"kind":"removeDevice","device":0}),
+    admin 1 2 (json% {"kind":"replaceKey","member":0}),
+    admin 1 3 (json% {"kind":"addMember","member":2,"role":"member"}),
+    admin 1 4 (json% {"kind":"removeMember","member":1}),
+    admin 1 5 (json% {"kind":"changeRole","member":1,"role":"admin"}),
+    admin 0 1 (json% {"kind":"removeDevice","device":1}),
+    admin 1 6 (json% {"kind":"replaceKey","member":1})])
+  checkField result ["ledger","members"] (json% [[0,"admin"],[1,"member"]])
+  checkField result ["ledger","key_generations"] (json% [[0,0],[1,0],[2,0]])
+  checkField result ["ledger","removed"] (json% [1])
+  checkField result ["ledger","refused"] (json% [1,2,3,4,5,7])
 
 -- last_admin_refused, applied_membership_authorized, and repeated identical
 -- refused slots with distinct claim numbers.

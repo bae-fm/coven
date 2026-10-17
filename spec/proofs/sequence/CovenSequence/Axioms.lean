@@ -1,4 +1,5 @@
 import CovenSequence
+import SequenceApply
 
 #print axioms CovenSequence.Claim.conclude_correct
 #print axioms CovenSequence.Claim.occupant_claimed
@@ -131,3 +132,14 @@ import CovenSequence
 #print axioms CovenSequence.Reader.prefix_sound
 #print axioms CovenSequence.Reader.next_apply
 #print axioms CovenSequence.Authority.withRoles_decision_eq
+
+#print axioms CovenSequence.step_unregistered_unremoved
+#print axioms CovenSequence.unregistered_unremoved
+#print axioms CovenSequence.self_registration_valid
+#print axioms CovenSequence.self_registration_applied
+#print axioms CovenSequence.registration_self_authored
+#print axioms CovenSequence.registered_device_refused
+#print axioms CovenSequence.initial_registration_never_repeated
+#print axioms CovenSequence.registration_never_repeated
+#print axioms CovenSequence.registration_at_most_once
+#print axioms SequenceApply.member_without_active_device_can_register

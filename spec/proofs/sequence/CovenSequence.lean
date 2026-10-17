@@ -14,6 +14,7 @@ import CovenSequence.Causality
 import CovenSequence.LiveClaims
 import CovenSequence.Owners
 import CovenSequence.Authority
+import CovenSequence.Registration
 import CovenSequence.Preparations
 import CovenSequence.QueueReload
 import CovenSequence.RaiseQueue
