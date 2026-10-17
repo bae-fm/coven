@@ -4,7 +4,7 @@
 use sqlite3_parser::ast::fmt::{ToTokens, TokenStream};
 use sqlite3_parser::lexer::{
     sql::{TokenType, Tokenizer},
-    Scanner,
+    Scanner, Splitter,
 };
 use std::ops::Range;
 use TokenType::{TK_COMMA, TK_LP, TK_RP};
@@ -16,27 +16,37 @@ pub(crate) struct SchemaSource<'a> {
 
 impl<'a> SchemaSource<'a> {
     pub(crate) fn new(sql: &'a str) -> Self {
-        let mut scanner = Scanner::new(Tokenizer::new());
+        Self::try_new(sql).expect("accepted schema tokens")
+    }
+
+    pub(crate) fn try_new(sql: &'a str) -> rusqlite::Result<Self> {
+        let mut scanner = Scanner::new(SqliteTokenizer(Tokenizer::new()));
         let mut tokens = Vec::new();
         loop {
             let (start, token, end) = scanner
                 .scan(sql.as_bytes())
-                .expect("accepted schema tokens");
+                .map_err(|error| rusqlite::Error::ToSqlConversionFailure(Box::new(error)))?;
             let Some((_, kind)) = token else { break };
             tokens.push((kind, start..end));
         }
-        Self { sql, tokens }
+        Ok(Self { sql, tokens })
+    }
+
+    pub(crate) fn tokens(&self) -> impl Iterator<Item = &'a str> + '_ {
+        self.tokens
+            .iter()
+            .map(|(_, range)| &self.sql[range.clone()])
     }
 
     // Only delimiters are interpreted here. The AST determines which nodes
     // exist, which expressions they own, and which clauses are constraints.
     pub(crate) fn body(&mut self) -> Self {
-        let start = self
-            .tokens
-            .iter()
-            .position(|(t, _)| *t == TK_LP)
-            .expect("AST node body");
-        self.body_at(start)
+        self.try_body().expect("AST node body")
+    }
+
+    pub(crate) fn try_body(&mut self) -> Option<Self> {
+        let start = self.tokens.iter().position(|(t, _)| *t == TK_LP)?;
+        Some(self.body_at(start))
     }
 
     pub(crate) fn node_body(&mut self, node: &impl ToTokens) -> Self {
@@ -136,5 +146,56 @@ impl TokenStream for NodePrefix {
             self.finished = kind == TK_LP;
         }
         Ok(())
+    }
+}
+
+// sqlite3-parser omits SQLite's Tcl parameter suffixes and requires a closing
+// block comment. Keep those accepted spellings in the shared token source.
+struct SqliteTokenizer(Tokenizer);
+
+impl Splitter for SqliteTokenizer {
+    type Error = sqlite3_parser::lexer::sql::Error;
+    type TokenType = TokenType;
+
+    fn split<'a>(
+        &mut self,
+        data: &'a [u8],
+    ) -> Result<(Option<(&'a [u8], TokenType)>, usize), Self::Error> {
+        use sqlite3_parser::lexer::sql::Error;
+        if !matches!(data[0], b'$' | b'@' | b':' | b'#') {
+            return match self.0.split(data) {
+                Err(Error::UnterminatedBlockComment(_)) if data.len() > 2 => Ok((None, data.len())),
+                result => result,
+            };
+        }
+        let mut end = 1;
+        let mut named = false;
+        while let Some(&byte) = data.get(end) {
+            if byte.is_ascii_alphanumeric() || byte >= 0x80 || matches!(byte, b'_' | b'$') {
+                named = true;
+                end += 1;
+            } else if data[end..].starts_with(b"::") {
+                end += 2;
+            } else if byte == b'(' && named {
+                end += 1;
+                while data
+                    .get(end)
+                    .is_some_and(|b| !b.is_ascii_whitespace() && *b != b')' && *b != 0)
+                {
+                    end += 1;
+                }
+                if data.get(end) != Some(&b')') {
+                    return Err(Error::BadVariableName(None));
+                }
+                end += 1;
+                break;
+            } else {
+                break;
+            }
+        }
+        if !named {
+            return Err(Error::BadVariableName(None));
+        }
+        Ok((Some((&data[..end], TokenType::TK_VARIABLE)), end))
     }
 }

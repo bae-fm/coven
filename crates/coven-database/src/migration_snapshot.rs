@@ -70,14 +70,14 @@ impl MigrationCapture {
             .map_err(|e| rusqlite::Error::UserFunctionError(Box::new(e)))?;
         let main = |name: &Option<sqlite3_parser::ast::Name<'_>>| {
             name.as_ref()
-                .is_none_or(|n| crate::removal_schema::name(n.0).eq_ignore_ascii_case("main"))
+                .is_none_or(|n| crate::sql::name(n.0).eq_ignore_ascii_case("main"))
         };
         let breaking = match command {
             Some(Cmd::Stmt(Stmt::AlterTable(table, AlterTableBody::AddColumn(column)))) => {
                 main(&table.db_name)
                     && self
                         .synced
-                        .contains(&crate::removal_schema::name(table.name.0).to_ascii_lowercase())
+                        .contains(&crate::sql::name(table.name.0).to_ascii_lowercase())
                     && column.constraints.iter().any(|c| {
                         c.name.is_some()
                             || !matches!(
@@ -89,19 +89,19 @@ impl MigrationCapture {
             }
             Some(Cmd::Stmt(Stmt::AlterTable(table, body))) => {
                 main(&table.db_name)
-                    && before.tables.contains_key(
-                        &crate::removal_schema::name(table.name.0).to_ascii_lowercase(),
-                    )
+                    && before
+                        .tables
+                        .contains_key(&crate::sql::name(table.name.0).to_ascii_lowercase())
                     && (matches!(body, AlterTableBody::RenameTo(_))
-                        || self.synced.contains(
-                            &crate::removal_schema::name(table.name.0).to_ascii_lowercase(),
-                        ))
+                        || self
+                            .synced
+                            .contains(&crate::sql::name(table.name.0).to_ascii_lowercase()))
             }
             Some(Cmd::Stmt(Stmt::DropTable { tbl_name, .. })) => {
                 main(&tbl_name.db_name)
-                    && before.tables.contains_key(
-                        &crate::removal_schema::name(tbl_name.name.0).to_ascii_lowercase(),
-                    )
+                    && before
+                        .tables
+                        .contains_key(&crate::sql::name(tbl_name.name.0).to_ascii_lowercase())
             }
             Some(Cmd::Stmt(
                 Stmt::CreateTable {
@@ -114,19 +114,20 @@ impl MigrationCapture {
             Some(Cmd::Stmt(Stmt::CreateIndex { tbl_name, .. })) => {
                 before
                     .tables
-                    .contains_key(&crate::removal_schema::name(tbl_name.0).to_ascii_lowercase())
+                    .contains_key(&crate::sql::name(tbl_name.0).to_ascii_lowercase())
                     && db
                         .migration_targets(sql)?
                         .iter()
                         .any(|t| self.synced.contains(t))
             }
             Some(Cmd::Stmt(Stmt::CreateTrigger { tbl_name, .. })) => {
-                before.tables.contains_key(
-                    &crate::removal_schema::name(tbl_name.name.0).to_ascii_lowercase(),
-                ) && db
-                    .migration_targets(sql)?
-                    .iter()
-                    .any(|t| self.synced.contains(t))
+                before
+                    .tables
+                    .contains_key(&crate::sql::name(tbl_name.name.0).to_ascii_lowercase())
+                    && db
+                        .migration_targets(sql)?
+                        .iter()
+                        .any(|t| self.synced.contains(t))
             }
             other => {
                 let targets = db.migration_targets(sql)?;

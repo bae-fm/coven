@@ -102,11 +102,12 @@ impl Schema {
                     key.columns.push(column);
                     key.target_columns.push(target_column);
                 }
-                let without_rowid = object.sql.as_ref().is_some_and(|sql| {
-                    tokens(sql)
+                let without_rowid = match &object.sql {
+                    Some(sql) => tokens(sql)?
                         .windows(2)
-                        .any(|p| p[0].word("without") && p[1].word("rowid"))
-                });
+                        .any(|p| p[0].word("without") && p[1].word("rowid")),
+                    None => false,
+                };
                 tables.insert(
                     name.to_ascii_lowercase(),
                     TableSchema {

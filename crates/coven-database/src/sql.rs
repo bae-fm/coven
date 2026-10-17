@@ -1,5 +1,12 @@
 //! SQLite tokens used to inspect CREATE statements without matching comments or strings.
 
+use crate::schema_source::SchemaSource;
+use sqlite3_parser::{
+    ast::{Cmd, Expr, Name, Operator, Stmt, UnaryOperator},
+    lexer::sql::Parser,
+    Bump, FallibleIterator,
+};
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub(crate) enum Token {
     Word(String),
@@ -12,80 +19,48 @@ impl Token {
     pub(crate) fn word(&self, word: &str) -> bool {
         matches!(self, Self::Word(value) if value.eq_ignore_ascii_case(word))
     }
-
-    pub(crate) fn identifier(&self, name: &str) -> bool {
-        matches!(self, Self::Word(value) | Self::Quoted(value) if value.eq_ignore_ascii_case(name))
-    }
 }
 
-pub(crate) fn tokens(sql: &str) -> Vec<Token> {
-    spanned_tokens(sql)
-        .into_iter()
-        .map(|(token, _)| token)
-        .collect()
+pub(crate) fn tokens(sql: &str) -> rusqlite::Result<Vec<Token>> {
+    Ok(normalized(&SchemaSource::try_new(sql)?))
 }
 
-/// Byte ranges preserve expressions exactly, including operators and literals.
-pub(crate) fn spanned_tokens(sql: &str) -> Vec<(Token, std::ops::Range<usize>)> {
-    let mut chars = sql.char_indices().peekable();
-    let mut result = Vec::new();
-    while let Some((start, ch)) = chars.next() {
-        let token = match ch {
-            ch if ch.is_whitespace() => continue,
-            '-' if chars.peek().is_some_and(|(_, c)| *c == '-') => {
-                chars.next();
-                for (_, ch) in chars.by_ref() {
-                    if ch == '\n' {
-                        break;
-                    }
-                }
-                continue;
-            }
-            '/' if chars.peek().is_some_and(|(_, c)| *c == '*') => {
-                chars.next();
-                while let Some((_, ch)) = chars.next() {
-                    if ch == '*' && chars.peek().is_some_and(|(_, c)| *c == '/') {
-                        chars.next();
-                        break;
-                    }
-                }
-                continue;
-            }
-            '\'' | '"' | '`' | '[' => {
-                let end = if ch == '[' { ']' } else { ch };
-                let mut value = String::new();
-                while let Some((_, next)) = chars.next() {
-                    if next == end {
-                        if ch != '[' && chars.peek().is_some_and(|(_, c)| *c == end) {
-                            chars.next();
-                        } else {
-                            break;
-                        }
-                    }
-                    value.push(next);
-                }
-                if ch == '\'' {
+// Keep migration comparison's spelling rules: quote contents retain case,
+// unquoted words fold ASCII case, and numeric/operator punctuation stays separate.
+fn normalized(source: &SchemaSource<'_>) -> Vec<Token> {
+    let mut tokens = Vec::new();
+    for mut text in source.tokens() {
+        if text.starts_with(['x', 'X']) && text.as_bytes().get(1) == Some(&b'\'') {
+            tokens.push(Token::Word("x".into()));
+            text = &text[1..];
+        }
+        match text.as_bytes()[0] {
+            quote @ (b'\'' | b'"' | b'`' | b'[') => {
+                let value = name(text);
+                tokens.push(if quote == b'\'' {
                     Token::String(value)
                 } else {
                     Token::Quoted(value)
+                });
+            }
+            _ => {
+                let mut word = String::new();
+                for ch in text.chars().chain(std::iter::once(' ')) {
+                    if ch.is_alphanumeric() || ch == '_' || ch == '$' {
+                        word.push(ch.to_ascii_lowercase());
+                    } else {
+                        if !word.is_empty() {
+                            tokens.push(Token::Word(std::mem::take(&mut word)));
+                        }
+                        if !ch.is_whitespace() {
+                            tokens.push(Token::Symbol(ch));
+                        }
+                    }
                 }
             }
-            ch if ch.is_alphanumeric() || ch == '_' || ch == '$' => {
-                let mut word = String::from(ch);
-                while chars
-                    .peek()
-                    .is_some_and(|(_, c)| c.is_alphanumeric() || *c == '_' || *c == '$')
-                {
-                    word.push(chars.next().expect("peeked character").1);
-                }
-                Token::Word(word.to_ascii_lowercase())
-            }
-            ch => Token::Symbol(ch),
-        };
-        let end = chars.peek().map_or(sql.len(), |(index, _)| *index);
-        result.push((token, start..end));
+        }
     }
-    result
+    tokens
 }
 
 /// Quote an identifier, never a value or SQL fragment.
@@ -93,104 +68,59 @@ pub(crate) fn identifier(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
+pub(crate) fn name(raw: &str) -> String {
+    match raw.as_bytes()[0] {
+        b'[' => raw[1..raw.len() - 1].to_owned(),
+        quote @ (b'\'' | b'"' | b'`') => raw[1..raw.len() - 1].replace(
+            &format!("{0}{0}", quote as char),
+            &(quote as char).to_string(),
+        ),
+        _ => raw.to_owned(),
+    }
+}
+
 pub(crate) fn guarded_trigger(sql: &str) -> bool {
-    let tokens = tokens(sql);
-    let Some(begin) = tokens.iter().position(|t| t.word("begin")) else {
-        return false;
-    };
-    let Some(when) = tokens[..begin].iter().position(|t| t.word("when")) else {
-        return false;
-    };
-    guarded_predicate(&tokens[when + 1..begin])
+    let bump = Bump::new();
+    let mut parser = Parser::new(&bump, sql.as_bytes());
+    let command = parser.next();
+    match command {
+        Ok(Some(Cmd::Stmt(Stmt::CreateTrigger {
+            when_clause: Some(expr),
+            ..
+        }))) => guarded_predicate(&expr),
+        _ => false,
+    }
 }
 
-fn guarded_predicate(mut expr: &[Token]) -> bool {
-    while expr.first() == Some(&Token::Symbol('(')) && matching_paren(expr) == Some(expr.len() - 1)
-    {
-        expr = &expr[1..expr.len() - 1];
+fn unparenthesized<'a, 'b>(mut expr: &'a Expr<'b>) -> &'a Expr<'b> {
+    while let Expr::Parenthesized(items) = expr {
+        let [item] = items.as_slice() else { break };
+        expr = item;
     }
-    let mut depth = 0;
-    let mut ands = Vec::new();
-    let mut cases = 0;
-    let mut between = 0;
-    for (i, token) in expr.iter().enumerate() {
-        match token {
-            Token::Symbol('(') => depth += 1,
-            Token::Symbol(')') => depth -= 1,
-            token if token.word("case") => cases += 1,
-            token if token.word("end") && cases > 0 => cases -= 1,
-            token if depth == 0 && cases == 0 && token.word("between") => between += 1,
-            token if depth == 0 && cases == 0 && token.word("or") => return false,
-            token if depth == 0 && cases == 0 && token.word("and") => {
-                if between > 0 {
-                    between -= 1;
-                } else {
-                    ands.push(i);
-                }
-            }
-            _ => {}
-        }
-    }
-    if !ands.is_empty() {
-        let mut start = 0;
-        for end in ands.into_iter().chain(std::iter::once(expr.len())) {
-            if guarded_predicate(&expr[start..end]) {
-                return true;
-            }
-            start = end + 1;
-        }
-        return false;
-    }
-    if !expr.first().is_some_and(|t| t.word("not")) {
-        return false;
-    }
-    let mut call = &expr[1..];
-    while call.first() == Some(&Token::Symbol('(')) && matching_paren(call) == Some(call.len() - 1)
-    {
-        call = &call[1..call.len() - 1];
-    }
-    matches!(call, [name, Token::Symbol('('), Token::Symbol(')')] if name.identifier("coven_applying"))
+    expr
 }
 
-fn matching_paren(tokens: &[Token]) -> Option<usize> {
-    let mut depth = 0;
-    for (i, token) in tokens.iter().enumerate() {
-        match token {
-            Token::Symbol('(') => depth += 1,
-            Token::Symbol(')') => {
-                depth -= 1;
-                if depth == 0 {
-                    return Some(i);
-                }
-            }
-            _ => {}
+fn guarded_predicate(expr: &Expr<'_>) -> bool {
+    match unparenthesized(expr) {
+        Expr::Binary(left, Operator::And, right) => {
+            guarded_predicate(left) || guarded_predicate(right)
         }
+        Expr::Unary(UnaryOperator::Not, call) => matches!(unparenthesized(call),
+            Expr::FunctionCall { name, distinctness: None, args: None, order_by: None, filter_over: None }
+                if !name.0.starts_with('\'') && Name(name.0) == "coven_applying"),
+        _ => false,
     }
-    None
 }
 
 /// Table clauses and suffix, retaining constraints and column definitions for
 /// migration comparison. SQLite has already parsed and accepted this SQL.
 pub(crate) fn table_parts(sql: &str) -> Option<(Vec<Vec<Token>>, Vec<Token>)> {
-    let tokens = tokens(sql);
-    let start = tokens.iter().position(|t| *t == Token::Symbol('('))?;
-    let end = start + matching_paren(&tokens[start..])?;
-    let mut parts = Vec::new();
-    let mut part = start + 1;
-    let mut depth = 0;
-    for (i, token) in tokens.iter().enumerate().take(end).skip(part) {
-        match token {
-            Token::Symbol('(') => depth += 1,
-            Token::Symbol(')') => depth -= 1,
-            Token::Symbol(',') if depth == 0 => {
-                parts.push(tokens[part..i].to_vec());
-                part = i + 1;
-            }
-            _ => {}
-        }
-    }
-    parts.push(tokens[part..end].to_vec());
-    Some((parts, tokens[end + 1..].to_vec()))
+    let mut source = SchemaSource::new(sql);
+    let body = source.try_body()?;
+    Some((
+        body.parts().iter().map(normalized).collect(),
+        normalized(&source),
+    ))
 }
 
 #[cfg(test)]

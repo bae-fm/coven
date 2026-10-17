@@ -2,7 +2,7 @@
 
 use crate::schema::{SchemaIndex, TableSchema};
 use crate::schema_source::SchemaSource;
-use crate::sql::identifier;
+use crate::sql::{identifier, name};
 use sqlite3_parser::{
     ast::{
         Cmd, ColumnConstraint, CreateTableBody, Expr, Name, SortedColumn, Stmt, TableConstraint,
@@ -305,17 +305,6 @@ fn check_name(named: &Option<Name<'_>>, expression: &SchemaSource<'_>) -> String
     match named {
         Some(named) => name(named.0),
         None => expression.text().trim_ascii().to_owned(),
-    }
-}
-
-pub(crate) fn name(raw: &str) -> String {
-    match raw.as_bytes()[0] {
-        b'[' => raw[1..raw.len() - 1].to_owned(),
-        quote @ (b'\'' | b'"' | b'`') => raw[1..raw.len() - 1].replace(
-            &format!("{0}{0}", quote as char),
-            &(quote as char).to_string(),
-        ),
-        _ => raw.to_owned(),
     }
 }
 

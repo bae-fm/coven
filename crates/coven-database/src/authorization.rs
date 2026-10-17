@@ -364,10 +364,8 @@ impl SqlAuthorization {
 
         // FTS prepares PRAGMA data_version itself. Permit that internal read,
         // while keeping direct app PRAGMAs outside the SQL capability.
-        if crate::sql::tokens(sql)
-            .first()
-            .is_some_and(|token| token.word("pragma"))
-        {
+        let tokens = crate::sql::tokens(sql)?;
+        if tokens.first().is_some_and(|token| token.word("pragma")) {
             return Err(rusqlite::Error::UserFunctionError(Box::new(
                 DbError::StatementForbidden {
                     operation: "PRAGMA",
@@ -377,7 +375,7 @@ impl SqlAuthorization {
 
         // SQLITE_ALTER_TABLE reports the old name, not the rename destination.
         // Check the destination token too; comments and string contents are not SQL.
-        for part in crate::sql::tokens(sql).windows(3) {
+        for part in tokens.windows(3) {
             if part[0].word("rename") && part[1].word("to") {
                 let name = match &part[2] {
                     crate::sql::Token::Word(name)

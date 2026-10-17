@@ -1,7 +1,7 @@
 //! Identity across a migration: explicit renames first, surviving names second.
 
-use crate::removal_schema::name;
 use crate::schema::Schema;
+use crate::sql::name;
 use coven_merge::{ConstraintColumns, ForeignKey};
 use rusqlite::fallible_iterator::FallibleIterator;
 use sqlite3_parser::{
