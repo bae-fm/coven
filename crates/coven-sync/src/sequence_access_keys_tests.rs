@@ -156,3 +156,194 @@ async fn a_replacement_invalidated_by_contention_undoes_its_key_and_delivery() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+use coven_database::Database;
+use coven_foundation::id_source::StoreId;
+use coven_storage::{
+    test_utils::MemoryKeyAdmin, AccessKeyAdmin, ListedKey, MintScope, S3Credentials, S3MemberKey,
+    StorageError, StorageFailure,
+};
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Mutex,
+};
+
+struct InterruptedMint {
+    database: Database,
+    provider: MemoryKeyAdmin,
+    kind: &'static str,
+    fail_undo: AtomicBool,
+    observations: Mutex<Vec<(MintScope, MintScope)>>,
+}
+
+#[async_trait::async_trait]
+impl AccessKeyAdmin for InterruptedMint {
+    async fn mint(&self, scope: &MintScope) -> Result<S3MemberKey, StorageError> {
+        let record = self
+            .database
+            .operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kind == self.kind)
+            .unwrap();
+        let data: serde_json::Value = serde_json::from_slice(&record.data).unwrap();
+        let recorded = if self.kind == "invite" {
+            &data["access"]["Minting"]
+        } else {
+            &data["scope"]
+        };
+        self.observations.lock().unwrap().push((
+            scope.clone(),
+            serde_json::from_value(recorded.clone()).unwrap(),
+        ));
+        self.provider.mint(scope).await
+    }
+    async fn probe(&self, scope: &MintScope, key: &S3Credentials) -> Result<(), StorageError> {
+        self.provider.probe(scope, key).await
+    }
+    async fn roll_back(&self, scope: &MintScope) -> Result<(), StorageError> {
+        if self.fail_undo.swap(false, Ordering::SeqCst) {
+            return Err(StorageFailure::PermissionDenied.into());
+        }
+        self.provider.roll_back(scope).await
+    }
+    async fn revoke(
+        &self,
+        key: &str,
+        principal: &coven_format::S3Principal,
+    ) -> Result<(), StorageError> {
+        self.provider.revoke(key, principal).await
+    }
+    async fn key_exists(
+        &self,
+        key: &str,
+        principal: &coven_format::S3Principal,
+    ) -> Result<bool, StorageError> {
+        self.provider.key_exists(key, principal).await
+    }
+    async fn list_keys(&self, store: StoreId) -> Result<Vec<ListedKey>, StorageError> {
+        self.provider.list_keys(store).await
+    }
+}
+
+// §13, §18: record the exact artifact before creation; retry undoes that name.
+#[tokio::test]
+async fn uncertain_mints_are_recorded_before_creation_and_undone_after_reopening() {
+    for kind in ["invite", "replace-access-key"] {
+        interrupted_mint(kind, false).await;
+    }
+}
+
+// §12.2, §18: cancellation cannot discard an uncertain grant.
+#[tokio::test]
+async fn cancelling_an_uncertain_invite_keeps_its_name_until_undo_succeeds() {
+    interrupted_mint("invite", true).await;
+}
+
+async fn interrupted_mint(kind: &'static str, cancel: bool) {
+    let group = Group::new();
+    let mut ana = group.device(1).await;
+    Arc::get_mut(&mut ana.sync).unwrap().ids = Arc::new(coven_foundation::id_source::UuidIds);
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let provider = group.storage.key_admin();
+    provider.fail_next_mint();
+    let admin = Arc::new(InterruptedMint {
+        database: ana.sync.database.clone(),
+        provider: provider.clone(),
+        kind,
+        fail_undo: AtomicBool::new(true),
+        observations: Mutex::new(Vec::new()),
+    });
+    let result = if kind == "invite" {
+        ana.sync
+            .create_invite(
+                InviteTarget::NewMember {
+                    role: coven_format::admin::MemberRole::Member,
+                },
+                InviteAccess::S3AdminAccess(admin.clone()),
+            )
+            .await
+            .map(drop)
+    } else {
+        ana.sync
+            .replace_member_access_key(ben.identity.member(), admin.clone())
+            .await
+            .map(drop)
+    };
+    assert!(
+        matches!(result, Err(SyncError::Cleanup { .. })),
+        "{result:?}"
+    );
+    let (minted, recorded) = admin.observations.lock().unwrap()[0].clone();
+    assert_eq!(
+        minted, recorded,
+        "the provider must receive the journaled name"
+    );
+    assert_eq!(provider.users(), std::slice::from_ref(&minted.key_name));
+    let record = ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|record| record.kind == kind)
+        .unwrap();
+    let mut ana = group.reopen(ana).await;
+    Arc::get_mut(&mut ana.sync).unwrap().ids = Arc::new(coven_foundation::id_source::UuidIds);
+    if cancel {
+        let data: serde_json::Value = serde_json::from_slice(&record.data).unwrap();
+        let invite = serde_json::from_value(data["id"].clone()).unwrap();
+        assert!(matches!(
+            ana.sync.cancel_invite(invite).await,
+            Err(SyncError::Pending(_))
+        ));
+        assert!(ana
+            .sync
+            .database
+            .operation(record.id)
+            .await
+            .unwrap()
+            .is_some());
+    }
+    let resumed = Arc::new(InterruptedMint {
+        database: ana.sync.database.clone(),
+        provider: provider.clone(),
+        kind,
+        fail_undo: AtomicBool::new(false),
+        observations: Mutex::new(Vec::new()),
+    });
+    ana.sync
+        .retry_with_admin_access(record.id, resumed.clone())
+        .await
+        .unwrap();
+    assert!(
+        !provider.users().contains(&minted.key_name),
+        "undo must delete the recorded principal"
+    );
+    if cancel {
+        assert!(provider.users().is_empty());
+        assert!(ana
+            .sync
+            .database
+            .operation(record.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert!(resumed.observations.lock().unwrap().is_empty());
+    } else {
+        let observations = resumed.observations.lock().unwrap();
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].0, observations[0].1);
+        assert_ne!(
+            observations[0].0, minted,
+            "a retry mints under a fresh name"
+        );
+        assert_eq!(provider.users(), [observations[0].0.key_name.clone()]);
+    }
+    ana.sync.database.close().await.unwrap();
+    ben.sync.database.close().await.unwrap();
+}

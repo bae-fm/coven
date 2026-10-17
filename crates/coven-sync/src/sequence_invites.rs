@@ -19,8 +19,8 @@ use coven_format::{
 use coven_foundation::id_source::{InviteId, MemberId};
 use coven_merge::Audience;
 use coven_storage::{
-    AccessKeyAdmin, CloudProvider, InviteStorage, MintScope, ObjectPath, S3Credentials,
-    S3MemberKey, StorageFailure, StorageInvitation,
+    CloudProvider, InviteStorage, MintScope, ObjectPath, S3Credentials, S3MemberKey,
+    StorageFailure, StorageInvitation,
 };
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeSet, time::Duration};
@@ -544,7 +544,7 @@ impl SequenceSync {
         id: OperationId,
     ) -> Result<InviteProgress, SyncError> {
         loop {
-            let record = self
+            let mut record = self
                 .database
                 .operation(id)
                 .await?
@@ -572,7 +572,13 @@ impl SequenceSync {
                                     PendingReason::AdminAccessRequired,
                                 ));
                             };
-                            let minted = self.mint_checked(admin.as_ref(), scope).await;
+                            let scope = scope.clone();
+                            let minted = self
+                                .mint_checked(admin.as_ref(), &mut record, &scope, |scope| {
+                                    work.access = InviteGrant::Minting(scope);
+                                    Ok(serde_json::to_vec(&work)?)
+                                })
+                                .await;
                             self.admin_access
                                 .lock()
                                 .expect("admin access poisoned")
@@ -714,6 +720,18 @@ impl SequenceSync {
                         .await?;
                 }
                 InviteState::Revoking => {
+                    if let InviteGrant::Minting(scope) = &work.access {
+                        let admin = self
+                            .admin_access
+                            .lock()
+                            .expect("admin access poisoned")
+                            .get(&id)
+                            .cloned();
+                        let Some(admin) = admin else {
+                            return Ok(InviteProgress::Waiting(PendingReason::AdminAccessRequired));
+                        };
+                        admin.roll_back(scope).await?;
+                    }
                     // A replacement invite takes back only its own new grant,
                     // never access its active member already holds (§12.2).
                     let deletions = match work.access.member_access() {
@@ -837,35 +855,6 @@ impl SequenceSync {
                 pauses_writes: false,
             },
         })
-    }
-
-    /// Make a key under names fresh for this call and check it from the
-    /// member's side, or roll back what the call made (§4).
-    pub(crate) async fn mint_checked(
-        &self,
-        admin: &dyn AccessKeyAdmin,
-        template: &MintScope,
-    ) -> Result<S3MemberKey, SyncError> {
-        let scope = MintScope::new(
-            template.store,
-            &template.member,
-            template.device,
-            self.ids.new_id(),
-        );
-        let error = match admin.mint(&scope).await {
-            Ok(key) => match admin.probe(&scope, &key.credentials).await {
-                Ok(()) => return Ok(key),
-                Err(error) => SyncError::Storage(error),
-            },
-            Err(error) => SyncError::Storage(error),
-        };
-        match admin.roll_back(&scope).await {
-            Ok(()) => Err(error),
-            Err(cleanup) => Err(SyncError::Cleanup {
-                operation: Box::new(error),
-                cleanup: Box::new(SyncError::Storage(cleanup)),
-            }),
-        }
     }
 
     fn invite_value(&self, session: &Session, work: &InviteWork) -> Result<Invite, SyncError> {

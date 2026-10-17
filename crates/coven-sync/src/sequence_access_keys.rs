@@ -238,7 +238,7 @@ impl SequenceSync {
         id: OperationId,
     ) -> Result<KeyProgress, SyncError> {
         loop {
-            let record = self
+            let mut record = self
                 .database
                 .operation(id)
                 .await?
@@ -256,7 +256,13 @@ impl SequenceSync {
                     let Some(admin) = admin else {
                         return Ok(KeyProgress::Waiting(PendingReason::AdminAccessRequired));
                     };
-                    let key = self.mint_checked(admin.as_ref(), &work.scope).await?;
+                    let scope = work.scope.clone();
+                    let key = self
+                        .mint_checked(admin.as_ref(), &mut record, &scope, |scope| {
+                            work.scope = scope;
+                            Ok(serde_json::to_vec(&work)?)
+                        })
+                        .await?;
                     let sealing = session
                         .history
                         .state
@@ -483,6 +489,53 @@ impl SequenceSync {
 }
 
 impl SequenceSync {
+    /// Journal each mint's exact name before sending it. An interrupted call
+    /// is undone by its recorded name before a new call takes fresh names (§18).
+    pub(crate) async fn mint_checked(
+        &self,
+        admin: &dyn AccessKeyAdmin,
+        record: &mut OperationRecord,
+        previous: &MintScope,
+        encode: impl FnOnce(MintScope) -> Result<Vec<u8>, SyncError>,
+    ) -> Result<S3MemberKey, SyncError> {
+        if record.last_step != 0 {
+            admin.roll_back(previous).await?;
+        }
+        let scope = MintScope::new(
+            previous.store,
+            &previous.member,
+            previous.device,
+            self.ids.new_id(),
+        );
+        let last_step = record
+            .last_step
+            .checked_add(1)
+            .ok_or(SyncError::SequenceExhausted)?;
+        self.database
+            .advance_operation(OperationUpdate {
+                id: record.id,
+                previous: record.last_step,
+                last_step,
+                data: encode(scope.clone())?,
+            })
+            .await?;
+        record.last_step = last_step;
+        let error = match admin.mint(&scope).await {
+            Ok(key) => match admin.probe(&scope, &key.credentials).await {
+                Ok(()) => return Ok(key),
+                Err(error) => SyncError::Storage(error),
+            },
+            Err(error) => SyncError::Storage(error),
+        };
+        match admin.roll_back(&scope).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(SyncError::Cleanup {
+                operation: Box::new(error),
+                cleanup: Box::new(SyncError::Storage(cleanup)),
+            }),
+        }
+    }
+
     /// While an operation holds admin access, list this store's keys once
     /// retired devices could have made stray ones, and keep each key a
     /// retired device made that no admin entry names pending deletion (§13).
