@@ -1,3 +1,5 @@
+import CovenSequence.Claims
+
 /-!
 # The store sequence
 
@@ -16,8 +18,8 @@ prefix it applied. For each audience `A` the state has three parts:
 - the *ledger*: what admin slots decide, the same for every audience. That is
   members and roles, devices and their removal, member key generations, other admin
   state (names, access, circle membership) abstractly as `aux`, key
-  copies, refused admin slots, and per device the last claim number it
-  claimed;
+  copies, refused admin slots, and per device the greatest claim number and
+  its slot digest;
 - the *audience ledger* of `A`: the first slot that claimed each unique value
   or owner row of `A`, `A`'s announced snapshots, its schema version, its last
   raise or reset, preparations, and its refused parts;
@@ -26,7 +28,7 @@ prefix it applied. For each audience `A` the state has three parts:
   covering `c` replaces the rows with the raiser's migrated rows as of `c` and
   re-applies the counted `A` parts of slots `c+1` to `r-1`, converted.
 
-Only admin slots and key copies change the ledger, besides the claim numbers
+Only admin slots and key copies change the ledger, besides the claim records
 every slot records, and only slots that touch
 `A` change `A`'s audience ledger and rows. So a device that reads the admin
 slots and the parts of the audiences it belongs to computes exactly their
@@ -42,6 +44,8 @@ namespace CovenSequence
 structure Sig where
   /-- Device ids. -/
   Dev : Type
+  /-- SHA-256 tokens for complete sealed slot bytes. -/
+  Digest : Type
   /-- Member ids. -/
   Mem : Type
   /-- Unique values and owner rows: whatever the first slot wins. -/
@@ -58,13 +62,14 @@ structure Sig where
   Aux : Type
   /-- Audiences: the store and each circle. -/
   Aud : Type
+  [decDigest : DecidableEq Digest]
   [decDev : DecidableEq Dev]
   [decMem : DecidableEq Mem]
   [decKey : DecidableEq Key]
   [decPath : DecidableEq Path]
   [decAud : DecidableEq Aud]
 
-attribute [instance] Sig.decDev Sig.decMem Sig.decKey Sig.decPath Sig.decAud
+attribute [instance] Sig.decDigest Sig.decDev Sig.decMem Sig.decKey Sig.decPath Sig.decAud
 
 variable {S : Sig}
 
@@ -118,9 +123,8 @@ structure Ledger (S : Sig) where
   aux : S.Aux
   copies : List (Nat × S.Mem × Nat)
   refused : Nat → Bool
-  /-- Per device, the largest claim number among the slots it claimed. Every
-  device numbers every slot it claims with one counter. -/
-  claims : S.Dev → Nat
+  /-- Greatest included claim number and its slot digest; later slots win ties. -/
+  claims : S.Dev → Option (ClaimRecord S.Digest)
 
 /-- What one audience's slots decide, besides its rows. -/
 structure AudLedger (S : Sig) where
@@ -158,6 +162,8 @@ structure Rules (S : Sig) where
   /-- The claim number at a sequence position: its device's counter at the claim.
   The position distinguishes repeated slots with identical decoded contents. -/
   number : Nat → Slot S → Nat
+  /-- SHA-256 of the complete slot bytes, including the claimed path. -/
+  digest : Nat → Slot S → S.Digest
   ledger0 : Ledger S
   aud0 : S.Aud → AudLedger S
   rows0 : S.Aud → S.Rows
@@ -237,10 +243,11 @@ def author : Slot S → S.Dev
   | .prepare d _ _ _ _ => d
   | .boundary d _ _ _ _ => d
 
-/-- Record a claimed slot's number for its device, whether or not the slot is
+/-- Record a claimed slot's number and digest for its device, whether or not the slot is
 valid: a refused slot was still claimed. -/
 def noteClaim (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
-  { L with claims := fun e => if e = author x then max (L.claims e) (R.number k x) else L.claims e }
+  { L with claims := fun e => if e = author x then
+      ClaimRecord.remember (L.claims e) ⟨R.number k x, R.digest k x⟩ else L.claims e }
 
 @[simp] theorem noteClaim_member (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).member = L.member := rfl
 @[simp] theorem noteClaim_deviceOf (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).deviceOf = L.deviceOf := rfl
@@ -248,7 +255,7 @@ def noteClaim (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
 @[simp] theorem noteClaim_keyGen (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).keyGen = L.keyGen := rfl
 
 /-- Apply slot `k` to the ledger: its effect if it is a valid admin slot or key
-copy, its refusal if invalid, and in every case its claim number. -/
+copy, its refusal if invalid, and in every case its claim number and digest. -/
 def ledgerStep (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
   noteClaim R (if ledgerValid R L x then ledgerEffect R L k x else refuse L k) k x
 

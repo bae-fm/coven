@@ -83,7 +83,7 @@ def readPart (c : Config n) (k : Nat) (j : Json) : Except String (Nat × WPart (
   distinct (rows.map (·.id)) "row update"
   return (a, ⟨← nat j "version", uniques.map Sum.inl ++ owners.map Sum.inr, ⟨writes, rows⟩⟩)
 
-def readSlot (c : Config n) (k : Nat) (j : Json) : Except String (Nat × Slot (sig n)) := do
+def readSlot (c : Config n) (k : Nat) (j : Json) : Except String (ClaimRecord String × Slot (sig n)) := do
   let claim ← positive j "claim"
   let d ← nat j "device"
   let slot ← match ← j.getObjValAs? String "kind" with
@@ -93,17 +93,14 @@ def readSlot (c : Config n) (k : Nat) (j : Json) : Except String (Nat × Slot (s
       distinct (parts.map (·.1)) "part audience"
       pure (.writes d (← nat j "key_gen") (fun a => (parts.find? (fun p => p.1 == a)).map (·.2)))
     | _ => throw "unknown slot kind"
-  return (claim, slot)
+  return (⟨claim, ← j.getObjValAs? String "digest"⟩, slot)
 
 def readApply (j : Json) : Except String Json := do
   let n ← nat j "member_count"
   let c ← readConfig n j
   let raw ← j.getObjValAs? (List Json) "slots"
   let entries ← raw.zipIdx.mapM fun (s, k) => readSlot c (k + 1) s
-  for (entry, index) in entries.zipIdx do
-    let (claim, x) := entry
-    for (old, y) in entries.take index do
-      if author x == author y && claim ≤ old then throw "device claim numbers must increase"
+  for (_, x) in entries do
     match x with
     | .writes _ _ parts =>
       for a in c.audiences do
@@ -119,22 +116,38 @@ def readApply (j : Json) : Except String Json := do
     | _ => pure ()
   return SequenceApply.run c entries
 
+/-- Metadata is authenticated outside this runner; digest strings are SHA-256
+tokens supplied by the caller, not hashes of JSON serialization. -/
+def readClaim (j : Json) : Except String (Nat × Nat × String) := do
+  return (← nat j "device", ← positive j "number", ← j.getObjValAs? String "bytes")
+
+def readClaimRecord (j : Json) : Except String (Nat × ClaimRecord String) := do
+  match (← j.getArr?).toList with
+  | [d, n, h] =>
+    let number ← fromJson? n
+    if number = 0 then throw "snapshot claim number must be positive; omit devices with no claim"
+    return (← fromJson? d, ⟨number, ← fromJson? h⟩)
+  | _ => throw "expected [device, claim number, digest]"
+
 def readSettle (j : Json) : Except String Json := do
   let claim ← j.getObjVal? "recorded"
-  let d ← nat claim "device"
-  let number ← positive claim "number"
+  let own ← readClaim claim
   let slot ← positive claim "slot"
-  let bytes ← claim.getObjValAs? String "bytes"
-  let current ← j.getObjValAs? (Option String) "current"
+  let digest ← claim.getObjValAs? String "digest"
+  let current ← match ← j.getObjVal? "current" with
+    | .null => pure none
+    | value => some <$> readClaim value
+  if let some x := current then
+    if x.2.2 = own.2.2 && (x.1 != own.1 || x.2.1 != own.2.1) then
+      throw "equal bytes must have equal authenticated metadata"
   let floor ← j.getObjVal? "floor"
   let start ← nat floor "first_kept"
-  let claims ← (← floor.getObjValAs? (List Json) "last_claims").mapM pair
+  let claims ← (← floor.getObjValAs? (List Json) "last_claims").mapM readClaimRecord
   distinct (claims.map (·.1)) "snapshot device"
-  let covered := match claims.find? (fun c => c.1 == d) with
-    | some c => c.2
-    | none => 0
-  return toJson (match Settle.settle start covered slot bytes number current with
-    | .landed => "landed" | .notLanded => "notLanded" | .retry => "retry")
+  let covered := (claims.find? (fun c => c.1 == own.1)).map (·.2)
+  let another := fun (x : Nat × Nat × String) => decide (x.1 = own.1 ∧ own.2.1 ≤ x.2.1)
+  return toJson (match Settle.settle start covered slot own own.2.1 digest another current with
+    | .landed => "landed" | .notLanded => "notLanded" | .retry => "retry" | .copy => "copy")
 
 def readRead (j : Json) : Except String Json := do
   let applied ← nat j "applied"

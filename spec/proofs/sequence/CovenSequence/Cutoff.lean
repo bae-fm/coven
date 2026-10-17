@@ -100,7 +100,7 @@ theorem keyGen_mono (seq : Nat → Slot S) (m : S.Mem) (j : Nat) :
       · subst hj; exact Nat.le_refl _
       · exact Nat.le_trans (ih (by omega)) (step_keyGen R _ _ _ m)
 
-/-- An applied slot's ledger is its effect, with its claim number noted. -/
+/-- An applied slot's ledger is its effect, with its claim number and digest noted. -/
 theorem applied_ledger (seq : Nat → Slot S) {j : Nat} (hj : 1 ≤ j) (h : Applied R seq j) :
     ledgerAt R seq j = noteClaim R (ledgerEffect R (ledgerAt R seq (j - 1)) j (seq j)) j (seq j) := by
   have hjeq : j = (j - 1) + 1 := by omega
@@ -121,7 +121,7 @@ def Cut (seq : Nat → Slot S) (j : Nat) (d : S.Dev) (g : Nat) : Prop :=
 /-- **The removal cut-off.** A batch at slot `k+1` by a device cut off at an
 earlier slot `j` is refused in every audience it has a part for: that audience
 only records the refusal, so no unique value or owner row is taken, and its
-rows are unchanged. The ledger only records the slot's claim number. -/
+rows are unchanged. The ledger only records the slot's claim number and digest. -/
 theorem cutoff (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g : Nat}
     {parts : S.Aud → Option (WPart S)} (hw : seq (k + 1) = .writes d g parts) (hcut : Cut R seq j d g)
     (A : S.Aud) {w : WPart S} (hA : parts A = some w) :

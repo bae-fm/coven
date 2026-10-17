@@ -26,6 +26,7 @@ open CovenSequence
 /-- One device of one member, one audience; paths are numbers. -/
 abbrev sig : Sig where
   Dev := Unit
+  Digest := Nat
   Mem := Unit
   Key := Unit
   Path := Nat
@@ -45,7 +46,7 @@ def ledger0 : Ledger sig where
   aux := ()
   copies := []
   refused := fun _ => false
-  claims := fun _ => 0
+  claims := fun _ => none
 
 def aud0 : AudLedger sig where
   owner := fun _ => none
@@ -69,6 +70,7 @@ def rules : Rules sig where
   boundaryAllowed := fun _ _ _ _ => true
   sinceReset := fun _ b => b
   number := fun _ _ => 0
+  digest := fun k _ => k
   ledger0 := ledger0
   aud0 := fun _ => aud0
   rows0 := fun _ => ([] : List Nat)

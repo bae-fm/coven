@@ -22,6 +22,7 @@ abbrev Key := Sum Nat Nat
 
 abbrev sig (members : Nat) : Sig where
   Dev := Nat
+  Digest := String
   Mem := Fin members
   Key := Key
   Path := Unit
@@ -59,7 +60,7 @@ def initialLedger (c : Config n) : Ledger (sig n) where
   aux := ()
   copies := []
   refused := fun _ => false
-  claims := fun _ => 0
+  claims := fun _ => none
 
 def initialAudience (version : Nat) : AudLedger (sig n) :=
   ⟨fun _ => none, [], 0, 0, 0, [], version, fun _ => false⟩
@@ -69,7 +70,7 @@ def initialAudiences (c : Config n) (a : Nat) : AudLedger (sig n) :=
     | some x => x.version
     | none => 0)
 
-def baseRules (c : Config n) (numbers : Nat → Nat) : Rules (sig n) where
+def baseRules (c : Config n) (records : Nat → ClaimRecord String) : Rules (sig n) where
   authorized := fun L d e => match e with
     | .addDevice _ m => L.member m
     | .removeDevice target => Authority.isAdmin L d ||
@@ -87,7 +88,8 @@ def baseRules (c : Config n) (numbers : Nat → Nat) : Rules (sig n) where
   resetRows := fun _ => []
   boundaryAllowed := fun _ _ _ _ => false
   sinceReset := fun _ b => b
-  number := fun k _ => numbers k
+  number := fun k _ => (records k).number
+  digest := fun k _ => (records k).digest
   ledger0 := initialLedger c
   aud0 := initialAudiences c
   rows0 := fun _ => []
@@ -96,30 +98,30 @@ def hasAdmin (L : Ledger (sig n)) : Decidable (Authority.HasAdmin L) :=
   decidable_of_iff ((List.finRange n).any (fun m => L.member m && decide (L.role m = .admin)) = true)
     (by simp [Authority.HasAdmin, List.any_eq_true])
 
-def rules (c : Config n) (numbers : Nat → Nat) : Rules (sig n) :=
-  Authority.withRoles (baseRules c numbers) hasAdmin
+def rules (c : Config n) (records : Nat → ClaimRecord String) : Rules (sig n) :=
+  Authority.withRoles (baseRules c records) hasAdmin
 
 /-- An existing member can register from a fresh installation even when none
 of that member's registered devices is active. Its older devices stay inactive.
 The current member-key signature is an external authentication premise. -/
-theorem member_without_active_device_can_register (c : Config n) (numbers : Nat → Nat)
+theorem member_without_active_device_can_register (c : Config n) (records : Nat → ClaimRecord String)
     (seq : Nat → Slot (sig n)) (k : Nat) (m : Fin n) (d : Nat)
     (initial : Authority.HasAdmin (initialLedger c))
-    (member : (ledgerAt (rules c numbers) seq k).member m = true)
-    (noActive : ∀ old, (ledgerAt (rules c numbers) seq k).deviceOf old = some m →
-      active (ledgerAt (rules c numbers) seq k) old = false)
-    (fresh : (ledgerAt (rules c numbers) seq k).deviceOf d = none) :
-    let R := rules c numbers
+    (member : (ledgerAt (rules c records) seq k).member m = true)
+    (noActive : ∀ old, (ledgerAt (rules c records) seq k).deviceOf old = some m →
+      active (ledgerAt (rules c records) seq k) old = false)
+    (fresh : (ledgerAt (rules c records) seq k).deviceOf d = none) :
+    let R := rules c records
     let L := ledgerAt R seq k
     let next := ledgerStep R L (k + 1) (.admin d (.addDevice d m))
     ledgerValid R L (.admin d (.addDevice d m)) = true ∧
       next.deviceOf d = some m ∧ active next d = true ∧
       ∀ old, L.deviceOf old = some m → active next old = false := by
-  let R := rules c numbers
+  let R := rules c records
   let L := ledgerAt R seq k
   change L.member m = true at member
   have admin : Authority.HasAdmin L := by
-    have h := Authority.every_prefix_has_admin (baseRules c numbers) seq initial k
+    have h := Authority.every_prefix_has_admin (baseRules c records) seq initial k
     simpa [L, R, rules, Authority.withRoles_decision_eq] using h
   have authorized : R.authorized L d (.addDevice d m) = true := by
     simp [R, rules, Authority.withRoles, Authority.allowed, Authority.membershipChange,
@@ -158,14 +160,14 @@ def ledgerJson (L : Ledger (sig n)) (devices : List Nat) (through : Nat) : Json 
     ("removed", toJson (devices.filter L.removed)),
     ("key_generations", toJson ((List.finRange n).map fun m => [m.val, L.keyGen m])),
     ("last_claims", toJson (devices.filterMap fun d =>
-      if L.claims d = 0 then none else some [d, L.claims d])),
+      (L.claims d).map fun r => Json.arr #[toJson d, toJson r.number, toJson r.digest])),
     ("refused", toJson ((List.range through).map (· + 1) |>.filter L.refused))]
 
 def rowJson (r : Row) : Json := Json.mkObj [
   ("row", toJson r.id), ("live", toJson r.live), ("value", toJson r.value),
   ("inputs", toJson (r.inputs.map fun (s, w) => [s, w]))]
 
-def audienceJson (entries : List (Nat × Slot (sig n))) (a through : Nat)
+def audienceJson (entries : List (ClaimRecord String × Slot (sig n))) (a through : Nat)
     (P : AudLedger (sig n)) (rows : List Row) : Json := Id.run do
   let slots := (List.range through).map (· + 1)
   let parts := (entries.take through).filterMap fun (_, s) => match s with
@@ -198,7 +200,7 @@ def audienceJson (entries : List (Nat × Slot (sig n))) (a through : Nat)
 /-- Each prefix uses the Model definitions, including refusal-only effects and
 claim recording for refused slots. The extension outside 1..length is never
 read; it reuses an actual slot instead of inventing a sentinel operation. -/
-def run (c : Config n) (entries : List (Nat × Slot (sig n))) : Json := Id.run do
+def run (c : Config n) (entries : List (ClaimRecord String × Slot (sig n))) : Json := Id.run do
   let devices := sorted (c.devices.map (·.1) ++ entries.flatMap fun (_, s) =>
     author s :: match s with
       | .admin _ (.addDevice d _) | .admin _ (.removeDevice d) => [d]

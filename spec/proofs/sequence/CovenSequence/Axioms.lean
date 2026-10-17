@@ -45,6 +45,19 @@ import SequenceApply
 #print axioms CovenSequence.Operation.forgetful_lands_twice
 #print axioms CovenSequence.Operation.eager_undo_leaks
 
+#print axioms CovenSequence.ClaimRecord.remember_number
+#print axioms CovenSequence.Claims.witness
+#print axioms CovenSequence.Claims.ge
+#print axioms CovenSequence.Settle.lastClaim_witness
+#print axioms CovenSequence.Settle.claims_eq
+#print axioms CovenSequence.Settle.claims_witness
+#print axioms CovenSequence.Settle.settle_correct'
+#print axioms CovenSequence.Settle.settle_from_floor_single
+#print axioms CovenSequence.Settle.copies_fool_number_only
+#print axioms CovenSequence.Settle.floor_landed
+#print axioms CovenSequence.Settle.floor_notLanded
+#print axioms CovenSequence.Settle.floor_copy
+#print axioms CovenSequence.Settle.floor_not_retry
 #print axioms CovenSequence.Settle.lastClaim_ge
 #print axioms CovenSequence.Settle.step_claims
 #print axioms CovenSequence.Settle.claims_ge

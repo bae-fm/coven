@@ -169,8 +169,8 @@ theorem stores_good {seq : Nat → Slot S} {st st' : Store S} (run : StoreSteps 
 
 /-- **The claimant's floor check.** A claimant that saw its bytes `x` at slot
 `i`, and then, after any storage steps, reads a floor whose first kept slot is
-not past `i`, holds the genuine slot `i`. If the floor has passed `i`, the claim
-is void and its batch is claimed again. -/
+not past `i`, holds the genuine slot `i`. If the floor has passed `i`, these bytes
+cannot settle the claim: use the floor snapshot's claim number and digest. -/
 theorem claim_floor_check {seq : Nat → Slot S} {st st' : Store S} (g : Good R st seq)
     {i : Nat} {x : Slot S} (hx : st.slot i = some x) (run : StoreSteps R seq st st')
     (hf : st'.floor.start ≤ i) : 1 ≤ i ∧ i ≤ st'.head ∧ x = seq i := by

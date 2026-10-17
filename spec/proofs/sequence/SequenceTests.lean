@@ -39,23 +39,42 @@ def rejects (input : Json) : IO Unit := do
   | .error _ => pure ()
   | .ok value => throw (IO.userError s!"unexpected acceptance: {value.compress}")
 
-def settlement (slot start covered : Nat) (current : Option String) : Json :=
-  json% {"kind":"settle", "recorded":{"device":0,"number":2,"slot":$(slot),"bytes":"ours"},
-    "current":$(current),"floor":{"first_kept":$(start),"last_claims":[[0,$(covered)],[1,99]]}}
+def current (device number : Nat) (bytes : String) : Json :=
+  json% {"device":$(device),"number":$(number),"bytes":$(bytes)}
 
--- Byte comparison at the floor; the snapshot takes precedence below it.
+def settlement (slot start : Nat) (covered : Option (Nat × String)) (read : Option Json) : Json :=
+  let claims := covered.toList.map fun (n, h) => json% [0,$(n),$(h)]
+  json% {"kind":"settle",
+    "recorded":{"device":0,"number":2,"slot":$(slot),"bytes":"ours","digest":"ours-hash"},
+    "current":$(read),"floor":{"first_kept":$(start),"last_claims":$(claims ++ [json% [1,99,"remote-hash"]])}}
+
+-- Exact bytes at the floor; authenticated same-id claims at or above n detect
+-- copies. Below the floor only the snapshot record may settle the claim.
 #eval do
-  check (settlement 2 0 0 (some "ours")) (toJson "landed")
-  check (settlement 2 2 0 (some "ours")) (toJson "landed")
-  check (settlement 2 2 9 (some "other")) (toJson "notLanded")
-  check (settlement 2 2 9 none) (toJson "retry")
-  check (settlement 2 3 2 none) (toJson "landed")
-  check (settlement 2 3 3 (some "other")) (toJson "landed")
-  -- stale_create_wins_deleted_slot: matching stale bytes cannot settle it.
-  check (settlement 2 3 1 (some "ours")) (toJson "notLanded")
-  check (settlement 2 3 1 none) (toJson "notLanded")
-  check (json% {"kind":"settle","recorded":{"device":2,"number":1,"slot":1,"bytes":"a"},
-    "current":null,"floor":{"first_kept":2,"last_claims":[[0,9]]}}) (toJson "notLanded")
+  let ours := some (current 0 2 "ours")
+  check (settlement 2 0 none ours) (toJson "landed")
+  check (settlement 2 2 none ours) (toJson "landed")
+  check (settlement 2 2 (some (3,"other-hash")) ours) (toJson "landed")
+  check (settlement 2 2 (some (9,"remote")) (some (current 1 2 "other"))) (toJson "notLanded")
+  check (settlement 2 2 none (some (current 0 2 "other"))) (toJson "copy")
+  check (settlement 2 2 none (some (current 0 3 "other"))) (toJson "copy")
+  check (settlement 2 2 none (some (current 0 1 "earlier"))) (toJson "notLanded")
+  check (settlement 2 2 (some (9,"remote")) none) (toJson "retry")
+  check (settlement 2 3 (some (2,"ours-hash")) none) (toJson "landed")
+  check (settlement 2 3 (some (2,"other-hash")) none) (toJson "copy")
+  for digest in ["ours-hash", "other-hash"] do
+    check (settlement 2 3 (some (3,digest)) ours) (toJson "copy")
+    check (settlement 2 3 (some (1,digest)) ours) (toJson "notLanded")
+  check (settlement 2 3 none ours) (toJson "notLanded")
+  check (settlement 2 3 (some (1,"earlier-hash")) none) (toJson "notLanded")
+  check (settlement 2 3 (some (2,"other-hash")) ours) (toJson "copy")
+  -- The other device's record cannot confirm ours.
+  check (settlement 2 3 none none) (toJson "notLanded")
+
+-- Another copy wins slot 41 with claim 1; deletion must not confirm the loser.
+#eval check (json% {"kind":"settle",
+  "recorded":{"device":0,"number":1,"slot":41,"bytes":"copy-a","digest":"hash-a"},
+  "current":null,"floor":{"first_kept":42,"last_claims":[[0,1,"hash-b"]]}}) (toJson "copy")
 
 -- checked_genuine and strict order: fetched arrival order does not skip gaps.
 #eval do
@@ -102,10 +121,11 @@ def applyCase (slots : List Json) : Json := json% {
     {"audience":1,"version":0,"writers":[0]}],"slots":$(slots)}
 
 def admin (device claim : Nat) (entry : Json) : Json := json% {
-  "kind":"admin","device":$(device),"claim":$(claim),"entry":$(entry)}
+  "kind":"admin","device":$(device),"claim":$(claim),"digest":$(s!"{device}:{claim}"),"entry":$(entry)}
 
 def writes (device claim generation : Nat) (parts : List Json) : Json := json% {
-  "kind":"writes","device":$(device),"claim":$(claim),"key_gen":$(generation),"parts":$(parts)}
+  "kind":"writes","device":$(device),"claim":$(claim),"digest":$(s!"{device}:{claim}"),
+  "key_gen":$(generation),"parts":$(parts)}
 
 def part (audience version : Nat) (unique owners numbers : List Nat) (rows : List Json) : Json := json% {
   "audience":$(audience),"version":$(version),"unique_claims":$(unique),"owner_claims":$(owners),
@@ -129,7 +149,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["audiences","0","unique_claims"] (json% [[7,1]])
   checkField result ["audiences","0","owner_claims"] (json% [[7,1]])
   checkField result ["audiences","1","owner_claims"] (json% [[7,4]])
-  checkField result ["ledger","last_claims"] (json% [[0,3],[1,1]])
+  checkField result ["ledger","last_claims"] (json% [[0,3,"0:3"],[1,1,"1:1"]])
 
 -- first_after_release without a surviving loser, and disjoint permanent
 -- namespaces even when their numeric keys coincide.
@@ -157,7 +177,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
     checkField result ["audiences","0","unique_claims"] (json% [])
     checkField result ["audiences","0","owner_claims"] (json% [])
     checkField result ["audiences","0","rows"] (json% [])
-    checkField result ["ledger","last_claims"] (json% [[0,1],[1,1]])
+    checkField result ["ledger","last_claims"] (json% [[0,1,"0:1"],[1,1,"1:1"]])
     checkField result ["ledger","refused"] (json% [])
   let result ← run (applyCase [admin 0 1 (json% {"kind":"replaceKey","member":1}),
     writes 1 1 1 [part 0 1 [8] [] [1] [row 1 true (some 8) [[2,1]]]]])
@@ -184,7 +204,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["slots","0","ledger","removed"] (json% [1])
   checkField result ["ledger","devices"] (json% [[0,0],[1,1],[2,1]])
   checkField result ["ledger","refused"] (json% [])
-  checkField result ["ledger","last_claims"] (json% [[1,1],[2,2]])
+  checkField result ["ledger","last_claims"] (json% [[1,1,"1:1"],[2,2,"2:2"]])
   checkField result ["audiences","0","unique_claims"] (json% [[7,3]])
 
 -- The admin role survives removal of all devices. Either member can recover
@@ -288,8 +308,8 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
     admin 0 5 (json% {"kind":"removeMember","member":0})])
   checkField result ["ledger","refused"] (json% [1,2,3,4])
   checkField result ["ledger","members"] (json% [[1,"admin"]])
-  checkField result ["ledger","last_claims"] (json% [[0,5],[1,1]])
-  checkField result ["slots","1","ledger","last_claims"] (json% [[0,2]])
+  checkField result ["ledger","last_claims"] (json% [[0,5,"0:5"],[1,1,"1:1"]])
+  checkField result ["slots","1","ledger","last_claims"] (json% [[0,2,"0:2"]])
 
 -- admin_state_cannot_settle: the added member is absent after removal, but
 -- the ledger still records which device's claim landed.
@@ -297,8 +317,27 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   let result ← run (applyCase [admin 0 1 (json% {"kind":"addMember","member":2,"role":"member"}),
     admin 0 2 (json% {"kind":"removeMember","member":2})])
   checkField result ["ledger","members"] (json% [[0,"admin"],[1,"member"]])
-  checkField result ["ledger","last_claims"] (json% [[0,2]])
-  check (settlement 1 3 2 none) (toJson "landed")
+  checkField result ["ledger","last_claims"] (json% [[0,2,"0:2"]])
+  check (settlement 1 3 (some (2,"ours-hash")) none) (toJson "landed")
+
+-- Copies may repeat or decrease numbers. The ledger retains the greatest
+-- number and its digest, takes the later digest on a tie, and includes refusals.
+#eval do
+  let claim := fun (number : Nat) (digest : String) => json% {
+    "kind":"admin","device":0,"claim":$(number),"digest":$(digest),
+    "entry":{"kind":"removeMember","member":0}}
+  let result ← run (applyCase [claim 2 "a", claim 1 "lower", claim 2 "b", claim 3 "higher"])
+  checkField result ["slots","1","ledger","last_claims"] (json% [[0,2,"a"]])
+  checkField result ["slots","2","ledger","last_claims"] (json% [[0,2,"b"]])
+  checkField result ["ledger","last_claims"] (json% [[0,3,"higher"]])
+  checkField result ["ledger","refused"] (json% [1,2,3,4])
+  -- Feed actual ledger output back into settlement, including on an equal-number tie.
+  let .ok claims := field result ["slots","2","ledger","last_claims"]
+    | throw (IO.userError "missing ledger claims")
+  for (digest, verdict) in [("a", "copy"), ("b", "landed")] do
+    check (json% {"kind":"settle",
+      "recorded":{"device":0,"number":2,"slot":3,"bytes":"recorded","digest":$(digest)},
+      "current":null,"floor":{"first_kept":4,"last_claims":$(claims)}}) (toJson verdict)
 
 -- Version and write permission are checked separately for each audience.
 #eval do
@@ -308,7 +347,7 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["audiences","0","refused"] (json% [1,3])
   checkField result ["audiences","1","refused"] (json% [1])
   checkField result ["audiences","0","unique_claims"] (json% [[9,2]])
-  checkField result ["ledger","last_claims"] (json% [[0,1],[1,1],[9,1]])
+  checkField result ["ledger","last_claims"] (json% [[0,1,"0:1"],[1,1,"1:1"],[9,1,"9:1"]])
   let empty ← run (applyCase [])
   checkField empty ["slots"] (json% [])
   checkField empty ["audiences","0","version"] (toJson (1 : Nat))
@@ -331,11 +370,22 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
   checkField result ["audiences","0","live_winners"] (json% [[7,null]])
 
 #eval do
+  rejects (json% {"kind":"settle",
+    "recorded":{"device":0,"number":1,"slot":1,"bytes":"a","digest":"h"},
+    "current":null,"floor":{"first_kept":2,"last_claims":[[0,1]]}})
+  rejects (json% {"kind":"settle",
+    "recorded":{"device":0,"number":1,"slot":1,"bytes":"a","digest":"h"},
+    "current":null,"floor":{"first_kept":2,"last_claims":[[0,0,"h"]]}})
+  rejects (json% {"kind":"settle",
+    "recorded":{"device":0,"number":1,"slot":1,"bytes":"a","digest":"h"},
+    "current":null,"floor":{"first_kept":2,"last_claims":[[0,1,"a"],[0,1,"b"]]}})
+  rejects (json% {"kind":"settle",
+    "recorded":{"device":0,"number":1,"slot":1,"bytes":"a","digest":"h"},
+    "current":{"device":1,"number":1,"bytes":"a"},"floor":{"first_kept":1,"last_claims":[]}})
   rejects (json% {"kind":"read","applied":0,"fetched":[1,1],"first_kept":1})
   rejects (json% {"kind":"read","applied":0,"fetched":[0],"first_kept":1})
   rejects (applyCase [admin 0 0 (json% {"kind":"removeMember","member":1})])
   rejects (applyCase [admin 0 1 (json% {"kind":"removeMember","member":3})])
-  rejects (applyCase [writes 0 1 0 [], writes 0 1 0 []])
   rejects (applyCase [writes 0 1 0 [part 4 0 [] [] [] []]])
   rejects (applyCase [writes 0 1 0 [part 0 1 [] [] [1] [row 1 true (some 7) [[1,2]]]]])
   rejects (json% {"kind":"past","writes":[

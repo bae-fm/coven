@@ -40,9 +40,10 @@ Checked counterexamples explain the rules:
   it lands an operation twice ([Operations](#operations)).
 - **Undo after every artifact request ends.** Otherwise a late create leaves
   an artifact behind.
-- **Settle from the per-device claim number.** Settling a deleted slot's claim
+- **Settle from the per-device claim number and slot digest.** Settling a deleted slot's claim
   from the snapshot's state alone loses or duplicates writes, and re-applies
-  undone admin changes
+  undone admin changes. A number without a digest can confirm another copy's
+  bytes after deletion
   ([Settling a claim](#settling-a-claim-whose-slot-was-deleted)).
 
 ## The model
@@ -60,8 +61,10 @@ For each audience `A`, a device's state has three parts:
 - **The ledger** holds what admin slots and key copies decide, the same for
   every audience. That is members and roles, devices and their removal, member key
   generations, `aux`, key copies and refused admin slots. It also holds, per
-  device, the last claim number of the slots it claimed: every device numbers
-  every slot it claims with one counter, and every slot records its number.
+  device, the greatest included claim number and the SHA-256 of that slot's
+  complete bytes. Later slots replace the digest on an equal number; lower
+  numbers preserve the existing record. A device with no included claim has
+  `none`.
 - **`A`'s audience ledger** holds the first slot that claimed each unique value
   or owner row of `A`, `A`'s announced snapshots and preparations, its schema version,
   its last raise or reset, its last reset, and its refused parts.
@@ -72,7 +75,7 @@ For each audience `A`, a device's state has three parts:
   its chosen rows and discards that suffix. Subsequent writes pass the
   authored-read reset gate before conversion.
 
-Only admin slots and key copies change the ledger, besides the claim number
+Only admin slots and key copies change the ledger, besides the claim evidence
 every slot records, and only slots with a part or announcement for `A` change
 `A`'s other two parts. A slot or part invalid at
 its position is refused: it is consumed, and only its refusal is recorded.
@@ -134,7 +137,7 @@ storage model:
 - `claim_floor_check`: a claimant that saw its bytes at slot `i` and then, after
   any storage steps, reads a floor whose first kept slot is not past `i` holds
   the genuine slot `i`. If the floor has passed `i`, the bytes do not settle the
-  claim: use the snapshot's per-device claim number
+  claim: use the snapshot's per-device claim number and digest
   ([settlement](#settling-a-claim-whose-slot-was-deleted)) before deciding to claim again.
 
 ## Convergence
@@ -177,7 +180,7 @@ original device, number, timestamp, schema, bytes and `readThrough`.
 
   Each audience only records the refusal, so no unique value or owner row is
   taken and its rows are unchanged. The ledger only records the slot's claim
-  number, and every device agrees by `prefix_determines_state`.
+  number and digest, and every device agrees by `prefix_determines_state`.
 
 A batch is cut off when it was "made under a replaced key". A batch that the
 member's other devices make under the new key counts.
@@ -474,55 +477,72 @@ after slot deletion is proved separately below.
 
 ## Settling a claim whose slot was deleted
 
-[`Settle`](sequence/CovenSequence/Settle.lean). Each device numbers every slot
-it claims with one counter: batches, admin entries, key copies, announcements.
-Before each create, the journal records the claim number, slot and exact bytes. On
-reopen, the device reads the slot and compares bytes. If the floor has passed
-the slot, it settles from the floor's snapshot instead. Each snapshot records,
-per device, the last claim number it includes, valid or refused, and a claim
-landed exactly when that number covers it. Every slot kind uses this rule.
-The device settles its current claim before starting another; contention retries
-retain that number, and new claims take increasing positive numbers.
+[`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot
+claims with one counter, settles its current claim before starting another,
+and records the attempted path and exact bytes before sending. Contention
+retries retain the number. Different copies of one device id may use equal
+numbers with different bytes; the general settlement proof allows this.
 
-The first part abstracts slots to what settlement reads: a claim's device, its
-number, an attempt nonce and a value. `Own` holds what the device knows of its
-claim `n`: its claims carry numbers up to `n`, and only the recorded attempt
-can be in the sequence, because every earlier attempt was settled as not
-landed.
+Every snapshot's ledger holds `Option (ClaimRecord Digest)` per device. `none`
+means no included claim. A record pairs the greatest included number with the
+SHA-256 of that claim's complete slot bytes, valid or refused. The digest is
+replaced on an equal number at a later slot and retained on a lower number.
+[`Claims`](sequence/CovenSequence/Claims.lean) defines this fold once for both
+the abstract settlement history and `Model`'s ledger.
 
-- `lastClaim_ge`: the snapshot's record covers number `n` exactly when some
-  claim of the device up to its coverage reaches `n`.
-- `settle_correct`: settlement says `landed` exactly when the claim is in the
-  sequence. `notLanded` means it is nowhere in it, and `retry` means its slot
-  is still empty.
-- `lands_once_never_lost`: once the recorded slot is occupied, retaining a landed
-  claim or successfully claiming again exactly when settlement says `notLanded`
-  leaves the claim at exactly one slot. The theorem assumes the new claim succeeds;
-  it does not establish eventual success under contention.
+For an in-flight claim numbered `n`, below the floor:
 
-The second part reads the record from `Model`. The ledger keeps each device's
-last claim number, so every snapshot body carries it.
+- No record, or `L < n`: `notLanded`.
+- `L > n`: `copy`, even if the digest matches; this copy has never claimed above `n`.
+- `L = n`: `landed` only when the digest matches, otherwise `copy`.
 
-- `claims_ge`: the ledger's record covers `n` exactly when some slot of the
-  device up to that point carries a claim number reaching `n`.
-- `settle_from_floor`: when the floor has passed the recorded slot, the floor's
-  snapshot body for any audience records the claim's number exactly when the
-  slot holds the recorded bytes. With `claim_floor_check` for a kept slot,
-  every claim settles correctly from storage.
+For a kept slot, equal complete bytes mean `landed` and absence means `retry`.
+Different bytes signed by the same id with a number at or above `n` mean `copy`;
+a different device means `notLanded`. Lower-number mismatches remain
+`notLanded`, as in the single-copy model. Bytes recreated below the floor
+never override its record. A read error supplies no settlement input.
 
-Two checked counterexamples show why the number is needed:
+- `Claims.witness`, `lastClaim_witness`, `claims_witness`: the number and
+  digest in a record came together from an included slot of that device.
+- `Claims.ge`, `lastClaim_ge`, `claims_ge`: the record's number reaches a
+  positive `n` exactly when an included claim reaches it. These bounds do not
+  assume unique or increasing numbers per device id.
+- `settle_correct'`: for any number of copies, `landed` implies the recorded
+  slot holds this copy's bytes; `notLanded` excludes that attempt; `retry`
+  is equivalent to a slot above the head; and `copy` is equivalent to evidence
+  of another claim at or above `n` in the source settlement reads.
+  The digest premise says that matching complete-byte hashes identify the
+  recorded bytes and slot path, including [D9's `after` header](../format.md#d9-sealed-objects).
+  It is a cryptographic/encoding assumption,
+  not a uniqueness assumption about claim numbers.
+- `settle_correct`: under `Own`, the single-copy journal facts, `landed` is
+  equivalent to the recorded claim being in the sequence, `notLanded` means
+  its claim number is nowhere in the sequence, `retry` means the slot is still
+  empty, and `copy` is impossible. These journal facts are not premises of
+  `settle_correct'`.
+- `lands_once_never_lost`: for one copy, once its attempted slot is occupied,
+  retaining a landed claim or successfully claiming again after `notLanded`
+  leaves the claim at exactly one slot. The successful new create is a premise;
+  this does not prove eventual success under contention.
+- `claims_eq`: ledger replay computes exactly the shared record fold.
+- `settle_from_floor`: the same safety and copy detection hold using the
+  actual ledger in any audience's honest floor snapshot, without claim-number
+  uniqueness. `settle_from_floor_single` retains the single-copy equivalence.
+  With `claim_floor_check`, kept-slot reads are also genuine.
 
-- `state_alone_cannot_settle`: in one history the device's batch took slot 1 and
-  was then overwritten; in the other, another device took slot 1. The
-  snapshot's state is the same in both, so any rule that settles from the state
-  is wrong in one. It either claims a landed batch again, landing its writes
-  twice, or drops an unlanded one, losing them. The per-device record tells the
-  two apart.
-- `admin_state_cannot_settle`: the device's claim adds a member, and a later
-  slot removes the member. If another device's identical entry took the slot
-  instead, the ledger after the removal is the same apart from claim numbers.
-  Settling by presence says "not landed" in both, so in the first history the
-  device adds the member again, against the removal. The claim numbers differ.
+Three checked counterexamples explain the evidence:
+
+- `copies_fool_number_only`: two copies claim slot 41 with number 1 and
+  different bytes; copy B wins. With floor 42, number-only settlement wrongly
+  confirms copy A. Digest settlement returns `copy`, including when A's bytes
+  were recreated below the floor.
+- `state_alone_cannot_settle`: a batch can land and have its value overwritten,
+  or lose its slot to another device, leaving identical final state. Looking
+  only at that state can duplicate a landed batch or drop an unlanded one.
+- `admin_state_cannot_settle`: a member addition followed by removal leaves
+  the same membership whether this device's addition landed or another
+  device's did. Settling by presence can apply the addition again against the
+  removal. The per-device records distinguish the histories.
 
 **Another copy using this device id.** Each copy records an attempt before
 sending it and creates only what it recorded, signed with its id.
@@ -540,16 +560,25 @@ prints one JSON answer. Invalid input reports an error on stderr and exits 1.
 All fields below are required; identifiers are natural numbers, members lie in
 `0..member_count-1`, and slots, claim numbers and write numbers are positive.
 
-**`settle`** calls `Settle.settle`. Bytes are opaque strings compared exactly;
-`current: null` means absent. `last_claims` contains `[device, number]` pairs;
-an omitted device has never claimed (number zero). The floor is read after the
-slot. Below `first_kept`, only the snapshot record decides, even if bytes match.
+**`settle`** calls `Settle.settle`. Bytes are opaque strings compared exactly.
+`recorded` supplies `device`, `number`, `slot`, `bytes`, and `digest`. A present
+`current` supplies authenticated `device`, `number`, and `bytes`; `null` means
+absent. Equal bytes must have equal authenticated metadata. `last_claims`
+contains `[device, number, digest]` triples; omit a device with no included
+claim rather than giving it a zero number or invented digest. Duplicate device
+records are rejected.
+
+Digest strings are supplied SHA-256 tokens: the runner compares them but does
+not implement SHA-256, validate its encoding, or hash the JSON representation.
+Fixtures may use symbolic tokens. Authentication, hashing complete sealed
+bytes, and path binding are caller responsibilities. The floor is read after
+the slot. Below `first_kept`, only the snapshot record decides.
 
 ```json
-{"kind":"settle","recorded":{"device":0,"number":2,"slot":4,"bytes":"claim-2"},"current":"claim-2","floor":{"first_kept":5,"last_claims":[[0,1]]}}
+{"kind":"settle","recorded":{"device":0,"number":1,"slot":41,"bytes":"copy-a","digest":"hash-a"},"current":null,"floor":{"first_kept":42,"last_claims":[[0,1,"hash-b"]]}}
 ```
 
-Answer: `"notLanded"`; the other answers are `"landed"` and `"retry"`.
+Answer: `"copy"`; the other answers are `"landed"`, `"notLanded"`, and `"retry"`.
 
 **`read`** calls `Reader.checkedSlots`, whose next-slot check supplies the
 buffer and floor premises of `ReadStep.apply`. It returns the consecutive
@@ -576,20 +605,21 @@ including for admins. Other admin entries need an active author. Membership
 must retain an admin. Conversion is the identity; audience writer lists and
 conversion are fixture parameters, not additional store rules.
 
-Slots occupy positions `1..slots.length`. Each has `device` and `claim`, with
-strictly increasing claim numbers per device. An admin slot is
-`{"kind":"admin","device":0,"claim":1,"entry":{"kind":"removeDevice","device":1}}`.
+Slots occupy positions `1..slots.length`. Each has `device`, positive `claim`,
+and `digest`. Repeated or decreasing numbers are accepted because copies can
+share an id. An admin slot is
+`{"kind":"admin","device":0,"claim":1,"digest":"slot-1-hash","entry":{"kind":"removeDevice","device":1}}`.
 Entry kinds are `addMember` (`member`, `role`), `removeMember` (`member`),
 `changeRole` (`member`, `role`), `addDevice` (`device`, `member`), `removeDevice`
 (`device`), and `replaceKey` (`member`); roles are `"admin"` or `"member"`.
 For example, device 2 registers itself to current member 1 with
-`{"kind":"admin","device":2,"claim":1,"entry":{"kind":"addDevice","device":2,"member":1}}`.
+`{"kind":"admin","device":2,"claim":1,"digest":"registration-hash","entry":{"kind":"addDevice","device":2,"member":1}}`.
 Device 2 must have no existing binding, even a removed one. It may register when
 member 1 has no active devices. The enclosing `device` must equal the entry's
 `device`; another author is consumed as a refused admin slot. The JSON input
 supplies already-authenticated entries: it carries no signatures, and the
 current member-key signature proving device 2 speaks for member 1 is assumed
-verified before this call. A refused registration records its claim number but
+verified before this call. A refused registration records its claim number and digest but
 does not bind the id; a subsequent valid self-registration can succeed.
 A writes slot carries `key_gen` and at most one part per declared audience:
 
@@ -597,7 +627,7 @@ A writes slot carries `key_gen` and at most one part per declared audience:
 {"kind":"apply","member_count":1,
  "initial":{"members":[{"member":0,"role":"admin","key_gen":0}],"devices":[{"device":0,"member":0}]},
  "audiences":[{"audience":0,"version":1,"writers":[0]}],
- "slots":[{"kind":"writes","device":0,"claim":1,"key_gen":0,"parts":[
+ "slots":[{"kind":"writes","device":0,"claim":1,"digest":"slot-1-hash","key_gen":0,"parts":[
    {"audience":0,"version":1,"unique_claims":[7],"owner_claims":[9],"writes":[1],
     "rows":[{"row":9,"live":true,"value":7,"inputs":[[1,1]]}]}]}]}
 ```
@@ -618,12 +648,12 @@ The answer has `ledger`, `audiences`, and `slots`; each item of `slots` has
 `slot`, `ledger`, and `audiences` for that prefix. The ledger contains `members`
 (`[member, role]`), all registered `devices` (`[device, member]`, including
 removed devices), `removed` device ids, `key_generations` (`[member, generation]`
-for the whole member universe), nonzero `last_claims` (`[device, number]`), and
+for the whole member universe), included `last_claims` (`[device, number, digest]`), and
 `refused` admin slot numbers. Each audience contains `audience`, `version`,
 `unique_claims` and `owner_claims` (`[key, first-slot]`), `live_winners`
 (`[value, row-or-null]` for every value retained in merged rows), `rows` in the
 input row shape, and `refused` part slot numbers. Tables are sorted by id;
-refusals are ascending. The example yields `last_claims:[[0,1]]`,
+refusals are ascending. The example yields `last_claims:[[0,1,"slot-1-hash"]]`,
 `unique_claims:[[7,1]]`, `owner_claims:[[9,1]]`, `live_winners:[[7,9]]`, and no
 refusals, both at the final state and slot 1. Empty `slots` returns the initial
 state and an empty prefix list.
@@ -667,9 +697,12 @@ intervening remote write. Only supplied writes can appear in an answer.
 - Reload models changed readable audiences and their local write gates.
   Key delivery, circle invitation and the policy choosing the followed set
   remain abstract; a newly readable audience must load its own prefix.
-- `Model` takes each slot's claim number as given (`Rules.number`); that a
-  device's numbers increase is a hypothesis of `settle_from_floor`, not
-  derived from a device's counter.
+- `Model` takes authenticated claim numbers and complete-slot digests as
+  inputs (`Rules.number`, `Rules.digest`). No SHA-256 implementation or
+  cryptographic security proof is included. Hash collision resistance and
+  path binding appear as explicit premises of `settle_correct'` and
+  `settle_from_floor`. Only the single-copy theorems assume `Own` or its
+  equivalent journal facts; these are not derived from a device counter.
 - Not modelled:
   - concrete authority policies beyond membership, role changes, the runner's
     device/key actions and store resets;
