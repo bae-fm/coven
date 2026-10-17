@@ -889,7 +889,6 @@ they do not replace the separate byte-format, merge or queue tests.
 - Not modelled:
   - concrete authority policies beyond membership, role changes, the runner's
     device/key actions and store resets;
-  - Drive's head file and its compare-and-swap;
   - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;
   - the merge's internals, source-verdict calculation and converter callbacks,
