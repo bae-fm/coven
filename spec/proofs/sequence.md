@@ -169,6 +169,31 @@ member's other devices make under the new key counts.
 - `owner_stays`: an owner, once chosen, never changes. A long-offline device's
   late claim loses whatever its timestamp.
 
+These are permanent abstract claims. Unique values that can be released use
+[`LiveClaims`](sequence/CovenSequence/LiveClaims.lean) instead:
+
+- `first_live_claim`, `winner_counted_setter`, `within_slot`: choose among
+  merged live rows left by the first removal pass, by the greatest
+  `(slot, write number)` of each value's current input setters, then by
+  primary-key rank. Each selected claim is a counted setter. Expressions and
+  partial predicates supply their input setters at this boundary.
+- `deleted_releases`, `first_after_release`: deletion or removal before
+  uniqueness releases the claim. The first claim after release wins when no
+  earlier live claimant survives. `older_loser_returns` checks why that
+  qualification is necessary: claims 1 and 2 precede deletion of 1; 2 returns
+  ahead of a new claim 3. This agrees with §8.5's returning-loser rule.
+- `readers_agree`: applying the selector to sound sequence readers' merged
+  rows gives the same winner. Later removal does not rerun uniqueness.
+
+[`Owners`](sequence/CovenSequence/Owners.lean):
+
+- `selected_creation`, `lower_write_number_wins`: counted generation-zero
+  creations select by slot and then write number before permission filtering.
+- `later_claim_preserves_creator`, `move_preserves_owner`, `retained_creator`:
+  subsequent claims, updates, deletion, reinsertion and audience moves retain
+  the selected original write and its authenticated member. The move's slot
+  does not become the creation slot.
+
 ## Snapshots and deletion
 
 [`Reader`](sequence/CovenSequence/Reader.lean) models a reader of one audience
@@ -395,6 +420,5 @@ sending it and creates only what it recorded, signed with its id.
 - Not modelled:
   - Drive's head file and its compare-and-swap;
   - unannounced snapshot bodies and orphaned batch objects;
-  - releasing a unique value;
   - joiners reading slots before they hold the store key;
   - the merge's internals, which the merge package covers.

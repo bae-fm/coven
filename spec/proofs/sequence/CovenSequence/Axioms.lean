@@ -65,3 +65,18 @@ import CovenSequence
 #print axioms CovenSequence.Causality.receivers_agree
 #print axioms CovenSequence.Causality.own_predecessor_is_read
 #print axioms CovenSequence.Causality.intervening_write_not_read
+
+#print axioms CovenSequence.LiveClaims.latest_ge
+#print axioms CovenSequence.LiveClaims.winner_counted_setter
+#print axioms CovenSequence.LiveClaims.winner_live
+#print axioms CovenSequence.LiveClaims.deleted_releases
+#print axioms CovenSequence.LiveClaims.first_live_claim
+#print axioms CovenSequence.LiveClaims.within_slot
+#print axioms CovenSequence.LiveClaims.first_after_release
+#print axioms CovenSequence.LiveClaims.readers_agree
+#print axioms CovenSequence.LiveClaims.older_loser_returns
+#print axioms CovenSequence.Owners.selected_creation
+#print axioms CovenSequence.Owners.lower_write_number_wins
+#print axioms CovenSequence.Owners.later_claim_preserves_creator
+#print axioms CovenSequence.Owners.move_preserves_owner
+#print axioms CovenSequence.Owners.retained_creator
