@@ -34,6 +34,7 @@ import CovenSequence
 #print axioms CovenSequence.dev_ok
 #print axioms CovenSequence.device_reaches_head
 #print axioms CovenSequence.device_stops
+#print axioms CovenSequence.stopped_stays
 #print axioms CovenSequence.deletion_keeps_reachable
 
 #print axioms CovenSequence.Operation.step_req
@@ -43,7 +44,10 @@ import CovenSequence
 #print axioms CovenSequence.Operation.forgetful_lands_twice
 #print axioms CovenSequence.Operation.eager_undo_leaks
 
-#print axioms CovenSequence.Settle.lastWrite_ge
+#print axioms CovenSequence.Settle.lastClaim_ge
+#print axioms CovenSequence.Settle.step_claims
+#print axioms CovenSequence.Settle.claims_ge
+#print axioms CovenSequence.Settle.settle_from_floor
 #print axioms CovenSequence.Settle.settle_correct
 #print axioms CovenSequence.Settle.lands_once_never_lost
 #print axioms CovenSequence.Settle.state_alone_cannot_settle

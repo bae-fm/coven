@@ -44,6 +44,7 @@ def ledger0 : Ledger sig where
   aux := ()
   copies := []
   refused := fun _ => false
+  claims := fun _ => 0
 
 def aud0 : AudLedger sig where
   owner := fun _ => none
@@ -61,6 +62,7 @@ def rules : Rules sig where
   merge := fun (r : List Nat) (b : Nat) => r ++ [b]
   convert := fun _ _ b => b
   migrate := fun v (r : List Nat) => r ++ [1000 + v]
+  number := fun _ => 0
   ledger0 := ledger0
   aud0 := fun _ => aud0
   rows0 := fun _ => ([] : List Nat)

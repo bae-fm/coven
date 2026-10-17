@@ -7,7 +7,8 @@ writes to), a key copy, a snapshot announcement for one audience ("audience
 `A` as of slot `c` is at path `p`"), or a schema raise of one audience, which
 announces that audience's raise snapshot the same way. The audiences are the
 store and each circle. A slot's kind, and which audiences its parts or
-announcement belong to, are clear metadata.
+announcement belong to, and its device and claim number, are readable by every
+member device: the kind in the clear, the rest sealed under the store key.
 
 Every device applies slots in strict order, so its state is a function of the
 prefix it applied. For each audience `A` the state has three parts:
@@ -15,7 +16,8 @@ prefix it applied. For each audience `A` the state has three parts:
 - the *ledger*: what admin slots decide, the same for every audience. That is
   members, devices and their removal, member key generations, other admin
   state (roles, names, access, circle membership) abstractly as `aux`, key
-  copies, and refused admin slots;
+  copies, refused admin slots, and per device the last claim number it
+  claimed;
 - the *audience ledger* of `A`: the first slot that claimed each unique value
   or owner row of `A`, `A`'s announced snapshots, its schema version, its last
   raise, and its refused parts;
@@ -24,7 +26,8 @@ prefix it applied. For each audience `A` the state has three parts:
   covering `c` replaces the rows with the raiser's migrated rows as of `c` and
   re-applies the counted `A` parts of slots `c+1` to `r-1`, converted.
 
-Only admin slots and key copies change the ledger, and only slots that touch
+Only admin slots and key copies change the ledger, besides the claim numbers
+every slot records, and only slots that touch
 `A` change `A`'s audience ledger and rows. So a device that reads the admin
 slots and the parts of the audiences it belongs to computes exactly their
 state, and never needs another audience's parts.
@@ -101,6 +104,9 @@ structure Ledger (S : Sig) where
   aux : S.Aux
   copies : List (Nat × S.Mem × Nat)
   refused : Nat → Bool
+  /-- Per device, the largest claim number among the slots it claimed. Every
+  device numbers every slot it claims with one counter. -/
+  claims : S.Dev → Nat
 
 /-- What one audience's slots decide, besides its rows. -/
 structure AudLedger (S : Sig) where
@@ -129,6 +135,8 @@ structure Rules (S : Sig) where
   convert : Nat → Nat → S.Batch → S.Batch
   /-- `migrate version rows`: the database part of the raise's migrations. -/
   migrate : Nat → S.Rows → S.Rows
+  /-- The claim number a slot carries: its device's counter at the claim. -/
+  number : Slot S → Nat
   ledger0 : Ledger S
   aud0 : S.Aud → AudLedger S
   rows0 : S.Aud → S.Rows
@@ -186,8 +194,28 @@ def ledgerEffect (L : Ledger S) (k : Nat) : Slot S → Ledger S
 def refuse (L : Ledger S) (k : Nat) : Ledger S :=
   { L with refused := fun i => if i = k then true else L.refused i }
 
+/-- The device that claimed a slot. -/
+def author : Slot S → S.Dev
+  | .admin d _ => d
+  | .writes d _ _ => d
+  | .keyCopy d _ _ => d
+  | .snapshot d _ _ _ => d
+  | .raise d _ _ _ _ => d
+
+/-- Record a claimed slot's number for its device, whether or not the slot is
+valid: a refused slot was still claimed. -/
+def noteClaim (L : Ledger S) (x : Slot S) : Ledger S :=
+  { L with claims := fun e => if e = author x then max (L.claims e) (R.number x) else L.claims e }
+
+@[simp] theorem noteClaim_member (L : Ledger S) (x : Slot S) : (noteClaim R L x).member = L.member := rfl
+@[simp] theorem noteClaim_deviceOf (L : Ledger S) (x : Slot S) : (noteClaim R L x).deviceOf = L.deviceOf := rfl
+@[simp] theorem noteClaim_removed (L : Ledger S) (x : Slot S) : (noteClaim R L x).removed = L.removed := rfl
+@[simp] theorem noteClaim_keyGen (L : Ledger S) (x : Slot S) : (noteClaim R L x).keyGen = L.keyGen := rfl
+
+/-- Apply slot `k` to the ledger: its effect if it is a valid admin slot or key
+copy, its refusal if invalid, and in every case its claim number. -/
 def ledgerStep (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
-  if ledgerValid R L x then ledgerEffect R L k x else refuse L k
+  noteClaim R (if ledgerValid R L x then ledgerEffect R L k x else refuse L k) x
 
 /-- Whether slot `x` has a part for, or announces for, audience `A`. -/
 def touches (A : S.Aud) : Slot S → Bool

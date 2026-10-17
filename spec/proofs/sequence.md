@@ -29,11 +29,10 @@ Five results are checked counterexamples, and each one is the reason for a rule:
   it lands an operation twice ([Operations](#operations)).
 - **Undo after every artifact request ends.** Otherwise a late create leaves
   an artifact behind.
-- **Settle from the per-device write number.** Settling a deleted slot's
-  claim from the snapshot's state alone loses or duplicates writes
-  ([Settling a claim](#settling-a-claim-whose-slot-was-deleted)). The same
-  holds for an admin claim settled by whether its change is present; that
-  rule needs a choice.
+- **Settle from the per-device claim number.** Settling a deleted slot's claim
+  from the snapshot's state alone loses or duplicates writes, and re-applies
+  undone admin changes
+  ([Settling a claim](#settling-a-claim-whose-slot-was-deleted)).
 
 ## The model
 
@@ -48,7 +47,9 @@ For each audience `A`, a device's state has three parts:
 
 - **The ledger** holds what admin slots and key copies decide, the same for
   every audience. That is members, devices and their removal, member key
-  generations, `aux`, key copies and refused admin slots.
+  generations, `aux`, key copies and refused admin slots. It also holds, per
+  device, the last claim number of the slots it claimed: every device numbers
+  every slot it claims with one counter, and every slot records its number.
 - **`A`'s audience ledger** holds the first slot that claimed each unique value
   or owner row of `A`, `A`'s announced snapshots, its schema version, its last
   raise, and its refused parts.
@@ -57,8 +58,9 @@ For each audience `A`, a device's state has three parts:
   loads the raiser's migrated rows as of `c`. It then replays the counted `A`
   parts of slots `c+1` to `r-1`, converted to the new version.
 
-Only admin slots and key copies change the ledger, and only slots with a part
-or announcement for `A` change `A`'s other two parts. A slot or part invalid at
+Only admin slots and key copies change the ledger, besides the claim number
+every slot records, and only slots with a part or announcement for `A` change
+`A`'s other two parts. A slot or part invalid at
 its position is refused: it is consumed, and only its refusal is recorded.
 Removing a member removes every device registered to it, so re-adding the
 member does not revive them.
@@ -139,8 +141,8 @@ storage model:
     was made under.
 
   Each audience only records the refusal, so no unique value or owner row is
-  taken and its rows are unchanged. The ledger is unchanged, and every device
-  agrees by `prefix_determines_state`.
+  taken and its rows are unchanged. The ledger only records the slot's claim
+  number, and every device agrees by `prefix_determines_state`.
 
 A batch is cut off when it was "made under a replaced key". A batch that the
 member's other devices make under the new key counts.
@@ -230,18 +232,23 @@ needed.
 
 [`Device`](sequence/CovenSequence/Device.lean) models a device with the list of
 audiences it follows, a key per audience, and one reader per audience. A
-reader may move only while no other reader of the device is behind it.
+reader may move only while no other reader of the device is behind it. When a
+reader's next slot, checked against the floor, is its audience's and the device
+has no key for it, the device stops entirely.
 
 - `keyless_passes_only_others` (in `Reader`): a reader of `A` without `A`'s key
   passes only slots that have no part or announcement for `A`.
 - `keyless_stops` (in `Reader`): such a reader whose next slot is `A`'s never
   moves.
 - `device_stops`: a device following `B` without `B`'s key, whose `B` reader's
-  next slot is `B`'s, never moves that reader. Every other reader applies at
-  most up to that slot, or loads its own floor snapshot.
+  next slot is `B`'s, never moves that reader. Even before it notices, every
+  other reader applies at most up to that slot, or loads its own floor
+  snapshot.
+- `stopped_stays`: once the device has stopped, nothing moves: no reader
+  applies a slot and none reloads.
 - `dev_ok`: device steps keep every followed reader sound.
-- `device_reaches_head`: on good storage, a device holding the keys of the
-  audiences it follows, and no others, can run every reader to the head. A
+- `device_reaches_head`: on good storage, a running device holding the keys of
+  the audiences it follows, and no others, can run every reader to the head. A
   device outside a circle has no reader for it, applies the circle's slots
   without reading their circle parts, and reaches the right state for every
   audience it reads.
@@ -249,9 +256,9 @@ reader may move only while no other reader of the device is behind it.
   stale creates, floor writes, deletions, uploads and reader steps:
   - storage stays good;
   - every reader stays at a prefix state of its audience;
-  - a device holding its audiences' keys can still run every reader to the
-    head of the current storage, where each holds the full state of its
-    audience.
+  - a device holding its audiences' keys never stops, and can still run every
+    reader to the head of the current storage, where each holds the full state
+    of its audience.
 
   Deleting covered slots never changes any device's reachable state.
 
@@ -292,39 +299,53 @@ only slots `1..n-1`.
 
 ## Settling a claim whose slot was deleted
 
-[`Settle`](sequence/CovenSequence/Settle.lean). Before each create, the journal
-records the slot and the exact bytes. On reopen, the device reads the slot and
-compares bytes. If the floor has passed the slot, it settles from the floor's
-snapshot instead. Each snapshot records, per device, the number of the last
-write of that device it includes, and a batch's claim landed exactly when that
-number covers the batch. The model abstracts slots to what settlement reads: a
-batch's author, its last write number, an attempt nonce and a value.
+[`Settle`](sequence/CovenSequence/Settle.lean). Each device numbers every slot
+it claims with one counter: batches, admin entries, key copies, announcements.
+Before each create, the journal records the slot and the exact bytes. On
+reopen, the device reads the slot and compares bytes. If the floor has passed
+the slot, it settles from the floor's snapshot instead. Each snapshot records,
+per device, the last claim number it includes, and a claim landed exactly when
+that number covers it. Admin claims settle by the same rule as batches.
 
-`Own` holds what the device knows of its batch `n`. Its batches carry numbers
-up to `n`. Only the recorded attempt can be in the sequence, because every
-earlier attempt was settled as not landed.
+The first part abstracts slots to what settlement reads: a claim's device, its
+number, an attempt nonce and a value. `Own` holds what the device knows of its
+claim `n`: its claims carry numbers up to `n`, and only the recorded attempt
+can be in the sequence, because every earlier attempt was settled as not
+landed.
 
-- `lastWrite_ge`: the snapshot's record covers number `n` exactly when some
-  batch of the device up to its coverage reaches `n`.
-- `settle_correct`: settlement says `landed` exactly when the batch is in the
+- `lastClaim_ge`: the snapshot's record covers number `n` exactly when some
+  claim of the device up to its coverage reaches `n`.
+- `settle_correct`: settlement says `landed` exactly when the claim is in the
   sequence. `notLanded` means it is nowhere in it, and `retry` means its slot
   is still empty.
 - `lands_once_never_lost`: a device that claims again exactly when settlement
-  says `notLanded` ends with the batch at exactly one slot. That re-establishes
-  `Own` for its next return.
-- `state_alone_cannot_settle` is a checked counterexample. In one history the
-  device's batch took slot 1 and was then overwritten; in the other, another
-  device took slot 1. The snapshot's state is the same in both, so any rule
-  that settles from the state is wrong in one. It either claims a landed batch
-  again, landing its writes twice, or drops an unlanded one, losing them. The
-  per-device record tells the two apart.
-- `admin_state_cannot_settle` is a checked counterexample to settling an admin
-  claim by whether its change is present. The device's claim adds a member,
-  and a later slot removes the member. If another device's identical entry
-  took the slot instead, the ledger after the removal is the same. Settling
-  by presence says "not landed" in both, so in the first history the device
-  adds the member again, against the removal. An admin claim needs the same
-  per-device number, or another landed-or-not record in the snapshot.
+  says `notLanded` ends with the claim at exactly one slot. For a batch its
+  writes land once; for an admin entry its change lands once. That
+  re-establishes `Own` for its next return.
+
+The second part reads the record from `Model`. The ledger keeps each device's
+last claim number, so every snapshot body carries it.
+
+- `claims_ge`: the ledger's record covers `n` exactly when some slot of the
+  device up to that point carries a claim number reaching `n`.
+- `settle_from_floor`: when the floor has passed the recorded slot, the floor's
+  snapshot body for any audience records the claim's number exactly when the
+  slot holds the recorded bytes. With `claim_floor_check` for a kept slot,
+  every claim settles correctly from storage.
+
+Two checked counterexamples show why the number is needed:
+
+- `state_alone_cannot_settle`: in one history the device's batch took slot 1 and
+  was then overwritten; in the other, another device took slot 1. The
+  snapshot's state is the same in both, so any rule that settles from the state
+  is wrong in one. It either claims a landed batch again, landing its writes
+  twice, or drops an unlanded one, losing them. The per-device record tells the
+  two apart.
+- `admin_state_cannot_settle`: the device's claim adds a member, and a later
+  slot removes the member. If another device's identical entry took the slot
+  instead, the ledger after the removal is the same apart from claim numbers.
+  Settling by presence says "not landed" in both, so in the first history the
+  device adds the member again, against the removal. The claim numbers differ.
 
 **Another copy using this device id.** Each copy records an attempt before
 sending it and creates only what it recorded, signed with its id.
@@ -337,19 +358,19 @@ sending it and creates only what it recorded, signed with its id.
 
 - Snapshot and raise bodies are honest: each is the announcer's state as of its
   coverage, or the raiser's migrated rows.
-- Admin slots and key copies are readable by every device that follows any
-  audience. A slot's kind and its parts' audiences are clear metadata. Q8
-  names the kind and key-copy routing; the parts' audiences must be clear too,
-  or a reader cannot tell a slot it is not meant to read from one it cannot
-  read.
+- Admin slots and key copies are readable by every member device. So are a
+  slot's device, claim number and each part's audience: they are sealed under
+  the store key, which every member holds, and the provider sees only the slot
+  kind and key-copy routing.
 - Unique values and owner rows are per audience; uniqueness across audiences is
   not modelled.
 - A part at a version above its audience's is refused. A device whose app
   cannot apply a slot stops before it; that stop is not modelled.
 - Circle membership changes are not modelled as a device starting or stopping
   an audience: a device starts following an audience as a joiner of it.
-- `Settle` is not composed with `Model`: its per-device record is computed over
-  its abstract slots, not stored in `Model`'s snapshot bodies.
+- `Model` takes each slot's claim number as given (`Rules.number`); that a
+  device's numbers increase is a hypothesis of `settle_from_floor`, not
+  derived from a device's counter.
 - Not modelled:
   - Drive's head file and its compare-and-swap;
   - the grace period, which is a cost setting and not a correctness rule;

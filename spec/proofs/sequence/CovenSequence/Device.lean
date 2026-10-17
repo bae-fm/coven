@@ -23,6 +23,9 @@ structure Device (S : Sig) where
   follows : List S.Aud
   keys : S.Aud → Bool
   reader : S.Aud → Reader S
+  /-- Set when a reader finds a slot it should read but has no key for: the
+  device then stops entirely, reloading nothing either. -/
+  stopped : Bool
 
 def Device.set (dv : Device S) (A : S.Aud) (d : Reader S) : Device S :=
   { dv with reader := fun B => if B = A then d else dv.reader B }
@@ -31,6 +34,8 @@ def Device.set (dv : Device S) (A : S.Aud) (d : Reader S) : Device S :=
     (dv.set A d).follows = dv.follows := rfl
 @[simp] theorem Device.set_keys (dv : Device S) (A : S.Aud) (d : Reader S) :
     (dv.set A d).keys = dv.keys := rfl
+@[simp] theorem Device.set_stopped (dv : Device S) (A : S.Aud) (d : Reader S) :
+    (dv.set A d).stopped = dv.stopped := rfl
 @[simp] theorem Device.set_same (dv : Device S) (A : S.Aud) (d : Reader S) :
     (dv.set A d).reader A = d := by simp [Device.set]
 theorem Device.set_other (dv : Device S) {A B : S.Aud} (d : Reader S) (h : B ≠ A) :
@@ -39,13 +44,19 @@ theorem Device.set_other (dv : Device S) {A B : S.Aud} (d : Reader S) (h : B ≠
     (dv.set A d).set A d' = dv.set A d' := by
   simp only [Device.set]; congr; funext B; by_cases h : B = A <;> simp [h]
 
-/-- One reader of the device steps. A step that moves a reader needs every
-other reader of the device to be at least as far. -/
+/-- One reader of a running device steps; a step that moves a reader needs every
+other reader of the device to be at least as far. Or the device stops: a
+reader's next slot, checked against the floor, is its audience's and the device
+has no key for it. -/
 inductive DevStep (st : Store S) : Device S → Device S → Prop
-  | step (dv : Device S) (A : S.Aud) (hA : A ∈ dv.follows) (d' : Reader S)
+  | step (dv : Device S) (hrun : dv.stopped = false) (A : S.Aud) (hA : A ∈ dv.follows) (d' : Reader S)
       (hs : ReadStep R A (dv.keys A) st (dv.reader A) d')
       (hgate : d'.pos ≠ (dv.reader A).pos → ∀ B ∈ dv.follows, (dv.reader A).pos ≤ (dv.reader B).pos) :
       DevStep st dv (dv.set A d')
+  | stop (dv : Device S) (B : S.Aud) (hB : B ∈ dv.follows) (hkey : dv.keys B = false) (x : Slot S)
+      (hb : (dv.reader B).buf ((dv.reader B).pos + 1) = some x)
+      (hf : st.floor.start ≤ (dv.reader B).pos + 1) (ht : touches B x = true) :
+      DevStep st dv { dv with stopped := true }
 
 inductive DevSteps (st : Store S) : Device S → Device S → Prop
   | refl (dv : Device S) : DevSteps st dv dv
@@ -63,17 +74,32 @@ def DevOk (st : Store S) (seq : Nat → Slot S) (dv : Device S) : Prop :=
 
 theorem devstep_frame {st : Store S} {dv dv' : Device S} (s : DevStep R st dv dv') :
     dv'.follows = dv.follows ∧ dv'.keys = dv.keys := by
-  cases s; exact ⟨rfl, rfl⟩
+  cases s <;> exact ⟨rfl, rfl⟩
+
+/-- **A stopped device stops entirely.** No reader of it moves, and nothing
+reloads. -/
+theorem stopped_stays {st : Store S} {dv dv' : Device S} (h : dv.stopped = true)
+    (run : DevSteps R st dv dv') : dv' = dv := by
+  induction run with
+  | refl => rfl
+  | @step a b c s _ ih =>
+    cases s with
+    | step hrun => rw [h] at hrun; cases hrun
+    | stop =>
+      have hb : { a with stopped := true } = a := by cases a; simp only at h; simp [h]
+      rw [hb] at ih
+      exact ih h
 
 theorem dev_ok {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {dv dv' : Device S}
     (s : DevStep R st dv dv') (h : DevOk R st seq dv) : DevOk R st seq dv' := by
   cases s with
-  | step A hA d' hs hgate =>
+  | step hrun A hA d' hs hgate =>
     intro B hB
     simp only [Device.set_follows] at hB
     by_cases hBA : B = A
     · subst hBA; rw [Device.set_same]; exact read_ok R g (h B hB) hs
     · rw [Device.set_other _ _ hBA]; exact h B hB
+  | stop => exact h
 
 theorem devs_ok {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {dv dv' : Device S}
     (run : DevSteps R st dv dv') (h : DevOk R st seq dv) : DevOk R st seq dv' := by
@@ -88,7 +114,8 @@ theorem devs_frame {st : Store S} {dv dv' : Device S} (run : DevSteps R st dv dv
   | step s _ ih => obtain ⟨a, b⟩ := devstep_frame R s; exact ⟨ih.1.trans a, ih.2.trans b⟩
 
 /-- Fetching never moves a reader, so it needs no gate. -/
-theorem lift_fetch (st : Store S) (dv : Device S) (A : S.Aud) (hA : A ∈ dv.follows) (lo : Nat) :
+theorem lift_fetch (st : Store S) (dv : Device S) (hrun : dv.stopped = false) (A : S.Aud)
+    (hA : A ∈ dv.follows) (lo : Nat) :
     ∀ n, DevSteps R st dv (dv.set A (fetched st (dv.reader A) lo n))
   | 0 => by
     rw [fetched_zero]
@@ -96,10 +123,11 @@ theorem lift_fetch (st : Store S) (dv : Device S) (A : S.Aud) (hA : A ∈ dv.fol
       cases dv; simp only [Device.set]; congr; funext B; by_cases h : B = A <;> simp [h]
     rw [this]; exact DevSteps.refl dv
   | n + 1 => by
-    have ih := lift_fetch st dv A hA lo n
+    have ih := lift_fetch st dv hrun A hA lo n
     rw [fetched_succ]
     refine DevSteps.trans R ih ?_
-    have hs := DevStep.step (R := R) (st := st) (dv.set A (fetched st (dv.reader A) lo n)) A
+    have hs := DevStep.step (R := R) (st := st) (dv.set A (fetched st (dv.reader A) lo n))
+      (by simpa using hrun) A
       (by simpa using hA) _ (by rw [Device.set_same]; exact ReadStep.fetch _ (lo + n))
       (by intro h; simp at h)
     rw [Device.set_set] at hs
@@ -149,13 +177,13 @@ On good storage, a device whose readers are sound, holding the key of every
 audience it follows (and of no other), can run its readers to the head; each
 then holds the state of every slot for its audience. -/
 theorem device_reaches_head {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) :
-    ∀ (dv : Device S), DevOk R st seq dv → (∀ A ∈ dv.follows, dv.keys A = true) →
+    ∀ (dv : Device S), dv.stopped = false → DevOk R st seq dv → (∀ A ∈ dv.follows, dv.keys A = true) →
       ∃ dv', DevSteps R st dv dv' ∧ DevOk R st seq dv' ∧ ∀ A ∈ dv.follows, (dv'.reader A).pos = st.head := by
   intro dv
   generalize hm : (dv.follows.map (fun B => st.head - (dv.reader B).pos)).sum = m
   induction m using Nat.strongRecOn generalizing dv with
   | ind m ih =>
-    intro hok hkeys
+    intro hrun hok hkeys
     by_cases hall : ∀ A ∈ dv.follows, (dv.reader A).pos = st.head
     · exact ⟨dv, DevSteps.refl dv, hok, hall⟩
     have hne : dv.follows ≠ [] := by intro h; apply hall; simp [h]
@@ -169,8 +197,9 @@ theorem device_reaches_head {st : Store S} {seq : Nat → Slot S} (g : Good R st
       have := (hok A hA).le_head
       omega
     obtain ⟨lo, n, d', hs, hpos⟩ := read_progress R g (hok a ha) hlt
-    have run1 := lift_fetch R st dv a ha lo n
-    have hs' := DevStep.step (R := R) (st := st) (dv.set a (fetched st (dv.reader a) lo n)) a
+    have run1 := lift_fetch R st dv hrun a ha lo n
+    have hs' := DevStep.step (R := R) (st := st) (dv.set a (fetched st (dv.reader a) lo n))
+      (by simpa using hrun) a
       (by simpa using ha) d' (by rw [Device.set_same, Device.set_keys, hkeys a ha]; exact hs)
       (by
         intro _ B hB
@@ -192,7 +221,8 @@ theorem device_reaches_head {st : Store S} {seq : Nat → Slot S} (g : Good R st
         · rw [Device.set_other _ _ hxa]; exact Nat.le_refl _
       · exact ha
       · rw [Device.set_same]; omega
-    obtain ⟨dv'', run3, hok3, hpos3⟩ := ih _ hdec (dv.set a d') rfl hok2 (by simpa using hkeys)
+    obtain ⟨dv'', run3, hok3, hpos3⟩ := ih _ hdec (dv.set a d') rfl (by simpa using hrun) hok2
+      (by simpa using hkeys)
     exact ⟨dv'', DevSteps.trans R run2 run3, hok3, by simpa using hpos3⟩
 
 theorem read_pos {A : S.Aud} {key : Bool} {st : Store S} {d d' : Reader S}
@@ -229,7 +259,8 @@ theorem device_stops {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {
     have hoky := dev_ok R g s hokx
     apply ih (hfy.trans hf) (hky.trans hk) hoky
     · cases s with
-      | step A hA d' hs hgate =>
+      | stop => exact hb
+      | step hrun A hA d' hs hgate =>
         by_cases hAB : B = A
         · subst hAB
           rw [Device.set_same]
@@ -241,7 +272,8 @@ theorem device_stops {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {
         · rw [Device.set_other _ _ hAB]; exact hb
     · intro C hC
       cases s with
-      | step A hA d' hs hgate =>
+      | stop => exact hall C hC
+      | step hrun A hA d' hs hgate =>
         by_cases hCA : C = A
         · subst hCA
           rw [Device.set_same]
@@ -272,26 +304,40 @@ device stays at a prefix state of its audience; and from wherever they are,
 a device holding the keys of its audiences can still run every reader to the
 head of the current storage. -/
 theorem deletion_keeps_reachable {seq : Nat → Slot S} {x y : Store S × Device S}
-    (run : SysSteps R seq x y) (g : Good R x.1 seq) (hok : DevOk R x.1 seq x.2) :
+    (run : SysSteps R seq x y) (g : Good R x.1 seq) (hok : DevOk R x.1 seq x.2)
+    (hrun : x.2.stopped = false) :
     Good R y.1 seq ∧ DevOk R y.1 seq y.2 ∧ y.2.follows = x.2.follows ∧ y.2.keys = x.2.keys ∧
       ((∀ A ∈ x.2.follows, x.2.keys A = true) →
         ∃ dv', DevSteps R y.1 y.2 dv' ∧
           ∀ A ∈ x.2.follows, (dv'.reader A).pos = y.1.head ∧
             ((dv'.reader A).ledger, (dv'.reader A).aud, (dv'.reader A).rows) = stateAt R seq A y.1.head) := by
-  have inv : Good R y.1 seq ∧ DevOk R y.1 seq y.2 ∧ y.2.follows = x.2.follows ∧ y.2.keys = x.2.keys := by
+  have inv : Good R y.1 seq ∧ DevOk R y.1 seq y.2 ∧ y.2.follows = x.2.follows ∧ y.2.keys = x.2.keys ∧
+      (y.2.stopped = true → x.2.stopped = true ∨ ∃ B ∈ x.2.follows, x.2.keys B = false) := by
+    clear hrun
     induction run with
-    | refl => exact ⟨g, hok, rfl, rfl⟩
+    | refl => exact ⟨g, hok, rfl, rfl, fun h => Or.inl h⟩
     | step s _ ih =>
       cases s with
       | store st st' dv h =>
         exact ih (store_good R h g) (fun A hA => store_reader R h (hok A hA))
       | device st dv dv' h =>
-        obtain ⟨a, b, c, d⟩ := ih g (dev_ok R g h hok)
-        obtain ⟨e, f⟩ := devstep_frame R h
-        exact ⟨a, b, c.trans e, d.trans f⟩
-  obtain ⟨g', hok', hf, hk⟩ := inv
+        obtain ⟨a, b, c, d, e⟩ := ih g (dev_ok R g h hok)
+        obtain ⟨f, f'⟩ := devstep_frame R h
+        refine ⟨a, b, c.trans f, d.trans f', fun hs => ?_⟩
+        rcases e hs with hm | ⟨B, hB, hkB⟩
+        · cases h with
+          | step hr => simp only [Device.set_stopped] at hm; exact Or.inl hm
+          | stop B hB hkey => exact Or.inr ⟨B, hB, hkey⟩
+        · exact Or.inr ⟨B, by rw [← f]; exact hB, by rw [← f']; exact hkB⟩
+  obtain ⟨g', hok', hf, hk, hst⟩ := inv
   refine ⟨g', hok', hf, hk, fun hkeys => ?_⟩
-  obtain ⟨dv', run', hok'', hpos⟩ := device_reaches_head R g' y.2 hok'
+  have hrun' : y.2.stopped = false := by
+    cases h : y.2.stopped
+    · rfl
+    · rcases hst h with h' | ⟨B, hB, hkB⟩
+      · rw [hrun] at h'; cases h'
+      · rw [hkeys B hB] at hkB; cases hkB
+  obtain ⟨dv', run', hok'', hpos⟩ := device_reaches_head R g' y.2 hrun' hok'
     (by intro A hA; rw [hk]; exact hkeys A (by rw [← hf]; exact hA))
   refine ⟨dv', run', fun A hA => ?_⟩
   have hA' : A ∈ y.2.follows := by rw [hf]; exact hA

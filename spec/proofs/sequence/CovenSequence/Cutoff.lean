@@ -17,6 +17,7 @@ variable {S : Sig} (R : Rules S)
 theorem step_deviceOf (L : Ledger S) (k : Nat) (x : Slot S) {d : S.Dev} {m : S.Mem}
     (h : L.deviceOf d = some m) : (ledgerStep R L k x).deviceOf d = some m := by
   unfold ledgerStep
+  simp only [noteClaim_deviceOf]
   split
   · rename_i hv
     cases x with
@@ -35,6 +36,7 @@ theorem step_deviceOf (L : Ledger S) (k : Nat) (x : Slot S) {d : S.Dev} {m : S.M
 theorem step_removed (L : Ledger S) (k : Nat) (x : Slot S) {d : S.Dev}
     (h : L.removed d = true) : (ledgerStep R L k x).removed d = true := by
   unfold ledgerStep
+  simp only [noteClaim_removed]
   split
   · cases x with
     | admin a e =>
@@ -49,6 +51,7 @@ theorem step_removed (L : Ledger S) (k : Nat) (x : Slot S) {d : S.Dev}
 theorem step_keyGen (L : Ledger S) (k : Nat) (x : Slot S) (m : S.Mem) :
     L.keyGen m ≤ (ledgerStep R L k x).keyGen m := by
   unfold ledgerStep
+  simp only [noteClaim_keyGen]
   split
   · cases x with
     | admin a e =>
@@ -97,9 +100,9 @@ theorem keyGen_mono (seq : Nat → Slot S) (m : S.Mem) (j : Nat) :
       · subst hj; exact Nat.le_refl _
       · exact Nat.le_trans (ih (by omega)) (step_keyGen R _ _ _ m)
 
-/-- An applied slot's ledger is its effect. -/
+/-- An applied slot's ledger is its effect, with its claim number noted. -/
 theorem applied_ledger (seq : Nat → Slot S) {j : Nat} (hj : 1 ≤ j) (h : Applied R seq j) :
-    ledgerAt R seq j = ledgerEffect R (ledgerAt R seq (j - 1)) j (seq j) := by
+    ledgerAt R seq j = noteClaim R (ledgerEffect R (ledgerAt R seq (j - 1)) j (seq j)) (seq j) := by
   have hjeq : j = (j - 1) + 1 := by omega
   unfold Applied at h
   rw [hjeq, ledgerAt_succ, ← hjeq]
@@ -118,12 +121,12 @@ def Cut (seq : Nat → Slot S) (j : Nat) (d : S.Dev) (g : Nat) : Prop :=
 /-- **The removal cut-off.** A batch at slot `k+1` by a device cut off at an
 earlier slot `j` is refused in every audience it has a part for: that audience
 only records the refusal, so no unique value or owner row is taken, and its
-rows are unchanged. The ledger is unchanged too. -/
+rows are unchanged. The ledger only records the slot's claim number. -/
 theorem cutoff (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g : Nat}
     {parts : S.Aud → Option (WPart S)} (hw : seq (k + 1) = .writes d g parts) (hcut : Cut R seq j d g)
     (A : S.Aud) {w : WPart S} (hA : parts A = some w) :
     audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (seq (k + 1)) = false ∧
-    ledgerAt R seq (k + 1) = ledgerAt R seq k ∧
+    ledgerAt R seq (k + 1) = noteClaim R (ledgerAt R seq k) (seq (k + 1)) ∧
     audAt R seq A (k + 1) = refuseAud (audAt R seq A k) (k + 1) ∧
     rowsAt R seq A (k + 1) = rowsAt R seq A k := by
   obtain ⟨hj1, happ, hcases⟩ := hcut

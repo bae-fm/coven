@@ -1,52 +1,53 @@
-import CovenSequence.Model
-import CovenSequence.Claim
+import CovenSequence.Retention
 
 /-!
 # Settling a claim after its slot was deleted
 
-Before each create, the journal records the slot and the exact bytes. On
-reopen, the device reads that slot and compares the bytes. If the floor has
-passed the slot, the slot is gone and the device settles from the floor's
-snapshot instead: each snapshot records, per device, the number of the last
-write of that device it includes, and a batch's claim landed exactly when that
-number covers the batch's writes.
+Each device numbers every slot it claims with one counter: batches, admin
+entries, key copies, announcements. Before each create, the journal records
+the slot and the exact bytes. On reopen, the device reads that slot and
+compares the bytes. If the floor has passed the slot, the slot is gone and the
+device settles from the floor's snapshot instead: each snapshot records, per
+device, the last claim number it includes, and a claim landed exactly when
+that number covers it. Admin claims settle by the same rule as batches.
 
-The model abstracts the claimed sequence to what settlement reads: a batch's
-author, the number of its last write, an attempt nonce (bytes are unique per
-attempt), and a value, through which the abstract state is computed.
+The first part abstracts the claimed sequence to what settlement reads: a
+claim's device, its number, an attempt nonce (bytes are unique per attempt),
+and a value through which an abstract state is computed. `settle_from_floor`
+then reads the record from the ledger in `Model`'s snapshot bodies.
 -/
 
 namespace CovenSequence.Settle
 
 /-- A slot as settlement sees it. -/
 inductive Rec (Dev : Type) where
-  | batch (author : Dev) (number : Nat) (attempt : Nat) (value : Nat)
+  | claim (author : Dev) (number : Nat) (attempt : Nat) (value : Nat)
   | other
   deriving DecidableEq
 
 variable {Dev : Type} [DecidableEq Dev]
 
-/-- The per-device record of a snapshot covering `k`: the largest write number
-of each device's batches at slots `1..k`. -/
-def lastWrite (seq : Nat → Rec Dev) (d : Dev) : Nat → Nat
+/-- The per-device record of a snapshot covering `k`: the largest claim number
+of each device's slots `1..k`. -/
+def lastClaim (seq : Nat → Rec Dev) (d : Dev) : Nat → Nat
   | 0 => 0
   | k + 1 =>
     match seq (k + 1) with
-    | .batch a n _ _ => if a = d then max (lastWrite seq d k) n else lastWrite seq d k
-    | .other => lastWrite seq d k
+    | .claim a n _ _ => if a = d then max (lastClaim seq d k) n else lastClaim seq d k
+    | .other => lastClaim seq d k
 
-/-- A positive number is covered exactly when some batch of `d` at a slot up
+/-- A positive number is covered exactly when some claim of `d` at a slot up
 to `k` reaches it. -/
-theorem lastWrite_ge (seq : Nat → Rec Dev) (d : Dev) {n : Nat} (hn : 1 ≤ n) :
-    ∀ k, n ≤ lastWrite seq d k ↔ ∃ j m t v, 1 ≤ j ∧ j ≤ k ∧ seq j = .batch d m t v ∧ n ≤ m
+theorem lastClaim_ge (seq : Nat → Rec Dev) (d : Dev) {n : Nat} (hn : 1 ≤ n) :
+    ∀ k, n ≤ lastClaim seq d k ↔ ∃ j m t v, 1 ≤ j ∧ j ≤ k ∧ seq j = .claim d m t v ∧ n ≤ m
   | 0 => by
-    simp only [lastWrite]
+    simp only [lastClaim]
     constructor
     · intro h; omega
     · rintro ⟨j, _, _, _, h1, h2, _⟩; omega
   | k + 1 => by
-    have ih := lastWrite_ge seq d hn k
-    simp only [lastWrite]
+    have ih := lastClaim_ge seq d hn k
+    simp only [lastClaim]
     cases hs : seq (k + 1) with
     | other =>
       simp only
@@ -57,7 +58,7 @@ theorem lastWrite_ge (seq : Nat → Rec Dev) (d : Dev) {n : Nat} (hn : 1 ≤ n) 
         by_cases hj : j = k + 1
         · subst hj; rw [hs] at h3; cases h3
         · exact ⟨j, m, t, v, h1, by omega, h3, h4⟩
-    | batch a m t v =>
+    | claim a m t v =>
       simp only
       by_cases ha : a = d
       · subst ha
@@ -66,7 +67,7 @@ theorem lastWrite_ge (seq : Nat → Rec Dev) (d : Dev) {n : Nat} (hn : 1 ≤ n) 
         · intro h
           by_cases hm : n ≤ m
           · exact ⟨k + 1, m, t, v, by omega, Nat.le_refl _, hs, hm⟩
-          · have : n ≤ lastWrite seq a k := by omega
+          · have : n ≤ lastClaim seq a k := by omega
             obtain ⟨j, m', t', v', h1, h2, h3, h4⟩ := ih.1 this
             exact ⟨j, m', t', v', h1, by omega, h3, h4⟩
         · rintro ⟨j, m', t', v', h1, h2, h3, h4⟩
@@ -99,32 +100,32 @@ def settle (start covered : Nat) (i : Nat) (own : Rec Dev) (n : Nat) (read : Opt
     | none => .retry
   else if n ≤ covered then .landed else .notLanded
 
-/-- What the device knows of its own batch numbered `n`: its batches carry
-numbers up to `n` (the journal holds its latest batch), and only the recorded
-attempt `(i, t)` of batch `n` can be in the sequence, because every earlier
+/-- What the device knows of its own claim numbered `n`: its claims carry
+numbers up to `n` (the journal holds its latest claim), and only the recorded
+attempt `(i, t)` of claim `n` can be in the sequence, because every earlier
 attempt was settled as not landed. -/
 structure Own (seq : Nat → Rec Dev) (head : Nat) (d : Dev) (n i t v : Nat) : Prop where
   pos : 1 ≤ n
   slot_pos : 1 ≤ i
-  numbers_le : ∀ j m t' v', 1 ≤ j → j ≤ head → seq j = .batch d m t' v' → m ≤ n
-  only_here : ∀ j t' v', 1 ≤ j → j ≤ head → seq j = .batch d n t' v' → j = i ∧ t' = t ∧ v' = v
+  numbers_le : ∀ j m t' v', 1 ≤ j → j ≤ head → seq j = .claim d m t' v' → m ≤ n
+  only_here : ∀ j t' v', 1 ≤ j → j ≤ head → seq j = .claim d n t' v' → j = i ∧ t' = t ∧ v' = v
 
 /-- **Settlement is correct.** The floor's snapshot covers `c ≥ start - 1` and
-records `lastWrite` as of `c`. A read of a kept slot returns the genuine slot,
+records `lastClaim` as of `c`. A read of a kept slot returns the genuine slot,
 or nothing above the head (`Claim.floor_check_sound`). Then settlement says
-`landed` exactly when the batch is in the sequence; `notLanded` means it is
+`landed` exactly when the claim is in the sequence; `notLanded` means it is
 nowhere in it, so claiming it again lands it once; `retry` means its slot is
 still empty. -/
 theorem settle_correct {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n i t v : Nat}
     (own : Own seq head d n i t v) (hsc : start ≤ c + 1) (hch : c ≤ head)
     {read : Option (Rec Dev)} (hread : start ≤ i → read = if i ≤ head then some (seq i) else none) :
-    (settle start (lastWrite seq d c) i (.batch d n t v) n read = .landed ↔
-      i ≤ head ∧ seq i = .batch d n t v) ∧
-    (settle start (lastWrite seq d c) i (.batch d n t v) n read = .notLanded →
-      ∀ j t' v', 1 ≤ j → j ≤ head → seq j ≠ .batch d n t' v') ∧
-    (settle start (lastWrite seq d c) i (.batch d n t v) n read = .retry → head < i) := by
-  have nowhere : ¬ (i ≤ head ∧ seq i = .batch d n t v) → ∀ j t' v', 1 ≤ j → j ≤ head →
-      seq j ≠ .batch d n t' v' := by
+    (settle start (lastClaim seq d c) i (.claim d n t v) n read = .landed ↔
+      i ≤ head ∧ seq i = .claim d n t v) ∧
+    (settle start (lastClaim seq d c) i (.claim d n t v) n read = .notLanded →
+      ∀ j t' v', 1 ≤ j → j ≤ head → seq j ≠ .claim d n t' v') ∧
+    (settle start (lastClaim seq d c) i (.claim d n t v) n read = .retry → head < i) := by
+  have nowhere : ¬ (i ≤ head ∧ seq i = .claim d n t v) → ∀ j t' v', 1 ≤ j → j ≤ head →
+      seq j ≠ .claim d n t' v' := by
     intro hnot j t' v' h1 h2 hj
     obtain ⟨rfl, rfl, rfl⟩ := own.only_here j t' v' h1 h2 hj
     exact hnot ⟨h2, hj⟩
@@ -133,54 +134,55 @@ theorem settle_correct {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n
     by_cases hih : i ≤ head
     · simp only [hih, ite_true] at hr
       subst hr
-      by_cases he : seq i = .batch d n t v
-      · have hv : settle start (lastWrite seq d c) i (.batch d n t v) n (some (seq i)) = .landed := by
+      by_cases he : seq i = .claim d n t v
+      · have hv : settle start (lastClaim seq d c) i (.claim d n t v) n (some (seq i)) = .landed := by
           simp [settle, hk, he]
         rw [hv]
         exact ⟨⟨fun _ => ⟨hih, he⟩, fun _ => rfl⟩, fun h => (by cases h), fun h => (by cases h)⟩
-      · have hv : settle start (lastWrite seq d c) i (.batch d n t v) n (some (seq i)) = .notLanded := by
+      · have hv : settle start (lastClaim seq d c) i (.claim d n t v) n (some (seq i)) = .notLanded := by
           simp [settle, hk, he]
         rw [hv]
         exact ⟨⟨fun h => (by cases h), fun h => absurd h.2 he⟩, fun _ => nowhere (fun h => he h.2),
           fun h => (by cases h)⟩
     · simp only [hih, ite_false] at hr
       subst hr
-      have hv : settle start (lastWrite seq d c) i (.batch d n t v) n none = .retry := by
+      have hv : settle start (lastClaim seq d c) i (.claim d n t v) n none = .retry := by
         simp [settle, hk]
       rw [hv]
       exact ⟨⟨fun h => (by cases h), fun h => absurd h.1 hih⟩, fun h => (by cases h), fun _ => by omega⟩
   · have hic : i ≤ c := by omega
-    have hcov := lastWrite_ge seq d own.pos c
-    by_cases hn : n ≤ lastWrite seq d c
+    have hcov := lastClaim_ge seq d own.pos c
+    by_cases hn : n ≤ lastClaim seq d c
     · obtain ⟨j, m, t', v', h1, h2, h3, h4⟩ := hcov.1 hn
       have hm := own.numbers_le j m t' v' h1 (by omega) h3
       have : m = n := by omega
       subst this
       obtain ⟨rfl, rfl, rfl⟩ := own.only_here j t' v' h1 (by omega) h3
-      have hv : settle start (lastWrite seq d c) j (.batch d m t' v') m read = .landed := by
+      have hv : settle start (lastClaim seq d c) j (.claim d m t' v') m read = .landed := by
         simp [settle, hk, hn]
       rw [hv]
       exact ⟨⟨fun _ => ⟨by omega, h3⟩, fun _ => rfl⟩, fun h => (by cases h), fun h => (by cases h)⟩
-    · have hv : settle start (lastWrite seq d c) i (.batch d n t v) n read = .notLanded := by
+    · have hv : settle start (lastClaim seq d c) i (.claim d n t v) n read = .notLanded := by
         simp [settle, hk, hn]
       rw [hv]
-      have hnot : ¬ (i ≤ head ∧ seq i = .batch d n t v) := fun ⟨_, he⟩ =>
+      have hnot : ¬ (i ≤ head ∧ seq i = .claim d n t v) := fun ⟨_, he⟩ =>
         hn (hcov.2 ⟨i, n, t, v, own.slot_pos, hic, he, Nat.le_refl _⟩)
       exact ⟨⟨fun h => (by cases h), fun h => absurd h hnot⟩, fun _ => nowhere hnot, fun h => (by cases h)⟩
 
-/-- **A write lands at most once and is never lost.** After settlement, a
-device claims its batch again (with a new attempt) exactly when settlement
-says it did not land; once that claim lands at the next slot, the batch's writes
-are in the sequence at exactly one slot. -/
+/-- **A claim lands at most once and is never lost.** After settlement, a
+device claims again (with a new attempt) exactly when settlement says it did
+not land; once that claim lands at the next slot, it is in the sequence at
+exactly one slot. For a batch, its writes land once; for an admin entry, its
+change lands once. -/
 theorem lands_once_never_lost {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n i t v : Nat}
     (own : Own seq head d n i t v) (hsc : start ≤ c + 1) (hch : c ≤ head) (hih : i ≤ head)
     {read : Option (Rec Dev)} (hread : start ≤ i → read = some (seq i)) (t₂ : Nat) :
-    let verdict := settle start (lastWrite seq d c) i (.batch d n t v) n read
+    let verdict := settle start (lastClaim seq d c) i (.claim d n t v) n read
     let seq' : Nat → Rec Dev := fun j =>
-      if j = head + 1 ∧ verdict = .notLanded then .batch d n t₂ v else seq j
+      if j = head + 1 ∧ verdict = .notLanded then .claim d n t₂ v else seq j
     let head' := if verdict = .notLanded then head + 1 else head
-    ∃ j, 1 ≤ j ∧ j ≤ head' ∧ (∃ t' v', seq' j = .batch d n t' v') ∧
-      ∀ j', 1 ≤ j' → j' ≤ head' → (∃ t' v', seq' j' = .batch d n t' v') → j' = j := by
+    ∃ j, 1 ≤ j ∧ j ≤ head' ∧ (∃ t' v', seq' j = .claim d n t' v') ∧
+      ∀ j', 1 ≤ j' → j' ≤ head' → (∃ t' v', seq' j' = .claim d n t' v') → j' = j := by
   intro verdict seq' head'
   have hc := settle_correct own hsc hch (read := read) (fun h => by simp [hih, hread h])
   have hret : verdict ≠ .retry := fun h => by have := hc.2.2 h; omega
@@ -207,25 +209,25 @@ theorem lands_once_never_lost {seq : Nat → Rec Dev} {head start c : Nat} {d : 
 
 /-! ## Settling from the state alone -/
 
-/-- An abstract state of the rows: the value of the last batch. A later batch
+/-- An abstract state of the rows: the value of the last claim. A later one
 overwrites an earlier one, as a later write to the same cell does. -/
 def lastValue (seq : Nat → Rec Dev) : Nat → Nat
   | 0 => 0
   | k + 1 =>
     match seq (k + 1) with
-    | .batch _ _ _ v => v
+    | .claim _ _ _ v => v
     | .other => lastValue seq k
 
 /-- Device `true` claimed slot 1 and later device `false` overwrote its value. -/
 def seqLanded : Nat → Rec Bool
-  | 1 => .batch true 1 0 5
-  | 2 => .batch false 1 0 7
+  | 1 => .claim true 1 0 5
+  | 2 => .claim false 1 0 7
   | _ => .other
 
 /-- Device `false` took slot 1, then overwrote its own value. -/
 def seqLost : Nat → Rec Bool
-  | 1 => .batch false 1 0 3
-  | 2 => .batch false 2 0 7
+  | 1 => .claim false 1 0 3
+  | 2 => .claim false 2 0 7
   | _ => .other
 
 /-- **Counterexample: settling from the state alone.** Device `true` recorded a
@@ -237,9 +239,9 @@ land twice) or drops one that did not (its writes are lost). The per-device
 record tells them apart. -/
 theorem state_alone_cannot_settle :
     lastValue seqLanded 2 = lastValue seqLost 2 ∧
-    seqLanded 1 = .batch true 1 0 5 ∧ seqLost 1 ≠ .batch true 1 0 5 ∧
+    seqLanded 1 = .claim true 1 0 5 ∧ seqLost 1 ≠ .claim true 1 0 5 ∧
     (∀ f : Nat → Bool, f (lastValue seqLanded 2) ≠ true ∨ f (lastValue seqLost 2) ≠ false) ∧
-    lastWrite seqLanded true 2 = 1 ∧ lastWrite seqLost true 2 = 0 := by
+    lastClaim seqLanded true 2 = 1 ∧ lastClaim seqLost true 2 = 0 := by
   refine ⟨rfl, rfl, by decide, fun f => ?_, rfl, rfl⟩
   show f 7 ≠ true ∨ f 7 ≠ false
   cases f 7 <;> simp
@@ -271,7 +273,13 @@ def adminRules : Rules adminSig where
   merge := fun r _ => r
   convert := fun _ _ b => b
   migrate := fun _ r => r
-  ledger0 := ⟨fun m => m, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false⟩
+  number := fun
+    | .admin true _ => 1
+    | .admin false (.addMember _) => 1
+    | .admin false _ => 2
+    | _ => 0
+  ledger0 := ⟨fun m => m, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
+    fun _ => 0⟩
   aud0 := fun _ => ⟨fun _ => none, [], 0, 0, 0, fun _ => false⟩
   rows0 := fun _ => ()
 
@@ -291,19 +299,109 @@ def adminLost : Nat → Slot adminSig
 
 open CovenSequence in
 /-- **Counterexample: settling an admin claim from the state.** Device `true`
-recorded a claim of slot 1 adding member `false`. Whether it landed or another
-device's identical change took the slot, the ledger after slot 2 is the same:
-the change was undone. Settling by presence says "not landed" in both, so in
-the first history the device adds the member again, against the removal. -/
+recorded its claim 1, of slot 1, adding member `false`. Whether it landed or
+another device's identical change took the slot, the ledger after slot 2 is the
+same apart from the claim numbers: the change was undone. Settling by presence
+says "not landed" in both, so in the first history the device adds the member
+again, against the removal. The claim numbers tell the two apart: device
+`true`'s last claim is 1 in the first and none in the second. -/
 theorem admin_state_cannot_settle :
-    ledgerAt adminRules adminLanded 2 = ledgerAt adminRules adminLost 2 ∧
+    { ledgerAt adminRules adminLanded 2 with claims := fun _ => 0 } =
+      { ledgerAt adminRules adminLost 2 with claims := fun _ => 0 } ∧
+    (ledgerAt adminRules adminLanded 2).claims true = 1 ∧
+    (ledgerAt adminRules adminLost 2).claims true = 0 ∧
     (ledgerAt adminRules adminLanded 2).member false = false ∧
     adminLanded 1 = .admin true (.addMember false) ∧
     adminLost 1 ≠ .admin true (.addMember false) := by
-  refine ⟨rfl, rfl, rfl, fun h => ?_⟩
+  refine ⟨rfl, rfl, rfl, rfl, rfl, fun h => ?_⟩
   simp only [adminLost] at h
   injection h with h1
   cases h1
+
+/-! ## Settling from `Model`'s floor snapshot -/
+
+section Compose
+
+variable {S : Sig} (R : Rules S)
+
+theorem step_claims (L : Ledger S) (k : Nat) (x : Slot S) (e : S.Dev) :
+    (ledgerStep R L k x).claims e = if e = author x then max (L.claims e) (R.number x) else L.claims e := by
+  have hin : (if ledgerValid R L x then ledgerEffect R L k x else refuse L k).claims = L.claims := by
+    split
+    · cases x with
+      | admin a e => cases e <;> rfl
+      | _ => rfl
+    · rfl
+  simp only [ledgerStep, noteClaim, hin]
+
+/-- The ledger's record covers a positive number exactly when some slot of the
+device up to `k` carries a claim number reaching it. -/
+theorem claims_ge (seq : Nat → Slot S) (h0 : ∀ e, R.ledger0.claims e = 0) (d : S.Dev) {n : Nat}
+    (hn : 1 ≤ n) :
+    ∀ k, n ≤ (ledgerAt R seq k).claims d ↔ ∃ j, 1 ≤ j ∧ j ≤ k ∧ author (seq j) = d ∧ n ≤ R.number (seq j)
+  | 0 => by
+    simp only [ledgerAt, h0]
+    constructor
+    · intro h; omega
+    · rintro ⟨j, h1, h2, _⟩; omega
+  | k + 1 => by
+    have ih := claims_ge seq h0 d hn k
+    rw [ledgerAt_succ, step_claims]
+    by_cases ha : d = author (seq (k + 1))
+    · simp only [ha, ite_true]
+      rw [← ha]
+      constructor
+      · intro h
+        by_cases hm : n ≤ R.number (seq (k + 1))
+        · exact ⟨k + 1, by omega, Nat.le_refl _, ha.symm, hm⟩
+        · obtain ⟨j, h1, h2, h3, h4⟩ := ih.1 (by omega)
+          exact ⟨j, h1, by omega, h3, h4⟩
+      · rintro ⟨j, h1, h2, h3, h4⟩
+        by_cases hj : j = k + 1
+        · subst hj; omega
+        · have := ih.2 ⟨j, h1, by omega, h3, h4⟩; omega
+    · simp only [ha, ite_false]
+      rw [ih]
+      constructor
+      · rintro ⟨j, h1, h2, h3, h4⟩; exact ⟨j, h1, by omega, h3, h4⟩
+      · rintro ⟨j, h1, h2, h3, h4⟩
+        by_cases hj : j = k + 1
+        · subst hj; exact absurd h3.symm ha
+        · exact ⟨j, h1, by omega, h3, h4⟩
+
+/-- **Settling from the floor snapshot.** A device's journal recorded slot `i`
+with bytes `x`, its claim number `n`, and `x` is its latest claim: its slots
+carry numbers up to `n`, and only slot `i` can hold claim `n` (every earlier
+attempt was settled as not landed). If the floor has passed `i`, the floor's
+snapshot body for any audience records `n` for the device exactly when slot `i`
+holds `x`. With `claim_floor_check` for a kept slot, every claim settles
+correctly, admin entries included. -/
+theorem settle_from_floor {seq : Nat → Slot S} {st : Store S} (g : Good R st seq)
+    (h0 : ∀ e, R.ledger0.claims e = 0) (A : S.Aud) {d : S.Dev} {n i : Nat} {x : Slot S}
+    (hxa : author x = d) (hxn : R.number x = n) (hn : 1 ≤ n) (hi : 1 ≤ i)
+    (hord : ∀ j, 1 ≤ j → j ≤ st.head → author (seq j) = d → R.number (seq j) ≤ n)
+    (honly : ∀ j, 1 ≤ j → j ≤ st.head → author (seq j) = d → R.number (seq j) = n → j = i ∧ seq j = x)
+    (hdel : i < st.floor.start) {L : Ledger S} {P : AudLedger S} {rows : S.Rows}
+    (hb : st.body (st.floor.path A) = some (L, P, rows)) :
+    n ≤ L.claims d ↔ (i ≤ st.head ∧ seq i = x) := by
+  rw [g.floor_body A] at hb
+  have hL : L = ledgerAt R seq (st.floor.covers A) := by
+    have := Option.some.inj hb
+    simp only [stateAt, Prod.mk.injEq] at this
+    exact this.1.symm
+  subst hL
+  have hic : i ≤ st.floor.covers A := by have := g.start_le A; omega
+  have hch := g.covers_le A
+  rw [claims_ge R seq h0 d hn]
+  constructor
+  · rintro ⟨j, h1, h2, h3, h4⟩
+    have hle := hord j h1 (by omega) h3
+    obtain ⟨rfl, hx⟩ := honly j h1 (by omega) h3 (by omega)
+    exact ⟨by omega, hx⟩
+  · rintro ⟨hih, hx⟩
+    exact ⟨i, hi, hic, by rw [hx, hxa], by rw [hx, hxn]; exact Nat.le_refl _⟩
+
+end Compose
 
 /-! ## Another copy using this device id -/
 
