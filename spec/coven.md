@@ -1363,7 +1363,8 @@ state-driven effects. [One sync pass](sync-pass.md) gives the request order.
   unless the floor supplies replacement coverage. Errors are never misses.
   Neither writer discovery nor sequence discovery uses listing.
 - After reading a batch, and after any claim response, check the floor’s
-  revision before committing or confirming. Its advertised covered prefix
+  revision before committing or confirming; the end-of-read floor check
+  is reused when it follows every read being committed. Its covered prefix
   is authoritative even before physical deletion finishes. Reload instead
   of applying bytes now covered by that checkpoint. This closes a race in
   which deletion and a delayed create reuse a physical path.
@@ -2475,7 +2476,8 @@ Carol's tablet:
 - A request already satisfied by the prefix completes without another entry
   when it establishes exactly the requested state. Adding an active member
   must repeat its keys, role and access; it cannot replace any of them.
-  Adding a removed id requires fresh keys. Replacing keys requires the
+  Removed member ids stay retired; inviting that person again uses a fresh
+  id and keys. Replacing keys requires the
   expected current binding still to match the operation's validated binding;
   it never silently replaces a pair another operation installed meanwhile.
 - Ana and Ben both try to remove each other. Ana claims 41 first. Ben reads

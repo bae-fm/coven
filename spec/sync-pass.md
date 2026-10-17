@@ -1,908 +1,351 @@
 # One sync pass
 
 This is the request order for [§6](coven.md#6-syncing-writes) and
-[E5](api.md#e5-storage-and-sync). Its bounds are requirements in
-[§3.1](coven.md#31-io-bounds). Discovery reads each undrained writer's next number;
-no pass lists pages of log history. A request below is made only when its
-stated condition holds.
+[E5](api.md#e5-storage-and-sync). [§3.1](coven.md#31-io-bounds) gives its bounds.
+There is one numbered sequence. Discovery never lists devices or log history.
+Each request below needs its stated condition.
 
 ## What survives a pass
 
-A read, exact status or listing supplies paths, encrypted sizes, revisions,
-storage publication times and their native resolution. Reads and exact status
-also carry available provider checksums, distinguishing whole-object digests
-from multipart composites. The device keeps a local catalog of these observations. Within a pass,
-every consumer shares each completed observation; no consumer repeats it
-under its own name. A failed or incomplete listing establishes neither
-absence nor a complete view of storage. Keep the preceding committed catalog
-and report the failure. Explicitly observed objects can still be downloaded.
+Reads and exact status supply paths, sizes, revisions, publication times and
+available provider checksums. Keep their checked observations in one catalog
+shared by sync, operations, reloads, agreement and retention. Distinguish a
+whole-object digest from a multipart composite. A failed read is not absence.
 
-For an immutable object, reuse checked facts by `(path, size, stored_at)`.
-A previously observed immutable path whose size or stored time changes
-reports `StorageFailure::Protocol`; keep the old evidence rather than apply
-another version. For posted positions, compare path, size, stored time
-and provider revision. Read only a new revision or missing retained bytes;
-equal size and time alone never establish that a replacement is unchanged.
+Reuse immutable facts by `(path, size, stored_at)`. A changed immutable object
+reports `StorageFailure::Protocol`; retain the earlier evidence. For floor
+and status objects, compare provider revisions too: equal size and time do
+not prove equal bytes. Read a new revision once and share its result.
 
-These local records survive reopening and have no pass-end expiry:
+These records survive reopening:
 
-- **Write headers:** each part's audience and encoded plaintext length,
-  plus the positions and schema facts consumers need. Record them when a
-  write is applied, or with the local write that authored them. Migration
-  preserves the authored record and its facts even before a first attempt;
-  received conversion keeps its interpretation separate
+- **Slots:** received bytes, complete-signature verdicts, decoded records,
+  publication identities and the first unmet prerequisite. Applied progress
+  is one slot number, advanced atomically with all that slot's effects.
+  Downloaded progress does not imply applied progress.
+- **Write headers:** original identity, `read_through`, timestamp, schema,
+  audience lengths, source evidence and containing slot. Conversion keeps
+  the authored bytes separate from the received interpretation
   ([`conversions_preserve_uploads`](proofs/queue/CovenQueue/Conversion.lean)).
-  Header-only retention keeps its authenticated header separately from a complete-signature verdict; it grants no author
-  authority. Keep the facts while the object or a reversible effect needs
-  them. Snapshot growth is an indexed sum of these lengths; coverage is a
-  join with checked snapshot positions.
-- **Snapshot prefixes:** the signed prefix including `T_c`, verified author,
-  first complete publication time, listed size and derived plaintext length;
-  admit counting snapshots only through `T_c + one day`
-  ([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)). Keep them while
-  the snapshot or a boundary names them. Selection, identity and coverage
-  share them; a verified prefix is never a claim that the body passed its
-  checks. Retain checked historical covering prefixes and landing times
-  while undeleted writes rely on their age, even if their snapshot bodies
-  have been removed (the historical-evidence premise of
-  [`bounded_witnessed_storage`](proofs/io/CovenIO/RetentionDeadline.lean);
-  durable preservation is an implementation obligation).
-- **Peer positions:** the last checked object identity and decoded positions,
-  fingerprints and relevant reports, including invalid-position verdicts.
-  Keep them until a completed observation replaces or removes that object.
-  A version listed longer than D9 allows is invalid unread, and an unchanged
-  invalid version is not downloaded again; discovery continues so its
-  replacement can be checked. Unknown authors or keys are waits on
-  locally retained bytes, retried when those prerequisites arrive.
-- **Own post:** the exact canonical D8 plaintext last confirmed published,
-  with the stored metadata when known. Compare all its fields, including
-  schema, fingerprints and pending reports, before sealing another post.
-  Random sealing bytes are not a reason to replace an unchanged post.
-- **File references:** an index from each retained write or snapshot to
-  the fixed file paths it mentions, with whether all relevant contents
-  were checked. Include old values, losses and inputs retained for non-final
-  effects, not only displayed rows. Local row, waiting-write, queue and
-  reversible-input references change in their existing transactions.
-  Record checked remote references with the apply, or after complete
-  authentication for retention alone. Delete an object's protection only
-  after its deletion is confirmed and no retained input needs it.
-- **Unfinished reads:** downloaded entries, write sections and snapshot
-  input still waiting for keys, causes, schema or an atomic reload. Keep
-  the bytes, checked facts and first unmet prerequisite across passes;
-  learning a key is a reason to open cached bytes, not fetch them again.
-  Keep fetched ranges under a configured retained-input disk budget.
-  Losing bytes is explicit eviction work, never ordinary
-  pass cleanup. Durable refusals and file-protection uncertainty are not
-  evicted merely to permit another attempt.
-- **Log download positions:** one contiguous received position per writer
-  for entries, writes and key copies. Keep received bytes and checked facts
-  before advancing; an applied snapshot can supply covered write positions.
-  These are separate from applied positions: a retained object waiting on a
-  key is not downloaded again. A miss is remembered for this pass, then
-  retried on a later due observation unless a retirement drain completes.
-- **Drained devices:** `_coven_drained_devices` records each local completed
-  drain by device id and the final retiring entry that justified it: a kept
-  retirement, or a registration replay does not keep, dropped or late, of a
-  device no kept entry registers (§6, §10). While waiting, the catalog retains that entry's qualifying finality
-  storage time `F`, atomically with the finality observation. The drain needs
-  a storage time `T > F + one day + five minutes`; reopening keeps this evidence.
-  Persist the mark only after all three logs reach terminal misses after `T`
-  without failure and their received inputs are retained. Failed work stays
-  pending and retries under shared backoff; reopening retains progress.
-  Replay removes a mark and its timing evidence if its retiring entry drops,
-  or if a dropped registration is kept again or a kept entry registers its
-  device, in the same transaction (neither once the registration is final:
-  one entry ever registers an id, §10); an active device is polled again. These marks
-  never enter snapshots or posts.
-- **Sealed-key presence:** retain each whole copy and its clear audience,
-  key id, stable recipient id and exact sealing public key by writer and
-  number. Copies are never deleted.
-  Observed presence and a successfully opened member copy are different
-  facts; secrets stay in custody. Key selection combines this permanent
-  evidence with each writer's newly read copies and current replay.
-- **Completed catch-up:** keep its qualifying storage time with its applied
-  positions (§15). A pass with unresolved history cannot refresh it. It
-  determines when return requires snapshot discovery; an unchanged idle
-  checkpoint causes no durable write.
-- **Removed-device file scans:** after confirmed storage cut-off, keep the
-  complete file-folder observation and its completion with the retention
-  candidates. A failed or partial scan records no completion. Reopening
-  retries unfinished work; a completed scan is not repeated on idle passes.
+- **Snapshots:** announcements, checked prefixes, coverage, purpose, size,
+  body verdicts and the floor's current bundle. An authenticated prefix
+  permits a coverage check, never loading unchecked data. Growth uses indexed
+  lengths, not body scans or snapshot listings.
+- **Peer status:** the last revision, applied slot, fingerprints and reports,
+  or its invalid-status verdict. An unchanged invalid revision is not
+  downloaded again. Unknown keys or authors wait on retained bytes.
+- **Own status:** the complete canonical plaintext last confirmed published
+  and any uncertain replacement's exact bytes. Random sealing bytes never
+  justify a new post of unchanged contents.
+- **File references:** fixed paths named by rows, losses, queued writes,
+  snapshots and retained source evidence, plus whether each input's relevant
+  contents were checked. Remove remote protection only after confirmed
+  deletion and when no retained input still needs it.
+- **Claims and journals:** exact attempted destination and bytes, reserved
+  publication identity, confirmed artifacts and every outstanding undo or
+  deletion. A lost reply cannot lose the obligation to settle that path.
+- **Keys:** original signed copy slots, routing, introductions and exposure
+  evidence. Presence and successful opening are distinct facts; secrets stay
+  in custody. Checkpoint evidence replaces deleted copy slots.
+- **Removed-device file scans:** after confirmed provider cut-off, the complete
+  folder observation and candidates. A failed or partial scan records no
+  completion; it retries. A successful scan is not repeated on idle passes.
 
-The sync owner also holds the **decoded store log between passes**, matching
-the committed database revision. It decodes the saved log once on startup
-through a read connection, then extends or replaces that value when a ready
-batch commits. All entry publishers use this same serialized owner. Prepare
-replay outside the writer; at commit, validate the revision and atomically
-install the entries, author checks, replay, affected data and operation
-progress. A failed transaction retains the previous decoded and durable
-state. No independently writable decoded copy is maintained by a worker.
+Keep unfinished ranges and bodies under the retained-input disk budget.
+Eviction is explicit work and any later read is charged to it. Durable
+refusals and unknown file-reference sets survive byte eviction. Never evict
+bytes needed for an uncommitted apply while advancing its cursor.
 
-Separately, the owner keeps the monotonic start of the last completed
-membership and key-copy catch-up for §10's send gate. This session-only
-evidence expires five minutes after that start, counting sleep, and is
-invalidated on reopen, reconnect or reset. It is not §15's durable storage-time
-checkpoint, which also requires data application and confirmed positions.
+One serialized owner holds the decoded administrative state matching the
+committed database revision. It extends that state when slots commit. Prepare
+outside the writer; validate the revision and install the slot, its effects
+and journal progress in one transaction. Failure leaves both decoded and
+durable state at the preceding revision. Workers have no separate writable
+copy of this state.
 
-**Ben's missing key.** His laptop downloads Ana's write 12, but lacks its
-Gifts key. The next pass uses the cached bytes and reports the same wait.
-When the copy arrives, Ben opens those bytes and applies them; he does not
-download write 12 again.
+The owner also retains the monotonic start of the last completed catch-up
+for §10's send gate. It expires after five minutes, counting sleep, and is
+invalidated by reopen, reconnect, reset or any blocked slot. It is session
+state, not a retention clock or an acknowledgement from another device.
+
+**Ben's missing key.** His laptop retains slot 41 and the earlier copy meant
+for him, but custody cannot open that copy. Slot 41 blocks later slots and all
+sending. Repairing custody lets him open the retained bytes and resume. A
+copy in a later slot cannot be read around the block.
 
 ## Requests, in order
 
-Every pass has three phases. A failed prerequisite remains visible while
-independent work proceeds; data first attempts require a usable key selected
-from this pass's completed membership and copy observations.
+### 1. Read forward
 
-## Phase 1: catch up on membership
+Serialize the pass with other claimers. Capture the local writes and commands
+it will service. Borrow keys unlocked at handle opening; opening or saving a
+key does not re-derive a passphrase key. Persist newly acquired keys before
+durable work depends on them. Create no journal merely to record an idle check.
 
-### 1. Prepare local work and storage time
+Read `<store>/seq/<applied+1>`. Continue consecutive exact reads until a miss.
+A far-behind device may bracket the end with existence checks at n+1, n+2,
+n+4, … and narrow the interval; these checks establish no applied progress.
+Fetch-ahead stays within transfer limits. Once a block is discovered, schedule
+no later read and retain already returned bytes.
 
-Serialize this pass with the store's other sync work. Capture the newest
-committed local write and commands it will service. Use the owner's decoded
-log and indexed pending work; create no snapshot or retention operation
-merely to find out that nothing needs doing.
-Record this first phase's monotonic start before its discovery requests.
+On a miss, read or check the revision of `<store>/floor`. A checkpoint covering
+the required slot starts §15's reload; it works even when deletion is underway
+and `first` has not advanced. A miss below a known later slot without such
+coverage is damage. A miss immediately after the known end otherwise ends
+this observation. A provider error supplies neither kind of miss.
 
-Borrow the member keys and keyring unlocked when the handle opened. Every
-pass, file task and operation uses that same session. Persist acquired or
-generated keys only when they change, before durable work depends on them.
-The custody owner retains its unlocked persistence capability; neither a
-read nor a save re-derives the passphrase key.
+A new device begins at the floor when present, otherwise slot 1. Before it
+holds the store key, §11's bootstrap may inspect clear copy routing and open
+its own boxes. This scan confers no applied cursor, membership or send gate.
+Check its binding history and snapshot signatures before committing bootstrap.
+No ordinary pass scans beyond a blocked slot for a later key or admin entry.
 
-**Ana reopens Household.** Her passphrase unlocks each configured custody
-once. Syncing a thousand objects uses those held keys. Stopping and starting
-sync does not unlock again; closing the handle erases the session.
-Choose an already observed storage time `T` before the store-log scan, if
-one is available. For finality use `T′ = T - M - δ`, with one common
-`M = one hour` and positive provider time unit δ (§4, §9), as the inclusive
-observation endpoint. If the subtraction underflows, this sample cannot
-advance finality. The provider's stored time T remains the age sample for
-retention, retirement drains and
-the return check. With no time sample yet, discovery and ordinary sync
-still proceed; finality and age-based deletion wait for qualifying evidence.
-From saved entry times and covered-log times, compute the next instant at
-which §9 finality or §15's age tests could change. Include snapshot upload
-expiry at `T_c + one day`
-([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean) proves late-landing
-selection, not local expiry scheduling), and the first
-storage observation strictly after each covering snapshot's landing plus
-one day ([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)). Include
-the last late entry's window and the strict boundary for finality; equality at 30 days
-does not establish it, and the finality endpoint is T′, not T. Include
-§6's drain deadline, strictly more than one day and five minutes after the
-saved qualifying storage time F. Include §15's return interval: a new device
-has no checkpoint; a returning device compares
-a fresh clock-object storage time with the last completed catch-up's saved
-storage time. A resumed session
-refreshes time, and a running session's monotonic timer schedules its next
-check before `T + monotonic elapsed` reaches `S + 29 days` (§15). This
-scheduling never replaces the check at each write miss. No due
-time-dependent work means no time probe.
+<a id="4-observe-keys-and-peers"></a>
 
-If a monotonic timer says a threshold may be reached and the known `T`
-cannot decide it, replace `<store>/clock/<this device>` and read its status.
-These are two logical requests; provider overhead is counted separately.
-A device clock only schedules a check; storage time decides it.
-For §15's recent-return check, pair the returned `T` with the monotonic
-reading from before the replacement request. Include request time and sleep
-in elapsed time; retaining a sample never restarts its elapsed timer.
-A sample still before the threshold schedules another check with backoff.
-A probe that writes anything must first satisfy §10 with the catalog and
-identity steps below, using read-only snapshot discovery conservatively
-when absence duration is not yet known. If no fresh completed first phase
-exists, complete that read-only phase before the clock replacement. Then
-list device folders and read the next entry numbers after the time
-observation. Count these extra
-requests; a probe cannot bypass identity. A snapshot observation already
-made for this return serves recovery too, without another listing.
-No unchanged positions post supplies this observation.
+### 2. Apply in order
 
-### 2. Discover and read the store log
+Before committing the batch, use a floor check made after its reads; reuse
+the check at the ending miss when it satisfies that order.
+If its advertised checkpoint covers these slots, load that replacement: a
+late create at a deleted path cannot replace the original claimed history.
 
-List the immediate **`<store>/store-log/` device folders**, following every
-folder page without entering their history. Union them with known writers
-and every device a received entry was written from or names in a
-registration, kept or dropped, including removed or replaced devices.
-Replay verdicts never remove a writer from this set; one set serves all
-three logs ([`counting_write_discovered`](proofs/io/CovenIO/Writers.lean)).
-§4 gives each provider's scoped operation, including CloudKit's query for
-permanent entry 1 records. Unknown writers start at entry 1.
-Include writers learned from arriving registrations before completing this
-observation; each needs its entry and copy reads too.
+Authenticate each slot's complete framing and signature. Resolve its author
+from the preceding administrative history; inner writes retain their own
+original authored views. Apply the slot and cursor in one transaction:
 
-For every undrained writer, GET its next **store-log entry** and **key copy**.
-Writers with a completed local retirement drain (§6) supply their retained
-entries and copies to replay, finality and key selection.
-Removed or replaced writers without that mark are polled like active ones.
-On a hit, fetch ahead in parallel up to the shared transfer limit; stop
-scheduling at the first miss. Retain completed reads, including requests
-already in flight, but never advance the contiguous download position past
-a miss or failed read. Charge every actual request. Do not reread decoded
-entries or copies. Store-log entries and key copies are never deleted, so
-a miss is an exact end observation at that instant.
+- **Admin:** validate against the immediately preceding prefix and apply the
+  final entry. A changed schema, reset or newly readable circle stages its
+  required reload before the slot can commit.
+- **Writes:** validate each original write and apply the batch in write-number
+  order. Lower-slot device/member removal or credential replacement consumes
+  the affected writes without effects or losses, recording `WritesRefused`.
+  Other admission, data-source and conversion checks remain (§8, §10, §17).
+- **Key copy:** retain authenticated routing and exposure; open a required
+  recipient copy using its named credential. Nonrecipient copies are consumed
+  without opening them. An introduced key's hash must match.
+- **Announcement:** check the named snapshot, purpose and monotone coverage
+  under §15. Retain its metadata; ordinary application need not load its body.
 
-Each key-copy GET reads the whole small object. Its clear prefix supplies
-audience, key id, stable recipient id and exact sealing credential; index
-these facts for key selection, sharing and exposure. Open a matching box
-with its named held private credential, reusing retained bytes; the current
-pair is not a substitute for the historical key named by that copy.
-An invalid opened key is ignored without hiding subsequent copies: retain
-its verdict and continue discovery (§11).
-Read an entry as one stream; its clear prefix names the store key. A copy
-may be needed before its introduction can be decrypted. Opening a candidate
-is tentative until §11's introduction checks, never authority to seal data.
-If it has not arrived, retain the entry and wait on writer-copy discovery
-under shared backoff. No keys-folder listing or separate per-recipient
-status probe is required.
+A readable part with no usable key, an unsupported version, damaged object,
+failed transaction or unfinished reload leaves the cursor before that slot.
+Record the named cause locally and stop all sending, including status, file
+parts and operation retries. Local reads and eligible app writes continue.
+There is no independent admin lane past the block.
 
-For finality, the folder listing starts after observing the stored time `T`.
-Each known undrained writer's entry discovery reaches its next-number miss
-after that listing. Together with retained entries, including completed
-retirement drains, this supplies every entry through `T′ = T - M - δ`.
-§4 guarantees listing visibility strictly before `T - M`; the extra tick
-keeps the inclusive endpoint inside that guarantee. Every writer with an
-entry through T′ has an entry 1 old enough to be listed, and its exact reads
-supply the rest. Recent writers may be absent. Discovery can include later
-entries too, but they do not enter this window. Their recorded reads still
-decide lateness; the margin does not erase genuine concurrency.
-Judge landing times against this complete received history, then check
-author views and apply causally ready entries in batches. One batch needs
-one replay of the received set and one atomic commit, not one full replay and
-transaction per received entry. Author-view checks still use exactly each
-entry's recorded past. Entries waiting for a key or cause stay cached.
-Independent ready entries can proceed, but a gap or unreadable entry
-through `T′` prevents finality and any cleanup depending on it.
-Do not read at or past a log's permanent refusal (§19.1). An incomplete
-catch-up also prevents new administrative work, key sharing and first
-attempts requiring a current membership view; it is not permission to seal
-against an older replay. Fixed attempted uploads retain their bytes, but
-every retry still needs §10's fresh completed catch-up.
-The first phase is complete only when the entry and copy logs reach their
-misses and every copy's clear prefix decodes. A pass's operations, new
-sharing, admission and first attempts use its own completed first phase,
-never an earlier catch-up that is still fresh enough for sending. After an
-incomplete one, the pass only resends copies and an entry reserved before it
-and attempted writes, and posts positions, each through §10's gate
-([`current_uses_this_pass`, `incomplete_only_retries`, `gated`](proofs/io/CovenIO/PassPhases.lean)).
-Counting the phase as complete because its entries completed while an earlier
-catch-up is fresh would first-send with that earlier pass's copies
-([`entries_only_reuses_previous`](proofs/io/CovenIO/PassPhases.lean)).
+A reload retains its selected inputs and fixed target. Stage each readable
+audience from its selected snapshot through a common required slot, then
+commit all rows, merge records, losses, source verdicts and cursor together.
+Reapply the eligible local queue with its original pasts. If deletion overtakes
+a required suffix read, obtain the newer floor bundle and restage; failure
+changes no visible state. A newer announcement alone does not restart it.
 
-Advance the single finality horizon only from all entries through `T′`
-and the inclusive §9 window `[T′ - 30 days, T′]`. Its cutoff is
-`T′ - 30 days`. Queries derive finality by comparing stored time
-strictly with that horizon; an unchanged horizon causes no update.
-A storage time learned during discovery or any later request can be used by
-a later observation, never retroactively as the time before this one.
-Reading this device's removal or replacement stops sends as §10 requires.
-Once a kept retirement, or a registration replay does not keep of a device
-no kept entry registers, is final, retain the qualifying sample T as `F`,
-keeping it distinct from the earlier finality endpoint T′.
-This observation's entry and copy misses can supply two parts of its drain
-only if they follow a storage time `T > F + one day + five minutes` (§6).
-The device remains undrained until step 6 supplies the write-log miss too.
+At a confirmed current end, refresh the send gate using this catch-up's start.
+Verify custody, device identity and publication reservations against slots or
+checkpoint receipts. A shared-slot collision is ordinary contention; only
+conflicting authenticated use of this device's publication identity is clone
+evidence (§10). Removed or replaced identities send nothing.
 
-### 3. Observe positions and identity
+Read status revisions by exact path for devices active in this applied state.
+Fetch only changed reports. Agreement compares equal applied slots, schema,
+audience and key; queued local writes omit a fingerprint. Status never drives
+sequence discovery or retention. A failed peer report affects that report,
+not already authenticated sequence data.
 
-List **`<store>/positions/` once**, including this device's post. Agreement,
-retention and reports share it. Positions never supply log discovery bounds:
-uploading and posting are separate requests, so a crash between them must
-not hide an uploaded object.
+### 3. Send by claiming
 
-On reopening or reconnecting, these read-only observations also supply own
-counter evidence for §10, including snapshots in any audience needed to
-check this id. Read this device's positions only if their observed identity
-is new or their checked local record is missing. A matching confirmed own
-post needs no GET. Reuse all authored or previously verified evidence.
-An uninterrupted warm pass has no snapshot listing for identity.
+All publishers share this owner and gate, including callers running outside
+the periodic pass. First settle any uncertain claim at its recorded path.
+Use the exact retained bytes; after retention, authenticate its checkpoint
+receipt before confirming it. Never publish elsewhere while its outcome is
+unknown.
 
-Read this device's next write number as part of its identity check; retain
-any hit for step 6. Combine it with the received store log, key-copy numbers,
-checked own positions/snapshot evidence and device-only custody under §10.
+For every admin action, validate its target against the latest applied state,
+then do and journal its prerequisites (§18). Generated keys, created S3 keys,
+deliveries and uploaded snapshots are owned by that operation. Prerequisite
+key copies and snapshot announcements claim their own earlier slots.
 
-This is the check for every send in this pass. A failed check sends nothing,
-including keys, files and positions. An out-of-loop sender serializes with
-this work and uses a current completed check plus the occupied-path rule;
-it cannot reuse evidence from before reconnect, reset or intervening work
-that invalidates it. Its required refreshes count as that call's requests.
-Every sender also checks the first phase's age immediately before each
-request (§10). A long-running pass or upload waits for the next pass once
-five minutes have elapsed from that catch-up's start. Sending also requires
-this installation's current signing credential in the completed replay, and
-a signed attempt's signer must still be current (§10). Neither new custody
-nor a retry rewrites an old object's signer or recorded view. Read-only
-confirmation can settle an already-published old-key attempt. Member-key
-replacement leaves device logs active; it does not permit a retirement drain.
+To claim after n, seal for `<store>/seq/<n+1>`, save the exact bytes and issue
+create-once. Upload a large writes slot in parts; only complete publication
+makes the slot visible. On `AlreadyExists`, read the complete object:
 
-### 4. Observe keys and peers
+- equal attempted bytes confirm success, including a lost success reply;
+- different bytes mean another claim won. Read and apply forward to the new
+  end, validate again, then try its first empty slot;
+- a read or comparison failure keeps this attempt pending.
 
-Use step 2's new-copy observations on every pass, even when all entries
-are final and every current member already has a copy. A delayed publication
-can expose a key without another entry arriving. No stale catalog substitutes
-for this pass's observation; completed retirement drains supply exact copy
-histories for the writers no longer polled. A provider cooldown delays the
-pass itself.
+After the response, check the floor before confirmation. Covered slots settle
+only from its authenticated receipts; a different recorded occupant means
+this attempt never claimed that logical slot. Journal prefix cleanup of any
+recreated bytes at that covered path (§6), then revalidate.
+A successful claim applies by step 2. A new candidate path gets a new outer
+envelope; its inner write bytes stay fixed. Never reuse a publication identity
+for different work. Never republish a confirmed publication.
 
-Use the retained clear prefixes and newly acquired copies for sharing and
-exposure; opening this member's copies uses bytes already read in step 2.
-This device's successful creates also establish presence. An expected copy
-not yet observed stays a wait; a later due read can supply it, without a
-separate probe for every possible recipient. Decide recipients and usable
-keys from the current received log before first attempts. Own publication
-updates the catalog without restarting discovery after each entry. Its
-lateness is still judged against every stored entry (§9): the latest
-complete catch-up received every entry through its `T′` (step 2), enough
-for an entry landing at most 30 days after `T′`. One landing later, or with
-no such catch-up, reads every writer's log again after its publication: a
-catch-up still fresh by device time never vouches for storage time.
+If intervening slots make an admin action invalid, undo every artifact its
+journal still owns and fail the call with the validation reason. Failed undo
+retains the journal and retries. Previously claimed prerequisite slots remain
+final history; they cannot be erased to undo a disclosure. An already-satisfied
+target completes without claiming a redundant entry.
 
-Read each peer's positions only for new or changed listed identity, or a
-missing local checked record. Verify once; use the decoded value for
-agreement, retention and reports. One completed positions observation
-atomically replaces received reports; a failed scan keeps the previous
-reports and records the failure. Do not rewrite unchanged report rows;
-persist any changed peer identity or positions with the observation.
-Recompare cached fingerprints when this device's own data, schema, positions
-or usable fingerprint key changes.
+Claim at most one writes slot per pass, containing the captured sendable
+prefix of this device's queue. A schema publication gate can end that prefix;
+later app commits wait for the next pass. Remove queue records only when
+consuming their confirmed slot. Local writes are not applied twice.
 
-Only a complete membership and key-copy observation with committed replay
-and a successful identity check supplies the completed first phase's start
-to senders. Completion never substitutes its own time for that start. A
-phase taking five minutes or more supplies no permission to send. Key
-selection's caught-up view exists exactly when this observation is complete
-([`begin_iff_complete`](proofs/io/CovenIO/PassPhases.lean)).
+Snapshot publication uploads the captured object and then claims its
+announcement. Revalidate coverage after contention; recapture a stale
+candidate and delete its unannounced object through the journal. Raise/reset
+snapshots become usable for that state only with their matching admin entry.
+No upload-time deadline or concurrent-raise winner calculation applies.
 
-## Phase 2: make keys and access match
+<a id="9-post-changed-positions-and-finish"></a>
 
-For each audience, retire keys whose observed copies name an excluded
-member, a retired sealing credential, or a credential that is not current
-for its named member, including a losing replacement candidate. Derive
-retired credentials from each kept replacement's recorded view (§11). Use an
-existing usable replacement; if none is held, acquire one or have a current
-audience member's device rotate. Share historical keys with current members
-who lack copies for their current non-retired sealing credential. Complete a needed rotation's copies and entry before
-first sending data with its key. Every copy and entry a pass sends in
-phase 2 goes up before its writes: copies in number order, an operation's
-copies before its entry, and writes in queue order
-([`sent_prefix`, `keys_before_data`](proofs/io/CovenIO/PassPhases.lean)).
-If no usable key can be acquired or made,
-that audience's sends wait with their first reason; app writes still commit.
+### 4. Perform effects and finish
 
-The owner's device runs the access work recorded when entries were applied.
-A non-owner exposes the owner wait. An admin's device holding admin access
-lists stray keys (§13) at most once. Requests serialize and check their current
-intention as §4 requires. Pending provider access does not block independent
-data protected by usable keys; no removal call runs a second revocation path.
+Derive effects from the now-applied state: sharing follows active members and
+open invites; noncurrent S3 keys await deletion; exposed audience keys rotate
+through the same operation path. Required reloads commit with their triggering
+slot. A blocked sequence can update local journals and report causes, but
+issues no outbound effect request until it can continue.
 
-Ana removes Ben. Carol's phase 1 receives the removal and Ben's old key copy.
-Her phase 2 publishes a rotation; Ana's device takes back provider access.
-Carol's phase 3 seals new data with that rotation. Ben's unresolved S3 key,
-if any, remains in the pending list for the admin.
+For due retention, select a verified announced bundle whose audiences cover
+the deletion cut and whose grace has elapsed. Conditionally advertise it in
+the floor before deleting any slots. Delete the covered prefix, then
+conditionally advance `first`. Journal every unfinished deletion and floor
+replacement. A conflict rereads the floor and never lowers its coverage or
+first slot. No reader acknowledgement or uploader's return is required (§15).
 
-Reserve each due historical copy independently of an entry only for a
-currently eligible recipient whose need is not already satisfied (§11).
-The number and fixed sealed bytes commit as an irrevocable attempt. Publish
-reserved copies in number order even if their initiating need changes;
-discarding a numbered row would hide later copies behind a gap.
-An occupied own copy requires complete byte equality (§10); absence checks come
-from the catalog, not one GET per possible recipient. New rotations and
-entry prerequisites are published by the ordered work in step 5.
+File retention runs only when references, upload completion, history deletion
+or provider cut-off can change eligibility. Use exact paths from the reference
+index and queue; never list files on an idle pass. After confirmed storage
+cut-off, one complete `<store>/files/<device>/` scan discovers removed-device
+orphans. Settle in-flight sessions first. An incomplete scan or unreadable
+reference-bearing input protects the files it might name. Unknown references
+are not empty. Retain the failure instead of fetching the same body each pass.
 
-### 5. Resume due operations and required reloads
+Replace `<store>/status/<this device>` at most once, only when canonical
+contents change or its absence was observed. Include the applied slot and
+this device's pending reports; fingerprints require exactly that published
+state. A lost reply retains its attempted bytes or confirms the stored value
+before settling. An unchanged refusal, heartbeat or time observation causes
+no replacement. A blocked sequence cannot publish this status.
 
-Only due operations whose prerequisites changed or whose retry delay
-elapsed run. All their catalog reads use steps 2–4. They issue their
-remaining requests in §18.1 order: prerequisite sealed-key creates or
-snapshot uploads, then the referencing entry create. A raise snapshot is
-prepared in step 8 like any snapshot, and waits for step 6 to confirm the
-captured own prefix, including the empty migration marker, before its
-snapshot request; ordinary new-schema writes behind the marker wait for a
-kept raise unless a capture taken again in step 8 includes them
-([`publication_after_confirmation`](proofs/queue/CovenQueue/RaiseUpload.lean),
-[`new_schema_send_requires_kept`](proofs/queue/CovenQueue/RaiseProgress.lean)).
-Applying an entry records any access change; the owner's serialized access
-work performs it.
-If a local entry changes membership, re-evaluate key eligibility before
-continuing to data first attempts, using this pass's copy observations and
-its own newly published copies. Never reserve a replacement entry without §9's
-online catch-up. An obsolete provider grant/revoke completes before its
-opposite is issued, as §4 requires. Count provider permission lookups and
-asynchronous-job polling as operation requests, subject to backoff.
-First settle any reserved store-log entry and its remaining prerequisite
-copies before reserving another entry. This includes queued entries whose
-initiating operation was discarded; discarding it cannot leave a log gap.
-A reserved registration sent under §10's admission exception is followed by
-another read-only first phase before any ordinary send, and ordinary sends
-use that later observation
-([`admission_rescans`, `admission_identity`](proofs/io/CovenIO/PassPhases.lean)).
-
-While this device has open invites and a request check is due, list
-**`<store>/join-requests/` once**, serving all its invites. Read only newly
-present requests or those lacking retained checked bytes. An already
-decoded request waiting for the person's decision needs no more GETs.
-Approval requires the invite's fixed member id and exact new pair, and
-confirms prerequisite copies to that candidate before publishing Add member
-or Replace member keys (§12). A losing replacement reports rejection without
-restarting against the winner. Self-replacement pauses app writes, confirms
-its queued writes/entries in step 6, and finishes custody before releasing
-the pause (§18). Approval deletes the request after its binding is kept; decline or expiry deletes the request and settles access under
-§12.2. No open invite means no join-request scan.
-
-A required reload first settles attempted uploads as §18.1 requires, then
-freezes each writer's required position at this device's applied positions
-(the bound [`committed_safe`](proofs/io/CovenIO/CommonReload.lean) assumes).
-Select counting usable snapshots and read each readable audience to the maximum
-of that requirement and all selected positions; retain the checked snapshot
-bodies and write inputs throughout staging
-([`committed_prefix`](proofs/io/CovenIO/CommonReload.lean)).
-After a missing required GET, refresh the readable audiences' catalog:
-counting coverage through that number proves publication, and absence then
-certifies deletion; the store's current newest always covers a deleted write
-([`covered_miss_published`](proofs/io/CovenIO/SnapshotWrites.lean),
-[`SnapshotHistory.deleted_miss_detected`](proofs/io/CovenIO/Reload.lean)).
-If the loaded audience's current snapshot reaches it, replace that audience's
-selection and recompute the common target; otherwise the write has no part
-there, and the store's selection holds its number
-([`scan_spec`, `unreached_not_held`](proofs/io/CovenIO/FixedReload.lean)).
-Selections otherwise stay fixed; deletion evidence in their catalogs needs no
-repeated GET, and a failed request or incomplete catalog is not such evidence
-(the successful-source premises of [`scan_spec`](proofs/io/CovenIO/FixedReload.lean)).
-The app keeps reading the old committed state while ordinary new writes join
-the waiting queue; install all readable audiences at the common target and
-apply eligible waiting writes on top in one transaction
-([`staging_keeps_visible`](proofs/io/CovenIO/AtomicReload.lean),
-[`common_cut_commits`](proofs/io/CovenIO/CommonReload.lean)).
-For example, replacing the store snapshot through write 2 while Gifts remains
-through 1 requires fetching write 2's Gifts part before either state is visible
-([`replacement_fills_other_audience`](proofs/io/CovenIO/CommonReloadExamples.lean)).
-The records checked by the reader are the records applied; do not decrypt and
-parse the body again.
-Ordinary recent-return-protected sync adds no snapshot listing for this rule.
-
-Every create uses fixed attempted bytes and the collision rule of §10;
-sealed keys use distinct writer paths under §11. For a lost reply or occupied
-path, reuse cached stored bytes when they establish the comparison, or
-make the one needed comparison read. Metadata cannot replace that byte comparison. Record returned metadata;
-where a provider omits it or the reply is lost, use the single-object status
-call, counted here. A folder listing miss cannot establish that this publication is absent.
-Never invent a publication time from the device clock.
-
-## Phase 3: sync data
-
-### 6. Send waiting writes, then receive writes
-
-First, for a new device or one failing §15's recent-return check, list
-each readable **`<store>/snapshots/<audience>/`** folder. Check previously unchecked signed
-prefixes by range to select the newest usable snapshot. Load it only if it
-covers past that audience's local position on some writer; otherwise keep
-the existing state and use ordinary next-number write reads. Apply §15's
-common-point loading rules, not each audience independently. Snapshots are
-never found by next number: retention can remove 2 while 3 remains.
-
-Create queued writes in device-number order, with the key and format rules
-of §6. Settle a tried write with its original bytes. An untried write uses
-the newest usable key under the received store log. Each success retires
-its queue row atomically; it also updates this pass's catalog. Resume any
-operation whose own-upload prerequisite this satisfies, using step 5's
-request order, without beginning a second full pass. An updated app uploads
-its original old-schema records and its empty migration marker before the
-raise; it never converts untried upload records, and ordinary new-schema
-records require a kept raise even on retry
-([`old_prefix_and_marker_enabled`, `new_schema_send_requires_kept`](proofs/queue/CovenQueue/RaiseProgress.lean),
-[`conversions_preserve_untried`](proofs/queue/CovenQueue/Conversion.lean)).
-For example, old write 1 and marker 2 confirm before the snapshot and raise
-publish, while new-schema write 3 remains queued
-([`raise_publishes_with_new_tail`](proofs/queue/CovenQueue/RaiseExamples.lean)).
-
-For downloads, GET the next write number of each undrained writer in step 2's
-set, reusing this device's identity read. A device whose addition replay
-dropped stays in that set: its writes can still count (§7.1)
-([`replay_devices_miss_counting_write`](proofs/io/CovenIO/WritersExamples.lean)).
-At each use of a miss, including a cached or parallel read's result, check
-`T + monotonic elapsed < S + 29 days` (§15), counting sleep. A pass-start
-check cannot authorize a later miss.
-At equality or later, take this step's away-device snapshot discovery and
-complete any required reload before using further write misses. Discovery
-from before expiry is insufficient. A new device or one without usable time
-evidence takes that path too; failure leaves history pending.
-A known required missing write uses step 5's certified deletion rule; without
-that certificate it remains a prerequisite, not a terminal idle miss
-([`scan_spec`](proofs/io/CovenIO/FixedReload.lean)).
-On a hit, fetch ahead within the configured transfer limit and stop at the
-first miss. Retain completed reads; reception order never bypasses causal
-or per-log application gates. Use retained headers to order causes and
-identify parts. An already cached wait is not a download trigger.
-Stream each uncached object once and check chunks as below. Apply each
-write atomically only after all checks, with its header facts and file
-references. Skipped audiences, resets and schema exclusions keep their
-existing rules. Verify a write with its device owner's key in its recorded
-`store_log_read`. Apply §10's device-retirement and member-key deadlines from
-retained first-publication times and current replay. Every unread kept
-replacement installing another signing key supplies an inclusive 30-day
-window, including for losing candidate keys. Consume an excluded write's
-position without effects or losses; later readers never rescue it. Feed that
-base verdict into §8's per-change source rule, recording dependent originals
-as losses while independent changes remain eligible. Rebuild admission,
-source evidence, losses, rows and positions atomically, retaining inputs
-until the deciding prefix is final and other retention gates pass. Entries retain §9's
-permanent landing rule. A required path neither supplied by a snapshot nor
-safely skipped under step 5 remains pending
-([`scan_spec`](proofs/io/CovenIO/FixedReload.lean)); retry only when its shared
-backoff permits, reusing this pass's absence observation.
-
-For a retirement past §6's finality wait, combine the write-log miss with
-step 2's entry and copy misses to finish its drain. Use observations after
-the qualifying `T > F + one day + five minutes`, retain all completed input,
-and wait for in-flight reads.
-Commit the local mark only when all three drains succeeded and the retiring
-entry is still kept and the wait has elapsed. Failure leaves it pending with
-retained progress and shared backoff. A miss before `T` is insufficient.
-
-### 7. Fill the eager file cache
-
-Eager work comes from changed file references, previously failed downloads
-now due, or an explicit cache request. Query missing cached ranges with
-indexes; do not enumerate every eager app row on each pass or requeue
-bytes solely because budget eviction discarded them. Share an in-flight
-fetch with another reader of the same range. Files retain §16.3's bounded
-ranges and per-chunk authentication; these are explicit exceptions to a
-single whole-object request. Account for their header and every range.
-
-Cache publication (§16.6) remains local IO; it never holds the database
-writer across disk reading or cryptography.
-
-### 8. Write snapshots and retain history
-
-Use cached signed prefixes and recorded write-part lengths to check
-growth. Evaluate retention's indexed candidates every pass; for any final
-write satisfying the reader-positions or 30-day gate, request a snapshot in
-this pass or the next for the store and each readable part audience whose
-current newest counting snapshot lacks coverage, even if no snapshot has ever
-covered it
-([`RetentionDeadline.refreshDue`](proofs/io/CovenIO/RetentionDeadline.lean),
-[`AudienceRetention.first_witness`](proofs/io/CovenIO/AudienceRetention.lean)).
-For example, one final 30-day-old write below the growth threshold still
-requests its first snapshot
-([`first_snapshot_deleted`](proofs/io/CovenIO/CommonReloadExamples.lean)).
-When growth would request a snapshot or a retention candidate is
-due, list only its relevant snapshot audience folders, sharing any discovery
-already performed for a reload. Read unchecked signed prefixes by range,
-then re-evaluate growth or coverage. A wait with unchanged prerequisites
-backs off; an idle pass performs no snapshot discovery. Create an operation
-only if an audience actually needs a snapshot.
-Prepare immediately after a complete write-log catch-up with nothing pending
-in that catch-up, using its storage sample from before the reads as the signed
-`T_c`, and require coverage of the audience's current newest counting
-snapshot at preparation (§15;
-[`completed_catchup_covers_old`](proofs/io/CovenIO/Reload.lean),
-[`SnapshotPublication.canPrepare`](proofs/io/CovenIO/Retention.lean)).
-The first theorem proves position coverage. Sampling before reads and keeping
-the sample through preparation and landing are checked by
-[`SnapshotPublication.begin_samples_time`, `read_uses_prior_sample`,
-`prepare_preserves_sample`, `land_preserves_sample`](proofs/io/CovenIO/SnapshotTiming.lean);
-signed encoding and exact-byte retries are not proved by those theorems.
-While a snapshot waits to be prepared, including a migration's raise,
-step 6 takes its sample by replacing this device's clock object and
-completing the store-log catch-up again before the write reads. A reload
-invalidates the write misses and any catch-up completed before it; the
-catch-up reads every writer again after it. A snapshot requested here, as
-growth requests one, therefore waits for the next pass's step 6. Work
-driven outside a pass, such as an app's reset, runs that catch-up first.
-If this pass cannot supply that catch-up, leave publication pending
-([`SnapshotPublication.act`](proofs/io/CovenIO/Retention.lean)).
-Capture it; before
-sending, confirm every own write through its position, with remote positions
-supported by checked published logs or previously published snapshots under
-the same gate ([`snapshot_covers_published`, `inherited_position_published`](proofs/io/CovenIO/SnapshotWrites.lean)).
-Later app commits do not extend that captured cut
-([`publication_after_confirmation`](proofs/queue/CovenQueue/RaiseUpload.lean)).
-A raise snapshot uses its migration's capture only when step 6's catch-up
-applied nothing past it; otherwise it captures the audience again through
-this device's newest write (§15, §17.1;
-[`RaiseHistory.unchanged_capture_prepares`](proofs/io/CovenIO/RaiseHistory.lean)).
-Its entry carries the snapshot's `T_c`; once an observed storage time is past
-`T_c + one day` before the entry is prepared, the attempt is abandoned like
-any other and the raise prepared afresh
-([`RaiseHistory.expired_stays_out`](proofs/io/CovenIO/RaiseHistory.lean)).
-No snapshot task is created and deleted merely to record an idle check.
-Abandon an attempt that passes `T_c + one day` without confirmed counting
-publication and prepare afresh at a new path, which each preparation
-reserves (§10). It has passed once a storage time this device observed, or
-its confirmed landing time, is later than `T_c + one day`. A request of an
-attempt abandoned on time that lands afterwards never counts, and the next
-attempt never reuses its path
-([`abandoned_never_counts_later`, `retry_new_path`](proofs/io/CovenIO/SnapshotAttempts.lean)). Every reader
-ignores an old attempt landing after that deadline
-([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
-The operation records an attempt it abandons once a request for it may
-have been sent or its landing was confirmed late, deletes such a landing
-that does not count on a later run, and finishes only once each record is
-settled (§15;
-[`abandoned_landing_unseen`](proofs/io/CovenIO/LateDeletion.lean)).
-For example, an attempt caught up at noon Monday and still unconfirmed after
-noon Tuesday cannot become usable by landing later
-([`late_snapshot_ignored`](proofs/io/CovenIO/Retention.lean)).
-
-From the same write, snapshot and positions catalogs, delete only objects
-whose coverage, finality, age/reader positions and ownership satisfy §15.
-For the store and every part audience require both newest counting coverage
-under every boundary replay could still select, including each reset entry not
-yet final, kept or dropped now, and a listed raise snapshot no entry names yet until the
-store-log catch-up has received every entry stored by a day after its `T_c`,
-and historical counting coverage whose landing was strictly more than one day
-ago; a replacement does not restart that historical age
-([`Eligible`, `maturity_survives_new_snapshots`](proofs/io/CovenIO/Retention.lean),
-[`RaiseHistory.deleted_stays_covered`, `listed_raise_hold_ends`](proofs/io/CovenIO/RaiseHistory.lean),
-[`dropped_reset_held`](proofs/io/CovenIO/RaiseHistoryExamples.lean)).
-For example, replacing Monday noon's covering snapshot on Tuesday morning
-still permits deletion after Tuesday noon if all other gates hold
-([`eligible_after_day`](proofs/io/CovenIO/Retention.lean)).
-A header missing from the local facts requires one authenticated read,
-retained across passes; existing facts require no remote reads. Each
-successful deletion updates the local catalog and reference index. Retention
-has no operation row; eligibility is derived again from the committed facts.
-Failure retains protection and its `Retention { path }` record.
-
-Consider files when a row/loss/protected-input change, history deletion,
-finality change, upload completion or ownership change can affect retention.
-Find files from fixed row references, retained inputs and the upload queue,
-using reads or status at exact paths. Never list files on an idle pass.
-
-Once §13's storage cut-off prevents further publication by a removed device,
-the device responsible for its cleanup lists **`<store>/files/<device>/`
-once**, across all pages, to discover orphans. This includes settling the
-ability of in-flight sessions to publish. Persist the paths and completed
-scan; a failed scan stays pending and retries. Retained references and
-finality still protect every candidate. If replay restores access, a later
-cut-off requires a new scan. An unresolved access request is not cut-off.
-When reference completeness needs remote snapshot discovery, list those
-audience folders for this due retention work and retain the checked facts.
-
-Use the durable reference index, checking local protection first. Read a
-retained object's body only if reference completeness is missing and the
-body can be checked. Record “cannot prove absence” for an unreadable or
-refused object; do not fetch it each pass. A changed prerequisite, update
-per §19.1, or confirmed object deletion can change that result. Delete a
-file only after complete authenticated reference evidence and all finality
-gates permit it. A failure never turns an unknown reference set into empty.
-
-### 9. Post changed positions and finish
-
-Derive the last publishable causally closed positions, fingerprints for
-exactly that state, and this device's publishable pending records (D8).
-Compare the complete canonical plaintext with the last confirmed post.
-Replace **`<store>/positions/<this device>` at most once**, and only on
-change; initial publication or observed disappearance also needs a post.
-A retained peer report is not this device's report and cannot cause an
-echo. A lost replacement reply keeps confirmation pending; a due retry
-uses the same attempted bytes or confirms the stored value before retiring
-that work. Failed publication retains the last confirmed post.
-
-No heartbeat, idle timestamp, unchanged refusal or time observation causes
-a replacement. Positions advance only over committed, fully realized work;
-pending changes can travel with the preceding positions (§6).
-
-If every discovered write and required reload is fully realized and its
-positions confirmed, retain the qualifying storage time from before this
-catch-up as the return checkpoint (§15). Keep the preceding checkpoint if
-history is still pending. `Synced` can still describe a finished pass with
-pending work; it does not by itself certify this checkpoint. An unchanged
-idle pass does not update a database timestamp.
-
-Publish the completion status in memory. Upload marking, queue removal,
-cache publication, received reports and this pass's own operation commits
-do not schedule an immediate full pass. If an app write or explicit command
-arrived after the pass's captured work and was not serviced, retain that
-wake and run once more. Otherwise wait for the idle schedule, a genuine
-external change, a new app command or the earliest due retry. Do not lose a
-write racing pass completion
-([`write_never_lost`](proofs/io/CovenIO/Wakes.lean),
-[`racing_passes`](proofs/io/CovenIO/Wakes.lean),
-[`bookkeeping_retains_none`](proofs/io/CovenIO/Wakes.lean)).
+Publish completion in memory. `Synced` describes a finished pass, not the
+absence of pending work. A blocked slot gives `Blocked`, with its cause also in pending
+records; it is not `Synced`. Retain one wake for app work arriving after this pass's capture;
+queue removal, cache publication and operation bookkeeping create no immediate
+second pass. Otherwise wait for the idle schedule, a genuine external change,
+a command or the earliest due retry
+([`write_never_lost`, `racing_passes`, `bookkeeping_retains_none`](proofs/io/CovenIO/Wakes.lean)).
 
 ## File uploads outside the pass
 
-The file-upload worker runs independently of these steps. A queued file,
-changed prerequisite or due retry wakes it; a pass never waits for its
-uploads. It shares the identity check (§10), transfer limits, retained
-observations and provider cooldown with the pass. Each upload uses its
-captured reference, fixed file key and source checks (§16.5), without
-selecting an audience key.
-Before every request, including a retry, part or session completion, check
-§10's catch-up freshness and current signing credentials. Expiry waits for the next pass without changing
-the fixed reference, key or confirmed session progress.
+The file worker wakes for a queued file, changed prerequisite or due retry;
+a pass never waits for it. It shares the owner’s observations, transfer limits,
+provider cooldown and current identity/send gate. Before every request,
+including parts, completion and retries, check that gate and any sequence
+block. Expiry or a block preserves the fixed reference and confirmed progress.
 
 Use one create up to the provider's single-request limit or 32 MiB, whichever
-is less; a 64-KiB encryption chunk boundary alone starts no session.
-Above that, begin or resume the recorded session, check
-confirmed progress, send remaining parts and finish. The source's whole-file
-check never holds the database writer across disk reading or cryptography.
-Completion changes no app row; it supplies new retention evidence without
-starting a full pass. Stopping sync waits for active transfers too (E5).
-
-Count the worker's requests and bytes separately from pass completion,
-using the same §3.1 terms. Moving work outside a pass does not omit its IO.
+is less. Encryption chunks alone do not start a session. Above that, begin
+or resume the recorded session, check confirmed progress, send the remaining
+parts and finish. Check the source as §16.5 requires without holding the
+SQLite writer across disk reads or crypto. Completion changes no app row.
+Stopping sync waits for active transfers. Charge every request and byte to
+§3.1 even though the worker runs outside pass completion.
 
 ## One stream, checked as it arrives
 
-A complete-object read is one streaming body request, not a length GET
-and data GET for each chunk. Read framing, prefix and header from that
-stream, bound lengths before allocating, authenticate each readable chunk,
-and incrementally hash every signed byte, including skipped encrypted
-parts. Check the final signature and complete framing before applying a
-write or snapshot. A snapshot's separately signed prefix can be used only
-after its own check. Readers share retained bytes and checked records.
-For any object naming a missing key, reuse the pass's acquired copies or
-wait for its due new-copy discovery, as in step 2. A later
-consumer never unlocks custody or downloads the same copy again.
+A complete-object read is one streaming body request. Bound framing before
+allocation, open readable chunks and incrementally hash all signed bytes,
+including unreadable ciphertext. Check complete framing and the final
+signature before applying any slot, write or snapshot. Share retained bytes
+and checked records; later consumers do not unlock custody or fetch them again.
 
-If an earlier chunk fails, retain the failure and drain the same stream if
-a complete download is needed to establish permanent refusal (§19.1).
-Never fetch the complete object again to justify the verdict. If transport
-fails before completion, it remains a failed read, not a permanent refusal.
-An update that permits another check uses the retained bytes first.
+On an early authentication failure, retain the cause and drain that same
+stream if complete download is required for a permanent refusal (§19.1).
+A failed transport remains a failed read. An update uses retained bytes first.
 
-A consumer needing only a write header or signed snapshot prefix starts
-with a bounded range, capped by object size. If that range does not contain
-the whole header, one second range extends the contiguous retained prefix.
-When the first range cannot reveal the exact end, extend to the maximum
-header end permitted by D1/D2, capped by object size; never assume the next
-length field fits the first buffer. Parse and bound every count before use.
-This permits at most two header requests, even for the largest position vectors.
-Retain any body bytes returned with that range too.
+A consumer needing only a signed snapshot prefix starts with a bounded range.
+If incomplete, one second range extends it to the exact end, or the maximum
+header bound when the first range cannot reveal that end, capped by object
+size. Parse counts before use. Keep body bytes returned with the prefix.
+A later body read streams from that retained prefix's end to EOF and hashes
+both as one object. A direct full read needs no preliminary request.
 
-When a consumer later needs the body, one streaming range reads from the
-retained prefix's end to EOF. Hash the cached prefix and the arriving suffix
-as one signed object. A direct full read needs no preliminary header request.
-The retained-input budget may evict completed inputs no pending apply or
-reversible effect needs; record eviction and charge any later fetch to it.
-A disk failure fails the requesting work and records its reason. Never drop
-pending bytes or advance positions while reporting success.
+An inner write header is obtained from its containing slot's checked stream;
+it is not a second object to fetch. CloudKit streams bounded asset parts;
+each native asset request is charged separately. A logical stream does not
+promise one native request for an object held in several assets.
 
-CloudKit streams bounded asset parts through coven-storage's native adapter.
-Each native asset request is counted as a transfer part; one logical stream is not a claim of
-one native request for an object held in several assets.
-
-**Carol's import.** Retention has already checked Ana's write header.
-Carol later applies the 50,000-note import: she hashes that retained header
-and reads only the remaining bytes through one body stream. Its chunks are
-checked as they arrive. Its complete signature must
-verify before the atomic apply; neither retention nor a later agreement
-check downloads that write again.
+**Carol's import.** Slot 42 carries Ana's queued import. Carol streams the
+slot once, checking the inner writes as they arrive. Its whole signature
+must verify before the batch commits. Snapshot growth and agreement reuse
+those facts instead of downloading the import again.
 
 ## Counting a pass
 
-Let `N` be active devices, including this one, plus retired devices not yet
-drained. Let `L_p(x)` count the native pages for one scoped listing on
-provider `p`. Folder ids and retained observations are already available
-in a warm idle pass with usable credentials:
+Let N be the active devices in the applied membership, including this one.
+With warm observations and usable credentials, an unchanged idle pass needs:
 
 ```
-D_p = L_p(store-log device folders) + L_p(positions/) + 3 * N
-R_idle,p = D_p + M_p
-M_S3 = number of listed positions objects (one exact HEAD each)
-M_other = 0
+D = 1 next-slot miss + 1 floor revision check + N status revision checks
+R_idle = 2 + N
 ```
 
-The three misses per device are its next store-log entry, write and key
-copy. A missing folder also establishes the miss; it needs no body request.
-Drained devices contribute no such probes. Their permanent folders and
-positions can still occupy listing pages, counted in `L_p`.
-Each folder listing enumerates devices, never log contents. Positions hold
-one object per device. If each listing fits one page, `D = 2 + 3 * N`.
-S3 adds one exact HEAD per listed positions object because `ListObjectsV2`
-omits the replacement version and user metadata; this includes positions of
-drained devices still present in storage. Other providers return the revision
-in their listing, so `R_idle = D`. There are no idle body
-bytes, publications, snapshot queries or file queries. Additional pages
-scale with devices, not with historical objects or attached files.
+These are logical provider requests. Charge path lookups, redirects and native
+asset parts when needed. S3 uses exact HEAD for revisions; no LIST occurs.
+There are no idle body bytes, publications, snapshot queries or file queries.
+Changed status or floor revisions add their body reads. Nonempty batches
+check the floor after reading; claim responses also require that check.
+Initial discovery and eviction have their own counts.
 
-An S3 GET, Dropbox download, OneDrive path read or CloudKit record fetch
-establishes an absent next object in one request. All folder lookups,
-redirects and native asset reads count when required. Initialization and
-eviction have their own counts.
+**Ben receives one note.** Household has three active devices. An unchanged
+idle pass needs five requests. One readable slot adds its body read and one
+changed-status replacement: seven requests; the floor check at the ending
+miss also supplies the required post-read check when peer reports
+and the floor have not also changed. Any already-issued fetch-ahead probe counts.
 
-**Ben receives one note.** Household has Ana's phone, Ben's laptop and
-Carol's tablet. Each discovery listing fits one S3 page. An idle pass uses
-**two LISTs, three position HEADs and nine GET misses: 14 requests**, regardless of their history.
-With a transfer limit of one, one new readable note and no other due work
-adds its GET and one changed-positions PUT: **16 requests**. Fetch-ahead
-with a higher limit may leave extra probes in flight after the first miss;
-charge those requests too. A second positions page makes these 15 and 17.
-
-A due clock observation adds a replacement and status call, plus any
-identity refresh and subsequent discovery needed to use that time.
-Open invites add their due request checks. Snapshot recovery or due retention
-adds only its required audience listings and prefix/body reads. A new file,
-snapshot, deletion, permission call, lookup, redirect or retry is charged to
-its separate §3.1 term; none is hidden behind 'one arrival'.
+Contention adds failed creates and winner reads. New writes, snapshots, files,
+permission calls, retries and due retention each add their actual requests and
+bytes under §3.1. A snapshot reload reads only the named bundle and required
+suffix; grace creates no clock-object publication.
 
 ## Waiting without repeated work
 
-The operation worker wakes for a command, a committed prerequisite change,
-pass completion that supplied new evidence, or its next due timer. There
-is no unconditional one-second database/operation scan. A wake reevaluates
-only affected work and never resets an unchanged wait's backoff (§3.1;
-[`evidence_keeps_backoff`](proofs/io/CovenIO/WaitingEvidence.lean),
-[`evidence_due_once`](proofs/io/CovenIO/WaitingEvidence.lean)). A wait names
-the prerequisite its attempt ended on, and only a commit changing that
-prerequisite is evidence for it; a commit changing anything else never wakes
-it, so an unchanged wait keeps §3.1's rate
-([`unrelated_commit_ignored`](proofs/io/CovenIO/WaitingEvidence.lean),
-[`unchanged_rate`](proofs/io/CovenIO/WaitingEvidence.lean)). A prerequisite
-is the committed rows its waiting work reads, keyed by primary key, so a
-commit that can unblock the wait always wakes it; a write's rows include its
-writer's applied position, so an advance short of the write wakes it too
-([`unblocking_commit_named`](proofs/io/CovenIO/PrerequisiteRows.lean),
-[`named_row_matters`](proofs/io/CovenIO/PrerequisiteRows.lean),
-[`only_partial_advances`](proofs/io/CovenIO/PrerequisiteRows.lean)). A wait begins
-when the attempt that ends in it started: a change to its prerequisite by
-other work while the attempt runs makes that wait due at once, while the
-attempt's own commits never do
-([`racing_commit_wakes`](proofs/io/CovenIO/WaitingEvidence.lean)). Reopening
-watches each persisted wait from the reopen on: a commit before it is not
-seen, and the wait is due within its persisted full wait, so a prerequisite
-satisfied before the reopen delays it at most that long
-([`reopened_due`](proofs/io/CovenIO/WaitingReopen.lean)). Without a forward
-wall-clock jump each reopen adds at most one start, the attempt it cut short
-([`reopen_rate`](proofs/io/CovenIO/WaitingReopen.lean)). Every recorded condition names what unblocks it: an entry held back by a
-pending reload waits on that reload, except a schema raise, which goes first
-unless it waits on that reload, on a write or on a write-log catch-up,
-which only step 6 sends, receives or runs, so the two never wait on each other
-([`no_cycle`](proofs/io/CovenIO/DriveOrder.lean)).
-Key waits share the keys observation, invite waits share the join-request
-observation, and agreement/retention share positions. Unchanged app-action
-and after-update pending records issue no automatic requests.
+Workers wake for commands, changes to named prerequisites or a due retry.
+There is no unconditional one-second database scan. A wake reevaluates only
+affected work; unrelated commits never reset backoff
+([`evidence_keeps_backoff`, `evidence_due_once`, `unrelated_commit_ignored`,
+`unchanged_rate`](proofs/io/CovenIO/WaitingEvidence.lean)). A wait names the
+committed rows its attempt reads; a change during that attempt makes the
+wait due, but the attempt's own commits do not
+([`unblocking_commit_named`, `named_row_matters`](proofs/io/CovenIO/PrerequisiteRows.lean),
+[`racing_commit_wakes`](proofs/io/CovenIO/WaitingEvidence.lean)). Reopening
+retains the persisted wait and watches subsequent changes
+([`reopened_due`, `reopen_rate`](proofs/io/CovenIO/WaitingReopen.lean)).
 
-The backoff applies to operations, missing-object probes, invites, join
-outcome polling, file retries, and provider job-status checks. A failed
-connection also delays new automatic passes; local writes and `sync_now`
-coalesce while it cannot be retried. SDK retries consume the same allowance,
-not a hidden second loop. Honor `Retry-After` for its provider/account scope
-across every worker. Delay-seconds use the monotonic timer; an HTTP-date
-must be interpreted against the provider response's clock before converting
-to a monotonic deadline, so a skewed device clock cannot shorten it. A
-missing usable time basis is reported, not treated as permission to retry
-immediately. An app retry can override ordinary backoff, never this cooldown.
+Key waits share retained copies; agreement shares status observations. A
+blocked slot waits on its own named cause, never a later slot. Reloads stage
+their required inputs without requiring the blocked cursor to advance first.
+App-action and after-update conditions issue no automatic requests.
 
-A joiner keeps its encrypted request, writer-copy download position,
-downloaded copies and entries across polling iterations. It does not run a
-complete store sync on every wait. The invite names the initial key, inviting
-writer, fixed member id and last published key-copy number at invite time.
-Before reading that number, the inviting device publishes its reserved
-copies in number order, so the number follows every copy reserved before the
-invite ([`invite_after_reserved`](proofs/io/CovenIO/PassPhases.lean)). Each due attempt
-GETs the next number, reading whole copies and inspecting their clear prefixes
-until an initial-key copy naming both its fixed id and new sealing key
-appears or a miss ends the attempt. Hits can
-fetch ahead within the transfer limit, without advancing across a gap.
-Retain other recipients' routing facts and every completed copy so reopening
-does not start again at the invite's number.
-After admission, bootstrap obtains every writer's copy history from 1,
-reusing this retained tail. The invite's cursor cannot stand in for the
-earlier exposure evidence needed for ordinary key selection.
+Backoff applies to operations, misses, invites, join polling, files and provider
+job checks. SDK retries share the same allowance. Provider `Retry-After`
+restricts every worker in that account scope, including explicit retries.
+Interpret HTTP dates against the provider response clock; a missing time basis
+reports a failure. Delay-seconds use a monotonic timer. Restart preserves
+`max(0, min(T - now, W))`, with the full provider wait W (§16.5).
 
-Also use status for the request's continued presence: absence of the key
-alone cannot report a decline. A due poll with no new copy costs one logical
-next-copy miss and one request-status call; copies that arrived add their
-reads, with provider lookup overhead counted separately. After observing
-request deletion, refresh the inviting writer's copies through a miss and
-check membership as §12.2 requires before deciding the outcome. A copy may
-have arrived between the earlier miss and deletion. Key bytes alone cannot
-admit a member without replay. Bootstrap requires the approving writer's
-kept binding for the exact id and requested pair; another writer's equal
-pair cannot rescue a dropped approval (§12).
+A joiner retains its encrypted request, routing cursor, copies and checkpoint
+inputs across polls. It reads forward from the invite's `read_through`, or
+uses the floor if those slots have been deleted. A due poll checks the next
+slot and request status; new arrivals add their reads. A key alone does not
+prove admission: require the approving device's claimed binding for the fixed
+member id and requested pair (§12.2). After request deletion, refresh sequence
+routing and the floor before deciding decline; approval may have raced the
+previous miss. This bootstrap scan sends no ordinary writes or status.
 
-**Ana's open invite.** While Carol has not sent her request, Ana's device
-backs off the shared request check. Once it arrives, the checked request
-stays local while Ana decides. Passes do not keep reading it, and waiting
-for approval does not replay the store log each second.
-
-**Ben's throttled laptop.** Storage says to retry after 600 seconds. The
-ordinary backoff cap is 300, but Ben's sync, upload and invite workers all
-wait at least 600 for that provider scope. App writes remain local and
-queued. The database keeps the provider/account cooldown's T and W.
-Restart arms `max(0, min(T - now, W))`, never an unconditional immediate
-retry. W remains 600 even though ordinary backoff caps at 300 (§16.5).
+**Ana's open invite.** With no request, Ana's device backs off its shared
+request check. Once Carol's request arrives, the checked request stays local
+while Ana decides; waiting does not replay history each second.

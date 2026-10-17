@@ -44,19 +44,17 @@ pub struct SealingKey(/* private */);
 /// `signing: SigningKey`, `sealing: SealingKey`.
 pub use coven_format::MemberKeys as MemberPublicKeys;
 
-/// One write: the device that made it and its number in that device's log (§6).
+/// One write: its device and local write number, independent of its slot (§6).
 pub struct WriteId {
     pub device: DeviceId,
     pub number: u64,
 }
 
-/// One store log entry: the device that wrote it and its number in that device's store log (§9).
-pub struct EntryId {
-    /// The device that wrote the entry.
-    pub device: DeviceId,
-    /// Its entry number, starting at one.
-    pub number: u64,
-}
+/// A positive slot number in the store's one sequence (§6).
+pub struct Slot(pub u64);
+
+/// An admin entry is identified by the slot containing it (§9).
+pub type EntryId = Slot;
 
 /// Row audience; ToSql/FromSql bind/read canonical text (§14).
 pub enum Audience {
@@ -187,7 +185,7 @@ impl Passphrase {
 pub struct MemberKeys { /* private fields */ }
 
 /// Stable member id and held private pairs, including historical credentials
-/// and a durable replacement candidate. Replay selects current authority (§11).
+/// and a durable replacement candidate. Applied slots select current authority (§11).
 /// Private material is erased when dropped.
 pub struct MemberIdentity { /* private fields */ }
 
@@ -205,7 +203,7 @@ impl ObjectPath {
     pub fn parse(value: &str) -> Result<Self, StorageError>;
     /// The path bound into the object's encryption.
     pub fn as_str(&self) -> &str;
-    /// Whether this is a posted-positions or clock path, the replaceable kinds.
+    /// Whether this is a status or floor path, the replaceable kinds.
     pub fn is_replaceable(&self) -> bool;
 }
 
@@ -251,7 +249,7 @@ pub struct StoredObject {
     pub size: u64,
     /// Server publication time of the complete object, not the uploading device's clock.
     /// Immutable objects retain their first stored time across retries. Replaced
-    /// positions and clock objects carry their replacement time (§9).
+    /// status and floor objects carry their replacement time (§4).
     pub stored_at: StorageTime,
     /// Timestamp resolution; S3 uses its whole-second HEAD/GET representation (§4).
     pub time_resolution: Duration,
@@ -376,13 +374,9 @@ pub enum DbError {
     NotInCircle(CircleId),
     /// A required reset, schema or skipped-history reload has not committed.
     AudienceReloading(Audience),
-    /// This device's last store-log entry is fixed but unpublished; it must be
-    /// published before this device makes another (§9).
-    StoreLogUploadPending(EntryId),
-    /// This device has used every store-log entry number (§9).
-    StoreLogNumberExhausted,
-    /// This device has reserved every key-copy number (§11).
-    KeyCopyNumberExhausted,
+    /// This device has exhausted its local write identities (§6).
+    WriteNumberExhausted,
+
     /// Self-replacement has paused app writes while queued objects settle
     /// and the new binding and custody are installed (§10, E9).
     MemberKeysChanging,
@@ -503,8 +497,8 @@ pub enum SnapshotError {
     Format(coven_format::Error),
     /// The snapshot needs a different app schema (§17).
     Schema { snapshot: u32, database: u32 },
-    /// These store-log entries must apply first; snapshots don't carry them.
-    StoreLog { missing: Vec<EntryId> },
+    /// Required checkpoint evidence or retained sequence slots are absent.
+    MissingSlots { missing: Vec<Slot> },
     /// These gap writes or causal predecessors were not supplied.
     MissingWrites { missing: Vec<WriteId> },
     /// A supplied write cannot apply yet.
@@ -515,8 +509,8 @@ pub enum SnapshotError {
 
 /// What a downloaded write waits for before it can apply (§6, §19.1).
 pub enum WriteWait {
-    /// Store-log entries the write's author had applied.
-    StoreLog(Vec<EntryId>),
+    /// The authored prefix or its authenticated checkpoint is not available.
+    SequenceThrough(Slot),
     /// Writes that must apply first, including the author's preceding write.
     Writes(Vec<WriteId>),
     /// The app must support this schema version.
@@ -787,7 +781,7 @@ pub enum MaterialError {
     UnknownCircleKey { circle: CircleId, key: KeyId },
 }
 
-/// A store or circle key's random id, named by the store log entry that
+/// A store or circle key's random id, named by the admin slot that
 /// brings the key in (§11).
 pub struct KeyId(pub Uuid);
 
@@ -857,7 +851,7 @@ impl CovenBuilder {
     /// How many file uploads run at once. Defaults to one.
     pub fn max_concurrent_uploads(self, n: NonZeroUsize) -> Self;
 
-    /// How many downloads run at once, including log fetch-ahead and file
+    /// How many downloads run at once, including sequence fetch-ahead and file
     /// ranges (E5, E8). Defaults to one.
     pub fn max_concurrent_downloads(self, n: NonZeroUsize) -> Self;
 
@@ -1266,10 +1260,10 @@ handle
   rebuilt from the database are not additional app-facing state.
 - E.g. Ana's app reads `members()` to draw its first list, or subscribes with
   `subscribe_members()` to receive that same list and later committed changes.
-- Subscriptions show current results, including replay changes. Their callback
+- Subscriptions show current results, as slots apply. Their callback
   histories need not match between devices (§9).
-- A loss with `pending_entries` can disappear on replay. Offer a removed row
-  elsewhere with the same key (§8); copying to a new key can produce two rows.
+- Offer a removed row elsewhere with the same key (§8); copying to a new key
+  can produce two rows. Published owner and unique claims follow slot order.
 
 ```rust
 /// SQL access to one read-only database snapshot (§5, E4).
@@ -1422,12 +1416,7 @@ pub struct LostValue {
     /// Old-shape values kept independently of the current schema (§17.1).
     /// Their table or columns may no longer exist; dismissal still works.
     pub frozen: bool,
-    /// Entries whose outcome can still change this loss (§9), sorted by id.
-    /// Empty when no non-final entry affects it. This is computed locally;
-    /// it is not part of the loss's fingerprint or snapshot identity.
-    /// Storage-time finality can change this list without changing the loss;
-    /// that committed change also notifies subscribe_lost_values().
-    pub pending_entries: Vec<EntryId>,
+
     /* private identity for dismissing this loss, including its audience */
 }
 
@@ -1482,8 +1471,8 @@ pub enum RowAuthorizationFailure {
 pub enum RemovalRule {
     ForeignKey { columns: Vec<String>, parent: String, parent_columns: Vec<String> },
     Check { constraint: String },
-    /// The circle is deleted by this kept entry (§14.7). This describes
-    /// the deletion, not a conflicting row edit; the row returns if it drops.
+    /// The circle is deleted by this entry (§14.7). This describes
+    /// the deletion, not a conflicting row edit; deletion is final.
     DeletedCircle { entry: EntryId },
     /// The same key is present in another audience, whose row is shown
     /// (§14.2).
@@ -1545,8 +1534,8 @@ while let Ok(values) = lost.next().await {
   - After `disconnect_storage`, setup reconnects at the recorded location.
     It refuses a different location with `LocationChangeUnsupported`;
     setup does not relocate a store already used by other devices.
-  - Creating uploads the store's first entry and its key sealed to this
-    member; waiting writes then go up through sync like any others.
+  - Creating claims slot 1, then the creator’s key-copy slot (§10). Waiting
+    writes then claim a writes slot through ordinary sync.
 - The app calls `authenticate(access)` on the handle before OAuth setup.
   Coven owns the request, checked redirect and code exchange. The builder's
   presenter opens the page and returns the redirect or cancellation; it receives
@@ -1562,6 +1551,8 @@ while let Ok(values) = lost.next().await {
   a path already occupied before the check is left untouched. A failed check
   returns `StorageSetupError::ProviderCheck`, naming the operation and its
   classified cause; the error retains a cleanup failure too if both fail.
+  It also checks conditional replacement for the floor: a matching revision
+  succeeds and a stale revision changes nothing.
 - An S3 location's behaviors are `S3Settings` (§4). Its `S3Profile` names a
   catalogued service or carries custom settings; with no profile, the
   endpoint selects (§4): no endpoint means AWS S3; `storage.googleapis.com`
@@ -1620,8 +1611,9 @@ while let Ok(values) = lost.next().await {
   bucket versioning or commits credentials after a versioning refusal.
 - Setup returns the restore code with the committed connection. Credentials,
   keys, location and code commit once the connection is ready; failure retains
-  their previous values and connection. A reserved first entry or access update
-  retains its number, plaintext, sealing key ids and sealed-key bytes for retry (§6, §18).
+  their previous values and connection. An uncertain claim retains its
+  destination and exact bytes. Confirmed contention reads forward and
+  revalidates; invalidated work undoes its journaled artifacts (§6, §18).
 - Setup takes the first device's name, as joining and restore do (§10, §12).
   Reconnecting an existing device keeps its registered name. Changed provider
   access is published as `Set access` before committing the new credentials.
@@ -1629,57 +1621,41 @@ while let Ok(values) = lost.next().await {
   local write or `sync_now`, and every 30 seconds while idle, subject to
   connection backoff and provider cooldowns. Stopping and closing finish the
   active pass first.
-  - [One sync pass](sync-pass.md) specifies every listing, read trigger,
-    send and cache lifetime in order; [§3.1](coven.md#31-io-bounds) states
-    the request and local-work bounds. List only store-log device folders
-    and positions on an idle pass. GET each undrained known writer's next
-    store-log, write and key-copy number; fetch ahead on a hit within the
-    transfer limit, stopping at the first miss. No pass lists pages of log history.
-  - New or long-absent devices list snapshots by audience (§15); snapshots
-    never use next-number discovery. The clock object's storage time and
-    the last completed catch-up's storage time measure absence. Due retention
-    can refresh snapshot coverage; idle passes do not list snapshots or files.
-  - Before any upload, the pass uses its completed observations, checked own
-    positions and snapshots, received store log and device custody to check
-    identity, counters, removal and replacement (§10). Other senders use
-    the same serialized check. They do not make independent duplicate scans.
-    Every send checks current signing credentials; an already signed object
-    must also have the current signer, with §10's bootstrap exceptions.
-    Every send, including retries and file parts, also checks that the last
-    completed first phase started less than five minutes ago, monotonically
-    with sleep counted. Otherwise it waits for the next pass (§10).
-  - The pass borrows the keys unlocked at open for the handle's session.
-    Its observations and retained checked bytes serve operations, reloads,
-    writes, file transfers, snapshots, retention and agreement together.
-    File uploads run in their own worker (§16.5), sharing those observations,
-    identity checks, transfer limits and backoff. A pass does not await them.
-  - Own positions are posted only when their complete publishable contents
-    change, or the post is absent. Upload completion creates no app write.
-  - Calls or app writes arriving during sync retain one wake if this pass
-    has not serviced them. Its own queue, operation and cache commits do
-    not trigger an immediate second pass. Waiting work uses the shared
-    backoff rules; a completion notification alone is not new evidence.
-  - Every subject that cannot advance has its first unmet condition in `pending()`.
-    This includes missing prerequisites, key copies, damaged objects, dropped
-    entries, fingerprint disagreements, pending operations and file failures.
-  - Independent work continues. Only coven's own failing operations fail
-    sync status; a failed required reload holds positions at it, recorded
-    under its audience and operation.
-  - Posted positions never advance over unfinished work. A device can replace
-    its previous post with updated pending records while its positions wait.
-    It omits fingerprints unless they describe exactly the posted positions.
-  - A finished pass publishes its completion time; `Synced` can coexist with
-    pending records. Live queries report committed changes (E4).
-  - Reset and coven-update retry rules are in §19.1. Neither a disagreement
-    nor a peer's silence triggers recovery on its own.
+  - [One sync pass](sync-pass.md) reads forward, applies slots, claims pending
+    publications and performs effects. Exact next-slot and floor reads find
+    history; active-device status is read by known paths. No idle listing or
+    device-folder discovery occurs.
+  - A missing required slot covered by the floor reloads its named snapshots
+    and suffix. Returning devices retain their original queued writes (§15).
+  - Every send shares §10's identity and catch-up gate, including retries,
+    files and operation work. Catch-up must have started less than five
+    minutes ago, with sleep counted. A blocked slot invalidates the gate at
+    once; no later admin entry or outbound request passes it.
+  - The pass and file worker share session keys, checked observations,
+    transfer limits and provider backoff. The pass does not await files.
+  - Status posts only on changed canonical contents or observed absence.
+    Queue, cache and operation bookkeeping do not wake another pass; app work
+    arriving after capture retains one wake. Upload completion changes no row.
+  - `pending()` names the first unmet condition for each subject, including
+    a blocked slot, failed reload, operation undo, files and disagreement.
+    A cut-off writes slot is consumed and records `WritesRefused` permanently.
+  - `Blocked` names the next slot and cause. Local reads and eligible writes
+    continue; later slots and every send wait. Independent local work may
+    proceed. A failed peer status or file does not block the sequence.
+  - `Synced` may coexist with pending file, provider or retention work, but
+    never with an unapplied discovered slot. Fingerprints require exactly the
+    posted applied prefix and no unclaimed local writes.
+  - Neither disagreement nor silence triggers recovery. §19.1 gives retry
+    and update behavior.
+
 - `Offline` describes the last failed attempt, not the connection's history.
   `Failed`: storage refused the whole pass, or coven's own operation failed;
   one that never clears stops sync until a reset.
   - Keep whether the provider answered; `StorageFailure::Network` alone
     cannot decide this. A server error response is not an offline device.
-  - A denied store listing can fail the pass. A refused write, missing key,
-    unpublished schema, failed file or retention wait stops its subject
-    and lets independent work continue; it does not set `Failed`.
+  - A denied required read can fail the pass. A slot’s unavailable key, schema
+    or damaged bytes gives `Blocked`; a failed file or retention wait stays
+    with its subject.
   - Removal records a `Connection` block with `Removed`, and stops the loop
     for good. Another copy using this device's id fails the pass with
     `DeviceIdInUse` and stops the loop, recording nothing (§10). Local
@@ -1690,7 +1666,7 @@ while let Ok(values) = lost.next().await {
     until the store is reopened.
     Never expose an apparently empty pending list after losing its update.
 - E.g. Ana syncs successfully, then loses Wi-Fi. The next attempt is
-  `Offline`. A later provider error denying the store listing is `Failed`.
+  `Offline`. A later provider error denying the required read is `Failed`.
   One bad photo while the rest syncs leaves `Synced` with a pending file record.
 - A device that isn't connected still reads and writes
   ([§3](coven.md#3-guarantees)); its writes wait in `_coven_uploads`.
@@ -1934,7 +1910,7 @@ impl StorageConfig {
 pub struct TransferLimits {
     /// Maximum file uploads running at once.
     pub uploads: NonZeroUsize,
-    /// Maximum concurrent downloads, shared by log fetch-ahead and file reads.
+    /// Maximum concurrent downloads, shared by sequence fetch-ahead and file reads.
     pub downloads: NonZeroUsize,
 }
 
@@ -1974,8 +1950,8 @@ pub enum StorageFailure {
     /// A member key coven made could list outside its store's prefix (§4).
     KeyBeyondStore,
     /// Setting up a store that never had storage found another device's
-    /// creation marker: another installation of the store claimed this
-    /// location first (§10, D10). Restore or join it instead.
+    /// slot 1: another installation claimed this location first (§10, D10).
+    /// Restore or join it instead.
     StoreExists,
     /// S3 rejected the device clock after one retry with the learned offset (§4).
     ClockSkew,
@@ -2003,11 +1979,14 @@ pub enum StorageFailure {
     InvitationMismatch,
     /// The session belongs to another provider or location.
     SessionMismatch,
+    /// A lost multipart-initiation reply left no attributable native session id.
+    /// Retain its cleanup journal; never abort another claimant’s session.
+    SessionIdentityUnknown,
     /// The recorded upload expired or a publication conflict invalidated it.
     SessionExpired,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
-    /// A posted-positions replacement exceeds this provider's single-request limit.
+    /// A status replacement exceeds this provider's single-request limit.
     SingleRequestTooLarge {
         /// Encrypted body length in bytes.
         size: u64,
@@ -2107,6 +2086,8 @@ pub enum StorageCheck {
     Create,
     /// Refuse a second create at the same path.
     CreateOnce,
+    /// Replace at a matching revision and refuse a stale revision (§15).
+    ConditionalReplace,
     /// Read the original bytes in full.
     Read,
     /// Read exactly an interior byte range.
@@ -2136,7 +2117,7 @@ pub enum StoreKeyUnlockError {
     SecureStorage(KeyError),
 }
 
-/// Sync or a store-log change failed (§9, §13, §17, E5).
+/// Sync or an administrative operation failed (§9, §13, §17, E5).
 pub enum SyncError {
     /// This call requires work that cannot yet advance (§19.1).
     Pending(Box<PendingRecord>),
@@ -2148,8 +2129,12 @@ pub enum SyncError {
     KeyUnavailable(KeyId),
     /// A key introduction reused an immutable key identity.
     KeyAlreadyUsed(KeyId),
-    /// Replay already rejects the proposed change in the author's applied view.
-    Rejected(DropReason),
+    /// The latest applied prefix no longer permits the operation; its journal
+    /// undoes owned artifacts before completion (§18).
+    Rejected(OperationRejection),
+    /// The sequence has no next slot, or this device no next publication id.
+    SequenceExhausted,
+    PublicationNumberExhausted,
     /// An object required by the change failed its checks.
     Damaged(DamagedObject),
     /// This device or its member was removed; syncing stops for good (§10).
@@ -2189,12 +2174,9 @@ pub enum SyncError {
     UpdateRequired(RequiredUpdate),
     /// A create-store entry names another store (§4).
     WrongStore { expected: StoreId, actual: StoreId },
-    /// The requested journal row is not failed work eligible for this call:
-    /// retry accepts provider work; discard accepts only app-owned work.
+    /// The requested journal row has no retryable work for this call.
     NotPending(OperationId),
-    /// This device publishes no store-log entry or snapshot until this
-    /// retained reload finishes (§18).
-    ReloadPending(OperationId),
+
     /// Decoding persisted operation data failed, retaining its cause.
     OperationData(serde_json::Error),
     /// Deleting an S3 key with admin access did not establish its absence;
@@ -2204,11 +2186,11 @@ pub enum SyncError {
 
 /// What showed that another copy uses this device's id (§10).
 pub enum DeviceIdEvidence {
-    /// Storage holds an own object numbered beyond this copy's reservations.
+    /// Authenticated history has an own publication beyond local reservations.
     StorageAhead,
-    /// One of this device's own immutable paths holds different bytes.
-    DifferentBytes,
-    /// The store log keeps a replacement of this device's id.
+    /// The same authenticated publication identity has different content.
+    PublicationConflict,
+    /// An earlier slot replaced this device's id.
     Replaced,
 }
 
@@ -2253,14 +2235,12 @@ pub struct PendingRecord {
 /// Stable identities; a record is keyed by subject and reporting device.
 pub enum PendingSubject {
     Write(WriteId),
-    Entry(EntryId),
+    Slot(Slot),
     KeyCopy { audience: Audience, key: KeyId, member: MemberId, sealing: SealingKey },
-    /// A key-copy object whose clear prefix does not decode: it names no
-    /// audience, key or recipient, so its path identifies it (§19.1).
-    KeyCopyPath { path: ObjectPath },
+
     Snapshot(SnapshotId),
-    /// Retention waits for this active reader's position, or storage age (§15).
-    Positions(DeviceId),
+    /// A replaceable device report, never a retention acknowledgement.
+    Status(DeviceId),
     File { device: DeviceId, file: FileId },
     Operation { id: OperationId, kind: OperationKind },
     Retention { path: ObjectPath },
@@ -2272,18 +2252,17 @@ pub enum PendingSubject {
 
 /// A condition coven has not yet observed (§19.1).
 pub enum Prerequisite {
-    /// The next completed store-log catch-up (§10, §15).
-    StoreLogCatchUp,
-    /// The next completed write-log catch-up, step 6 of a pass (§15).
-    WriteLogCatchUp,
+    /// A completed read and apply through the current sequence end (§10).
+    SequenceCatchUp,
+
     Object(ObjectPath),
     DeviceRegistration(DeviceId),
     SchemaPublication { audience: Audience, version: u32 },
     Reload(Audience),
-    Positions(DeviceId),
-    /// Physical cleanup cannot release this entry's retained inputs (§9), or
-    /// a snapshot waits to be prepared until it is final (§15).
-    EntryFinality(EntryId),
+    Status(DeviceId),
+    /// The announced checkpoint needed for a covered prefix (§15).
+    Checkpoint(Slot),
+
 }
 
 /// One vocabulary for failed object checks in calls and pending records.
@@ -2341,9 +2320,10 @@ pub enum PendingReason {
     NoStorage,
     Storage { provider: CloudProvider, failure: StorageFailure },
     Refused(Refusal),
-    /// Positions can be replaced, unlike an immutable refused object.
-    InvalidPositions(Refusal),
-    Dropped(DropReason),
+    /// Status can be replaced, unlike an immutable refused slot.
+    InvalidStatus(Refusal),
+    /// Consumed without effects; a permanent lower-slot cut-off (§10).
+    WritesRefused { cutoff: Slot, cause: WriteCutoff },
     ProviderPending { action: ProviderAccessAction, account: String },
     PendingOwner { account: String },
     AccountInUse { account: String },
@@ -2369,51 +2349,40 @@ pub enum Retry {
 }
 
 impl PendingRecord {
-    /// Automatic: missing objects, prerequisites, keys, pending provider/owner
-    /// work, shared-account waits, invalid replaceable positions, and storage
-    /// Network/Conflict/RateLimited/NotFound/SessionExpired.
-    /// AfterUpdate: Refused and UpdateRequired.
-    /// Never: a dropped entry or write, or this device's removal.
-    /// AppAction: every other reason, including disagreements
-    /// and an app operation replay dropped.
-    /// Coven's own operation: Automatic on a drop, a database, disk or custody
-    /// failure, or storage QuotaExceeded/File; AppAction, retried on new
-    /// credentials or connection, if a person clears it; else Never.
-    /// Files use those same failure classes. An uploader's missing, changed
-    /// or mismatching source retries automatically; peer reports stay visible.
-    /// A replay change can clear a replay-dependent reason without retrying
-    /// its subject. It cannot undo an entry's LandedTooLate, but can undo a
-    /// write's retirement-dependent LandedTooLate (§10).
+    /// Automatic: retryable reads, keys, provider work and unfinished
+    /// operation/undo work, subject to shared backoff.
+    /// AfterUpdate: refused immutable objects and unsupported formats/schema.
+    /// Never: WritesRefused or this device's removal/replacement.
+    /// AppAction: failures a person clears, such as required credentials;
+    /// retried on new credentials or connection.
+    /// Files use the same classes; an uploader's missing, changed or
+    /// mismatching source retries automatically.
+    /// A later slot cannot reverse a cut-off or bypass a blocked slot.
     pub fn retry(&self) -> Retry;
 }
 
-/// The absent target named by a rejected store-log change (§9).
+/// The absent target named by a rejected administrative change (§9).
 pub enum EntryTarget {
     Member(MemberId),
     Device(DeviceId),
     Circle(CircleId),
 }
 
-/// Why an entry or a write was dropped (§9, §10).
-pub enum DropReason {
-    /// Storage published this entry more than 30 days after an entry it had
-    /// not read (§9). Shown as “landed too late”, including on its author's
-    /// device. Permanent across replay and updates; the entry's position passes.
-    /// For a write, publication exceeded a kept device retirement's or member-key
-    /// replacement's 30-day deadline (§10). Its position passes, but dropping
-    /// that deciding entry can restore it.
-    LandedTooLate,
-    /// A conflicting concurrent entry beat it.
-    BeatenBy(EntryId),
-    /// At its place in the replay, the member, device or circle it changes
-    /// no longer existed.
+/// Why validation refused an administrative operation (§9, §18).
+pub enum OperationRejection {
     TargetGone(EntryTarget),
-    /// Applying it would have left the store without an admin.
     NoAdminLeft,
-    /// The proposed member pair reuses an established signing or sealing key.
     KeysAlreadyUsed,
-    /// Its author's role didn't allow it, in the member list they had read.
+    /// The expected member binding changed while this call was preparing.
+    MemberKeysChanged(MemberId),
     NotAllowed,
+}
+
+/// The lower-slot event that permanently excluded a writes slot (§10).
+pub enum WriteCutoff {
+    DeviceRemoved,
+    MemberRemoved,
+    MemberKeysReplaced,
 }
 
 impl CovenHandle {
@@ -2530,8 +2499,10 @@ pub enum SyncStatus {
     Offline { error: Arc<StorageError> },
     /// The initial sync is queued or a sync is running.
     Syncing,
-    /// The last pass finished; individual subjects may still be pending.
+    /// The pass reached its observed end; other subjects may still be pending.
     Synced { finished_at: SystemTime },
+    /// This slot prevents later application and every send (§6).
+    Blocked { slot: Slot, reason: PendingReason },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed { error: SyncFailure },
 }
@@ -2585,39 +2556,27 @@ loop {
 
 ### E6 Operations and recovery
 
-- Administrative calls first catch up on reachable storage (§9). No storage
-  returns `SyncError::NoStorage`; a failed read returns its typed error.
-  Neither starts an operation or reserves an entry. Already-started work
-  retains its progress across network failures.
-- A tried entry publishes its fixed bytes only while §10's current-credential
-  gate permits it. If it lands too late, its
-  `Entry` subject reports `Dropped(LandedTooLate)`; publication settles but
-  the action has not succeeded. When replay drops an attempt's entry and
-  work remains, starting over catches up and validates again, then resumes
-  at the first step with a new entry number and, for a rotation, a fresh key.
-  The old copies and entry stay in storage, and a late entry's pending
-  record remains (§18, §19.1;
-  [checked history: `restart_changes_key`](proofs/queue.md#checked-histories-and-limits)).
-  Member-key replacement instead reports its rejection without creating a
-  new entry to override the winner; replacing again needs an explicit call
-  or approved invite. Retrying publication keeps the same pair and bytes.
-- Every unfinished operation is a row in `_coven_operations`
-  ([§18](coven.md#18-operations)).
-- A failed step returns its typed error to a waiting caller and records its
-  first unmet condition in `pending()` (E5). Pending work appears there too.
-- Automatic snapshot writing, retention and reloads use the same list.
-  Retention is derived each pass and has a path subject, with no operation
-  row. App-work calls cannot discard coven's own operations.
-- App work includes keeping a reset or schema change and an app-requested
-  reload. Provider access work is recorded by replay; the app may retry a
-  failed request but cannot discard the current access intention.
-  Discarding an invite takes back what it granted, as cancelling does, and
-  returns once that is done; an invite with a reserved approval entry
-  publishes it instead (§13).
-  Single-entry calls return their errors directly; a reserved entry still
-  has its own pending subject.
-- A record stores a typed reason, not an error string. The immediate call
-  retains the native cause; reopening retains the reason and subject.
+- Every administrative call uses one journaled operation path (§18), including
+  role changes, renames, removal, invites, rotation, reset and schema raises.
+  Catch up, validate, prepare the entry's prerequisites, then claim.
+- Contention reads and applies the intervening slots, then validates again.
+  An uncertain claim settles its exact destination before another attempt.
+  Success is final when the entry's slot commits; no later replay drops it.
+- If validation fails, undo every artifact still owned by the operation and
+  return `Rejected`. A failed undo retains the journal and original reason,
+  reports both causes and retries. It cannot leave an unrecorded key or
+  unannounced snapshot. Claimed prerequisite copies remain signed history.
+- `_coven_operations` records unfinished work and undo. Transient failures
+  retain typed causes and retry; the app does not decide whether to keep a
+  claimed entry or restart an invalidated one. Already-satisfied targets
+  complete without redundant entries. Member-key replacement additionally
+  requires its original expected binding still to be current.
+- Snapshot publication, reload, floor advancement and prefix deletion use
+  journals too. Provider sharing follows current members and open invites;
+  unconfirmed S3 deletions remain explicit obligations. Ordinary file
+  retention derives candidates from recorded references.
+- Immediate errors keep native causes; persisted pending records keep the
+  reason and subject. Neither failure nor reset erases an undo obligation.
 
 ```rust
 /// The local integer primary key of one unfinished operation (§18).
@@ -2625,13 +2584,23 @@ pub struct OperationId(pub i64);
 
 /// The app purpose of an unfinished operation (§18.1, §19.3).
 pub enum OperationKind {
+    CreateStore,
+    AddDevice,
+    SetRole,
+    SetAccess,
+    RemoveMember,
+    RemoveDevice,
+    RenameCircle,
+    RemoveCircleMember,
+    /// Advertise a checkpoint, delete its covered prefix, advance the floor.
+    RetainSequence,
     /// Make a circle and publish its first sealed key.
     CreateCircle,
     /// Seal the circle's history and add a member.
     AddCircleMember,
     /// Delete a circle's rows and publish its deletion.
     DeleteCircle,
-    /// An owner's device grants or takes back one account's access per replay.
+    /// An owner’s device grants or takes back one account’s required access.
     RevokeAccess,
     /// Migrate the schema, snapshot it and raise the version.
     SchemaChange,
@@ -2660,28 +2629,18 @@ pub enum OperationKind {
 pub type OperationError = SyncError;
 
 impl CovenHandle {
-    /// Runs failed app-owned or provider access work again from the step
-    /// after its last completed one. A cause that still stands fails again.
+    /// Makes an operation’s retry or undo due now, from its recorded progress.
+    /// It cannot resurrect an invalidated action or bypass provider cooldown.
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
-
-    /// Abandons a failed operation and deletes its row. Completed steps stay
-    /// completed; reserved objects keep their bytes and §10's sending gates.
-    /// Returns Pending with the operation's unmet condition while a reserved
-    /// replacement needs settlement or its current binding needs custody. Before
-    /// reservation, releasing a self-replacement pause requires held current keys.
-    /// Other devices may already see stored copies or a complete snapshot;
-    /// §18's publication order and reader checks still apply (queue proof:
-    /// copies_visible_before_finish, snapshot_visible_before_finish).
-    pub async fn discard_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting
     /// writes, as an operation (§19.2).
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError>;
 
     /// Resets the store from this device's copy, as an admin (§19.3): writes
-    /// a snapshot, then records the reset in the store log. Every device,
+    /// a snapshot, then announces it and claims the reset slot. Every device,
     /// including this one, reloads from it. Pre-reset writes outside it are
-    /// ignored without loss records; queued writes still upload to fill the log.
+    /// ignored without loss records; queued writes retain their original pasts when claimed.
     pub async fn reset_store(&self) -> Result<(), SyncError>;
 }
 ```
@@ -2964,7 +2923,7 @@ match stream.read_at(resume_at, 256 * 1024).await {
 
 - Only admins add and remove members, and change roles; each member removes
   their own devices, and admins any device ([§9](coven.md#9-members-and-roles)).
-- Administrative calls require an online store-log catch-up (§9, E6).
+- Administrative calls require an online sequence catch-up (§9, E6).
 - A member records their own new storage access; an admin may also record an
   S3 replacement for another member. Authority uses the author's role in the
   entry's recorded view, independently of who holds provider-admin access.
@@ -2976,38 +2935,37 @@ match stream.read_at(resume_at, 256 * 1024).await {
   operation-scoped admin-access sources.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
-  Replacement invites provide the approval/bootstrap flow (E10), subject to
-  their provider-access requirements. Another
-  admin's concurrent replacement wins over self-replacement, even when self
-  is an admin. Member removal wins. A rejected replacement returns its replay
-  reason, never restarts to overrule the winner. Keys must both be fresh.
+  Replacement invites provide approval/bootstrap (E10), subject to provider
+  access. The expected old binding must still be current at the claim; an
+  earlier replacement or removal fails the call and undoes its artifacts.
+  Replacing again needs a new call. Both keys must be fresh.
+
 - Replacement preserves the id, role, circle memberships and device ids.
   Historical public bindings remain available for signature checks. Old
   sealing credentials expose their audience keys (§11); storage access is
   a separate operation. Neither a restore code nor a key copy proves approval.
-- Removing a member publishes one entry. It returns `()` once replay keeps
-  it; applying entries is the single path that records provider access work.
+- Removing a member publishes one entry. It returns `()` once its slot commits; applying entries is the single path that records provider access work.
 - The pending list describes unresolved access work. Each owner's device
   serializes grant and revoke requests, and performs the opposite request
-  when replay reverses the intention (§4, §13).
+  when a later slot changes the required access (§4, §13).
   Pending and failed work appears in `pending()`, with the operation id for
   retry. Derived provider work cannot be discarded while its current
   intention remains unmet: disappearance from this list must not hide a
-  retained grant. A replay change can replace or remove an account-sharing
+  retained grant. A later slot can replace or remove an account-sharing
   intention; S3 deletion records follow the rule below.
 - Each distinct superseded or removed-member S3 key has a `DeleteAccessKey`
-  record, including keys recorded by an admin and keys in dropped entries.
+  record, including keys recorded by an admin and uncommitted keys owed by a journal.
   The old key becomes pending when its replacement is recorded. A record
   clears only after coven deletes that exact key with admin access and a
   subsequent provider read confirms that id absent, or after an explicit
   `confirm_access_key_deleted`. Missing, failed or wrong-key reads retain it;
-  a delete reply, elapsed time or replay reversal never suffices. Both paths
+  a delete reply or elapsed time never suffices. Both paths
   retain confirmation by key id, so later entries and retries cannot restore
   the notice. Failed commits preserve pending work and report the failure.
 - A key coven made that no entry records, such as one whose minting database
   was lost before recording it, gets its own `DeleteAccessKey` record from
   an admin's sync while admin access is held, once its minting device is
-  retired and drained (§13).
+  retired (§13).
 - Removing an account can leave access through a parent, a grant reaching other
   accounts, an unidentified recipient, or the owner. `PendingReason::AccessRemains`
   retains these grants and their reasons for the app to present to the owner;
@@ -3015,7 +2973,7 @@ match stream.read_at(resume_at, 256 * 1024).await {
   whose grants remain is its own `RevokeAccess` record, so a member whose
   recorded accounts kept grants lists every such account.
   The revocation remains in `pending()` until a retry confirms the owner
-  removed those grants, or replay no longer requires that revocation.
+  removed those grants, or later slots no longer require that revocation.
   This also preserves the result when no app call is waiting, including a
   revocation initiated by applying another device's removal.
 
@@ -3028,22 +2986,22 @@ impl CovenHandle {
     pub fn subscribe_members(&self) -> LiveQuery<Vec<MemberInfo>>;
 
     /// Replaces this member's pair and returns its restore code (§9, §11).
-    /// Refuses app writes with MemberKeysChanging while confirming queued writes and entries, then
-    /// keeps the candidate before publishing its copies and binding.
-    /// Success follows replay acceptance, custody and synced-code refresh.
-    /// Failure retains both pairs and progress; other devices holding the
-    /// old pair report MemberKeysReplaced.
+    /// Refuses app writes with MemberKeysChanging while confirming queued
+    /// writes and entries, then keeps the candidate before claiming its copies
+    /// and binding. Success follows the claimed binding, custody and synced-code
+    /// refresh. Failure retains both pairs and progress; other devices holding
+    /// the old pair report MemberKeysReplaced.
     pub async fn replace_member_keys(&self) -> Result<SecretText, SyncError>;
 
     /// Publishes a prepared public pair for an active member under §9's
     /// authority rules. The target retains its private pair before this call;
     /// this call receives no private keys and changes no local private custody.
     /// Confirms copies of every store key and the held circle keys before
-    /// publishing the replacement; returns once replay keeps it.
+    /// publishing the replacement; returns once its slot commits.
     /// Any admin may replace another member, independently of provider ownership.
     /// A self target is still self-replacement, even for an admin; callers
     /// replacing this installation's own pair use replace_member_keys instead.
-    /// Rejection is reported without restarting against the winner. Provider
+    /// Invalidation undoes this call’s artifacts. Provider
     /// access and installing the prepared private pair are separate work.
     pub async fn replace_member_keys_for(
         &self,
@@ -3059,7 +3017,7 @@ impl CovenHandle {
     /// If publication fails, the call returns the failure and retains the new credentials:
     /// the remote entry may already exist. Retry with the same key to finish publication.
     /// Member removal lists every recorded key until confirmed deleted,
-    /// including this key if replay drops its set-access entry (§13).
+    /// An invalidated operation settles any uncertain claim before undo (§18).
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -3109,14 +3067,14 @@ impl CovenHandle {
     /// devices (D9), records it for them, then deletes the old key and reads
     /// it gone. Their own key, or another member's as an admin; any other
     /// caller is refused before admin access is used. Returns the new key for
-    /// the person to keep, and the old key's outcome. A dropped entry returns
-    /// its refusal, with the made key pending deletion beside the old one.
+    /// the person to keep, and the old key’s outcome. Validation failure
+    /// deletes the newly made key and delivery, retaining the old binding.
     /// After a restart the operation waits with AdminAccessRequired.
-    /// Discarding it before its entry leaves the key to reclaim (§13).
+    /// Failed undo retains its journal and retries (§18).
     pub async fn replace_member_access_key(&self, member: &MemberId, admin: Arc<dyn AccessKeyAdmin>) -> Result<AccessKeyReplacement, SyncError>;
 
     /// Publishes the removal of this member and all their devices (§13).
-    /// Returns once the entry is kept. Provider work appears only in pending(),
+    /// Returns once the slot commits. Provider work appears only in pending(),
     /// including owner waits, retained grants and S3 keys until confirmed deleted.
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
 
@@ -3253,8 +3211,8 @@ pub struct ListedKey { pub access_key_id: String, pub principal: S3Principal, pu
 pub struct S3MemberKey { pub credentials: S3Credentials, pub principal: S3Principal }
 
 // Each DeleteAccessKey record belongs to its own DeleteAccessKey operation,
-// whose id the app passes to confirm or delete with admin access. Retry and
-// discard refuse it: only the two clearing events end it.
+// whose id the app passes to confirm or delete with admin access;
+// ordinary retry cannot clear it: only the two confirmation events end it.
 
 // Pending notices are DeleteAccessKey records in _coven_pending. Only verified
 // admin deletion or explicit confirm_access_key_deleted clears one. Confirmation
@@ -3297,8 +3255,7 @@ pub struct DeviceInfo {
 pub enum DeviceState {
     Active,
     Removed,
-    /// A kept add-device entry replaces this id. Its older objects are
-    /// judged by their recorded reads, with no upper log number (§10).
+    /// An earlier add-device slot replaced this id. Later writes are refused (§10).
     Replaced,
 }
 
@@ -3347,11 +3304,13 @@ pub enum ProviderSignOut {
 - A replacement invite fixes an existing active id before the requester
   generates keys. Approval binds the exact signed request's new pair after
   publishing copies of every store key and the held circle keys. The
-  join waits for its approving writer's kept matching id-and-pair binding
-  before registration; an equal-payload winner does not rescue a rejected approval.
-  A losing replacement fails with its replay reason even if copies exist.
+  join requires its approving device’s claimed matching id-and-pair binding
+  before registration. If the expected binding changed first, approval undoes
+  its owned artifacts and fails; available key bytes alone are not admission.
   Restore checks the supplied pair against the current binding and reports
-  `SyncError::MemberKeysReplaced` for an old code; it never rebinds old keys.
+  `SyncError::MemberKeysReplaced` when authenticated history shows an old
+  code. If the current checkpoint cannot be opened, report the unavailable
+  key instead of inferring membership. Restore never rebinds old keys.
 - Each call takes the app's layout-scoped `CovenBuilder`, plus its code,
   device name, status callback and cancellation receiver, and
   returns the open `CovenHandle`. Restore also accepts the separately
@@ -3413,7 +3372,7 @@ pub enum CodeKind {
     /// Holds only the person's member id and private keys, store id/name and location.
     Restore,
     /// Holds an invite id, chosen member id, secret, initial key id, inviting writer and its
-    /// key-copy number at invite time; approval is required (§12.2).
+    /// applied slot at invite time; approval is required (§12.2).
     Invite,
 }
 
@@ -3504,8 +3463,9 @@ impl OAuthRedirectError {
 
 impl CovenHandle {
     /// Shows this member's code again: stable id, current private pair, store
-    /// id/name and location; no storage credentials. Missing current keys
-    /// report MemberKeysReplaced; a retired pair is never exported.
+    /// id/name and location; no storage credentials. The pair is the one current
+    /// in the applied prefix; missing current keys report MemberKeysReplaced,
+    /// and a retired pair is never exported.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
 
     /// Fixes a fresh member id or an existing active replacement target, as
@@ -3876,13 +3836,13 @@ pub trait MemberKeyCustody: Send + Sync {
 - A circle's members add and remove its members ([§14.3](coven.md#143-circles)).
   Circle changes first catch up on reachable storage (§9, E6).
 - Circle-changing calls return `SyncError` ([E5](#e5-storage-and-sync)), as member calls
-  do ([E9](#e9-members-and-devices)). Pre-validation uses replay's rules:
+  do ([E9](#e9-members-and-devices)). Validation uses the latest applied prefix:
   `Rejected(NotAllowed)` for authority, `Rejected(NoAdminLeft)` for the
   last-admin rule, and `Rejected(TargetGone(target))` for an absent member,
   device or circle. The target retains its typed id. `StoreOwner` remains
   a separate provider constraint.
 - Removing someone from a circle publishes one entry and returns once it is
-  kept. Rotation follows in the sync pass; it is not part of that call (§11).
+  claimed. Rotation follows in the sync pass; it is not part of that call (§11).
 
 ```rust
 /// Circle calls borrowing the open store that owns their work (§14, E12).
@@ -3899,13 +3859,13 @@ impl Circles<'_> {
     /// Renames a circle. Its key, members and rows don't change.
     pub async fn rename(&self, circle: CircleId, name: &str) -> Result<(), SyncError>;
 
-    /// Deletes a circle with one store-log entry. The deletion rule hides
-    /// its rows while the entry is kept; there is no row-delete write (§14.7).
+    /// Deletes a circle with one admin slot. The deletion rule hides
+    /// its rows permanently; there is no row-delete write (§14.7).
     pub async fn delete(&self, circle: CircleId) -> Result<(), SyncError>;
 
     /// Adds a store member to the circle. They get its current and earlier
     /// keys, so they read its history. Rejoining devices reload skipped parts,
-    /// including when replay returns a deleted circle (§14.4).
+    /// using the checkpoint and retained suffix (§14.4).
     pub async fn add_member(&self, circle: CircleId, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes someone with one entry; remaining members rotate exposed keys (§14.6).
@@ -3948,12 +3908,12 @@ pub struct CircleMemberInfo {
   transaction, so a failure leaves the schema as it was.
 - A migration has two parts (§17.1): the first changes the database; the
   optional second converts eligible row changes of received late ordinary
-  writes using the winning raise's conversion, in version and causal order
+  writes using the applied raise's conversion, in version and causal order
   ([`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
   - Local migration preserves every queued original record, including
     untried writes; tried uploads also retain their format and sealing keys
     ([`conversions_preserve_uploads`, `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Key-replacement window drops use the same data rule (§10).
+  - Member-key slot cut-offs use the same data rule (§10).
   - Before invoking a callback, coven determines candidate schema admission
     and resolves each change's original generation source and replaced
     setters under §8. A dependent change never reaches the callback: retain
@@ -3963,14 +3923,14 @@ pub struct CircleMemberInfo {
     ([`dependent_change_not_converted`, `converted_change_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
   - One received interpretation, including one audience part, can contain
     converted changes and frozen originals. Conversion is independent of
-    attempt status and preserves device, number, timestamp, causal positions,
+    attempt status and preserves device, number, timestamp, authored read-through slot,
     row identity, generation, operation and original source identities.
     Renamed tables and columns retain their sources under the new names;
     frozen changes keep their old names and original cause
     ([`conversion_preserves_identity`, `convertChange_metadata`](proofs/queue/CovenQueue/Conversion.lean);
     reference and rename validation remain implementation obligations).
   - With no converter, keep each original change as a schema loss naming
-    the breaking version and pass the position. No callback changes any
+    the breaking version and consume the write. No callback changes any
     upload record. Already frozen values and causes survive later raises
     ([`missing_converter_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
   - The author reloading after a competing raise uses the same per-change
@@ -3983,7 +3943,7 @@ pub struct CircleMemberInfo {
     later changes keep that same distinction (§17.1;
     [`mixed_write`, `partial_write_chain`](proofs/queue/CovenQueue/DataExamples.lean)).
   - A failed callback aborts the receive or reload transaction, preserving
-    the preceding committed values, losses, source verdicts and positions.
+    the preceding committed values, losses, source verdicts and applied slot.
     The upload queue remains unchanged on success and failure alike.
 - Coven decides whether a migration is an addition or a breaking change by
   comparing the schema before and after it. Statements that change rows of
