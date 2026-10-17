@@ -69,7 +69,7 @@ impl crate::SequenceSync {
 /// The pending `DeleteAccessKey` work in a discarded operation journal (§10).
 /// A reset carries these into its replacement database; a key the old copy
 /// made but never recorded is reclaimed after its device's retirement (§13).
-pub fn owed_access_key_deletions(
+pub(crate) fn owed_access_key_deletions(
     records: &[coven_database::OperationRecord],
 ) -> Result<Vec<coven_database::AccessKeyDeletion>, crate::SyncError> {
     let mut deletions = Vec::new();

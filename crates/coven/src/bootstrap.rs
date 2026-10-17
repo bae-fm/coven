@@ -462,11 +462,7 @@ async fn prepare_and_load(
         }
         // The notice commits before any handle is published (E5).
         if let Some(reset) = reset {
-            reset::carry_discarded_keys(&database, pending, &reset).await?;
-            database
-                .record_device_reset(reset)
-                .await
-                .map_err(CovenError::from)?;
+            reset::carry_discarded_provider_work(&sync, pending, reset).await?;
         }
         Ok::<_, BootstrapError>(true)
     };

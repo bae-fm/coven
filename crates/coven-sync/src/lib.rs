@@ -55,7 +55,6 @@ pub use pending::{
 pub use refusal::Refusal;
 pub use restore_codes::{read_connection, RestoreCodes};
 pub use sequence_state::{SequenceStatus, SyncState, SyncStatus};
-pub use sequence_sync::access_keys::owed_access_key_deletions;
 pub use sequence_sync::access_keys::DeleteAccessKeyError;
 pub use sequence_sync::sequence_join::JoinOutcome;
 pub use sequence_sync::SequenceSync;

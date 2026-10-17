@@ -8,7 +8,7 @@ use super::*;
 /// connection and both key custodies are checked before anything moves; a
 /// failure leaves the files in place with its typed error. The new device
 /// names the old id as the one it replaces (§12.1). Only the old database's
-/// operation journal is read, for the S3 key deletions it owed.
+/// operation journal is read, for owed provider cleanup and open invites.
 pub(crate) async fn reset_device(
     mut builder: CovenBuilder,
     store: StoreId,
@@ -125,28 +125,21 @@ async fn record(
     Ok(())
 }
 
-/// Keep the S3 key deletions the discarded database owed pending in its
-/// replacement (§10). A database too damaged to read carries nothing. Any
-/// other failure fails the reset, which retries.
-pub(super) async fn carry_discarded_keys(
-    database: &coven_database::Database,
+/// Carry provider cleanup from the discarded journal and commit the reset
+/// notice together (§10). A database too damaged to read carries nothing;
+/// any other failure fails the reset, which retries.
+pub(super) async fn carry_discarded_provider_work(
+    sync: &SequenceSync,
     pending: &BootstrapStore,
-    reset: &DeviceReset,
+    reset: DeviceReset,
 ) -> Result<(), BootstrapError> {
-    let path = pending.discarded_database_path(reset);
+    let path = pending.discarded_database_path(&reset);
     let records = match coven_database::discarded_operations(path).await {
         Ok(records) => records,
-        Err(coven_database::DbError::DamagedDatabase) => return Ok(()),
+        Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
         Err(error) => return Err(SyncError::from(error).into()),
     };
-    // A journal row that does not decode is damage too.
-    let Ok(deletions) = coven_sync::owed_access_key_deletions(&records) else {
-        return Ok(());
-    };
-    database
-        .record_access_key_deletions::<coven_sync::PendingRecord>(None, deletions)
-        .await
-        .map_err(|error| SyncError::from(error).into())
+    Ok(sync.record_device_reset(reset, &records).await?)
 }
 
 /// A store that never set up storage has no stored history and no published
@@ -170,7 +163,11 @@ async fn reset_unconnected(
     let database = builder.database(directory.clone())?.open().await?;
     let prepared = async {
         database
-            .record_device_reset(reset)
+            .record_device_reset::<coven_sync::PendingRecord>(
+                reset,
+                Vec::new(),
+                coven_database::ProviderChanges::default(),
+            )
             .await
             .map_err(CovenError::from)?;
         let waits = Arc::new(

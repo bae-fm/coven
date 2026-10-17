@@ -2476,7 +2476,8 @@ No removal of Ana enters the sequence.
   Separate new devices may replace the same old id; each keeps its fresh identity.
 - A failed reset resumes with its recorded new id.
   Ordinary opening refuses the installation until reset finishes.
-- Carry readable `DeleteAccessKey` obligations into the new database before opening it.
+- Carry readable `DeleteAccessKey` obligations, owed account revocations and open
+  invites as owed cleanup into the new database with its reset notice before opening it.
   A database too damaged to read supplies no records; orphan keys follow §13.
 - Commit the `DeviceReset` notice with old and new ids before returning the handle.
   The notice survives reopening and tells the app that unsent edits were discarded.
@@ -2732,6 +2733,9 @@ No removal of Ana enters the sequence.
   recorded access entry; a key replacement never implies provider cut-off.
 - Once the request is approved or declined, or the invite expires, Ana's
   device deletes the request object.
+- Resetting the inviting device carries its unfinished invites into the new
+  database for the same grant revocation and request deletion as expiry,
+  preserving active members' retained access (§13).
 - Declining the request, or letting the invite expire after a day, takes
   back the storage access it granted; on S3, the key becomes pending deletion
   under §13, through coven with admin access or through the provider's console.
@@ -3964,7 +3968,7 @@ It cannot read Ben's removal at 81 or send queued writes until 80 applies.
 - A damaged database fails to open with `DbError::DamagedDatabase`.
   The app calls `CovenBuilder::reset_device` (E1).
   - Use §10's reset to a new device, from saved settings
-    and custody; only §10's owed deletions carry over.
+    and custody; only §10's owed provider cleanup carries over.
   - Check storage and unlock the member and store keys before moving the
     damaged files. A missing setting, unavailable key or failed connection
     leaves them in place and returns its typed error.

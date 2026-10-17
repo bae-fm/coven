@@ -278,7 +278,7 @@ impl SequenceSync {
             state: InviteState::Grant,
         };
         let changes = match work.account() {
-            Some(account) => vec![self.account_change(account, true)?],
+            Some(account) => vec![self.account_change(account, true, true)?],
             None => Vec::new(),
         };
         let operation = self
@@ -716,14 +716,13 @@ impl SequenceSync {
                         };
                         admin.roll_back(scope).await?;
                     }
-                    // A replacement invite takes back only its own new grant,
-                    // never access its active member already holds (§12.2).
+                    // Cleanup takes back only the invite's new grant. An
+                    // approval may have landed before its device reset (§12.2).
                     let deletions = match work.access.member_access() {
                         Ok(access @ MemberAccess::S3AccessKey { .. }) => {
-                            let retained = matches!(work.binding, InviteBinding::Replace { .. })
-                                && session.history.state.members.get(&work.member).is_some_and(
-                                    |value| !value.removed && value.access.same_credential(&access),
-                                );
+                            let retained = session.history.state.members.values().any(|value| {
+                                !value.removed && value.access.same_credential(&access)
+                            });
                             if retained {
                                 Vec::new()
                             } else {
@@ -764,7 +763,8 @@ impl SequenceSync {
                                         account.to_owned(),
                                     ))
                             });
-                            vec![self.account_change(account, used || others.contains(account))?]
+                            let invited = others.contains(account);
+                            vec![self.account_change(account, used || invited, invited)?]
                         }
                         None => Vec::new(),
                     };
@@ -797,6 +797,7 @@ impl SequenceSync {
         &self,
         account: &str,
         intended: bool,
+        needs_invitation: bool,
     ) -> Result<ProviderAccessChange, SyncError> {
         Ok(ProviderAccessChange {
             operation: NewOperation {
@@ -808,7 +809,7 @@ impl SequenceSync {
             account: account.to_owned(),
             intended,
             initially_granted: false,
-            needs_invitation: intended,
+            needs_invitation,
             owner: true,
         })
     }
@@ -948,3 +949,6 @@ mod tests;
 
 #[path = "sequence_invite_approval.rs"]
 mod approval;
+
+#[path = "sequence_invite_reset.rs"]
+mod reset;

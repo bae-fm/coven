@@ -1,15 +1,30 @@
 //! Device-reset notices and committed member lists (§10, E5).
 
 use super::{Database, DbError};
-use crate::{CovenResult, LiveQuery};
+use crate::{CovenResult, LiveQuery, NewOperation, PendingValue, ProviderChanges};
 use coven_foundation::files::DeviceReset;
 
 impl Database {
-    /// Store the replacement notice before the replacement handle is published.
-    pub async fn record_device_reset(&self, reset: DeviceReset) -> Result<(), DbError> {
+    /// Commit carried provider cleanup with the replacement notice before
+    /// publication. A resumed bootstrap cannot import the same work twice.
+    pub async fn record_device_reset<P: PendingValue>(
+        &self,
+        reset: DeviceReset,
+        operations: Vec<NewOperation>,
+        provider: ProviderChanges,
+    ) -> Result<(), DbError> {
         self.call(move |inner| {
             inner.access.with_writer(|writer| {
-                writer.transaction(|db| crate::device_reset::record(db, &reset))
+                writer.transaction(|db| {
+                    if crate::device_reset::read(db)? == Some(reset) {
+                        return Ok(());
+                    }
+                    for operation in &operations {
+                        crate::operation::insert(db, operation)?;
+                    }
+                    provider.record::<P>(db)?;
+                    crate::device_reset::record(db, &reset)
+                })
             })
         })
         .await
@@ -76,3 +91,7 @@ impl Database {
         self.subscribe(|sql| sql.device_reset())
     }
 }
+
+#[cfg(test)]
+#[path = "database_device_tests.rs"]
+mod tests;

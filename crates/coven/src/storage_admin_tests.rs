@@ -152,7 +152,7 @@ async fn an_admin_replaces_a_members_key_and_their_device_adopts_it() {
 }
 
 /// The owner's desktop with one invite whose key admin access made.
-async fn invited_with_made_key() -> (Network, coven_storage::test_utils::MemoryKeyAdmin) {
+async fn invited_with_made_key() -> (Network, coven_storage::test_utils::MemoryKeyAdmin, Invite) {
     let network = Network::new(1).await;
     let owner = &network.devices[0];
     let admin = owner
@@ -165,7 +165,7 @@ async fn invited_with_made_key() -> (Network, coven_storage::test_utils::MemoryK
         }))
         .await
         .unwrap();
-    owner
+    let invite = owner
         .handle
         .create_invite(
             InviteTarget::NewMember {
@@ -177,21 +177,19 @@ async fn invited_with_made_key() -> (Network, coven_storage::test_utils::MemoryK
         .unwrap();
     let made = owner.storage.key_admin();
     assert_eq!(made.users().len(), 1);
-    (network, made)
+    (network, made, invite)
 }
 
-/// A reset keeps no key its discarded database made (T267): another live
-/// copy may still record it, and §13's reclaim takes it once the old device
-/// is retired. A database too damaged to read carries nothing either, and
-/// the reset still completes.
+/// A database too damaged to read carries no journal; its unrecorded keys
+/// remain subject to reclamation after the old device is retired (§13).
 #[tokio::test]
-async fn a_reset_leaves_an_invites_made_key_live() {
-    for (damaged, recorded) in [(false, true), (true, false), (true, true)] {
-        let (mut network, made) = invited_with_made_key().await;
+async fn a_reset_of_an_unreadable_database_leaves_key_reclamation_to_admins() {
+    for recorded in [false, true] {
+        let (mut network, made, _invite) = invited_with_made_key().await;
         let device = network.devices.remove(0);
         device.handle.close().await.unwrap();
         let directory = device.layout.store_dir(&device.store);
-        if damaged {
+        {
             let database = directory.database_path();
             for suffix in ["-wal", "-shm"] {
                 let path = std::path::PathBuf::from(format!("{}{suffix}", database.display()));
@@ -221,4 +219,124 @@ async fn a_reset_leaves_an_invites_made_key_live() {
         handle.close().await.unwrap();
         network.close().await;
     }
+}
+
+async fn reset_owner(network: &mut Network) {
+    let owner = &network.devices[0];
+    owner.handle.close().await.unwrap();
+    let handle = network
+        .reopen(owner)
+        .reset_device(owner.store, "Reset desktop")
+        .await
+        .unwrap();
+    network.devices[0].handle = handle;
+}
+
+#[tokio::test]
+async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
+    let mut network = Network::with_schema(CloudProvider::CloudKit, vec![], vec![]).await;
+    let owner = &network.devices[0];
+    let invite = owner
+        .handle
+        .create_invite(
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+            },
+            InviteAccess::ProviderAccount {
+                email: "carol@example.test".into(),
+            },
+        )
+        .await
+        .unwrap();
+    let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    let coven_storage::InviteStorage::Account(invitation) =
+        coven_storage::InviteStorage::decode(code.storage.as_bytes()).unwrap()
+    else {
+        panic!("account invite")
+    };
+    let carol = coven_storage::test_utils::MemoryStorage::for_recipient(
+        &owner.storage,
+        "carol@example.test",
+    )
+    .unwrap();
+    carol.join(owner.store, &invitation).await.unwrap();
+    let request = ObjectPath::join_request(owner.store, invite.id);
+    owner.handle.stop_sync();
+    owner
+        .handle
+        .subscribe_sync_status()
+        .wait_for(|state| matches!(state, SyncStatus::Stopped))
+        .await
+        .unwrap();
+    carol.create(&request, b"unapproved request").await.unwrap();
+    reset_owner(&mut network).await;
+    network.devices[0].handle.start_sync().await.unwrap();
+    network.sync(0).await;
+    let owner = &network.devices[0];
+    assert!(owner.storage.status(&request).await.unwrap().is_none());
+    assert!(matches!(carol.read(&request).await,
+        Err(error) if error.failure() == coven_storage::StorageFailure::PermissionDenied));
+    assert!(owner.handle.pending().await.unwrap().is_empty());
+    network.close().await;
+}
+
+#[tokio::test]
+async fn reset_carries_an_open_invites_minted_key_until_confirmed_deletion() {
+    let (mut network, made, invite) = invited_with_made_key().await;
+    let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    let coven_storage::InviteStorage::S3 { credentials, .. } =
+        coven_storage::InviteStorage::decode(code.storage.as_bytes()).unwrap()
+    else {
+        panic!("S3 invite")
+    };
+    let request = ObjectPath::join_request(network.devices[0].store, invite.id);
+    network.devices[0].handle.stop_sync();
+    network.devices[0]
+        .handle
+        .subscribe_sync_status()
+        .wait_for(|state| matches!(state, SyncStatus::Stopped))
+        .await
+        .unwrap();
+    network.devices[0]
+        .storage
+        .create(&request, b"unapproved request")
+        .await
+        .unwrap();
+    reset_owner(&mut network).await;
+    network.devices[0].handle.start_sync().await.unwrap();
+    network.sync(0).await;
+    let owner = &network.devices[0];
+    let keys = pending_keys(&owner.handle.pending().await.unwrap());
+    assert_eq!(keys.len(), 1);
+    let (operation, key) = &keys[0];
+    assert_eq!(key.access_key_id, credentials.access_key_id);
+    assert!(owner.storage.status(&request).await.unwrap().is_none());
+    assert!(matches!(key.principal, S3Principal::IamUser { .. }));
+    let admin = owner
+        .handle
+        .admin_access(AdminAccessSource::Pasted(AdminCredential::AccessKey {
+            access_key_id: "admin".into(),
+            secret_access_key: SecretText::new("admin-secret".into()),
+            session_token: None,
+            iam_endpoint: None,
+        }))
+        .await
+        .unwrap();
+    made.fail_next_delete();
+    assert!(matches!(
+        owner
+            .handle
+            .delete_access_key(*operation, admin.clone())
+            .await,
+        Err(SyncError::AccessKeyNotDeleted(_))
+    ));
+    assert_eq!(pending_keys(&owner.handle.pending().await.unwrap()), keys);
+    owner
+        .handle
+        .delete_access_key(*operation, admin)
+        .await
+        .unwrap();
+    assert!(made.users().is_empty());
+    assert!(pending_keys(&owner.handle.pending().await.unwrap()).is_empty());
+    network.close().await;
 }
