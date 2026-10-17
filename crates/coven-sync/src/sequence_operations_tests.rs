@@ -5,6 +5,77 @@ use coven_foundation::id_source::{IdSource, KeyId};
 use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage};
 
 #[tokio::test]
+async fn the_provider_owner_cannot_be_removed_or_claim_a_removal() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    let owner = coven_format::MemberAccess::ProviderAccount("ana@example.org".into());
+    group.create_with_access(&ana, owner).await;
+    ana.sync
+        .administer(StoreChange::AddMember {
+            member: ben.identity.member(),
+            keys: ben.identity.keys().public_keys(),
+            role: MemberRole::Admin,
+            access: coven_format::MemberAccess::ProviderAccount("ben@example.org".into()),
+        })
+        .await
+        .unwrap();
+    ben.sync
+        .administer(StoreChange::AddDevice {
+            name: "Ben".into(),
+            replaces: None,
+        })
+        .await
+        .unwrap();
+    ana.sync.pass().await.unwrap();
+    let before = ana.sync.database.applied_slot().await.unwrap();
+    for initiator in [&ana, &ben] {
+        let counter = initiator.sync.database.claim_counter().await.unwrap();
+        let result = initiator
+            .sync
+            .administer(StoreChange::RemoveMember {
+                member: ana.identity.member(),
+            })
+            .await;
+        assert!(matches!(result, Err(SyncError::StoreOwner)), "{result:?}");
+        assert_eq!(
+            initiator.sync.database.applied_slot().await.unwrap(),
+            before
+        );
+        assert_eq!(
+            initiator.sync.database.claim_counter().await.unwrap(),
+            counter
+        );
+        assert!(initiator
+            .sync
+            .database
+            .current_claim()
+            .await
+            .unwrap()
+            .is_none());
+        assert!(initiator
+            .sync
+            .database
+            .operations()
+            .await
+            .unwrap()
+            .is_empty());
+    }
+    assert!(group
+        .storage
+        .status(&ObjectPath::slot(
+            group.store,
+            (before + 1).try_into().unwrap()
+        ))
+        .await
+        .unwrap()
+        .is_none());
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
 async fn abandoned_preparation_deletion_preserves_reader_progress() {
     let group = Group::new();
     let ana = group.device(1).await;

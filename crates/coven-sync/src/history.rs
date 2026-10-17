@@ -191,6 +191,17 @@ impl History {
         slot: Slot,
         change: &StoreChange,
     ) -> Result<Option<AdminEffect>, OperationRejection> {
+        if let StoreChange::RemoveMember { member } = change {
+            if self.state.members.get(member).is_some_and(|current| {
+                matches!(
+                    current.access,
+                    coven_format::MemberAccess::ProviderAccount(_)
+                )
+            }) && self.owns_storage(*member)
+            {
+                return Err(OperationRejection::StoreOwner);
+            }
+        }
         effects::checked_change(
             &self.state,
             header,

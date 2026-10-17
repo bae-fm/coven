@@ -375,12 +375,12 @@ impl SequenceSync {
                     self.abandon_settled_claim(id).await?;
                     if let Err(cleanup) = self.undo_step(&step).await {
                         return Err(SyncError::Cleanup {
-                            operation: Box::new(SyncError::Rejected(reason)),
+                            operation: Box::new(reason.into()),
                             cleanup: Box::new(cleanup),
                         });
                     }
                     self.database.finish_operation(id).await?;
-                    return Err(SyncError::Rejected(reason));
+                    return Err(reason.into());
                 }
                 Progress::Running(step) => step,
             };

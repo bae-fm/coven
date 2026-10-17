@@ -16,6 +16,8 @@ pub enum EntryTarget {
 /// Why the current applied state refuses an administrative operation.
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum OperationRejection {
+    /// The provider account owns the store and cannot be removed.
+    StoreOwner,
     /// The target is absent, removed, or cannot be reused.
     TargetGone(EntryTarget),
     /// The resulting store would have no active admin.

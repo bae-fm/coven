@@ -251,7 +251,10 @@ pub enum SyncFailure {
 
 impl From<OperationRejection> for SyncError {
     fn from(reason: OperationRejection) -> Self {
-        Self::Rejected(reason)
+        match reason {
+            OperationRejection::StoreOwner => Self::StoreOwner,
+            reason => Self::Rejected(reason),
+        }
     }
 }
 
