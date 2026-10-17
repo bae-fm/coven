@@ -46,8 +46,8 @@ impl StorageConnections {
         };
         Ok(GuidedAccessKey {
             bucket: bucket.clone(),
-            store_prefix: coven_storage::ObjectPrefix::all(self.store).under(prefix),
-            policy: coven_storage::providers::s3_member_policy(&location, self.store)?,
+            store_prefix: coven_storage::ObjectPrefix::all(self.store()).under(prefix),
+            policy: coven_storage::providers::s3_member_policy(&location, self.store())?,
         })
     }
 }

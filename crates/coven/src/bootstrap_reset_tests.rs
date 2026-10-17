@@ -262,7 +262,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
             matches!(
                 s,
                 SyncStatus::Failed {
-                    error: SyncFailure::DeviceIdInUse(DeviceIdEvidence::StorageAhead)
+                    error: SyncFailure::DeviceIdInUse(DeviceIdEvidence::UnattemptedSlot { .. })
                 }
             )
         })

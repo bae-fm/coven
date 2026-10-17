@@ -100,7 +100,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let (started, observed) = tokio::sync::oneshot::channel();
     let (resume, held) = tokio::sync::oneshot::channel();
     storage
-        .hold_next_creation(ObjectPrefix::keys(directory.id()), started, held)
+        .hold_next_creation(ObjectPrefix::all(directory.id()), started, held)
         .await;
     let circles = handle.circles();
     let mut waiting = Box::pin(circles.create("Interrupted"));
@@ -112,8 +112,8 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     observed.await.unwrap();
     storage.set_online(false);
     resume.send(()).unwrap();
-    handle.barrier().await.unwrap();
-    drop(waiting);
+    // The circle's operation stays journaled after its offline attempt.
+    assert!(waiting.await.is_err());
     handle.close().await.unwrap();
     storage.set_online(true);
     let handle = open().open(directory.id()).await.unwrap();
@@ -155,7 +155,17 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         handle.retry_pending_operation(OperationId(-1)).await,
         Err(OperationError::NotPending(OperationId(-1)))
     ));
-    handle.barrier().await.unwrap();
+    // A pass resumes the interrupted circle's journaled operation.
+    let mut status = handle.subscribe_sync_status();
+    status.borrow_and_update();
+    handle.start_sync().await.unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
     let circle = handle.circles().list().await.unwrap().remove(0);
     assert_eq!(circle.name, "Interrupted");
     handle.circles().rename(circle.id, "Family").await.unwrap();
@@ -163,7 +173,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     let outsider = MemberId(uuid::Uuid::from_u128(0x0e));
     assert!(matches!(
         handle.circles().add_member(circle.id, &outsider).await,
-        Err(SyncError::Rejected(coven_database::DropReason::TargetGone(coven_database::EntryTarget::Member(id)))) if id == outsider
+        Err(SyncError::Rejected(OperationRejection::TargetGone(EntryTarget::Member(id)))) if id == outsider
     ));
     let invite = handle
         .create_invite(
@@ -188,7 +198,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
         handle
             .set_member_role(&member.member(), MemberRole::Member)
             .await,
-        Err(SyncError::Rejected(coven_database::DropReason::NoAdminLeft))
+        Err(SyncError::Rejected(OperationRejection::NoAdminLeft))
     ));
     assert!(keys
         .unlock()
@@ -241,7 +251,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     };
     let db = database().open().await.unwrap();
     let pending = db.operations().await.unwrap();
-    let migration = pending.iter().find(|r| r.kind == "migrate-schema").unwrap();
+    let migration = pending.iter().find(|r| r.kind == "schema-raise").unwrap();
     assert_eq!(migration.last_step, 1);
     assert!(db
         .pending::<PendingRecord>()
@@ -258,22 +268,16 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.unlock_store_key().await.unwrap();
     // A sync pass uploads the captured old prefix and marker, then the raise
     // snapshot and entry publish (§18.1).
-    let mut pending = handle.subscribe_pending();
     handle.start_sync().await.unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(20), async {
-        loop {
-            let records = pending.next().await.unwrap();
-            if !records.iter().any(|r| {
-                matches!(
-                    r.subject,
-                    coven_sync::PendingSubject::Operation {
-                        kind: coven_sync::OperationKind::SchemaChange,
-                        ..
-                    }
-                )
-            }) {
-                break;
-            }
+        while handle
+            .store_state()
+            .await
+            .schema
+            .get(&coven_merge::Audience::Store)
+            .is_none_or(|version| version.number != 2)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
     })
     .await
@@ -281,7 +285,7 @@ async fn app_reopening_resumes_operations_and_files_using_one_storage_capability
     handle.close().await.unwrap();
     let db = database().open().await.unwrap();
     assert_eq!(
-        db.store_log().await.unwrap().replay.state.schema[&coven_merge::Audience::Store].number,
+        db.store_state().await.unwrap().schema[&coven_merge::Audience::Store].number,
         2
     );
     assert!(db.operations().await.unwrap().is_empty());
@@ -528,9 +532,9 @@ mod recovery {
                 .open()
                 .await
                 .unwrap();
-            let local = database.local_store_log().await.unwrap();
+            let device = directory.settings().unwrap().device_id;
             assert_eq!(
-                local.log.replay.state.devices[&local.device].name,
+                database.store_state().await.unwrap().devices[&device].name,
                 "Ana’s recovered laptop"
             );
             database.close().await.unwrap();

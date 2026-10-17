@@ -50,12 +50,12 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     drop(directory);
     drop(pending);
     let (_, cancel) = watch::channel(false);
-    for field in ["initial_key", "inviting_writer", "key_copy_number"] {
+    for field in ["initial_key", "inviting_writer", "read_through"] {
         let mut changed = coven_sync::read_invite_code(&invite.code).unwrap();
         match field {
             "initial_key" => changed.initial_key = KeyId(UuidIds.new_id()),
             "inviting_writer" => changed.inviting_writer.0 ^= 1,
-            "key_copy_number" => changed.key_copy_number += 1,
+            "read_through" => changed.read_through += 1,
             _ => unreachable!(),
         }
         let result = join_with_invite(

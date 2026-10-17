@@ -80,7 +80,7 @@ impl Clock for JoinClock {
 }
 
 #[tokio::test]
-async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() {
+async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
     let owner = Owner::new(CloudProvider::S3, true).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
@@ -105,19 +105,13 @@ async fn restore_loads_snapshots_and_later_writes_with_identical_fingerprints() 
         .open()
         .await
         .unwrap();
-    let scoped = Arc::new(StoreKeychain::new(install.keychain.clone(), directory.id()));
-    let keys = KeyringCustody::<StoreKeyring>::new(scoped.clone());
     assert_eq!(rows(&db).await, owner.rows().await);
-    assert_eq!(fingerprint(&db, &keys).await, owner.fingerprints().await);
-    let log = db.local_store_log().await.unwrap();
-    assert_eq!(
-        log.log.replay.state.devices[&log.device].member,
-        owner.member.member()
-    );
-    assert_eq!(
-        log.log.replay.state.devices[&log.device].name,
-        "Ana’s laptop"
-    );
+    // Registration claimed the slot after everything the owner applied.
+    assert_eq!(db.applied_slot().await.unwrap(), owner.applied().await + 1);
+    let state = db.store_state().await.unwrap();
+    let device = directory.settings().unwrap().device_id;
+    assert_eq!(state.devices[&device].member, owner.member.member());
+    assert_eq!(state.devices[&device].name, "Ana’s laptop");
     assert!(directory
         .owned_file(StoreFile::Bootstrap)
         .read_optional()
@@ -305,7 +299,7 @@ async fn declined_and_expired_requests_finish_without_committing_custody() {
             let request = next_join_request(&owner.handle).await;
             if expiry {
                 owner.clock.set(invite.expires_at);
-                owner.handle.barrier().await.unwrap();
+                owner.sync().await;
             } else {
                 owner.handle.decline_join_request(&request).await.unwrap();
             }
@@ -568,18 +562,21 @@ async fn keychain_discovery_refuses_ambiguous_or_mismatched_store_ids() {
 }
 
 #[tokio::test]
-async fn a_device_removed_during_loading_receives_the_provider_refusal() {
+async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
-    let (listed, listing) = tokio::sync::oneshot::channel();
+    let (read, reading) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
+    // Approval claims the store key's copy and then the binding; the joiner
+    // reads the slot after them once it has applied both.
+    let after = owner.applied().await + 3;
     owner
         .storage
-        .hold_next_listing(
-            ObjectPrefix::audience_snapshots(owner.directory.id(), &coven_merge::Audience::Store),
-            listed,
+        .hold_next_read(
+            ObjectPath::slot(owner.directory.id(), after.try_into().unwrap()),
+            read,
             resumed,
         )
         .await;
@@ -593,22 +590,9 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
     let remove = async {
         let request = next_join_request(&owner.handle).await;
         owner.handle.approve_join_request(&request).await.unwrap();
-        listing.await.unwrap();
-        owner.sync().await;
-        let members = owner.handle.members().await.unwrap();
-        let devices = &members
-            .iter()
-            .find(|m| m.id == request.member)
-            .unwrap()
-            .devices;
-        assert_eq!(devices.len(), 1);
-        assert!(matches!(
-            owner.handle.remove_device(devices[0].id).await.unwrap(),
-            ProviderSignOut::RemoveAppAccess {
-                provider: CloudProvider::OneDrive
-            }
-        ));
-        // Cut off this account in the fake to model provider refusal on the removed device.
+        reading.await.unwrap();
+        owner.handle.remove_member(&request.member).await.unwrap();
+        // Cut off this account in the fake to model provider refusal after removal.
         owner
             .storage
             .revoke_access("join@example.com")
@@ -618,7 +602,8 @@ async fn a_device_removed_during_loading_receives_the_provider_refusal() {
     };
     let (result, ()) = join_with_response(joining, remove).await;
     assert!(
-        matches!(result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied)
+        matches!(&result, Err(BootstrapError::Sync(SyncError::Storage(error))) if error.failure() == StorageFailure::PermissionDenied),
+        "{result:?}"
     );
     install.absent(owner.directory.id()).await;
     owner.close().await;
@@ -633,13 +618,21 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    // The owner's own passes read that slot too: only the joiner's read is held.
+    owner.handle.stop_sync();
+    owner
+        .handle
+        .subscribe_sync_status()
+        .wait_for(|status| matches!(status, SyncStatus::Stopped))
+        .await
+        .unwrap();
+    // The first slot after the invite, where approval claims the copy.
     owner
         .storage
         .hold_next_read(
-            ObjectPath::key_copy(
+            ObjectPath::slot(
                 owner.directory.id(),
-                code.inviting_writer,
-                (code.key_copy_number + 1).try_into().unwrap(),
+                (code.read_through + 1).try_into().unwrap(),
             ),
             listed,
             resumed,
@@ -654,6 +647,7 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
     );
     let approve = async {
         listing.await.unwrap();
+        owner.handle.start_sync().await.unwrap();
         let request = next_join_request(&owner.handle).await;
         owner.handle.approve_join_request(&request).await.unwrap();
         resume.send(()).unwrap();
@@ -667,7 +661,7 @@ async fn approval_after_a_copy_miss_is_not_mistaken_for_decline() {
 }
 
 #[tokio::test]
-async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
+async fn removal_lists_every_recorded_key_including_a_concurrent_replacement() {
     for concurrent in [true, false] {
         let owner = Owner::new(CloudProvider::S3, false).await;
         let invite = owner.invite().await;
@@ -693,11 +687,7 @@ async fn removal_lists_every_recorded_key_including_a_dropped_replacement() {
             let (resume, resumed) = tokio::sync::oneshot::channel();
             owner
                 .storage
-                .hold_next_creation(
-                    ObjectPrefix::store_logs(owner.directory.id()),
-                    listed,
-                    resumed,
-                )
+                .hold_next_creation(ObjectPrefix::all(owner.directory.id()), listed, resumed)
                 .await;
             let replacement = async {
                 listing.await.unwrap();
@@ -739,12 +729,14 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     let handle = install.restore(&owner).await;
     let directory = install.layout.store_dir(&owner.directory.id());
     let before = handle.restore_code().await.unwrap();
-    let entries_before = owner
-        .storage
-        .list(&ObjectPrefix::store_logs(owner.directory.id()))
+    let slots = || async {
+        crate::tests::stored(&owner.storage, owner.directory.id(), |path| {
+            path.slot_number().is_some()
+        })
         .await
-        .unwrap()
-        .len();
+        .len()
+    };
+    let entries_before = slots().await;
     owner
         .storage
         .set_faults(Faults {
@@ -788,15 +780,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
         assert_eq!(handle.restore_code().await.unwrap(), retained);
     }
     owner.sync().await;
-    assert_eq!(
-        owner
-            .storage
-            .list(&ObjectPrefix::store_logs(owner.directory.id()))
-            .await
-            .unwrap()
-            .len(),
-        entries_before + 1
-    );
+    assert_eq!(slots().await, entries_before + 1);
     handle.close().await.unwrap();
     let disconnected = Coven::builder(install.layout.clone())
         .with_keychain(install.keychain.clone())

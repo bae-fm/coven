@@ -271,6 +271,30 @@ impl Network {
     }
     pub(crate) async fn sync(&self, index: usize) {
         let handle = &self.devices[index].handle;
+        // A pass already running may have read state before this request;
+        // the pass after it serves the request.
+        let running = matches!(
+            &*handle.subscribe_sync_status().borrow(),
+            SyncStatus::Syncing
+        );
+        self.pass(index).await;
+        if running {
+            self.pass(index).await;
+        }
+        // S3 keys awaiting deletion stay until confirmed or deleted (§13).
+        let pending = handle.pending().await.unwrap();
+        assert!(
+            pending.iter().all(|record| !matches!(
+                record.subject,
+                PendingSubject::Operation { kind, .. } if kind != OperationKind::DeleteAccessKey
+            )),
+            "{pending:?}"
+        );
+    }
+
+    /// Request a pass and wait for one finishing after the request.
+    async fn pass(&self, index: usize) {
+        let handle = &self.devices[index].handle;
         self.clock.set(self.clock.now() + Duration::from_secs(1));
         let after = self.clock.now();
         let mut status = handle.subscribe_sync_status();
@@ -295,16 +319,6 @@ impl Network {
                 &*status.borrow()
             )
         });
-        // S3 keys awaiting deletion stay until confirmed or deleted (§13).
-        assert!(handle
-            .pending()
-            .await
-            .unwrap()
-            .iter()
-            .all(|record| !matches!(
-                record.subject,
-                PendingSubject::Operation { kind, .. } if kind != OperationKind::DeleteAccessKey
-            )));
     }
 
     async fn quiet(&self) {
@@ -370,22 +384,19 @@ impl Network {
     }
     async fn assert_converged(&self) {
         let expected = self.rows(0).await;
-        let state = posted(&self.devices[0]).await;
+        let applied = self.devices[0].handle.applied_slot().await;
+        let schema = self.devices[0].handle.store_state().await.schema;
         for (i, device) in self.devices.iter().enumerate() {
             assert_eq!(self.rows(i).await, expected, "device {i} rows");
-            let other = posted(device).await;
-            assert_eq!(other.writes, state.writes, "device {i} write positions");
             assert_eq!(
-                other.store_log, state.store_log,
-                "device {i} store-log positions"
+                device.handle.applied_slot().await,
+                applied,
+                "device {i} slot"
             );
             assert_eq!(
-                other.schema_version, state.schema_version,
+                device.handle.store_state().await.schema,
+                schema,
                 "device {i} schema"
-            );
-            assert_eq!(
-                other.fingerprints, state.fingerprints,
-                "device {i} fingerprints"
             );
             let status = device.handle.subscribe_sync_status();
             let value = status.borrow();
@@ -464,83 +475,24 @@ pub(crate) async fn join_and_approve<T, F: std::future::Future<Output = ()>>(
     .await
 }
 
-pub(crate) async fn posted(device: &Device) -> coven_format::objects::PostedPositions {
-    use coven_format::{codes::RestoreCode, sealed_single::SingleChunkObject, Object};
-    let code = RestoreCode::from_text(&device.handle.restore_code().await.unwrap()).unwrap();
-    let member = device
-        .handle
-        .members()
+/// The objects in storage that `keep` selects, among everything the store holds.
+pub(crate) async fn stored(
+    storage: &MemoryStorage,
+    store: StoreId,
+    keep: impl Fn(&ObjectPath) -> bool,
+) -> Vec<StoredObject> {
+    storage
+        .list(&ObjectPrefix::all(store))
         .await
         .unwrap()
         .into_iter()
-        .find(|m| m.is_self)
-        .unwrap();
-    let id = device
-        .layout
-        .store_dir(&device.store)
-        .settings()
-        .unwrap()
-        .device_id;
-    let path = ObjectPath::positions(device.store, id);
-    let bytes = device.storage.read(&path).await.unwrap();
-    let object = SingleChunkObject::decode(&bytes).unwrap();
-    let SingleChunkObject::PostedPositions {
-        key,
-        chunk,
-        signature,
-    } = &object
-    else {
-        panic!("positions object")
-    };
-    let mut opened = None;
-    for copy in device
-        .storage
-        .list(&ObjectPrefix::keys(device.store))
-        .await
-        .unwrap()
-    {
-        let bytes = device.storage.read(&copy.path).await.unwrap();
-        let sealed = coven_format::sealed_key::SealedKey::decode(&bytes).unwrap();
-        if sealed.prefix().audience == coven_merge::Audience::Store
-            && sealed.prefix().key == *key
-            && sealed.prefix().member == member.id
-        {
-            opened = Some(
-                sealed
-                    .open_store_key(
-                        &MemberIdentity::new(code.member, code.member_keys.clone()),
-                        copy.path.as_str(),
-                    )
-                    .unwrap(),
-            );
-            break;
-        }
-    }
-    let key = opened.expect("member's published store key");
-    let mut hash = coven_crypto::ObjectHasher::new();
-    hash.update(&bytes[..bytes.len() - 64]);
-    // The positions' author signs with the pair its restore code carries.
-    assert_eq!(member.id, code.member);
-    code.member_keys
-        .public_keys()
-        .signing
-        .verify_object(path.as_str(), &hash.finish(), signature)
-        .unwrap();
-    let plain = key
-        .derive()
-        .open_object_chunk(
-            path.as_str(),
-            &object.prefix().encode().unwrap(),
-            0,
-            0,
-            chunk,
-        )
-        .unwrap();
-    let Object::PostedPositions(positions) = Object::decode(&plain).unwrap() else {
-        panic!("positions frame")
-    };
-    assert_eq!(positions.device, id);
-    positions
+        .filter(|object| keep(&object.path))
+        .collect()
+}
+
+/// The snapshot bodies in storage.
+pub(crate) async fn snapshots(storage: &MemoryStorage, store: StoreId) -> Vec<StoredObject> {
+    stored(storage, store, |path| path.snapshot_id().is_some()).await
 }
 
 struct Generator(u64);
@@ -791,12 +743,15 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
         .clock
         .set(network.clock.now() + Duration::from_secs(31 * 24 * 3600));
     network.sync(0).await;
+    network.sync(0).await;
+    // Retention moved the floor past slot 1 without waiting for device 1.
+    let first = ObjectPath::slot(network.devices[0].store, 1.try_into().unwrap());
     assert!(network.devices[0]
         .storage
-        .list(&ObjectPrefix::device_logs(network.devices[0].store))
+        .status(&first)
         .await
         .unwrap()
-        .is_empty());
+        .is_none());
     network.devices[1].handle.start_sync().await.unwrap();
     network.quiet().await;
     assert_eq!(network.rows(1).await.0.len(), 2);
@@ -805,7 +760,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
 }
 
 #[tokio::test]
-async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_action() {
+async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let network = Network::new(2).await;
     let reader = &network.devices[1].handle;
     reader.stop_sync();
@@ -814,45 +769,44 @@ async fn an_internal_reload_failure_reports_sync_status_and_retries_without_app_
         .wait_for(|s| matches!(s, SyncStatus::Stopped))
         .await
         .unwrap();
+    let before = reader.applied_slot().await;
     network.devices[0].handle.reset_store().await.unwrap();
     network.sync(0).await;
     let storage = &network.devices[0].storage;
-    let snapshots = storage
-        .list(&ObjectPrefix::snapshots(network.devices[0].store))
-        .await
-        .unwrap();
+    let snapshots = snapshots(storage, network.devices[0].store).await;
     assert_eq!(snapshots.len(), 1);
     let path = &snapshots[0].path;
     let bytes = storage.read(path).await.unwrap();
     storage.delete(path).await.unwrap();
-    let before = posted(&network.devices[1]).await.writes;
     reader.start_sync().await.unwrap();
     let mut status = reader.subscribe_sync_status();
-    tokio::time::timeout(
+    let blocked = tokio::time::timeout(
         Duration::from_secs(15),
-        status.wait_for(|s| matches!(s, SyncStatus::Failed { .. })),
+        status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })),
     )
     .await
     .unwrap()
-    .unwrap();
+    .unwrap()
+    .clone();
+    let SyncStatus::Blocked { slot, .. } = blocked else {
+        unreachable!()
+    };
     assert!(reader
         .pending()
         .await
         .unwrap()
         .iter()
-        .any(|record| matches!(
-            record.subject,
-            PendingSubject::Operation {
-                kind: OperationKind::RequiredReload,
-                ..
-            }
-        )));
-    // The post claims the applied store log, but no write past the reload.
-    let positions = posted(&network.devices[1]).await;
-    assert_eq!(positions.writes, before);
+        .any(|record| record.subject == PendingSubject::Slot(slot)));
+    // Nothing after the blocked slot applies.
+    assert!(reader.applied_slot().await < slot.0);
+    assert!(reader.applied_slot().await >= before);
     storage.create(path, &bytes).await.unwrap();
     network.sync(1).await;
-    assert_ne!(posted(&network.devices[1]).await, positions);
+    assert_eq!(
+        reader.applied_slot().await,
+        network.devices[0].handle.applied_slot().await
+    );
+    network.assert_converged().await;
     network.close().await;
 }
 
@@ -860,7 +814,7 @@ mod pending_records {
     use super::*;
 
     #[tokio::test]
-    async fn pending_records_are_live_while_sync_succeeds_and_reset_withdraws_the_report() {
+    async fn a_damaged_slot_blocks_the_reader_once_without_reading_it_again() {
         let network = Network::new(2).await;
         let reader = &network.devices[1].handle;
         reader.stop_sync();
@@ -881,20 +835,25 @@ mod pending_records {
             .unwrap();
         network.sync(0).await;
         let storage = &network.devices[0].storage;
-        let object = storage
-            .list(&ObjectPrefix::device_logs(network.devices[0].store))
-            .await
-            .unwrap()
-            .pop()
-            .unwrap();
+        let slot = owner.applied_slot().await;
+        let path = ObjectPath::slot(network.devices[0].store, slot.try_into().unwrap());
+        let size = storage.status(&path).await.unwrap().unwrap().size;
         storage
-            .corrupt_byte(&object.path, object.size as usize - 1)
+            .corrupt_byte(&path, size as usize - 1)
             .await
             .unwrap();
         reader.start_sync().await.unwrap();
-        network.sync(1).await;
+        reader.sync_now();
+        let mut status = reader.subscribe_sync_status();
+        tokio::time::timeout(
+            Duration::from_secs(15),
+            status.wait_for(|s| matches!(s, SyncStatus::Blocked { .. })),
+        )
+        .await
+        .unwrap()
+        .unwrap();
         let record = PendingRecord {
-            subject: PendingSubject::Write(object.path.write_id().unwrap()),
+            subject: PendingSubject::Slot(Slot(slot)),
             reason: PendingReason::Refused(Refusal::Signature { cause: None }),
             reported_by: network.devices[1]
                 .layout
@@ -904,35 +863,23 @@ mod pending_records {
                 .device_id,
         };
         assert_eq!(received.next().await.unwrap(), vec![record.clone()]);
-        let before = network.devices[1]
-            .storage
-            .reads()
-            .await
-            .into_iter()
-            .filter(|(path, _, _)| path == &object.path)
-            .count();
-        network.sync(1).await;
-        assert_eq!(
+        let reads = || async {
             network.devices[1]
                 .storage
                 .reads()
                 .await
                 .into_iter()
-                .filter(|(path, _, _)| path == &object.path)
-                .count(),
-            before
-        );
-        network.sync(0).await;
-        let report = owner.subscribe_pending().next().await.unwrap();
-        assert_eq!(report.len(), 1);
-        assert_eq!(report[0], record);
+                .filter(|(read, _, _)| read == &path)
+                .count()
+        };
+        let before = reads().await;
+        reader.sync_now();
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        assert_eq!(reads().await, before);
         assert!(network.rows(1).await.0.is_empty());
-        owner.reset_store().await.unwrap();
-        network.sync(1).await;
+        // The owner's own pass is unaffected.
         network.sync(0).await;
-        assert!(received.next().await.unwrap().is_empty());
-        assert!(owner.subscribe_pending().next().await.unwrap().is_empty());
-        network.assert_converged().await;
+        assert!(owner.pending().await.unwrap().is_empty());
         network.close().await;
     }
 }

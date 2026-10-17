@@ -157,7 +157,7 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(ObjectPrefix::store_logs(f.directory.id()), entered, resumed)
+        .hold_next_creation(ObjectPrefix::all(f.directory.id()), entered, resumed)
         .await;
     {
         let replacement = f
@@ -189,8 +189,7 @@ async fn dropping_a_replacement_waiter_does_not_interrupt_key_installation_or_pu
 }
 
 #[tokio::test]
-async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requires_the_same_access()
-{
+async fn custody_failure_rolls_back_credentials_before_claiming_the_creation() {
     let f = Fixture::new().await;
     f.handle.close().await.unwrap();
     let handle = builder(
@@ -221,19 +220,18 @@ async fn custody_failure_rolls_back_credentials_and_the_reserved_creation_requir
         &*handle.subscribe_sync_status().borrow(),
         SyncStatus::Disconnected
     ));
-    let path = f
-        .storage
-        .list(&ObjectPrefix::store_logs(f.directory.id()))
+    let first = ObjectPath::slot(f.directory.id(), 1.try_into().unwrap());
+    assert!(f.storage.status(&first).await.unwrap().is_none());
+    // Nothing was claimed, so another key sets the store up.
+    setup("changed").await.unwrap();
+    assert!(f.storage.status(&first).await.unwrap().is_some());
+    let me = handle
+        .members()
         .await
-        .unwrap()[0]
-        .path
-        .clone();
-    let original = f.storage.read(&path).await.unwrap();
-    assert!(
-        setup("changed").await.is_err(),
-        "a reserved creation cannot silently record another access key"
-    );
-    setup("original").await.unwrap();
-    assert_eq!(f.storage.read(&path).await.unwrap(), original);
+        .unwrap()
+        .into_iter()
+        .find(|member| member.is_self)
+        .unwrap();
+    assert_eq!(me.devices.len(), 1);
     handle.close().await.unwrap();
 }

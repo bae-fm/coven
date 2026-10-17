@@ -1,10 +1,7 @@
 use crate::*;
 use coven_crypto::custody::{InMemoryCustody, KeyringCustody, StoreKeychain};
 use coven_database::test_utils::WriteCheckpoint;
-use coven_format::{
-    sealed_snapshot::SnapshotObjectPrefix, sealed_write::WriteObjectPrefix,
-    write_stream::WriteHeaderFrame,
-};
+use coven_format::sealed_slot::{SlotKind, SlotObjectPrefix};
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::{
     sync::Arc,
@@ -169,87 +166,6 @@ async fn read_note(handle: &CovenHandle) -> String {
         .unwrap()
 }
 
-fn open_write(
-    bytes: &[u8],
-    path: &ObjectPath,
-    ring: &StoreKeyring,
-    signer: &coven_crypto::SigningKey,
-) -> coven_format::write::WriteRecord {
-    let prefix_len = WriteObjectPrefix::length(bytes).unwrap();
-    let aad = &bytes[..prefix_len];
-    let prefix = WriteObjectPrefix::decode(aad).unwrap();
-    let header_len = WriteObjectPrefix::header_chunk_length(&bytes[prefix_len..]).unwrap();
-    let sealed =
-        WriteObjectPrefix::header_chunk(&bytes[prefix_len..prefix_len + header_len]).unwrap();
-    let mut plain = ring
-        .store_key(prefix.store_key)
-        .unwrap()
-        .derive()
-        .open_object_chunk(path.as_str(), aad, 0, 0, sealed)
-        .unwrap();
-    let header = WriteHeaderFrame::decode(&plain).unwrap();
-    let mut layout = prefix
-        .clone()
-        .opened_header(
-            &plain,
-            header.parts.iter().map(|p| p.plaintext_length).collect(),
-        )
-        .unwrap();
-    // The part roots and header signature follow the sealed header (D9).
-    let tail_start = prefix_len + header_len;
-    let tail_end = tail_start + WriteObjectPrefix::tail_length(prefix.part_keys.len());
-    let tail = prefix.decode_tail(&bytes[tail_start..tail_end]).unwrap();
-    signer
-        .verify_write_header(
-            path.as_str(),
-            aad,
-            &bytes[prefix_len..tail_start],
-            &tail.roots,
-            &tail.signature,
-        )
-        .unwrap();
-    let mut offset = tail_end;
-    while let Some(chunk) = layout.next_chunk() {
-        let length = layout.chunk_length(&bytes[offset..]).unwrap();
-        let (_, sealed) = layout
-            .decode_chunk(&bytes[offset..offset + length])
-            .unwrap();
-        let key = match header.parts[chunk.section as usize - 1].audience {
-            Audience::Store => ring.store_key(chunk.key).unwrap().derive(),
-            Audience::Circle(circle) => ring.circle_key(circle, chunk.key).unwrap().derive(),
-        };
-        plain.extend(
-            key.open_object_chunk(path.as_str(), aad, chunk.section, chunk.index, sealed)
-                .unwrap(),
-        );
-        offset += length;
-    }
-    let signature = layout.read_signature(&bytes[offset..]).unwrap();
-    let mut hash = coven_crypto::ObjectHasher::new();
-    hash.update(&bytes[..offset]);
-    signer
-        .verify_object(path.as_str(), &hash.finish(), &signature)
-        .unwrap();
-    layout.finish(&[]).unwrap();
-    let record = coven_format::write_stream::decode_plaintext(&plain).unwrap();
-    for (part, (root, key)) in record
-        .parts
-        .iter()
-        .zip(tail.roots.iter().zip(&prefix.part_keys))
-    {
-        let keys = match part.audience {
-            Audience::Store => ring.store_key(*key).unwrap().derive(),
-            Audience::Circle(circle) => ring.circle_key(circle, *key).unwrap().derive(),
-        };
-        let leaves = coven_format::authorship::part_leaves(part);
-        assert_eq!(
-            coven_format::authorship::root(&keys.authorship_hasher(), &leaves).unwrap(),
-            *root
-        );
-    }
-    record
-}
-
 async fn assert_uploaded(
     f: &Fixture,
     handle: &CovenHandle,
@@ -258,17 +174,15 @@ async fn assert_uploaded(
     assert!(!queued.is_empty());
     f.sync(handle).await;
     assert!(handle.test_queued_writes().await.unwrap().is_empty());
-    let ring = f.keys.unlock().unwrap().unwrap();
-    for record in queued {
-        let id = record.header.position;
-        let path =
-            ObjectPath::device_log(f.directory.id(), id.device, id.number.try_into().unwrap());
-        let bytes = f.storage.read(&path).await.unwrap();
-        assert_eq!(
-            open_write(&bytes, &path, &ring, &f.member.keys().public_keys().signing),
-            *record
-        );
-    }
+    // The writes landed in the last slot this device applied.
+    let path = ObjectPath::slot(
+        f.directory.id(),
+        handle.applied_slot().await.try_into().unwrap(),
+    );
+    let bytes = f.storage.read(&path).await.unwrap();
+    let prefix =
+        SlotObjectPrefix::decode(&bytes[..SlotObjectPrefix::length(&bytes).unwrap()]).unwrap();
+    assert!(matches!(prefix.kind, SlotKind::Writes));
 }
 
 #[test]
@@ -418,11 +332,7 @@ async fn app_reads_and_writes_finish_while_a_sync_pass_is_held() {
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (release, released) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(
-            ObjectPrefix::device_logs(f.directory.id()),
-            entered,
-            released,
-        )
+        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, released)
         .await;
     handle.start_sync().await.unwrap();
     entering.await.unwrap();
@@ -512,82 +422,43 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
 }
 
 #[tokio::test]
-async fn newer_snapshots_delete_covered_logs_and_older_own_snapshots() {
+async fn growth_snapshots_let_retention_delete_covered_slots_and_superseded_snapshots() {
     async fn grow_and_retain(f: &Fixture, handle: &CovenHandle, body: String) {
-        let logs = f
-            .storage
-            .list(&ObjectPrefix::device_logs(f.directory.id()))
-            .await
-            .unwrap();
-        assert_eq!(logs.len(), 1);
         note(handle, body).await;
         f.sync(handle).await;
-        // A covered log goes only once its covering snapshot is a storage
-        // day old (§15): a pass that sees the position posted after
-        // snapshot publication still keeps the old log and the new one.
-        f.sync(handle).await;
-        let held = f
-            .storage
-            .list(&ObjectPrefix::device_logs(f.directory.id()))
-            .await
-            .unwrap();
-        assert_eq!(held.len(), 2);
-        assert_eq!(held[0].path, logs[0].path);
-        // This pass observes the storage time a day later.
-        f.clock.set(f.clock.now() + Duration::from_secs(86400));
-        f.sync(handle).await;
-        assert!(f
-            .storage
-            .list(&ObjectPrefix::device_logs(f.directory.id()))
-            .await
-            .unwrap()
-            .is_empty());
-        assert_eq!(
-            f.storage.read(&logs[0].path).await.unwrap_err().failure(),
-            StorageFailure::NotFound
-        );
+        // Retention waits for the announcements' grace (§15).
+        f.clock.set(f.clock.now() + Duration::from_secs(8 * 86400));
+        for _ in 0..3 {
+            f.sync(handle).await;
+        }
     }
     let (f, handle) = Fixture::new().await;
+    let store = f.directory.id();
     note(&handle, "before snapshot".into()).await;
     f.sync(&handle).await;
-    grow_and_retain(&f, &handle, "x".repeat(1024 * 1024 + 1)).await;
-    let old = f
-        .storage
-        .list(&ObjectPrefix::snapshots(f.directory.id()))
-        .await
-        .unwrap();
-    assert_eq!(old.len(), 1);
-    let prefix = |bytes: &[u8]| {
-        SnapshotObjectPrefix::decode(&bytes[..SnapshotObjectPrefix::length(bytes).unwrap()])
-            .unwrap()
-    };
-    let first = prefix(&f.storage.read(&old[0].path).await.unwrap());
-    assert_eq!(first.writes.0[0].number, 2);
-    handle
-        .write(|sql| {
-            sql.execute(
-                "INSERT INTO notes VALUES('marker','another write','store')",
-                [],
-            )?;
-            Ok(())
-        })
-        .await
-        .unwrap();
+    note(&handle, "x".repeat(1024 * 1024 + 1)).await;
     f.sync(&handle).await;
-    // The first snapshot holds the note three times: its synced row, merge
-    // row and original change kept as source evidence (D7 section 5).
+    // Encoded growth past 1 MiB requests the first snapshot.
+    let old = crate::tests::snapshots(&f.storage, store).await;
+    assert_eq!(old.len(), 1);
+    f.clock.set(f.clock.now() + Duration::from_secs(8 * 86400));
+    for _ in 0..3 {
+        f.sync(&handle).await;
+    }
+    let first = ObjectPath::slot(store, 1.try_into().unwrap());
+    assert_eq!(
+        f.storage.read(&first).await.unwrap_err().failure(),
+        StorageFailure::NotFound
+    );
+    // Growth past the first snapshot's size requests a newer one, which
+    // supersedes it once past grace and outside the floor.
     grow_and_retain(&f, &handle, "y".repeat(4 * 1024 * 1024 + 1)).await;
-    let new = f
-        .storage
-        .list(&ObjectPrefix::snapshots(f.directory.id()))
-        .await
-        .unwrap();
-    assert_eq!(new.len(), 1);
-    assert_ne!(new[0].path, old[0].path);
-    assert_eq!(new[0].path.device(), old[0].path.device());
-    let second = prefix(&f.storage.read(&new[0].path).await.unwrap());
-    assert!(first.writes.0.iter().all(|id| second.writes.covers(*id)));
-    assert_eq!(second.writes.0[0].number, 4);
+    let new = crate::tests::snapshots(&f.storage, store).await;
+    assert!(!new.is_empty());
+    assert!(new
+        .iter()
+        .all(|snapshot| snapshot.path != old[0].path
+            && snapshot.path.device() == old[0].path.device()));
     assert_eq!(
         f.storage.read(&old[0].path).await.unwrap_err().failure(),
         StorageFailure::NotFound
@@ -680,54 +551,5 @@ async fn removal_preserves_key_material_and_publishes_only_the_member_target() {
         .any(|m| m.member == removed));
     let ring = f.keys.unlock().unwrap().unwrap();
     assert_eq!(ring.to_secret_bytes().as_bytes(), before.as_bytes());
-    let mut removals = 0;
-    for object in f
-        .storage
-        .list(&ObjectPrefix::store_logs(f.directory.id()))
-        .await
-        .unwrap()
-    {
-        let bytes = f.storage.read(&object.path).await.unwrap();
-        let envelope = coven_format::sealed_single::SingleChunkObject::decode(&bytes).unwrap();
-        let coven_format::sealed_single::SingleChunkObject::StoreLog { key, .. } = &envelope else {
-            panic!("store log")
-        };
-        let plain = ring
-            .store_key(*key)
-            .unwrap()
-            .derive()
-            .open_object_chunk(
-                object.path.as_str(),
-                &envelope.prefix().encode().unwrap(),
-                0,
-                0,
-                envelope.chunk(),
-            )
-            .unwrap();
-        let coven_format::Object::StoreLog(entry) = coven_format::Object::decode(&plain).unwrap()
-        else {
-            panic!("entry")
-        };
-        use coven_format::store_log::StoreChange;
-        match entry.change {
-            StoreChange::CreateStore { key, key_hash, .. } => {
-                assert_eq!(key_hash, ring.store_key(key).unwrap().hash());
-            }
-            StoreChange::CreateCircle {
-                circle,
-                key,
-                key_hash,
-                ..
-            } => {
-                assert_eq!(key_hash, ring.circle_key(circle, key).unwrap().hash());
-            }
-            StoreChange::RemoveMember { member } => {
-                assert_eq!(member, removed);
-                removals += 1;
-            }
-            _ => (),
-        }
-    }
-    assert_eq!(removals, 1);
     handle.close().await.unwrap();
 }

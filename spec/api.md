@@ -2556,6 +2556,8 @@ pub enum OperationKind {
     RemoveCircleMember,
     /// Conditionally advance the floor, then delete slots below it (§15).
     RetainSequence,
+    /// Delete stored files nothing retained refers to (§16.5).
+    RetainFiles,
     /// Make a circle and publish its first sealed key.
     CreateCircle,
     /// Seal the circle's history and add a member.

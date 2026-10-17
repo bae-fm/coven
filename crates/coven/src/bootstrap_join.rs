@@ -76,7 +76,7 @@ impl Joining<'_> {
     /// wait lasts (§4).
     pub(super) async fn admit(
         &mut self,
-        sync: &mut StoreLogSync,
+        sync: &SequenceSync,
         database: &Database,
         status: &impl Fn(BootstrapStatus),
     ) -> Result<bool, BootstrapError> {

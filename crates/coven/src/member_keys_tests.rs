@@ -119,7 +119,7 @@ async fn member_keys_are_replaced_through_the_public_calls() {
             .handle
             .replace_member_keys_for(&carol, prepared.public_keys())
             .await,
-        Err(SyncError::Rejected(DropReason::KeysAlreadyUsed))
+        Err(SyncError::Rejected(OperationRejection::KeysAlreadyUsed))
     ));
     let stopped = handle.circles().create("Garden").await;
     assert!(
@@ -284,7 +284,7 @@ mod owner_identity {
         network.close().await;
     }
 
-    /// Ana's device snapshots the store holding Carol's note, and every log
+    /// Ana's device snapshots the store holding Carol's note, and every slot
     /// it covers is deleted. Dan joins later and has only that snapshot: it
     /// carries Carol's creation with the evidence of her write, which Ana
     /// cannot sign for her, so Dan's device knows the note is Carol's and
@@ -313,7 +313,7 @@ mod owner_identity {
         network.sync(1).await;
         network.sync(0).await;
         // Ana's large note makes her device publish a snapshot; a month
-        // later the logs it covers are gone.
+        // later the slots it covers are gone.
         let large = "x".repeat(1024 * 1024 + 1);
         network.devices[0]
             .handle
@@ -331,19 +331,14 @@ mod owner_identity {
         network.sync(0).await;
         let store = network.devices[0].store;
         let storage = &network.devices[0].storage;
-        assert_eq!(
-            storage
-                .list(&ObjectPrefix::snapshots(store))
-                .await
-                .unwrap()
-                .len(),
-            1
-        );
+        // Aged history makes each device snapshot what it reads (§15).
+        assert!(!crate::tests::snapshots(storage, store).await.is_empty());
+        // Retention moved the floor past the slots Dan never reads.
         assert!(storage
-            .list(&ObjectPrefix::device_logs(store))
+            .status(&ObjectPath::slot(store, 1.try_into().unwrap()))
             .await
             .unwrap()
-            .is_empty());
+            .is_none());
         network
             .join_as(
                 2,

@@ -47,10 +47,8 @@ impl Owner {
         network.sync(0).await;
         if snapshot {
             assert_eq!(
-                storage
-                    .list(&ObjectPrefix::snapshots(directory.id()))
+                crate::tests::snapshots(&storage, directory.id())
                     .await
-                    .unwrap()
                     .len(),
                 1
             );
@@ -66,9 +64,8 @@ impl Owner {
             .await
             .unwrap();
         network.sync(0).await;
-        // Keep operation calls connected without a background sync pass racing
-        // the joining device for held requests and injected failures.
-        handle.unlock_store_key().await.unwrap();
+        // Passes read join requests and approve them; the loop keeps running.
+        handle.start_sync().await.unwrap();
         Self {
             network,
             directory,
@@ -83,7 +80,6 @@ impl Owner {
     pub(super) async fn sync(&self) {
         self.handle.start_sync().await.unwrap();
         self.network.sync(0).await;
-        self.handle.unlock_store_key().await.unwrap();
     }
 
     pub(super) async fn rows(&self) -> Vec<(String, Vec<u8>)> {
@@ -97,13 +93,9 @@ impl Owner {
             .unwrap()
     }
 
-    pub(super) async fn fingerprints(&self) -> Vec<(Audience, coven_crypto::Fingerprint)> {
-        crate::tests::posted(&self.network.devices[0])
-            .await
-            .fingerprints
-            .into_iter()
-            .map(|f| (f.audience, f.bytes))
-            .collect()
+    /// The last slot the owner applied.
+    pub(super) async fn applied(&self) -> u64 {
+        self.handle.applied_slot().await
     }
 
     pub(super) async fn invite(&self) -> Invite {
@@ -284,37 +276,6 @@ pub(super) async fn rows(db: &Database) -> Vec<(String, Vec<u8>)> {
     })
     .await
     .unwrap()
-}
-
-pub(super) async fn fingerprint(
-    db: &Database,
-    keys: &dyn StoreKeyCustody,
-) -> Vec<(Audience, coven_crypto::Fingerprint)> {
-    let ring = keys.unlock().unwrap().unwrap();
-    // The newest authorized store-key introduction this fixture's log received.
-    let log = db.local_store_log().await.unwrap().log;
-    let key = log
-        .entries
-        .iter()
-        .rev()
-        .filter(|applied| applied.check.authorized())
-        .find_map(|applied| match &applied.entry.change {
-            coven_format::store_log::StoreChange::CreateStore { key, .. }
-            | coven_format::store_log::StoreChange::RotateKey {
-                audience: Audience::Store,
-                key,
-                ..
-            } => Some(*key),
-            _ => None,
-        })
-        .unwrap();
-    db.sync_state(vec![(
-        Audience::Store,
-        ring.store_key(key).unwrap().derive().fingerprint_hasher(),
-    )])
-    .await
-    .unwrap()
-    .fingerprints
 }
 
 /// A status callback that cancels at the `phase.1`-th report of `phase.0`.

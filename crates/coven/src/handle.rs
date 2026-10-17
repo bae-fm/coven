@@ -23,16 +23,14 @@ use std::sync::{Arc, Mutex};
 
 /// A shared handle to the open store and its running work (§20.2).
 /// Administrative changes catch up with storage before starting and report
-/// replay rejection as `SyncError::Rejected`, including its typed target.
+/// a refusal by the applied state as `SyncError::Rejected`, including its
+/// typed target.
 #[derive(Clone)]
 pub struct CovenHandle {
     closing: Arc<coven_foundation::files::StoreClosingGuard>,
     database: Database,
-    operations: coven_sync::Operations,
     files: coven_sync::Files,
-    sync: coven_sync::SyncLoop,
     storage: Arc<crate::storage::StorageConnections>,
-    codes: coven_sync::RestoreCodes,
     custody: Arc<Mutex<Option<StoreCustody>>>,
     directory: StoreDir,
     keychain: Arc<StoreKeychain>,
@@ -49,11 +47,8 @@ impl CovenHandle {
     pub(crate) fn new(
         database: Database,
         custody: StoreCustody,
-        operations: coven_sync::Operations,
         files: coven_sync::Files,
-        sync: coven_sync::SyncLoop,
         storage: Arc<crate::storage::StorageConnections>,
-        codes: coven_sync::RestoreCodes,
         directory: StoreDir,
         keychain: Arc<StoreKeychain>,
         device: DeviceId,
@@ -61,11 +56,8 @@ impl CovenHandle {
         Self {
             closing: Arc::new(database.closing_guard()),
             database,
-            operations,
             files,
-            sync,
             storage,
-            codes,
             custody: Arc::new(Mutex::new(Some(custody))),
             directory,
             keychain,
@@ -173,7 +165,7 @@ impl CovenHandle {
         self.database.subscribe_pending()
     }
 
-    /// The members and their devices, as this device's store log has them (E9).
+    /// The members and their devices, as this device's applied slots have them (E9).
     pub async fn members(&self) -> CovenResult<Vec<MemberInfo>> {
         self.database.members().await
     }
@@ -183,37 +175,39 @@ impl CovenHandle {
         self.database.subscribe_members()
     }
 
-    /// Wait for the operation worker to finish every earlier call.
-    #[cfg(test)]
-    pub(crate) async fn barrier(&self) -> Result<(), SyncError> {
-        self.operations.barrier().await
-    }
     /// Set a member's role as an admin.
     pub async fn set_member_role(
         &self,
         member: &MemberId,
         role: MemberRole,
     ) -> Result<(), SyncError> {
-        self.operations.set_member_role(member, role).await
+        self.storage
+            .administer(coven_format::admin::StoreChange::ChangeRole {
+                member: *member,
+                role,
+            })
+            .await
     }
-    /// Publish removal and return once replay keeps it. Provider work is
+    /// Publish removal and return once its slot commits. Provider work is
     /// reported through pending(), independently of the removal call (§13).
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
-        self.operations.remove_member(member).await
+        self.storage
+            .administer(coven_format::admin::StoreChange::RemoveMember { member: *member })
+            .await
     }
     /// Remove a device and return instructions for its provider sign-out.
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
-        self.operations.remove_device(device).await
+        self.storage.remove_device(device).await
     }
     /// Explicitly confirms that this S3 key was deleted, including through the
     /// provider's console. Clears only this id's DeleteAccessKey record and
     /// keeps the confirmation (§13).
     pub async fn confirm_access_key_deleted(&self, key: &str) -> Result<(), SyncError> {
-        self.operations.confirm_access_key_deleted(key).await
+        Ok(self.database.clear_access_key(key.into()).await?)
     }
     /// Obtains the storage account's admin access from the source the person
     /// chose. It is held in memory for the operations it is passed to and is
-    /// never stored, logged or put in the store log or invites (§4).
+    /// never stored, logged or put in a slot or invite (§4).
     pub async fn admin_access(
         &self,
         source: AdminAccessSource,
@@ -233,23 +227,20 @@ impl CovenHandle {
         operation: OperationId,
         admin: Arc<dyn AccessKeyAdmin>,
     ) -> Result<(), SyncError> {
-        self.operations.delete_access_key(operation, admin).await
+        self.storage.delete_access_key(operation, admin).await
     }
     /// Replaces a member's S3 key with admin access (§13): makes the key and
     /// checks it from the member's side, delivers it sealed to the member's
-    /// devices, records it for them in the store log, then deletes the old
-    /// key and reads it gone. The member's own key, or another member's as an
-    /// admin. The returned key is for the person to keep; the old key's
-    /// deletion outcome is reported, and a key it could not delete stays
-    /// pending.
+    /// devices, records it for them, then deletes the old key and reads it
+    /// gone. The member's own key, or another member's as an admin. The
+    /// returned key is for the person to keep; the old key's deletion outcome
+    /// is reported, and a key it could not delete stays pending.
     pub async fn replace_member_access_key(
         &self,
         member: &MemberId,
         admin: Arc<dyn AccessKeyAdmin>,
     ) -> Result<AccessKeyReplacement, SyncError> {
-        self.operations
-            .replace_member_access_key(member, admin)
-            .await
+        self.storage.replace_member_access_key(*member, admin).await
     }
     /// Resumes work waiting with `AdminAccessRequired`, holding this admin
     /// access for that operation only (§4).
@@ -258,33 +249,23 @@ impl CovenHandle {
         operation: OperationId,
         admin: Arc<dyn AccessKeyAdmin>,
     ) -> Result<(), OperationError> {
-        self.operations
-            .retry_with_admin_access(operation, admin)
-            .await
+        self.storage.retry_with_admin_access(operation, admin).await
     }
     /// Reload this device from snapshots, retaining and replaying its waiting writes (§19.2).
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError> {
-        self.operations.reload_from_snapshot().await
+        self.storage.reload_from_snapshot().await
     }
     /// Reset the store audience from this device as an admin, then reload locally (§19.3).
     pub async fn reset_store(&self) -> Result<(), SyncError> {
-        self.operations.reset_store().await
+        self.storage.reset(Audience::Store).await
     }
-    /// Retry a permanently failed operation from its next unfinished step.
-    /// A new entry attempt catches up and validates against replay again;
-    /// an already reserved entry retains its original bytes.
+    /// Make an operation's retry or undo due now, from its recorded progress.
+    /// It cannot resurrect an invalidated action or bypass provider cooldown.
     pub async fn retry_pending_operation(
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
-        self.operations.retry_pending_operation(operation).await
-    }
-    /// Abandon a failed operation after publishing any reserved entry.
-    pub async fn discard_pending_operation(
-        &self,
-        operation: OperationId,
-    ) -> Result<(), OperationError> {
-        self.operations.discard_pending_operation(operation).await
+        self.storage.retry_pending_operation(operation).await
     }
     /// Fixes a fresh member id or an existing active replacement target, as
     /// an admin, then shares access and creates an invitation expiring after a
@@ -294,28 +275,27 @@ impl CovenHandle {
         target: InviteTarget,
         access: InviteAccess,
     ) -> Result<Invite, SyncError> {
-        self.storage.prepare_invite().await?;
-        self.operations.create_invite(target, access).await
+        self.storage.create_invite(target, access).await
     }
     /// Checked join requests, starting with the current list.
     pub fn subscribe_join_requests(&self) -> tokio::sync::watch::Receiver<Vec<JoinRequest>> {
-        self.operations.subscribe_join_requests()
+        self.storage.subscribe_join_requests()
     }
     /// Approve the exact request shown by the subscription.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        self.operations.approve_join_request(request).await
+        self.storage.approve_join_request(request).await
     }
     /// Decline a request and revoke its invitation's access.
     pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        self.operations.decline_join_request(request).await
+        self.storage.decline_join_request(request).await
     }
     /// Cancel an unsettled invitation and revoke its access.
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
-        self.operations.cancel_invite(invite).await
+        self.storage.cancel_invite(*invite).await
     }
     /// Circle calls borrowing this store's operation owner.
     pub fn circles(&self) -> Circles<'_> {
-        Circles::new(&self.operations, &self.database)
+        Circles::new(&self.storage, &self.database)
     }
 
     /// Runs one write.
@@ -473,10 +453,7 @@ impl CovenHandle {
         self.closing.begin_close();
         let handle = self.clone();
         crate::coven::completion(tokio::spawn(async move {
-            handle.storage.close().await;
-            let sync = handle.sync.close().await;
-            handle.codes.close().await;
-            let operations = handle.operations.close().await;
+            let storage = handle.storage.close().await;
             handle.files.close().await;
             let custody = handle.custody.clone();
             crate::coven::blocking(move || {
@@ -486,14 +463,14 @@ impl CovenHandle {
             })
             .await;
             let database = handle.database.close().await;
-            // Closing a worker can fail while releasing its provider. Finish
-            // closing every owner and erase custody before reporting failures.
-            let workers = [sync, operations].into_iter().map(|result| match result {
+            // Closing the connection can fail while releasing its provider.
+            // Finish closing every owner and erase custody before reporting.
+            let storage = match storage {
                 Err(SyncError::Database(DbError::StoreClosed)) => Ok(()),
                 result => result,
-            });
-            workers
-                .chain([database.map_err(SyncError::from)])
+            };
+            [storage, database.map_err(SyncError::from)]
+                .into_iter()
                 .filter_map(Result::err)
                 .reduce(|operation, cleanup| SyncError::Cleanup {
                     operation: Box::new(operation),
@@ -502,6 +479,16 @@ impl CovenHandle {
                 .map_or(Ok(()), Err)
         }))
         .await
+    }
+    /// The last slot this installation applied.
+    #[cfg(test)]
+    pub(crate) async fn applied_slot(&self) -> u64 {
+        self.database.applied_slot().await.unwrap()
+    }
+    /// Membership, keys and audience state as this installation applied them.
+    #[cfg(test)]
+    pub(crate) async fn store_state(&self) -> coven_database::StoreState {
+        self.database.store_state().await.unwrap()
     }
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(any(test, feature = "test-utils"))]

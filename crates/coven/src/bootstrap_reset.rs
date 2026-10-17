@@ -62,20 +62,23 @@ pub(crate) async fn reset_device(
     builder.keys = KeyCustody::Custom(keys.clone());
     // Unlocking must succeed; loading acquires any store key it lacks.
     KeySession::store(keys)?;
-    // The connection is reached before the damaged files move.
-    let probe = Arc::new(coven_sync::SendGate::new(builder.clock.clone()));
+    // The connection is reached before the damaged files move: one status
+    // read of slot 1, which publishes nothing.
     builder
         .connector()
         .connect(
             data.location.clone(),
             super::provider_auth(&data, sign_in.as_ref())?,
-            probe,
+            Arc::new(crate::storage::NoPublications),
             // The damaged database cannot hold a cooldown for this one probe.
             Arc::new(coven_storage::NoCooldown),
         )
         .await
         .map_err(SyncError::from)?
-        .list_writers(store)
+        .status(&coven_storage::ObjectPath::slot(
+            store,
+            std::num::NonZeroU64::MIN,
+        ))
         .await
         .map_err(SyncError::from)?;
     if recorded.is_none() {
@@ -190,8 +193,7 @@ async fn reset_unconnected(
             .map_err(CovenError::from)?,
     );
     let owners = builder.owners(directory, keychain)?;
-    let sync = owners.sync(database.clone(), waits.clone());
-    Ok(owners.handle(database, sync, waits))
+    Ok(owners.handle(database, waits).await?)
 }
 
 #[cfg(test)]

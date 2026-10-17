@@ -458,7 +458,6 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven/src/builder.rs", "CovenBuilder", "owners"),
         ("crates/coven/src/builder.rs", "OpeningOwners", "handle"),
-        ("crates/coven/src/builder.rs", "OpeningOwners", "sync"),
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
         ("crates/coven/src/coven.rs", "<free>", "blocking"),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
@@ -486,6 +485,17 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven/src/storage.rs", "StorageConnections", "call"),
         ("crates/coven/src/storage.rs", "StorageConnections", "new"),
+        // Setup, unlocking, starting and loading compose a connection's
+        // sequence owner, loop and credential owner at runtime.
+        (
+            "crates/coven/src/storage.rs",
+            "StorageConnections",
+            "attach",
+        ),
+        // A started loop's connection attempts outlive the start call; close
+        // stops and awaits them. Stopping releases the client after the pass.
+        ("crates/coven/src/storage.rs", "StorageConnections", "start"),
+        ("crates/coven/src/storage.rs", "StorageConnections", "stop"),
         ("crates/coven/src/test_utils.rs", "TestCoven", "builder"),
         (
             "crates/coven/src/test_utils.rs",

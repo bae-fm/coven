@@ -4,7 +4,7 @@ use super::*;
 
 /// An OAuth store commits `sign_in`'s current tokens, which then refresh in
 /// the handle's device custody; a rollback holds them in the session again.
-pub(super) fn publish_bootstrap(
+pub(super) async fn publish_bootstrap(
     pending: &BootstrapStore,
     code: RestoreCode,
     credentials: StorageCredentials,
@@ -96,8 +96,10 @@ pub(super) fn publish_bootstrap(
             return Err(error);
         }
     };
-    let sync = owners.sync(database.clone(), waits.clone());
-    let handle = owners.handle(database, sync, waits);
+    let handle = owners
+        .handle(database, waits)
+        .await
+        .map_err(BootstrapError::from)?;
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)
         .remove()

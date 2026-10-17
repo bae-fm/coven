@@ -2,8 +2,8 @@
 //!
 //! Declare tables and migrations on [`Coven::builder`], then create or open
 //! the store. SQL, files, keys and their capabilities remain with the
-//! crates that own them. Opening resumes unfinished operations and committed
-//! file work without starting a sync loop; an empty journal needs no unlocked keys.
+//! crates that own them. Opening resumes committed file work without starting
+//! a sync loop; unfinished operations resume once storage connects.
 
 mod builder;
 mod coven;
@@ -45,10 +45,8 @@ pub use coven_database::{
     RowChange, RowIdentity, RowKey, SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql,
     UnsentWork, UserFile, WriteBatch, WriteId,
 };
-pub use coven_database::{DropReason, EntryTarget};
-pub use coven_database::{LogObject, LogRefusal};
-pub use coven_format::pending::RefusalCode;
-pub use coven_format::value::EntryId;
+/// An admin entry is identified by the slot containing it (§9).
+pub type EntryId = Slot;
 pub use coven_format::{IamPolicy, MemberAccess, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
@@ -62,7 +60,7 @@ pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,
 };
 pub use coven_foundation::uuid_text::UuidText;
-pub use coven_merge::{Audience, MergeError};
+pub use coven_merge::{Audience, MergeError, Slot};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub use coven_storage::providers::DesktopDeviceSignIn;
 pub use coven_storage::providers::{AdminAccessSource, DeviceSignInPresenter};
@@ -87,15 +85,15 @@ pub use test_utils::TestCoven;
 
 mod circles;
 pub use circles::Circles;
-pub use coven_format::store_log::{MemberRole, SnapshotId};
+pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
     AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject,
-    DeviceIdEvidence, DeviceInfo, DeviceState, FileMissingReason, FileSourceFailure, Invite,
-    InviteAccess, InviteTarget, JoinRequest, LocalFailure, MemberInfo, OldKeyDeletion,
-    OperationError, OperationId, OperationKind, PendingReason, PendingRecord, PendingSubject,
-    Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError, SyncFailure,
-    SyncStatus,
+    DeviceIdEvidence, DeviceInfo, DeviceState, EntryTarget, FileMissingReason, FileSourceFailure,
+    Invite, InviteAccess, InviteTarget, JoinRequest, LocalFailure, MemberInfo, OldKeyDeletion,
+    OperationError, OperationId, OperationKind, OperationRejection, PendingReason, PendingRecord,
+    PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError,
+    SyncFailure, SyncStatus, WriteCutoff,
 };
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

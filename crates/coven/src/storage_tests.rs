@@ -300,11 +300,7 @@ async fn disconnect_waits_for_the_active_pass_and_custody_failure_keeps_sync_run
     let (entered, entering) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(
-            ObjectPrefix::device_logs(f.directory.id()),
-            entered,
-            resumed,
-        )
+        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
         .await;
     f.handle.sync_now();
     entering.await.unwrap();
@@ -383,14 +379,7 @@ async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
         |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= written),
     )
     .await;
-    assert_eq!(
-        f.storage
-            .list(&ObjectPrefix::device_logs(f.directory.id()))
-            .await
-            .unwrap()
-            .len(),
-        1
-    );
+    assert!(f.handle.test_queued_writes().await.unwrap().is_empty());
     f.handle.close().await.unwrap();
 }
 
@@ -501,7 +490,7 @@ async fn reconnecting_without_network_is_offline_and_stop_and_close_finish_the_a
         let (listed, listing) = tokio::sync::oneshot::channel();
         let (resume, resumed) = tokio::sync::oneshot::channel();
         f.storage
-            .hold_next_listing(ObjectPrefix::device_logs(f.directory.id()), listed, resumed)
+            .hold_next_read(ObjectPath::floor(f.directory.id()), listed, resumed)
             .await;
         f.handle.sync_now();
         listing.await.unwrap();
@@ -690,7 +679,7 @@ async fn forgetting_keys_finishes_the_active_pass_before_removing_custody() {
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
     f.storage
-        .hold_next_listing(ObjectPrefix::device_logs(f.directory.id()), listed, resumed)
+        .hold_next_read(ObjectPath::floor(f.directory.id()), listed, resumed)
         .await;
     f.handle.sync_now();
     listing.await.unwrap();

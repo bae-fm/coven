@@ -11,14 +11,18 @@ use coven_storage::{
 };
 use std::time::Duration;
 
-/// Each pass lists positions exactly once (SP step 3).
+/// Each pass reads forward to a missing slot, then reads the floor (SP
+/// steps 1-2). A claim's own floor read follows its create instead.
 fn passes(device: &crate::tests::Device) -> usize {
-    let positions = ObjectPrefix::positions(device.store);
+    let floor = coven_storage::ObjectPath::floor(device.store);
     device
         .storage
         .request_trace()
-        .iter()
-        .filter(|request| matches!(request, MemoryRequest::List(prefix) if *prefix == positions))
+        .windows(2)
+        .filter(|pair| {
+            matches!(&pair[0], MemoryRequest::Read(path, None) if path.slot_number().is_some())
+                && matches!(&pair[1], MemoryRequest::Read(path, None) if *path == floor)
+        })
         .count()
 }
 
@@ -33,25 +37,10 @@ async fn insert(handle: &CovenHandle, id: &str) {
         .unwrap();
 }
 
-/// The newest write number in storage. Writes are numbered in order and
-/// retention deletes only covered ones, so this counts uploads even after
-/// earlier writes went (§15).
-async fn stored_writes(device: &crate::tests::Device) -> usize {
-    device
-        .storage
-        .list(&ObjectPrefix::device_logs(device.store))
-        .await
-        .unwrap()
-        .iter()
-        .filter_map(|object| object.path.write_id())
-        .map(|id| id.number as usize)
-        .max()
-        .unwrap_or(0)
-}
-
-async fn wait_for_writes(device: &crate::tests::Device, count: usize) {
+/// Wait until every queued write has a landed slot.
+async fn wait_for_sent(device: &crate::tests::Device) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while stored_writes(device).await < count {
+        while !device.handle.test_queued_writes().await.unwrap().is_empty() {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
@@ -59,45 +48,26 @@ async fn wait_for_writes(device: &crate::tests::Device, count: usize) {
     .unwrap();
 }
 
-/// A requested snapshot's own catch-up samples storage time by replacing this
-/// device's clock object first (§15). It lists positions, but it is no pass.
-fn snapshot_catch_ups(device: &crate::tests::Device) -> usize {
-    let clock = format!("{}/clock/", device.store);
-    device
-        .storage
-        .request_trace()
-        .iter()
-        .filter(|request| {
-            matches!(request, MemoryRequest::Replace(path) if path.as_str().starts_with(&clock))
-        })
-        .count()
-}
-
 #[tokio::test]
 async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
-    let writes = stored_writes(device).await;
-    let before = passes(device) - snapshot_catch_ups(device);
+    let before = passes(device);
     let (started, held) = tokio::sync::oneshot::channel();
     let (resume, holding) = tokio::sync::oneshot::channel();
     device
         .storage
-        .hold_next_creation(ObjectPrefix::device_logs(device.store), started, holding)
+        .hold_next_creation(ObjectPrefix::all(device.store), started, holding)
         .await;
     insert(&device.handle, "first").await;
     held.await.unwrap();
-    // Two writes commit while the pass is uploading the first.
+    // Two writes commit while the pass is claiming a slot for the first.
     insert(&device.handle, "second").await;
     insert(&device.handle, "third").await;
     resume.send(()).unwrap();
-    wait_for_writes(device, writes + 3).await;
-    // The first pass may send all three writes; the racing writes still
-    // retain one more pass, which publishes `Syncing` before it lists
-    // positions. Once it has listed them, the next `Synced` is its own.
-    // A catch-up replaces the clock before it lists positions, so the count
-    // can dip below `before` for a moment.
-    let counted = || (passes(device) - snapshot_catch_ups(device)).saturating_sub(before);
+    wait_for_sent(device).await;
+    // The racing writes retain one more pass, which claims their slot.
+    let counted = || passes(device).saturating_sub(before);
     tokio::time::timeout(Duration::from_secs(10), async {
         while counted() < 2 {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -113,8 +83,8 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     .await
     .unwrap()
     .unwrap();
-    // Retiring uploaded rows and posting positions schedule nothing more:
-    // no third pass follows the retained one.
+    // Applying its own slots schedules nothing more: no third pass follows
+    // the retained one.
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(counted(), 2);
     network.close().await;
@@ -124,7 +94,6 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
 async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     let network = Network::new(1).await;
     let device = &network.devices[0];
-    let writes = stored_writes(device).await;
     let mut status = device.handle.subscribe_sync_status();
     device.handle.stop_sync();
     tokio::time::timeout(
@@ -140,7 +109,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(passes(device), before);
     device.handle.start_sync().await.unwrap();
-    wait_for_writes(device, writes + 1).await;
+    wait_for_sent(device).await;
     assert_eq!(passes(device) - before, 1);
     // Closing ends the loop: a write committed after stopping is not sent.
     status.borrow_and_update();
@@ -286,7 +255,6 @@ async fn stored(device: &crate::tests::Device, id: &str) -> bool {
 async fn a_held_file_upload_delays_no_pass_and_its_completion_schedules_none() {
     let network = file_network().await;
     let device = &network.devices[0];
-    let writes = stored_writes(device).await;
     let creates = file_creates(device);
     let (started, held) = tokio::sync::oneshot::channel();
     let (resume, holding) = tokio::sync::oneshot::channel();
@@ -296,24 +264,10 @@ async fn a_held_file_upload_delays_no_pass_and_its_completion_schedules_none() {
         .await;
     attach(&device.handle, "photo", vec![7; 2048]).await;
     held.await.unwrap();
-    // A later write uploads and positions post while the file's create waits.
-    let posted = |device: &crate::tests::Device| {
-        let positions = ObjectPrefix::positions(device.store);
-        device
-            .storage
-            .request_trace()
-            .iter()
-            .filter(|request| matches!(request, MemoryRequest::Replace(path) if positions.contains(path)))
-            .count()
-    };
-    let before = posted(device);
+    // A later write claims its slot while the file's create waits.
     insert(&device.handle, "later").await;
     network.sync(0).await;
-    wait_for_writes(device, writes + 2).await;
-    assert!(
-        posted(device) > before,
-        "positions waited for the file upload"
-    );
+    wait_for_sent(device).await;
     assert_eq!(file_creates(device), creates + 1, "a pass sent file bytes");
     assert!(!stored(device, "photo").await);
     resume.send(()).unwrap();
@@ -438,7 +392,6 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     })
     .await
     .unwrap();
-    let writes = stored_writes(device).await;
     let mut status = device.handle.subscribe_sync_status();
     status.borrow_and_update();
     insert(&device.handle, "the rest").await;
@@ -457,7 +410,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
         "{:?}",
         &*status.borrow()
     );
-    assert_eq!(stored_writes(device).await, writes + 1);
+    wait_for_sent(device).await;
     assert!(refused(&device.handle.pending().await.unwrap()));
     device.storage.set_faults(Faults::none()).await;
     wait_for_empty_queue(&device.handle).await;
@@ -475,19 +428,13 @@ async fn refuse_rotation(
     let owner = &network.devices[0];
     network.devices[1].handle.stop_sync();
     let members = owner.handle.members().await.unwrap();
-    let me = members.iter().find(|m| m.is_self).unwrap();
     let removed = members.iter().find(|m| !m.is_self).unwrap().id;
-    let own = owner
-        .storage
-        .list(&ObjectPrefix::store_log(owner.store, me.devices[0].id))
-        .await
-        .unwrap()
-        .len() as u64;
-    // The removal is the next entry; the rotation it requires follows.
-    let rotation = coven_storage::ObjectPath::store_log(
+    network.sync(0).await;
+    // The removal claims the next slot; the store-key copy of the rotation
+    // it requires follows.
+    let rotation = coven_storage::ObjectPath::slot(
         owner.store,
-        me.devices[0].id,
-        std::num::NonZeroU64::new(own + 2).unwrap(),
+        (owner.handle.applied_slot().await + 2).try_into().unwrap(),
     );
     let mut faults = Faults::none();
     faults
@@ -634,7 +581,7 @@ async fn each_attempt_is_offline_or_failed_by_whether_storage_answered() {
     let outage = attempt(device, |s| matches!(s, SyncStatus::Failed { .. })).await;
     assert_eq!(outage.failure(), StorageFailure::Network);
     assert!(outage.answered());
-    // A denied store listing fails the pass too.
+    // A denied read fails the pass too.
     device
         .storage
         .set_faults(Faults {
@@ -674,13 +621,18 @@ async fn a_pass_losing_the_network_after_reaching_storage_is_offline() {
     let device = &network.devices[0];
     let (listed, listing) = tokio::sync::oneshot::channel();
     let (resume, resumed) = tokio::sync::oneshot::channel();
+    // The pass reads the floor, then claims a slot for this write.
     device
         .storage
-        .hold_next_listing(ObjectPrefix::device_logs(device.store), listed, resumed)
+        .hold_next_read(
+            coven_storage::ObjectPath::floor(device.store),
+            listed,
+            resumed,
+        )
         .await;
     let mut status = device.handle.subscribe_sync_status();
     status.borrow_and_update();
-    device.handle.sync_now();
+    insert(&device.handle, "offline").await;
     listing.await.unwrap();
     device.storage.set_online(false);
     resume.send(()).unwrap();

@@ -32,14 +32,14 @@ impl StorageConnections {
                 // bucket, the bucket must hold nothing but this store (§4).
                 owner
                     .connector
-                    .check_new_s3_store(config.clone(), credentials.clone(), owner.store)
+                    .check_new_s3_store(config.clone(), credentials.clone(), owner.store())
                     .await?;
             }
             // §4's safety check: the effective settings must agree with what
             // the service does, before the provider check and any commitment.
             let detection = owner
                 .connector
-                .detect_s3(config.clone(), credentials.clone(), owner.store)
+                .detect_s3(config.clone(), credentials.clone(), owner.store())
                 .await?;
             let config = detection.resolve(config)?;
             owner
@@ -69,7 +69,7 @@ impl StorageConnections {
         self.call(move |owner| async move {
             Ok(owner
                 .connector
-                .detect_s3(storage, credentials, owner.store)
+                .detect_s3(storage, credentials, owner.store())
                 .await?)
         })
         .await

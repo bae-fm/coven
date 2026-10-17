@@ -9,7 +9,7 @@ use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
 use coven_storage::{
     ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };
-use coven_sync::StoreLogSync;
+use coven_sync::SequenceSync;
 use std::sync::Arc;
 use tokio::sync::watch;
 
@@ -89,8 +89,8 @@ pub enum BootstrapStatus {
     Connecting,
     /// The join request waits for an admin's approval.
     WaitingForApproval,
-    /// Loading the store log, snapshots and later writes, then keeping keys
-    /// and credentials.
+    /// Loading the floor's snapshots and the slots after them, then keeping
+    /// keys and credentials.
     Loading,
     /// The join waits on these first unmet conditions, the records
     /// `pending()` returns once the store is open (§19.1).
@@ -250,31 +250,39 @@ async fn bootstrap_device(
             ring,
             database,
             storage,
-            send,
+            state,
+            publications,
             waits,
         })) => {
             status(BootstrapStatus::Loading);
-            let result = check_cancel(cancel).and_then(|()| {
+            let result = match check_cancel(cancel).and_then(|()| {
                 builder.authentication.take();
                 let mut owners = builder.owners(
                     pending.directory(),
                     Arc::new(StoreKeychain::new(keychain, id)),
                 )?;
-                send.invalidate();
-                owners.send = send;
+                owners.state = state;
+                owners.publications = publications;
                 owners.storage = Some(storage);
-                // No await separates final custody, publication and the handle.
-                commit::publish_bootstrap(
-                    &pending,
-                    code,
-                    credentials,
-                    sign_in,
-                    ring,
-                    owners,
-                    database.clone(),
-                    waits,
-                )
-            });
+                Ok(owners)
+            }) {
+                // No cancellable await separates final custody, publication
+                // and the handle.
+                Ok(owners) => {
+                    commit::publish_bootstrap(
+                        &pending,
+                        code,
+                        credentials,
+                        sign_in,
+                        ring,
+                        owners,
+                        database.clone(),
+                        waits,
+                    )
+                    .await
+                }
+                Err(error) => Err(error),
+            };
             match result {
                 Ok(handle) => Ok(Some(handle)),
                 Err(error @ BootstrapError::Published { .. }) => Err(error),
@@ -314,7 +322,9 @@ struct Loaded {
     ring: StoreKeyring,
     database: Database,
     storage: Arc<coven_storage::StorageConnection>,
-    send: Arc<coven_sync::SendGate>,
+    /// The sync state the handle continues, and the connection's gate around it.
+    state: Arc<coven_sync::SyncState>,
+    publications: Arc<crate::storage::Publications>,
     waits: Arc<coven_sync::RetryWaits>,
 }
 
@@ -352,7 +362,8 @@ async fn prepare_and_load(
     };
     check_cancel(cancel)?;
     let settings = directory.settings().map_err(CovenError::from)?;
-    let send = Arc::new(coven_sync::SendGate::new(builder.clock.clone()));
+    let state = Arc::new(coven_sync::SyncState::new());
+    let publications = Arc::new(crate::storage::Publications::new(state.clone()));
     let ring = Arc::new(KeySession::store(Arc::new(
         InMemoryCustody::<StoreKeyring>::empty(),
     ))?);
@@ -375,15 +386,46 @@ async fn prepare_and_load(
             .connect(
                 data.location.clone(),
                 provider_auth(&data, sign_in.as_ref())?,
-                send.clone(),
+                publications.clone(),
                 waits.clone(),
             )
             .await
             .map_err(SyncError::from)?;
-        Ok::<_, BootstrapError>((waits, storage))
+        // The loading owner's transfers end with loading; the handle's start
+        // with the handle.
+        let files = coven_sync::Files::new(
+            coven_database::FileDatabase::new(database.clone()),
+            directory.clone(),
+            None,
+            state.clone(),
+            waits.clone(),
+            builder.ids.clone(),
+            builder.limits,
+        );
+        let sync = SequenceSync::open(
+            database.clone(),
+            storage.clone(),
+            directory.clone(),
+            settings.device_id,
+            ring.clone(),
+            identity,
+            state.clone(),
+            builder.clock.clone(),
+            builder.ids.clone(),
+            waits.clone(),
+            files.clone(),
+        )
+        .await;
+        match sync {
+            Ok(sync) => Ok::<_, BootstrapError>((waits, storage, files, Arc::new(sync))),
+            Err(error) => {
+                files.close().await;
+                Err(error.into())
+            }
+        }
     }
     .await;
-    let (waits, storage) = match connected {
+    let (waits, storage, files, sync) = match connected {
         Ok(connected) => connected,
         Err(error) => {
             return combine(
@@ -396,46 +438,27 @@ async fn prepare_and_load(
             )
         }
     };
-    let mut writes = coven_sync::DeviceLogSync::new(
-        storage.clone(),
-        database.clone(),
-        ring.clone(),
-        identity.clone(),
-        builder.clock.clone(),
-        send.clone(),
-    );
-    let mut sync = StoreLogSync::new(
-        storage.clone(),
-        database.clone(),
-        ring.clone(),
-        identity,
-        builder.clock.clone(),
-        send.clone(),
-        builder.ids.clone(),
-        directory,
-        waits.clone(),
-        // The loading owner runs no operation; the opened store's owner
-        // refreshes the restore code its custody keeps.
-        coven_sync::RestoreCodeCustody::Unkept,
-    );
     let loading = async {
         if let Admission::Joining(joining) = &mut admission {
-            if !joining.admit(&mut sync, &database, status).await? {
+            if !joining.admit(&sync, &database, status).await? {
                 return Ok(false);
             }
-            status(BootstrapStatus::Loading);
-        } else {
-            status(BootstrapStatus::Loading);
-            if !sync
-                .bootstrap_member(coven_sync::BindingSource::Restore)
-                .await?
-            {
-                return Err(SyncError::Rejected(coven_database::DropReason::NotAllowed).into());
-            }
         }
-        sync.load_new_device(device_name, reset.map(|reset| reset.old_device))
-            .await?;
-        sync.download_later_writes(&mut writes).await?;
+        status(BootstrapStatus::Loading);
+        // Reading forward opens this member's copies and loads the floor's
+        // snapshots and the slots after them; an interrupted bootstrap's
+        // registration is already applied.
+        sync.unlock().await?;
+        let registered = database
+            .store_state()
+            .await?
+            .devices
+            .get(&settings.device_id)
+            .is_some_and(|device| device.member == member.member());
+        if !registered {
+            sync.register_device(device_name.into(), reset.map(|reset| reset.old_device))
+                .await?;
+        }
         // The notice commits before any handle is published (E5).
         if let Some(reset) = reset {
             reset::carry_discarded_keys(&database, pending, &reset).await?;
@@ -452,6 +475,7 @@ async fn prepare_and_load(
         _ = cancelled(&mut cancellation) => Err(BootstrapError::Cancelled),
         result = loading => result,
     };
+    files.close().await;
     drop(sync);
     let result = result.and_then(|loaded| {
         if !loaded {
@@ -480,7 +504,8 @@ async fn prepare_and_load(
             ring,
             database,
             storage,
-            send,
+            state,
+            publications,
             waits,
         })),
         result => {

@@ -405,7 +405,7 @@ async fn disconnected_member_and_circle_reads_match_their_subscriptions() {
 #[tokio::test]
 async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
     tokio::time::timeout(std::time::Duration::from_secs(10), async {
-        use coven_storage::{test_utils::MemoryStorage, Storage, StorageSettings};
+        use coven_storage::{test_utils::MemoryStorage, StorageSettings};
         let root = tempfile::tempdir().unwrap();
         let layout = StoreLayout::new(root.path().to_owned());
         let app = TestCoven::new();
@@ -436,7 +436,8 @@ async fn closing_waits_for_setup_after_its_caller_is_cancelled() {
         resume.send(()).unwrap();
         close.await.unwrap();
         assert_eq!(StorageSettings::new(directory.clone()).read().unwrap(), Some(config));
-        assert_eq!(storage.list(&ObjectPrefix::store_logs(directory.id())).await.unwrap().len(), 1);
+        // Creation claimed slot 1 and the creator's key copy at slot 2.
+        assert_eq!(crate::tests::stored(&storage, directory.id(), |path| path.slot_number().is_some()).await.len(), 2);
         assert!(matches!(handle.store_key_state(), Err(KeyError::StoreClosed)));
     }).await.expect("cancelled setup finishes before close");
 }
@@ -582,117 +583,40 @@ async fn migration_failure_precedes_custody_unlock() {
 }
 
 #[tokio::test]
-async fn stop_and_close_preserve_release_failures_and_erase_custody() {
-    use std::{
-        future::Future,
-        pin::Pin,
-        time::{Duration, SystemTime},
-    };
-
-    struct HeldClock;
-    impl Clock for HeldClock {
-        fn now(&self) -> SystemTime {
-            SystemTime::UNIX_EPOCH + Duration::from_secs(1_000)
-        }
-        fn elapsed(&self) -> Duration {
-            Duration::ZERO
-        }
-        fn sleep(&self, _: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
-            Box::pin(std::future::pending())
-        }
-    }
-
-    for stop_first in [false, true] {
-        let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().into());
-        let app = TestCoven::new();
-        let ids = Arc::new(UuidIds);
-        let keys = Arc::new(Keys {
-            keys: Mutex::new(Some(StoreKeyring::new(
-                StoreKey::generate(KeyId(ids.new_id())).unwrap(),
-            ))),
-            ..Keys::default()
-        });
-        let identity = Arc::new(Identity::default());
-        let handle = builder(&app, layout.clone())
-            .clock(Arc::new(HeldClock))
-            .key_custody(KeyCustody::Custom(keys.clone()))
-            .identity_custody(IdentityCustody::Custom(identity.clone()))
-            .create_store("session")
-            .await
-            .unwrap();
-
-        handle.pending().await.unwrap();
-        // Hold timer-driven work so stopping or closing encounters the damaged row.
-        handle
-            .database
-            .start_operation(coven_database::NewOperation {
-                kind: "create-circle".into(),
-                data: b"malformed operation".to_vec(),
-                started_by: "create_circle".into(),
-                pauses_writes: false,
-            })
-            .await
-            .unwrap();
-        let clone = handle.clone();
-        // The operation worker stops on its journal and every waiter, here the
-        // sync loop releasing its provider, shares that one undecodable row.
-        let stopped = if stop_first {
-            let mut status = handle.subscribe_sync_status();
-            handle.stop_sync();
-            tokio::time::timeout(
-                Duration::from_secs(10),
-                status.wait_for(|s| matches!(s, SyncStatus::Failed { .. })),
-            )
-            .await
-            .unwrap()
-            .unwrap();
-            let latest = handle.subscribe_sync_status();
-            let source = match &*latest.borrow() {
-                SyncStatus::Failed {
-                    error: SyncFailure::Other(source),
-                } => source.clone(),
-                _ => panic!("release failure stays visible to new subscribers"),
-            };
-            assert!(matches!(
-                source.downcast_ref(),
-                Some(SyncError::OperationData(_))
-            ));
-            assert!(handle
-                .database
-                .pending::<PendingRecord>()
-                .await
-                .unwrap()
-                .iter()
-                .all(|record| !matches!(record.subject, PendingSubject::Connection)));
-            Some(source)
-        } else {
-            None
-        };
-        let error = handle.close().await.unwrap_err();
-        let SyncError::Failed {
-            failure: LocalFailure::Operation,
-            source,
-        } = &error
-        else {
-            panic!("{error:?}")
-        };
-        assert!(
-            matches!(source.downcast_ref(), Some(SyncError::OperationData(_))),
-            "{source:?}"
-        );
-        if let Some(stopped) = stopped {
-            assert!(Arc::ptr_eq(&stopped, source));
-        }
-        assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
-        assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
-        assert!(keys.keys.lock().unwrap().is_none());
-        assert!(identity.keys.lock().unwrap().is_none());
-        assert!(matches!(
-            clone.read(|_| Ok(())).await,
-            Err(CovenError::Database(DbError::StoreClosed))
-        ));
-    }
+async fn closing_erases_custody_once_and_fails_later_calls_on_every_clone() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let ids = Arc::new(UuidIds);
+    let keys = Arc::new(Keys {
+        keys: Mutex::new(Some(StoreKeyring::new(
+            StoreKey::generate(KeyId(ids.new_id())).unwrap(),
+        ))),
+        ..Keys::default()
+    });
+    let identity = Arc::new(Identity::default());
+    let handle = builder(&app, layout.clone())
+        .key_custody(KeyCustody::Custom(keys.clone()))
+        .identity_custody(IdentityCustody::Custom(identity.clone()))
+        .create_store("session")
+        .await
+        .unwrap();
+    let clone = handle.clone();
+    // Without storage there is no loop to stop; stopping changes nothing.
+    handle.stop_sync();
+    handle.close().await.unwrap();
+    assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
+    assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
+    assert!(keys.keys.lock().unwrap().is_none());
+    assert!(identity.keys.lock().unwrap().is_none());
+    assert!(matches!(
+        clone.read(|_| Ok(())).await,
+        Err(CovenError::Database(DbError::StoreClosed))
+    ));
+    assert!(matches!(
+        clone.store_key_state(),
+        Err(KeyError::StoreClosed)
+    ));
 }
 
 #[test]
@@ -727,19 +651,23 @@ fn retry(reason: PendingReason) -> Retry {
 }
 
 #[test]
-fn missing_prerequisites_and_replaceable_positions_retry_automatically() {
+fn missing_prerequisites_retry_automatically() {
     let device = DeviceId(1);
-    let path = ObjectPath::clock(coven_storage::test_utils::STORE_ID, device);
+    let path = ObjectPath::floor(coven_storage::test_utils::STORE_ID);
     for prerequisite in [
+        Prerequisite::SequenceCatchUp,
         Prerequisite::Object(path.clone()),
         Prerequisite::DeviceRegistration(device),
-        Prerequisite::SchemaPublication {
+        Prerequisite::SchemaRaise {
             audience: Audience::Store,
             version: 2,
         },
         Prerequisite::Reload(Audience::Store),
-        Prerequisite::Positions(device),
-        Prerequisite::EntryFinality(EntryId { device, number: 1 }),
+        Prerequisite::Snapshot(SnapshotId {
+            audience: Audience::Store,
+            device,
+            number: 1,
+        }),
     ] {
         assert_eq!(retry(PendingReason::Waits(prerequisite)), Retry::Automatic);
     }
@@ -763,7 +691,6 @@ fn missing_prerequisites_and_replaceable_positions_retry_automatically() {
         PendingReason::AccountInUse {
             account: "shared@example.org".into(),
         },
-        PendingReason::InvalidPositions(Refusal::Signature { cause: None }),
     ] {
         assert_eq!(retry(reason.clone()), Retry::Automatic, "{reason:?}");
     }
@@ -876,75 +803,57 @@ fn local_and_access_failures_require_app_action() {
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Missing)),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed)),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Integrity)),
-        PendingReason::Disagrees,
         PendingReason::Failed(LocalFailure::Database),
         PendingReason::Failed(LocalFailure::Disk),
         PendingReason::Failed(LocalFailure::KeyCustody),
         PendingReason::Failed(LocalFailure::Crypto),
         PendingReason::Failed(LocalFailure::Operation),
         PendingReason::Paused,
-        // Sending needs the member's current keys: restore with them (§10).
-        PendingReason::MemberKeysReplaced {
-            member: MemberId(uuid::Uuid::from_u128(3)),
-        },
     ] {
         assert_eq!(retry(reason.clone()), Retry::AppAction, "{reason:?}");
     }
     assert_eq!(retry(PendingReason::Removed), Retry::Never);
+    // This installation never sends again with a retired pair; restoring
+    // with the current keys is a new installation (§10).
+    assert_eq!(
+        retry(PendingReason::MemberKeysReplaced {
+            member: MemberId(uuid::Uuid::from_u128(3)),
+        }),
+        Retry::Never
+    );
 }
 
 #[test]
-fn replay_drops_are_final_for_logs_and_retried_for_operations() {
-    for (subject, expected) in [
-        (
-            PendingSubject::Write(WriteId {
-                device: DeviceId(1),
-                number: 2,
-            }),
-            Retry::Never,
-        ),
-        (
-            PendingSubject::Entry(EntryId {
-                device: DeviceId(1),
-                number: 2,
-            }),
-            Retry::Never,
-        ),
-        (
-            PendingSubject::Operation {
-                id: OperationId(3),
-                kind: OperationKind::CreateCircle,
-            },
-            Retry::AppAction,
-        ),
-        // Coven's own operation retries itself (§18).
-        (
-            PendingSubject::Operation {
-                id: OperationId(4),
-                kind: OperationKind::RotateKey,
-            },
-            Retry::Automatic,
-        ),
+fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
+    for cause in [
+        WriteCutoff::DeviceRemoved,
+        WriteCutoff::MemberRemoved,
+        WriteCutoff::MemberKeysReplaced,
     ] {
-        for reason in [
-            DropReason::LandedTooLate,
-            DropReason::BeatenBy(EntryId {
-                device: DeviceId(2),
-                number: 1,
-            }),
-            DropReason::TargetGone(EntryTarget::Device(DeviceId(2))),
-            DropReason::TargetGone(EntryTarget::Circle(CircleId(uuid::Uuid::from_u128(1)))),
-            DropReason::TargetGone(EntryTarget::Member(MemberId(uuid::Uuid::from_u128(5)))),
-            DropReason::NotAllowed,
-            DropReason::NoAdminLeft,
-            DropReason::KeysAlreadyUsed,
-        ] {
-            let record = PendingRecord {
-                subject: subject.clone(),
-                reason: PendingReason::Dropped(reason),
-                reported_by: DeviceId(1),
-            };
-            assert_eq!(record.retry(), expected, "{record:?}");
-        }
+        let record = PendingRecord {
+            subject: PendingSubject::Slot(Slot(7)),
+            reason: PendingReason::WritesRefused {
+                cutoff: Slot(5),
+                cause,
+            },
+            reported_by: DeviceId(1),
+        };
+        assert_eq!(record.retry(), Retry::Never, "{record:?}");
+    }
+    // A refused administrative operation records its local category; an
+    // app's operation waits for the app, coven's own never clears.
+    for (kind, expected) in [
+        (OperationKind::CreateCircle, Retry::AppAction),
+        (OperationKind::RotateKey, Retry::Never),
+    ] {
+        let record = PendingRecord {
+            subject: PendingSubject::Operation {
+                id: OperationId(3),
+                kind,
+            },
+            reason: PendingReason::Failed(LocalFailure::Operation),
+            reported_by: DeviceId(1),
+        };
+        assert_eq!(record.retry(), expected, "{record:?}");
     }
 }
