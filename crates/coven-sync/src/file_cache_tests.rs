@@ -192,7 +192,7 @@ fn clock() -> Arc<FixedClock> {
     ))
 }
 
-/// Advance the elapsed clock used by retry deadlines (§6.7).
+/// Advance the retry clock by `seconds` (§6.7).
 fn advance(clock: &FixedClock, seconds: u64) {
     clock.set(clock.now() + Duration::from_secs(seconds));
 }
