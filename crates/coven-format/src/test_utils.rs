@@ -23,6 +23,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 use zeroize::Zeroizing;
 
+/// Decode a pinned hexadecimal fixture for consumer tests.
+pub fn fixture_bytes(text: &str) -> Vec<u8> {
+    hex::decode(text.trim()).expect("pinned hexadecimal fixture")
+}
+
 /// An original write by device one.
 pub fn position() -> WriteId {
     WriteId {

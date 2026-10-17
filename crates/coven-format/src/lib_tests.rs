@@ -2,17 +2,7 @@ use super::*;
 use crate::error::Rule;
 use zeroize::Zeroizing;
 
-pub(super) fn hex(text: &str) -> Vec<u8> {
-    let bytes = text.trim().as_bytes();
-    assert_eq!(bytes.len() % 2, 0);
-    bytes
-        .chunks_exact(2)
-        .map(|p| {
-            let digit = |b: u8| (b as char).to_digit(16).expect("hex digit") as u8;
-            (digit(p[0]) << 4) | digit(p[1])
-        })
-        .collect()
-}
+pub(super) use crate::test_utils::fixture_bytes as hex;
 
 #[test]
 fn every_object_and_snapshot_section_has_pinned_bytes() {
@@ -31,7 +21,11 @@ fn every_object_and_snapshot_section_has_pinned_bytes() {
 
 /// Every fixture `fixtures/generate-deterministic.py` writes.
 #[cfg(not(windows))]
-const GENERATED_FIXTURES: [&str; 17] = [
+const GENERATED_FIXTURES: [&str; 21] = [
+    "sealed-access-key.hex",
+    "snapshot-settlement-claims.hex",
+    "sealed-refused-writes-slot.hex",
+    "sealed-reset-ignored-writes-slot.hex",
     "sealed-migration-write.hex",
     "sealed-circle-snapshot.hex",
     "sealed-announcement.hex",
@@ -257,7 +251,11 @@ fn arbitrary_truncated_and_bit_flipped_inputs_never_panic() {
             decode_or_typed_error(&bytes);
         }
     }
-    for bytes in test_utils::frame_examples() {
+    for bytes in include_str!("../fixtures/v1.hex")
+        .lines()
+        .take(test_utils::frame_examples().len())
+        .map(hex)
+    {
         for end in 0..bytes.len() {
             assert!(reencode(&bytes[..end]).is_err());
         }

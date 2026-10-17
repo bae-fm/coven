@@ -143,15 +143,12 @@ def pair(sodium, seed):
     return signing_public(sodium, seed) + sealing_public(sodium, seed)
 
 
-def key_copy(sodium, path, audience, key_id, plaintext, seed, ephemeral_seed, nonce):
-    """A copy slot addressed to Ana's exact credential (D9, D11)."""
+def anonymous_box(sodium, kind, path, prefix, plaintext, seed, ephemeral_seed, nonce):
     recipient = sealing_public(sodium, seed)
-    prefix = bytes([33, 0, 1, 2]) + bytes([1]) * 16 + b"\x01" + audience + key_id + ANA + recipient
     ephemeral = bytes([ephemeral_seed]) * 32
     sender = sealing_public(sodium, ephemeral_seed)
     shared = c.create_string_buffer(32)
     checked(sodium.crypto_scalarmult(shared, ephemeral, recipient))
-    kind = b"circle" if audience[0] == 1 else b"store"
     box_context = context(b"coven/sealed-box/v1", kind, path, prefix, sender, recipient)
     extracted = hmac.digest(bytes(32), shared.raw, "sha256")
     key = hmac.digest(extracted, box_context + b"\x01", "sha256")
@@ -163,10 +160,29 @@ def key_copy(sodium, path, audience, key_id, plaintext, seed, ephemeral_seed, no
         box_context, len(box_context), None, nonce, key,
     ))
     assert length.value == len(ciphertext)
-    prefix += sender + nonce + u32(len(plaintext)) + ciphertext.raw
+    return sender + nonce + ciphertext.raw
+
+
+def key_copy(sodium, path, audience, key_id, plaintext, seed, ephemeral_seed, nonce):
+    """A copy slot addressed to Ana's exact credential (D9, D11)."""
+    recipient = sealing_public(sodium, seed)
+    prefix = bytes([33, 0, 1, 2]) + bytes([1]) * 16 + b"\x01" + audience + key_id + ANA + recipient
+    kind = b"circle" if audience[0] == 1 else b"store"
+    sealed = anonymous_box(sodium, kind, path, prefix, plaintext, seed, ephemeral_seed, nonce)
+    prefix += sealed[:56] + u32(len(plaintext)) + sealed[56:]
     slot_number = int(path.rsplit(b"/", 1)[1])
     plaintext = slot_header(slot_number, slot_number) + frame(16, b"")
     return signed(sodium, path, prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, plaintext))
+
+
+def access_key_delivery(sodium):
+    """Ana delivers Ben an IAM access key at one fixed mint-attempt path."""
+    path = STORE_TEXT + b"access-keys/42424242-4242-4242-4242-424242424242/77777777-7777-7777-7777-777777777777"
+    prefix = bytes([40, 0, 1]) + BEN + sealing_public(sodium, 0x35) + ANA
+    principal = b"\x01" + text(b"coven-0123") + b"\x00" + text(b"coven-member")
+    plaintext = text(b"AKIAMEMBER") + text(b"member-secret") + principal
+    sealed = anonymous_box(sodium, b"s3-key", path, prefix, plaintext, 0x35, 0x57, 0x46)
+    return signed(sodium, path, prefix + text(sealed))
 
 
 def signature(sodium, message, seed):
@@ -385,6 +401,17 @@ def bounded_slot(sodium, slot, kind, plaintext, claim=None):
     return signed(sodium, path, prefix + chunk(sodium, encryption_key(17), path, prefix, 0, 0, body))
 
 
+def seal_writes_slot(sodium, slot, claim, writes):
+    path = STORE_TEXT + b"seq/" + str(slot).encode()
+    prefix = bytes([33, 0, 1, 1]) + bytes([1]) * 16 + b"\x00"
+    plaintext = slot_header(slot, claim) + u64(len(writes))
+    plaintext += b"".join(u64(len(write)) + write for write in writes)
+    body = prefix
+    for index, start in enumerate(range(0, len(plaintext), 65536)):
+        body += chunk(sodium, encryption_key(17), path, prefix, 0, index, plaintext[start:start + 65536])
+    return signed(sodium, path, body)
+
+
 def changes(sodium):
     """`test_utils::store_changes`, in canonical tag order."""
     initial_hash = hashlib.sha256(bytes([17]) * 32).digest()
@@ -533,13 +560,10 @@ def main():
 
     entry_object = bounded_slot(sodium, 1, 0, frames[0])
     # The inner object remains fixed when the batch claims another slot.
-    path = STORE_TEXT + b"seq/6"
-    prefix = bytes([33, 0, 1, 1]) + bytes([1]) * 16 + b"\x00"
-    plaintext = slot_header(6, 5) + u64(2) + u64(len(write)) + write + u64(len(migration)) + migration
-    body = prefix
-    for index, start in enumerate(range(0, len(plaintext), 65536)):
-        body += chunk(sodium, encryption_key(17), path, prefix, 0, index, plaintext[start:start + 65536])
-    writes_slot = signed(sodium, path, body)
+    writes_slot = seal_writes_slot(sodium, 6, 5, [write, migration])
+    # Separate histories whose covered writes were refused or ignored by reset.
+    refused_slot = seal_writes_slot(sodium, 9, 8, [write, migration])
+    reset_ignored_slot = seal_writes_slot(sodium, 10, 9, [write, migration])
 
     # Snapshot chunks use random nonces; these fixed ones are public test data.
     path = STORE_TEXT + b"snapshots/store/1/1"
@@ -585,15 +609,26 @@ def main():
     authored = next(piece for piece in frames[:write_at] if piece[0] == 6 and piece[7] == 5)
     assert authored[-1] == 1  # Applied verdict in the source record.
     claim_snapshots = []
-    for number, verdict in [(8, b"\x03"), (9, b"\x05" + u64(2))]:
+    for number, verdict, stored in [(8, b"\x03", refused_slot), (9, b"\x05" + u64(2), reset_ignored_slot)]:
         counts = [0] * 12
         counts[5], counts[11] = 1, 2
         body = frame(5, snapshot_id(store_audience(), 1, number) + u32(2) + b"".join(u64(n) for n in counts))
         body += frame(6, authored[7:-1] + verdict)
-        body += last_claim(1, number, bytes([0x81]) * 32) + last_claim(2, 1, bytes([0x21]) * 32) + frame(7, b"")
+        body += last_claim(1, number, hashlib.sha256(stored).digest()) + last_claim(2, 1, bytes([0x21]) * 32) + frame(7, b"")
         claim_snapshots.append(body)
     (out / "snapshot-claims.hex").write_text("".join(body.hex() + "\n" for body in claim_snapshots))
+    # Each case retains an actual slot digest after its slot is below the floor.
+    # The four cases stop at different coverage and therefore have different last claims.
+    settlements = []
+    for slot, claim, stored in [(1, 1, entry_object), (2, 2, store_key),
+                                (6, 5, writes_slot), (9, 8, circle_announcement)]:
+        prefix = bytes([34, 0, 1]) + store_audience() + bytes([1]) * 16 + u64(slot) + b"\x00"
+        header = frame(5, snapshot_id(store_audience(), 1, slot) + u32(2) + u64(0) * 11 + u64(1))
+        body = header + last_claim(1, claim, hashlib.sha256(stored).digest()) + frame(7, b"")
+        settlements.append(prefix + body)
+    (out / "snapshot-settlement-claims.hex").write_text("".join(body.hex() + "\n" for body in settlements))
     for name, data in [
+        ("sealed-access-key.hex", access_key_delivery(sodium)),
         ("sealed-write.hex", write),
         ("sealed-migration-write.hex", migration),
         ("sealed-circle-snapshot.hex", circle_snapshot),
@@ -602,6 +637,8 @@ def main():
         ("sealed-admin.hex", entry_object),
         ("sealed-snapshot.hex", snapshot),
         ("sealed-writes-slot.hex", writes_slot),
+        ("sealed-refused-writes-slot.hex", refused_slot),
+        ("sealed-reset-ignored-writes-slot.hex", reset_ignored_slot),
         ("sealed-floor.hex", floor),
         ("sealed-join-request.hex", join_object),
         ("sealed-store-key.hex", store_key),

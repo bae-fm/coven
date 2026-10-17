@@ -622,10 +622,17 @@ fn pinned_refused_and_reset_ignored_parts_preserve_claim_numbers() {
         encoded.extend(writer.finish().unwrap());
         assert_eq!(encoded, bytes);
         assert_eq!(authored, 1);
+        let object = if last_claim == 8 {
+            include_str!("../fixtures/sealed-refused-writes-slot.hex")
+        } else {
+            include_str!("../fixtures/sealed-reset-ignored-writes-slot.hex")
+        };
+        let mut digest = coven_crypto::ObjectHasher::new();
+        digest.update(&crate::tests::hex(object));
         assert_eq!(
             claims,
             [
-                (DeviceId(1), last_claim, Some([0x81; 32])),
+                (DeviceId(1), last_claim, Some(*digest.finish().as_bytes())),
                 (DeviceId(2), 1, Some([0x21; 32]))
             ]
         );

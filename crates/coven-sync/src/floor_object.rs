@@ -163,3 +163,7 @@ impl FloorObject {
         &self.object
     }
 }
+
+#[cfg(test)]
+#[path = "floor_object_tests.rs"]
+mod tests;

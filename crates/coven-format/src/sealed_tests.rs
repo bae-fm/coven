@@ -700,3 +700,255 @@ mod sequence {
         header.header
     }
 }
+
+mod fixture_mutations {
+    use super::{take, walk_snapshot, walk_write};
+    use crate::{
+        chunks::FrameDecoder,
+        sealed_floor::{FloorPrefixDecoder, FloorPrefixEncoder},
+        sealed_slot::{BoundedSlot, SlotObjectPrefix},
+        sealed_stream::StreamObjectLayout,
+        sealed_write::WriteObjectPrefix,
+        snapshot::{SnapshotDecoder, SnapshotEncoder},
+        test_utils as f,
+        tests::{hex, mutations},
+        write_stream::WriteHeaderFrame,
+        Error,
+    };
+
+    fn stream(mut bytes: &[u8]) -> Result<(), Error> {
+        let mut reader = StreamObjectLayout::new();
+        let mut writer = StreamObjectLayout::new();
+        while bytes.len() > 64 {
+            let length = reader.chunk_length(bytes)?;
+            let piece = take(&mut bytes, length)?;
+            assert_eq!(writer.encode_chunk(reader.decode_chunk(piece)?)?, piece);
+        }
+        reader.read_signature(bytes)?;
+        writer.read_signature(bytes)?;
+        Ok(())
+    }
+
+    fn floor(mut bytes: &[u8]) -> Result<(), Error> {
+        let first = take(&mut bytes, FloorPrefixDecoder::HEADER_LENGTH)?;
+        let mut reader = FloorPrefixDecoder::start(first)?;
+        let (mut writer, header) = FloorPrefixEncoder::start(reader.key, reader.remaining())?;
+        assert_eq!(first, header);
+        while reader.remaining() > 0 {
+            let length = reader.copy_length(bytes)?;
+            let piece = take(&mut bytes, length)?;
+            assert_eq!(writer.copy(&reader.copy(piece)?)?, piece);
+        }
+        reader.finish()?;
+        writer.finish()?;
+        stream(bytes)
+    }
+
+    #[test]
+    fn every_sequence_envelope_fixture_decodes_all_truncations_and_bit_changes() {
+        for text in [
+            include_str!("../fixtures/sealed-admin.hex"),
+            include_str!("../fixtures/sealed-announcement.hex"),
+            include_str!("../fixtures/sealed-circle-announcement.hex"),
+        ] {
+            let bytes = hex(text);
+            assert_eq!(
+                BoundedSlot::decode(&bytes).unwrap().encode().unwrap(),
+                bytes
+            );
+            mutations(&bytes, |changed| {
+                if let Ok(object) = BoundedSlot::decode(changed) {
+                    assert_eq!(object.encode().unwrap(), changed);
+                }
+            });
+        }
+        let bytes = hex(include_str!("../fixtures/sealed-floor.hex"));
+        floor(&bytes).unwrap();
+        mutations(&bytes, |changed| {
+            let _ = floor(changed);
+        });
+        for text in [
+            include_str!("../fixtures/sealed-writes-slot.hex"),
+            include_str!("../fixtures/sealed-refused-writes-slot.hex"),
+            include_str!("../fixtures/sealed-reset-ignored-writes-slot.hex"),
+        ] {
+            let bytes = hex(text);
+            let decode = |mut bytes: &[u8]| -> Result<(), Error> {
+                let length = SlotObjectPrefix::length(bytes)?;
+                let prefix = take(&mut bytes, length)?;
+                assert_eq!(SlotObjectPrefix::decode(prefix)?.encode()?, prefix);
+                stream(bytes)
+            };
+            decode(&bytes).unwrap();
+            mutations(&bytes, |changed| {
+                let _ = decode(changed);
+            });
+        }
+        let bytes = hex(include_str!("../fixtures/sealed-circle-snapshot.hex"));
+        walk_snapshot(&bytes, |_, _| {}).unwrap();
+        mutations(&bytes, |changed| {
+            let _ = walk_snapshot(changed, |_, _| {});
+        });
+        let bytes = hex(include_str!("../fixtures/sealed-migration-write.hex"));
+        let prefix_length = WriteObjectPrefix::length(&bytes).unwrap();
+        let piece_length = WriteObjectPrefix::header_chunk_length(&bytes[prefix_length..]).unwrap();
+        let sealed =
+            WriteObjectPrefix::header_chunk(&bytes[prefix_length..prefix_length + piece_length])
+                .unwrap();
+        let path = format!("coven/write/{}/1/4", f::STORE_ID);
+        let header = f::store_key()
+            .derive()
+            .open_object_chunk(&path, &bytes[..prefix_length], 0, 0, sealed)
+            .unwrap();
+        let lengths: Vec<_> = WriteHeaderFrame::decode(&header)
+            .unwrap()
+            .parts
+            .iter()
+            .map(|part| part.plaintext_length)
+            .collect();
+        walk_write(&bytes, &header, &lengths, |_, _| {}).unwrap();
+        mutations(&bytes, |changed| {
+            let _ = walk_write(changed, &header, &lengths, |_, _| {});
+        });
+    }
+
+    fn snapshot(
+        bytes: &[u8],
+        prefix: &crate::sealed_snapshot::SnapshotObjectPrefix,
+    ) -> Result<Vec<u8>, Error> {
+        let mut input = bytes;
+        let mut frames = FrameDecoder::new(None);
+        let first = frames.next(&mut input)?.ok_or(Error::Truncated)?;
+        let mut reader = SnapshotDecoder::start(&first, prefix)?;
+        let (mut writer, mut encoded) = SnapshotEncoder::start(reader.header().clone())?;
+        while let Some(frame) = frames.next(&mut input)? {
+            if let Some(record) = reader.frame(&frame, &f::oracle())? {
+                encoded.extend(writer.record(record)?);
+            }
+        }
+        frames.finish()?;
+        reader.finish()?;
+        encoded.extend(writer.finish()?);
+        Ok(encoded)
+    }
+
+    #[test]
+    fn claim_snapshot_fixtures_decode_all_truncations_and_bit_changes() {
+        let mut prefix = f::snapshot_prefix(&f::snapshot_header());
+        prefix.covers = 10;
+        for bytes in include_str!("../fixtures/snapshot-claims.hex")
+            .lines()
+            .map(hex)
+        {
+            assert_eq!(snapshot(&bytes, &prefix).unwrap(), bytes);
+            mutations(&bytes, |changed| {
+                if let Ok(encoded) = snapshot(changed, &prefix) {
+                    assert_eq!(encoded, changed);
+                }
+            });
+        }
+        for bytes in include_str!("../fixtures/snapshot-settlement-claims.hex")
+            .lines()
+            .map(hex)
+        {
+            let decode = |mut bytes: &[u8]| -> Result<Vec<u8>, Error> {
+                let length = crate::sealed_snapshot::SnapshotObjectPrefix::length(bytes)?;
+                let piece = take(&mut bytes, length)?;
+                let prefix = crate::sealed_snapshot::SnapshotObjectPrefix::decode(piece)?;
+                let mut encoded = prefix.encode()?;
+                encoded.extend(snapshot(bytes, &prefix)?);
+                Ok(encoded)
+            };
+            assert_eq!(decode(&bytes).unwrap(), bytes);
+            mutations(&bytes, |changed| {
+                if let Ok(encoded) = decode(changed) {
+                    assert_eq!(encoded, changed);
+                }
+            });
+        }
+    }
+
+    #[test]
+    fn pinned_plaintext_chunks_decode_every_truncation_and_bit_change() {
+        let pieces: Vec<_> = include_str!("../fixtures/v1.hex")
+            .lines()
+            .map(hex)
+            .collect();
+        let write_at = f::frame_examples().len();
+        let header = WriteHeaderFrame::decode(&pieces[write_at + 1]).unwrap();
+        let chunks = header
+            .parts
+            .iter()
+            .map(|part| part.chunk_count())
+            .sum::<u64>();
+        let snapshot_at = write_at + 2 + usize::try_from(chunks).unwrap();
+        for (index, write) in [(write_at, true), (snapshot_at, false)] {
+            mutations(&pieces[index], |changed| {
+                let encoded = if write {
+                    WriteObjectPrefix::decode(changed).and_then(|prefix| prefix.encode())
+                } else {
+                    crate::sealed_snapshot::SnapshotObjectPrefix::decode(changed)
+                        .and_then(|prefix| prefix.encode())
+                };
+                if let Ok(encoded) = encoded {
+                    assert_eq!(encoded, changed);
+                }
+            });
+        }
+        let plain = pieces[write_at + 1..snapshot_at].concat();
+        let decode = |bytes: &[u8]| -> Result<Vec<u8>, Error> {
+            let record = crate::write_stream::decode_plaintext(bytes)?;
+            f::write_plaintext(&record)
+        };
+        assert_eq!(decode(&plain).unwrap(), plain);
+        mutations(&plain, |changed| {
+            if let Ok(encoded) = decode(changed) {
+                assert_eq!(encoded, changed);
+            }
+        });
+        let prefix =
+            crate::sealed_snapshot::SnapshotObjectPrefix::decode(&pieces[snapshot_at]).unwrap();
+        let plain = pieces[snapshot_at + 1..].concat();
+        assert_eq!(snapshot(&plain, &prefix).unwrap(), plain);
+        mutations(&plain, |changed| {
+            if let Ok(encoded) = snapshot(changed, &prefix) {
+                assert_eq!(encoded, changed);
+            }
+        });
+    }
+
+    #[test]
+    fn pinned_text_decodes_every_truncation_and_bit_change() {
+        for (index, text) in include_str!("../fixtures/codes.txt").lines().enumerate() {
+            mutations(text.as_bytes(), |changed| {
+                if let Ok(text) = std::str::from_utf8(changed) {
+                    let encoded = if index == 0 {
+                        crate::codes::RestoreCode::from_text(text).and_then(|code| code.to_text())
+                    } else {
+                        crate::codes::InviteCode::from_text(text).and_then(|code| code.to_text())
+                    };
+                    if let Ok(encoded) = encoded {
+                        assert_eq!(encoded.as_bytes(), changed);
+                    }
+                }
+            });
+        }
+        for (index, text) in include_str!("../fixtures/file-reference.txt")
+            .lines()
+            .enumerate()
+        {
+            mutations(text.as_bytes(), |changed| {
+                if let Ok(text) = std::str::from_utf8(changed) {
+                    if index == 0 {
+                        if let Ok(path) = crate::path::ObjectPath::parse(text) {
+                            assert_eq!(path.as_str(), text);
+                        }
+                    } else if let Ok(reference) = crate::file_reference::FileReference::decode(text)
+                    {
+                        assert_eq!(reference.encode().as_str(), text);
+                    }
+                }
+            });
+        }
+    }
+}

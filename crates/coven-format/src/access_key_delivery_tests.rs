@@ -18,6 +18,53 @@ fn identity(id: u128) -> MemberIdentity {
 }
 
 #[test]
+fn independently_sealed_delivery_opens_for_its_recorded_member() {
+    let directory = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("fixtures");
+    let bytes = crate::tests::hex(
+        &std::fs::read_to_string(directory.join("sealed-access-key.hex"))
+            .expect("D14 includes an independently generated delivered S3 key"),
+    );
+    let ana = MemberIdentity::new(
+        MemberId(uuid::Uuid::from_bytes([0x4d; 16])),
+        crate::test_utils::keys_from_seed(0x33),
+    );
+    let ben = MemberIdentity::new(
+        MemberId(uuid::Uuid::from_bytes([0x42; 16])),
+        crate::test_utils::keys_from_seed(0x35),
+    );
+    let path = crate::path::ObjectPath::access_key(
+        coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16])),
+        &ben.member(),
+        uuid::Uuid::from_bytes([0x77; 16]),
+    );
+    let signer = ana.keys().public_keys().signing;
+    let opened = open(&ben, &signer, path.as_str(), &bytes).unwrap();
+    assert_eq!(opened.access_key_id, key().access_key_id);
+    assert_eq!(
+        opened.secret_access_key.as_str(),
+        key().secret_access_key.as_str()
+    );
+    assert_eq!(opened.principal, key().principal);
+    let prefix = routing(&bytes).unwrap().encode().unwrap();
+    assert_eq!(prefix, bytes[..prefix.len()]);
+    let length =
+        u32::from_be_bytes(bytes[prefix.len()..prefix.len() + 4].try_into().unwrap()) as usize;
+    let sealed = &bytes[prefix.len() + 4..bytes.len() - 64];
+    assert_eq!(length, sealed.len());
+    let plaintext = ben
+        .keys()
+        .open_access_key(path.as_str(), &prefix, sealed)
+        .unwrap();
+    assert_eq!(
+        encode_key(&opened).unwrap().as_slice(),
+        plaintext.as_slice()
+    );
+    crate::tests::mutations(&bytes, |changed| {
+        assert!(open(&ben, &signer, path.as_str(), changed).is_err());
+    });
+}
+
+#[test]
 fn a_delivery_opens_only_for_its_member_and_names_its_signer() {
     let admin = identity(1);
     let ana = identity(2);
