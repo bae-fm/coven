@@ -1,6 +1,6 @@
 use crate::*;
 use coven_crypto::{
-    custody::{InMemoryCustody, KeySession},
+    custody::{InMemoryCustody, KeySession, Keychain, StoreKeychain},
     MemberIdentity, StoreKey, StoreKeyring,
 };
 use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
@@ -9,7 +9,7 @@ use coven_foundation::{
     files::StoreLayout,
     id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId},
 };
-use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage};
+use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage, StorageSettings};
 use std::sync::Arc;
 
 #[cfg(test)]
@@ -262,6 +262,26 @@ impl Group {
         ana.sync.pass().await.unwrap();
     }
 }
+pub(crate) fn codes(
+    device: &Device,
+    keychain: Arc<Keychain>,
+) -> (RestoreCodes, Arc<StoreKeychain>) {
+    let store = Arc::new(StoreKeychain::new(keychain, device.sync.store()));
+    let settings = StorageSettings::new(device.sync.directory.clone());
+    settings.commit(&device.storage.config()).unwrap();
+    (
+        RestoreCodes::new(
+            device.sync.store(),
+            device.sync.database.clone(),
+            device.sync.member.clone(),
+            Arc::new(DeviceCredentials::new(store.clone(), None)),
+            settings,
+            Some(device.sync.clone()),
+        ),
+        store,
+    )
+}
+
 pub(crate) fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
     for entry in std::fs::read_dir(from).unwrap() {
         let entry = entry.unwrap();

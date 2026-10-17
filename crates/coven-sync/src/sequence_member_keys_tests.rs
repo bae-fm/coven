@@ -148,30 +148,8 @@ async fn an_admin_publishes_a_prepared_pair_with_copies_for_its_member() {
     }
 }
 
-use coven_crypto::custody::{Keychain, StoreKeychain};
+use coven_crypto::custody::Keychain;
 use coven_crypto::SecretBytes;
-use coven_storage::{Storage, StorageSettings};
-use std::sync::Arc;
-
-pub(crate) fn codes(
-    device: &Device,
-    keychain: Arc<Keychain>,
-) -> (RestoreCodes, Arc<StoreKeychain>) {
-    let store = Arc::new(StoreKeychain::new(keychain, device.sync.store()));
-    let settings = StorageSettings::new(device.sync.directory.clone());
-    settings.commit(&device.storage.config()).unwrap();
-    (
-        RestoreCodes::new(
-            device.sync.store(),
-            device.sync.database.clone(),
-            device.sync.member.clone(),
-            Arc::new(DeviceCredentials::new(store.clone(), None)),
-            settings,
-            Some(device.sync.clone()),
-        ),
-        store,
-    )
-}
 
 // §18.1 and E9: identity installation is unfinished until code custody commits.
 #[tokio::test]
@@ -307,7 +285,7 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
 
 async fn run_background(ana: &Device, owner: RestoreCodes) {
     let mut status = ana.sync.state.subscribe_sync();
-    let control = SyncLoop::new(ana.sync.clone(), Some(owner));
+    let control = SyncLoop::new(ana.sync.clone(), owner);
     control.start().unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {

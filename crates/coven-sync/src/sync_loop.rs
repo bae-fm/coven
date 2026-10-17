@@ -20,8 +20,9 @@ enum Command {
 }
 impl SyncLoop {
     /// Compose a stopped loop for an open, connected sequence owner.
-    /// `codes` installs a delivered S3 key on this device after each pass (§13).
-    pub fn new(sync: Arc<SequenceSync>, codes: Option<crate::RestoreCodes>) -> Self {
+    /// `codes` completes member-key replacement and installs delivered S3 keys
+    /// on this device after each pass (§18.1, §13).
+    pub fn new(sync: Arc<SequenceSync>, codes: crate::RestoreCodes) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         tokio::spawn(run(sync, codes, receiver));
         Self { commands }
@@ -70,8 +71,6 @@ impl SyncLoop {
         receive.await.map_err(|_| DbError::StoreClosed)?
     }
 }
-/// A pass, then the delivered S3 key this member's applied history records,
-/// unless this device already uses it (§13).
 /// Coven's own operation whose last attempt failed, if any: it retries under
 /// its own backoff, but the pass that left it is not `Synced` (E5).
 async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, SyncError> {
@@ -91,23 +90,23 @@ async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, Sy
         }))
 }
 
+/// Complete a pass and member-key custody (§18.1), then install any delivered
+/// S3 key this device does not already use (§13).
 async fn pass(
     sync: &SequenceSync,
-    codes: Option<&crate::RestoreCodes>,
+    codes: &crate::RestoreCodes,
 ) -> Result<Option<crate::PendingRecord>, SyncError> {
     sync.pass().await?;
-    if let Some(codes) = codes {
-        codes.resume_member_keys().await?;
-        let held = match codes.connection().await? {
-            Some(coven_storage::ConnectionCredentials {
-                credentials: coven_storage::StorageCredentials::S3(held),
-                ..
-            }) => Some(held.access_key_id),
-            _ => None,
-        };
-        if let Some(key) = sync.delivered_access_key(held.as_deref()).await? {
-            codes.adopt_delivered_key(key).await?;
-        }
+    codes.resume_member_keys().await?;
+    let held = match codes.connection().await? {
+        Some(coven_storage::ConnectionCredentials {
+            credentials: coven_storage::StorageCredentials::S3(held),
+            ..
+        }) => Some(held.access_key_id),
+        _ => None,
+    };
+    if let Some(key) = sync.delivered_access_key(held.as_deref()).await? {
+        codes.adopt_delivered_key(key).await?;
     }
     failing(sync).await
 }
@@ -128,7 +127,7 @@ fn failed(sync: &SequenceSync, error: SyncError) -> SyncStatus {
 
 async fn run(
     sync: Arc<SequenceSync>,
-    codes: Option<crate::RestoreCodes>,
+    codes: crate::RestoreCodes,
     mut commands: mpsc::UnboundedReceiver<Command>,
 ) {
     let status = &sync.state;
@@ -265,7 +264,7 @@ async fn run(
                 }
                 status.publish(SyncStatus::Syncing);
                 let connection_version = sync.waits.connection_version();
-                match pass(&sync, codes.as_ref()).await {
+                match pass(&sync, &codes).await {
                     Ok(failing) => match retry.succeeded(&sync.database, &sync.waits).await {
                         Ok(()) => match failing {
                             None => status.publish(SyncStatus::Synced { finished_at: sync.clock.now() }),

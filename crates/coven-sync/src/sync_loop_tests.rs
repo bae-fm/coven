@@ -1,5 +1,6 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
+use coven_crypto::custody::Keychain;
 
 /// E5 and sync-pass's Object reads: an incomplete read is retryable input,
 /// never evidence that the slot's bytes cannot apply.
@@ -82,8 +83,10 @@ async fn an_app_commit_wakes_a_pass_and_a_requested_pass_reads_it_elsewhere() {
     group.create(&ana).await;
     group.admit(&ana, &ben).await;
     ben.sync.pass().await.unwrap();
-    let ana_loop = SyncLoop::new(ana.sync.clone(), None);
-    let ben_loop = SyncLoop::new(ben.sync.clone(), None);
+    let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
+    let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
     ana_loop.start().unwrap();
     ben_loop.start().unwrap();
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
@@ -128,7 +131,8 @@ async fn an_ended_operation_wait_does_not_starve_a_requested_pass() {
     group
         .clock
         .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(5));
-    let ana_loop = SyncLoop::new(ana.sync.clone(), None);
+    let (ana_codes, _) = codes(&ana, Keychain::in_memory("sync-loop-ana").unwrap());
+    let ana_loop = SyncLoop::new(ana.sync.clone(), ana_codes);
     ana_loop.start().unwrap();
     let next = ana.sync.database.applied_slot().await.unwrap() + 1;
     insert(&ana.sync.database, "a", "sent").await;
@@ -158,7 +162,8 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
         .await
         .unwrap();
     let mut status = ben.sync.state.subscribe_sync();
-    let ben_loop = SyncLoop::new(ben.sync.clone(), None);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
     ben_loop.start().unwrap();
     let shown = tokio::time::timeout(
         std::time::Duration::from_secs(10),
@@ -192,7 +197,8 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
         .await
         .unwrap();
     let mut status = ben.sync.state.subscribe_sync();
-    let worker = SyncLoop::new(ben.sync.clone(), None);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let worker = SyncLoop::new(ben.sync.clone(), ben_codes);
     worker.start().unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),
@@ -212,7 +218,8 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
     let ben = group.reopen(ben).await;
     let requests = ben.storage.request_count();
     let mut status = ben.sync.state.subscribe_sync();
-    let worker = SyncLoop::new(ben.sync.clone(), None);
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let worker = SyncLoop::new(ben.sync.clone(), ben_codes);
     worker.start().unwrap();
     tokio::time::timeout(
         std::time::Duration::from_secs(5),

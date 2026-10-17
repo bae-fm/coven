@@ -361,7 +361,7 @@ impl StorageConnections {
             coven_storage::StorageSettings::new(self.directory.clone()),
             Some(sync.clone()),
         );
-        let sync_loop = SyncLoop::new(sync.clone(), Some(codes.clone()));
+        let sync_loop = SyncLoop::new(sync.clone(), codes.clone());
         let started = if start { sync_loop.start() } else { Ok(()) };
         *self.control.lock().expect("loop control poisoned") = Some(sync_loop.clone());
         *live = Connection::Active(Live {
