@@ -1,7 +1,5 @@
 //! The cleartext file header, indexed ciphertext chunks and authenticated ranges.
 
-use std::ops::Range;
-
 use crate::chunks::CHUNK_SIZE;
 use crate::error::{require, Error, Rule};
 use coven_crypto::{CryptoError, FileKey, FILE_CHUNK_TAG_LEN};
@@ -114,21 +112,6 @@ impl FileHeader {
         )?;
         Ok(key.open_chunk(path, &self.encode(), index, bytes)?)
     }
-
-    /// Select the chunks covering a half-open plaintext range. No I/O occurs.
-    pub fn range(&self, range: Range<u64>) -> Result<FileRange, Error> {
-        require(
-            range.start <= range.end && range.end <= self.size,
-            "file range",
-            Rule::Chunk,
-        )?;
-        let result = FileRange {
-            header: *self,
-            range,
-        };
-        result.encrypted_range()?;
-        Ok(result)
-    }
 }
 
 /// One file chunk's coordinates, computed from its header.
@@ -140,105 +123,6 @@ pub struct FileChunk {
     pub offset: u64,
     /// Exact plaintext length; the stored length adds a 16-byte tag.
     pub plaintext_length: usize,
-}
-
-/// A requested plaintext range and the ciphertext needed to open it.
-#[derive(Clone, Debug)]
-pub struct FileRange {
-    header: FileHeader,
-    range: Range<u64>,
-}
-impl FileRange {
-    /// Half-open storage range to fetch. An empty request fetches no bytes.
-    pub fn encrypted_range(&self) -> Result<Range<u64>, Error> {
-        if self.range.is_empty() {
-            return Ok(FILE_HEADER_LEN as u64..FILE_HEADER_LEN as u64);
-        }
-        let first = self.header.chunk(self.range.start / CHUNK_SIZE as u64)?;
-        let last = self
-            .header
-            .chunk((self.range.end - 1) / CHUNK_SIZE as u64)?;
-        Ok(first.offset..last.offset + (last.plaintext_length + FILE_CHUNK_TAG_LEN) as u64)
-    }
-
-    /// Open exactly the fetched ciphertext range and return the requested bytes.
-    /// Chunks outside this range are neither supplied nor opened. Lengths are
-    /// checked against the supplied bytes before any plaintext is allocated.
-    pub fn open(&self, key: &FileKey, path: &str, bytes: &[u8]) -> Result<Vec<u8>, FileError> {
-        let stored = self.encrypted_range()?;
-        exact_length(bytes.len() as u64, stored.end - stored.start)?;
-        if self.range.is_empty() {
-            return Ok(Vec::new());
-        }
-        let size = CHUNK_SIZE as u64;
-        let first = self.range.start / size;
-        let last = (self.range.end - 1) / size;
-        let length =
-            usize::try_from(self.range.end - self.range.start).map_err(|_| Error::Allocation)?;
-        let mut result = Vec::new();
-        result
-            .try_reserve_exact(length)
-            .map_err(|_| Error::Allocation)?;
-        let mut remaining = bytes;
-        for index in first..=last {
-            let chunk = self.header.chunk(index)?;
-            let (sealed, rest) = remaining.split_at(chunk.plaintext_length + FILE_CHUNK_TAG_LEN);
-            let plain = self.header.open_chunk(key, path, index, sealed)?;
-            let start = self.range.start.saturating_sub(index * size) as usize;
-            let end = (self.range.end - index * size).min(chunk.plaintext_length as u64) as usize;
-            result.extend_from_slice(&plain[start..end]);
-            remaining = rest;
-        }
-        Ok(result)
-    }
-}
-
-/// A complete file envelope, borrowing its original ciphertext and tags.
-#[derive(Debug)]
-pub struct FileObject<'a> {
-    header: FileHeader,
-    chunks: &'a [u8],
-}
-impl<'a> FileObject<'a> {
-    /// Check the header and exact stored size without allocating or decrypting.
-    pub fn decode(bytes: &'a [u8]) -> Result<Self, Error> {
-        let header = FileHeader::decode(&bytes[..bytes.len().min(FILE_HEADER_LEN)])?;
-        exact_length(bytes.len() as u64, header.encrypted_size()?)?;
-        Ok(Self {
-            header,
-            chunks: &bytes[FILE_HEADER_LEN..],
-        })
-    }
-
-    /// The validated header describing this file.
-    pub fn header(&self) -> FileHeader {
-        self.header
-    }
-
-    /// Reproduce the cleartext header, ciphertext and tags without resealing.
-    pub fn encode(&self) -> Result<Vec<u8>, Error> {
-        let mut bytes = Vec::new();
-        bytes
-            .try_reserve_exact(FILE_HEADER_LEN + self.chunks.len())
-            .map_err(|_| Error::Allocation)?;
-        bytes.extend_from_slice(&self.header.encode());
-        bytes.extend_from_slice(self.chunks);
-        Ok(bytes)
-    }
-
-    /// Authenticate only the chunks covering the requested plaintext range.
-    pub fn read_range(
-        &self,
-        key: &FileKey,
-        path: &str,
-        range: Range<u64>,
-    ) -> Result<Vec<u8>, FileError> {
-        let selected = self.header.range(range)?;
-        let stored = selected.encrypted_range()?;
-        let start = (stored.start - FILE_HEADER_LEN as u64) as usize;
-        let end = (stored.end - FILE_HEADER_LEN as u64) as usize;
-        selected.open(key, path, &self.chunks[start..end])
-    }
 }
 
 fn exact_length(actual: u64, expected: u64) -> Result<(), Error> {

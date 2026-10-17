@@ -401,7 +401,9 @@ async fn identical_app_files_have_distinct_stored_ciphertext() {
     assert_eq!(a.len(), b.len());
     assert_ne!(a, b);
     // Exclude tags: different paths can change tags even with a reused file key.
-    let header = coven_format::file::FileObject::decode(&a).unwrap().header();
+    let header =
+        coven_format::file::FileHeader::decode(&a[..coven_format::file::FILE_HEADER_LEN]).unwrap();
+    assert_eq!(a.len() as u64, header.encrypted_size().unwrap());
     for index in 0..header.chunk_count() {
         let chunk = header.chunk(index).unwrap();
         let start = chunk.offset as usize;
