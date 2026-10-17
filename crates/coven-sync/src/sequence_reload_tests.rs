@@ -136,7 +136,7 @@ async fn an_app_reload_rebuilds_from_the_newest_snapshot_and_keeps_waiting_write
 }
 
 /// The floor in storage, as `device` reads it.
-async fn stored_floor(device: &Device) -> crate::floor_object::FloorObject {
+pub(super) async fn stored_floor(device: &Device) -> crate::floor_object::FloorObject {
     let mut ring = device.sync.keys.read().unwrap().unwrap();
     crate::floor_object::FloorObject::read(
         &device.sync.database,
@@ -597,109 +597,6 @@ async fn a_reload_reopens_with_its_selected_snapshot_and_target() {
             ]
         );
         assert!(ben.database().operation(operation).await.unwrap().is_none());
-        ana.database().close().await.unwrap();
-        ben.database().close().await.unwrap();
-    }
-}
-
-// §15: retention can remove the selected snapshot or its required suffix.
-#[tokio::test]
-async fn a_retained_reload_uses_a_newer_floor_when_its_suffix_is_deleted() {
-    for (older_circle_coverage, departure) in [(false, false), (true, false), (true, true)] {
-        let group = Group::new();
-        let ana = group.device(1).await;
-        let ben = group.device(2).await;
-        group.create(&ana).await;
-        group.admit(&ana, &ben).await;
-        if departure {
-            let keeper = ana.sync.create_circle("Private".into()).await.unwrap();
-            ana.sync.snapshot(Audience::Circle(keeper)).await.unwrap();
-        }
-        let circle = if older_circle_coverage {
-            let circle = ana.sync.create_circle("Ana's".into()).await.unwrap();
-            if departure {
-                ana.sync
-                    .administer(StoreChange::AddCircleMember {
-                        circle,
-                        member: ben.identity.member(),
-                    })
-                    .await
-                    .unwrap();
-            }
-            let snapshot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
-            Some((circle, snapshot))
-        } else {
-            None
-        };
-        insert(ana.database(), "a", "first").await;
-        ana.sync.pass().await.unwrap();
-        let first = ana.sync.snapshot(Audience::Store).await.unwrap();
-        ben.sync.pass().await.unwrap();
-        let selected = if departure { circle.unwrap().1 } else { first };
-        let old = ben.sync.session.lock().await.history.announcements[&selected].clone();
-        let path = crate::snapshot_object::path(group.store, &old.snapshot).unwrap();
-        ben.storage
-            .set_faults(Faults {
-                read_failures: [(path.clone(), StorageFailure::PermissionDenied)].into(),
-                ..Faults::none()
-            })
-            .await;
-        assert!(ben.sync.reload_from_snapshot().await.is_err());
-        assert!(ben
-            .database()
-            .operations()
-            .await
-            .unwrap()
-            .iter()
-            .any(|r| r.kind == "sequence-reload"));
-        ben.storage.set_faults(Faults::none()).await;
-        insert(ana.database(), "b", "covered by the newer floor").await;
-        ana.sync.pass().await.unwrap();
-        ana.sync.snapshot(Audience::Store).await.unwrap();
-        let departed_at = if departure {
-            ana.sync
-                .snapshot(Audience::Circle(circle.unwrap().0))
-                .await
-                .unwrap();
-            ana.sync
-                .administer(StoreChange::RemoveCircleMember {
-                    circle: circle.unwrap().0,
-                    member: ben.identity.member(),
-                })
-                .await
-                .unwrap();
-            Some(ana.database().applied_slot().await.unwrap())
-        } else {
-            None
-        };
-        group.clock.set(
-            std::time::UNIX_EPOCH
-                + crate::sequence_sync::sequence_retention::GRACE
-                + std::time::Duration::from_secs(1),
-        );
-        ana.sync.pass().await.unwrap();
-        ana.sync.pass().await.unwrap();
-        assert!(ana.storage.status(&path).await.unwrap().is_none());
-        let floor = stored_floor(&ana).await;
-        assert_eq!(
-            floor.header.first.0 > old.covers + 1,
-            !older_circle_coverage
-        );
-        let ben = group.reopen(ben).await;
-        ben.sync.reload_from_snapshot().await.unwrap();
-        assert!(ben.database().applied_slot().await.unwrap() >= floor.header.first.0 - 1);
-        if let Some(departed_at) = departed_at {
-            // §15: the chosen followed set and installed prefix agree.
-            assert!(ben.database().applied_slot().await.unwrap() >= departed_at);
-            assert!(!ben
-                .database()
-                .store_state()
-                .await
-                .unwrap()
-                .reads_circle(circle.unwrap().0, &ben.identity.member(),));
-        }
-        assert_eq!(rows(ben.database()).await, rows(ana.database()).await);
-        assert!(ben.database().operations().await.unwrap().is_empty());
         ana.database().close().await.unwrap();
         ben.database().close().await.unwrap();
     }

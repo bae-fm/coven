@@ -368,3 +368,7 @@ mod announcement {
         ))
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_reload_operation_tests.rs"]
+mod tests;

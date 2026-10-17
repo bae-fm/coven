@@ -93,6 +93,33 @@ def settlement (slot start : Nat) (covered : Option (Nat × String)) (read : Opt
   check (json% {"kind":"read","applied":0,"fetched":[],"first_kept":2})
     (json% {"reload":true,"apply":[]})
 
+def reselection (old floorAt : Nat) (covers : List Nat) (missing : Option Json)
+    (floor : List Json) : Json := json% {"kind":"reselect", "old_target":$(old),
+      "floor_at":$(floorAt),"covers":$(covers),"missing":$(missing),"floor":$(floor)}
+
+def selection (slot audience covers : Nat) : Json :=
+  json% {"slot":$(slot),"audience":$(audience),"covers":$(covers)}
+
+#eval do
+  let old := some (selection 4 0 3)
+  -- A later announcement, including equal coverage, permits reselection.
+  check (reselection 4 6 [5] old [selection 6 0 5]) (toJson (6 : Nat))
+  check (reselection 4 6 [3] old [selection 6 0 3]) (toJson (6 : Nat))
+  -- The old target remains fixed when already past the floor's prefix.
+  check (reselection 9 6 [5] old [selection 6 0 5]) (toJson (9 : Nat))
+  -- A retained current audience also contributes to the common target.
+  check (reselection 4 6 [5,10] old [selection 6 0 5]) (toJson (10 : Nat))
+  -- The old audience may have departed: its replacement remains in the floor.
+  check (reselection 4 8 [7] old [selection 6 0 5, selection 8 1 7]) (toJson (8 : Nat))
+  -- Neither age alone, coverage alone, nor another audience is sufficient.
+  for floor in [[selection 2 0 1], [selection 4 0 3], [selection 6 0 2],
+                [selection 6 1 5], []] do
+    check (reselection 4 6 [5] old floor) Json.null
+  -- A deleted suffix is a separate trigger with no missing-body check.
+  check (reselection 4 6 [5] none [selection 6 0 5]) (toJson (6 : Nat))
+  rejects (reselection 4 6 [5] old [selection 6 0 5, selection 7 0 5])
+  rejects (reselection 4 6 [5] old [selection 5 0 5])
+
 -- own_predecessor_is_read includes own writes outside the authored prefix;
 -- intervening_write_not_read excludes later-published remote writes.
 #eval do

@@ -1,6 +1,7 @@
 import SequenceApply
 import CovenSequence.Settle
 import CovenSequence.Causality
+import CovenSequence.Reload
 
 /-! One case per process; malformed inputs fail on stderr with nonzero exit. -/
 namespace SequenceJson
@@ -161,6 +162,23 @@ def readRead (j : Json) : Except String Json := do
   | none => return Json.mkObj [("reload", toJson true), ("apply", toJson ([] : List Nat))]
   | some slots => return Json.mkObj [("reload", toJson false), ("apply", toJson slots)]
 
+def readSelection (j : Json) : Except String (Reload.Selection Nat) := do
+  let slot ← positive j "slot"
+  let covers ← nat j "covers"
+  if covers ≥ slot then throw "snapshot coverage must precede its announcement"
+  return ⟨slot, ← nat j "audience", covers⟩
+
+/-- The same reselection decision used by the monotonicity theorems.
+Authentication and the reason for retrying are supplied by the Rust fixture. -/
+def readReselect (j : Json) : Except String Json := do
+  let missing ← match ← j.getObjVal? "missing" with
+    | .null => pure none
+    | value => some <$> readSelection value
+  let floor ← (← j.getObjValAs? (List Json) "floor").mapM readSelection
+  distinct (floor.map (·.audience)) "floor audience"
+  return toJson (Reload.reselect (← nat j "old_target") (← nat j "floor_at")
+    (← j.getObjValAs? (List Nat) "covers") missing floor)
+
 /-- Bytes carry the containing slot in this projection. Timestamp and schema
 are units/zero because Past does not inspect either. -/
 abbrev Original := Causality.Original Nat Unit Nat
@@ -186,6 +204,7 @@ def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
   | "read" => readRead j
+  | "reselect" => readReselect j
   | "apply" => readApply j
   | "past" => readPast j
   | _ => throw "unknown case kind"

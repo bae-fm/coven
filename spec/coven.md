@@ -3125,6 +3125,8 @@ Before a floor exists, the sequence starts at slot 1.
   ([`read_ok`](proofs/sequence/CovenSequence/Reader.lean)).
 - Fix the reload target when loading begins. New writes or announcements do
   not restart it. If deletion removes needed slots, use the newer floor's snapshots.
+  The floor's rules alone do not imply that its snapshot supersedes a reload's
+  selected announcement ([`unchecked_reselection_goes_backwards`](proofs/sequence/CovenSequence/ReloadExamples.lean)).
 - Reload commits rows, merge records, source verdicts and the applied slot together.
   Failure preserves the previously visible state.
 - Ordinary reload permits local app writes throughout, then applies eligible queued
