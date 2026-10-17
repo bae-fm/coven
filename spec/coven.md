@@ -2885,10 +2885,12 @@ an upload; a slow upload simply announces later.
 
 **Announcing and loading are separate.** Applying an announcement reads no
 snapshot: the announcement is signed and carries the coverage, the purpose and a
-hash of the snapshot. A snapshot is read only when a device loads it. The device
-checks the body against the announced hash, then its signature and its prefix
-([format.md D9](format.md#d9-sealed-objects)). So a snapshot whose body an
-undone operation deleted never blocks a device that doesn't load it.
+hash of the snapshot. A device reads the body when it loads the snapshot or
+checks which files the snapshot still references before deleting files (§17.8).
+Both uses check the body against the announced hash, then its signature and its
+prefix ([format.md D9](format.md#d9-sealed-objects)). File deletion needs those
+checked references even when the device does not install the snapshot's rows.
+A body deleted by an undone operation never blocks applying its announcement.
 
 **Which snapshot a device loads.** It loads the newest snapshot that applies to
 the audience's current schema version and reset. If that snapshot needs a key the
