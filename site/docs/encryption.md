@@ -1,163 +1,161 @@
 # Encryption
 
-An opaque cloud home encrypts application data before uploading it. Its Store
-packages and snapshot images use the Store key; Circle data uses the relevant
-Circle key. Signed Store control records remain readable so a device can verify
-membership and publication history before opening encrypted data.
+The provider holds every byte of the store and must read none of it. Members
+must read everything they're entitled to, including on a new device or after
+joining late. And once Ben is removed, new data must stop reaching him. This
+page covers which keys exist, what the provider can see, how a key reaches a
+member, and which key new data uses. Where keys are kept on the device is the
+[Keys](/docs/keys) page.
 
-Encryption hides the protected contents. It does not hide the existence of the
-store, its activity, or all of its metadata. A browsable home deliberately stores
-application data in plaintext.
+## The keys
 
-## Three key layers
-
-**Symmetric keys protect data.** The Store keyring holds 32-byte keys used with
-XChaCha20-Poly1305, which authenticates ciphertext as it decrypts it. The keyring
-retains previous keys so existing data remains readable after rotation. Each
-key has a generation number, but its identity is its full SHA-256 fingerprint:
-concurrent rotations can produce different keys with the same generation.
-New seals use the highest generation, with the greatest fingerprint breaking a
-tie. Readers resolve the exact fingerprint recorded in the sealed payload.
-[`MasterKeyring`](rustdoc:struct:coven::MasterKeyring) is the material managed by
-[custody](/docs/keys); coven constructs the cipher internally.
-
-[Circles](/docs/circles) have their own encryption keys. Store membership alone
-does not supply a Circle's key. A blob's audience selects its Store or Circle
-key, and `BlobScope::Derived` derives a further key from that audience key and
-the scope label using HKDF-SHA256. A derived scope does not itself create a
-membership boundary: a holder of the audience key can perform the derivation.
-
-**Ed25519 keys prove authorship.** A Store identity and a registered device are
-distinct. [`UserKeypair`](rustdoc:struct:coven::UserKeypair) supplies the identity
-key. A device registration binds its author identity, device ID, and device
-signing public key to one Store root and a creation, join, or recovery origin.
-The device signing key is derived from that identity key and registration
-context. Registrations are signed by the identity key; device-authored records
-are checked against the registered device signing key. This separates
-permission to decrypt from proof of who authored a record.
-
-**Recipient encryption delivers keys.** To share the Store keyring, an owner
-seals it to the recipient's X25519 public key, derived from their Ed25519 public
-key. The recipient derives the matching secret key to open it. The sealed box
-alone does not authenticate a sender, so it travels inside the Owner-signed
-membership entry that grants or rotates that member's access: the entry's
-signature and hash authenticate the sealed bytes, and the entry's position in
-membership history fixes which keyring generation they must decode to.
-
-The membership entry names its recipient and is itself a readable signed
-record, so an invitation does not hide who granted access to whom.
-
-## What the storage provider sees
-
-Protection is selected by the object kind, not by its filename extension:
-
-| Object | Protection in an opaque home |
+| Key | Encrypts or does |
 | --- | --- |
-| Store row packages, Store snapshot images, reclamation evidence | Store-key encryption |
-| Store root, publications, commit records, acknowledgements, device registrations, snapshot metadata, membership entries and rollups | Signed, readable records |
-| Circle packages, roster and metadata records, acknowledgements, snapshot images and metadata | Circle-key encryption |
-| Circle control records, including each recipient's sealed access entry | Store-key encryption |
-| Application blobs | Encryption under their audience key and declared scope |
+| The store key | the store's rows and its metadata, such as admin entries and slot headers |
+| Each circle's key | that circle's rows ([Circles](/docs/circles)) |
+| Each file's key | that file; the key travels inside its encrypted row |
+| A member's signing pair (Ed25519) | signs every slot the member's devices write |
+| A member's sealing pair (X25519) | opens keys sealed to the member |
+| Provider credentials | reach storage; they encrypt nothing |
 
-A commit record can be readable while the row changes it references are in an
-encrypted package. Likewise, readable snapshot metadata refers to an encrypted
-database image. Those are separate objects with separate protections.
+The store key and circle keys are *audience keys*. An audience can have several:
+rotation adds new ones, and older ones stay readable, because old data was
+written with them. Contents are encrypted with XChaCha20-Poly1305, slots are
+signed with Ed25519, and keys are sealed to members with X25519 sealed boxes.
 
-The provider can observe object paths, stored lengths, writes, reads, and
-deletions. It can read the signed control records, including their public keys,
-device registrations, membership relationships, sequence and publication
-positions, and exact object references. Public keys are identifiers, not an
-anonymity guarantee; encryption does not conceal the provider account used to
-access storage.
+Every slot is signed by its author's member key, and the signature covers the
+slot's path, so the provider can't move one object into another's place.
 
-Representative logical paths are:
+## What the provider sees
+
+| Who can read it | What |
+| --- | --- |
+| The provider, in the clear | each slot's kind (writes, admin entry, key copy, announcement); a key copy's routing: its audience, key id, recipient member and sealing key, so circle ids are visible; object sizes and framing; the device and audience named in file and snapshot paths; which account writes each object |
+| Every member, under the store key | each slot's device and claim number, and which audience each part of a write belongs to |
+| A circle's members, under its key | the contents of that circle's parts |
+| Members of an audience only | its names, values and operation contents |
+
+The provider also sees counts and timing. It doesn't see which device claimed a
+slot: that is sealed inside the slot.
+
+A write's signature covers, for each of its parts, a hash over that part's row
+changes. The hash is keyed with a secret derived from the part's audience key,
+so a member outside that audience can't test a guessed row against it.
+
+## Getting a key to someone
+
+A key reaches a member as a *key copy*: the key sealed to that member's current
+sealing key, published in its own slot. The copy's routing is readable, which
+is how Dan finds his copy before he holds any key.
+
+A new audience key is *introduced* by an admin entry naming the key's random id
+and a SHA-256 hash of its 32 bytes. An operation claims every copy a new key
+needs before it claims the introduction, so by the time a key is in use,
+everyone who should have it has a copy. Store creation is the one exception:
+slot 1 creates the store and the creator's copy follows at slot 2.
+
+Opening a copy:
+
+1. Open it with the private key its routing names.
+2. If the key's introduction has already applied, check the key against its
+   hash. A mismatch stops the device at that slot.
+3. If the introduction hasn't arrived yet, keep the key as *tentative*. It
+   can't encrypt app data until its introduction confirms it.
+
+A device needn't open a copy meant for someone else; its routing still records
+whom the key reached. A member who has no copy of an older key is sent one, so
+they can read history written under it. Approving Dan's join sends him copies
+of every store key, not just the newest, so he can read a late write made under
+an older one.
+
+## Which key new data uses
+
+A copy *exposes* its key to its recipient, whether or not they ever open it. A
+key exposed to someone who has since left the audience, or to a sealing key
+since replaced, isn't used for new data.
+
+Before a write is first sent, its device picks, for each audience, the newest
+key that is introduced, held in custody, and not exposed that way. If none is,
+the device waits for a new key from another member, or rotates one itself
+through an [operation](/docs/sharing#how-admin-changes-are-made). Only a member
+of the audience can rotate its key.
+
+Carol, an admin outside Gifts, removes Ben from the store. Ben had copies of the
+store key and the Gifts key. Ana is still in Gifts, so her next pass rotates the
+Gifts key before any new Gifts data uses it; Carol can't make that key. If Ana
+is offline, new Gifts data waits until a member of Gifts is online. Any
+remaining member's device replaces the store key the same way before it sends
+more store data. Older keys stay readable.
+
+A few rules keep this from getting stuck or changing bytes:
+
+- **Admin entries can use any accepted store key,** even an exposed one.
+  Otherwise exposure could block the very removal or rotation that fixes it.
+- **Retries keep their keys.** A write keeps the keys chosen on its first
+  attempt, so its bytes don't change.
+- **A copy can arrive late.** A copy to Ben made before its author saw his
+  removal can land after Ana's read. On her next read it exposes that key, and
+  Ana uses another key from then on.
+
+Removal can't take back what Ben already downloaded. The provider's cut-off
+stops him downloading more ([Sharing](/docs/sharing#provider-access)), not
+opening what he holds.
+
+## Nonces
+
+Slots and the writes inside them are encrypted with nonces derived from their
+content: an HMAC, under the encryption key, of the object's path or the write's
+identity, its readable prefix, the chunk's position, and a hash of the chunk's
+plaintext. So:
+
+- a retried write or slot encrypts to the same bytes, which the byte comparison
+  that settles a claim relies on ([Sync](/docs/sync-model#when-the-reply-is-lost));
+- changed plaintext gets a different nonce, even if a restored backup has
+  forgotten an earlier attempt at the same path.
+
+The writes inside a slot are bound to their store, device and write number
+rather than to the slot's path. When Ben loses slot 41 and resends at 42, only
+the outer envelope changes; the bytes he wrote stay the same.
+
+## Files
+
+An uploaded file at `<store>/files/<device>/<file>` has an 11-byte readable
+header, then its chunks:
 
 ```text
-store-v1/candidates/{family}/packages/{device}/{seq}/{hash}.pkg
-store-v1/candidates/{family}/commits/{device}/{seq}/{hash}.json
-store-v1/acks/{device}/{seq}.json
-store-v1/publications/current.json
-store-v1/publications/entries/{position}/{hash}.json
-store-v1/snapshot-images/{author}/{hash}.db
-store-v1/snapshots/{author}/{hash}.json
-store-v1/membership/entries/{author}/{grant}/{stream_id}/{seq}/{hash}.json
-store-v1/membership-rollups/{author}/{hash}.json
-{namespace}/opaque/{locator_hash}
+[kind: 1 byte (38)][format version: 2 bytes][plaintext size: 8 bytes]
+[chunk 0][chunk 1]…[chunk n]
 ```
 
-Exact protocol objects use their domain's extension, and blobs use their
-locator's logical key. There is no blanket `.enc` suffix on these paths.
-Providers can assign a separate physical object identifier; the retained exact
-reference records that identifier along with the logical key, stored length,
-and stored-byte hash.
+Each chunk is 64 KiB of the file, the last possibly shorter, encrypted with
+XChaCha20-Poly1305 under the file's own random key and followed by its 16-byte
+tag. A chunk's nonce is its index. Its authentication binds the path, the
+header and the index, so a chunk can't be altered, swapped or reordered
+unnoticed. Chunk `i` starts at `11 + i × (65,536 + 16)`, so any range is read
+and checked without the rest. An empty file has a header and no chunks.
 
-Uploaded files expose an 11-byte header containing the object kind, format
-version, and plaintext length. Chunks are always 64 KiB, so the length determines
-their offsets. The file's independent key travels in its row's encrypted writes;
-it is not in the file header.
-See [the threat model](/docs/threat-model) for the limits of these protections.
+Upload retries check each plaintext chunk against its recorded hash before
+encrypting it, so a retry can never encrypt different bytes under the same key
+and index ([Files](/docs/files#uploads)).
 
-## Where the store key lives
+The file's key is written into its row's where column, inside the row's
+encrypted writes. It never reaches storage any other way, so only the row's
+readers can read the file.
 
-The host selects [custody](/docs/keys) for its Store keyring: the OS keyring,
-a passphrase-wrapped file, an in-memory value, or a host-supplied implementation.
-Coven uses that owner to unlock and persist the material. On key rotation, it
-persists the merged keyring before using the new key for cloud writes.
+## Algorithms
 
-Losing every usable copy of an encryption key makes data encrypted under that
-key unreadable. Keeping older keyring entries is what lets existing objects
-remain readable after later rotations.
+| Use | Algorithm |
+| --- | --- |
+| Encrypting contents | XChaCha20-Poly1305 |
+| Signing slots | Ed25519, over the path and a SHA-256 of every preceding byte |
+| Sealing a key to a member | X25519 anonymous sealed box with XChaCha20-Poly1305 |
+| Keys for each purpose | HKDF-SHA256 from the store or circle key, with separate labels for encryption and authorship |
+| A join request's key | HKDF-SHA256 from the invite secret |
+| Key introductions | SHA-256 of the key's 32 bytes, with a random key id |
 
-Cloud encryption does not encrypt the local SQLite database.
+## On the device
 
-## Opaque and browsable homes
-
-The home's storage mode selects how Store data and application blobs are
-stored. An **opaque** home encrypts those contents; a **browsable** home stores
-them in plaintext. Signed Store control records remain readable in either mode.
-The provider's account and container access controls still apply to both.
-
-Blob paths bind a particular stored version:
-
-| Home | Blob logical key | Stored contents |
-| --- | --- | --- |
-| Opaque | `{namespace}/opaque/{locator_hash}` | Encrypted |
-| Browsable | `{namespace}/readable/{cloud_path}/.coven-versions/{locator_hash}` | Plaintext |
-
-The locator hash covers more than file contents: it includes the blob identity,
-uploader registration, content hash and length, and protection-specific fields.
-For an opaque blob those fields include audience, scope, and key fingerprint;
-for a browsable blob they include the declared readable path. Two uploads with
-equal file contents therefore need not identify the same stored object.
-
-A browsable blob has no per-chunk authentication tags. Coven verifies a complete
-download against its exact reference and plaintext hash; it refuses the
-encrypted-blob range-reader API for that blob rather than returning an
-unverified partial read.
-
-## Chunked encryption
-
-Coven encrypts each uploaded file in 64-KiB chunks with XChaCha20-Poly1305.
-The last chunk may be shorter. Each chunk adds a 16-byte authentication tag;
-an empty file has a header and no chunks.
-
-The stored file at `files/<device>/<file>` is:
-
-```text
-[kind: 1 byte (38)][format version: 2 bytes, big-endian]
-[plaintext length: 8 bytes, big-endian]
-[encrypted chunk 0][encrypted chunk 1]...[encrypted chunk n]
-```
-
-Each file has an independent random key. A chunk's nonce is its zero-based index
-encoded as a 24-byte big-endian number. Its authentication tag binds the
-`coven/file-chunk/v1` context, storage path, complete header, index, and contents.
-Changing chunk positions, the declared length, or the path makes authentication
-fail. Upload retries verify each plaintext chunk against its recorded hash before
-encrypting it, so a retry cannot encrypt different bytes under the same key and
-chunk index.
-
-The range reader reads the header once, then fetches and authenticates only the
-chunks covering the requested plaintext range. Chunk `i` starts at
-`11 + i × (65,536 + 16)`. Reading a range does not need preceding chunks or a
-complete file download.
+Coven doesn't encrypt the database on the device. Members' private keys and
+audience keys stay in [custody](/docs/keys), never in the database. Losing every
+copy of a key makes the data encrypted under it unreadable; keeping older keys
+is what keeps old data readable after a rotation.

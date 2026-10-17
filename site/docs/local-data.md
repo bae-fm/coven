@@ -1,302 +1,233 @@
 # Local data
 
 A coven store is one SQLite database on the device, plus the files its rows
-carry. The host opens it through one handle, declares which tables participate
-in sync, and runs ordinary SQL. This page is about that declaration: what a
-synced table looks like, what stays local, and how a *gate* keeps chosen rows
-on one device even inside a synced table.
+carry. The app opens it through one handle, declares which tables sync, and
+runs ordinary SQL. This page is about the store on one device: opening it,
+declaring tables, keys, and writing and reading.
 
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+## Opening a store
 
-## What a synced table looks like
-
-For a row to travel, every device needs two things it can rely on: a stable
-way to say *which* row this is, and a value that orders concurrent edits to
-it. Both ride on typed columns, so a third convention pins the types
-themselves. These are the conventions a synced table carries, checked at open:
-
-- declared `STRICT`: SQLite refuses an insert or update whose value doesn't
-  match a column's declared type, so a synced table can never hold a value off
-  the type every peer's apply and coven's own conflict-resolution code expect
-- a `TEXT` primary key named `id`, at column position 0: together with the table
-  name, this is the logical row identity on every device
-- an `_updated_at TEXT NOT NULL` column, stamped through
-  [`SqlContext::stamp`](rustdoc:method:coven::SqlContext::stamp): the register
-  concurrent edits are ordered by
-
-Everything else about the schema is yours. Tables you do *not* pass to
-[`synced_tables`](rustdoc:method:coven::CovenBuilder::synced_tables) never
-leave the device: that is also the mechanism for per-device state (window
-positions, per-device pin bookkeeping, local paths). Put it in a table you
-don't declare.
-
-### Row identity
-
-Every `SyncedTable` declares what its ids mean. Use
-`RowIdentity::IndependentUuid` for rows created independently on offline
-devices; every id must be a canonical lowercase hyphenated UUIDv4 or UUIDv7.
-Use `RowIdentity::SharedKey` only when an application key intentionally names
-the same logical row everywhere, such as `settings(id = 'preferences')`. Equal
-shared keys merge as one row under the normal `_updated_at` policy.
-A row one device holds privately joins the shared row with its key when the
-shared copy arrives; see [which rows merge](/docs/merge#which-rows-merge).
-
-Changing a primary key removes the old identity and inserts the new identity in
-one transaction; SQLite records that the same way as an explicit delete plus
-insert. The introduced id must satisfy the table's mode. Even an equal, valid
-UUID means one logical row: identity mode prevents predictable key reuse, but
-equal `(table, id)` values always denote the same row.
-
-<svg class="flow" viewBox="0 0 660 168" role="img" aria-label="Declared tables sync to the cloud; undeclared tables never leave the device">
-<text class="hdr" x="155" y="22" text-anchor="middle">THIS DEVICE</text>
-<text class="hdr" x="560" y="22" text-anchor="middle">CLOUD</text>
-<rect class="lane" x="10" y="32" width="290" height="124" rx="10"/>
-<rect class="lanec" x="470" y="32" width="180" height="124" rx="10"/>
-<rect class="chipo" x="30" y="44" width="250" height="26" rx="7"/>
-<text class="lbl s11" x="155" y="61" text-anchor="middle">todos · synced</text>
-<rect class="chipo" x="30" y="78" width="250" height="26" rx="7"/>
-<text class="lbl s11" x="155" y="95" text-anchor="middle">lists · synced</text>
-<rect class="chipd" x="30" y="112" width="250" height="26" rx="7"/>
-<text class="lbl s11" x="155" y="129" text-anchor="middle">ui_state · not declared</text>
-<line class="arr" x1="305" y1="70" x2="462" y2="70" marker-end="url(#fa)"/>
-<text class="sub" x="384" y="60" text-anchor="middle">declared tables sync</text>
-<line class="arrd" x1="305" y1="125" x2="380" y2="125"/>
-<line class="arrd" x1="392" y1="118" x2="380" y2="132"/>
-<text class="sub" x="384" y="148" text-anchor="middle">never leaves</text>
-<text class="sub" x="560" y="98" text-anchor="middle">changesets · snapshot</text>
-</svg>
-
-## Declaring the set
-
-By default, every row of a synced table reaches every device in the store,
-and some rows are not meant to: a draft, a private list. If keeping them back
-were application logic, every query and every sync path would have to
-remember it, and the first one that forgot would leak the row. Instead the
-host *gates* the table: privacy becomes a property of the schema, and coven
-enforces it everywhere a row can travel. The host declares the gate per table on
-the [`SyncedTable`](rustdoc:struct:coven::SyncedTable) values
-it passes to `Coven::builder(layout.clone()).synced_tables(...)`, and coven enforces
-it on both paths a row can take to another device: the per-cycle changeset
-and the bootstrap snapshot.
-
-Examples: a `workspace` holds `lists`, a `list` holds `todos`, and a list has
-a boolean `shared` column. A private list, and the todos under it, should stay
-on the device that made it.
-
-[`SyncedTable`](rustdoc:struct:coven::SyncedTable) has these
-gate forms:
+Each store lives in its own directory under the app's
+[`StoreLayout`](rustdoc:struct:coven::StoreLayout). The directory holds the
+database, coven's copies of files, the cache, and the store's settings: its id
+and name, this device's id, and its storage location. The app never picks a
+device id; creating, restoring or joining a store does.
 
 ```rust
-SyncedTable::new("todos", RowIdentity::IndependentUuid) // inherits the list's gate
-    .gated_through("list_id")
-SyncedTable::new("attachments", RowIdentity::IndependentUuid).remote_root()
-SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared")
-SyncedTable::new("workspaces", RowIdentity::IndependentUuid).gated_by_descendants()
-SyncedTable::new("notes", RowIdentity::IndependentUuid).scoped_by("audience")
+let layout = StoreLayout::new(app_dir);
+
+// First launch: make the store. Its member keys go to custody before anything else.
+let handle = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .create_store("Household")
+    .await?;
+
+// Later launches: open it again.
+let store = layout.stores().await?[0].id;
+let handle = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .open(store)
+    .await?;
 ```
 
-- `new(name, row_identity)` declares the table synced with no gate of its own. It
-  syncs unconditionally unless it names a foreign key to inherit a gate through.
-- `gated_through(column)` names the one foreign key this table takes
-  its gate from, whatever the chain ends at: a gated root, an audience root, a
-  remote root, or a kept ancestor. A table with a foreign key into a gated table
-  must name it — coven refuses to choose among a table's foreign keys, because
-  which one carries the gate is the host's answer, not a fact in the schema.
-- `remote_root()` keeps whole-table row sync and makes blobs on those rows and
-  their descendants Remote by construction.
-- `gated_by(column)` makes the table a *gated root*: a row syncs only while its
-  boolean `column` is true.
-- `gated_by_descendants()` marks an *ancestor* that should sync only while a
-  gated descendant of it survives.
-- `scoped_by(column)` makes the table an *audience root*: a `TEXT` column selects
-  whether each row reaches the whole store, one [Circle](/docs/circles), or only
-  this device. It is the general form of `gated_by` (which chooses only between
-  the store and this device). Audience roots require an opaque cloud home and are
-  covered on the [Circles](/docs/circles#declaring-audience-routing) page.
+Opening migrates coven's own tables, then runs the app's pending migrations
+([Schema evolution](/docs/schema-evolution)), then checks the schema against
+the declared tables. It needs no network and doesn't start syncing: a store
+with storage set up opens as `Stopped`, one without as `Disconnected`
+([Sync](/docs/sync-model#status-and-pending-work)).
 
-A table is one root kind or plain, never two at once; `gated_through`
-is the plain table's own declaration and never combines with a root kind. Two
-further properties are orthogonal to the gate and covered in
-[Blobs](/docs/blobs): a table may *carry a blob* (`carries_blob`), and it may be
-an *asset*, a decoration like a cover image that rides its subject's gate but
-never keeps that subject alive.
+One writable handle can have a store open at a time; a second open, in this
+process or another, fails with `StoreLockError::AlreadyOpen`. Another process,
+such as a widget, can read alongside the app with `open_read_only`, which
+returns a [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle). It runs
+no migration and refuses a database whose schema needs migrating or is newer
+than its own; while it is open, the store can't be deleted.
 
-## One tree, both directions
+`handle.close()` stops syncing, closes every connection and releases the lock.
+`handle.delete_store(IfUnsent::Refuse)` removes the store from this device: it
+refuses while writes or files wait to upload, publishes this device's removal,
+then deletes its keychain entries and directory. `IfUnsent::Discard` drops the
+unsent work instead. For a store that no longer opens,
+`Coven::discard_store(&store_dir)` deletes it without opening it. The copy in
+storage is never touched.
 
-The gate flows *down* foreign keys; the keep flows *up* them.
+## Declaring synced tables
 
-<svg class="flow" viewBox="0 0 660 212" role="img" aria-label="A workspace keeps syncing because one shared list survives; a private list and its todos stay local">
-<rect class="chip" x="16" y="88" width="150" height="26" rx="7"/>
-<text class="lbl s11" x="91" y="105" text-anchor="middle">workspace · Acme</text>
-<text class="sub" x="91" y="130" text-anchor="middle">gated_by_descendants</text>
-<path class="tree" d="M166 101h24v-48h34M166 101h24v62h34"/>
-<rect class="chipa" x="224" y="40" width="186" height="26" rx="7"/>
-<text class="lbl s11" x="317" y="57" text-anchor="middle">list · Groceries — shared ✓</text>
-<rect class="chipd" x="224" y="150" width="186" height="26" rx="7"/>
-<text class="lbl s11" x="317" y="167" text-anchor="middle">list · Journal — shared ✗</text>
-<path class="tree" d="M410 53h24v-25h34M410 53h24v25h34"/>
-<path class="tree" d="M410 163h24v-25h34M410 163h24v25h34"/>
-<rect class="chip" x="468" y="16" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="543" y="32" text-anchor="middle">todo · milk</text>
-<rect class="chip" x="468" y="66" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="543" y="82" text-anchor="middle">todo · bread</text>
-<rect class="chipd ghost" x="468" y="126" width="150" height="24" rx="6"/>
-<text class="lbl s11 ghost" x="543" y="142" text-anchor="middle">todo · therapy</text>
-<rect class="chipd ghost" x="468" y="176" width="150" height="24" rx="6"/>
-<text class="lbl s11 ghost" x="543" y="192" text-anchor="middle">todo · gym</text>
-<text class="sub" x="317" y="22" text-anchor="middle">keep flows up: one shared list keeps the workspace</text>
-<text class="sub" x="317" y="205" text-anchor="middle">gate flows down: a private list takes its todos with it</text>
-</svg>
+The app tells coven which tables sync with a
+[`SyncedTable`](rustdoc:struct:coven::SyncedTable) for each one. Every other
+table stays on the device: window positions, a search index, per-device
+settings.
 
-## Gated roots
-
-A gated root carries a boolean column. A row whose column is false stays on the
-device that wrote it, and its foreign-key descendants stay with it. With
-`lists.gated_by("shared")`, a private list and its todos never leave the device.
-
-The gate flows down the declared foreign keys: a child row syncs iff the row at
-the top of its chain, the gated root, syncs. `todos` name `list_id`, so a todo is
-shared exactly while its list is. The host declares the gate once, on the root,
-and each descendant names the one foreign key it inherits through; a chain of
-those declarations reaches every descendant.
-
-## Remote roots
-
-A remote root has no gate column. Every row syncs, like
-`new(name, row_identity)`, but the row
-also anchors blob locality: blobs carried by that row or by descendants are
-Remote. Host-provided blobs upload before the row changeset is pushed, and a peer
-reads them from the cache or cloud. `make_remote`, `make_local`, and
-`cancel_make_remote` reject a remote root because there is no Local state to
-enter or leave.
-
-A plain table that carries blobs but is not under a gated root or remote root is
-not a blob locality root. Rows still sync, but blob reads fail because coven has
-no authoritative Local/Remote answer for the bytes.
-
-## Ancestors
-
-A list belongs to a workspace. A workspace sits above the gate, not below it, so
-the root gate never reaches it: a workspace whose every list is private would
-still sync its own row and arrive on a peer as an empty workspace, a row
-pointing at nothing.
-
-`gated_by_descendants()` removes that orphan. The ancestor syncs only while a
-surviving descendant references it. coven infers which descendants count from
-the foreign-key graph: every synced table with a foreign key into the ancestor,
-except a child that named its foreign key into this ancestor as the one it
-inherits through (a many-to-many join row, which would otherwise keep its parent
-alive in a circle). The rule
-composes up the chain, so a workspace nested in a parent of its own would sync
-only while a surviving workspace, and through it a shared list, kept it alive.
-
-A many-to-many is the case the exception covers. Say todos carry `labels`
-through a `todo_labels` join. Mark `labels` with `gated_by_descendants()`: a
-label syncs while a shared todo wears it. The join row names `todo_id` as the
-foreign key it inherits through, so it does not count as a keep-child of `todos`;
-it does count for `labels`. Naming `label_id` instead would flip both: the join
-row would take its gate from the label and keep a todo alive.
-
-## The keep rule
-
-A private row must not leak through *any* channel, and there are two: the
-per-cycle changeset and the bootstrap snapshot. If each path had its own idea
-of "private", they would eventually disagree, and the disagreement would be a
-leak. So both share one definition of "kept", built as a SQL predicate. For a
-gated root it is the column test:
-
-```sql
-lists.shared IS NOT NULL AND CAST(lists.shared AS INTEGER) <> 0
+```rust
+fn tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("notes", RowIdentity::IndependentUuid),
+        SyncedTable::new("tags", RowIdentity::SharedKey),
+        SyncedTable::new("note_tags", RowIdentity::SharedKey)
+            .key_columns(["note_id", "tag_id"]),
+    ]
+}
 ```
 
-For a descendant it is an `EXISTS` up the foreign key into its parent's rule:
+A declaration can also say how the table's rows get their
+[audience](/docs/circles#declaring-audiences) (`audience_column`,
+`audience_from`), that its rows carry a [file](/docs/files) (`carries_files`),
+that only each row's creator may change it ([`owner_only`](/docs/merge#owner-tables)),
+and which of its triggers are [shared](/docs/merge#triggers)
+(`shared_trigger`). The schema itself is the app's: coven adds no columns to
+synced tables.
 
-```sql
-EXISTS (SELECT 1 FROM lists
-        WHERE lists.id = todos.list_id AND (<lists kept>))
+### Keys
+
+Every synced row is named by its table and its primary key, on every device.
+Two devices that insert the same key insert the same row. So each synced table
+declares what kind of key it has:
+
+- **Independent** (`RowIdentity::IndependentUuid`): each new row gets a random
+  UUID, so rows made on different devices never collide. Ana and Ben each
+  create a note offline; they get two notes.
+- **Shared** (`RowIdentity::SharedKey`): the app derives the key from what makes
+  the row unique, so the same thing made on two devices is one row. Ana and
+  Ben, both offline, each add the tag "urgent". Both derive the key `urgent`,
+  their inserts are one row, and their cells merge.
+
+Either kind can span several columns with `key_columns`; without it, the key
+is the one column `id`. An independent key over several columns needs a UUID in
+one of them.
+
+Bind independent keys with [`UuidText`](rustdoc:struct:coven::UuidText), which
+writes a UUID as canonical lowercase text. Inserting anything else, including
+an uppercase UUID, fails with `DbError::KeyNotUuid`. A bare `uuid::Uuid` would
+bind as a blob.
+
+```rust
+let note = UuidText(Uuid::now_v7());
+handle.write(move |sql| {
+    sql.execute("INSERT INTO notes (id, title) VALUES (?1, ?2)", (note, "Paint colors"))?;
+    sql.execute("INSERT INTO tags (id) VALUES ('urgent') ON CONFLICT DO NOTHING", [])?;
+    sql.execute("INSERT INTO note_tags (note_id, tag_id) VALUES (?1, 'urgent')", (note,))?;
+    Ok(())
+}).await?;
 ```
 
-For an ancestor it is an `EXISTS` down each inferred child into that child's
-rule:
+Changing a row's primary key is a delete of the old row and an insert of the
+new one, on every device ([Merge](/docs/merge#key-changes)).
 
-```sql
-EXISTS (SELECT 1 FROM lists
-        WHERE lists.workspace_id = workspaces.id AND (<lists kept>))
+Coven refuses, when the database opens and after every migration, keys that
+can't mean the same thing on every device. The error names the table:
+
+| Refused | Why | Error |
+| --- | --- | --- |
+| An integer rowid key, or any key SQLite picks | two devices would pick the same number for different rows | `SchemaError::GeneratedPrimaryKey` |
+| A synced table without a primary key | coven can't tell which row a change belongs to | `SchemaError::NoPrimaryKey` |
+| A key column that allows NULL | a key with a NULL in it names no row | `SchemaError::NullableKey` |
+| An independent key with no text column for its UUID | | `SchemaError::IndependentKeyNotUuid` |
+| A collation other than `BINARY` on a key, unique or foreign-key column | under `COLLATE NOCASE`, SQLite would hold "Urgent" and "urgent" as one row that coven treats as two | `SchemaError::KeyCollation` |
+| Declared key columns that don't match the table's primary key | | `SchemaError::KeyColumns` |
+
+The rules for foreign keys, unique constraints, CHECKs and triggers are on the
+[Merge](/docs/merge#the-rules-sql-brings-with-it) page;
+[Constraints](/docs/constraints) lists what can't be expressed at all.
+
+## Writing
+
+A write is one SQLite transaction through `handle.write`. Its closure gets a
+[`SqlContext`](rustdoc:struct:coven::SqlContext) with `execute`,
+`execute_batch`, `query_row` and `query`. If the closure returns an error, or a
+statement fails, the whole transaction rolls back.
+
+When a write commits, coven records in the same transaction:
+
+- the rows as they now stand;
+- a *write record* for upload: each row change with the columns it touched and
+  their old and new values, the write's device and number, its timestamp, the
+  schema version it was made with, and how far this device had read the
+  store's sequence (`read_through`);
+- the facts later [owner checks](/docs/merge#owner-tables) need.
+
+Here is the write record for a write that fixes a note's title and deletes a
+tag:
+
+```
+ana-phone, write 3, 2026-10-02 12:00:00.000 #0
+  read_through: slot 20
+  notes  row 42  update  title: "Grocry list" → "Grocery list"
+  tags   "errands"  delete
 ```
 
-Every form bottoms out at some root's column test, so "kept" is one expression
-that the changeset filter and the snapshot cleanup evaluate the same way.
+Writing needs no key and no storage. The record waits on the device unencrypted
+and unsigned; it is encrypted and signed when it is sent
+([Sync](/docs/sync-model#a-sync-pass)). Ana can use the app before she has set
+storage up at all.
 
-## Flipping the gate
+A commit never waits for the network, but it can be refused for local reasons:
+a SQL constraint or trigger, a write into a circle the member isn't in, a
+change to another member's owned row, or an audience in the middle of a
+reload. The [`DbError`](rustdoc:enum:coven::DbError) names each. Coven also
+refuses SQL that would get around it: transaction control, `PRAGMA`, `ATTACH`
+or loading an extension (`DbError::StatementForbidden`), and anything that
+reads or changes coven's own objects (`DbError::InternalTable`). App tables,
+indexes and triggers may not start with `_coven_` or `coven_`.
 
-The gate is a live switch, not a create-time choice, and both directions
-must move complete subtrees: sharing delivers the whole subtree, and
-unsharing removes it from peers without destroying the owner's copy.
+**Rowids.** In a table whose rowid isn't its primary key, the app can read the
+rowid but can't change it once the row exists. The rowid is SQLite's private
+address for the row: coven doesn't sync it, and `VACUUM` can renumber it.
 
-Setting a root's gate from false to true makes a previously-local subtree
-public. Peers never held it, so coven re-emits the whole now-visible connected
-component (the root row, its descendants, and the ancestors the new row keeps
-alive) as full inserts in that cycle. The subtree lands complete, not as an
-update to rows the peer is missing.
+**A rollback that fails.** If a transaction fails and rolling it back fails
+too, a connection may still be inside that transaction. Every later call on
+that handle, read-only or not, then fails with `DbError::RollbackFailed` until
+the store is reopened.
 
-The reverse, true to false, is a retract: coven emits deletes for the rows that
-leave the shared set so peers remove them, the mirror of the false-to-true
-re-emit. The candidate rows are the structural connected component of the roots
-that flipped this cycle, minus any row still kept by another root (a sibling that
-shares an ancestor is spared; a now-childless ancestor is deleted too). The
-flipping device keeps its own rows (now gated-false, local-only): retract writes
-only to the outgoing changeset, never deletes locally, and fires once on the flip
-cycle. A root that was never shared has nothing on peers to retract, so it emits
-nothing.
+## Reading
 
-An ancestor's retract can race a new child. While one device removes an
-album's last shared release, which retracts the album, another device can add
-a release to the same album. The new child keeps the ancestor alive: applying
-a history, coven skips the DELETE of a `gated_by_descendants` row that a
-remaining inferred child still references, while a DELETE whose children the
-same commit also removes applies as before, and an ancestor kept this way keeps
-its own ancestors (the album's artist) too. The new child's own commit carries
-the ancestor it keeps (a newly shared row re-emits its shared ancestors), so
-the ancestor is present whichever of the two commits comes first, and every
-device converges on it. The withdrawing device sees the album shared again,
-kept by the other device's release.
+`handle.read` runs a closure on one of several read-only connections, in one
+transaction, so every statement in it sees the same committed state. Reads run
+alongside each other and alongside the writer, and a read after an awaited
+write sees that write. SQLite itself refuses writes on these connections.
 
-<svg class="flow" viewBox="0 0 660 240" role="img" aria-label="While shared is on, peers hold the subtree; the flag flips off; one retract removes it from peers while the owner keeps it">
-<text class="hdr" x="120" y="22" text-anchor="middle">FLIPPING DEVICE</text>
-<text class="hdr" x="540" y="22" text-anchor="middle">PEERS</text>
-<rect class="lane" x="10" y="32" width="220" height="176" rx="10"/>
-<rect class="lane" x="430" y="32" width="220" height="176" rx="10"/>
-<circle class="numc" cx="24" cy="59" r="8"/>
-<text class="num" x="24" y="62.5" text-anchor="middle">1</text>
-<rect class="chipa" x="40" y="46" width="170" height="26" rx="7"/>
-<text class="lbl s11" x="125" y="63" text-anchor="middle">Journal — shared ✓</text>
-<rect class="chip" x="450" y="46" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="540" y="63" text-anchor="middle">Journal + its todos</text>
-<text class="sub" x="330" y="63" text-anchor="middle">in sync</text>
-<line class="arrd" x1="20" y1="100" x2="640" y2="100"/>
-<circle class="numc" cx="330" cy="100" r="8"/>
-<text class="num" x="330" y="103.5" text-anchor="middle">2</text>
-<text class="sub" x="330" y="88" text-anchor="middle">shared flips off</text>
-<rect class="chip" x="40" y="118" width="170" height="26" rx="7"/>
-<text class="lbl s11" x="125" y="135" text-anchor="middle">Journal — shared ✗</text>
-<text class="sub" x="125" y="192" text-anchor="middle">rows stay, local-only</text>
-<circle class="numc" cx="330" cy="132" r="8"/>
-<text class="num" x="330" y="135.5" text-anchor="middle">3</text>
-<line class="arr" x1="238" y1="152" x2="422" y2="152" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="168" text-anchor="middle">retract: deletes in the changeset</text>
-<rect class="chipd ghost" x="450" y="118" width="180" height="26" rx="7"/>
-<text class="sub" x="540" y="192" text-anchor="middle">subtree removed</text>
-<text class="sub" x="330" y="230" text-anchor="middle">1 peers hold the shared subtree · 2 the flag flips off · 3 one retract removes it there; the owner keeps it</text>
-</svg>
+```rust
+let titles: Vec<String> = handle
+    .read(|sql| Ok(sql.query("SELECT title FROM notes", [], |row| row.get(0))?))
+    .process(|mut titles| {
+        titles.sort();
+        Ok(titles)
+    })
+    .await?;
+```
 
-## Where it runs
+`process` runs on a separate worker after the read has released its
+connection, so expensive work doesn't hold one. Fetch every database input in
+the read; `process` gets owned values and no SQL.
 
-The two paths a row can cross on both apply the same keep rule:
+### Live queries
 
-- The changeset filter cuts gated-false rows from each outgoing changeset before
-  it is signed and uploaded.
-- The snapshot cleanup deletes gated-false rows from the bootstrap copy before
-  it is encrypted and uploaded.
+`handle.subscribe` runs a query once, then again whenever a write commits that
+changes rows it read, whether the write was local or arrived from another
+device. Coven records the tables, columns and keys the query reads, so an
+unrelated write doesn't rerun it. The first `next()` returns the current
+result; an error is a result too and doesn't end the query. Dropping the
+`LiveQuery` ends it.
 
-So a device that bootstraps from a snapshot and a device that applies live
-changesets receive the same set of rows.
+```rust
+let mut notes = handle.subscribe(|sql| {
+    Ok(sql.query("SELECT id, title FROM notes ORDER BY title", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?)
+});
+while let Ok(rows) = notes.next().await {
+    show_notes(rows);
+}
+```
+
+`handle.subscribe_reconfigurable(request, query)` takes a request, such as a
+page number or a search term, that the app can replace through
+`requests().set(..)` without starting a new subscription. Each result says
+which request and revision it answers, and whether a new request, a write, or
+both caused it.
+
+Coven's own state has ready-made live queries with the same results as their
+one-shot reads: `subscribe_members`, `subscribe_lost_values`,
+`subscribe_pending`, `subscribe_uploads`, `subscribe_pin_progress` and others.
+They all work offline.

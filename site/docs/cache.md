@@ -1,277 +1,117 @@
 # Cache
 
-A blob lives in the cloud, encrypted. To read it (show a photo, play a track) a
-device needs the plaintext bytes on local disk. The cache is where those bytes
-live: a device-local store of blob files, keyed by blob id, that serves a read
-from disk on a hit and fetches from the cloud on a miss.
+An uploaded file lives in storage, encrypted. To show a photo or play a song, a
+device needs its bytes on local disk. The cache is where those bytes live: each
+device keeps uploaded files, and pieces of them, within a size budget the app
+sets. This page covers the budget, pinning, eager downloads and progress. How a
+file is attached, uploaded and read is the [Files](/docs/files) page.
 
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+The cache holds only uploaded files, so everything in it can be fetched again.
+A file still waiting to upload is read from its source on this device: the
+user's original, or coven's own copy of app-provided bytes. The cache keeps the
+encrypted chunks as storage holds them, checked as they arrived; reads decrypt
+them.
 
-It is a separate layer from the [cloud blob lifecycle](/docs/blobs). That page
-covers how a blob is uploaded, downloaded, and deleted across devices. This page
-covers the one device's copy: where it sits, when it is fetched, how long it is
-kept, and how a user pins a blob to keep it offline.
+## The budget
 
-The cache is coven's, under the store directory. Examples: a todos app whose
-`todo_attachments` rows each point at a photo; audio is the case the lazy half
-exists for.
-
-The cache holds **Remote** blobs only: bytes that also live in the cloud, so a
-cache copy is always re-fetchable. A **Local** blob is never in the cache: it is
-the user's own file at a path (user-provided) or coven's own copy in the local
-store (host-provided). See [Blobs](/docs/blobs) for that distinction.
-
-## Two folders, no table
-
-A Remote blob is in exactly one of two folders under the store directory, or in
-neither. Both are segmented by the blob's namespace, so each namespace's cache
-evicts against its own budget without touching another's:
-
-```
-storage/pinned/<namespace>/{ab}/{cd}/<id>   protected, never evicted
-storage/cache/<namespace>/{ab}/{cd}/<id>    opportunistic, evictable
-neither                                     remote-only: no file, fetched on next read
-```
-
-`{ab}` and `{cd}` are the first two byte-pairs of the dash-stripped id (the same
-content-addressed shard the cloud layout uses, built by
-[`StoreDir::pinned_blob_path`](rustdoc:method:coven::StoreDir::pinned_blob_path)
-/ [`cache_blob_path`](rustdoc:method:coven::StoreDir::cache_blob_path)).
-
-There is no cache table, because a table would be a second copy of the truth:
-every crash between a file write and its row would leave the two disagreeing,
-and the disagreement would surface as a phantom hit or a wasted re-download.
-The file on disk *is* the presence record, and the folder it sits in *is* the
-retention class. Nothing the two directory listings
-can't answer, so there is no metadata sidecar to keep in step with the disk.
-Every cache write is atomic
-([`local_blob::write_atomic`](rustdoc:fn:coven::write_atomic): write a
-temp file, then rename it over the destination), so a crash mid-write cannot
-leave a torn file that a later read would trust as whole. Pinning and unpinning
-are a `rename` within `storage/` (one filesystem, atomic), so a blob is never
-visible in both folders or in neither mid-move.
-
-
-<svg class="flow" viewBox="0 0 660 188" role="img" aria-label="A Remote blob's cache state: absent, evictable in cache/, or protected in pinned/; fills, pins, unpins, and eviction move it between them">
-<path class="arrd" d="M110 58 C 200 6, 460 6, 550 58" marker-end="url(#fam)"/>
-<text class="sub" x="330" y="20" text-anchor="middle">pin fetches an absent blob straight into pinned/</text>
-<rect class="chipd" x="30" y="64" width="165" height="30" rx="8"/>
-<text class="lbl s11" x="112" y="83" text-anchor="middle">neither · remote-only</text>
-<rect class="chip" x="250" y="64" width="165" height="30" rx="8"/>
-<text class="lbl s11" x="332" y="83" text-anchor="middle">cache/ · evictable</text>
-<rect class="chipa" x="470" y="64" width="165" height="30" rx="8"/>
-<text class="lbl s11" x="552" y="83" text-anchor="middle">pinned/ · protected</text>
-<line class="arr" x1="199" y1="72" x2="246" y2="72" marker-end="url(#fa)"/>
-<text class="sub" x="222" y="60" text-anchor="middle">fill</text>
-<line class="arrd" x1="246" y1="88" x2="199" y2="88" marker-end="url(#fam)"/>
-<text class="sub" x="222" y="112" text-anchor="middle">eviction</text>
-<line class="arr" x1="419" y1="72" x2="466" y2="72" marker-end="url(#fa)"/>
-<text class="sub" x="442" y="60" text-anchor="middle">pin</text>
-<line class="arrd" x1="466" y1="88" x2="419" y2="88" marker-end="url(#fam)"/>
-<text class="sub" x="442" y="112" text-anchor="middle">unpin</text>
-<text class="sub" x="330" y="140" text-anchor="middle">fill = eager pull, first read, or write · every move is one atomic rename or write</text>
-<text class="sub" x="330" y="162" text-anchor="middle">one blob, in time: fetched on first read · pinned for a trip · unpinned · evicted under pressure · fetched again on the next read</text>
-</svg>
-
-Cache files are plaintext. Encryption happens on the way to the cloud, not on
-local disk; a blob comes back from the cloud decrypted and lands in the cache as
-the bytes the host reads.
-
-## Reading a blob
-
-The host never tracks where a blob's bytes are at the moment of a read (a
-user file, the local store, a cache folder, or only the cloud); it asks for
-the blob, and coven resolves the location.
-[`CovenHandle::read_blob`](rustdoc:method:coven::CovenHandle::read_blob) serves a
-blob's whole contents.
+Each file declaration names a *namespace* and that namespace's cache budget in
+bytes ([Files](/docs/files#declaring-files)). Each namespace evicts on its own,
+so a big namespace can't push out a small one:
 
 ```rust
-let bytes = handle.read_blob(&blob).await?;
+vec![
+    SyncedTable::new("tracks", RowIdentity::IndependentUuid)
+        .carries_files(FileDecl::new("audio", 2 << 30, Provenance::UserProvided, CacheFill::CacheLazy)),
+    SyncedTable::new("covers", RowIdentity::IndependentUuid)
+        .carries_files(FileDecl::new("covers", 64 << 20, Provenance::AppProvided, CacheFill::CacheEager)),
+]
 ```
 
+The declared budget applies when the namespace is first declared. After that,
+`handle.set_cache_budget("audio", bytes)` changes it, and
+`handle.get_cache_budget("audio")` reads it. Tables that share a namespace must
+declare the same budget (`SchemaError::CacheBudgetDisagrees`).
 
-<svg class="flow" viewBox="0 0 660 206" role="img" aria-label="read_blob dispatches on the blob's provenance and locality: the user's file, the local store, or the cache; a Remote miss fetches into the evictable cache and serves from there">
-<rect class="chipa" x="255" y="14" width="150" height="28" rx="8"/>
-<text class="lbl s11" x="330" y="32" text-anchor="middle">read_blob(blob)</text>
-<line class="arr" x1="290" y1="46" x2="130" y2="76" marker-end="url(#fa)"/>
-<line class="arr" x1="330" y1="46" x2="330" y2="76" marker-end="url(#fa)"/>
-<line class="arr" x1="370" y1="46" x2="530" y2="76" marker-end="url(#fa)"/>
-<rect class="chip" x="40" y="82" width="160" height="28" rx="8"/>
-<text class="lbl s11" x="120" y="100" text-anchor="middle">the user's file</text>
-<text class="sub" x="120" y="126" text-anchor="middle">Local · user-provided</text>
-<rect class="chip" x="250" y="82" width="160" height="28" rx="8"/>
-<text class="lbl s11" x="330" y="100" text-anchor="middle">the local store</text>
-<text class="sub" x="330" y="126" text-anchor="middle">Local · host-provided</text>
-<rect class="chip" x="460" y="82" width="160" height="28" rx="8"/>
-<text class="lbl s11" x="540" y="100" text-anchor="middle">cache, else cloud</text>
-<text class="sub" x="540" y="124" text-anchor="middle">Remote · pinned/, then cache/</text>
-<line class="arrd" x1="540" y1="132" x2="540" y2="150" marker-end="url(#fam)"/>
-<rect class="chipd" x="450" y="154" width="180" height="24" rx="7"/>
-<text class="lbl s11" x="540" y="170" text-anchor="middle">miss: fetch fills cache/</text>
-<text class="sub" x="330" y="198" text-anchor="middle">the blob's declared provenance and its gate decide the branch; nothing is probed</text>
-</svg>
+When a namespace is over budget, the least recently used files and chunks go
+first. Freeing space never fails a read.
 
-It resolves by where the bytes are, in order: a **user-provided Local** blob is
-read from the user's own file (an external ref), a **host-provided Local** blob
-from the local store, both with no cloud fallback. Otherwise the **cache**:
-`pinned/<namespace>/<id>` then `cache/<namespace>/<id>`, a file in either folder a
-hit read straight off disk. On a cache miss it resolves the blob's
-[scope](/docs/blobs#encryption-scope) to a key, downloads and decrypts the object
-from the cloud, writes the plaintext to `cache/<namespace>/<id>` (the evictable
-folder, never the protected one), and returns the bytes it just fetched. A plain
-read populates the cache; it never pins.
+`handle.evict_file(&file)` removes an uploaded file's copies from the cache,
+pinned or not. It never touches storage or a file waiting to upload; a later
+read downloads it again.
 
-[`CovenHandle::open_blob_stream`](rustdoc:method:coven::CovenHandle::open_blob_stream)
-is the ranged sibling, for a host that streams or seeks a large blob (audio
-playback) without loading the whole file. It returns a
-[`BlobStream`](rustdoc:struct:coven::BlobStream) the host holds for as long as it
-is reading that blob, and reads ranges from:
+## Reads fill the cache
 
-```rust
-let stream = handle.open_blob_stream(&blob).await?;
-let header = stream.read_at(0, 1024).await?;
-let tail = stream.read_at(stream.plaintext_size() - 4096, 4096).await?;
-```
-
-Opening resolves the blob's locality the same way `read_blob` does, opens the one
-file that holds it, and reads all of it to check its size and content hash against
-the row — then **keeps that open file** for the stream's lifetime. Each `read_at`
-is one positioned read of the already-proven file: it costs the bytes it returns,
-not the size of the blob. A zero length is an empty result, and a range past the
-blob's plaintext length is an error rather than a short read.
-
-Holding the open file is what makes the ranges exact, not just cheap. Proving a
-blob's identity means reading all of it, so a stream cannot re-prove per range —
-that would make every range cost the whole blob. Instead it proves once, and then
-reads a file handle rather than a path: a name can be replaced between two reads,
-a handle cannot. The stream keeps serving the plaintext the row named at open even
-if the file is evicted, renamed, or deleted underneath it. The one thing this does
-not cover is an **in-place** rewrite of a file the user owns and edits themselves;
-coven's own copies are only ever published by rename or hard link, never written
-in place. Open a new stream (or call `read_blob`) to re-check the file against the
-row.
-
-A stream opened over a cache miss downloads and decrypts the exact cloud object
-once and populates `cache/<namespace>/<locator-hash>` with the whole plaintext,
-exactly as a whole-file miss does — so the next stream over the same blob opens a
-local file. Only whole plaintexts are ever written there: a partial file would be
-read as the whole blob by `read_blob`, since presence is the only truth.
-
-On either path, a failure to even check whether a file exists (a broken
-filesystem) is surfaced, never collapsed into a miss: re-downloading over a
-present file would be wasteful and could hide a real fault.
-
-## Cache fill: eager and lazy
-
-Whether a Remote blob lands in the cache automatically depends on its **cache
-fill**, declared per blob in the table's
-[declaration](/docs/blobs#declaring-which-rows-carry-blobs) as a
-[`CacheFill`](rustdoc:enum:coven::CacheFill):
-
-- `CacheEager`: fetched into the cache on every device's pull. Part of "having the
-  store", e.g. an album's cover art, so a grid renders from local bytes without a
-  fetch. It lands in the **evictable** `storage/cache/<namespace>/<id>`; it is not
-  pinned, so if it later falls out of its namespace's budget it shows a placeholder
-  until the next read re-fetches it.
-- `CacheLazy`: skipped on pull. A pulling device does not fetch it up front; the
-  first `read_blob` does, populating `cache/<namespace>/<id>`. This is for large
-  blobs a device may never open, audio being the motivating case.
-
-Both fills cache evictably; the difference is only *when* the bytes arrive (on pull
-vs. on first read). Neither is pinned automatically; pinning is a separate, manual
-gesture below.
+Reading an uploaded file that isn't cached fetches only the chunks the read
+needs and keeps them, so reading the same range again costs nothing. Ben plays
+the first minute of a song on his laptop: those chunks are cached. He seeks to
+the chorus: only the chunks under the new position are fetched.
 
 ## Pinning
 
-The cache is evictable. Pinning is how a user keeps a chosen Remote blob local and
-safe from eviction (an offline-for-the-flight gesture).
-
-[`CovenHandle::pin`](rustdoc:method:coven::CovenHandle::pin) ensures a blob is
-both present and protected, in `storage/pinned/<namespace>/<id>`:
+The cache is evictable. Pinning keeps a file whole on the device whatever the
+budget, until the app unpins it: the gesture for "keep this for the flight".
 
 ```rust
-handle.pin(&blobs, &|progress| show(progress.blobs_pinned, progress.blobs_total)).await?;
+let files = vec![handle.file_ref("tracks", track).await?];
+let mut progress = handle.subscribe_pin_progress(files.clone());
+handle.pin(&files).await?; // returns once every file is whole on this device
 ```
 
-A pin *populates*, it is not a flag flip. Three cases per blob: already in
-`pinned/` (nothing to do); in `cache/` (rename it into `pinned/`, promoting a
-blob a read or an eager pull already fetched with no cloud round-trip); in neither
-(fetch from the cloud straight into `pinned/`). It takes `BlobRef`s rather than
-bare ids because the from-absent case needs the blob's cloud coordinates
-(namespace, scope, cloud_path), which an id alone lacks. It is idempotent.
+Pinning assembles a complete cache file from the chunks already cached and the
+ones it fetches, checks it against the row's content hash, and syncs it to disk
+before the pin counts. A cancelled or crashed pin leaves no half-downloaded file
+exempt from eviction. A file still queued for upload on this device is pinned at
+once, and stays pinned through its upload.
 
-[`CovenHandle::unpin`](rustdoc:method:coven::CovenHandle::unpin) drops the
-protection: it moves `pinned/<namespace>/<id>` back to `cache/<namespace>/<id>`,
-so the file stays readable but becomes evictable again. It is not a delete.
-Unpin works on any blob regardless of its `CacheFill`; a `CacheEager` blob that
-was never pinned is already evictable, so unpinning it is a no-op.
+`handle.unpin(&files)` stops keeping them; they stay in the cache until the
+budget evicts them. To show which rows are kept offline, `rows_pinned(table,
+keys)` answers with one `Option<bool>` per key, `None` for a row with no file,
+and `subscribe_rows_pinned` keeps the answer current.
 
-`pin` reports [`PinProgress`](rustdoc:struct:coven::PinProgress) as it goes:
-blobs kept so far and their stored bytes, counting downloads in flight.
+## Eager downloads
 
-A host shows which rows are kept offline with
-[`CovenHandle::rows_pinned`](rustdoc:method:coven::CovenHandle::rows_pinned),
-or keeps the answer current with
-[`CovenHandle::subscribe_rows_pinned`](rustdoc:method:coven::CovenHandle::subscribe_rows_pinned).
-The subscription re-reads after a commit or after any copy in `cache/` or
-`pinned/` is written or removed, and delivers only answers that changed;
-`set_rows` moves it to another page of rows. Pin state is the kept file's
-presence at its expected size, so answering reads no file contents; reading the
-blob verifies its bytes.
+A file declared `CacheFill::CacheEager` downloads as soon as its row arrives, on
+every device: an album's cover art, so a grid renders from local bytes. That
+includes rows that arrive in bulk, such as after joining or reloading from a
+snapshot. A `CacheLazy` file waits for its first read.
 
-## The size budget
-
-`pinned/` grows with what the user chose to keep; `cache/` grows with what gets
-fetched. Left unbounded the evictable cache would grow forever, so the host can set
-a **per-namespace** budget with `handle.set_cache_budget(...)`, in bytes:
+`handle.eager_cache_fill_status()` and `subscribe_eager_cache_fill_status()`
+report the downloads waiting:
 
 ```rust
-handle.set_cache_budget("audio", 2 * 1024 * 1024 * 1024).await?; // 2 GiB for audio
-handle.set_cache_budget("covers", 64 * 1024 * 1024).await?;      // 64 MiB for covers
+pub enum EagerCacheFillStatus {
+    Idle,
+    Downloading(PinProgress),
+    Cancelled(PinProgress),
+}
 ```
 
-Each namespace evicts independently against its own budget, so a small namespace
-(`covers`) is never wiped by pressure from a big one (`audio`). The budget counts
-**only** the files under that namespace's `cache/<namespace>/`. `pinned/` is
-structurally exempt, because the eviction sweep never looks there: a pinned blob
-can never be evicted, whatever the budget; the local store is never walked either.
-With no budget set for a namespace (`handle.get_cache_budget(...)` returns
-`None`) eviction is off for it and that namespace's cache is unbounded until the
-host opts into a limit.
+`cancel_eager_cache_fill()` stops the current downloads without stopping sync.
+Evicting a file that finished downloading doesn't request it again; a row that
+changes to a different file does.
 
-Coven runs the budget sweep after every populate into a namespace. It sums that
-namespace's `cache/<namespace>/` files and, if the total is over budget, deletes
-the oldest by modification time until the total is back under it. Modification
-time is the recency proxy: there is no `last_accessed` column (the same
-folder-truth tradeoff the whole cache makes), so the oldest-written file goes
-first. Pinning, not access tracking, is how a blob is kept.
+## Progress and failures
 
-The file a populate just wrote is excluded from the candidates outright, so a read
-or stage can never evict the very bytes it just produced (its size still counts
-toward the total it must fit under). If that one in-use file alone is larger than
-the whole budget, the cache is left holding exactly it and over budget by that
-much; the caller still gets its bytes, and the over-budget condition is logged
-rather than reported as met.
+Pin and eager-download progress is a [`PinProgress`](rustdoc:struct:coven::PinProgress):
+files completed and requested, and bytes cached and total. It counts only
+checked bytes committed to the cache, never bytes merely received, so after a
+restart the first reads show the same progress, even before storage
+reconnects.
 
-Eviction is best-effort and never fails the populate that triggered it: the write
-already succeeded, so the bytes are durably cached. A cache briefly over budget is
-not wrong state (the next populate's sweep corrects it), so an eviction failure is
-logged and the read or stage still returns its bytes.
+Reads, pins and eager downloads of one file share its cached ranges and one
+pending record. A call that fails returns its typed error at once; the pending
+list records the first unmet condition, and progress stays at what was
+committed. Ben's laptop is downloading an eager file and has two checked ranges
+when Wi-Fi drops. The pending list reports the network failure, progress stays
+at those two ranges, and the retry fetches the rest. A final content hash that
+doesn't match instead leaves a permanent refusal (`Refused(ContentHash)`) and
+publishes no completed file or pin.
 
-## Explicit Eviction
-
-[`CovenHandle::evict_blob`](rustdoc:method:coven::CovenHandle::evict_blob) removes
-one blob's local cache copies from both `cache/<namespace>/` and
-`pinned/<namespace>/`. It does not delete the cloud blob or the row that
-references it; a later `read_blob` can fetch the bytes again if the row still
-exists.
-
-## At a glance
-
-| | `storage/pinned/<namespace>/` | `storage/cache/<namespace>/` |
+| Pending reason | When | Next |
 | --- | --- | --- |
-| Holds | user-pinned Remote blobs | eagerly-pulled (`CacheEager`) + read-populated (`CacheLazy`) Remote blobs |
-| Counts toward the namespace budget | no (exempt) | yes |
-| Evicted by budget sweep | never | oldest-by-mtime when over the namespace budget |
-| Removed by `evict_blob` | yes | yes |
-| Populated by | `pin` | the pull's `CacheEager` download, `read_blob` miss, `write_blob` |
+| `NoStorage` | no storage connected | |
+| `Storage { .. }` | a network or provider failure | retried by its failure class |
+| `Waits(Object(path))` | storage confirms absence; the uploader is active | waits for the upload |
+| `FileUnavailable(..)` | the uploader was removed or replaced | needs the app to act |
+| `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk or the whole file failed its check | not retried on the same bytes |
+| `Failed(Disk)` | writing the local cache failed | |

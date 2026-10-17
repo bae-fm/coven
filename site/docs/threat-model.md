@@ -1,228 +1,138 @@
 # Threat model
 
-coven has no server. A store's data lives in the user's own cloud bucket, and
-every device that writes it holds the store key. The storage provider is not
-trusted with plaintext, and it is not trusted to say who may write. This page
-states, per adversary, what coven defends and what it does not — so the line
-between "coven's job" and "the deployment's job" is written down rather than
-re-derived each time.
+coven has no server. A store's data lives in the household's own cloud storage,
+and every member's devices hold the store key. This page says, for each party,
+what coven defends against and what it doesn't, so the line between coven's
+job and the household's is written down.
 
-Two mechanisms carry most of the defense, and the sections below refer back to
-them:
+Two mechanisms carry most of the defence:
 
-- **The store keyring.** A set of symmetric keys shared by every member, each
-  identified by its fingerprint and ordered by a generation number, used with
-  XChaCha20-Poly1305 (see [Encryption](/docs/encryption)). Every sealed object
-  names the key that sealed it by fingerprint, adoption merges keyrings rather
-  than replacing them, and every device seals new content under the same
-  deterministically chosen key — so two owners rotating concurrently converge
-  instead of splitting the store.
-  Every changeset, snapshot, blob, and membership record is sealed under it. The
-  cipher is authenticated: a flipped byte fails to open. The associated data of
-  each sealed object binds it to its `(store_id, cloud_key)` position, so an
-  object copied to a different key fails to open there.
-- **Signed membership.** Causal, per-author membership streams beginning at the
-  founder bound into the signed Store protocol root (see
-  [Sharing](/docs/sharing)). Entries, heads, and snapshot metadata are signed,
-  so the provider holding them cannot forge membership or the sealed Store keys
-  those entries carry.
+- **Encryption.** Everything coven stores is encrypted with an audience key
+  that only that audience's members hold: the store key, or a circle's key
+  ([Encryption](/docs/encryption)). Authentication fails on any changed byte.
+- **Signed slots in one sequence.** Every slot is signed by its author's member
+  key, over its path, and every device judges each slot against the membership
+  as it stood just before that slot ([Sync](/docs/sync-model)). A device that
+  meets a slot it can't check stops there rather than skipping it.
 
-## Non-member with read access to the bucket
+## The storage provider
 
-Someone who can read the bucket but is not a member — a leaked read credential, a
-provider employee, a misconfigured public bucket.
+coven assumes the provider is *honest but curious*: it may read what it stores,
+but it doesn't alter or withhold it.
 
-**Defended.** Confidentiality comes from the store keyring: every object is
-sealed before it leaves the device, and the reader holds no generation of that
-key, so the bucket is ciphertext and a flat set of key paths. Integrity of the
-control plane comes from the signatures on membership entries, heads, and
-snapshot metadata — a reader who cannot write changes nothing, and a
-reader learns nothing beyond object sizes and access timing.
+**What it sees.** Object sizes, counts and timing; which account writes each
+object; each slot's kind; a key copy's routing, which names a circle id and a
+recipient member; and the device and audience named in file and snapshot paths.
+It doesn't see names, values, file contents, or which device claimed a slot
+([what the provider sees](/docs/encryption#what-the-provider-sees)).
 
-## Non-member with write access to the bucket
+**What it can't do.** Read contents, or forge a slot, a snapshot or an admin
+entry, without a member's keys.
 
-Someone who can write the bucket but is not a member — a leaked write credential,
-or the provider itself acting maliciously (see also
-[the provider](#the-storage-provider-itself)).
+**What no design prevents.** Whoever controls storage can delete it or hold it
+back. Coven doesn't recover lost or damaged storage; the household starts a new
+store by hand. A [reset](/docs/bootstrap#resetting-an-audience) replaces an
+audience from one device's copy; it can't rebuild storage.
 
-**Tampering is detected; availability is not.** A write-capable attacker can
-replace or delete any object, but cannot produce one that passes verification:
-membership entries and control objects carry Ed25519 signatures the attacker
-cannot forge, and sealed content is bound by its associated data to the exact
-`(store_id, cloud_key)` it was written under, so an authentic object relocated to
-another key fails to open there. A changeset additionally carries its
-`(device_id, seq)` inside the signature, and the puller refuses one whose
-declared position does not match where it was fetched from — before the signature
-or schema is even consulted (see
-`pull_changes`) — so a member's
-authentic changeset cannot be replayed into another slot.
+coven also relies on the provider behaving as [Storage](/docs/storage#what-coven-needs-from-a-provider)
+requires: complete reads, create-once that publishes atomically, conditional
+replacement of the floor, and access cut-off that really cuts off. Setup checks
+these against the real service every time, and certification races many
+writers against each S3 service, but neither can prove them for all time.
 
-Availability is *not* defended: anyone who can write the bucket can also delete
-it. coven detects the resulting corruption or absence and refuses to act on it;
-it cannot prevent the loss. Keeping bucket write credentials to the members who
-need them is the deployment's responsibility.
+## Someone with storage credentials but no key
 
-## Current member
+A leaked storage credential, a misconfigured bucket. Unlike the provider, this
+party may be hostile.
 
-A device that is currently in signed membership with a write-capable role.
+**Defended: confidentiality and integrity.** They hold no audience key, so they
+read nothing but sizes, counts and timing. They can't produce a slot that
+passes a signature check, and moving an authentic object to another path fails
+its check there, because the path is signed.
 
-**Defended by authorization.** A current Owner or Member may write changesets; a
-Follower is read-only. The puller judges every Store commit against the applicable membership state: an
-author who is not a write-capable member at pull time is rejected, and the
-snapshot (a destructive, whole-catalog primitive) is authorized to Owners only.
-Membership is anchored to its founder, so a member cannot rewrite history
-to grant themselves a role they were never given. An Owner's signature over a
-snapshot covers the image, its coverage and its summary; it is not a warrant for
-the history the image carries, so a receiver walks that history against its own
-membership authority before the image becomes its database
-(see [Bootstrap](/docs/bootstrap)). What a current member *can* do
-— they hold the store key and a valid identity — is exactly what membership
-grants: write store data. Removing that capability is the next section.
+**Not defended: availability.** They can delete or replace objects. A device
+that downloads a complete object that fails a check refuses it and stops at
+that slot, reporting `Refused`; it never skips ahead. Keeping storage
+credentials to the members who need them is the household's job.
 
-## Current member, against another member's Circle
+## A current member
 
-A current store member asking what they learn about a [Circle](/docs/circles)
-they are not in.
+Current members trust each other: each has access to the storage and isn't
+trying to damage it. A member's devices hold the store key and the member's
+signing key, so a member can do whatever their role allows
+([Sharing](/docs/sharing#members-roles-and-devices)). Authority is checked on
+every device: an admin entry counts only if its author may make it in the state
+before its slot, and the store always keeps an admin.
 
-**Circle contents are defended; the Circle's existence and administration are
-not.** A Circle package is encrypted to that Circle's key, which a non-member
-never receives, so its rows, roster, and display name stay confidential. What a
-store member *does* see, because it is Store-encrypted control state they must be
-able to verify: that the Circle exists, the Owner public keys and the roster and
-metadata author coordinates that administer it, and — through the Store-visible routing mirror —
-pseudonymous per-Circle row counts and the timing of every audience move. The
-administrator visibility is deliberate: verifying a Circle's close outcome,
-conflict resolution, or deletion requires reading the Owner authority that signed
-it. A store member who holds the routing key can also test guesses for
-predictable table-and-primary-key combinations against the mirror. These are
-stated protocol properties, listed in full under
-[the Circle privacy limits](/docs/circles#security-and-privacy-limits); the
-boundary that hides even counts and administrators is a separate store, not a
-Circle.
+Within that trust, two things are still checked:
 
-## Revoked member with residual bucket access
+- **Who wrote what.** Every slot is signed, and a table declared
+  [`owner_only`](/docs/merge#owner-tables) keeps each row's changes to its
+  creator, so "Ana rated this" really was Ana.
+- **Circles.** A member outside a circle doesn't hold its key and can't read
+  its rows or files. They do see that it exists, its name, who is in it, who
+  writes to it, when and how much ([Circles](/docs/circles#what-other-members-can-see)).
 
-A former member who has been removed from the chain but still holds a bucket
-credential the provider has not withdrawn.
+## A removed member
 
-**Confidentiality of new content is defended; integrity and availability of the
-control state are not.** Removal rotates the store keyring: it appends a fresh
-generation, re-wraps it for every remaining member, and never wraps it for the
-removed one (see [revocation is key rotation](/docs/sharing#revocation-is-key-rotation)).
-Content written after the rotation is sealed under a generation the removed member
-never receives. This holds even when the removing device cannot immediately adopt
-the new generation locally: a device that knows a rotation has committed but has
-not folded it into its own cipher refuses to seal anything new for the cloud
-until it adopts it (see
-[`RotationPending`](rustdoc:struct:coven_protocol::objects::RotationPending)),
-so there is no window in which the store keeps producing content under the
-superseded generation the removed member still holds.
+Removing Ben stops what comes next; it can't take back what he has.
 
-What is *not* defended, for a removed member who keeps a working write credential:
-the integrity and availability of the control plane. They can still delete or
-withhold objects (they can write the bucket), and their tampering is detected but
-not prevented — this is the [non-member-with-write](#non-member-with-write-access-to-the-bucket)
-case, and coven's responsibility ends at detection.
+- **His writes stop counting.** Writes from his devices that land after his
+  removal, or signed with keys that have since been replaced, have no effect on
+  any device. There is no grace period ([the cut-off](/docs/sharing#the-cut-off)).
+- **New data uses keys he never had.** Every key copied to him counts as
+  exposed and is replaced before new data uses it
+  ([Encryption](/docs/encryption#which-key-new-data-uses)).
+- **His storage access is taken back** by provider work: the owner's device
+  unshares on Dropbox, OneDrive and iCloud, and on S3 his access key is deleted
+  ([provider access](/docs/sharing#provider-access)). Until that happens he can
+  still download ciphertext, which he can't open if it's under new keys, and he
+  can still delete objects.
+- **He keeps what he had.** Rows, files and keys already on his devices stay
+  there. If he has seen something secret, treat it as seen.
 
-Whether the residual credential exists at all is provider-dependent. Consumer
-clouds (Dropbox, OneDrive) and CloudKit unshare the folder or zone
-on removal, so the credential stops working and this adversary ceases to exist.
-S3 hands out one static bucket credential that cannot be withdrawn from a single
-member; there, revoking the *credential* is the bucket administrator's job, and
-coven's guarantee is the key rotation above, not the withdrawal. Member removal
-completes on an S3 home for exactly this reason — it does not wait on a
-credential revocation the provider cannot perform.
+A key copy already on its way when Ben was removed can still reach him: a copy
+made before its author saw the removal can land after it. Other devices then
+treat that key as exposed too.
 
-## The storage provider itself
+## A stolen restore code
 
-The provider that holds the bucket, in full generality: it serves every read,
-accepts every write, and chooses what to return.
+A restore code holds a member's private keys. Anyone who sees it can open the
+store, given storage access, for as long as those keys are current; coven can't
+tell them apart from the member. Replacing the member's keys stops writes made
+with the old ones from counting, but can't take back keys and data the code
+already reached. Coven offers no recovery from a stolen code; the household
+removes that member and starts over by hand if needed. Apps should blur the
+code until the person asks to show it.
 
-**Untrusted for content and for the control plane; it can still withhold,
-reorder, and roll back.** Content is sealed and control objects are signed, so
-the provider cannot read plaintext or forge a membership decision. What it
-retains is scheduling power over what it serves: it can withhold an object,
-serve an older version, or reorder what a reader sees.
+## A copied device
 
-Rollback of *membership* is bounded: readers persist per-author-stream head
-watermarks and refuse regressions. Device invitations and restore codes carry the
-corresponding causal frontier, so a fresh device refuses membership older than
-the code it received (see [Bootstrap](/docs/bootstrap)).
+Restoring a phone from a backup can leave two installations with one device id.
+The device id also lives in the keychain, which backups don't copy, so a copy
+usually can't open. A copy that does open stops sending as soon as history shows
+another installation using its id ([Sync](/docs/sync-model#another-copy-of-the-same-device)).
+Coven detects that evidence, not every clone. Even where a copy forgot an
+earlier attempt, content-derived nonces keep it from sealing changed bytes with
+a reused nonce.
 
-Withholding is *not* defendable from inside the artifact. A provider that stops
-serving new objects presents a reader with a stale-but-internally-consistent
-view, and nothing in the bucket distinguishes "nothing new" from "new things
-hidden." Detecting that requires an external freshness anchor coven does not
-have; it is out of scope.
+## An attacker on the device
 
-## A local attacker with write access to the store directory
+Someone who can write the store's directory, its database or its passphrase
+file is outside coven's model. Coven trusts its own local database; the
+device's protections, such as full-disk encryption, OS process isolation and
+the keychain that holds the keys ([Keys](/docs/keys)), are the boundary. The
+passphrase file is the one thing coven reads defensively: it refuses key
+derivation settings beyond fixed bounds rather than spending whatever the file
+asks for.
 
-Someone who can write the on-device store directory — its SQLite database, its
-`sync_state`, its keyring envelope.
+## What coven assumes
 
-**Out of scope.** coven trusts its own local store. The head watermark, the
-pinned owner, and the device identity all live there; an attacker who can rewrite
-`sync_state` can clear the rollback floor, and one who can rewrite the database
-can substitute local data wholesale. The local device's own protection — full-disk
-encryption, OS process isolation, the platform keychain that holds the store key
-(see [Keys](/docs/keys)) — is the boundary here, not coven. The passphrase
-envelope is the one piece coven treats as untrusted input from disk, and only
-narrowly: it reads the envelope's KDF parameters from an unauthenticated file, so
-it floors them rather than deriving a key at whatever cost the file names.
+- The ciphers, signatures, hashes, key derivation, random numbers and key
+  custody work as designed.
+- SQLite transactions are atomic and durable, and file and custody writes are
+  durable.
+- The provider behaves as described above.
 
-## The device-pairing channel
-
-The existing device displays one pairing code in person. It contains an
-ephemeral public key, LAN endpoints, provider identity,
-and expiry. The joining device seals its signed identity request to that key;
-the existing device accepts one exact request for the session and refuses a
-competing identity. Its credential-bearing response is sealed again to the
-approved joining identity.
-
-**The displayed code is the trust handoff.** A replacement code can point the
-joining device at an attacker's Store because the joining device has no earlier
-owner key to compare. Once scanned, changing LAN traffic cannot substitute
-either side: the request is bound to the complete offer, and
-the returned admission is bound to the request's public key. The admission's
-founder key is pinned for every later membership decision.
-
-## Cross-store linkability
-
-A provider that hosts two of one user's stores, asking whether it can tell they
-belong to the same device.
-
-**Defended.** A device's signing identity is per store: each store it belongs to
-gets its own freshly generated Ed25519 keypair, established when that store is
-created, joined, or restored, never derived from a shared secret and never reused
-across stores (see [Keys](/docs/keys#no-silent-identity-minting)). No pubkey a
-device writes into one store's membership state appears in another's, so a
-provider hosting two of a user's stores cannot tie them to one device by matching
-signing keys. A per-store restore code likewise carries authority scoped to the
-one store it names.
-
-## Accepted risks
-
-Four positions are worth stating on their own, as deliberate scope decisions
-rather than gaps to close later.
-
-**Removal either activates its complete state or restores the prior state.**
-Removing a member records the prior provider access and membership objects,
-then publishes the membership removal with its replacement key generation. If
-activation loses its expected head or another step fails, coven restores those
-exact prior objects and access grants and reports the failure.
-
-**Blob retirement follows the accepted snapshot, not a clock.** A blob no live
-row binds is deleted once the accepted Store snapshot's own inventory shows
-nothing owns it, and only by the current Owner. A device far enough behind that
-it has not pulled the row change is protected by that snapshot, not by a timer:
-the object it still references survives until a snapshot the store accepted
-excludes it. The cost of the boundary is the other direction — an orphaned blob
-can outlive its row for as long as the store goes without publishing a snapshot
-that releases it. The failure is loud either way: a push that would publish a row
-whose blob is missing remotely refuses and retries every cycle.
-
-**Withholding and local-state tampering are out of scope**, for the reasons in
-[the provider](#the-storage-provider-itself) and
-[the local attacker](#a-local-attacker-with-write-access-to-the-store-directory)
-sections: the first needs an external freshness anchor coven does not have, and
-the second is the device's own protection boundary, not coven's.
+coven's design is checked by machine-checked models of the sequence, the merge
+and parts of storage. They prove properties of the models under these
+assumptions; they don't prove the cryptography or the Rust code.

@@ -1,151 +1,101 @@
 # Keys
 
-coven runs entirely on the host's own device and the host's own storage;
-there is no coven server. Every key coven needs — the master key that
-encrypts a store's data, this device's signing identity for that store, a
-host's own secrets — lives on the device, and the platform key store protects
-secrets that must persist. Each operating system exposes different APIs and
-access policies, so coven defines what may leave the device and how a host can
-supply a different custody implementation.
+coven runs entirely on the app's devices and the household's own storage; there
+is no coven server to hold a key. Every key coven needs lives on the device:
+the member's two key pairs, the store and circle keys this device has opened,
+this device's id, provider credentials, and secrets the app asks coven to keep.
+This page covers where each lives, the custody choices, and what each platform
+needs. What the keys do is the [Encryption](/docs/encryption) page.
 
-This page is coven's position: the right default should require no decision
-from the host, and a host with a real reason to deviate should still be able
-to.
+## Naming the keychain service
 
-## Bundled platform key stores
-
-coven bundles a keyring store for each platform it ships to: macOS and iOS
-(Apple's data-protection keychain, via `apple-native-keyring-store`'s
-protected store), Android (the Android Keystore, via
-`android-native-keyring-store`), and Windows (Credential Manager, via
-`windows-native-keyring-store`). A host names its own keyring service once at
-startup with [`set_keyring_service`](rustdoc:fn:coven::set_keyring_service),
-and that one call also installs the store bundled for the
-target it's compiled for; every key coven or the host stores afterward goes
-through it.
+The app names its keychain service once at startup, before any store opens:
 
 ```rust
-coven::set_keyring_service("todos")?;
+coven::set_keyring_service("com.example.notes")?;
 ```
 
-That is the whole integration. A host does not depend on a keyring-store crate
-itself, does not call `keyring_core::set_default_store`, and does not construct
-a store — coven brings the store for each target it supports, installs it, and
-fails loud with a typed error if it cannot. A host that installs its own store
-alongside coven's is duplicating work coven already did, and the usual way that
-goes wrong is a construction failure that gets logged and swallowed, leaving no
-store installed and the real cause discarded. On Android there is one further
-step, but it belongs to the *app*, not to key storage:
-[the JNI application context](#android) must be initialized before the first
-coven call.
+Every entry coven keeps goes under that service. Calling it again with the same
+name is harmless; another name fails with `KeyError::ServiceAlreadyRegistered`,
+and an empty name with `KeyError::InvalidServiceName`. Using the keychain before
+naming the service fails with `KeyError::ServiceNotRegistered`.
 
-Linux uses the Secret Service over D-Bus, via
-`zbus-secret-service-keyring-store`. The one exception is a host with a
-requirement no bundled store meets:
-`keyring_core::set_default_store` installs any store implementing
-`keyring_core`'s trait, and if one is already installed when
-`set_keyring_service` runs, coven keeps it instead of installing its own. That
-is the deliberate escape hatch, not the normal path.
+coven brings the native credential store for each platform it supports: Apple's
+data-protection keychain on macOS and iOS, the Android Keystore, Windows
+Credential Manager, and the Secret Service over D-Bus on Linux. The app doesn't
+install a store itself. On any other platform, keychain custody fails with
+`KeyError::UnsupportedKeyringPlatform`; the other custody choices below still
+work.
 
-## Apple syncs the restore code and a separate S3 key
+## Custody
 
-On Apple, coven keeps the [restore code](/docs/sharing#restore-codes) in iCloud
-Keychain and keeps an S3 key in a separate synced entry. Replacing the S3 key
-updates that entry without rewriting the code. OAuth refresh changes only this
-device's credentials.
+*Custody* is where secret keys live. Coven keeps two things in custody, chosen
+separately on the builder:
 
-Store keys, member-key custody, installation identity, device credentials and
-[host secrets](#host-secrets) use device-only entries. Creating, joining or
-restoring a store commits the code and any separate S3 key alongside device
-custody. A failed operation reports its failure and any rollback failures.
-Deleting the store removes its synced code and separate S3 entry too.
-
-## Custody is a choice, with working presets
-
-Two of the three secrets coven manages — the store's master key, and that
-store's signing identity — are each protected by a **custody**: a value you
-choose that says where the secret is unlocked from, where it's written when
-established, and how it's removed. coven never touches a cipher or a raw key
-directly; it drives every master-key and identity operation through whatever
-custody resolves to. Both are selected per store, on the builder — a device
-holds a distinct signing identity in each store it belongs to, generated
-fresh when that store is created, joined, or restored, never derived from a
-shared root secret and never reused across stores.
-
-**The master key** is selected per store, on the builder, with
-[`CovenBuilder::key_custody`](rustdoc:method:coven::CovenBuilder::key_custody):
+- **key custody** (`CovenBuilder::key_custody`): every store and circle key this
+  device has opened, including older ones, so it reads writes made under them;
+- **identity custody** (`CovenBuilder::identity_custody`): the member's id and
+  private key pairs, including a replacement pair while one is being published.
 
 ```rust
 Coven::builder(layout.clone())
-    .key_custody(coven::KeyCustody::Keyring)   // the default
-    .synced_tables(tables)
-    .migrations(migrations)
-    .open(store_dir.id()).await?;
+    .key_custody(KeyCustody::Keyring)           // the default
+    .identity_custody(IdentityCustody::Keyring) // the default
+    .synced_tables(tables())
+    .migrations(migrations())
+    .open(store)
+    .await?;
 ```
 
-- [`KeyCustody::Keyring`](rustdoc:enum:coven::KeyCustody) — the OS keyring,
-  the default, byte-for-byte today's behavior described above.
-- [`KeyCustody::Passphrase`](rustdoc:enum:coven::KeyCustody) — Argon2id over
-  a memorized [`Passphrase`](rustdoc:struct:coven::Passphrase) wraps the
-  master keyring; the wrapped blob is a file in the store directory
-  (`master.keyring`), not a keyring entry.
-- [`KeyCustody::InMemory`](rustdoc:enum:coven::KeyCustody) — empty session custody, filled as keys are opened and retained by the returned handle.
-- [`KeyCustody::Custom`](rustdoc:enum:coven::KeyCustody) — a host's own
-  [`MasterKeyCustody`](rustdoc:trait:coven::MasterKeyCustody) implementation
-  (`unlock` / `persist` / `forget`).
+Each takes one of four choices:
 
-**The store's signing identity** is selected next to the master key, on the
-builder, with
-[`CovenBuilder::identity_custody`](rustdoc:method:coven::CovenBuilder::identity_custody):
+| Choice | Keeps keys in |
+| --- | --- |
+| `Keyring` | the OS keychain, under the registered service; the default |
+| `Passphrase(Passphrase)` | a file in the store's directory, sealed with a key derived from the passphrase by Argon2id |
+| `InMemory` | memory, for this handle's session only; it starts empty |
+| `Custom(..)` | the app's own [`StoreKeyCustody`](rustdoc:trait:coven::StoreKeyCustody) or [`MemberKeyCustody`](rustdoc:trait:coven::MemberKeyCustody) |
 
-```rust
-Coven::builder(layout.clone())
-    .identity_custody(coven::IdentityCustody::Keyring)   // the default
-    .synced_tables(tables)
-    .migrations(migrations)
-    .open(store_dir.id()).await?;
-```
+The keychain and the passphrase protect against different things. The keychain
+protects against a stolen, locked device: the OS won't hand the key to any
+process until the device is unlocked. A passphrase also protects against a
+process running as the signed-in user: nothing usable is on disk until the
+passphrase is supplied. That is also its cost: the app has to ask for it, the
+person has to remember it, and losing it loses the keys as thoroughly as losing
+a keychain entry would.
 
-Its presets mirror the master key's:
-[`IdentityCustody::Keyring`](rustdoc:enum:coven::IdentityCustody) (the
-default),
-[`IdentityCustody::Passphrase`](rustdoc:enum:coven::IdentityCustody) (the
-same envelope format, wrapped in a file inside the store directory —
-`identity.envelope` — alongside `master.keyring`),
-[`IdentityCustody::InMemory`](rustdoc:enum:coven::IdentityCustody) (empty session custody, filled by creation, restore or join), and
-[`IdentityCustody::Custom`](rustdoc:enum:coven::IdentityCustody) (a host's
-own [`DeviceIdentityCustody`](rustdoc:trait:coven::DeviceIdentityCustody)
-implementation).
+Custody is unlocked once, when the store is created or opened, and kept for that
+handle's session, so sync passes never derive a passphrase key again. A custom
+custody follows the same lifetime: `unlock` is called once, `persist` reuses
+what `unlock` unlocked, `forget` removes the keys, and `close` erases what it
+holds in memory.
 
-The two presets are not interchangeable defaults — they protect against
-different things. The keyring protects against a stolen, locked device: the
-OS won't hand the key to any process without the device being unlocked. A
-passphrase additionally
-protects against a process running as the signed-in user: nothing usable is
-at rest until the passphrase is supplied, so malware running as you, or a
-second process sharing your OS session, gets nothing without also knowing the
-passphrase. That is also its cost: the passphrase is state a host has to
-prompt the user for and the user has to remember, and losing it loses the key
-exactly as thoroughly as losing a keyring entry would.
+`create_store` puts the new member's keys in identity custody before publishing
+anything. Restoring takes them from the restore code; joining makes them. Opening
+an existing store never makes new keys.
 
-## Identity creation
+`handle.store_key_state()` says whether this session holds the store key
+(`Available` or `Locked`). `handle.unlock_store_key()` opens the store keys
+from their copies sealed to this member in storage, keeps them in custody, and
+connects without starting sync. `handle.forget_store_keys()` removes them from
+custody and the session, and drops the provider connection.
 
-[`CovenBuilder::create_store`](rustdoc:method:coven::CovenBuilder::create_store)
-creates the member identity in the chosen custody before publishing the store,
-then returns its open handle. A failure before publication removes the hidden
-store and its new custody entries; rollback failures are returned too.
-Existing custom identity custody is refused without overwriting it.
+## What else is in the keychain
 
-Joining establishes the admitted member identity; restoring imports the identity
-from the restore code. Opening an existing store never generates replacement keys.
+Besides the two custodies, coven keeps device-only keychain entries for this
+device's id, which backups don't copy ([Sync](/docs/sync-model#another-copy-of-the-same-device)),
+and for provider credentials and sign-in tokens.
+
+On Apple platforms coven also keeps the [restore code](/docs/sharing#a-person-s-new-device-the-restore-code)
+in a synced iCloud Keychain entry, and an S3 key in a separate synced entry
+beside it. Replacing the S3 key updates that entry without changing the code.
+`restore_from_keychain` reads them on a new device.
 
 ## Host secrets
 
-A host with its own store-scoped secret that isn't row data — an API key for
-a third-party service the app integrates with, say — stores it in the same
-platform keyring, under the same configured store, as coven's own key material,
-without importing `keyring_core` or hand-building an `Entry` against coven's
-account scheme:
+An app can keep its own secrets, such as an API token for a service it
+integrates with, in the same keychain and under the same access policy as
+coven's keys:
 
 ```rust
 handle.set_host_secret("discogs_api_key", &api_key)?;
@@ -153,70 +103,32 @@ let api_key = handle.host_secret("discogs_api_key")?;   // None if never set
 handle.delete_host_secret("discogs_api_key")?;
 ```
 
-`name` is scoped to the store the handle is open on — two stores never share
-a host secret even under the same name. coven validates it: empty,
-containing `:` (the account scheme's own separator — allowing it would let a
-host secret's name forge another store's account), or matching one of
-coven's own reserved slot names, is refused with
-[`KeyError::InvalidSecretName`](rustdoc:enum:coven::KeyError).
+Names are arbitrary strings, scoped to the store and encoded so they can't
+collide with coven's own entries. Coven keeps a list of the names in another
+keychain entry, outside the database: saving adds the name before writing the
+secret, and deleting removes the secret before the name. So deleting the store
+removes every secret even when its database is damaged, and the app needn't
+remember the names. A crash between the two steps can leave an extra name,
+never an unlisted secret.
 
 ## Deleting a store from this device
 
-[`Coven::delete_store`](rustdoc:method:coven::Coven::delete_store) removes a
-closed store's keyring entries — its device signing identity, master key,
-cloud-home credentials, and the host secrets the host names — and then its
-directory. It takes the store's open lock first, so an open store is refused
-before anything is removed, and it works on a store whose database no longer
-opens. The keyring cannot list a store's entries, so the host passes the names
-of its own secrets. Close the handle first:
-[`CovenHandle::close`](rustdoc:method:coven::CovenHandle::close) returns once
-the sync loop, the database connections, and the lock are gone, so nothing of
-the store is open when the deletion runs. Dropping the handle on an async
-runtime instead leaves its connections closing in the background, and they
-keep the store's lock until they have, so a deletion that runs first is
-refused as open.
+`handle.delete_store(IfUnsent::Refuse)` refuses while writes or files wait to
+upload; with storage set up, it publishes this device's removal; then it closes
+the store and deletes it. `IfUnsent::Discard` drops the unsent work instead.
+For a store that no longer opens, `Coven::discard_store(&store_dir)` deletes it
+without opening it. Deleting removes every host secret, then the list, then
+coven's other keychain entries, then the directory. A deletion that fails partway
+is finished by running it again. Storage is never touched.
 
-```rust
-handle.close().await;
-coven::Coven::delete_store(&store_dir, &store_id, &["discogs_api_key"])?;
-```
-
-A deletion that fails partway is finished by running it again. The cloud copy
-of the store is not touched.
-
-## Per-platform host requirements
-
-### Android
-
-The bundled Android store needs Android's JNI application context — nothing
-a `cargo build` receives on its own. A host supplies it via a Kotlin bridge: a
-class exposing `external fun initializeNdkContext(Context)`, backed
-by whichever shared library the host's Rust build produces (the crate's own
-if built standalone, or the host's own combined native library if coven is
-linked into one — bae calls its `bae_bridge`). The host calls
-`initializeNdkContext(applicationContext)` once at startup, **before any
-coven call** — before `set_keyring_service`, before opening a store — and
-packages the backing `.so` in `jniLibs/<abi>/` like any other native
-library. (bae does exactly this: `BaeApp.onCreate` calls
-`Keyring.initializeNdkContext(this)` before its own `initKeyring()` wrapper
-around `set_keyring_service`.)
-
-### Windows
-
-Windows Credential Manager caps a stored secret at
-`CRED_MAX_CREDENTIAL_BLOB_SIZE`: 2560 bytes. coven's own keys fit
-comfortably inside it. A host secret or a passphrase export that might not —
-a long API token, a bundle of credentials serialized as JSON — should check
-its own size before writing; coven surfaces the overage as an error, not a
-silent truncation.
+## Per-platform requirements
 
 ### Apple
 
-No setup call is required. What is required is a team-prefixed
-`keychain-access-groups` entitlement backed by an embedded provisioning
-profile — signing alone is not enough. In Xcode, the practical way to get
-this is to set `DEVELOPMENT_TEAM` so automatic signing fetches and embeds a
-profile:
+The data-protection keychain needs a team-prefixed `keychain-access-groups`
+entitlement backed by an embedded provisioning profile; signing alone isn't
+enough. In Xcode, setting `DEVELOPMENT_TEAM` lets automatic signing fetch and
+embed one:
 
 ```xml
 <!-- YourApp.entitlements -->
@@ -226,43 +138,50 @@ profile:
 </array>
 ```
 
-Two distinct failure modes come from getting this wrong, and they look
-nothing alike:
+Without the entitlement, as in an ad-hoc-signed binary or a plain `cargo test`
+harness, the OS refuses every keychain call with `errSecMissingEntitlement`
+(-34018). With the entitlement but no provisioning profile behind it, the OS
+kills the process at launch, before any coven code runs; a build with no team
+should omit the entitlement. While the keychain is locked or the session can't
+show UI, the OS answers `errSecInteractionNotAllowed` (-25308): the entry is
+there, and the same read succeeds once the device unlocks. Coven returns these
+as `KeyError::Keychain`, keeping the native cause; an app that reads a key at
+startup should treat the last one as "device locked, ask again", not as a
+missing key.
 
-- **The entitlement is missing entirely** — an ad-hoc-signed binary, a plain
-  `cargo test` harness, or an app built with no team. The OS refuses every
-  data-protection-keychain call with `errSecMissingEntitlement` (OSStatus
-  -34018), which coven surfaces as
-  [`KeyError::MissingKeychainEntitlement`](rustdoc:enum:coven::KeyError) —
-  typed, naming the fix above, not a generic string.
-- **The entitlement is present but has no provisioning profile behind
-  it** — e.g. an ad-hoc-signed build that declares `keychain-access-groups`
-  without a team. This is not a keychain error at all: the kernel kills the
-  process at launch (`SIGKILL`, exit 137) before any coven code runs. If a
-  build has no team, the entitlement must be **omitted**, not included —
-  omitting it degrades to the first failure mode (a clear, typed error on
-  first key use) instead of a launch-time kill with no diagnostic.
+iCloud storage also needs the iCloud entitlement for the app's CloudKit
+container ([Storage](/docs/storage#icloud-cloudkit)).
 
-A third refusal has nothing to do with signing: while the keychain is locked,
-the display is asleep, or the login session cannot show UI, the OS answers
-`errSecInteractionNotAllowed` (OSStatus -25308). coven surfaces that as
-[`KeyError::KeychainTemporarilyUnavailable`](rustdoc:enum:coven::KeyError),
-separate from every other keyring failure, because the entry is there and the
-same read succeeds after the session unlocks. A host that reads a key during
-startup should say the device is locked and ask again, not treat the key as
-absent and establish a second one.
+### Android
 
-A plain `cargo test` binary can never carry a provisioning profile (Apple
-doesn't code-sign `cargo test` harnesses), so it can never reach the real
-data-protection keychain — this is a platform limitation, not a coven gap.
-coven's own tests mock the keyring for this reason
-(`keyring_core::mock::Store`); a real key operation needs the entitlement and
-profile above, in CI as much as on a device.
+The Android Keystore store needs the app's JNI context before the first keychain
+use. The app declares the bridge class the store expects and calls it once at
+startup, before `set_keyring_service` or opening a store:
+
+```kotlin
+package io.crates.keyring
+
+import android.content.Context
+
+class Keyring {
+    companion object {
+        external fun initializeNdkContext(context: Context)
+    }
+}
+
+// In Application.onCreate, after loading the app's native library:
+Keyring.initializeNdkContext(applicationContext)
+```
+
+### Windows
+
+Credential Manager caps a stored secret at 2,560 bytes. Coven's own keys fit. A
+host secret that might not, such as a long token or a bundle of credentials,
+should check its size first; a value that doesn't fit fails with
+`KeyError::Keychain`, never a silent truncation.
 
 ### Linux
 
-The bundled store uses the desktop Secret Service over D-Bus. A session must
-provide a Secret Service implementation, such as GNOME Keyring or KWallet;
-failure to connect is returned by `set_keyring_service` instead of leaving a
-registered service backed by no store. A host may install a different
-`keyring_core` store before registration, and coven will retain it.
+The session must provide a Secret Service, such as GNOME Keyring or KWallet.
+Without one, keychain custody fails with `KeyError::Keychain`; passphrase or
+custom custody still works.

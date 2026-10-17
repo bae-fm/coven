@@ -1,134 +1,176 @@
 # Schema evolution
 
-A database image and a retained write have separate schema versions. Updating an
-app migrates its local database, but does not rewrite the packages other devices
-signed or the writes this device already captured. Coven interprets each retained
-write under its authoring schema, then applies the host's registered changeset
-transformations before merging it into the current database.
+The app owns its schema and changes it with migrations. But Ana's phone may run
+the new version for a week before Ben's laptop updates, and Ben keeps editing
+offline in the meantime. Every device has to agree on what the data looks like
+after the change, and Ben's edits made in the old shape have to land somewhere.
 
-## The migration ladder
+## Migrations
 
-The host passes contiguous versions `1..=N` to the builder. Coven applies pending
-steps over SQLite's `PRAGMA user_version` inside the database-open transaction.
-A failure rolls back the pending migrations and their version updates together.
-A database newer than the registered ladder is refused with
-[`MigrationError::SchemaTooNew`](rustdoc:enum:coven::MigrationError).
+The app's schema is a list of migrations numbered from 1 with no gaps:
 
 ```rust
-let handle = Coven::builder(layout.clone())
-    .synced_tables(synced_tables)
-    .migrations(vec![
-        Migration::sql(1, "initial", include_str!("migrations/0001_initial.sql")),
-        Migration::sql(2, "remove_origin", include_str!("migrations/0002_remove_origin.sql"))
-            .changesets(vec![coven::TableChangesetMigration::new(
-                "todos",
-                &[],
-                |row, _identity| {
-                    row.columns.retain(|column| column.name != "origin");
-                    Ok(())
-                },
-            )]),
-    ])
-    .open(store_dir.id()).await?;
+fn migrations() -> Vec<Migration> {
+    vec![
+        Migration::sql(1, "initial", include_str!("migrations/001_initial.sql")),
+        Migration::sql(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name")
+            .writes(|change| {
+                if change.table == "attachments" {
+                    change.rename_column("title", "name");
+                }
+                Ok(())
+            }),
+    ]
+}
 ```
 
-`Migration::sql` runs a SQL batch; `Migration::run` accepts a callback for data
-migrations. The same registered ladder builds historical column layouts on a
-separate in-memory database. Migration callbacks must therefore operate on the
-provided SQL context; they cannot depend on an external cache or current wall
-clock to determine canonical synced values.
+`Migration::sql` runs SQL; `Migration::run` runs code with a
+[`MigrationContext`](rustdoc:struct:coven::MigrationContext), for rebuilds and
+backfills SQL alone can't express. Opening runs every migration above the
+database's version in one transaction, then checks the schema rules against the
+declared tables, which describe only the newest version. If anything fails,
+nothing changes. A database newer than the app's migrations fails with
+`MigrationError::SchemaTooNew`; numbering that isn't 1 to N fails with
+`MigrationError::NotContiguous`.
 
-Coven's own tables use a separate schema version. Every writable open migrates
-them automatically, in place, before the app's migrations; each internal
-migration is atomic. Read-only opens refuse tables that need migrating. Any
-open refuses an internal schema newer than this coven supports.
+Coven's own tables migrate first, automatically, every time a device opens for
+writing ([below](#coven-s-own-schema-and-format)).
 
-## Transform historical writes explicitly
+## Additions and breaking changes
 
-SQLite session changesets address columns by position. Renaming a column without
-changing its width does not make an older changeset mean the new thing; appending
-a required column does not supply the value an old INSERT needs. Register a
-`TableChangesetMigration` on the migration that changes the table's row meaning.
-Coven does not infer that meaning from column counts or names.
+Every write records the schema version it was made with. Coven sorts each
+migration into one of two kinds by comparing the schema before and after it,
+together with the app's table declarations:
 
-An adapter receives a `ChangesetRow` with named, typed `ChangesetColumn` cells.
-Each column has `old` and `new` values. `None` is an undefined cell in a sparse
-UPDATE; `Some(Value::Null)` is SQL NULL. Keep that distinction when translating
-values. An INSERT states new values, a DELETE states old values, and an UPDATE
-states its primary key and changed cells. A newly required column needs values
-on INSERT and DELETE, while an unchanged UPDATE column remains undefined.
+| The migration | Kind |
+| --- | --- |
+| adds only new tables or new columns | addition |
+| adds an index, a constraint or a foreign key, or anything else | breaking |
+| changes a table's `owner_only` declaration | breaking |
+| drops or renames a table or column | breaking |
+| inserts, updates or deletes rows of synced tables | breaking, even if it only adds tables or columns |
+| changes only local tables, or views | neither: they don't sync |
 
-Adapters compose from the write's recorded version through the current version.
-After each step the row must match that registered schema. They preserve the
-operation, table, primary key, indirect flag, and `_updated_at` cells. Changing
-row identities or the immutable sync-routing contract is not a column migration.
-The database's synced-table declarations still require `STRICT` tables and valid
-row identities, as described in [Local data](/docs/local-data).
+A migration that changes rows is breaking because each device would otherwise
+compute those changes from its own rows, and the devices would disagree. Its
+statements decide its kind, never the rows a device happens to hold.
 
-A sparse UPDATE may omit an identity field needed by a transformation. Declare
-such fields explicitly in `TableChangesetMigration::new`'s second argument.
-Coven uses a stated old/new value when present; otherwise it reads that declared
-immutable field from the target row by primary key. An UPDATE that changes a
-declared immutable field is rejected. A missing target retains delete-wins
-behavior. Mutable current-row values are not exposed as historical facts.
+## Additions
 
-## Original bytes and current application
+Ana's app adds `color` to notes. Devices on the old version keep working, and
+their writes apply everywhere; they just don't set `color`. Ben, on the old
+version, can still edit titles locally. Once his laptop reaches a slot written
+at the newer version, it stops there with `UpdateRequired`
+([Sync](/docs/sync-model#a-stuck-device-stops)) and waits for his app update
+before his queued titles can reach Ana.
 
-Pull verifies the signed package and validates its original layout against the
-recorded authoring version. Conversion happens during ordered transactional
-application, before current-schema readers, audience checks, blob checks, and
-conflict resolution. An earlier INSERT in that transaction can therefore supply
-immutable context for a later sparse UPDATE.
+## Breaking changes and the raise
 
-The original authenticated bytes and their version remain retained unchanged.
-Converted bytes are an application value, not a replacement signed package.
-Retained history replay, local journal replay, and Circle bootstrap installation
-use the same registered transformations. Conversion or application failure rolls
-back the transaction; it cannot leave an earlier row committed while its
-materialized position reports otherwise.
+A breaking change raises the store's schema version, which every device shares.
+Whichever device updates first makes the raise:
 
-## Captured writes keep their version
+1. it runs the migration;
+2. it takes a snapshot, at the new version, of every audience it can read;
+3. it announces those snapshots;
+4. it claims the raise: one admin entry per audience.
 
-A local write records its authoring schema in the same transaction as its
-changeset and durable write receipt. Publication uses that captured version,
-even if the app upgraded before preparing or retrying the package. The currently
-open database's `user_version` is not a replacement version for older bytes.
+Every other device reloads from the raise's snapshot when it applies the raise,
+once its own app has updated. While that reload runs, writes into the audience
+fail with `DbError::AudienceReloading`. A device on an older app stops at the
+raise with `UpdateRequired`, which also stops it uploading; after updating it
+reloads and sends its waiting old-version writes, unchanged.
 
-When upgrading an existing unversioned journal, Coven uses an exact prepared
-package version only when the retained bytes agree. Otherwise it compares the
-registered historical layouts and transformations. Recovery succeeds only when
-the interpretation is unambiguous. A same-width rename with different meanings
-is an upgrade error, not a reason to label the write with the current version.
-The complete database-open transaction rolls back on that error.
+For a circle the raising device can't read, the first device of one of that
+circle's members to update writes the circle's snapshot and raises it.
 
-## Newer packages wait for an app update
+If Ana and Ben update on the same afternoon and both prepare the raise, the
+first claim establishes it. The other device adopts that snapshot and undoes
+its own unused work.
 
-A package whose `schema_version` exceeds the receiver's supported version is
-held with `HeldStorePositionReason::NewerSchema`. Its materialized position does
-not advance, and dependent commits wait. After upgrading, the receiver can
-validate and apply those original packages.
+### The migration write
 
-An older package is interpreted through its registered migration path. A newer
-version number alone does not prove that every older row shape is understood:
-a missing transformation is an explicit failure. There is no storage-level
-`min_schema_version` enforcement; the package hold and registered schema
-interpretation are the implemented version boundaries.
+Everything a breaking migration changes in the synced tables is one write by the
+device that runs it: its *migration write*. It holds what differs between the
+synced tables before and after: rows inserted or deleted, and cells whose value
+changed. A cell the migration left as it was keeps the write that set it, so a
+late write competes with that write, not with the migration. A renamed column
+keeps its cells' writes under its new name.
 
-For example, a device at version 2 can receive a version-1 UPDATE after its
-`origin` column was removed when migration 2 declares the transformation above.
-A device still at version 1 holds version-2 packages until it upgrades. Neither
-device re-labels a write to make it fit.
+Ana's migration renames `title` to `name` and fills a new column `slug` from it.
+Each note's `name` keeps the write that last set its title, and each `slug` is
+set by the migration write. The migration write reaches other devices only
+inside the raise's snapshot.
 
-## Snapshots and Circle images
+## Late writes in the old shape
 
-A Store snapshot is a SQLite database image containing its own `user_version`.
-Its signed metadata states the same schema version. A newer receiver runs the
-pending image migrations before applying the snapshot's retained tails. An
-older receiver refuses a snapshot newer than its supported schema.
+Writes made on the old version still arrive afterwards: Ben edited offline
+before updating. A migration's optional second part, its *converter*, turns an
+old-shape row change received from another device into the new shape:
 
-A Circle bootstrap is a changeset of INSERTs. Coven verifies the original hash,
-row identities, declared tables, and absence of repeated rows before converting
-those INSERTs. It then stages the converted rows on the receiver's schema and
-checks the routing contract and exact blob closure. Installation and its
-bookkeeping share the caller's transaction. The signed original image is never
-rewritten to impersonate a current-schema image.
+```rust
+Migration::sql(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name")
+    .writes(|change| {
+        if change.table == "attachments" {
+            change.rename_column("title", "name");
+        }
+        Ok(())
+    })
+```
+
+The callback gets a [`RowChange`](rustdoc:struct:coven::RowChange): its table,
+key, operation and changed columns, each with old and new values. A write from
+version 1 arriving at a version-3 device goes through the converters of
+migrations 2 and 3, in order.
+
+With a converter, Ben's late edit converts and applies on every device,
+including his own once he adopts the raise. Without one, it is kept as a lost
+value in its old shape, naming the breaking version as its cause
+(`Replacement::SchemaChange`), so nothing disappears silently. Such a lost value
+is *frozen*: it keeps its old column names and values, takes no part in later
+merges, and survives later raises. A converter added later can't revive it.
+
+Coven never calls a converter on a change that couldn't count anyway: one the
+owner rules refuse, or one built on data that was dropped
+([dependent changes](/docs/merge#dependent-changes)). Those stay frozen in their
+original shape, while the write's other changes convert and apply. A converter
+may rename columns and add new ones; changing a reference's value, or adding a
+column that is a reference, fails, because the device can't know which version
+of the parent the old write meant. A failing converter aborts the receiving
+transaction and leaves the previous state.
+
+Nothing in an upload queue is ever rewritten. Ben's waiting old-version writes
+go out exactly as he made them; receivers convert them.
+
+## The migrating device's own queue
+
+When Ana's phone migrates, its queue may already hold writes made at the old
+version, and she keeps writing at the new one before the raise is claimed.
+Migrating appends an empty record, the *migration marker*, behind the writes
+already queued. The old-version writes and the marker go out first, unchanged
+and in order; writes made after the marker wait until the raise applies. An
+update that only adds columns, run while a raise still waits to publish, moves
+that raise to the newer version.
+
+## Lost values across a migration
+
+A breaking migration deletes rows that are [taken out](/docs/merge#rows-taken-out-and-rows-that-come-back),
+and records each as one frozen lost value, so its values survive. Dropping a
+table or column doesn't dismiss its lost values either: Ana's migration drops
+`notes.color` while Ben's lost value "blue" is still pending, and every device
+keeps that lost value under `notes.color`, frozen. The app can still read and
+dismiss it.
+
+## Coven's own schema and format
+
+Coven changes too. Its own tables in the app's database migrate in place each
+time a device opens for writing, before the app's migrations; each internal
+migration is atomic. A read-only open refuses tables that need migrating, and
+any open refuses an internal schema newer than this coven supports
+(`CovenMigrationError::SchemaTooNew`).
+
+Everything coven writes to storage records the format version it was written in,
+outside its encryption. An older coven that meets a newer object asks for an
+update (`UpdateRequired`) instead of reporting damage, and carries on once
+updated. A format change needs no admin entry, snapshot or reload. A write
+already tried is retried in the format of its first attempt, so its bytes don't
+change.

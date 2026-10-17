@@ -1,169 +1,154 @@
-# Bootstrap
+# Snapshots and joining
 
-A device that joins or restores a store needs the current shared database without
-replaying every retained Store commit. Coven publishes signed database snapshots
-with exact commit coverage. The new device installs one snapshot, then pulls the
-commits beyond that coverage.
+The sequence would grow forever. A household that has used the app for five
+years would have hundreds of thousands of slots, and a new phone would have to
+read every one. Instead, devices take *snapshots*: the complete state of one
+audience as of a slot, its *coverage*. Once every audience has a snapshot, the
+slots before it can be deleted, and a device that is new, or has been away,
+loads the snapshot instead of the deleted slots.
 
-## Snapshot contents
+## What a snapshot holds
 
-Snapshot capture reconstructs shared state at the exact accepted Store frontier
-in a separate replay database. It excludes the local write journal, checks that
-every accepted commit is represented, and exports the selected audience's rows.
-Private rows and pending local changes do not become shared snapshot contents.
-The live database is left unchanged.
+A snapshot records one audience, the store or one circle, after applying
+through a slot. It holds the audience's rows, coven's merge records and lost
+values, and the evidence old writes still need: each deleted row's generations,
+and whether each change's data counted. Without that evidence, an old edit
+arriving late could bring a deleted row back.
 
-The image retains the application schema and `user_version`. Signed metadata
-binds the image hash, schema version, Store root, author, creation time, accepted
-publication predecessor, and exact author-sequence/commit coverage. Continuing
-membership, device, operation, and object-ownership evidence has its own place
-in the image and metadata; it is not reconstructed by fetching the retired
-publication prefix.
+A store snapshot also holds the signed admin entries, key copies and
+announcements needed to know who was a member when, which keys exist, and which
+schema raises and resets happened. Every snapshot records, for each device, the
+number of the last claim it includes and a hash of that slot's bytes, so a
+device can settle a claim after its slot is deleted
+([Sync](/docs/sync-model#the-floor)).
 
-The database image contains catalog rows, not their blob files. Bootstrap
-downloads every referenced `CacheEager` blob before accepting the store;
-`CacheLazy` blobs remain fetch-on-read.
+A snapshot leaves out everything that belongs to one device: unsent writes,
+journals, pending records, file sources and the cache. A device snapshots only
+audiences it can read, and only slots it has applied.
 
-## Publication
+## Taking a snapshot
 
-Store commits and Store snapshots share one accepted publication order. A
-snapshot names the exact current publication record whose accepted state its
-image represents. Uploading the image or signing metadata does not accept it:
-the publisher must conditionally advance the provider's current record from
-that exact predecessor to the snapshot's publication entry.
+A snapshot becomes usable in three steps, each recorded before it happens:
 
-Each candidate reserves its own metadata `ObjectSlot`. Its image and membership
-rollup paths derive from that complete slot, including an opaque provider
-identifier when present. Different candidates therefore own different image
-and rollup objects even when their plaintext hashes match. The signed metadata
-binds those objects, coverage, membership and device state, retained authority,
-schema version, author, and creation time.
+1. the device journals the snapshot;
+2. it uploads the snapshot's bytes to `<store>/snapshots/<audience>/<device>/<n>`;
+3. it claims a slot *announcing* it, naming its path, its coverage, its purpose
+   and a hash of its bytes.
 
-Before uploading, Coven durably records the exact image, rollup, metadata, blob
-bindings, and publication attempt. It verifies the blobs and creates the image,
-rollup, metadata, and immutable publication entry before attempting the
-conditional current-record replacement. Local completion records accepted
-coverage and transfers the image's continuing object ownership atomically.
+So an announcement always names a snapshot already in storage. A device asks
+for a new snapshot of an audience once the writes to it since the last one add
+up to more than that snapshot's size, or 1 MiB if there is none yet. An
+announcement's coverage never goes backward for its audience.
 
-A failed or lost response preserves the durable attempt. Retrying determines
-its acceptance from the verified current publication before proceeding. If
-another accepted commit wins the position, the snapshot is rebuilt over the
-accepted state. If a newer accepted snapshot already fulfills the requested
-coverage, the operation completes against that snapshot after retiring its
-unused candidate objects. Conflicting bytes at an occupied exact slot are an
-error.
+Applying an announcement reads no snapshot. A snapshot is read only when a
+device loads it, and then it is checked against the announced hash and its
+signature. A device always loads the newest snapshot that applies; if that one
+needs a key the device lacks, an app update, or has damaged bytes, the device
+waits and says why. It never loads an older snapshot to get around the problem.
 
-Only an authorized Owner can publish a Store snapshot. An Owner's signature
-alone does not establish acceptance; the verified current record and its
-retained publication interval select the accepted snapshot.
+## The floor
 
-## The membership rollup
+The floor, at `<store>/floor`, names the first kept slot and, for each audience,
+the snapshot it relies on. Every snapshot it names covers at least the slot
+before the first kept one, and it names every audience whose deleted history
+still matters: the store and every circle, even one the device writing the floor
+can't open. Snapshots may cover different slots: the store's might cover 560 and
+Gifts' 520, with the first kept slot 501.
 
-A joining or restoring device needs verified membership authority before it can
-open the Store keyring. Each Store snapshot therefore names a signed plaintext
-membership rollup alongside its encrypted image. The rollup carries exact
-membership heads, entries, and exact predecessor acceptance results for the
-snapshot's membership state.
+The floor also carries the original key copies needed to open the store key,
+with their routing readable, so a new device can find its copy before it holds
+any key. Before any floor exists, the sequence starts at slot 1.
 
-Those objects remain subject to signature, linkage, grant, and accepted-control
-verification. The reader starts from its pinned Store root and required
-membership floor. Missing or invalid required authority fails bootstrap;
-a signed rollup does not independently establish which Store publications were
-accepted.
+## A new device
 
-## Selecting a snapshot
+A device that restores or joins ([Sharing](/docs/sharing)) starts from the
+floor. It opens its key copy, checks the entry that bound that key to its member
+and the floor's signature, loads the floor's snapshots, applies the kept slots
+after them, and only then registers itself and hands the app the open store.
+Without a floor, it reads from slot 1.
 
-`PreparedSnapshotBootstrap::prepare` uses the verified current publication to
-select the accepted Store snapshot. It verifies the required membership floor,
-rejects an unsupported schema version before downloading the image, verifies
-the image against its exact reference and plaintext hash, and binds the selected
-authority to the staged database.
+Restoring and joining report their progress through the status callback the
+app passes in, as [`BootstrapStatus`](rustdoc:enum:coven::BootstrapStatus):
+`Connecting`, `WaitingForApproval`, `Loading`, or `Pending(records)` naming what
+it waits for. Until it finishes, the installation is hidden from
+`layout.stores()` and ordinary opens refuse it. Cancelling removes it. Rows
+arrive before their files; files declared `CacheEager` then download as they
+would for any arriving row ([Cache](/docs/cache#eager-downloads)).
 
-A pending Join can require the original snapshot accepted for its Attempt even
-after newer snapshots have compacted that Attempt. Its retained Join proof
-selects that exact snapshot and protects its artifacts. Bootstrap verifies that
-retained authority instead of selecting another image with similar coverage.
+## Coming back after a long absence
 
-Same-provider handoff uses `PreparedDeviceJoinSnapshot`: the transfer carries
-verified installation authority and the accepted interval after its selected
-snapshot. The receiver checks that closure and its accepted membership, then
-downloads the selected image. It does not scan historical snapshot candidates.
+Ben's laptop was off for a year. The floor now starts at slot 501; Ben had
+applied through 40. Reading slot 41, he finds it missing, reads the floor, and
+*reloads*: he loads the floor's snapshots and applies the slots from 501 on.
+His unsent edits keep their original timestamps and `read_through`, and are
+judged exactly as if he had sent them a year ago. Being late doesn't refuse
+them.
 
-## Installing coverage
+The floor's snapshots can cover different slots, so the device picks one target:
+the highest coverage among them. With the store's snapshot at 560 and Gifts' at
+520, Ben's laptop reads slots 521 to 560 for Gifts, then commits every audience
+together and reads on from 561. A reload commits all at once: rows, merge
+records, lost values and progress in one transaction. A failed reload leaves
+the old state visible.
 
-The downloaded image and its signed coverage stay bound together through a
-single-use `PreparedSnapshotBootstrap`. The value binds the destination path,
-image hash, verified Store protocol root, snapshot hash, and exact coverage.
-Its fields are private and it cannot be cloned.
+**Writing during a reload.** During an ordinary reload, like Ben's, the app
+keeps writing. When the loaded state commits, coven applies the device's queued
+writes over it, with their original numbers, timestamps and `read_through`,
+including writes made while loading.
 
-Consuming it through `PreparedSnapshotBootstrap::install` rechecks the destination
-and image bytes, opens the database with the application's normal migration
-ladder and synced-table declarations, then installs the protocol root, snapshot
-hash, and every exact covered position in one SQLite transaction. An invalid row
-identity, migration failure, changed image, wrong store, or wrong destination
-removes the incomplete database and returns the error.
+Three kinds of reload replace an audience with state the device's own writes
+didn't see: a [reset](#resetting-an-audience), a breaking
+[schema raise](/docs/schema-evolution#breaking-changes-and-the-raise), and a
+circle the device can newly read ([Circles](/docs/circles#joining-a-circle)).
+While one of these runs, writes into that audience fail with
+`DbError::AudienceReloading`, because they'd be made against state about to be
+replaced. Other audiences stay writable.
 
-The installed replay baseline binds its image to authenticated coverage and
-publication authority. Pull verifies the accepted continuation above that base;
-it does not fabricate a materialized commit row for each retired historical
-entry.
+The app can ask a working device to reload, for example when its data looks
+wrong, with `handle.reload_from_snapshot()`. It keeps its device id and its
+unsent writes.
 
-An image also carries the retained history the receiver will stand on, and the
-owner's signature over the image says nothing about whether this store's
-membership ever authorized the commits inside it. So the history an image
-carries is verified against the store's own authority while the database it was
-installed into is still private to its preparation: every retained commit is
-walked for its predecessor state, its membership at the cut it names, and the
-authority its author claims. A cold restore, a warm adoption during a pull, and
-a same-provider device join all run that walk before their destination can
-become anyone's database, and each refuses by discarding the preparation — its
-database files and every payload file the attempt wrote go with it.
+## Deleting history
 
-Restore resolves Circle access for the receiving identity. The destination is
-opened once and stays private until it can serve: the Store image installs
-first, the receiving identity then re-resolves its own access against those
-installed rows, and the selected Circle images and accepted packages install
-beyond that base. Restore selects each Circle's verified image or founding base;
-a same-epoch successor without a new image continues the recipient's exact
-earlier bootstrap through verified control history. Missing or invalid required
-images fail installation, and the failed attempt takes the database files and
-every payload file it wrote with it. The snapshot author's cached access does
-not grant the receiver access. Join and restore complete their required
-membership, registration, eager-blob, and continuation work before returning the
-Store.
+Once every audience has a snapshot covering slots up to some point, and a grace
+period has passed, any device with permission to delete in storage:
 
-## Schema versions
+1. journals the new floor and the deletions it plans;
+2. writes the new floor with a request that succeeds only if the floor hasn't
+   changed since it read it;
+3. deletes the slots below the new first kept slot.
 
-The snapshot image carries its SQLite schema and the signed metadata repeats its
-schema version before download:
+The grace period is usually seven days from the latest announcement of the
+snapshots chosen. It spares short absences a full reload; it isn't needed for
+correctness. Deletion never waits for an absent device, and no device has to
+acknowledge anything.
 
-- A binary at or above the snapshot version opens the image and runs the same
-  host migration ladder used by an existing device. The join or restore caller
-  also passes its explicit policy for Coven's bookkeeping-schema ladder.
-- A binary below the snapshot version refuses it with `SnapshotError::SchemaTooNew`
-  before installing the database.
+If two devices move the floor at once, one conditional write fails; that device
+reads the current floor and decides again. The floor never moves backward. A
+lost reply is settled by reading the floor before deleting anything, and failed
+deletions stay journaled and show in `pending()`.
 
-See [Schema evolution](/docs/schema-evolution) for live-commit version handling.
+An audience nobody can snapshot holds its history back. If no member of a
+circle comes online to snapshot it, that circle's uncovered history stays;
+history it already covers is deleted without waiting.
 
-## Reclamation
+## Resetting an audience
 
-An accepted Store snapshot closes the publication prefix it represents.
-Covered Store packages can be reclaimed once their required rows, authority,
-and blob ownership have transferred to the accepted snapshot or another live
-owner. Store retirement does not wait for every device to acknowledge the
-snapshot. Circle packages and images retain their separate Circle authority
-and acknowledgement requirements.
+If devices disagree about the data, the person can choose one device's version
+and reset an audience to it: an admin for the store with `handle.reset_store()`,
+a circle's member for that circle with `handle.circles().reset(circle)`.
 
-The accepted successor carries exact pending deletion references for covered
-publication entries and obsolete snapshot metadata, images, and rollups.
-Pending Join artifacts remain protected until their operation releases them.
-A later snapshot may omit a deletion obligation only after the provider
-confirms the exact object is absent; a conflicting occupant is an error.
-Physical artifact deletion uses that accepted inventory and does not append a
-new publication entry for each object.
+The device writes a snapshot of what it has, announces it, and claims a reset
+entry naming it. Every device reloads from that snapshot when it applies the
+entry, the resetting device included. From then on, only two things count for
+that audience: the snapshot, and later writes whose `read_through` includes the
+reset slot.
 
-Reclamation preserves objects needed by retained replay, pending work, private
-state, live blob bindings, and continuing control evidence. Package deletion
-uses its verified authority and durable operation journal. Exact deletion
-failures remain visible and resumable. The authoritative current-record slot
-is preserved through compaction.
+Ana resets the store from her phone's snapshot, which covers Ben's writes
+through 8. Ben's laptop made writes 9 and 10 without reading the reset. Ben
+still uploads both, but neither changes the store or creates a lost value: that
+is what a reset is for. After reading the reset, Ben makes write 11, and it
+applies on every device.
+
+A reset replaces an audience from a device's copy. It doesn't recover lost or
+damaged storage; if storage itself is gone, the household starts a new store.

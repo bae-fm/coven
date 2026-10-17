@@ -1,168 +1,133 @@
 # Constraints
 
-coven has no server. Removing it is what makes the rest possible — no backend to
-run, storage the user already owns, end-to-end encryption that no operator can
-undo — but it also removes the one place a traditional system puts its
-enforcement. A server is a trusted third party that sits in the middle of every
-request: it can refuse a token the instant you revoke it, hand each user only the
-rows they may see, keep a log nobody can forge, throttle an abuser, and delete a
-record on command. coven has none of that, because there is nobody in the middle.
-Trust lives in keys, and a key, once given, cannot be taken back.
+coven has no server. Removing it is what makes the rest possible: no backend to
+run, storage the user already owns, end-to-end encryption no operator can undo.
+But it also removes the one place a traditional system puts its enforcement. A
+server sits in the middle of every request: it can refuse a token the instant
+you revoke it, hand each user only the rows they may see, keep a log nobody can
+forge, throttle an abuser, and delete a record on command. coven has none of
+that, because there is nobody in the middle. Trust lives in keys, and a key,
+once given, can't be taken back.
 
-This page is the honest ledger of what that costs. Every limit below traces to
-the same root: **with no server, there is no central point of enforcement.** The
-[comparison](/docs/comparison) page places coven against other systems on what it
-*does*; this one is what it gives up to do it.
+This page is the ledger of what that costs. The [comparison](/docs/comparison)
+page places coven against other systems on what it *does*; this one is what it
+gives up to do it.
 
-## Revocation withholds new secrets; it cannot un-send old ones
+## Small groups, modest write rates
 
-When you remove a member, coven rotates the store to a
-[new key generation](/docs/encryption#three-key-layers) the removed member never
-receives, re-wraps the keyring to everyone who remains, and deletes the removed
-member's wrapped copy (see
-[Revocation is key rotation](/docs/sharing#revocation-is-key-rotation)). From
-that point on, everything sealed under the new generation is unreadable to them.
+coven is built for one person's devices or a household of up to about twenty
+people, four or five typically. Every device applies every slot of the store's
+one sequence, and every publish is a create-once request that only one device
+can win at a time. A busy group of hundreds, or a stream of writes many times a
+second, is not what it is for.
 
-What removal cannot do is reach into their device. Anything the removed member
-already pulled and decrypted before the rotation, they keep — the plaintext is on
-their disk, and the old key generations that were valid when they held them stay
-valid for data sealed under them. There is no server to send a "forget this"
-command, and no way to claw a byte back once it has left. Removal is a guarantee
-about the *future* — no new content — not about the past. If a member has seen
-something secret, treat it as seen; rotate the actual secret (a password, an API
-key stored in a row), not just the membership.
+## Removal withholds new secrets; it can't un-send old ones
+
+When Ana removes Ben, his writes stop counting from the removal's slot, and
+every key he was sent is replaced before new data uses it
+([Encryption](/docs/encryption#which-key-new-data-uses)). Everything written
+after that is unreadable to him.
+
+What removal can't do is reach into his devices. Rows, files and keys he already
+has stay there. There is no server to send a "forget this" command. Removal is a
+promise about the future, not the past. If a member has seen something secret,
+treat it as seen: change the secret itself, such as a password kept in a row,
+not just the membership.
 
 ## No server-side access control
 
-A server enforces policy at the moment of each request. coven has no such moment,
-so several controls a server-backed system offers do not exist:
+A server enforces policy at the moment of each request. coven has no such
+moment, so several controls a server-backed system offers don't exist:
 
-- **No instant, universal cutoff.** Removing a member cuts their cloud access
-  where the provider allows it (an unshare on the consumer clouds), but on S3 a
-  shared credential cannot be withdrawn from one holder alone, so
-  [setting access to absent](/docs/storage#granting-and-revoking-access) reports it as
-  unrevocable and removal proceeds on the [key rotation](#revocation-withholds-new-secrets-it-cannot-un-send-old-ones)
-  alone. Even where cloud access *is* cut, it does not un-see already-synced data.
-- **No per-field filtering, and only coarse per-row filtering.** Membership
-  grants the whole store keyring: a new member can decrypt every Store-audience
-  object. [Circles](/docs/circles) narrow this — a row addressed to a Circle is
-  encrypted for that Circle's members only, so a store can hold rows some members
-  never receive — but a Circle is not a server-side row filter. It leaks
-  pseudonymous row counts, move timing, and which identities administer each
-  Circle to every store member (see
-  [the Circle privacy limits](/docs/circles#security-and-privacy-limits)), and it
-  cannot hide a *column* from a member who receives the row. When two sets of
-  people must learn nothing about each other, that is two stores, not two Circles
-  in one store. The [gate](/docs/local-data) that keeps some rows on one device is
-  a different thing again: the owner's device holding its own rows back.
-- **No tamper-proof access log.** coven signs append-only
-  [membership state](/docs/sharing#membership-records), so who may *write* is
-  recorded and forgery-evident. But a *read* is just a download of ciphertext from
-  the provider; coven keeps no record of who fetched what, and there is no server
-  to keep one.
+- **No instant cut-off.** A removal applies on every device as soon as each
+  reads it, but taking back storage access is provider work. On Dropbox,
+  OneDrive and iCloud only the account that holds the store can unshare, so if
+  its owner is offline, the unsharing waits for them. On S3, deleting the
+  member's access key needs the storage account's admin access
+  ([Sharing](/docs/sharing#provider-access)).
+- **Rows, not columns.** [Circles](/docs/circles) keep rows from members
+  outside them, but every member still sees that a circle exists, its name, who
+  is in it, and how much they write. Nothing hides one column of a row from a
+  member who can read the row. When two groups of people must learn nothing
+  about each other, that is two stores.
+- **No log of reads.** Every slot is signed, so who wrote what is recorded. A
+  read is a download of ciphertext from the provider; coven keeps no record of
+  who fetched what.
 - **No rate limiting.** Nothing in coven throttles how fast a member reads or
-  writes. The only limits are the storage provider's own; coven absorbs a
-  provider's throttling ([the OAuth session retries a `429`](/docs/storage#oauth-sessions-refresh-and-retry))
-  but imposes none of its own.
-- **No forced deletion.** You can delete rows and let the delete propagate (see
-  [deletes are remove-wins](/docs/merge#the-merge)), but you cannot compel another
-  member's device to erase what it already holds, and you cannot reach past your
-  own access to purge the provider.
+  writes. The only limits are the provider's own, which coven honours.
+- **No forced deletion.** A delete propagates to every device, but nothing can
+  make another member's device forget what it already had.
 
-## Every member device holds the whole store
+## Every device holds what it can read
 
-coven is fully replicated: every device carries the entire database within its
-access scope, not a server-filtered slice of it. A new device
-[bootstraps](/docs/bootstrap) from a snapshot, which is a full image of the
-database, and thereafter every row that syncs reaches every member device.
-
-This is the direct consequence of granting the keyring rather than mediating
-access: there is no "need to know" sub-store a member is kept out of, because
-there is no query-time authority to enforce one. It is a strength for
-availability and offline use — every device is complete and self-sufficient — and
-a limit on confidentiality *within* a store: sharing a store is sharing all of
-it. When two sets of people should not see each other's data, that is two stores,
-not one store with internal walls.
+coven is fully replicated: every device carries every row of every audience its
+member can read, not a slice a server picked. That makes every device complete
+and usable offline, and it means sharing a store, or a circle, is sharing all of
+it.
 
 ## Consistency is convergent, not global
 
-Devices are not consistent at every instant. Each device commits offline and
-publishes to its own stream; peers [merge](/docs/merge) the independent streams
-when they pull. coven converges — every device that holds the same accepted
-history lands on the same rows — but it does not claim global serializability or
-linearizability, and it offers no transaction spanning devices. The
-consequences:
+Devices aren't consistent at every instant. Each device commits offline and
+merges other devices' writes when it reads them. Every device that has applied
+the same slots holds the same rows, but there is no transaction spanning
+devices. The consequences:
 
-- **Column-wise last-writer-wins.** Concurrent edits to different columns of one
-  row both survive; concurrent edits to the *same* column resolve to the later
-  writer, ordered by a [hybrid logical clock](/docs/merge#the-clock) rather than
-  wall-clock time. The loser's value is overwritten, not queued for review.
-- **Delete-wins, and only after sync.** A delete beats a concurrent edit
-  (`arbitrate_row_conflict`),
-  but a delete only takes effect on a device once that device pulls it. Until
-  then, the row is still live there.
-- **No cross-device transactions.** A transaction is atomic on the device that
-  writes it, but coven does not offer a transaction that spans devices: two
-  offline commits meet and merge, they do not serialize behind one another.
-- **No globally-enforced uniqueness or foreign keys.** SQLite enforces a
-  `UNIQUE` or `CHECK` constraint within one device, but coven cannot enforce one
-  across the store: two offline devices can each insert a row that is locally
-  valid but collides on merge. When that happens the conflicting rows are omitted
-  and the affected tables surfaced, rather than reconciled
-  ([constraints and foreign keys](/docs/merge#constraints-and-foreign-keys)). A
-  foreign-key reference whose parent has not yet arrived is retried and, if still
-  unsatisfied, dropped. Design the schema so concurrent writers do not depend on a
-  globally unique value being unique everywhere at once.
+- **The larger timestamp wins a cell.** Concurrent edits to different cells of
+  a row both survive; concurrent edits to the same cell resolve to the larger
+  timestamp. The losing value isn't thrown away: it is kept as a lost value the
+  app can show and offer back ([Merge](/docs/merge#lost-values)).
+- **Deletes win, after sync.** An edit made to a row that has since been deleted
+  loses, whenever it arrives. But a delete takes effect on a device only once
+  that device reads it.
+- **Constraints are decided after the fact.** SQLite enforces a `UNIQUE` or
+  `CHECK` constraint, or a foreign key, on one device. Two offline devices can
+  each make a row that is valid alone and breaks the constraint together. coven
+  decides those the same way everywhere: the first slot keeps a unique value,
+  and a row that fails a CHECK or lost its parent is taken out and kept as a
+  lost value ([Merge](/docs/merge#the-rules-sql-brings-with-it)). So a row Ana
+  created offline can be taken out later, after Ben's earlier claim arrives.
+  Design the app to show that, not to assume it can't happen.
+- **Admin changes need the network.** Writes never wait, but adding a member,
+  changing a role or making a circle first catches up with the sequence online.
 
 ## Member identity lives on the device and in the restore code
 
-The store keys live in the selected [custody](/docs/keys). A
-[restore code](/docs/sharing#restore-codes) holds the member's signing and sealing
-keys, the store id and name, and storage location. It never holds an S3 key or
-OAuth tokens. A new device needs a separately kept S3 access key or the
-provider's account sign-in to reach the store and open its sealed keys.
+A member's private keys live in [custody](/docs/keys) and in their
+[restore code](/docs/sharing#a-person-s-new-device-the-restore-code). Anyone
+holding the code is that member to coven. Coven offers no recovery from a stolen
+code.
 
-Anyone holding the code is that member to coven. Theft of the code is outside
-coven's threat model; coven offers no stolen-code recovery. Changing an S3 key
-changes storage access and leaves the written restore code valid.
-
-The flip side is that there is no reset. If another member remains, they can
-re-invite you and you rejoin under a new identity. But if you are the store's only
-member and you lose every device *and* the restore code, the encrypted data is
-unrecoverable — there is no operator to verify your identity and let you back in,
-because there is no operator at all. The security that keeps the provider from
-reading your data is the same property that means nobody can recover it for you.
+The flip side is that there is no reset. If another admin remains, they can
+invite you again to your existing member id and replace your keys. But if every
+member loses every device and restore code, the encrypted data is unrecoverable:
+there is no operator to check who you are and let you back in. The security that
+keeps the provider from reading the data is the same property that means nobody
+can recover it for you.
 
 ## The storage provider is the shared dependency
 
-Removing the server does not remove every dependency; it concentrates one. There
-is no coven service to go down, but availability now rides entirely on the
-[storage provider](/docs/storage). If the provider is unreachable, the account is
-suspended, or its credentials are revoked, no device can sync until it is restored
-— and because the provider is a dumb byte store by design, it cannot mediate,
-arbitrate, or enforce anything on coven's behalf when it is up. It holds
-ciphertext and serves it back; that is the whole contract.
+Removing the server doesn't remove every dependency; it concentrates one. There
+is no coven service to go down, but availability now rides on the
+[storage provider](/docs/storage). If the provider is unreachable, the account
+is suspended, or its credentials are revoked, no device can sync until that is
+fixed. Whoever controls the storage can delete it, and coven can't rebuild a
+store from nothing.
 
 ## What the absence of a server buys
 
-Stated plainly, and kept in balance with the limits above, removing the server is
-also what gives coven its properties:
+Kept in balance with the limits above, removing the server is also what gives
+coven its properties:
 
-- **Nothing to run or operate.** No backend to deploy, scale, patch, or pay for;
-  a store needs only storage the user already has.
-- **Provider-agnostic and portable.** The same store works over S3, Dropbox,
-  OneDrive, or iCloud, and the data is the user's own — on a
-  [browsable home](/docs/encryption#opaque-and-browsable-homes) they can even read
-  it in the storage console by name.
-- **Works offline.** Every device holds the full database and commits writes
-  locally; with no provider connected a store is
-  [local-only and complete](/docs/storage#what-the-host-configures), and syncs
-  when a provider is attached.
-- **The provider never sees plaintext.** On the default opaque home every object
-  is [encrypted before it leaves the device](/docs/encryption); the provider holds
-  ciphertext and opaque key paths, never a row, a file, or a real identity.
-- **Full ownership.** The data lives in the user's storage under their
-  credentials, with no operator holding a copy or a key.
+- **Nothing to run or operate.** No backend to deploy, scale, patch or pay for;
+  a store needs only storage the household already has.
+- **The provider never sees contents.** Every object is
+  [encrypted before it leaves the device](/docs/encryption); the provider holds
+  ciphertext, sizes and timing.
+- **Works offline.** Every device holds its whole database and commits writes
+  locally. A store works before any storage is set up
+  ([Local data](/docs/local-data)), and syncs once it is.
+- **Full ownership.** The data lives in the household's storage under their own
+  accounts, with no operator holding a copy or a key.
 
-These are not separate features bolted onto a serverless design; they are the
-same decision as every constraint above, read from the other side.
+These aren't separate features added to a serverless design; they are the same
+decision as every constraint above, read from the other side.

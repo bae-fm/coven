@@ -1,401 +1,296 @@
 # Sharing
 
-A store can have more than one writer. coven decides who may write from the
-store's signed membership state: causal per-owner streams that pull verifies
-against each Store commit, so the cloud provider never decides who may write.
+A store is shared by several people, each with several devices. Someone must be
+allowed to add Dan, and nobody may remove the last admin. There is no server to
+ask, so every device reaches the same answer on its own, from the store's
+sequence. This page covers members, roles and devices, how a person's new
+device gets in, how a new person gets in, and removing people.
 
-Every initialized store has signed founder membership, including a store with
-one writer and a browsable cloud home. Creation publishes a signed
-`StoreProtocolRoot` that binds the store id, founder membership entry, and schema
-version. Its `store_root_hash` is pinned locally and carried by every signed
-Store protocol object, and the founder publishes its causal membership head.
-"Browsable" describes cloud visibility and readable blob paths; it does not
-disable membership authorization.
+## Members, roles and devices
 
-coven shares a store by **membership**: it grants the *whole store* to
-another *writer*, a peer with their own identity in membership, by sealing the
-store keyring to that member's keypair. The store is the unit of sharing —
-a different set of people is a different store.
+A *member* is a person. Each member has a random, permanent
+[`MemberId`](rustdoc:struct:coven::MemberId) and two key pairs: one to sign with
+and one that others seal keys to. A *device* is one installation of the app,
+belonging to one member, with its own id. Every slot is signed with its
+author's member key, and every device checks that signature against the
+membership as it stood just before that slot.
 
-Examples use the todos app; two people both write todos, and the owner
-controls who else can.
+`handle.members()` (live: `subscribe_members()`) lists the active members as this
+device has applied them:
 
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
-
-## Identity
-
-A member is identified by an Ed25519 public key (32 bytes). A signature proves
-who signed the bytes; accepted membership determines what that identity may do.
-Devices also have registered signing keys, and their registrations must be
-activated before those keys can authorize ordinary Store publications.
-The key used for encryption (X25519) is computed from the Ed25519
-key by
-[`ed25519_to_x25519_public_key`](rustdoc:fn:coven_keys::keys::ed25519_to_x25519_public_key),
-so anyone holding a member's Ed25519 public key can derive the target to wrap
-the store keyring to (see [The store keyring](#the-store-keyring)).
-
-## Membership records
-
-Anyone who ever held bucket access can write bytes, so a correctly encrypted
-but forged changeset is always possible, and there is no server to refuse it.
-Each device decides who may write from storage alone, with nothing but keys to
-trust. Membership changes are therefore signed records. A
-[`MembershipEntry`](rustdoc:type:coven_protocol::membership::MembershipEntry)
-signs a [`MembershipEntryBody`](rustdoc:struct:coven_protocol::membership::MembershipEntryBody):
-the Store id, author and Owner grant, stream coordinate, previous-entry hash,
-observed dependencies, display timestamp, and
-[`StoreAuthorityChange`](rustdoc:enum:coven_protocol::membership::StoreAuthorityChange).
-The change records a grant, removal, device registration activation, device
-exclusion proposal or outcome, or a transfer of provider administration.
-
-The signature covers the complete body.
-[`verify_membership_entry`](rustdoc:fn:coven_protocol::membership::verify_membership_entry)
-checks the signature against the entry author.
-
-The `created_at` value is an HLC string used for display ordering, not to authorize
-anything. It is author-supplied and therefore spoofable, so no access decision
-reads it (see [Revocation](#revocation-is-key-rotation)).
-
-## Membership publication
-
-Owners keep separate, hash-linked membership streams. Entries and heads name
-the author, the Owner grant authorizing that stream, and its random stream id:
-
-```
-store-v1/membership/entries/{author}/{owner_grant}/{stream_id}/{seq}/…
-store-v1/membership/heads/{author}/{owner_grant}/{stream_id}/{seq}/…
+```rust
+pub struct MemberInfo {
+    pub id: MemberId,
+    pub keys: MemberPublicKeys,
+    pub role: MemberRole,          // Admin or Member
+    pub devices: Vec<DeviceInfo>,  // id, name, and Active, Removed or Replaced
+    pub is_self: bool,             // the member using this device
+}
 ```
 
-Each entry names its predecessor and observed membership dependencies. An
-`AuthorHead` selects an exact entry and links the preceding head. These links
-let readers verify a stream's history; uploading an entry and head does not by
-itself accept a membership change.
+| Action | Who may do it |
+| --- | --- |
+| Create the store | the first device, which becomes the first admin |
+| Add or remove a member, change a role | an admin |
+| Add a device | the member it belongs to, from that new device |
+| Remove a device | its member, or an admin |
+| Replace a member's keys | that member, or an admin |
+| Create a circle | any member, who becomes its first member |
+| Rename a circle, add or remove its members, delete it | its members only; an admin outside it can't |
 
-Except for the founder bound by the Store root, a membership head names an
-activating Store commit. The commit carries the matching membership control.
-Its publication enters the shared accepted history by conditionally replacing
-`store-v1/publication/current.json` using the provider version the writer read.
-A competing writer must observe and validate the winning history before retrying;
-it cannot overwrite another accepted admission with its stale view.
+A store may have several admins and always keeps at least one: removing or
+demoting the last admin is refused. The member whose provider account holds the
+store, the Dropbox folder's owner say, can't be removed either, because nobody
+else could take provider access back; that fails with `SyncError::StoreOwner`.
+Having the S3 account's admin key doesn't make anyone a store admin, and being a
+store admin doesn't give anyone the S3 account.
 
-After acceptance, the publisher writes a `MembershipHeadAcceptance` result
-binding the exact head to the winning publication record and its verified
-membership predecessor. A reader discovering membership from its rooted streams
-checks that result as well as the entry, head, grant and device authority.
-A missing required result leaves finalization incomplete; a signature alone
-cannot turn the uploaded candidate into accepted authority.
+## How admin changes are made
 
-<svg class="flow" viewBox="0 0 660 258" role="img" aria-label="Owners prepare separate membership controls, compete to advance the shared Store publication, and finalize results that readers verify">
-<text class="hdr" x="105" y="22" text-anchor="middle">PREPARE</text>
-<text class="hdr" x="330" y="22" text-anchor="middle">ACCEPT</text>
-<text class="hdr" x="555" y="22" text-anchor="middle">VERIFY</text>
-<rect class="lanec" x="10" y="36" width="190" height="156" rx="10"/>
-<rect class="lane" x="235" y="36" width="190" height="156" rx="10"/>
-<rect class="lanec" x="460" y="36" width="190" height="156" rx="10"/>
-<rect class="chipo" x="25" y="57" width="160" height="43" rx="7"/>
-<text class="lbl s11" x="105" y="74" text-anchor="middle">Owner A</text>
-<text class="sub" x="105" y="90" text-anchor="middle">entry + head + commit</text>
-<rect class="chipo" x="25" y="124" width="160" height="43" rx="7"/>
-<text class="lbl s11" x="105" y="141" text-anchor="middle">Owner B</text>
-<text class="sub" x="105" y="157" text-anchor="middle">entry + head + commit</text>
-<line class="arr" x1="200" y1="79" x2="231" y2="101" marker-end="url(#fa)"/>
-<line class="arr" x1="200" y1="145" x2="231" y2="123" marker-end="url(#fa)"/>
-<rect class="chipa" x="250" y="81" width="160" height="60" rx="7"/>
-<text class="lbl s11" x="330" y="99" text-anchor="middle">shared current record</text>
-<text class="sub" x="330" y="116" text-anchor="middle">conditional replacement</text>
-<text class="sub" x="330" y="131" text-anchor="middle">one winner at a time</text>
-<line class="arr" x1="425" y1="111" x2="456" y2="111" marker-end="url(#fa)"/>
-<rect class="chipa" x="475" y="72" width="160" height="79" rx="7"/>
-<text class="lbl s11" x="555" y="91" text-anchor="middle">accepted control</text>
-<text class="sub" x="555" y="110" text-anchor="middle">exact head + result</text>
-<text class="sub" x="555" y="128" text-anchor="middle">rooted authority checks</text>
-<text class="sub" x="330" y="220" text-anchor="middle">A competing publication is checked against the winner before retry.</text>
-<text class="sub" x="330" y="240" text-anchor="middle">Uploading signed objects alone does not accept the change.</text>
-</svg>
+Every change to membership or settings is an *admin entry* in a slot, and every
+admin call follows one path, an *operation*:
 
-[`MembershipChain`](rustdoc:struct:coven_protocol::membership::MembershipChain)
-is derived from verified membership objects. An initialized device retains
-accepted history and membership cursors in its database; loading current
-membership uses that accepted publication and its retained proofs. It does not
-need to rediscover all membership objects on every sync.
+1. **Catch up.** Read and apply the sequence to its end, and check the change is
+   allowed. Admin calls need storage; they can't run offline.
+2. **Prepare.** Record each piece of preparation in the operation's journal
+   before doing it, such as a new key and its copies, or a provider share.
+3. **Claim** the next slot with the entry.
+4. **If someone else claimed it first,** apply their slot and check again. If
+   the change is still allowed, claim the next slot. If not, undo what the
+   journal recorded and fail with `SyncError::Rejected(OperationRejection)`.
 
-Validation binds the founder entry to the pinned Store root, checks exact
-references and signatures, follows predecessor and dependency links, and
-checks each grant change against the authority at its accepted publication
-predecessor. Store-activated controls also require their accepted publication
-evidence and the issuer's device authority.
-A newly signed registration does not establish its own activation.
+Ana and Ben, both admins, each try to remove the other. Ana's removal claims
+slot 41 first. Ben's device reads it, finds Ben no longer an admin, undoes its
+work, and his call fails with `Rejected(NotAllowed)`. No removal of Ana ever
+enters history.
 
-Role changes are membership controls too. The current role comes from verified
-grants and removals in accepted publication order. A candidate must name the
-accepted grant state it follows; an intervening grant change prevents accepting
-the earlier candidate. An issuer whose grant has been removed cannot accept its
-earlier candidate. Readers reject conflicting membership authority.
+A claimed entry is final. An operation survives a crash or a dropped call: it
+settles its claim, then finishes or undoes. Waiting operations appear in
+`pending()` with their operation id, and `retry_pending_operation(id)` makes a
+retry due now.
 
-## Roles
+## A person's new device: the restore code
 
-[`MemberRole`](rustdoc:enum:coven::MemberRole) has three
-forms:
+A *restore code* holds the member's id and current private keys, the store's id
+and name, and the storage location. It never holds storage credentials: no S3
+key, no OAuth token. Setup returns it, and `handle.restore_code()` shows it
+again. Its text form starts with `CVR1-`.
 
-- **Owner** can write, and can mutate the chain: admit, remove, and change
-  roles. The founder is an owner, and an owner can promote others. Any current
-  owner can admit, not just the founder.
-- **Member** can read and write todos, but cannot touch the chain.
-- **Follower** holds the store keyring and reads everything, but may not
-  write. The restriction is enforced acceptance-side: a puller re-derives each
-  author's role from the chain and rejects a Follower's changesets.
+A new device gets the code by scanning a QR code on one of the person's devices,
+from iCloud Keychain on Apple platforms, or by typing it. Coven keeps the code
+in iCloud Keychain after setup, joining and key replacement. Storage access is
+separate: on S3 the person enters their access key, which they keep apart, in a
+password manager say, unless a QR scan from their own device or iCloud Keychain
+supplies it alongside the code. On Dropbox and OneDrive the new device signs in
+to the person's own account.
 
-`MemberRole::can_write` is true for `Owner` and `Member`, false for `Follower`.
+Ana's new laptop scans the code from her phone:
 
-## The provider administrator
+```rust
+let info = decode_code_info(&scanned)?;
+let mut builder = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .oauth_clients(oauth_clients.clone());
+if let Some(access) = info.oauth_access {
+    builder.authenticate(access).await?;
+}
+let s3_credentials = if info.cloud_provider == CloudProvider::S3 {
+    Some(ask_for_s3_access_key().await?)
+} else {
+    None
+};
+let handle = restore_from_code(builder, &scanned, s3_credentials, "Ana's laptop", |step| show_step(step), &cancel_rx)
+    .await?;
+```
 
-One thing is not a role at all. Admitting a device to a store means handing it
-access to the bucket or folder the store lives in, and that is a request to the
-storage provider, not a signature. Exactly one *device* makes those requests:
-the provider administrator, named by its exact device registration. It starts
-as the device that created the store, bound to that store's signed root.
+The laptop opens the key copies sealed to Ana, loads the store, checks that the
+code's keys are Ana's current ones, and registers itself as a new device. An
+old code, whose keys have since been replaced, fails with
+`SyncError::MemberKeysReplaced`. Restoring always makes a fresh device; it
+doesn't rescue an old installation's unsent writes. `restore_from_keychain`
+does the same from iCloud Keychain.
 
-The administrator is the device that offers a device join and approves the
-provider access behind it, and the only device that may publish a reclaim
-receipt or retire a superseded snapshot's artifacts. Being an owner is not
-enough, and neither is signing in to the same provider account: the check is
-against that one registration.
+Anyone who sees the code can open the store, given storage access, for as long
+as its keys are current: to coven, they *are* that member. Apps should blur the
+QR code until the person taps to show it. Coven offers no recovery from a
+stolen code; the household removes that member and starts over.
 
-Administration moves by an accepted membership change like any other. The
-current administrator signs a transfer naming another device of the same store,
-both devices must be active where the chain says so, and once the change is
-accepted every device resolves the new administrator from the chain — including
-a device that restored from a snapshot and never saw the transfer happen. Only
-the current administrator can sign one, so a store whose administering device is
-lost keeps its data and its membership but cannot admit new devices until that
-device comes back.
+## Adding a person: invites
 
-The transfer carries protocol authority and nothing else. A Dropbox or
-OneDrive folder belongs to whoever created it and coven cannot move that; an S3
-store's shared credential needs nothing moved. What checks that the new
-administrator can actually reach the provider is the capability probe it runs
-when it acts.
+Ana adds Dan to Household, on Dropbox:
 
-## The store keyring
+1. Ana's phone shares the store's folder with Dan's Dropbox account and shows
+   an *invite*: a QR code holding the store's location, a member id chosen for
+   Dan, and a one-time secret.
+2. Dan's phone scans it, signs in to his own Dropbox, makes Dan's member keys,
+   and writes a *join request* to storage, encrypted with a key from the invite
+   secret.
+3. Ana's phone, the only device holding that secret, shows the request. Ana
+   approves.
+4. Ana's phone sends Dan copies of every store key, sealed to his new keys,
+   then claims the entry adding him.
+5. Dan's phone opens its keys, loads the store and registers itself.
 
-Data is only as private as the distribution of its keys: encryption means
-nothing if the key travels carelessly. A store's data is encrypted under a
-symmetric key that can
-[rotate](#revocation-is-key-rotation); the keyring is the full set of those key
-generations. Each member's copy of the keyring is sealed to their X25519
-public key with libsodium's sealed box, and that sealed box travels inside the
-Owner-signed membership entry that grants or rotates their access. The sealed
-box authenticates no sender; the entry's signature and hash do, and the entry's
-place in membership history fixes the generation the box must decode to.
+The invite only lets Dan ask; Ana's approval lets him in.
 
-A joiner verifies the accepted membership activation, then opens the sealed key
-its own active grant carries with the matching private key.
+```rust
+// Ana's phone
+let invite = handle
+    .create_invite(
+        InviteTarget::NewMember { role: MemberRole::Member },
+        InviteAccess::ProviderAccount { email: "dan@example.com".into() },
+    )
+    .await?;
+show_qr_code(&invite.code);
 
-Admission retains its prepared objects and progress in a durable journal.
-A failure before acceptance does not grant membership; a failure after
-acceptance must resume finalization of that accepted change. It cannot undo
-acceptance by deleting or replacing an entry.
+let mut requests = handle.subscribe_join_requests();
+loop {
+    for request in requests.borrow_and_update().clone() {
+        if request.invite == invite.id {
+            if confirm(&request.device_name).await {
+                handle.approve_join_request(&request).await?;
+            } else {
+                handle.decline_join_request(&request).await?;
+            }
+        }
+    }
+    requests.changed().await?;
+}
+```
 
-## Pull verification
+```rust
+// Dan's phone
+let mut builder = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .oauth_clients(oauth_clients.clone());
+builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
+match join_with_invite(builder, &scanned, "Dan's phone", |step| show_step(step), &cancel_rx).await? {
+    Some(handle) => show_store(handle),
+    None => show_declined(),
+}
+```
 
-Each signed Store commit names the exact
-[`MembershipCoord`](rustdoc:struct:coven_protocol::membership::MembershipCoord)
-that grants its author write access, its device registration, and its
-membership and device-state predecessors. Pull follows the accepted Store
-publication history and verifies the commit's signature, exact references and
-authority at that publication boundary. A device announcement helps locate
-history; it does not independently accept a commit.
+On Dropbox, OneDrive and iCloud, only the account that holds the store can share
+it, so the inviting admin must be that member. On S3 there is no sharing:
+`InviteAccess::S3AccessKey` hands over a key made by hand in the provider's
+console, and `InviteAccess::S3AdminAccess` lets coven make one
+([below](#s3-access-keys)).
 
-Required membership objects are loaded by their exact references and checked
-against the pinned root and accepted control proofs. Invalid signatures,
-missing required objects, inconsistent predecessors or unauthorized authors
-prevent the affected history from being materialized. A commit cannot grant
-its own author access merely by carrying a valid signature.
+An invite expires a day after it was made. Declining, letting it expire, or
+`cancel_invite` takes back the provider access it granted. Dan's phone keeps
+its new keys and request across restarts, and picks up where it left off;
+`join_with_invite` returns `None` when the request is declined or the invite
+expires.
 
-## Reading membership before opening data
+## Losing everything
 
-A joining or restoring device needs membership authority before it can open
-the store keyring. The root, membership entries, heads, acceptance results and
-membership rollup are signed plaintext protocol objects. The protected snapshot
-database image carries data; possessing or decrypting that image does not
-establish its author's authority.
+Ben loses every device and his restore code. An admin invites him again with
+`InviteTarget::ReplaceMemberKeys { member }`, naming his existing member id.
+Approving it replaces his keys: his role, circles and existing device ids stay
+attached to his id, writes signed with his old keys that land afterwards are
+refused, and his old keys count as exposed, so keys copied to them are replaced
+([Encryption](/docs/encryption#which-key-new-data-uses)).
 
-A published snapshot names a **membership rollup** carrying the membership
-objects up to its declared frontier. It supplies bytes to the same rooted
-verification used for individual objects. Readers still check the necessary
-provider head slots and acceptance results, and follow later history; a rollup
-does not make cold verification a fixed number of reads. See
-[Bootstrap](bootstrap.md#the-membership-rollup).
+If every member loses every device and restore code, the store is lost:
+everything is encrypted.
 
-The preliminary rollup lookup is an advisory optimization: if it cannot be
-used, the rooted reader can obtain those membership objects individually.
-That does not bypass a failed required proof. Once an accepted snapshot or
-control is selected, its required objects and authority must verify; missing
-or invalid evidence is an error.
+## Replacing a member's keys
 
-## Revocation is key rotation
+A member who suspects a leak replaces their own keys with
+`handle.replace_member_keys()`, which returns a new restore code. While it runs,
+app writes are refused with `DbError::MemberKeysChanging`; it first sends the
+writes already queued, while the old keys still count. Other devices still
+holding the old keys stop sending and report `MemberKeysReplaced`; they restore
+from the new code. The member's id, role, circles and devices stay the same.
+An admin can publish a prepared pair for another member with
+`replace_member_keys_for`.
 
-You cannot un-send data: a removed member keeps every byte they already
-pulled. What removal *can* guarantee is that they read nothing new, and the
-only enforcement that needs no server and no honest clock is a key they never
-receive. So removal is key rotation, not a temporal replay of the chain ("was
-this author allowed when they claim they wrote this?").
-`handle.remove_member(...)`:
+## Removing people and devices
 
-1. Prepares the removal and a new key generation, sealing the rotated keyring
-   to every remaining member inside the removal entry, and retains it in its
-   durable operation.
-2. Uploads that entry, then requests removal of the member's cloud access.
-   Providers with no per-member credential revocation report that limitation;
-   key rotation protects new encrypted data.
-3. Publishes the matching Store commit and membership head, accepts the control
-   through the shared Store publication, and finalizes its acceptance result.
+`handle.remove_member(&member)` publishes one entry removing the member, their
+devices and their circle memberships; a circle left empty is deleted at that
+slot. `handle.remove_device(device)` removes one device and says how its member
+cuts that device off at the provider. `set_member_role` changes a role.
 
-The removal seals nothing to the removed member, so they receive no key for the
-new generation. Earlier entries keep the keys they always carried; deleting them
-cannot take back a key the member already learned.
+A removed person still has the keys and data they had. Two things stop them
+doing more: the sequence stops counting what they send, and the provider stops
+letting them reach storage.
 
-<svg class="flow" viewBox="0 0 660 158" role="img" aria-label="Removing a member appends key generation 2; remaining members receive it, the removed member stops at generation 1">
-<line class="arrd" x1="30" y1="62" x2="640" y2="62" marker-end="url(#fam)"/>
-<rect class="chipo" x="70" y="48" width="120" height="28" rx="7"/>
-<text class="lbl s11" x="130" y="66" text-anchor="middle">generation 1</text>
-<circle class="glyphf" cx="300" cy="62" r="4"/>
-<text class="lbl s11" x="300" y="40" text-anchor="middle">remove member</text>
-<rect class="chipa" x="400" y="48" width="120" height="28" rx="7"/>
-<text class="lbl s11" x="460" y="66" text-anchor="middle">generation 2</text>
-<text class="sub" x="130" y="102" text-anchor="middle">everyone could read</text>
-<text class="sub" x="460" y="102" text-anchor="middle">sealed to remaining members only</text>
-<text class="sub" x="330" y="134" text-anchor="middle">the removed member's keyring stops at generation 1: new data is unreadable to them</text>
-</svg>
+### The cut-off
 
-Subsequent Store publications are checked against the accepted removal, and
-new data sealed under the rotated generation is unreadable without that key.
-Remaining members keep the old generations in their keyring, so data sealed before the rotation stays
-readable. This is why the timestamp does not need to be load-bearing: even a
-candidate with a timestamp from before the removal cannot bypass the accepted
-publication's authority checks. `remove_member` refuses to remove the last
-owner.
+A removal's slot is a line in history. Writes from the removed device or member
+that land in later slots don't count; writes that landed before keep counting.
+The same line falls at a member-key replacement: later writes signed with the
+old keys don't count.
 
-Removal does not retract changes accepted before it. Preparing or uploading
-an earlier candidate does not give that candidate an earlier acceptance time.
+Ana's old phone sends write 8 while her new device claims slot 70, registering
+itself in the old phone's place. If write 8 lands at slot 69, it counts. At slot
+71, it doesn't. Every device consumes that slot, makes no change to any row,
+records no lost value, and reports `WritesRefused` naming the entry that decided
+it. There is no grace period.
 
-## One-scan device pairing
+A device that applies its own removal, or its member's, stops syncing and tells
+the app.
 
-An existing device displays one pairing code. The joining device scans it,
-establishes an encrypted LAN session, and sends its signed identity and provider
-account through that session. After the owner approves the exact identity, cloud
-access and the membership grant that carries the sealed keyring return through
-the same session, encrypted to the joining device. No second code is displayed, scanned, or pasted.
+### Provider access
 
-<svg class="flow" viewBox="0 0 660 216" role="img" aria-label="The owner displays one pairing code; the joining device scans it and the devices complete approval over an encrypted LAN session">
-<text class="hdr" x="120" y="22" text-anchor="middle">JOINER</text>
-<text class="hdr" x="330" y="22" text-anchor="middle">ENCRYPTED LAN SESSION</text>
-<text class="hdr" x="540" y="22" text-anchor="middle">OWNER</text>
-<rect class="lane" x="10" y="32" width="220" height="172" rx="10"/>
-<rect class="lane" x="430" y="32" width="220" height="172" rx="10"/>
-<circle class="numc" cx="24" cy="59" r="8"/>
-<text class="num" x="24" y="62.5" text-anchor="middle">1</text>
-<rect class="chip" x="30" y="46" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="63" text-anchor="middle">scan pairing code</text>
-<line class="arr" x1="214" y1="59" x2="426" y2="59" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="49" text-anchor="middle">offer carries endpoint + ephemeral key</text>
-<circle class="numc" cx="444" cy="108" r="8"/>
-<text class="num" x="444" y="111.5" text-anchor="middle">2</text>
-<rect class="chip" x="450" y="88" width="180" height="40" rx="7"/>
-<text class="lbl s11" x="540" y="104" text-anchor="middle">approve_device_pairing(...)</text>
-<text class="sub" x="540" y="120" text-anchor="middle">verify identity + approve</text>
-<line class="arr" x1="446" y1="150" x2="234" y2="150" marker-end="url(#fa)"/>
-<circle class="numc" cx="330" cy="150" r="8"/>
-<text class="num" x="330" y="153.5" text-anchor="middle">3</text>
-<text class="sub" x="330" y="136" text-anchor="middle">recipient-sealed admission</text>
-<circle class="numc" cx="24" cy="177" r="8"/>
-<text class="num" x="24" y="180.5" text-anchor="middle">4</text>
-<rect class="chip" x="30" y="164" width="180" height="26" rx="7"/>
-<text class="lbl s11" x="120" y="181" text-anchor="middle">join_with_device_pairing</text>
-</svg>
+Removal in the sequence stops Ben's writes from counting. Taking away his
+storage access stops him reading anything new. That second step is provider
+work, recorded when the removal applies. `remove_member` returns once its entry
+applies; the provider work shows in `pending()`.
 
-The owner calls `handle.start_device_pairing()`. The returned
-`DevicePairingHost` owns the listener and a durable journal; its offer contains
-the Store name and provider, expiry, LAN endpoints, and an ephemeral public
-key. Dropping and reopening the app resumes that exact
-session rather than minting another code.
+On Dropbox, OneDrive and iCloud, only the account that holds the store can
+change sharing, so that member's device unshares when it applies the removal.
+Ben removes Dan while Ana, the folder's owner, is offline: Dan's removal applies
+everywhere at once, Ben's pending list names the wait for Ana, and Ana's next
+pass does the unsharing. The owner's device takes back only a grant to that one
+account, keeps an account shared while another member or open invite uses it,
+and reports grants it can't remove alone, such as a parent folder's share or a
+public link, as `PendingReason::AccessRemains`.
 
-After scanning, the joining device completes provider sign-in when required,
-then calls `PreparedDevicePairing::open_or_create`. The pending Ed25519 identity
-stays in the platform key store; the pairing journal retains the offer and
-signed request but no private key. The complete request is sealed to the offer's
-ephemeral key and is bound to the complete offer hash.
+These providers can't cut off one device of an account. To lock out a lost
+phone, [`ProviderSignOut`](rustdoc:enum:coven::ProviderSignOut) tells the app
+what the person does:
 
-The owner receives the exact request from `wait_for_request()`, displays its
-public-key fingerprint and provider account, and passes it with a role to
-`handle.approve_device_pairing(...)`. coven:
+| Provider | What the person does |
+| --- | --- |
+| Dropbox, OneDrive | remove the app's access from their account, then sign in again on the devices they keep |
+| iCloud | remove the lost device from their Apple account |
+| S3 | an admin replaces that member's access key |
 
-1. grants the joiner cloud access,
-2. seals the store keyring to their X25519 key inside the membership entry,
-3. signs and validates the membership control against accepted authority,
-4. accepts its Store publication and finalizes the exact head acceptance result,
-5. serializes those exact admission facts and encrypts them to the request's
-   pending identity,
-6. binds the sealed admission to the signed transport offer for this attempt.
+Removal changes no ciphertext or key anyone already has; it stops what comes
+next. Keys the removed member had seen are replaced before new data uses them
+([Encryption](/docs/encryption#which-key-new-data-uses)).
 
-The sealed admission returns through the same LAN session. Only the pending
-identity retained for that request can decrypt its cloud connection, Store id,
-owner key, membership grant, Store root, and membership floor. The two sides then
-exchange four exact values through the Store's cloud transport:
+### S3 access keys
 
-1. The offer becomes a provider access request; the selected provider
-   administrator returns an approval.
-2. The approval becomes a registration request; the owner accepts it and
-   returns the provider-ready bootstrap.
-3. The joining device installs the snapshot database and returns its readiness
-   proof; the owner verifies provider admission and returns an activation.
-4. The joining device installs that activation, atomically saves its config,
-   moves the pending journal into the Store database, and promotes the pending
-   identity into this store's custody.
+On S3 each member has their own access key, and coven tracks every key it knows
+of until it is confirmed deleted. Making and deleting keys needs the storage
+account's admin access, which coven borrows for one operation and never stores,
+logs or puts in the store. The person chooses where it comes from with
+[`AdminAccessSource`](rustdoc:enum:coven::AdminAccessSource): a signed-in AWS or
+`gcloud` CLI, Google sign-in, AWS IAM Identity Center, or a pasted admin key.
+Coven runs no CLI until the person picks it. Or the person makes the key in the
+provider's console, following `guided_access_key()`, which fills in the bucket,
+the store's prefix and the member policy.
 
-Every client call resumes the durable journal. The same exchange admits a new
-member's device and another device belonging to an existing member.
+```rust
+let admin = handle.admin_access(AdminAccessSource::AwsCli { profile: None }).await?;
+let replacement = handle.replace_member_access_key(&ben, admin).await?;
+give_to_ben(replacement.key.credentials);
+```
 
-The device is now a writer. A join that is interrupted keeps the exact pairing,
-pending identity, membership admission, and join journals so both apps resume
-the same attempt. Before approval, `PreparedDevicePairing::abandon` removes the
-joining device's pending key and journal; the owner can cancel the waiting
-session without admitting anyone.
+`replace_member_access_key` makes a fresh key limited to the store, checks from
+the member's side that it reaches the store and nothing beyond it
+(`StorageFailure::KeyBeyondStore` otherwise), delivers it sealed to the
+member's devices, records it, then deletes the old key and reads it gone. The
+restore code doesn't change. A member's other devices take a new key directly
+with `update_credentials`.
 
-The pairing code is the trust handoff. A substituted code can point at another
-Store because the joining device has no earlier owner key. Once the intended
-code is scanned, the signed and encrypted request/response prevent LAN traffic
-from replacing either identity.
-
-## Restore codes
-
-A restore code opens the store on a new device of an existing member. It holds
-only that member's signing and sealing keys, the store id and name, and the
-storage location. `handle.restore_code()` returns `CVR1-` followed by the
-base32-encoded binary frame and its typing-error checksum.
-
-The code never contains an S3 key or OAuth tokens. The person keeps their S3
-access key separately, for example in a password manager, and enters it on the
-new device. Dropbox and OneDrive require their own provider
-sign-in. A QR scan from one of the person's own devices may transfer the code
-and S3 key as separate values; apps should blur the QR code until the person
-chooses to show it. iCloud Keychain also keeps the S3 key separately alongside the code.
-
-`decode_code_info` validates a code and returns its kind, store id, name,
-provider and sign-in requirement. `restore_from_code` takes the builder, code,
-optional S3 credentials, device name, progress callback and cancellation
-receiver. S3 requires those credentials; other providers refuse them and use
-the builder's sign-in. `restore_from_keychain` uses an explicitly supplied S3
-key or reads the separately held key. Missing keys and keychain failures reach
-the caller before bootstrap begins.
-
-The restored member keys open the store's sealed keys. The new device then
-registers itself and loads the store. Replacing an S3 access key updates the
-held credentials and its recorded access id; it leaves the restore code
-unchanged. Retained devices take the key directly through `update_credentials`.
-The written code remains valid.
-
-Anyone holding the code is that member to coven and can open the store with
-storage access. Coven offers no recovery from a stolen code. Keep it private.
-Invites for another person have a different contract: an S3 invite carries the
-key made for its recipient, and the person still needs the admin's approval.
+Every S3 key no longer current, whether replaced, belonging to a removed member,
+or made for an invite that ended, is a `DeleteAccessKey` record in `pending()`
+until coven deletes that exact key with admin access and reads it absent
+(`delete_access_key`), or the app confirms a console deletion with
+`confirm_access_key_deleted`. A success reply or elapsed time never clears it.

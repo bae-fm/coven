@@ -1,513 +1,220 @@
 # Circles
 
-[Sharing](/docs/sharing) grants the *whole* store to a member: everyone who
-holds the store keyring reads every synced row. A Circle narrows that inside one
-store. A Circle is a private audience — a named subset of the store's members —
-and a row addressed to a Circle reaches only that Circle's members, not the rest
-of the store.
+Some rows are for only some members. Ana and Ben's Gifts list shouldn't be
+readable by Carol, though all three share Household. A *circle* is a group of
+members inside a store who share rows the others can't read.
 
-Circles do not add a second protocol. Every Store and Circle change rides the
-same [accepted Store publication history](/docs/sync-model) that carries ordinary
-row changes: an accepted Store commit is what activates a Circle package,
-control change, roster change, or bootstrap. What a Circle adds is *who* a row's
-package is encrypted for.
-
-Examples use the todos app, with a `Family` Circle inside a store two housemates
-share.
+The hard part is keeping SQL's rules working when some devices can't see some
+rows: Carol's device must still check foreign keys and unique values, and
+decide the same things, without reading Gifts. This page covers how rows get
+their audience, the rules that keep that working, and how circles are run.
 
 ## Audiences
 
-Every synced row belongs to exactly one **audience** at a time:
+Every synced row belongs to one *audience*: the store, or one circle. A row in
+the store reaches every member's devices; a row in a circle reaches only its
+members' devices. Each audience has its own key, so the other members' devices
+hold only encrypted bytes they can't open.
 
 ```rust
 pub enum Audience {
     Store,
     Circle(CircleId),
-    Local,
 }
 ```
 
-- **Store** — every store member receives the row. This is the default and the
-  audience of every row in a store with no Circles.
-- **Circle(id)** — only the [effective members](#effective-membership) of that
-  one Circle receive the row.
-- **Local** — the row never leaves the device that wrote it.
+A [`CircleId`](rustdoc:struct:coven::CircleId) is a random, permanent UUID;
+renaming a circle never changes it.
 
-A person may belong to any number of Circles, so an audience is *not* a person
-and *not* a Circle roster: Store and Local are audiences on their own, and each
-Circle contributes exactly one more audience. A [`CircleId`](rustdoc:struct:coven::CircleId)
-is a permanent random 128-bit value; renaming a Circle never changes it, its
-keys, its rows, or its package history.
+## Declaring audiences
 
-## Declaring audience routing
+The app says, for each synced table, how its rows get their audience:
 
-A row's audience is a column on a *synced graph root*, the same way a
-[gate](/docs/local-data) is. Only a root declares an audience; each descendant
-names the foreign key it inherits that audience through. Two builder forms exist,
-and a table uses at most one:
+- a **root** table names an audience column, never NULL, holding `store` or a
+  circle's id: `audience_column("audience")`;
+- a **descendant** table names one foreign key, and each row takes the audience
+  of the row it points at: `audience_from("list_id")`. A todo is in its list's
+  circle;
+- any other table is in the store, every row of it.
 
 ```rust
-SyncedTable::new("lists", RowIdentity::IndependentUuid).scoped_by("audience")
-SyncedTable::new("todos", RowIdentity::IndependentUuid)
-    .gated_through("list_id")
+vec![
+    SyncedTable::new("lists", RowIdentity::IndependentUuid).audience_column("audience"),
+    SyncedTable::new("todos", RowIdentity::IndependentUuid).audience_from("list_id"),
+    SyncedTable::new("todo_labels", RowIdentity::SharedKey)
+        .key_columns(["todo_id", "label_id"])
+        .audience_from("todo_id"),
+    SyncedTable::new("labels", RowIdentity::SharedKey),
+]
 ```
 
-- [`scoped_by(column)`](rustdoc:method:coven::SyncedTable::scoped_by) makes the
-  table an **audience root**. The `TEXT` column holds the row's audience: `NULL`
-  is Store, the reserved value `local` is Local, and any other value is a
-  canonical committed `CircleId`. Moving a row between audiences is an ordinary
-  SQL update to that column (see [Moving a row](#moving-a-row)).
-- [`gated_through(column)`](rustdoc:method:coven::SyncedTable::gated_through)
-  makes a descendant table take its audience from the parent row named by the
-  foreign key in `column`. It is the same declaration a table under a
-  [gated root](/docs/local-data#gated-roots) uses: every plain table with a
-  foreign key into a gated table must select its inheritance foreign key
-  explicitly, and coven never guesses among a table's foreign keys.
+Bind audiences as [`Audience`](rustdoc:enum:coven::Audience) or `CircleId`
+values; coven writes them as canonical text, `store` or the circle's UUID in
+lowercase with hyphens. Any other spelling, uppercase included, fails with
+`DbError::InvalidAudience`, because two spellings of one circle would otherwise
+look like two audiences.
 
-`scoped_by` is the general form of the two-audience [`gated_by`](/docs/local-data#gated-roots)
-(Store or Local only). A table declares one or the other, never both.
+A descendant's foreign key must be one column, into a synced table, not set
+null (the row would lose its audience), and part of a chain that ends at a root
+or a store table. A table can't declare both forms. Coven checks these when the
+database opens and after each migration (`SchemaError::AudienceForeignKeyColumns`,
+`AudienceForeignKeyTarget`, `AudienceForeignKeyAction`, `AudienceCycle`,
+`TwoAudiences`).
 
-For a synchronized foreign key from child to parent, the child and parent may
-share an audience, or the parent may be Store — a Circle row may not point into
-a different Circle or into Local, and no Store row may point into a Circle or
-Local. Coven validates the whole connected foreign-key component on every host
-write and every applied package, including unchanged descendants, so a
-concurrent move or delete cannot leave a dangling cross-audience reference.
+## Unique values don't cross audiences
 
-A store that declares any audience root requires an [opaque cloud
-home](/docs/encryption#opaque-and-browsable-homes); a browsable home cannot hold
-Circles.
+A device outside a circle can't see the circle's claim to a unique value, so it
+would decide differently. So a unique constraint, or a shared key, must stay
+inside one audience:
 
-### Private routing
+- **on a root table** it must include the audience column, as in
+  `UNIQUE(audience, title)`: the same title in the store and in a circle are two
+  separate claims;
+- **on a descendant table** it must include the foreign key the table takes its
+  audience from.
 
-A row can move between audiences while other devices still hold older packages,
-so the receiver needs a Store-visible, convergent answer to which audience owns
-a row right now — without the answer revealing the application's real table name
-or primary key. Coven keeps a Store-visible mirror keyed by a `RowRoutingId`: an
-HMAC over the row's `(table_name, row_identity)` under a key every store member
-can derive. The mirror row carries only the routing id and the owning
-`CircleId` (or nothing, for Store or a deleted/Local row). Table names and
-primary keys never appear in it.
+`note_tags(note_id, tag_id)` is allowed: only someone who can see note 42 can
+tag it. `UNIQUE(file_name)` on attachments is refused: Ana's `plan.pdf` on a
+Gifts note and Ben's on a store note would clash on Ana's device but not on
+Carol's. `UNIQUE(note_id, file_name)` is allowed. The error is
+`SchemaError::AudienceConstraint`, naming the table and constraint.
 
-Because the routing key is derived from store-level material, a store member who
-holds it can test guesses for *predictable* table-and-primary-key combinations
-against the mirror. This is a stated [privacy limit](#security-and-privacy-limits),
-not a defect.
+## References stay readable
 
-## Effective membership
+A row may point only at rows everyone who can read it can also read:
 
-Circle access requires **both**:
+- a circle's row may point at rows in the same circle, or the store's;
+- a store row may point only at store rows.
 
-1. active Store membership, and
-2. active membership on that Circle's roster.
+So every device that reads a row can check its foreign keys. Carol also has a
+circle of her own, Recipes:
 
-The effective members of a Circle are the intersection. Removing a person from
-the Store immediately ends their effective access to every Circle, even before
-the Circle's key rotates — the same store keyring rotation that revocation
-performs already withholds new Store content from them, and a removed store
-member never fetches or decrypts a Circle package.
-
-When a Circle's resolved roster still names a Store identity that is no longer an
-active store member, the Circle is **rotation-required**: publishing new content
-into it is refused until an Owner closes the current epoch and activates a
-successor roster without that identity. Rename and member-addition are refused
-in this state too; member removal, close finalization, and conflict resolution
-stay available. A completed close, or re-adding the person to the store, clears
-the state.
-
-Rotation protects *future* Circle writes. Like store revocation, it cannot make
-already-received history unseen: a former member keeps every Circle package,
-key, and snapshot they pulled while they had access.
-
-## The `coven.circles()` API
-
-Circle commands live on a borrowed namespace off the handle,
-[`coven.circles()`](rustdoc:method:coven::CovenHandle::circles). Every method is
-async and returns [`SyncError`](#errors), as store membership calls do.
-
-```rust
-let circles = handle.circles();
-
-// Create a Circle whose founder is this store identity.
-let family: CircleId = circles.create("Family").await?;
-
-// Rename it — the id, keys, roster, rows, and history are unchanged.
-circles.rename(family, "Household").await?;
-
-// Add (or re-add) a store member by their Ed25519 public key. This seals them a
-// fresh access leaf and a current bootstrap image.
-circles.add_member(family, &housemate_pubkey_hex).await?;
-
-// Remove a member. This closes the old epoch and returns the durable operation
-// tracking the close (see below).
-let op: CircleOperationId = circles.remove_member(family, &housemate_pubkey_hex).await?;
-
-// Delete a Circle. Terminal.
-circles.delete(family).await?;
+```
+store     notes  row 42   "Groceries"
+Gifts     pins   row 3    note → 42        allowed
+store     links  row 10   pin → 3          refused: Carol can't read pin 3
+Recipes   pins   row 2    pin → 3          refused: Carol, in Recipes, can't read pin 3
 ```
 
-`create` returns the new [`CircleId`](rustdoc:struct:coven::CircleId) once the
-signed roster, metadata, access set, control, activating Store commit, and local
-materialization are all durable. `add_member`, `rename`, and `delete` complete
-against the durable operation journal; `remove_member` returns a
-[`CircleOperationId`](rustdoc:struct:coven::CircleOperationId) because a member
-removal runs the multi-step [epoch close](#member-removal-and-epoch-close) before
-it activates.
+A write that breaks this fails on the device making it with
+`DbError::ReferenceAudience`. That includes a move: moving note 42 into Gifts
+while store link 5 still points at it fails, since link 5 would point at a row
+Carol can't read. Which circle a row is in never depends on who is in the
+circle, so a change of members never breaks a reference.
 
-Re-adding a former member is the same call as `add_member`. Prior possession of
-an old Circle key grants no current authority — the re-add issues a new active
-access leaf and a current bootstrap.
+## Moving rows
 
-### Inspecting Circles
-
-```rust
-// Every Circle the local identity can see, with its derived state.
-let all: Vec<Circle> = circles.list().await?;
-
-// The Circle's current members who remain current store members, with roles.
-let members: Vec<CircleMemberInfo> = circles.members(family).await?;
-```
-
-[`Circle`](rustdoc:struct:coven::Circle) is what `list` reports per Circle:
-
-```rust
-pub struct Circle {
-    pub id: CircleId,
-    pub name: Option<String>,       // absent while inactive, conflicted, or deleted
-    pub role: Option<CircleRole>,   // present only when the local identity holds active access
-    pub state: CircleState,
-}
-```
-
-[`CircleState`](rustdoc:enum:coven::CircleState) is the Circle's derived state,
-mapped once from its current control:
-
-- `Active` — a single resolved active epoch whose roster names only current store
-  members.
-- `Inactive` — the local identity holds no active access: never granted, or
-  revoked by a removal it has not re-joined past.
-- `Closing` — an [epoch close](#member-removal-and-epoch-close) is in flight;
-  authoring new content under the old epoch is frozen until the successor
-  activates.
-- `RotationRequired { removed_members }` — the roster names store identities that
-  are no longer active store members (see [Effective membership](#effective-membership)).
-- `ControlConflict { branches }` — the control history forked into concurrent
-  valid successors and awaits Owner resolution. Carries the complete retained
-  branch set.
-- `Deleted` — the control history terminated in an Owner-signed deletion.
-
-[`CircleMemberInfo`](rustdoc:struct:coven::CircleMemberInfo) carries each
-member's `pubkey`, [`CircleRole`](rustdoc:enum:coven::CircleRole) (`Owner` or
-`Member`), and an `is_self` flag.
-
-### Durable operations
-
-Every Circle command is a durable operation: it survives restart and resumes
-from its exact recorded phase without guessing remote state. Inspect the
-operations that have not yet activated:
-
-```rust
-let pending: Vec<CircleOperationInfo> = circles.operations().await?;
-```
-
-[`CircleOperationInfo`](rustdoc:struct:coven::CircleOperationInfo) names the
-operation id, its Circle, its
-[`kind`](rustdoc:enum:coven::CircleOperationKind) (`Create`, `Rename`,
-`AddMember`, `RemoveMember`, `ResolveControl`, `Delete`), and its
-[`state`](rustdoc:enum:coven::CircleOperationState):
-
-- `Pending` — prepared, waiting to publish.
-- `WaitingForCloseResponses` — a member-removal close is collecting participant
-  responses.
-- `Finalizing` — the successor commit, outcome, and bootstraps are staged and
-  about to publish.
-- A pending record names why the operation cannot publish.
-  [`AuthorityLost`](rustdoc:enum:coven::CircleOperationBlock) means the author's
-  exact store grant no longer has current write authority; the initiator calls
-  `circles.retry_operation(op_id).await?` once authority is restored.
-  `PublicationRefused { reason }` means verification refused this candidate and
-  no retry of it can be accepted — a device authoring from state it has already
-  moved past reaches this. The refusal releases the Store publication
-  reservation the operation held, so the device's other work publishes; the
-  operation stays here, with its reason, until the initiator calls
-  `circles.discard_operation(op_id).await?`. That discard is accepted because a
-  refused candidate is provably unable to activate: either its commit never
-  reached the provider, which its own journal records, or another accepted
-  commit already holds its author-stream coordinate.
-- `Discarding` — Coven accepted a verified permanent-nonactivation proof and is
-  exact-deleting the candidate's exclusive objects before clearing the durable
-  operation.
-
-An initiator can discard an operation only after Coven verifies that its
-candidate can never activate:
-
-```rust
-circles.discard_operation(op_id).await?;
-```
-
-Discard succeeds only after Coven verifies that the exact prepared Store commit
-can never activate. Four grounds settle that, cheapest first: the candidate's
-commit never reached the provider, which the operation's own record of completed
-uploads states; another accepted commit already holds the candidate's exact
-author-stream coordinate, which a coordinate carries only once; the author's
-device was excluded before that position; or an accepted Store commit revoked
-the exact Store membership grant that authorized it without covering the
-candidate in its predecessor history. When the outcome is genuinely unknown —
-the commit is out there and nothing has taken its place —
-[`discard_operation`](rustdoc:method:coven::Circles::discard_operation) returns
-`DiscardRequiresNonactivation` and leaves the durable operation unchanged.
-Discarding an ordinary *host write* that a Circle refused is separate, on
-[`WriteStatus`](#offline-and-pending-writes).
-
-### Control conflicts
-
-Two Owner devices can author concurrent valid control successors — for example,
-two renames while offline. Coven never silently picks one when the choice would
-decide membership, keys, or deletion intent; instead it retains both and reports
-the Circle as `ControlConflict { branches }`. An Owner resolves it by choosing
-one branch:
-
-```rust
-if let CircleState::ControlConflict { branches } = &circle.state {
-    circles.resolve(circle.id, branches[0].clone()).await?;
-}
-```
-
-[`resolve`](rustdoc:method:coven::Circles::resolve) authors a successor of the
-chosen [`CircleControlCoord`](rustdoc:struct:coven::CircleControlCoord) that
-names every retained branch as a dependency, so the conflict collapses to that
-successor deterministically on every device in either arrival order. Resolution
-is the exit path out of a conflict, so it is callable regardless of
-rotation-required state; a branch discovered since the command resurfaces as a
-new conflict rather than being silently dropped.
-
-[`delete`](rustdoc:method:coven::Circles::delete) is the other exit, and it
-needs no chosen branch. A deletion authors from the first branch in the
-canonical branch order every device reduces to and covers the rest, so the
-conflict collapses to one terminal deletion everywhere. It also lands where a
-resolution cannot: a resolution carries its branches' roster and metadata
-history forward and must reduce it, while a deletion freezes the epoch and
-reduces nothing.
-
-An author-stream position is filled exactly once. A position belongs to one
-`(identity, device, Owner grant)`, and acceptance refuses a control that
-introduces a different entry at a position the Circle's accepted history has
-already filled — on the device that authored it, before it uploads anything,
-and on every peer that would admit it. So two entries can never reach one
-position, and no Circle reaches a conflict its branches cannot be resolved or
-deleted out of.
-
-An epoch-close branch cannot be chosen directly: participant responses bind to
-that closing control, and moving the close under a new control would strand
-responses already written to create-once slots. If every retained branch is an
-epoch close, the device with a local waiting close first calls
-`cancel_close(circle.id)`. That reopens its exact close branch while retaining
-the other close branches. The Owner then calls `resolve` with the reopened
-active branch. Cancellation explicitly withdraws the local removal; resolution
-explicitly rejects the remaining close branches.
-
-### Roster and metadata provenance
-
-A Circle's roster and metadata are private: only effective members hold the key
-that opens their entries. Their *authority* is not private, because it is
-accepted Store history.
-
-Each entry is signed by its author and published exactly once, by the Store
-commit whose signing device authored it. That commit is the entry's
-device-authorship proof: a control may introduce an entry only when the entry
-names the same author and the same device as the commit carrying it. Every later
-control still holding the entry names the exact earlier accepted Store commit
-that introduced it, so an entry's origin never rests on a later Owner's say-so —
-a later control's signed object map is not evidence that anything was ever
-accepted.
-
-Inheritance is monotone. A successor may add entries; it may not drop one, swap
-its object, or re-publish a different entry at an author-stream position an
-earlier accepted control already filled. A verifier resolves each named
-activation through the activations it has already staged in the same batch, its
-own retained accepted activations, or the candidate commit's verified
-predecessor history — and refuses the control outright when none of them holds
-it. The historical Owner grant behind each entry is re-derived by the roster
-reduction itself, over the whole inherited entry set, exactly as it was when the
-entry was first accepted.
-
-A Store member outside the Circle verifies the public half of this — every
-predecessor control and the exact commit that activated it — without holding any
-Circle key. A recipient verifies the private half, the entries themselves, once
-its access is established; that is also what a recipient restoring from a
-snapshot re-verifies before the restored Circle becomes authoritative.
-
-## Member removal and epoch close
-
-Removing a member always closes the old epoch before any future write, so that
-new content is sealed under a key the removed member never receives. Removal
-publishes an epoch close naming every remaining member's device and a reserved
-response slot for each. Each remaining device, after pulling, applies every
-accepted old-epoch commit it holds and publishes its own applied frontier into
-its slot. When every slot is settled, an Owner-signed outcome rotates the Circle
-key and epoch, drops the removed member, and publishes a fresh bootstrap for
-every remaining member.
-
-Packages beyond the accepted cutoff are invalid: receivers omit them
-deterministically, and authoring beyond the cutoff fails to its initiator. No
-later pass repairs an incomplete close; every step is retained for idempotent
-retry or fails loudly.
-
-Inspect a close in flight:
-
-```rust
-let status: CircleCloseStatus = circles.close_status(family).await?;
-for participant in status.participants {
-    // participant.device_id, participant.settlement:
-    //   Responded | Excluded | Pending
-}
-```
-
-An Owner can settle a stuck close two ways:
-
-```rust
-// Exclude an unavailable participant device. It must reset from the successor
-// bootstrap before it can write or acknowledge again.
-circles.exclude_close_device(family, device_id).await?;
-
-// Cancel the local waiting close, restoring its frozen epoch byte-for-byte.
-// This also works when that close is one branch of a control conflict.
-let cancel_op = circles.cancel_close(family).await?;
-```
-
-Each participant slot holds exactly one of two signed values — the device's own
-response, or an Owner-signed exclusion — and create-once semantics decide every
-race between them. The one outcome slot likewise holds exactly one of the final
-outcome or an Owner-signed cancellation.
-
-## Moving a row
-
-Changing a row's audience is an ordinary SQL update to its `scoped_by` column;
-coven previews the transaction, computes the inherited closure, and publishes
-only the destination representation — full destination-row inserts, full private
-routes, the Store mirror change, and any Store ancestors the destination graph
-requires. It does *not* publish a source-audience delete: receivers drop the
-stale source materialization because the winning Store mirror no longer names
-that audience, which avoids requiring a recipient to receive a package after
-their access has ended.
+A row moves when its root's audience column changes, or when a descendant is
+pointed at a parent in another audience. A move is an ordinary write, and it
+commits at once:
 
 ```rust
 handle.write(move |sql| {
-    sql.execute(
-        "UPDATE lists SET audience = ?1 WHERE id = ?2",
-        coven::rusqlite::params![family.to_string(), list_id],
-    )?;
+    sql.execute("UPDATE notes SET audience = ?1 WHERE id = ?2", (gifts, note))?;
     Ok(())
 }).await?;
 ```
 
-A move out of Local or an unavailable Circle requires every referenced blob's
-verified plaintext before the host transaction commits; missing material fails
-the write rather than deferring a download.
+A move is a delete of the root and its descendants in the old audience and a
+full insert of them in the new one. Carol's devices see note 42 and its
+attachments deleted; Ana's and Ben's insert them in Gifts. Files don't move:
+each file's key travels in its row.
 
-## Offline and pending writes
+**One key in two audiences.** Ana moves note 1 into Gifts; Carol, outside it,
+sees it deleted and adds note 1 to the store again. The store's note 1 and
+Gifts' note 1 are now two rows. A device that reads both shows one of them in
+the app's table and takes the other out, like a unique value's loser: the
+store's row wins over a circle's. Of two circles' rows, the one whose current
+generation started with the smaller timestamp wins.
 
-The [write status](/docs/sync-model#lifecycle) surface is unchanged for Circle
-rows: a host transaction is `LocalOnly`, `Pending`, `Publishing`, `Published`,
-or `Resolved`, with a pending record when it cannot advance. One
-[`WriteBlock`](rustdoc:enum:coven::WriteBlock) reason is Circle-specific:
-`RotationRequired { circle_id, removed_members }`, recorded when a write targets
-a Circle whose roster names a removed store member. Repair it by completing the
-Circle's close (or re-adding the member to the store), then retry the pending
-write. Circle writes never claim global serializability: a concurrent
-constraint conflict surfaces as a typed deterministic conflict, the same as a
-Store write.
+## Running a circle
 
-## Snapshots, restore, and reclamation
+Circle calls live on `handle.circles()`:
 
-A new device [bootstraps](/docs/bootstrap) from the accepted Store snapshot,
-then reconstructs each Circle its receiving identity can access. Its base can
-be a recipient bootstrap, a retained bootstrap, or a standalone Circle snapshot.
-When a same-epoch control supplies no new image, restore follows its verified
-predecessors to the recipient's earlier bootstrap. Only verified founding access
-allows reconstruction from an empty Circle base.
+```rust
+let circles = handle.circles();
+let gifts = circles.create("Gifts").await?;          // this member is its first member
+circles.add_member(gifts, &ben).await?;
+circles.rename(gifts, "Birthday gifts").await?;
+let mine = circles.list().await?;                    // the circles this member is in
+let in_gifts = circles.members(gifts).await?;        // CircleMemberInfo { member, is_self }
+circles.remove_member(gifts, &ben).await?;
+circles.delete(gifts).await?;
+```
 
-Restore verifies the selected image and its exact coverage, then applies accepted
-Circle packages beyond that base. Missing or invalid required images fail restore;
-they do not authorize another base. Circle rows, routing, blob ownership, and the
-receiving identity's access install in one transaction over the installed Store
-image, and the restored database becomes visible only once both have landed.
+Any member of the store can make a circle and is its first member. Only the
+circle's own members rename it, add and remove its members, rotate its key and
+delete it; an admin outside it can't. Each call is an admin operation
+([Sharing](/docs/sharing#how-admin-changes-are-made)), so it needs storage, and
+a change no longer allowed fails with `SyncError::Rejected`: `NotAllowed` for a
+caller without authority, `TargetGone(..)` for a member, device or circle that
+no longer exists. `subscribe_list` and `subscribe_members` are the live forms.
 
-Standalone Circle snapshots are sealed to their epoch's key. Restore selects an
-applicable image whose cut is covered by the accepted Store frontier; incomparable
-candidate cuts fail selection. Reclamation additionally requires acknowledgement
-stability: every device with active access must acknowledge a frontier covering
-the snapshot cut. This also gates publication of the next standalone generation.
+`circles.members(circle)` lists only members who are still in the store.
 
-Reclamation is audience-specific and evidence-based: it deletes a Circle
-package, snapshot, or bootstrap only when verified acknowledgements and snapshot
-coverage prove no retained history still needs it. A member-addition bootstrap
-is pinned to its recipient's access activation and is not reclaimed until that
-recipient has acknowledged a later sufficient Circle snapshot or lost authority
-under signed evidence. It also deletes packages excluded by an accepted
-epoch-close cutoff, superseded standalone snapshot generations, and audience
-blob ciphertext after no live row or retained replay input still owns it.
+## Writes into circles
 
-## Deletion
+A write can touch several audiences. Ana's write adds a store note and a Gifts
+pin: its slot carries one *part* per audience, each encrypted with its
+audience's key, under one signature.
 
-An Owner deletes a Circle with an Owner-signed terminal control transition.
-Activation reduces the Circle's current state to `Deleted` and, in the same pull
-transaction, prunes its materialized rows, audience mirrors, blob bindings, and
-access/roster/metadata caches, while retaining the control spine needed to
-verify historical commits and reclamation. `list` reports the Circle as
-`Deleted` rather than omitting it.
+Every device opens the slot's header with the store key and checks the whole
+signature, including parts it can't read. Parts for audiences this member isn't
+in are passed over without being opened: not being in Gifts is not a missing
+key. A missing key for a part the device *should* read stops it at that slot
+([Sync](/docs/sync-model#a-stuck-device-stops)).
 
-Deletion is terminal: a control descending from a deletion is invalid, and a
-successor racing it from another Owner device surfaces as a `ControlConflict`
-the Owner resolves. Deletion does not claim to erase copies members already
-received.
+A write into a circle the member isn't in, or one that doesn't exist, fails on
+the writing device with `DbError::NotInCircle`.
 
-## Errors
+## Joining a circle
 
-Circle calls return [`SyncError`](rustdoc:enum:coven::SyncError), preserving the
-same typed causes as store membership calls:
+Ana adds Dan to Gifts. Dan needs two things: Gifts' older keys, which Ana's
+device sends him before the entry adding him, and the Gifts history his devices
+passed over unopened while he was outside. So Dan's laptop loads Gifts'
+snapshot and the slots after it, then commits Gifts' data. Until that commits,
+writes into Gifts fail with `DbError::AudienceReloading`; other audiences stay
+writable.
 
-- `CircleNotMember(CircleId)` — the caller is not a member of the circle.
-- `CircleDeleted(CircleId)` — the circle has been deleted or does not exist.
-- `NotStoreMember(MemberId)` — the target is not an active store member.
+A newly made circle has no history, so its first members load nothing.
 
-Database, storage, key and operation failures use the corresponding `SyncError`
-variants directly.
+## Leaving a circle
 
-## Security and privacy limits
+Ana removes Ben from Gifts. Ben keeps the rows and keys he already had. The
+remaining members' devices replace every Gifts key Ben was sent before writing
+new Gifts data, so he can't read anything written after.
 
-Circles partition confidentiality *within* a store, but they run over the same
-storage every store member and the provider can observe. These are protocol
-properties, not gaps to close later:
+Edits Ben made before he read his removal still count: he may send Gifts parts
+he queued earlier, sealed with the old key he already held, which shows him no
+new data. Once his device reads the removal, new writes into Gifts fail with
+`NotInCircle`. Removing Ben from the store, rather than from the circle, applies
+the full [cut-off](/docs/sharing#the-cut-off).
 
-- **Revocation prevents future access; it cannot un-send old data.** A removed
-  member keeps every Circle plaintext, key, snapshot, and package they already
-  pulled. Adding a member grants the retained history needed to materialize the
-  Circle's current state.
-- **Store members can see which identities administer which Circles.** A
-  Circle's public control state is encrypted to the store, not to the Circle, so
-  every store member can verify a Circle's control history — and that state names
-  the Owner public keys, the roster and metadata author coordinates, and the
-  exact accepted Store commit behind every predecessor control. Store
-  members therefore learn which identities own and administer which Circles, even
-  Circles they are not in. This is deliberate and load-bearing: verifying a close
-  outcome, a conflict resolution, or a deletion requires reading the Owner
-  authority that signed it. Circle *contents*, rosters, and display names stay
-  private to effective members; the *administrators* do not.
-- **The Store-visible routing mirror leaks pseudonymous row counts, routing
-  changes, and timing.** Every store member sees how many rows each Circle holds
-  (under opaque routing ids), and every audience move and delete as it happens.
-- **A store member with the routing key can test guesses for predictable
-  table-and-primary-key combinations** against that mirror, since the routing id
-  is a keyed hash of `(table, primary key)`.
-- **Store commits reveal addressed Circle ids, object timing, sizes, and hashes**
-  to store members and the storage provider.
-- **Recipient access objects reveal their number, size, and update timing**, even
-  though the recipient identity in each is pseudonymous.
-- **User-supplied object storage can observe provider-level access and object
-  metadata.**
+A circle left empty is deleted at that slot, whether its last member left it or
+was removed from the store.
 
-When two sets of people must not learn *anything* about each other — not row
-counts, not who administers what, not timing — that is two stores, not two
-Circles in one store. The [Constraints](/docs/constraints) page covers the
-store-level version of this boundary.
+## Deleting a circle
+
+Any member of a circle can delete it with one admin entry. From that slot on,
+its rows are taken out on every device that read them, including late edits
+made before the deletion that arrive afterwards. Their lost values name the
+deletion entry (`RemovalRule::DeletedCircle`), so the app can offer their values
+in another audience, keeping their keys. A new local write into the circle
+fails with `DbError::DeletedCircle`. A deletion is never reversed; making
+another circle gives it a fresh id.
+
+Deleting a circle doesn't delete its files from storage by itself: lost values,
+snapshots and queued writes that still name them keep protecting them.
+
+## What other members can see
+
+Circles hide contents, not structure. Everyone in the store can see that a
+circle exists, its name, who is in it, who writes to it, when, and how much:
+admin entries and each slot's header, which names its parts' audiences, are
+sealed with the store key, which every member holds. Key copies are routed in
+the clear, so the provider sees circle ids too
+([Encryption](/docs/encryption#what-the-provider-sees)). Only a circle's members
+read its rows and its files.
+
+When two groups of people must not learn anything about each other, not even
+that the other exists, that is two stores, not two circles in one store.

@@ -1,395 +1,280 @@
 # Storage
 
-coven syncs over a [`CloudHome`](rustdoc:trait:coven::CloudHome): one provider
-value that moves object bytes between a device and storage the user already
-controls, and answers for the storage itself — whether it can be reached, and
-who may reach it. coven owns encryption, the key layout, ordering, and retry.
-A provider handles bytes without interpreting application rows or assigning
-protocol sequence numbers. Coven signs the publication order; the provider
-enforces conditional replacement of its current record.
+coven has no server of its own. A store lives in cloud storage the household
+already has: an S3-compatible bucket, a Dropbox or OneDrive folder, or iCloud
+through CloudKit. Everything that keeps a store consistent, such as exactly one
+device winning slot 41, rests on a handful of things the provider does. This
+page names them, then says how each provider supplies them and how the app
+sets storage up.
 
-Objects are named one way.
-[`ExactSlotStorage`](rustdoc:trait:coven::ExactSlotStorage) allocates a
-provider-specific location before publication, creates it once, and reads,
-ranges, streams and deletes by that same location; `CloudHome` builds on it with
-what is true of the provider rather than of one object — whether it is
-reachable, how many operations it has been asked for, and who may reach it.
-[`ExactCloudHome`](rustdoc:trait:coven::ExactCloudHome) is the name callers hold
-a whole provider by. There is no second way to address an object by name, and no
-second provider value to obtain after opening the home. A repeated create of the
-same exact object reports `AlreadyPresent`; different bytes report
-`SlotCollision` and never replace the first object.
+## What coven needs from a provider
 
-The location is opaque to coven. For S3, Dropbox and OneDrive it is the object's
-logical key.
+A store lives on exactly one provider. Every member reaches it with their own
+provider account, or on S3 their own access key.
 
-`ExactSlotStorage` also reads a mutable record with its provider revision and
-replaces it only if that revision still matches. Store publication uses this
-operation on one root-bound current record. Immutable candidates carry the
-content; the successful conditional replacement accepts a publication. A
-changed revision reports `VersionChanged`, so the publisher verifies the
-competing accepted history before retrying.
+- **Create once.** Create an object only if its path is empty, and refuse an
+  occupied path without touching its bytes. Ana and Ben both try to create
+  slot 41; the provider must store exactly one and refuse the other, whether the
+  two requests race or one is a retry, and whether the object goes up in one
+  request or in parts. Without this, two devices would each believe they hold
+  slot 41 and history would split. A provider that can't do this can't hold a
+  store.
+- **Conditional replace.** Replace the floor only if its revision is still the
+  one the device read, in one step. Without this, two devices moving the floor
+  at once could overwrite each other.
+- **Complete reads,** whole and by byte range, streamed so the reader checks
+  each chunk as it arrives.
+- **Exact status.** Asked about one exact path, the provider answers "absent"
+  or the object's size, time, id and revision. An error is never absence: a
+  timeout read as "absent" would make a present slot look like the end of the
+  sequence.
+- **Listing** one prefix. The sequence never depends on a listing; listings
+  serve files and setup checks.
+- **Delete** an object by its exact path.
+- **Sharing,** where the provider has it: grant and take back one member's
+  access. S3 has no sharing; each member has their own access key instead.
 
-<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
+Times come from the provider, never the device's clock, and coven keeps each
+with the precision the provider reported. They describe what the provider did;
+they don't order slots or act as deadlines.
 
-<svg class="flow" viewBox="0 0 660 210" role="img" aria-label="Sync concepts pass through the sealing layer to the exact-slot provider trait and then to a provider">
-<rect class="lane" x="80" y="16" width="500" height="40" rx="9"/>
-<text class="lbl s11" x="330" y="34" text-anchor="middle">sync concepts</text>
-<text class="sub" x="330" y="48" text-anchor="middle">a device's changeset seq · a blob id · a membership entry</text>
-<line class="arr" x1="330" y1="60" x2="330" y2="74" marker-end="url(#fa)"/>
-<rect class="chipo" x="80" y="78" width="500" height="40" rx="9"/>
-<text class="lbl s11" x="330" y="96" text-anchor="middle">CloudSyncConnection</text>
-<text class="sub" x="330" y="110" text-anchor="middle">seals and opens · maps concepts to flat keys</text>
-<line class="arr" x1="330" y1="122" x2="330" y2="136" marker-end="url(#fa)"/>
-<rect class="chipo" x="80" y="140" width="500" height="40" rx="9"/>
-<text class="lbl s11" x="330" y="158" text-anchor="middle">ExactCloudHome</text>
-<text class="sub" x="330" y="172" text-anchor="middle">exact slots · conditional record replacement · reachability · access</text>
-<line class="arr" x1="330" y1="184" x2="330" y2="196" marker-end="url(#fa)"/>
-<text class="sub" x="330" y="208" text-anchor="middle">S3 · Dropbox · OneDrive · CloudKit</text>
-</svg>
+## Where a store lives
 
-Examples use the todos app. Its changesets, snapshots, attachment
-blobs, and membership records all land in one cloud home under keys like
-`store-v1/candidates/<family>/commits/<device>/42/<hash>.json`.
+Every object path starts with the store's id:
 
-## What the host configures
+| Path | Holds |
+| --- | --- |
+| `<store>/seq/<n>` | one slot of the sequence, created once |
+| `<store>/floor` | the first kept slot and the snapshots each audience relies on; the only object ever replaced |
+| `<store>/snapshots/<audience>/<device>/<n>` | one snapshot, found through its announcement |
+| `<store>/files/<device>/<file>` | one uploaded file |
+| `<store>/join-requests/<invite>` | a join request |
+| `<store>/access-keys/<member>/<attempt>` | an S3 key delivered to a member |
 
-The host selects one provider at a time and fills its settings in
-[`CloudHomeConfig`](rustdoc:struct:coven::CloudHomeConfig), held on
-[`Config`](rustdoc:struct:coven::Config). coven reads the current config
-fresh on each operation rather than caching its own copy, so a provider swap or
-disconnect takes effect on the next sync cycle without rebuilding the sync layer.
+So several stores can share one Dropbox or OneDrive folder, one CloudKit zone,
+or one S3 bucket and prefix, except on an S3 service whose member keys reach a
+whole bucket ([below](#a-bucket-of-its-own)). Finding the sequence never lists
+anything: reading `seq/41` never enumerates Ana's 20,000 photos, or another
+store's objects.
 
-With no provider selected there is no sync layer at all; the store is
-local-only and complete. At connect time coven builds the cloud home: it reads
-the selected provider's settings from config and its credentials from the OS
-keyring; a missing setting or credential fails with a `Storage` error naming
-the field ("S3 bucket not configured", "Dropbox OAuth token not in
-keyring").
+## Setting up storage
 
-## The trait
-
-Encryption, protocol ordering, verification, and retry live above the provider
-implementations. A backend supplies the provider-shaped operations no wrapper
-can manufacture: create-once exact slots and the multipart sessions behind them,
-conditional replacement, and account access. There is no way to overwrite an
-object that exists: every write coven makes is an exact create or a versioned
-conditional replacement. These excerpts show the publication boundary; the
-linked trait definitions include the complete API.
+A store works on the device before any storage exists. Setting storage up
+creates the store at a location, the first time, and connects this device to
+it. It returns the person's restore code and starts syncing.
 
 ```rust
-pub trait ExactSlotStorage: Send + Sync {
-    async fn provider_binding(&self) -> Result<ResolvedProviderBinding, CloudHomeError>;
-    async fn cross_principal_evidence(&self)
-        -> Result<CrossPrincipalProviderEvidence, CloudHomeError>;
-    async fn allocate_slot(&self, logical_key: &str)
-        -> Result<ObjectSlot, CloudHomeError>;
-    async fn list_slots(&self, prefix: &str) -> Result<Vec<ObjectSlot>, CloudHomeError>;
-    async fn create_at(&self, upload: &ExactUpload<'_>, control: &UploadControl)
-        -> Result<ExactCreateOutcome, CloudHomeError>;
-    async fn create_versioned_at(&self, upload: &ExactUpload<'_>, control: &UploadControl)
-        -> Result<ExactCreateOutcome, CloudHomeError>;
-    async fn read_versioned_at(&self, slot: &ObjectSlot)
-        -> Result<CloudVersionedObject, CloudHomeError>;
-    async fn replace_at_if_version(
-        &self, slot: &ObjectSlot, expected: &CloudObjectVersion, bytes: Vec<u8>,
-    ) -> Result<ConditionalWriteOutcome, CloudHomeError>;
-    async fn read_at(&self, slot: &ObjectSlot) -> Result<Vec<u8>, CloudHomeError>;
-    async fn read_range_at(&self, slot: &ObjectSlot, start: u64, end: u64)
-        -> Result<Vec<u8>, CloudHomeError>;
-    async fn open_stream_at(&self, slot: &ObjectSlot)
-        -> Result<CloudObjectStream, CloudHomeError>;
-    async fn delete_at(&self, slot: &ObjectSlot) -> Result<(), CloudHomeError>;
+match handle
+    .setup_s3_storage(storage, "Ana's laptop", access_key_id, SecretText::new(secret))
+    .await
+{
+    Ok(setup) => {
+        remember(setup.connection.storage);
+        show_blurred_qr_code(setup.restore_code.as_str());
+    }
+    Err(error) => show_setup_error(error),
 }
-
-pub trait CloudHome: ExactSlotStorage {
-    async fn probe(&self) -> Result<(), CloudHomeError> { /* default: list a sentinel prefix */ }
-
-    async fn set_access(&self, desired: CloudAccessState)
-        -> Result<CloudAccessOutcome, CloudHomeError>;
-}
-
-pub trait ExactCloudHome: CloudHome {}
 ```
 
-- `ExactCloudHome` is one provider value carrying both the object contract and
-  the provider's own facts. There is no optional second provider object to
-  obtain after opening the home, and no way to reach an object except through a
-  slot the provider allocated or listed.
-- `allocate_slot` reserves a location before anything is written, and
-  `list_slots` reports the locations of what is already there. Every slot that
-  names a stored object comes from one of those two, so a read can never land on
-  a different provider object that happens to share a name.
-- `create_at` preserves immutable object identity. `read_versioned_at` returns
-  bytes and the revision that `replace_at_if_version` must present for that
-  exact slot. A revision mismatch is a competing writer; an unavailable or
-  ambiguous result remains an error. The current record is not deleted during
-  Store publication.
-- `open_stream_at` serves one exact object's stored bytes as the provider
-  delivers them, and nothing is written to disk on the way. The stream ends
-  only when the whole object has arrived; a provider that stops part-way ends
-  it with that error instead, which is what lets the reader above tell a
-  complete body from a truncated one while it authenticates each chunk.
-- `probe` checks that the backend is reachable with the configured credentials.
-  Setup flows call it before persisting credentials, so a typo or a missing
-  bucket fails at setup instead of via a delayed reconnect banner. The default
-  implementation lists a sentinel prefix through `list_slots`; backends override
-  it with a provider-specific capability check. S3 reads no bucket metadata at
-  all: it creates a probe object twice to prove create-only behavior, reads it
-  back, checks the listing reports it, runs the configured integrity check, and
-  deletes what it wrote. Upload-checksum mode also sends a deliberately wrong
-  SHA-256 and requires the endpoint to reject it.
-- `create_at` is the only upload. A provider serves a small object in one
-  bounded request and a large one through its own streaming session, choosing
-  by its own threshold, and pumps a sized `BlobBody` through the shared
-  multipart driver — which reports cumulative bytes to the `progress` callback
-  for the per-file bar. Small control files (auth keys, head pointers, the
-  snapshot) pass `no_progress`, which discards the reports.
-- `read_at` returns the whole object. `read_range_at` returns a half-open byte
-  range (`start` inclusive, `end` exclusive), which is how coven fetches only
-  the encrypted chunks covering a blob byte range.
-- `list_slots` returns every slot under a logical-key prefix. `delete_at` is not
-  an error when the slot is already empty.
-- `set_access` sets whether one member principal can reach the cloud home. The
-  command carries the absolute desired state, verifies provider readback, and
-  is safe to retry after an unknown outcome. It is provider-shaped and
-  described below.
+There is one call per kind of provider: `setup_s3_storage`,
+`setup_oauth_storage` for Dropbox and OneDrive, and `setup_cloudkit_storage`.
 
-## Granting and revoking access
+Before setup commits anything, it checks the provider with the credentials just
+supplied: it creates a fresh sealed test object, requires a second create at
+that path to be refused, reads it back whole and by range, runs a scoped
+listing, deletes it, and confirms it is gone. It also checks that the floor can
+be replaced at a matching revision and not at a stale one. A failure returns
+`StorageSetupError::ProviderCheck` naming the
+[`StorageCheck`](rustdoc:enum:coven::StorageCheck) that failed, and leaves the
+previous connection in place. Credentials, keys, location and restore code
+commit together once the connection is ready.
 
-Membership is cryptographic, but a new member still has to *reach* the bytes:
-the storage itself must admit them. That is inherently provider-shaped (a
-folder share, a credential, a share URL), so it lives on the trait.
+Setting up a store that already exists elsewhere fails with
+`StorageFailure::StoreExists`: another installation claimed slot 1 there first,
+so this device should restore or join instead. After `disconnect_storage`,
+setup reconnects at the recorded location; a different location fails with
+`StorageSetupError::LocationChangeUnsupported`, because the store's other
+devices still use the old one.
 
-`set_access(CloudAccessState::Present { ... })` carries the member's public key
-plus the provider account email for backends that share by account, and returns
-a
-[`CloudHomeJoinInfo`](rustdoc:enum:coven::CloudHomeJoinInfo), one
-variant per provider, carrying exactly what another device needs to reach the
-same cloud home:
+## Dropbox and OneDrive
 
-- The consumer clouds (Dropbox, OneDrive) share the store folder with
-  the member's provider account and return its folder or drive id.
-  setting access to `Absent` unshares it and reports `RevokeOutcome::Revoked`.
-- S3 returns the bucket, region, endpoint, access key, secret key, and optional
-  key prefix: access rides pre-shared credentials. One member's copy of a
-  shared key cannot be withdrawn alone, so setting access to `Absent` reports
-  `RevokeOutcome::Unsupported` and removal proceeds anyway: the
-  [key rotation](/docs/sharing#revocation-is-key-rotation) that removal
-  performs, not credential withdrawal, is what protects post-removal content.
-  Cutting the removed member's residual *write* access means rotating the
-  bucket credentials, which is the user's call.
-- CloudKit returns a share URL.
+**Signing in.** coven does the sign-in itself, so no token passes through the
+app. The app registers its own provider apps with
+[`OAuthClients`](rustdoc:struct:coven::OAuthClients) (coven ships none) and gives
+the builder one [`OAuthPresenter`](rustdoc:trait:coven::OAuthPresenter):
+something that opens an authorization page and returns the provider's redirect,
+or a cancellation. On desktops coven supplies `DesktopOAuthPresenter`, which
+opens the browser and listens locally; iOS and Android apps supply their
+platform's sign-in sheet. `authenticate` runs the sign-in; coven builds the
+request, checks the redirect, exchanges the code and keeps the tokens.
 
-`set_access(CloudAccessState::Absent { ... })` withdraws access where the
-provider supports per-member revocation and reports a `RevokeOutcome`.
-Because access updates work with folder shares and share URLs,
-not encrypted payloads, they live below the encryption layer and are called
-directly on the provider, not through the wrapper described under
-[Where encryption sits](#where-encryption-sits).
+```rust
+handle.authenticate(OAuthAccess::OneDrive).await?;
+handle
+    .setup_oauth_storage(StorageConfig::OneDrive { drive_id, folder_id }, "Ana's laptop")
+    .await?;
+```
+
+Coven uses a token until the provider rejects it with HTTP 401, then refreshes
+once and retries that request once. If that fails, the caller gets the failure;
+`OAuthError::Reauthorize` means the person has to sign in again. Token expiry
+never consults the device clock: Ben sets his laptop's clock back a year, and
+his token still works until Dropbox rejects it.
+
+**Dropbox access levels.** Dropbox offers two kinds of app key. An *App-folder*
+key reaches only the app's own folder, and Dropbox refuses sharing inside it. A
+*Full Dropbox* key reaches the whole account and can share. The level is fixed
+when the store is created, by its
+[`DropboxLocation`](rustdoc:enum:coven::DropboxLocation): `AppFolder` for a
+store only one person will use, `SharedFolder { namespace_id }` for one that can
+be shared. With both keys registered, the app asks the person; there is no
+default. Ana chooses not-shared for her Notes store; when she later tries to
+invite Carol, `create_invite` fails with
+`StorageFailure::DropboxAppFolderNotShareable` before changing anything at
+Dropbox.
+
+On Dropbox, OneDrive and iCloud, only the account that holds the store can share
+it or take sharing back ([Sharing](/docs/sharing#provider-access)).
+
+## iCloud (CloudKit)
+
+CloudKit is built into coven on Apple platforms. The app supplies its container
+identifier and the iCloud entitlement for it, and calls
+`setup_cloudkit_storage(container, device_name)`. The store is a zone in the
+owner's private database, shared with members through a CloudKit share. Other
+platforms refuse CloudKit at setup with `StorageFailure::ProviderUnavailable`.
+
+## S3 services
+
+S3 is a protocol many services implement, and they differ on exactly the
+points coven depends on: which header makes a write create-once, whether
+multipart uploads honour it, how objects are dated. Garage, for example,
+accepts a write to an occupied name, so it can't hold a store.
+
+coven describes a service's behaviour as data,
+[`S3Settings`](rustdoc:struct:coven::S3Settings), one choice per behaviour. A
+location's `profile` picks them:
+
+- **none:** the endpoint's host picks the service. No endpoint is AWS,
+  `storage.googleapis.com` is Google Cloud Storage, and hosts ending in
+  `.r2.cloudflarestorage.com` are Cloudflare R2;
+- **a known service by name** (`S3Profile::Named`): `Aws`, `Gcs`, `R2`, or one
+  of the self-hosted `RustFs`, `SeaweedFs`, `CephRgw` and `VersityGw`, which have
+  no fixed hostname;
+- **custom settings** (`S3Profile::Custom`).
+
+An endpoint that matches no known host and names no profile is detected at
+setup, and its settings are recorded as the location's custom profile, so the
+restore code and every other device use the same ones.
+
+**Detection.** `handle.detect_s3_settings(..)` probes a bucket with the
+person's key, writing only fresh objects under the store's `.coven-check`
+prefix and deleting them afterwards. Its [`S3Detection`](rustdoc:struct:coven::S3Detection)
+holds the detected settings and one result per probe, so an app with an
+advanced-settings screen can prefill it, and `detection.check(&settings)` says
+whether an override agrees with what was observed. Setup runs detection on
+every S3 location anyway and refuses settings that contradict it, naming the
+first failed check: `CreateOnce`, `MultipartCreateOnce`, `PublicationTime` or
+`Behavior`. A service no setting makes safe, such as Garage, fails
+`CreateOnce`.
+
+### A bucket of its own
+
+Each member has their own S3 access key, limited as narrowly as the service
+allows. On AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway a key can
+be limited to the store's prefix, so stores there can share a bucket. R2's
+tokens reach a whole bucket, and so does every custom profile; there, a member
+of one store could delete another store's objects in the same bucket. So on
+those services **every store has its own bucket from creation**. A location
+with a base prefix fails with `StorageFailure::OwnBucketRequired { reason:
+Prefix }`, and creating a store in a bucket that holds anything else fails with
+`reason: Occupied`. Ana creates Household in the R2 bucket `household`;
+creating Garden in that bucket is refused, so Garden gets the bucket `garden`.
+
+### Versioned buckets
+
+A versioned bucket can break create-once in a way one-at-a-time tests don't
+see: a versioned Ceph RGW bucket accepted two racing creates of one name as
+separate versions. So setup reads the bucket's versioning state, and `Enabled`
+or `Suspended` requires the profile to be certified with versioning on;
+otherwise setup fails with `StorageSetupError::S3VersioningUnsupported`. Setup
+never changes the bucket's versioning.
+
+### Certification
+
+A service is *certified* when coven's live suite has raced many writers against
+a real bucket and every race kept exactly one winner. Racing matters:
+SeaweedFS 4.48 refused occupied names one request at a time, but two racing
+multipart completions of one name both succeeded, so its profile now publishes
+every object by a conditional copy, which passed.
+
+| Service | Certified |
+| --- | --- |
+| Google Cloud Storage | yes, versioning off only |
+| Cloudflare R2 | yes (R2 has no versioning) |
+| RustFS 1.0.1 | yes, versioning off and on |
+| SeaweedFS 4.48 | yes, versioning off and on, publishing every object by copy |
+| Ceph RGW 20.2.4 | versioning off only |
+| Versity Gateway 1.9.0 | yes, versioning off and on |
+| AWS S3 | no: there is no live account to run against |
+
+Certification never skips setup's own checks. Every S3 location, certified or
+not, runs them.
+
+**Clock skew.** S3 signs requests with the device's clock. When a service
+answers `RequestTimeTooSkewed`, coven retries once using the offset the
+response's date gives; if that still fails, it reports
+`StorageFailure::ClockSkew`.
+
+**Member keys.** Making and deleting S3 keys for members needs the storage
+account's admin access, which coven borrows for one operation and never keeps.
+[Sharing](/docs/sharing#s3-access-keys) covers it.
+
+## Large objects
+
+A file or writes slot up to the provider's single-request limit, or 32 MiB,
+whichever is less, goes up in one create. A larger one goes up in parts. Where
+the provider's own resumable upload keeps unfinished parts invisible, refuses an
+occupied name and dates the object by when it was complete, coven uses it:
+Dropbox's upload sessions, CloudKit's atomic save, and conditional multipart
+completion on most S3 services. Where it doesn't, coven uploads to a private
+temporary at `<store>/.coven-uploads/<session>` and publishes it with one copy
+that refuses an occupied name: OneDrive always, and AWS and GCS for multipart
+uploads.
+
+One S3 copy moves at most 5 GiB, so on a profile that publishes by copy (AWS,
+SeaweedFS) a larger object fails with `StorageFailure::CopyTooLarge` before any
+request.
 
 ## Errors
 
-`AccessDenied` means nothing to the person looking at a sync banner, and the
-host can't translate it either; it doesn't know S3 from Dropbox. So every
-failure crosses this boundary as a sentence a UI can show verbatim.
+Every storage failure carries one [`StorageFailure`](rustdoc:enum:coven::StorageFailure)
+classification through setup, sync status, uploads and reads, inside a
+[`StorageError`](rustdoc:enum:coven::StorageError) that keeps the provider's
+native cause. `Network` is no route, a timeout or an interrupted response;
+`Authentication` and `PermissionDenied` are refused credentials or access;
+`QuotaExceeded`, `RateLimited`, `NotFound`, `AlreadyExists`, `ContainerNotFound`
+and the rest name what the provider said. `error.retryable()` is true only for
+network interruptions and throttling. A provider's response body is never
+printed, because providers can echo credentials.
 
-```rust
-// Selected error variants; the enum also preserves typed backend,
-// local-filesystem, blob-source, and protocol failures.
-pub enum CloudHomeError {
-    NotFound(String),
-    AlreadyExists(String),
-    SlotCollision(String),
-    Configuration(String),
-    Transport(String),
-    CleanupFailed {
-        operation: Box<CloudHomeError>,
-        cleanup: Box<CloudHomeError>,
-    },
-    UnresolvedOutcome {
-        operation: Box<CloudHomeError>,
-        settlement: Box<CloudHomeError>,
-    },
-    Io(#[from] std::io::Error),
-}
-```
+## What a store costs
 
-- `NotFound(key)`: the key is not there. coven uses it for the expected misses
-  (no snapshot yet, a blob not uploaded yet), so a host that maps it to a UI
-  state matches the variant directly.
-- `AlreadyExists(key)`: a provider's create-only request reported an occupied
-  destination. Exact-slot adapters settle that response internally and return
-  `ExactCreateOutcome::AlreadyPresent` only when the stored size and hash match.
-- `SlotCollision(key)`: an exact slot contains bytes other than the object the
-  caller named.
-- `Configuration(msg)`: missing or invalid settings, credentials, OAuth
-  authorization, or provider capability. Retrying the same request cannot
-  succeed until configuration changes.
-- `Transport(msg)`: a backend, network, response, or service failure that may
-  succeed when the initiating operation retries.
-- `CleanupFailed`: the primary operation and its required cleanup both failed;
-  neither cause is discarded.
-- `UnresolvedOutcome`: a create lost its response and the configured metadata,
-  checksum, or readback check needed to determine the result also failed.
-- `Io`: a local filesystem or I/O failure surfaced from `std::io::Error`.
+A quiet pass makes two requests: the next slot, which is missing, and the
+floor. Each kind of work adds its own:
 
-Each driver classifies the failures a user can act on. For example, S3
-`AccessDenied` becomes "Your S3 credentials don't have permission to write to
-this bucket. Check the access policy in sync settings."; `NoSuchBucket` becomes
-"The S3 bucket no longer exists. Check the bucket name in sync settings."; and
-Backblaze or MinIO `OverQuota`/`QuotaExceeded` becomes a quota message (AWS
-rarely returns these). The consumer clouds do the same for their full-storage
-codes (`storageQuotaExceeded`, `path/insufficient_space`, `quotaLimitReached`).
-Every other service error keeps its raw code and message so it stays debuggable
-in logs.
+| Work | Adds |
+| --- | --- |
+| a slot arrives | its read |
+| a claim | its create, and a floor read after it lands |
+| losing a race | the occupied slot's read, and each further attempt |
+| admin preparation | its actual requests: key copies, access changes, snapshot uploads |
+| a snapshot | its upload and its announcement |
+| a reload | the floor's snapshots, and the slots after them |
+| deleting history | one conditional floor write, and the deletes |
+| files | their own reads, upload parts and deletes, outside the pass |
 
-Above the `CloudHome` boundary, blob reads retain three distinct causes. A
-provider or network failure is transport and sets the sync loop to `Offline`.
-Plaintext that fails its signed content hash is `InvalidContent`; failure to
-create, write, sync, or rename the local destination is `LocalFilesystem`.
-Invalid content and local filesystem failures hold or fail the affected work
-without reporting that storage is offline. Inline host-blob uploads, snapshot
-uploads, row-gate `make_remote` uploads, and candidate blob downloads all keep
-provider transport typed through this boundary.
-
-## Providers
-
-The storage crate contains four cloud adapters plus an in-memory home for tests.
-Sync requires both exact immutable objects and provider-enforced conditional
-replacement.
-
-The host selects one
-local `exact_upload_verification` policy: `upload_checksum`, `metadata_hash`,
-`readback`, or `unchecked`. Invitations and restore codes do not carry that
-choice. Upload-checksum enforcement is available on S3; Dropbox and OneDrive
-reject that policy during setup. Metadata mode uses the
-provider's content identity: S3's `HeadObject` SHA-256,
-Dropbox's `content_hash` or OneDrive's `sha1Hash`. Readback downloads and verifies the full body.
-Unchecked mode trusts only an observed successful create response. It cannot
-confirm that an occupied slot holds the same bytes or settle a lost response,
-so those cases fail the initiating operation instead of being accepted from
-presence alone.
-
-- **S3** ([`S3CloudHome`](rustdoc:struct:coven::S3CloudHome))
-  works against any S3-compatible endpoint (AWS, Backblaze B2, Wasabi, MinIO).
-  Files at or below 8 MiB go up as a single `PutObject`; larger files use a
-  multipart upload with 8 MiB parts, reporting progress per completed part and
-  aborting the in-progress upload on failure so the bucket holds no orphaned
-  parts. An optional key prefix is prepended to every key (trailing slashes
-  normalized), so `changes/dev1/42.enc` can become
-  `libs/abc/changes/dev1/42.enc`. Exact uploads send SHA-256 checksums for both
-  bounded and multipart objects when checksum or metadata verification is
-  selected.
-
-- **OneDrive**
-  (`OneDriveCloudHome`)
-  hex-encodes each key into a slash-free filename, decoded exactly on list,
-  and uses a Microsoft Graph resumable
-  upload session in 7.5 MiB chunks (Graph requires 320 KiB alignment).
-  Metadata verification compares the Graph `sha1Hash` and size.
-
-- **Dropbox**
-  (`DropboxCloudHome`)
-  uses native Dropbox paths under the store folder (for example
-  `/Apps/your-app/my-store/changes/dev1/42.enc`), so no filename encoding is
-  needed. Metadata verification computes Dropbox's block-based `content_hash`
-  locally and compares it with the provider's value and size. Sharing goes
-  through `share_folder` to get a `shared_folder_id`.
-
-- **CloudKit** is built into `coven-storage` on Apple platforms through
-  `objc2-cloud-kit`. The app supplies its container identifier and iCloud
-  entitlement. Coven creates a custom zone and uses the owner's private database
-  or a participant's shared database. Canonical paths are record names;
-  create-once uses `ifServerRecordUnchanged`, and positions and clocks use
-  `allKeys` replacement. Encrypted bytes live in bounded 8 MiB assets. Recorded
-  uploads keep confirmed parts across restarts; an atomic save publishes the
-  destination only after all parts exist, so its server `creationDate` dates
-  complete publication. Prefix queries omit pending parts and follow every
-  cursor; completeness uses the common one-hour listing margin. Read/write
-  `CKShare` participation handles joining and access removal. Unsupported
-  platforms return `StorageFailure::ProviderUnavailable` during setup.
-
-- **In-memory**
-  ([`InMemoryCloudHome`](rustdoc:struct:coven::InMemoryCloudHome),
-  under the `test-utils` feature) is a `HashMap`-backed home that two simulated
-  devices share through an `Arc` to round-trip changesets and blobs in unit
-  tests. It exposes `keys()`, `get()`, `len()`, and `deletes_seen()` for
-  after-the-fact assertions, and `insert_exact_object()` /
-  `replace_exact_object()` / `restore_exact_object()` for a test that needs to
-  put bytes at a slot behind the adapter's back.
-
-## OAuth sessions: refresh and retry
-
-Dropbox and OneDrive share their token lifecycle through an OAuth
-session. Each backend owns one and routes its requests through it. Before a
-request, the session checks the access token's expiry: if it expires within 60
-seconds it refreshes first, persisting the new tokens to the keyring. After a
-request, a `401` triggers one refresh and one retry.
-
-The session also absorbs transient pressure: a `429` or any `5xx` retries up to
-four times with exponential delay (500 ms doubling, capped at 32 seconds,
-honoring a server-supplied `Retry-After`), so routine quota throttling degrades
-a cycle to slow rather than failed, while a hard outage exhausts the attempts
-in seconds and fails loud to the cycle's own minutes-long backoff.
-
-When the refresh itself fails because the grant is gone (refresh token revoked,
-expired, or the account password changed), the underlying
-[`OAuthError::Reauthorize`](rustdoc:variant:coven::OAuthError::Reauthorize)
-surfaces as a `Storage` message: "Your {provider} access was revoked or expired.
-Reconnect to keep syncing." That is a user-facing message, not a transient
-network error, so a host should wire it to a reconnect affordance rather than
-retrying. A session missing its refresh token entirely produces the same kind of
-reconnect message.
-
-## Where encryption sits
-
-Encryption stays out of the providers so that all five share one at-rest
-implementation instead of five slightly different ones. `ExactSlotStorage`
-deals only in stored bytes. The at-rest protection and the key layout
-live one level up, in
-`CloudSyncConnection`,
-which wraps an `Arc<dyn ExactCloudHome>`: it seals on the way down, opens on the way up,
-and owns the mapping from Store protocol objects, blob ids, and wrapped member
-keys to the flat keys the trait stores. Both how it seals (the
-[`CloudCipher`](rustdoc:enum:coven::CloudCipher)) and how it
-keys blobs (the
-`BlobPathScheme`) come
-from the home's [storage mode](/docs/encryption#opaque-and-browsable-homes), one
-choice set when the home is created:
-
-- An **opaque** home (the default) encrypts objects whose protocol context
-  selects the Store cipher, including Store packages. Blob paths use
-  `{namespace}/opaque/{locator_hash}`.
-- A **browsable** home keeps Store-cipher objects in plaintext. Each blob uses
-  the consumer's readable path followed by an immutable version:
-  [`{namespace}/readable/{cloud_path}/.coven-versions/{locator_hash}`](/docs/blobs#browsable-home-blob-paths).
-  Anyone with bucket access can read that Store content by name.
-
-Exact protocol slots and blob paths do not acquire a cipher-dependent suffix.
-
-Object context determines protection independently of the home's blob naming.
-Signed plaintext controls, including Store commits and publication entries,
-remain readable so a device can verify authority before obtaining Store keys.
-Recipient-sealed objects arrive already encrypted for their recipient. Circle
-objects use their Circle key, rather than the Store cipher.
-
-## Ranged reads
-
-A host that streams a large opaque blob (audio playback, scrubbing) opens a
-`BlobRangeReader`. The stored blob header declares independently authenticated
-chunks. Opening the reader fetches that header; each plaintext range then
-fetches and opens only the sealed chunks that cover it. The chunk tag binds the
-header, blob identity, and chunk index, so a provider cannot substitute a chunk
-from another blob or position. Browsable blobs have no authenticated chunk
-format and therefore require the whole-object materialization path.
-
-## Lifecycle
-
-`handle.start_sync().await` builds a provider client when absent, reading the
-stored location and custody credentials and refreshing expired tokens, then
-starts the sync loop. Repeating it while running keeps the same client and loop.
-`handle.stop_sync()` finishes the active pass and file transfers, drops unlocked
-keys and the provider client, and reports `Stopped`. The next start reads custody
-again. `handle.disconnect_storage().await` also removes this device's storage
-credentials and reports `Disconnected`; storage's contents are untouched.
+A device far behind finds the end of the sequence in a logarithmic number of
+existence checks, then reads each slot it still needs or reloads from
+snapshots. Provider metadata requests, redirects, listing pages, upload parts
+and retries are counted separately.

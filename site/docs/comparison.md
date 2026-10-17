@@ -3,7 +3,7 @@
 coven is an embeddable engine for **end-to-end-encrypted, multi-writer SQLite
 sync over storage you already own**, an S3 bucket, a Dropbox or OneDrive
 folder, an iCloud container. There is no coven server and no central
-database: the cloud home is the only backend, and all trust is cryptographic.
+database: the user's storage is the only backend, and all trust is cryptographic.
 
 Lots of projects share one or two of those traits; the table below places coven
 against them on the axes that distinguish it. No single row matches all of them, 
@@ -40,7 +40,7 @@ infrastructure, a sync node (Jazz) or a relay (Evolu), both self-hostable, but
 neither is your raw Dropbox/S3 bucket. DXOS replicates peer-to-peer through
 signaling/relay infrastructure rather than an object store. coven has no such
 component at all: it reads and writes the user's bucket directly. Jazz and DXOS
-have group permissions like coven's membership chain; Evolu's multi-user sharing,
+have group permissions like coven's members and circles; Evolu's multi-user sharing,
 built on asymmetric cryptography, is newer and owner-to-owner rather than a group
 model.
 
@@ -53,14 +53,15 @@ local edit as a conflict copy for manual resolution, rather than merging, and is
 not something you embed. Cryptomator is a *file vault*: it transparently
 encrypts files into your cloud, with no app-state sync, no merge, and no
 multi-user model. coven takes the same "encrypt, then write to your bucket"
-transport and puts a multi-writer SQLite sync engine and a cryptographic
-membership chain on top.
+transport and puts a multi-writer SQLite sync engine and signed, cryptographic
+membership on top.
 
 **The SQLite multi-writer primitive: cr-sqlite (Vlcn).** cr-sqlite is the merge
 layer alone: a CRDT extension that lets concurrent SQLite writers converge. It
 brings no transport, encryption, or access control, you would build a coven-like
-system on top of it. coven instead merges concurrent edits column by column
-over a hybrid logical clock, with the later writer winning per collision (see
+system on top of it. coven merges concurrent edits cell by cell by timestamp,
+keeps each value that loses as a lost value the app can offer back, and decides
+foreign-key, unique and CHECK conflicts the same way on every device (see
 [Merge](/docs/merge)), and ships the transport, encryption, and membership
 with it.
 
@@ -96,8 +97,8 @@ Read down coven's row: the backend is storage the user already owns (no server,
 no central database); the providers are ordinary consumer clouds and S3; every
 object is encrypted before it leaves the device; concurrent writers across
 devices merge; it is a library a host app embeds, not a product; and multiple
-users and devices are admitted through a signed, append-only membership chain
-that wraps the store key to each member.
+users and devices are admitted by signed entries in the store's one shared
+sequence, which every device checks, with the store key sealed to each member.
 
 Individually, each trait has strong implementations above. The combination, 
 serverless **and** bring-your-own-consumer-cloud **and** end-to-end encrypted

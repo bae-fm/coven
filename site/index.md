@@ -18,7 +18,7 @@ features:
           width: 28
           height: 28
       title: Private
-      details: 'Every row and file is encrypted on the cloud. Key handling is idiomatic on every platform.'
+      details: 'Every row and file is encrypted before it leaves the device. Key handling is idiomatic on every platform.'
       link: /docs/encryption
     - icon:
           light: /icons/harddrive-light.svg
@@ -27,7 +27,7 @@ features:
           height: 28
       title: Local first
       details: 'Every device has the full database. Writes commit locally, sync follows in the background.'
-      link: /docs/
+      link: /docs/local-data
     - icon:
           light: /icons/cloud-light.svg
           dark: /icons/cloud-dark.svg
@@ -41,8 +41,8 @@ features:
           dark: /icons/merge-dark.svg
           width: 28
           height: 28
-      title: No conflicts
-      details: 'Every device writes, offline included, and concurrent writes merge on their own.'
+      title: Every device writes
+      details: 'Offline included. Concurrent writes merge on their own, and a value that loses is kept for the app to offer back.'
       link: /docs/merge
     - icon:
           light: /icons/layers-light.svg
@@ -50,16 +50,16 @@ features:
           width: 28
           height: 28
       title: Beyond the disk
-      details: 'Rows carry files. A file commits in the row''s transaction and streams from the cloud.'
-      link: /docs/blobs
+      details: 'Rows carry files. A file commits with its row and streams from the cloud a range at a time.'
+      link: /docs/files
     - icon:
           light: /icons/door-light.svg
           dark: /icons/door-dark.svg
           width: 28
           height: 28
-      title: Pick what syncs
-      details: 'SQLite in a sync harness: specify which rows should sync, relations follow automatically.'
-      link: /docs/local-data
+      title: Pick who sees
+      details: 'Rows can belong to a circle inside the store. Only its members can read them; everything else still syncs to everyone.'
+      link: /docs/circles
 ---
 
 <div class="home-body">
@@ -125,15 +125,15 @@ handle.write(|sql| {
 
 ### Serverless sync
 
-The cloud becomes the sync medium. Devices push sealed, signed objects and
-pull each other's; it only ever holds ciphertext.
+The cloud becomes the sync medium. Devices publish encrypted, signed slots in
+one shared order and read each other's; it only ever holds ciphertext.
 
 ```rust
 handle.start_sync().await?;
 ```
 
 </div>
-<svg class="flow" viewBox="0 0 660 120" role="img" aria-label="The phone pushes a sealed object to the cloud; the laptop pulls it">
+<svg class="flow" viewBox="0 0 660 120" role="img" aria-label="The phone publishes an encrypted slot to the cloud; the laptop reads it">
 <text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
 <text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
 <text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
@@ -143,13 +143,13 @@ handle.start_sync().await?;
 <rect class="chip" x="25" y="52" width="150" height="28" rx="7"/>
 <text class="lbl" x="100" y="70" text-anchor="middle">note · “milk run”</text>
 <line class="arr" x1="182" y1="66" x2="248" y2="66" marker-end="url(#fa)"/>
-<text class="sub" x="215" y="94" text-anchor="middle">push · sealed</text>
+<text class="sub" x="215" y="94" text-anchor="middle">publish · sealed</text>
 <rect class="chipo" x="255" y="52" width="150" height="28" rx="7"/>
 <path class="glyph" d="M271 63v-3a3 3 0 0 1 6 0v3"/>
 <rect class="glyphf" x="269.5" y="63" width="9" height="7" rx="1.5"/>
-<text class="lbl s11" x="290" y="70">signed object</text>
+<text class="lbl s11" x="290" y="70">seq/1 · signed</text>
 <line class="arr" x1="428" y1="66" x2="466" y2="66" marker-end="url(#fa)"/>
-<text class="sub" x="447" y="94" text-anchor="middle">pull</text>
+<text class="sub" x="447" y="94" text-anchor="middle">read</text>
 <rect class="chip" x="485" y="52" width="150" height="28" rx="7"/>
 <text class="lbl" x="560" y="70" text-anchor="middle">note · “milk run”</text>
 </svg>
@@ -166,7 +166,7 @@ handle.start_sync().await?;
 ### Everyone writes
 
 Apart, both devices edit the same row. The next sync applies both: merge is
-column by column.
+cell by cell.
 
 ```sql
 UPDATE notes SET body = 'oat, 2%' …
@@ -187,12 +187,12 @@ UPDATE notes SET body = 'oat, 2%' …
 <line class="arr" x1="182" y1="60" x2="248" y2="60" marker-end="url(#fa)"/>
 <line class="arr" x1="478" y1="60" x2="412" y2="60" marker-end="url(#fa)"/>
 <rect class="chipo" x="255" y="38" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="330" y="54" text-anchor="middle">Δ title — phone</text>
+<text class="lbl s11" x="330" y="54" text-anchor="middle">seq/2 · phone: title</text>
 <rect class="chipo" x="255" y="70" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="330" y="86" text-anchor="middle">Δ body — laptop</text>
+<text class="lbl s11" x="330" y="86" text-anchor="middle">seq/3 · laptop: body</text>
 <line class="arrd" x1="100" y1="80" x2="100" y2="140" marker-end="url(#fam)"/>
 <line class="arrd" x1="560" y1="80" x2="560" y2="140" marker-end="url(#fam)"/>
-<text class="sub" x="110" y="114">merge on pull</text>
+<text class="sub" x="110" y="114">merge on read</text>
 <rect class="chipa" x="25" y="146" width="150" height="40" rx="8"/>
 <text class="lbl" x="100" y="162" text-anchor="middle">Milk run</text>
 <text class="sub" x="100" y="177" text-anchor="middle">oat milk, 2%</text>
@@ -210,16 +210,17 @@ UPDATE notes SET body = 'oat, 2%' …
 <div class="flowrow">
 <div class="flowtext">
 
-### Blobs, too
+### Files, too
 
 A photo commits in the row's transaction. The laptop takes the row now and
 streams the photo on first view.
 
 ```rust
-handle.write_with_blobs(
-    |b| { b.put_blob(ns, id, bytes); Ok(()) },
-    |sql| { /* INSERT the row */ Ok(()) },
-).await?;
+handle.write(move |sql| {
+    sql.execute("INSERT INTO photos …", params)?;
+    sql.register_user_file("photos", id, photo)?;
+    Ok(())
+}).await?;
 ```
 
 </div>
@@ -238,11 +239,11 @@ handle.write_with_blobs(
 <text class="sub" x="100" y="132" text-anchor="middle">one transaction</text>
 <line class="arr" x1="184" y1="80" x2="248" y2="80" marker-end="url(#fa)"/>
 <rect class="chipo" x="255" y="50" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="330" y="66" text-anchor="middle">row object</text>
+<text class="lbl s11" x="330" y="66" text-anchor="middle">slot · the row</text>
 <rect class="chipo" x="255" y="84" width="150" height="24" rx="6"/>
 <path class="glyph" d="M271 94v-3a3 3 0 0 1 6 0v3"/>
 <rect class="glyphf" x="269.5" y="94" width="9" height="7" rx="1.5"/>
-<text class="lbl s11" x="290" y="100">blob object</text>
+<text class="lbl s11" x="290" y="100">file · its own key</text>
 <line class="arr" x1="428" y1="62" x2="466" y2="62" marker-end="url(#fa)"/>
 <line class="arrd" x1="428" y1="96" x2="466" y2="96" marker-end="url(#fam)"/>
 <rect class="chip" x="485" y="50" width="150" height="24" rx="6"/>
@@ -255,7 +256,7 @@ handle.write_with_blobs(
 
 <div class="flowlink">
 <svg viewBox="0 0 14 34" width="14" height="34" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="31" marker-end="url(#fa)"/></svg>
-<span>Offload the original</span>
+<span>Keep it offline</span>
 </div>
 
 <div class="flowrow">
@@ -263,100 +264,85 @@ handle.write_with_blobs(
 
 ### Beyond the disk
 
-The original moves to the cloud. Devices keep cache copies; a pin keeps one
-offline.
+Each device caches what it reads, within a budget, and fetches only the chunks
+a read needs. A pin keeps a file whole for offline.
 
 ```rust
-handle.make_remote("photos", id, false).await?;
+handle.pin(&[recording]).await?;
 ```
 
 </div>
-<svg class="flow" viewBox="0 0 660 150" role="img" aria-label="A large original moves to the cloud; devices keep cache copies and a pin">
+<svg class="flow" viewBox="0 0 660 150" role="img" aria-label="A large file lives in the cloud; the phone pins a whole copy, the laptop caches only the chunks it has read">
 <text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
 <text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
 <text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
 <rect class="lane" x="10" y="32" width="180" height="106" rx="10"/>
 <rect class="lanec" x="240" y="32" width="180" height="106" rx="10"/>
 <rect class="lane" x="470" y="32" width="180" height="106" rx="10"/>
-<rect class="chip" x="485" y="48" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="560" y="64" text-anchor="middle">RAW original · 48 MB</text>
-<line class="arr" x1="478" y1="60" x2="412" y2="60" marker-end="url(#fa)"/>
-<text class="sub" x="447" y="44" text-anchor="middle">offload</text>
-<rect class="chipo" x="255" y="48" width="150" height="24" rx="6"/>
-<path class="glyph" d="M271 58v-3a3 3 0 0 1 6 0v3"/>
-<rect class="glyphf" x="269.5" y="58" width="9" height="7" rx="1.5"/>
-<text class="lbl s11" x="290" y="64">blob · 48 MB</text>
-<rect class="chipd" x="485" y="96" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="560" y="112" text-anchor="middle">cache · streams on read</text>
-<rect class="chipd" x="25" y="48" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="100" y="64" text-anchor="middle">cache copy</text>
-<rect class="chip" x="25" y="96" width="150" height="24" rx="6"/>
-<circle class="glyphf" cx="40" cy="106" r="3"/>
-<line class="glyph" x1="40" y1="109" x2="40" y2="114"/>
-<text class="lbl s11" x="50" y="112">pinned copy</text>
+<rect class="chipo" x="255" y="70" width="150" height="24" rx="6"/>
+<path class="glyph" d="M271 80v-3a3 3 0 0 1 6 0v3"/>
+<rect class="glyphf" x="269.5" y="80" width="9" height="7" rx="1.5"/>
+<text class="lbl s11" x="290" y="86">recording · 48 MB</text>
+<line class="arr" x1="251" y1="82" x2="184" y2="82" marker-end="url(#fa)"/>
+<text class="sub" x="217" y="70" text-anchor="middle">pin</text>
+<line class="arrd" x1="409" y1="82" x2="476" y2="82" marker-end="url(#fam)"/>
+<text class="sub" x="443" y="70" text-anchor="middle">on read</text>
+<rect class="chipa" x="25" y="70" width="150" height="24" rx="6"/>
+<circle class="glyphf" cx="40" cy="80" r="3"/>
+<line class="glyph" x1="40" y1="83" x2="40" y2="88"/>
+<text class="lbl s11" x="50" y="86">pinned · whole file</text>
+<rect class="chipd" x="485" y="70" width="150" height="24" rx="6"/>
+<text class="lbl s11" x="560" y="86" text-anchor="middle">cache · chunks read</text>
+<text class="sub" x="100" y="122" text-anchor="middle">kept whatever the budget</text>
+<text class="sub" x="560" y="122" text-anchor="middle">evicted when over budget</text>
 </svg>
 </div>
 
 <div class="flowlink">
 <svg viewBox="0 0 14 34" width="14" height="34" aria-hidden="true"><line x1="7" y1="0" x2="7" y2="31" marker-end="url(#fa)"/></svg>
-<span>Flip shared</span>
+<span>Make a circle</span>
 </div>
 
 <div class="flowrow">
 <div class="flowtext">
 
-### Pick what syncs
+### Pick who sees
 
-One flag shares a subtree. Flipping it on cascades the project's rows and
-files to peers; flipping it off retracts them from peers and keeps them
-local.
+Rows can belong to a circle. Moving a note into Gifts takes it off every device
+outside the circle; the rest of the store still syncs to everyone.
 
 ```sql
-UPDATE projects SET shared = 1 …
+UPDATE notes SET audience = :gifts …
 ```
 
 </div>
-<svg class="flow" viewBox="0 0 660 290" role="img" aria-label="Flipping a shared flag cascades a project subtree to peers; flipping it off retracts it from peers while it stays local">
-<text class="hdr" x="100" y="22" text-anchor="middle">PHONE</text>
+<svg class="flow" viewBox="0 0 660 230" role="img" aria-label="A note in the store reaches Carol's laptop; after it moves into the Gifts circle, its slot part is sealed with the Gifts key and Carol's laptop removes it">
+<text class="hdr" x="100" y="22" text-anchor="middle">ANA'S PHONE</text>
 <text class="hdr" x="330" y="22" text-anchor="middle">CLOUD</text>
-<text class="hdr" x="560" y="22" text-anchor="middle">LAPTOP</text>
-<rect class="lane" x="10" y="32" width="180" height="246" rx="10"/>
-<rect class="lanec" x="240" y="32" width="180" height="246" rx="10"/>
-<rect class="lane" x="470" y="32" width="180" height="246" rx="10"/>
-<rect class="chipa" x="25" y="44" width="150" height="26" rx="7"/>
-<text class="lbl s11" x="100" y="61" text-anchor="middle">Zine — shared ✓</text>
-<path class="tree" d="M36 70v22h9M36 92v32h9"/>
-<rect class="chip" x="47" y="80" width="128" height="24" rx="6"/>
-<text class="lbl s11" x="111" y="96" text-anchor="middle">task row</text>
-<rect class="chip" x="47" y="112" width="128" height="24" rx="6"/>
-<text class="lbl s11" x="111" y="128" text-anchor="middle">photo + file</text>
-<line class="arr" x1="182" y1="88" x2="248" y2="88" marker-end="url(#fa)"/>
-<rect class="chipo" x="255" y="44" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="330" y="60" text-anchor="middle">Δ Zine</text>
-<rect class="chipo" x="255" y="76" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="330" y="92" text-anchor="middle">Δ task</text>
-<rect class="chipo" x="255" y="108" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="330" y="124" text-anchor="middle">Δ photo + blob</text>
-<line class="arr" x1="428" y1="88" x2="466" y2="88" marker-end="url(#fa)"/>
-<rect class="chip" x="485" y="44" width="150" height="26" rx="7"/>
-<text class="lbl s11" x="560" y="61" text-anchor="middle">Zine</text>
-<rect class="chip" x="485" y="80" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="560" y="96" text-anchor="middle">task row</text>
-<rect class="chip" x="485" y="112" width="150" height="24" rx="6"/>
-<text class="lbl s11" x="560" y="128" text-anchor="middle">photo + file</text>
-<text class="sub" x="330" y="156" text-anchor="middle">later, shared flips off</text>
-<line class="arrd" x1="20" y1="164" x2="640" y2="164"/>
-<rect class="chip" x="25" y="176" width="150" height="26" rx="7"/>
-<text class="lbl s11" x="100" y="193" text-anchor="middle">Zine — shared ✗</text>
-<rect class="chip" x="47" y="210" width="128" height="24" rx="6"/>
-<text class="lbl s11" x="111" y="226" text-anchor="middle">task row</text>
-<rect class="chip" x="47" y="240" width="128" height="24" rx="6"/>
-<text class="lbl s11" x="111" y="256" text-anchor="middle">photo + file</text>
-<text class="sub" x="330" y="205" text-anchor="middle">deletes emitted</text>
-<rect class="chipd ghost" x="485" y="176" width="150" height="26" rx="7"/>
-<rect class="chipd ghost" x="485" y="206" width="150" height="24" rx="6"/>
-<rect class="chipd ghost" x="485" y="234" width="150" height="24" rx="6"/>
-<text class="sub" x="560" y="271" text-anchor="middle">retracted</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">CAROL'S LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="186" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="186" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="186" rx="10"/>
+<rect class="chip" x="25" y="48" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="100" y="65" text-anchor="middle">gift ideas · store</text>
+<line class="arr" x1="182" y1="61" x2="248" y2="61" marker-end="url(#fa)"/>
+<rect class="chipo" x="255" y="48" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="330" y="65" text-anchor="middle">part · store key</text>
+<line class="arr" x1="428" y1="61" x2="476" y2="61" marker-end="url(#fa)"/>
+<rect class="chip" x="485" y="48" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="560" y="65" text-anchor="middle">gift ideas</text>
+<text class="sub" x="330" y="104" text-anchor="middle">moved into Gifts</text>
+<line class="arrd" x1="20" y1="114" x2="640" y2="114"/>
+<rect class="chipa" x="25" y="132" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="100" y="149" text-anchor="middle">gift ideas · Gifts</text>
+<line class="arr" x1="182" y1="145" x2="248" y2="145" marker-end="url(#fa)"/>
+<rect class="chipo" x="255" y="132" width="150" height="26" rx="7"/>
+<path class="glyph" d="M271 143v-3a3 3 0 0 1 6 0v3"/>
+<rect class="glyphf" x="269.5" y="143" width="9" height="7" rx="1.5"/>
+<text class="lbl s11" x="290" y="149">part · Gifts key</text>
+<rect class="chipd ghost" x="485" y="132" width="150" height="26" rx="7"/>
+<text class="sub" x="560" y="182" text-anchor="middle">removed: not in Gifts</text>
+<text class="sub" x="100" y="182" text-anchor="middle">Ana and Ben read it</text>
 </svg>
 </div>
 

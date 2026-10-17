@@ -1,406 +1,284 @@
 # Sync
 
-coven syncs SQLite row changes between devices that share a store. It has one
-protocol: devices capture writes locally, publish them through one accepted
-Store history, and pull that history. Concurrent edits merge column by column with
-deletes winning over concurrent edits. The unit of exchange is one host
-transaction: its SQLite changeset becomes a Store package named by an exact
-signed commit.
+A device's writes commit locally. This page follows them from there to every
+other device: how they're published, in what order everyone applies them, what
+a sync pass does, and what the app sees while it runs. How a write merges into
+another device's rows is the [Merge](/docs/merge) page.
 
 <svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs><marker id="fa" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="amf"/></marker><marker id="fam" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M0,0L8,4L0,8Z" class="ammf"/></marker></defs></svg>
 
-<svg class="flow" viewBox="0 0 660 238" role="img" aria-label="Local writes become immutable candidates. Conditional replacement of the current record accepts one publication order, which peers verify and replay.">
-<text class="hdr" x="100" y="22" text-anchor="middle">LOCAL DEVICE</text>
-<text class="hdr" x="350" y="22" text-anchor="middle">CLOUD</text>
-<text class="hdr" x="580" y="22" text-anchor="middle">PEER</text>
-<rect class="lane" x="10" y="32" width="180" height="170" rx="10"/>
-<rect class="lanec" x="210" y="32" width="280" height="170" rx="10"/>
-<rect class="lane" x="510" y="32" width="140" height="170" rx="10"/>
-<rect class="chip" x="25" y="56" width="150" height="30" rx="7"/>
-<text class="lbl s11" x="100" y="75" text-anchor="middle">durable write journal</text>
-<text class="sub" x="100" y="111" text-anchor="middle">works offline</text>
-<text class="sub" x="100" y="148" text-anchor="middle">prepare exact candidate</text>
-<line class="arr" x1="194" y1="71" x2="223" y2="71" marker-end="url(#fa)"/>
-<rect class="chipo" x="230" y="56" width="240" height="30" rx="7"/>
-<text class="lbl s11" x="350" y="75" text-anchor="middle">immutable package + commit + entry</text>
-<line class="arr" x1="350" y1="90" x2="350" y2="114" marker-end="url(#fa)"/>
-<rect class="chip" x="230" y="120" width="240" height="30" rx="7"/>
-<text class="lbl s11" x="350" y="139" text-anchor="middle">conditionally replace current record</text>
-<text class="sub" x="350" y="181" text-anchor="middle">one accepted publication order</text>
-<line class="arr" x1="494" y1="135" x2="523" y2="135" marker-end="url(#fa)"/>
-<text class="lbl s11" x="580" y="75" text-anchor="middle">verify accepted history</text>
-<text class="lbl s11" x="580" y="135" text-anchor="middle">replay causal changes</text>
-<text class="sub" x="580" y="181" text-anchor="middle">commit rows + position</text>
-<text class="sub" x="330" y="228" text-anchor="middle">Uploading a candidate does not publish it. Acceptance is the conditional record update.</text>
+## The sequence
+
+All of a store's history is one numbered sequence of objects in storage:
+`<store>/seq/1`, `seq/2`, `seq/3`, and so on. Each object is a *slot*, and a
+slot holds one of four things:
+
+- **writes:** one device's queued writes, sent together in one pass;
+- **an admin entry:** a membership or settings change, such as adding Carol;
+- **a key copy:** a key sealed to one member ([Encryption](/docs/encryption#getting-a-key-to-someone));
+- **a snapshot announcement:** "a snapshot of this audience, covering slots up
+  to n, is at this path" ([Snapshots](/docs/bootstrap)).
+
+Every device applies slots in order, 1, 2, 3, and never skips one. Because
+everyone applies the same slots in the same order, everyone agrees on what
+happened and when. That one order decides who was a member when a write was
+made, which of two inserts of the same unique value came first, and when
+history can be deleted.
+
+A device applies each slot in one database transaction together with "applied
+through this slot". If that transaction fails, both the data and the progress
+stay where they were.
+
+## Claiming a slot
+
+To publish, a device *claims* the next slot: it creates `seq/n+1` with a
+request the provider accepts only if nothing is there yet. Every supported
+provider has such a create-once request ([Storage](/docs/storage#what-coven-needs-from-a-provider)).
+If two devices try the same slot, exactly one wins.
+
+<svg class="flow" viewBox="0 0 660 222" role="img" aria-label="Ana and Ben have both applied through slot 40 and both try to create slot 41. Storage keeps Ana's and refuses Ben's. Ben applies slot 41 and claims 42 with the same writes.">
+<text class="hdr" x="100" y="22" text-anchor="middle">ANA'S PHONE</text>
+<text class="hdr" x="330" y="22" text-anchor="middle">STORAGE</text>
+<text class="hdr" x="560" y="22" text-anchor="middle">BEN'S LAPTOP</text>
+<rect class="lane" x="10" y="32" width="180" height="160" rx="10"/>
+<rect class="lanec" x="240" y="32" width="180" height="160" rx="10"/>
+<rect class="lane" x="470" y="32" width="180" height="160" rx="10"/>
+<rect class="chip" x="255" y="44" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="330" y="61" text-anchor="middle">seq/39</text>
+<rect class="chip" x="255" y="78" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="330" y="95" text-anchor="middle">seq/40</text>
+<rect class="chipa" x="255" y="112" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="330" y="129" text-anchor="middle">seq/41 · Ana's writes</text>
+<rect class="chipo" x="255" y="146" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="330" y="163" text-anchor="middle">seq/42 · Ben's writes</text>
+<rect class="chip" x="25" y="112" width="150" height="26" rx="7"/>
+<text class="lbl s11" x="100" y="129" text-anchor="middle">queued writes</text>
+<line class="arr" x1="179" y1="125" x2="251" y2="125" marker-end="url(#fa)"/>
+<text class="sub" x="100" y="160" text-anchor="middle">create seq/41 ✓</text>
+<rect class="chip" x="485" y="112" width="150" height="60" rx="7"/>
+<text class="lbl s11" x="560" y="138" text-anchor="middle">queued writes</text>
+<text class="sub" x="560" y="156" text-anchor="middle">same bytes inside</text>
+<line class="arrd" x1="481" y1="122" x2="409" y2="122" marker-end="url(#fam)"/>
+<text class="sub" x="445" y="108" text-anchor="middle">taken</text>
+<line class="arr" x1="481" y1="160" x2="409" y2="160" marker-end="url(#fa)"/>
+<text class="sub" x="445" y="186" text-anchor="middle">apply 41, create 42 ✓</text>
+<text class="sub" x="330" y="212" text-anchor="middle">Both had applied through 40. One create of seq/41 succeeds; the other device applies it and moves on.</text>
 </svg>
 
-Packages, commits, and publication entries occupy exact immutable slots. One
-mutable current record, at the location bound by the signed Store root, names
-the accepted history. Replacing that record requires the provider revision read
-with its previous value. A competing publisher must observe and verify the
-accepted change before retrying; uploaded candidates outside that history have
-no effect. A puller records exact commit hashes with its materialized positions.
+Ana and Ben both have writes to send, and both have applied through slot 40.
+Both try to create slot 41. The provider stores Ana's and refuses Ben's. Ben
+reads slot 41, applies Ana's writes, and tries slot 42 with the same writes he
+had queued. Nobody's work is lost; Ben's lands one slot later.
 
-Examples use the todos app (workspaces hold lists, lists hold todos, todos
-carry attachments and labels); Alice and Bob share the store.
+A device claims slot n+1 only after it has applied slots 1 through n. No clock
+or deadline is involved: a device that comes back after a month catches up,
+then claims.
 
-This page covers how a local write reaches every device. Row-level gating
-(which rows stay local) has its own page, [Local data](/docs/local-data);
-fresh-device bootstrap from a snapshot has its own page,
-[Bootstrap](/docs/bootstrap).
+### When the reply is lost
 
-## One protocol
+A claim can go wrong in a less obvious way: the request succeeds, but the reply
+never arrives. Ana retries, and the provider says the slot is taken
+(`AlreadyExists`). Taken by whom? Ana reads slot 41 and compares it with the
+exact bytes she sent. If they match, the slot is hers. Without that comparison
+she would claim slot 42 too, and her writes would land twice.
 
-There is one protocol and no mode to select. A commit keeps its author's
-sequence, exact predecessor, and causal dependencies. The accepted publication
-order answers whether a candidate became shared and which snapshot boundary it
-belongs to; causal dependencies still govern replay of row changes. A snapshot
-closes the complete accepted prefix before it, so a later publication cannot
-extend retired history.
+So before every create, a device records in its local *journal* what it is
+claiming: a claim number, the slot path, and the exact bytes. Each device
+numbers its claims 1, 2, 3, with one counter across every kind of slot. It
+settles its current claim before starting another, and after a crash or a lost
+reply it settles first: read the recorded slot, compare, and only then move on.
 
-Offline writes remain in the local journal. Publishing requires storage with
-both create-once exact slots and provider-enforced conditional replacement.
-The provider compares revisions; Coven constructs and verifies the signed
-history and its authorization.
+| What the device finds at its recorded slot | What it does |
+| --- | --- |
+| its own bytes | treats the claim as landed, after checking the floor (below) |
+| different bytes from another device | applies them, checks the work is still allowed, and claims the next slot |
+| different bytes signed with its own device id | stops sending: another copy of this device exists ([below](#another-copy-of-the-same-device)) |
+| nothing | retries the same path with the same bytes |
+| a failed read | leaves the claim unsettled and tries later |
 
-Every writable open, including restore and join, automatically migrates coven's
-own local tables before the app's migrations. Each internal migration is atomic.
-Read-only opens refuse tables that need migrating, and any open refuses an
-internal schema newer than this coven supports. Opening works
-without a provider — the store is local-only and complete until one is attached.
+The same bytes go out on every retry. Coven encrypts slots with nonces derived
+from their content ([Encryption](/docs/encryption#nonces)), so sealing the same
+writes again reproduces the same object, byte for byte.
 
-A single Store commit may carry an optional Store package and one package per
-touched [Circle](/docs/circles) (a private audience inside the store); the
-enclosing commit's coordinate is what orders and activates every package it
-names. Circle packages have no independent sequence or activation of their own.
+## The floor
 
-## Change capture
+Old slots are eventually deleted, once snapshots cover them
+([Snapshots](/docs/bootstrap#deleting-history)). That creates a trap: once
+slot 41 is deleted, its path is empty again, and a create-once request for it
+can succeed. A request from long ago, delayed in the network, could land there
+and look like a real slot.
 
-A missed write is a silent divergence: two devices disagree and nothing
-reports it. If capture meant the host reporting its own changes, every
-forgotten call site in every app would be such a miss. So coven owns the
-connections and records changes itself; a host write that skips the recording
-cannot happen, because the only connection that can write is the one capture
-is attached to.
+The defence is one record, the *floor*, at `<store>/floor`. It names the first
+slot still kept and, for each audience, the snapshot it relies on. A device
+reads the floor after reading slots and before applying them. Anything below
+the floor is not trusted; the device loads a snapshot instead. A device that
+has just claimed a slot checks the floor the same way before believing its
+claim. If the floor has passed the slot it was claiming, it settles the claim
+from the floor's snapshot, which records each device's last claim number and a
+hash of that slot's bytes.
 
-The host opens the store once through
-`Coven::builder(layout.clone()).synced_tables(...).migrations(...).open(store_dir.id()).await`, declaring
-its [synced tables](/docs/local-data), and from then on runs all its writes
-through `handle.write(...)`. The writer connection lives on one dedicated
-thread (an actor). Each host transaction gets a SQLite session attached to every
-declared table. Its insert, update, and delete operations become one changeset;
-the session ends with that transaction. The host writes as usual, and there is
-no host-lent pointer to a connection coven does not own.
+## A sync pass
 
-Each declaration also states its row identity. `(table, id)` names one logical
-row across every device: independently created rows use canonical UUIDv4 or
-UUIDv7 ids, while `SharedKey` tables intentionally merge equal application
-keys. Before the host transaction commits, coven validates introduced ids and
-records a primary-key change as deletion of the old identity plus insertion of
-the new one. The app rows, shared changeset, exact materialized dependency
-frontier, stable `WriteId`, affected row identities, and initial `WriteStatus`
-commit together or all roll back. `handle.write` returns a `WriteReceipt`;
-separate successful calls never combine into one Store commit.
+A device syncs in *passes*. A pass does four things, in order:
 
-The set is not a tuning knob. With no tables declared the session attaches
-nothing and produces empty changesets forever, so sync initialization treats an
-empty set as a hard error and refuses to start.
+1. **Read forward.** Read `seq/<last applied + 1>`, then the next, until one is
+   missing. On a miss, read the floor. A device far behind finds the end
+   quickly by checking n+1, n+2, n+4, … and narrowing the gap.
+2. **Apply.** Check each slot's framing and complete signature, then apply it
+   in one transaction with "applied through this slot". The floor read at the
+   final miss also checks that nothing just read has been deleted.
+3. **Claim.** Settle any unsettled claim, then send: at most one writes slot
+   holding this device's queued writes, plus any admin operations the app
+   asked for.
+4. **Effects.** Do what the new state calls for: share or unshare provider
+   access, delete S3 keys no longer in use, replace keys a removed member had
+   seen, take snapshots, and delete history the floor has passed.
 
-Initialization also installs signed authorization. A new store publishes its
-self-signed Owner founder and causal membership head, then records the founder
-and complete accepted head floor, finishing authorization before returning a
-runnable session. This applies to opaque and browsable homes; browsable changes
-visibility and blob paths, not authorization.
+A pass over a quiet store, with nothing new and nothing to send, costs **two
+requests**: the next slot, which is missing, and the floor. It lists nothing
+and writes nothing, whether the store has three devices or twenty, and 20,000
+files or none. If Ana added one note, Ben's next pass makes three reads: her
+slot, the miss after it, and the floor.
 
-## Reads
+A writes slot carries every write this device has queued and can send, in the
+order they were made. It has no size cap; a large one uploads in parts and
+becomes visible only when complete. Each single write must fit SQLite's 1 GB
+value limit, or the commit itself fails with `DbError::TooLarge`. Writes the
+app commits while a pass is sending wait for the next one. A queued write
+leaves the queue only once its slot is confirmed and applied.
 
-Reads don't need capture, and they don't get it. Two read paths exist, and
-both hold the invariant above the same way: they run on read-only SQLite
-connections, so a write through them is refused by SQLite itself — a read
-cannot bypass capture because it cannot write at all.
+Files don't travel in slots. A separate upload worker sends them on its own
+schedule, so a pass never waits for a file ([Files](/docs/files#uploads)).
 
-- **In the host's own process**: `handle.read(...)`. The full handle owns
-  four read-only connections with one worker per connection. Independent reads
-  can run concurrently with each other and the writer, with no change-capture
-  session attached. Each read uses one transaction; all statements in that
-  closure see the same snapshot. A `read` after an awaited `write` sees that
-  committed data.
-- **From a second process (or a second handle)**:
-  `Coven::builder(layout.clone()).synced_tables(...).migrations(...).open_read_only(store_dir.id()).await` returns a
-  [`CovenReadHandle`](rustdoc:struct:coven::CovenReadHandle) — a same-store
-  reader for something like a macOS File Provider extension that must serve
-  reads while the app holds the full handle open. It takes no store lock
-  and runs no migrations (it refuses pending Coven migrations and a host schema
-  newer than its binary), and it
-  exposes reads only: SQL, and blob reads that may fetch from the cloud into
-  the device cache. SQLite's locking coordinates the readers with the writer,
-  and each new read transaction sees committed state.
+## Order
 
-Application reads and live queries share a FIFO queue holding at most 64
-waiting operations. A full queue makes callers wait for admission. Cancelling
-an operation before it starts discards its closure; a running read finishes
-and its result is discarded if the caller has gone away. Write dispatch keeps
-its separate contract: a dispatched write can commit even after its caller
-stops awaiting it.
+Each write records `read_through`, the last slot its device had applied when
+the write was made. That record never changes, even if the write is sent much
+later. A write's *past* is every write in slots up to its `read_through`, plus
+its own device's earlier writes.
 
-`handle.read(fetch).process(transform).await` separates SQL from expensive
-processing. The first closure fetches owned values in one transaction. Once that
-transaction ends and the connection is available, a separate pool of four workers processes
-the values, with its own queue of at most 64 waiting operations. Processing
-receives no SQL context: all database inputs belong in the first closure.
+Ana creates note 43 in slot 20. Ben reads through 20, then attaches a file to
+it. Whatever slot Ben's write lands in comes after 20 on every device, so every
+device has note 43 before the attachment. Applying slots in order is all it
+takes.
 
-`handle.subscribe(fetch).process(transform)` and
-`handle.subscribe_reconfigurable(request, fetch).process(transform)`
-apply the same split to live queries. The extracted values retain their exact
-read dependencies through processing, including processing errors. Relevant
-commits arriving during processing remain available for the next query run.
-A result whose request was replaced while it ran is still delivered with that
-request and its revision, and the replacement request runs next.
+Ben and Carol both edit while at slot 20: their edits are *concurrent*, even if
+Ben's lands in slot 21 and Carol's in slot 30, because neither saw the other.
+Which value a cell keeps is decided by timestamps, not slot numbers
+([Merge](/docs/merge#timestamps)).
 
-For a reconfigurable subscription, `fetch` receives `(&request, sql)` and
-`transform` receives `(&request, fetched)`, both for the same request revision.
-Only the processed value needs `Clone` and `PartialEq` for delivery; fetched
-values can be owned types that support neither. Adding processing to a
-subscription starts a fresh sequence of deliveries while retaining its request
-handles.
+Every write is checked against its author's view: its signature with the
+author's key as it stood at its `read_through`, and its author's membership and
+circles there. The app sees its own commits at once, before they claim a slot;
+the device shows the published slots with its local queue on top.
 
-The write path polices itself: a `handle.write(...)` callback that prepares no
-`INSERT`, `UPDATE`, or `DELETE` statement is rejected as a pure read on the
-write path; move it to `read`. A write to a device-local (undeclared) table is
-still a write even though its rows do not enter a synced changeset.
+## A stuck device stops
 
-## The sync cycle
+A device that can't apply a slot stops there. It may be missing a key, need an
+app update to read a newer format or schema, or have read damaged bytes. Until
+it can apply that slot it applies nothing after it, reloads nothing, and sends
+nothing: no writes, no files, no operations.
 
-One background loop runs one cycle at a time. Each cycle loads durable state and:
+Stopping is deliberate. Skipping slot 80 could mean missing Ben's removal at 81
+while still sending writes that removal should have cut off. Ben's laptop reads
+slot 41, a copy of a Gifts key it can't open; a key that arrives in a later
+slot can't get it past 41.
 
-1. Resolves authorization from accepted history, then refreshes
-   encryption-key and device-registration state.
-1. Drains blob uploads and retries the oldest prepared Store write using its
-   persisted exact bytes.
-1. Completes ready row-gate transitions and pulls verified remote Store commits.
-1. Prepares pending writes in order, uploads and verifies their referenced
-   blobs, then creates their exact packages, commits, and publication entries.
-   Conditional replacement of the current record accepts each publication.
-1. Applies remote commits whose predecessors and exact dependencies are fully
-   materialized. Installation commits rows, authorization state, and exact
-   positions together with replay of retained local writes.
-1. Flushes the register clock, durable file cleanup, acknowledgements, and blob
-   deletion work.
-1. Evaluates snapshot publication and reclamation against exact commit coverage.
+The app can still read its data and commit the local writes it is allowed to.
+The sync status is `Blocked` with the slot and its reason: `KeyUnavailable`,
+`UpdateRequired`, or a `Refused` cause for damaged bytes. A slot whose bytes
+haven't all arrived is a failed read, retried; only a complete object that
+fails a check is refused.
 
-A host transaction's capture session exists only inside that transaction, so a
-host write can land during any network operation without joining another write.
-Remote applies use the engine's apply path rather than the host transaction path
-and therefore never enter the local write ledger.
+Two things look like blocks but aren't:
 
-When Alice edits a todo title, that call already leaves a durable pending write.
-Her loop creates encrypted exact objects at
-`store-v1/candidates/<family>/packages/<alice-device>/<seq>/<hash>.pkg`,
-`store-v1/candidates/<family>/commits/<alice-device>/<seq>/<hash>.json`.
-The publication entry names that exact commit; the conditional record update
-makes it part of accepted history. Bob verifies that acceptance and Alice's
-commit, waits until the named dependencies are materialized, then applies the
-package and records Alice's exact sequence and commit hash. The signed commit
-derives `<family>` from its Store, author registration, write identity,
-sequence, and predecessor. Its candidate-object manifest must exactly equal the
-package and other candidate-exclusive objects reached by its closed body.
+- **Circle parts this member can't read.** A writes slot can carry parts for
+  several audiences. Parts for circles this member isn't in are passed over
+  without being opened ([Circles](/docs/circles#writes-into-circles)).
+- **Writes refused by a removal.** Writes from a device or member that land
+  after their removal, or after their member's keys were replaced, have no
+  effect. Every device consumes the slot, records `WritesRefused` naming the
+  entry that decided it, and moves on ([Sharing](/docs/sharing#the-cut-off)).
 
-### Push
+## Waiting and retrying
 
-A commit stream is only trustworthy if an accepted sequence never changes
-meaning, even across a crash. The durable write record owns the original write
-and its stable `WriteId`. Preparation reserves the author's sequence, constructs
-the exact signed candidate and publication attempt, and persists them before
-upload. Retrying an unchanged attempt uses those same exact objects.
+A device sleeps until something can have changed: a write from the app, a
+changed prerequisite, or a retry that is due. While idle, it runs a pass every
+30 seconds; a local write or `handle.sync_now()` asks for one at once. Requests
+that arrive during a pass, or during connection backoff, coalesce into the next
+one.
 
-If another publisher wins, Coven verifies and installs that accepted history.
-Within the same snapshot boundary it can prepare a new publication entry for
-the existing commit. Crossing a snapshot boundary requires rebuilding the
-unaccepted candidate against the new baseline while retaining the write identity
-and author reservation. A lost response is settled by reading accepted history;
-the presence of an uploaded package alone never proves publication.
+Automatic retries share one schedule of delays: 1, 2, 4, …, 256 seconds, then
+300. The deadline is saved with the work, so reopening the app neither restarts
+the wait nor skips it, and a clock changed in between can shorten a wait but
+not stretch it past its full length. A provider's `Retry-After` can lengthen a
+wait, and it applies to explicit retries from the app too. A wait for an app
+action or an app update makes no requests at all.
 
-Before an append, the write is `Publishing`. A storage or readback failure puts
-it back in `Pending`; the loop's reconnect and backoff policy owns the retry. A
-missing blob, a still-local user blob, invalid package data, or invalid Store
-protocol state creates a typed durable pending record and holds later writes behind it.
-After acceptance is verified, local completion records `PublishedWrite::Commit`
-with the exact commit, or `PublishedWrite::Snapshot` when accepted snapshot
-coverage proves completion after the commit's history has retired. The latter
-names the reserved author position and accepted snapshot without inventing an
-exact candidate hash. Publication evidence, replay state, owned cleanup metadata,
-and the write's completion are recorded atomically.
+## Status and pending work
 
-The host lists pending records with `handle.pending()`. After repairing
-the named prerequisite, retrying a pending write requeues it and wakes sync.
-If the write must be abandoned, discarding it atomically reverses it and every later
-unpublished write whose working rows depend on it. Discarded records remain
-queryable with terminal `Resolved(Discarded)` status and no longer participate
-in preparation.
+`handle.start_sync()` starts the loop; its first pass builds the provider client
+from the credentials in custody. Setting up storage starts it too.
+`handle.stop_sync()` returns at once and stops after the active pass and file
+transfers, keeping keys, credentials and the storage location.
+`handle.disconnect_storage()` also removes this device's storage credentials.
+None of them touch what's in storage.
 
-A retained private-only write that conflicts with accepted shared history has
-a pending record with reason `RebaseConflict`. The conflict identifies its `WriteId`, affected
-rows, and reason. The failed apply preserves the private write and its dependent
-suffix. Retrying returns that write to `LocalOnly`, so it remains
-private; explicit discard reverses the dependent unpublished suffix as above.
-Private rows already folded into the baseline have no remaining write receipt;
-their conflicts report the row and accepted commit without inventing a `WriteId`.
-
-A peer must never learn of a row whose file is not yet in the cloud. That
-ordering rides the [gate](/docs/local-data), per root, not a global hold: the
-cycle publishes whatever the gate emits and never holds the whole changeset
-back while uploads drain. A root being made remote stays gated off
-(local-only) while its blobs upload. When the last upload lands, coven flips
-the gate on and breaks the drain, and the gate re-emits the root's full
-subtree in that same cycle. One slow upload therefore delays only its own
-root. The host's
-[`BlobTransitionObserver`](/docs/blobs#observing-transitions-and-uploads) only
-reports progress and completion; coven, not the host, decides when to
-publish.
-
-### Pull
-
-Pull reads the current publication record at its root-bound location and
-verifies the immutable accepted entries back to its installed boundary. If
-history has been retired, it prepares the accepted snapshot and retained
-evidence needed to replace that baseline. A commit becomes ready only after its
-predecessor and every exact dependency are materialized. Unaccepted immutable
-candidates are inert, and provider listing order never chooses a winner.
-For each ready commit, pull:
-
-- parses the signed commit and checks its `schema_version` against the local
-  `Database::schema_version`;
-- verifies the commit's publication acceptance, package hash, and
-  Ed25519 signatures;
-- checks the author against the membership state through the exact causal
-  membership grant the commit names;
-- validates every row id under the table's declared identity mode; an invalid id
-  holds that exact Store commit without advancing its materialized position;
-- prepares the package for atomic installation with exact materialized
-  positions, advancing the clock past its stamps.
-
-The materialized ledger advances only after package installation and its
-bookkeeping succeed. Background eager-cache filling has its own progress and
-failure state; it does not make a committed row apply wait for a cache download.
-Join and restore have their own required blob work before returning a store;
-see [Bootstrap](/docs/bootstrap).
-
-A network failure before the current provider client has reached storage reports
-`SyncStatus::Offline`; a failed pass after successful contact reports `Failed`. A verified blob whose plaintext
-does not match its signed hash is invalid content, and failure to create or
-write its local cache destination is a local filesystem failure. Those two
-categories hold or fail the affected work without changing the loop to
-`Offline`.
-
-### Failure boundaries
-
-Publication acceptance and local materialization are different facts. A commit
-can be accepted but held locally because its schema, package, dependencies, or
-required files cannot be applied. Pull reports the exact held coordinate and
-reason. It never advances that commit's materialized position to hide the error.
-
-<svg class="flow" viewBox="0 0 660 194" role="img" aria-label="Accepted publications are prepared for one database transaction. Successful installation commits rows and positions together; a held installation preserves the previous state.">
-<text class="hdr" x="330" y="22" text-anchor="middle">ACCEPTANCE AND LOCAL INSTALLATION</text>
-<rect class="lanec" x="10" y="36" width="190" height="118" rx="10"/>
-<text class="lbl s11" x="105" y="69" text-anchor="middle">accepted publications</text>
-<text class="sub" x="105" y="96" text-anchor="middle">verify + prepare packages</text>
-<line class="arr" x1="204" y1="94" x2="238" y2="94" marker-end="url(#fa)"/>
-<rect class="chip" x="245" y="62" width="165" height="64" rx="8"/>
-<text class="lbl s11" x="327" y="87" text-anchor="middle">database transaction</text>
-<text class="sub" x="327" y="108" text-anchor="middle">rows + positions + local replay</text>
-<line class="arr" x1="414" y1="77" x2="449" y2="65" marker-end="url(#fa)"/>
-<line class="arr" x1="414" y1="111" x2="449" y2="135" marker-end="url(#fa)"/>
-<rect class="chipo" x="455" y="46" width="195" height="38" rx="7"/>
-<text class="lbl s11" x="552" y="70" text-anchor="middle">applied → commit together</text>
-<rect class="chipd" x="455" y="116" width="195" height="38" rx="7"/>
-<text class="lbl s11" x="552" y="140" text-anchor="middle">held → preserve prior state</text>
-<text class="sub" x="330" y="181" text-anchor="middle">A failed installation does not leave some of its rows or positions committed.</text>
-</svg>
-
-Invalid accepted-history evidence can fail the pull before package preparation.
-Package preparation can hold individual commits and their dependents. Once
-prepared work reaches database installation, a constraint or private/shared
-replay conflict rolls that transaction back; earlier rows in that transaction
-are not reported as applied. Snapshot adoption also preserves the previous
-installed state if its replacement cannot be committed.
-
-There is no promise that a malformed accepted object affects only one author's
-stream: dependencies and snapshot boundaries connect the accepted history.
-Authorization failure is not permission to skip a commit and advance past it.
-
-## How edits merge
-
-Applying a changeset is its own subject: the hybrid logical clock that orders
-edits, the column-level three-way premerge, remove-wins deletes, and the
-future-skew bound all live on the [Merge](/docs/merge) page. The cycle's part
-is only *when*: each changeset is applied, and the clock advanced past its
-stamps, as it lands during pull.
-
-## Schema versioning
-
-Every retained write carries the schema version under which its changeset was
-captured. Publication preserves that version even after the producer upgrades.
-A package newer than the receiver is held with
-`HeldStorePositionReason::NewerSchema`; its materialized position and dependent
-work wait until the app supports it.
-
-For supported historical versions, the registered migration ladder translates
-typed old/new cells before current-schema checks and conflict resolution.
-Conversion occurs in ordered transactional application, so preceding writes
-are visible when a sparse UPDATE needs declared immutable identity context.
-The signed original package and version stay unchanged. A failed conversion
-rolls back its installation, including rows and materialized positions.
-
-Image migrations, changeset transformations, captured journal versions, and
-snapshot tails are described in [Schema evolution](/docs/schema-evolution).
-
-## Lifecycle
-
-`CovenHandle` owns the sync lifecycle. `handle.start_sync().await` builds the
-provider client when absent, using custody credentials and refreshing expired
-tokens, then starts the loop. Repeating the call while running keeps the same
-client and loop. With no storage set up, starting does nothing.
-
-`handle.stop_sync()` finishes the active pass and file transfers before dropping
-unlocked keys and every worker's provider reference. It preserves the stored
-location and credentials for the next start. `handle.disconnect_storage().await`
-also removes this device's storage credentials; a custody failure preserves the
-connection and loop state. Neither call deletes remote contents.
-
-The keys the loop signs and encrypts with come from the builder's key and identity
-custody. Opening a store does not start syncing. Storage setup starts the loop;
-unlocking a store key keeps the connection stopped. `handle.sync_now()` requests
-a pass while running, as does a local write; the idle interval is 30 seconds.
-
-Observe the current status through
-[`CovenHandle::subscribe_sync_status`](rustdoc:method:coven::CovenHandle::subscribe_sync_status):
+`handle.subscribe_sync_status()` returns a `watch::Receiver` whose first value
+is the current status:
 
 ```rust
 pub enum SyncStatus {
-    Disconnected,
-    Stopped,
-    Offline,
+    Disconnected,                                  // no storage set up
+    Stopped,                                       // set up, not syncing
+    Offline { error: Arc<StorageError> },          // the last attempt couldn't reach storage
     Syncing,
-    Synced { finished_at: SystemTime },
-    Failed { error: SyncFailure },
+    Synced { finished_at: SystemTime },            // the pass reached the end of the sequence
+    Blocked { slot: Slot, reason: PendingReason }, // a slot that can't apply
+    Failed { error: SyncFailure },                 // storage refused the whole pass, or coven failed
 }
 ```
 
-`Disconnected` means no storage is set up on this device. A configured store
-opens as `Stopped`, whether a provider client exists yet or not. Stopping reports
-`Stopped` only after releasing the client; failure to release it reports `Failed`.
-`Offline` means a network failure before the current client has reached storage.
-Once any provider operation succeeds, a later failed pass reports `Failed`.
+`Synced` means the pass reached the end of the sequence; files or provider work
+may still be pending. `Offline` describes the last attempt, not the
+connection's history: Ana syncs, then loses Wi-Fi, and her next attempt is
+`Offline`. A provider error that denies a required read is `Failed`. One bad
+photo while the rest syncs leaves `Synced`, with a pending record for the
+photo.
 
-The receiver immediately contains the current value and survives starts and
-stops. Intermediate values may be coalesced. `Failed` preserves the typed cause
-of a whole-pass failure; `Synced` carries only the pass's completion time. Live
-queries notify the app when rows change. The handle's `pending()` and
-`subscribe_pending()` expose the same persisted typed conditions, keyed by
-subject, including while disconnected. Each record describes this installation's
-first unmet condition; a new reason replaces its previous reason and committed
-progress clears it.
-On S3, each key awaiting deletion is a `DeleteAccessKey` record there, cleared
-only by explicit confirmation or coven's verified deletion. Removal, a location taken by another store,
-or a required update stops further passes; other pass failures retry on the idle
-interval or an explicit request.
+Anything that can't proceed has one record in `handle.pending()` (live:
+`subscribe_pending()`), offline too. Each
+[`PendingRecord`](rustdoc:struct:coven::PendingRecord) names its subject, such
+as a write, a slot, a file, an operation or the connection, and its first unmet
+condition as a typed [`PendingReason`](rustdoc:enum:coven::PendingReason):
+"needs an app update", "key not available yet", "waiting for Ana's device to
+unshare", "source file moved". The record stays until that condition changes
+or the work settles; time passing never clears it. `record.retry()` says how it
+will retry: `Automatic` on the schedule above, `AfterUpdate`, `AppAction` (for
+example new credentials), or `Never`.
+
+If coven can't save a pending record, it stops syncing and fails database calls
+with `DbError::PendingPersistence` until the store is reopened, so the app never
+sees an empty list that hides a lost update.
+
+## Another copy of the same device
+
+Restoring a phone from a backup can leave two installations with one device id.
+Both would sign slots as the same device and number their claims alike, and
+each could mistake the other's slot for its own.
+
+The first defence is custody: a device's id also lives in the keychain, which
+backups don't copy, and opening with a missing or different id there is
+refused. A copy that does open stops sending with `SyncError::DeviceIdInUse` as
+soon as history shows another installation using its id: a slot signed by its
+id at a path its journal never attempted, or different bytes signed by its id
+where its own claim should be.
+
+Coven never resets a device on its own. The app can call
+`CovenBuilder::reset_device(store, device_name)`, which loads the store from
+storage under a fresh device id, registers it as replacing the old one, and
+moves the old directory aside for inspection. A damaged database
+(`DbError::DamagedDatabase`) is reset the same way. Unsent writes from the old
+installation are not imported; `handle.device_reset()` returns the stored notice
+with the old and new ids, so the app can tell the person that unsent edits may
+have been lost.

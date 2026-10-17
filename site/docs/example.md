@@ -1,225 +1,165 @@
 # Example
 
-Here we build a small todo app to show how coven fits into a host. The app owns
-its schema, its UI, and its product policy. coven owns the SQLite connections,
-change capture, encrypted sync, membership, and blob transfer. The two meet at
-one call to open the database and a handful of methods after that.
+This page builds a small notes app to show how coven fits into an app. The app
+owns its schema, its UI and its product policy. coven owns the SQLite
+connections, recording and merging changes, encrypted sync, members, and files.
+They meet at one builder and a handful of methods after that.
 
-The data model: a `workspaces` table holds `lists`, a `list` holds `todos`, and
-a list has a boolean `shared` column. Lists marked `shared` (and the todos under
-them) reach teammates; the rest stay on the device that wrote them.
+The household: Ana creates a store called Household on her phone, connects
+Dropbox, invites Ben, and they keep a Gifts list Carol can't read.
 
-## Open the store
+## The schema
 
-coven owns the connections. The host opens one handle with
-[`Coven::builder`](rustdoc:struct:coven::Coven), handing over the set of tables
-that sync and the [migration ladder](/docs/schema-evolution) that creates the
-app's own tables. Every writable open automatically migrates coven's own local
-tables in place before the app's migrations. Each internal migration is atomic.
-Read-only opens refuse tables that need migrating; any open refuses an internal
-schema newer than this coven supports. The handle owns one writer and a pool of
-read-only connections that backs `handle.read`.
+Notes can be in the store or in a circle; attachments and tags follow their
+note. Attachments carry the user's own files.
 
 ```rust
-use coven::{Coven, Migration, RowIdentity, SyncedTable};
+use coven::{
+    Audience, CacheFill, Coven, DropboxAccess, DropboxLocation, FileDecl, InviteAccess,
+    InviteTarget, MemberRole, Migration, OAuthAccess, Provenance, RowIdentity, StorageConfig,
+    StoreLayout, SyncStatus, SyncedTable, UuidText,
+};
+use uuid::Uuid;
 
 const SCHEMA: &str = "
-CREATE TABLE workspaces (
-    id TEXT PRIMARY KEY,
-    name TEXT NOT NULL,
-    _updated_at TEXT NOT NULL
-) STRICT;
-CREATE TABLE lists (
-    id TEXT PRIMARY KEY,
-    workspace_id TEXT NOT NULL REFERENCES workspaces(id),
-    name TEXT NOT NULL,
-    shared INTEGER NOT NULL DEFAULT 0,
-    _updated_at TEXT NOT NULL
-) STRICT;
-CREATE TABLE todos (
-    id TEXT PRIMARY KEY,
-    list_id TEXT NOT NULL REFERENCES lists(id),
+CREATE TABLE notes (
+    id TEXT PRIMARY KEY NOT NULL,
     title TEXT NOT NULL,
-    done INTEGER NOT NULL DEFAULT 0,
-    _updated_at TEXT NOT NULL
-) STRICT;
+    body TEXT NOT NULL DEFAULT '',
+    audience TEXT NOT NULL,
+    UNIQUE (audience, title)
+);
+CREATE TABLE attachments (
+    id TEXT PRIMARY KEY NOT NULL,
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    name TEXT NOT NULL,
+    size INTEGER NOT NULL,
+    hash BLOB,
+    location TEXT
+);
+CREATE TABLE tags (id TEXT PRIMARY KEY NOT NULL);
+CREATE TABLE note_tags (
+    note_id TEXT NOT NULL REFERENCES notes(id) ON DELETE CASCADE,
+    tag_id TEXT NOT NULL REFERENCES tags(id) ON DELETE CASCADE,
+    PRIMARY KEY (note_id, tag_id)
+);
+CREATE TABLE ui_state (key TEXT PRIMARY KEY, value TEXT);  -- local: not declared
 ";
 
+fn tables() -> Vec<SyncedTable> {
+    vec![
+        SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
+        SyncedTable::new("attachments", RowIdentity::IndependentUuid)
+            .audience_from("note_id")
+            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided, CacheFill::CacheLazy)),
+        SyncedTable::new("tags", RowIdentity::SharedKey),
+        SyncedTable::new("note_tags", RowIdentity::SharedKey)
+            .key_columns(["note_id", "tag_id"])
+            .audience_from("note_id"),
+    ]
+}
+
+fn migrations() -> Vec<Migration> {
+    vec![Migration::sql(1, "initial", SCHEMA)]
+}
+```
+
+Notes and attachments get random UUID keys, so two devices never make the same
+one. Tags use shared keys: Ana and Ben each adding the tag "urgent" offline make
+one row. `ui_state` isn't declared, so it never leaves the device.
+`UNIQUE (audience, title)` includes the audience column, as a unique constraint
+on an audience root must ([Circles](/docs/circles#unique-values-don-t-cross-audiences)).
+The `hash` and `location` columns belong to coven, which fills them in when a
+file is attached ([Files](/docs/files#declaring-files)).
+
+## Create the store
+
+```rust
+coven::set_keyring_service("com.example.notes")?;
+
+let layout = StoreLayout::new(app_dir);
 let handle = Coven::builder(layout.clone())
-    .synced_tables(vec![
-        SyncedTable::new("workspaces", RowIdentity::IndependentUuid),
-        SyncedTable::new("lists", RowIdentity::IndependentUuid).gated_by("shared"),
-        SyncedTable::new("todos", RowIdentity::IndependentUuid)
-            .gated_through("list_id"),
-    ])
-    .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
-    .create_store("Todos").await?;
+    .synced_tables(tables())
+    .migrations(migrations())
+    .create_store("Household")
+    .await?;
 ```
 
-Every synced table is declared `STRICT`, carries an `id` text primary key at
-column 0, and has an `_updated_at TEXT NOT NULL` column. `(table, id)` is the
-logical row identity on every device. These app rows are independently created,
-so their ids are canonical UUIDv4 or UUIDv7 values. A table instead uses
-`RowIdentity::SharedKey` only when equal application keys intentionally merge as
-one row. SQLite represents a primary-key change as deleting the old identity
-and inserting the new validated identity in the same transaction. The
-[`SyncedTable`](rustdoc:struct:coven::SyncedTable) values declare how
-each table is gated:
-[`new`](rustdoc:method:coven::SyncedTable::new) syncs every row,
-[`remote_root`](rustdoc:method:coven::SyncedTable::remote_root)
-syncs every row and makes blobs on those rows and descendants always Remote,
-[`gated_by`](rustdoc:method:coven::SyncedTable::gated_by) makes a
-row sync only while its boolean column is true, and
-[`gated_by_descendants`](rustdoc:method:coven::SyncedTable::gated_by_descendants)
-keeps an ancestor row alive only while a gated descendant survives, and
-[`gated_through`](rustdoc:method:coven::SyncedTable::gated_through)
-names the foreign key a plain table takes its gate from. Here `lists` is a gated
-root, and `todos` name `list_id` as the foreign key they inherit that gate
-through. Tables you don't pass are local-only and never leave the device. The
-gating rules are in [Local data](/docs/local-data).
-
-The handle's SQL context mints `_updated_at` stamps from a clock already seeded
-past every value on disk, so a write made right after a restart can't mint a
-stamp that sorts behind an existing row.
-
-## Write a row
-
-The host runs SQL through [`handle.write`](rustdoc:struct:coven::CovenHandle), an
-async method that takes a closure over a SQL context. coven re-exports the exact
-rusqlite it owns, so use `coven::rusqlite` rather than depending on rusqlite
-directly. Bind `sql.stamp()` into the `_updated_at` column of every synced-row
-write; that value is coven's register for ordering writes across devices. The
-transaction's rows, captured changeset, dependency frontier, write id, and
-initial publication status commit together.
+`create_store` makes Ana's member keys and puts them in the OS keychain, then
+creates the store on the phone. It needs no network. On later launches the app
+opens the same store:
 
 ```rust
-use coven::rusqlite::params;
+let store = layout.stores().await?[0].id;
+let handle = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .open(store)
+    .await?;
+```
 
-let receipt = handle.write(move |sql| {
-    let todo_id = uuid::Uuid::new_v4().to_string();
+## Write and read
+
+```rust
+let note = UuidText(Uuid::now_v7());
+handle.write(move |sql| {
     sql.execute(
-        "INSERT INTO todos (id, list_id, title, done, _updated_at)
-         VALUES (?1, ?2, ?3, 0, ?4)",
-        params![todo_id, list_id, title, sql.stamp()],
+        "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
+        (note, "Groceries", Audience::Store),
     )?;
+    sql.execute("INSERT INTO tags (id) VALUES ('urgent') ON CONFLICT DO NOTHING", [])?;
+    sql.execute("INSERT INTO note_tags (note_id, tag_id) VALUES (?1, 'urgent')", (note,))?;
     Ok(())
-})
-.await?;
+}).await?;
 ```
 
-`receipt.value` is the closure's result. `receipt.write_id` remains stable across
-restart, and `receipt.status` is `LocalOnly` when no shared rows changed or
-`Pending` when this transaction awaits publication. One successful `write`
-call creates one write id and one Store commit.
-
-Don't read the stamp as a wall-clock time or compare two of them as dates. It is
-an opaque clock value coven advances past pulled rows so a later local write
-always sorts after them.
-
-## Read a row
-
-Reads go through [`handle.read`](rustdoc:struct:coven::CovenHandle), which
-runs the closure in one transaction on a read-only connection from a bounded
-pool. Independent reads can run concurrently with each other and the writer,
-while every statement in one closure sees a consistent snapshot. The closure
-gets a `SqlReadContext` with query operations but no retained connection
-(and no stamp to mint on a read). SQLite refuses writes on that connection.
-A read issued after an awaited write sees that write.
+The write commits on the phone at once, rows and its record for upload in one
+transaction. A live query reruns whenever a write changes rows it read, whether
+the write was Ana's or arrived from another device:
 
 ```rust
-let titles: Vec<String> = handle
-    .read(move |conn| {
-        let mut stmt = conn.prepare(
-            "SELECT title FROM todos WHERE list_id = ?1 ORDER BY _updated_at",
-        )?;
-        let rows = stmt
-            .query_map([list_id], |row| row.get::<_, String>(0))?
-            .collect::<Result<_, _>>()?;
-        Ok(rows)
-    })
+let mut notes = handle.subscribe(|sql| {
+    Ok(sql.query("SELECT id, title FROM notes ORDER BY title", [], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+    })?)
+});
+while let Ok(rows) = notes.next().await {
+    show_notes(rows);
+}
+```
+
+## Connect storage
+
+Ana chooses a shared Dropbox folder. The app registers its own Dropbox app keys
+and a sign-in presenter on the builder; coven runs the sign-in and keeps the
+tokens.
+
+```rust
+handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
+let setup = handle
+    .setup_oauth_storage(
+        StorageConfig::Dropbox { location: DropboxLocation::SharedFolder { namespace_id } },
+        "Ana's phone",
+    )
     .await?;
+show_blurred_qr_code(setup.restore_code.as_str());
 ```
 
-If building the result requires expensive parsing or computation, use
-`handle.read(fetch).process(transform).await`: fetch every database input as
-owned values in `fetch`, then build the result in `transform`. Processing runs on
-separate bounded workers after the read transaction has ended. For values that
-must stay current, `handle.subscribe(fetch).process(transform)` repeats the same
-extraction and processing when a relevant committed change occurs.
+Setup checks Dropbox, creates the store there, returns Ana's restore code, and
+starts syncing. Her note goes out in the next pass. On later launches,
+`handle.start_sync()` starts syncing again.
 
-A local-only app stops here: open the handle, write through `handle.write`, read
-through `handle.read`, and never build any of the sync machinery below.
-
-## Turn on sync
-
-Sync needs a master key and a cloud provider. The master key is protected by
-*custody* — where it's unlocked from, and where it's written when
-established — which defaults to the OS keyring and can be selected on the
-builder with
-[`key_custody`](rustdoc:method:coven::CovenBuilder::key_custody) before
-`open()`; the `open` call above didn't set one, so it got the default. Either
-way, the host names its keyring service once at startup with
-[`set_keyring_service`](rustdoc:fn:coven::set_keyring_service) — coven never
-reads or writes a keyring entry without it. See [Keys](/docs/keys) for every
-preset and what each one protects against.
-
-```rust
-coven::set_keyring_service("todos")?;
-```
-
-A fresh store has no master key yet. The atomic cloud-home setup generates one
-for an opaque home, prepares the provider connection under that proposed key,
-then commits the key, provider credentials, and replacement connection as one
-operation. A failed setup restores the previous custody state and leaves the
-previous connection installed. Builder creation already establishes the member
-identity in the selected custody before publishing the store; joining and
-restoring establish their identity as part of admission.
-
-```rust
-let connected = handle
-    .setup_s3_cloud_home(cloud_home, access_key, secret_key)
-    .await?;
-// Persist `connected.cloud_home` through the host's ConfigProvider source.
-```
-
-Persist the returned cloud-home config only after setup succeeds. Existing
-stores reconnect their already-committed config with `start_sync`. Which rows
-carry blobs is declared on the synced tables passed to `open` (see
-[Attachments](#attachments)), not here.
-
-After a write, nudge the loop with `sync_now` so the local edit goes out
-promptly; the loop also runs on its own timer, so a missed trigger still syncs.
-
-```rust
-handle.sync_now();
-```
-
-The trigger is a no-op until the loop is running, so the host can call it after
-every write without checking.
-
-## React to remote changes
-
-The host reads the current `SyncStatus` through
-`handle.subscribe_sync_status()`. The receiver immediately contains the current
-value and may coalesce intermediate values. A successful pass supplies its
-completion time. Use live queries to refresh views when their rows change;
-query `pending()` or observe `subscribe_pending()` for typed pending conditions,
-including S3 keys awaiting deletion.
+## Show what sync is doing
 
 ```rust
 let mut status = handle.subscribe_sync_status();
 loop {
     match &*status.borrow_and_update() {
-        coven::SyncStatus::Synced { finished_at } => {
-            // Show when the last sync pass finished.
-        }
-        coven::SyncStatus::Failed { error } => {
-            // Show the failure and its typed cause.
-        }
-        coven::SyncStatus::Disconnected | coven::SyncStatus::Stopped => {
-            // Show that syncing is stopped.
-        }
-        coven::SyncStatus::Offline | coven::SyncStatus::Syncing => {}
+        SyncStatus::Synced { finished_at } => show_last_synced(*finished_at),
+        SyncStatus::Offline { .. } => show_offline(),
+        SyncStatus::Blocked { reason, .. } => show_blocked(reason),
+        SyncStatus::Failed { error } => show_sync_error(error),
+        SyncStatus::Disconnected | SyncStatus::Stopped | SyncStatus::Syncing => {}
     }
     if status.changed().await.is_err() {
         break;
@@ -227,112 +167,91 @@ loop {
 }
 ```
 
-`Disconnected` means no storage is set up. `Stopped` means storage is configured
-but the loop is stopped, including immediately after opening a store.
-`Offline` means a network failure before the current client has reached storage;
-a failed pass after successful contact reports `Failed`.
+`Blocked` means a slot can't apply yet, most often because the app needs an
+update. Anything else that can't proceed, such as a file that can't upload or a
+provider share waiting for the folder's owner, is a record in
+`handle.subscribe_pending()` ([Sync](/docs/sync-model#status-and-pending-work)).
 
-For write-specific UI, `handle.pending_writes()` lists every unpublished write
-with affected table/primary-key identities. `handle.write_status(&write_id)` and
-`handle.subscribe_write_status(&write_id)` expose its current durable state,
-including its exact published device position or a typed semantic block.
-`handle.pending()` lists pending records. After the prerequisite is
-repaired, retrying a pending write requeues it and wakes sync.
-Discarding a pending write atomically reverses that write and
-every later unpublished write whose local rows depend on it. If candidate objects
-may already exist remotely, discard publishes signed nonactivation authority and
-verifies exact cleanup before reversing local rows.
+## Offer back what was lost
 
-## Attachments
-
-If a todo carries a file, that file is a blob. coven moves blobs with the rows
-that reference them, and it learns which rows carry one from a per-table
-*declaration*, not a runtime callback. The host marks the blob-bearing synced table
-with [`carries_blob`](rustdoc:method:coven::SyncedTable::carries_blob)
-when it builds the set it passes to `open`, naming the columns that locate each blob
-plus its cloud namespace, a
-[`BlobScope`](rustdoc:enum:coven::BlobScope)
-(`Master` for a key every member holds, `Derived` for a fixed per-scope key), a
-[`Provenance`](rustdoc:enum:coven::Provenance) (the Local story:
-`UserProvided` for the user's own file, `HostProvided` for data coven keeps), and a
-[`CacheFill`](rustdoc:enum:coven::CacheFill) (the Remote story: `CacheEager` to
-fetch it into the cache on pull, `CacheLazy` to fetch on first read):
+Ben retitles a note while Ana, offline, retitles it too. One title wins on every
+device; the other is a lost value the app can show and offer back:
 
 ```rust
-use coven::{BlobDecl, CacheFill, Provenance};
-
-// In the set you pass to `Coven::builder(...).synced_tables(...)`, declare the blob on `todos`:
-//   blob id = the row's primary key; opaque home, so no cloud_path column;
-//   master-scoped; the user's own file, fetched into every device's cache on pull.
-SyncedTable::new("todos", RowIdentity::IndependentUuid)
-    .gated_through("list_id")
-    .carries_blob(
-        BlobDecl::new("todo-files", Provenance::UserProvided, CacheFill::CacheEager),
-    )
+let mut lost = handle.subscribe_lost_values();
+while let Ok(values) = lost.next().await {
+    for value in &values {
+        offer_to_restore(value); // e.g. "Ben's title was replaced"
+    }
+}
 ```
 
-coven resolves the declaration against the live schema each cycle and derives every
-blob a row references itself: what to upload on push, what to download on pull,
-whose cache to drop on a delete, and what to backfill after a snapshot bootstrap.
-It encrypts the file on upload; on pull it downloads, decrypts, and writes the
-plaintext into its own [cache](/docs/cache), which the host reads back through
-`handle.read_blob`. Where the bytes come from is the blob's provenance: the
-user's own file (user-provided) or coven's local store (host-provided). Use
-`handle.write_with_blobs(...)` when writing a row together with host-provided bytes. A blob
-table under `remote_root()` has no Local state: rows sync normally, host-provided
-blobs upload before the row is pushed, and reads resolve through the cache/cloud.
-The [Blobs](/docs/blobs) page covers the declaration, the outbox, and the cloud
-layout, and the [Cache](/docs/cache) page covers the device-local read side.
+Restoring a value is an ordinary write. `dismiss_lost_values` drops the ones the
+person has dealt with, on every device ([Merge](/docs/merge#lost-values)).
 
-## Share with a teammate
-
-A store starts with one member, the device that created it. To add a teammate,
-the owner starts one LAN pairing session and displays its code:
+## Attach a file
 
 ```rust
-let pairing = handle.start_device_pairing().await?;
-show_qr(pairing.offer().encode());
-```
-
-The joining device scans that code, completes provider authorization when the
-provider requires it, and opens a durable `PreparedDevicePairing`. That object
-mints and retains the pending device identity and repeatedly submits the same
-signed, encrypted request to the endpoints in the code.
-
-The owner receives the verified public key and provider account from
-`pairing.wait_for_request()`, shows them for approval, then calls
-`handle.approve_device_pairing(...)`. Approval seals cloud access and the Store
-key to that exact identity. The invitation returns through the encrypted LAN
-session; the remaining signed registration artifacts use create-once objects in
-the Store cloud home. `join_with_device_pairing(...)` resumes the joining side
-from its journal until the Store configuration is saved. No code travels back
-to the joining device by camera or clipboard.
-
-`handle.remove_member(...)` appends a
-fresh key generation the removed member never receives. The signed membership
-chain, key wrapping, and the join flow are covered in [Sharing](/docs/sharing).
-
-## Keep some rows to a subset of the store
-
-Membership grants the whole store. To keep a subset of rows private to some
-members inside it, use a [Circle](/docs/circles): a named audience whose rows
-only its members receive. Declare an audience column on the root, then address
-rows to a Circle by updating that column.
-
-```rust
-// declared: SyncedTable::new("lists", RowIdentity::IndependentUuid).scoped_by("audience")
-let family = handle.circles().create("Family").await?;
-handle.circles().add_member(family, &housemate_pubkey_hex).await?;
-
+let attachment = UuidText(Uuid::now_v7());
+let size = std::fs::metadata(&path)?.len() as i64;
+let prepared = coven::prepare_user_file(&path, |read| show_progress(read)).await?;
 handle.write(move |sql| {
     sql.execute(
-        "UPDATE lists SET audience = ?1 WHERE id = ?2",
-        params![family.to_string(), list_id],
+        "INSERT INTO attachments (id, note_id, name, size) VALUES (?1, ?2, ?3, ?4)",
+        (attachment, note, "receipt.pdf", size),
+    )?;
+    sql.register_user_file("attachments", attachment, prepared)?;
+    Ok(())
+}).await?;
+```
+
+The file stays where the user keeps it; coven never moves or changes it. It
+uploads in the background. On Ben's laptop the row arrives first, and the file
+downloads when he opens it:
+
+```rust
+let file = handle.file_ref("attachments", attachment).await?;
+let bytes = handle.read_file(&file).await?;
+```
+
+## Invite Ben
+
+```rust
+let invite = handle
+    .create_invite(
+        InviteTarget::NewMember { role: MemberRole::Member },
+        InviteAccess::ProviderAccount { email: "ben@example.com".into() },
+    )
+    .await?;
+show_qr_code(&invite.code);
+```
+
+Ben's phone scans the code, signs in to his own Dropbox, and calls
+`join_with_invite`, which writes a join request and waits. Ana's phone shows the
+request through `subscribe_join_requests()`, and she approves it with
+`approve_join_request`. The whole flow, and restoring on a new device of one's
+own, is on the [Sharing](/docs/sharing#adding-a-person-invites) page.
+
+## Keep the Gifts list from Carol
+
+```rust
+let ben = invite.member; // the member id Ana's invite fixed for Ben
+
+let circles = handle.circles();
+let gifts = circles.create("Gifts").await?;
+circles.add_member(gifts, &ben).await?;
+
+let list = UuidText(Uuid::now_v7());
+handle.write(move |sql| {
+    sql.execute(
+        "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
+        (list, "Carol's birthday", gifts),
     )?;
     Ok(())
 }).await?;
 ```
 
-The whole Circle lifecycle — states, epoch close on member removal, control
-conflict resolution, deletion, and the privacy limits — is on the
-[Circles](/docs/circles) page.
+The note, its attachments and its tags are in Gifts: encrypted with the Gifts
+key, readable on Ana's and Ben's devices and not on Carol's. Moving a note
+between the store and a circle is an `UPDATE` of its `audience` column
+([Circles](/docs/circles#moving-rows)).

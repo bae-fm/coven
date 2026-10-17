@@ -4,23 +4,33 @@ Sync normally means a backend: a server you run and pay for, and a database
 that holds every user's data in the clear.
 
 coven syncs without the server. Devices exchange end-to-end-encrypted changes
-through storage the user already has, and merge them locally.
+through cloud storage the household already pays for, and merge them locally.
 
-The data is SQLite. You keep your schema; coven owns the connections and runs
-your queries through them, so it can
-[capture](https://www.sqlite.org/sessionintro.html) each change with SQLite's
-session extension, encrypt and sign it, move it through the user's storage,
-and apply remote changes back.
+The data is SQLite. You keep your schema and write ordinary SQL. coven owns the
+connections and runs your SQL through them, so it can record each change as it
+commits, encrypt and sign it, publish it to storage, read everyone else's, and
+merge them into your tables. Rows can carry files, such as songs, photos or
+documents, which sync with them.
+
+coven is built for one person's devices or a household of up to about twenty
+people; four or five is typical. It is not built for high write rates or large
+groups.
+
+The examples on these pages follow one household. Ana, Ben and Carol share a
+store called Household. Ana and Ben also share a circle called Gifts, which
+Carol can't read. Each has a phone and a laptop. Dan joins later.
 
 ## The round trip
 
 No server is needed because nothing in the loop below requires one. A write
-is captured, sealed, and parked in storage; every other device picks it up
-from there. The storage never has to understand the data, which is what lets
-it be storage the user already has.
+commits on the device at once. A later sync pass encrypts it, signs it and
+publishes it as the next numbered *slot* of the store's sequence in storage.
+Every other device reads the slots in the same order, checks each signature,
+and merges the writes into its own database. Storage never has to understand
+the data, which is what lets it be storage the user already has.
 
 <div style="margin: 1.5rem 0; padding: 24px 28px; background: var(--vp-code-block-bg); border-radius: 8px;">
-<svg viewBox="11 18 666 232" width="100%" role="img" aria-label="On your device, your app's write is captured, signed, and encrypted by coven, then pushed to storage you own. On a teammate's device, coven pulls it back, verifies, decrypts, and applies it into their app." style="font-family: var(--vp-font-family-mono); overflow: visible;">
+<svg viewBox="11 18 666 232" width="100%" role="img" aria-label="On your device, your app's write is captured, signed, and encrypted by coven, then published to storage you own. On another member's device, coven reads it, verifies, decrypts, and merges it into their app." style="font-family: var(--vp-font-family-mono); overflow: visible;">
   <defs>
     <marker id="rt-arrow" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
       <path d="M0,0 L10,5 L0,10 z" style="fill: var(--coven-a);" />
@@ -54,185 +64,145 @@ it be storage the user already has.
   <line x1="236" y1="210" x2="164" y2="210" style="stroke: var(--coven-a); stroke-width: 2;" marker-end="url(#rt-arrow)" />
 
   <!-- labels -->
-  <text x="94"  y="83"  text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">INSERT todo</text>
+  <text x="94"  y="83"  text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">INSERT note</text>
 
-  <text x="330" y="74"  text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">capture changes</text>
+  <text x="330" y="74"  text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">record the write</text>
   <text x="330" y="92"  text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">sign + encrypt</text>
 
   <text x="592" y="138" text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">storage you own</text>
-  <text x="592" y="160" text-anchor="middle" style="fill: var(--vp-c-text-2); font-size: 12px;">▒ ciphertext ▒</text>
+  <text x="592" y="160" text-anchor="middle" style="fill: var(--vp-c-text-2); font-size: 12px;">▒ seq/1, seq/2 … ▒</text>
 
   <text x="330" y="206" text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">verify + decrypt</text>
-  <text x="330" y="224" text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">apply changes</text>
+  <text x="330" y="224" text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">merge the write</text>
 
   <text x="94"  y="215" text-anchor="middle" style="fill: var(--vp-c-text-1); font-size: 13px;">refresh UI</text>
 </svg>
 </div>
 
-The provider only ever holds ciphertext. It never sees a todo title, a file,
-or who is allowed to write.
+The provider holds encrypted bytes. It sees object sizes, counts and timing,
+and the kind of each slot; it never sees a note's title, a file's contents, or
+which device wrote a slot. What it can see is listed on the
+[Encryption](/docs/encryption#what-the-provider-sees) page.
 
 ## In your code
 
-The integration is one builder call and a handful of methods on the handle it
-returns. Two beats give the flavor; the whole tour, from open to invite, is
-the [Example](/docs/example).
+The integration is one builder and a handful of methods on the handle it
+returns. Three steps give the flavor; the whole tour, from creating a store to
+inviting someone, is the [Example](/docs/example).
 
-**Open the store.** Declare the tables that sync and the migration ladder that
-builds your schema. `open` automatically migrates coven's own tables before
-running your migrations and returns one handle. Tables you don't list stay
-local to the device.
+**Create the store.** Name the keychain service once at startup, then declare
+the tables that sync and the migrations that build your schema. Tables you
+don't declare stay on the device.
 
 ```rust
-use coven::{Coven, Migration, RowIdentity, SyncedTable};
+use coven::{Coven, Migration, RowIdentity, StoreLayout, SyncedTable};
 
+coven::set_keyring_service("com.example.notes")?;
+
+let layout = StoreLayout::new(app_dir);
 let handle = Coven::builder(layout.clone())
     .synced_tables(vec![
-        SyncedTable::new("todos", RowIdentity::IndependentUuid),
-        SyncedTable::new("todo_attachments", RowIdentity::IndependentUuid),
+        SyncedTable::new("notes", RowIdentity::IndependentUuid),
+        SyncedTable::new("tags", RowIdentity::SharedKey),
     ])
-    .migrations(vec![Migration::sql(1, "initial", MY_SCHEMA)])
-    .open(store_dir.id()).await?;
+    .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
+    .create_store("Household")
+    .await?;
 ```
 
-The identity argument states what equal ids mean across devices. Use
-`IndependentUuid` with canonical UUIDv4 or UUIDv7 ids for independently created
-rows. Use `SharedKey` only when equal application keys intentionally name and
-merge as one logical row. Changing a primary key removes the old identity and
-inserts the new validated identity atomically.
+On later launches the same builder calls `open(store_id)` instead;
+`layout.stores()` lists the stores on this device. Creating and opening need no
+network: the store is complete on the device before any storage is set up.
 
-**Write normally, through the handle.** Your closure gets a transaction;
-coven captures what changed when it commits. Synced rows carry an
-`_updated_at` you mint with `sql.stamp()`; that stamp is how edits order
-across devices.
+**Write and read normally, through the handle.** A write is one SQLite
+transaction. coven records what it changed in the same transaction, so a
+committed write is never lost, even if the app crashes a moment later. There is
+no timestamp column to maintain; coven stamps each write itself.
 
 ```rust
-let id = uuid::Uuid::new_v4().to_string();
-let receipt = handle.write(move |sql| {
-    sql.execute(
-        "INSERT INTO todos (id, title, _updated_at) VALUES (?1, ?2, ?3)",
-        coven::rusqlite::params![id, title, sql.stamp()],
-    )?;
+use coven::UuidText;
+use uuid::Uuid;
+
+let note = UuidText(Uuid::now_v7());
+handle.write(move |sql| {
+    sql.execute("INSERT INTO notes (id, title) VALUES (?1, ?2)", (note, "Groceries"))?;
     Ok(())
 }).await?;
-```
 
-The returned `WriteReceipt` names this transaction in coven's durable write
-ledger. Its initial status is `LocalOnly` when the transaction changed no shared
-rows, otherwise `Pending`. Separate calls produce separate write ids and Store
-commits.
-
-**Read through the handle.** Pure reads go through `handle.read`, which uses
-four read-only connection workers. Independent reads run concurrently with each
-other and the writer. Each closure runs in one transaction, so all its SQL
-statements see a consistent snapshot. SQLite refuses writes on these
-connections. A read issued after an awaited write sees that write.
-
-The readers share a queue holding at most 64 waiting operations. When it is
-full, callers wait for admission; cancelled operations that have not started
-are discarded. Live queries use the same pool.
-
-```rust
-let titles: Vec<String> = handle.read(|conn| {
-    conn.query("SELECT title FROM todos ORDER BY _updated_at", [], |row| {
-        row.get(0)
-    }).map_err(coven::CovenError::from)
-}).await?;
-```
-
-**Read again when the result can change.** `handle.subscribe()` uses the same
-read context and retains the query. The first `next()` returns the initial
-result. While it runs, SQLite reports every table and column the statement
-reads. In a single-table query without subqueries, equality, `IN`, and range
-predicates over binary-collated `INTEGER`, `TEXT`, and `BLOB` primary keys are
-also matched against their bound values. Other SQL falls back to
-table-and-column matching, so an unsupported predicate may rerun more often but
-cannot miss a relevant committed row change. Virtual-table dependencies return
-an error because SQLite sessions do not report their row changes. Changes
-already waiting are represented by the next result.
-
-```rust
-let mut titles = handle.subscribe(|conn| {
-    conn.query("SELECT title FROM todos ORDER BY _updated_at", [], |row| {
-        row.get(0)
-    }).map_err(coven::CovenError::from)
+let mut titles = handle.subscribe(|sql| {
+    Ok(sql.query("SELECT title FROM notes ORDER BY title", [], |row| row.get::<_, String>(0))?)
 });
-
-loop {
-    render(titles.next().await?);
+while let Ok(titles) = titles.next().await {
+    show(titles);
 }
 ```
 
-For expensive result assembly, `handle.read(fetch).process(transform).await`
-fetches owned values in the read transaction, then passes them to a separate
-bounded pool after releasing the connection. Fetch every database input in `fetch`;
-`transform` receives owned values without a SQL context. The live equivalents are
-`subscribe(fetch).process(transform)` and
-`subscribe_reconfigurable(request, fetch).process(transform)`: dependencies
-stay attached to the read that produced the data, and each event carries the
-request and revision it answers. A read that finishes after the request changed
-is still delivered, then the latest request runs, so requests that change
-during every read cannot starve the subscription.
+**Connect storage.** Setting up storage creates the store there, returns the
+person's restore code, and starts syncing. On later launches,
+`handle.start_sync()` starts it again.
 
-Without `.process(...)`, awaiting the read returns the fetched values directly.
-Reads begin when awaited; subscriptions begin when their `next()` is awaited.
-
-Everything else follows the same ownership boundary: `handle.write_with_blobs`
-commits a row and its file bytes in one transaction, `handle.pending_writes` reconstructs
-unpublished writes after restart, `handle.start_sync` starts the background
-loop, `handle.subscribe_sync_status` exposes its current state, and
-`handle.start_device_pairing()` returns the one code an existing device displays
-while it receives and approves the joining device's signed identity over the LAN.
+```rust
+handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
+let setup = handle
+    .setup_oauth_storage(
+        StorageConfig::Dropbox { location: DropboxLocation::SharedFolder { namespace_id } },
+        "Ana's phone",
+    )
+    .await?;
+show_blurred_qr_code(setup.restore_code.as_str());
+```
 
 ## Who owns what
 
 The integration stays small because the boundary is strict: coven owns what
-sync needs to be correct, and the host owns the product.
+sync needs to be correct, and the app owns the product.
 
-coven owns the sync layer and the database connections:
+coven owns:
 
-- The SQLite connections: one writer, where coven runs the change-capture
-  session and keeps its own bookkeeping, and a bounded pool of read-only
-  connections for application queries. Callers use the handle's write and read
-  methods; every connection stays owned by coven.
-- Capturing local changes and applying remote ones.
-- Encrypting, signing, and verifying everything that leaves the device.
-- Moving rows and files through your storage.
-- Membership, invites, and recovery codes.
+- the SQLite connections: one writer, where coven records each change and keeps
+  its own bookkeeping, and several read-only connections for the app's queries;
+- recording local changes and merging everyone else's;
+- encrypting, signing and checking everything that leaves the device;
+- the store's sequence in storage, snapshots, and deleting old history;
+- members, devices, circles, invites and restore codes;
+- moving files, the cache, and pinning.
 
-You own the app:
+The app owns:
 
-- Your schema and your queries, run through coven's connections.
-- Which tables sync and which stay local.
-- Where user-provided blob files live on disk.
-- Provider configuration and credentials.
-- All UI and product policy.
+- its schema and its queries, run through coven's connections;
+- which tables sync and which stay on the device;
+- where the user's own files live on disk;
+- the provider sign-in screen and the provider's app registration;
+- all UI and product policy, including what to show for a lost value or a
+  pending condition.
 
 ## Topics
 
 In reading order; each page builds on the ones before it:
 
-- [Local data](/docs/local-data): the store on one device: schema
-  conventions, which tables sync, which rows share.
-- [Sync](/docs/sync-model): change capture, the cycle, push and pull.
-- [Merge](/docs/merge): the clock, and how concurrent edits land on every
-  device.
-- [Storage](/docs/storage): the `CloudHome` contract and the providers.
-- [Blobs](/docs/blobs): files that rows carry, where their bytes live, and how
-  they move.
-- [Cache](/docs/cache): the device-local copies of remote files: budgets,
-  pinning, eviction.
-- [Sharing](/docs/sharing): membership, roles, invite, join, revoke.
-- [Circles](/docs/circles): private audiences inside one store: who receives
-  which rows, and the Circle lifecycle.
-- [Bootstrap](/docs/bootstrap): snapshots and how a new device joins or
-  restores.
-- [Encryption](/docs/encryption): the keys, what is encrypted, what the
+- [Local data](/docs/local-data): the store on one device: opening it, which
+  tables sync, keys, writing and reading.
+- [Sync](/docs/sync-model): the sequence, how a write claims a slot, a sync
+  pass, and what the app sees while it runs.
+- [Merge](/docs/merge): timestamps, how concurrent edits land on every device,
+  lost values, and the rules your SQL schema brings.
+- [Storage](/docs/storage): what coven needs from a provider, and how Dropbox,
+  OneDrive, iCloud and S3 services supply it.
+- [Files](/docs/files): files that rows carry: attaching, uploading, status and
+  reading.
+- [Cache](/docs/cache): the device's copies of uploaded files: budgets,
+  pinning and eager downloads.
+- [Sharing](/docs/sharing): members, roles and devices; restore codes,
+  invites and removal.
+- [Circles](/docs/circles): rows only some members can read.
+- [Snapshots and joining](/docs/bootstrap): snapshots, the floor, deleting
+  old history, and how a new or returning device catches up.
+- [Encryption](/docs/encryption): the keys, what is encrypted, and what the
   provider sees.
-- [Keys](/docs/keys): where each key lives on the device, the custody
-  presets, and what a host has to set up per platform.
-- [Schema evolution](/docs/schema-evolution): migrating the synced schema while
-  devices upgrade at different times.
+- [Keys](/docs/keys): where keys live on the device, custody choices, and what
+  each platform needs.
+- [Schema evolution](/docs/schema-evolution): changing the schema while
+  devices update at different times.
 
 ## Status
 
