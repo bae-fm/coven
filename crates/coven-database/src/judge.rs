@@ -395,7 +395,7 @@ fn combined(steps: &[Step]) -> Option<Change<Value>> {
     Some(effect)
 }
 
-/// Each row's owner, as the selected creations and the store log name them.
+/// Each row's owner, as the selected creations and the counted membership name them.
 struct Owners<'a> {
     schema: &'a WriteSchema,
     version: u32,
@@ -453,7 +453,7 @@ impl<'a> Owners<'a> {
             return Ok(None);
         };
         // A device's own creations are its member's, even before its
-        // registration reaches the store log.
+        // registration acquires a slot.
         if creation.creator.write.device == self.device {
             return Ok(None);
         }

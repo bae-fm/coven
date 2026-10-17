@@ -30,9 +30,9 @@ fn own(write: WriteId, row: RowId) -> Creation {
 }
 
 /// Two devices insert the same shared key concurrently. Whatever arrives
-/// first, the insert with the smaller timestamp is the creation (§8.8).
+/// first in the store sequence is the creation (§8.8, Lean Owners).
 #[tokio::test]
-async fn the_earliest_concurrent_creation_is_selected_in_either_receipt_order() {
+async fn the_first_slot_keeps_the_creation_regardless_of_timestamps() {
     let earliest = insert(0, 0).header.position;
     let later = insert(1, 0).header.position;
     for order in [[0, 1], [1, 0]] {
@@ -48,7 +48,7 @@ async fn the_earliest_concurrent_creation_is_selected_in_either_receipt_order() 
         db.receive(insert(order[1], 0).into()).await.unwrap();
         assert_eq!(
             selected(&db, &row(0)),
-            Some(own(earliest, row(0))),
+            Some(own(first, row(0))),
             "{order:?}"
         );
         db.close().await.unwrap();
@@ -125,14 +125,13 @@ async fn an_owner_declaration_change_refuses_to_open() {
 async fn snapshots_carry_creations_through_reload() {
     let source_store = TestStore::new();
     let source = source_store.schema(owned(), SCHEMA).await.unwrap();
+    for n in [1, 0] {
+        TestStore::register(&source, insert(n, 0).header.position.device, n as u8 + 1);
+    }
     // Streams keep each write's evidence, which the snapshot carries.
     for n in [1, 0] {
         source
-            .receive_stream(
-                stream(&insert(n, 0)),
-                coven_format::value::EntryPositions(Vec::new()),
-                || Ok(()),
-            )
+            .receive_stream(stream(&insert(n, 0)), || Ok(()))
             .await
             .unwrap();
     }
@@ -144,7 +143,7 @@ async fn snapshots_carry_creations_through_reload() {
     assert_eq!(selected(&target, &row(0)), selected(&source, &row(0)));
     assert_eq!(
         selected(&target, &row(0)),
-        Some(own(insert(0, 0).header.position, row(0)))
+        Some(own(insert(1, 0).header.position, row(0)))
     );
     source.close().await.unwrap();
     target.close().await.unwrap();
@@ -156,13 +155,9 @@ async fn snapshots_carry_creations_through_reload() {
 async fn a_table_rename_keeps_the_original_creation() {
     let store = TestStore::new();
     let db = store.schema(owned(), SCHEMA).await.unwrap();
-    db.receive_stream(
-        stream(&insert(0, 0)),
-        coven_format::value::EntryPositions(Vec::new()),
-        || Ok(()),
-    )
-    .await
-    .unwrap();
+    db.receive_stream(stream(&insert(0, 0)), || Ok(()))
+        .await
+        .unwrap();
     let original = selected(&db, &row(0)).unwrap();
     db.close().await.unwrap();
     let db = store
@@ -183,64 +178,4 @@ async fn a_table_rename_keeps_the_original_creation() {
     assert_eq!(selected(&db, &renamed), Some(original));
     assert_eq!(selected(&db, &row(0)), None);
     db.close().await.unwrap();
-}
-
-/// Random concurrent creations, updates, deletes and reinserts, received in
-/// causal orders: each row's creation is the model's selected generation-one
-/// write (`Ownership.selected_creation`), whatever order delivered them.
-#[tokio::test]
-#[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the merge runner"]
-async fn creation_differential_histories() {
-    use crate::test_utils::tests::{run_lean, write_id, Generator, ReloadHistory};
-    let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
-    let mut compared = 0;
-    for seed in 0..48 {
-        let mut rng = Generator::new(seed + 40_000);
-        let mut history = ReloadHistory::generate(&mut rng);
-        history.reset = false;
-        history.covered.clear();
-        for write in &mut history.writes {
-            write.header.store_log_read = coven_format::value::EntryPositions(Vec::new());
-        }
-        if !history.valid() {
-            continue;
-        }
-        let rows = history.rows();
-        for _ in 0..2 {
-            history.writes = rng.order(&history.writes);
-            let store = TestStore::new();
-            let db = store.schema(owned(), SCHEMA).await.unwrap();
-            // One member's devices: selection, not permission, is compared.
-            for write in &history.writes {
-                TestStore::register(&db, write.header.position.device, 1);
-            }
-            for write in &history.writes {
-                db.receive_stream(
-                    stream(write),
-                    coven_format::value::EntryPositions(Vec::new()),
-                    || Ok(()),
-                )
-                .await
-                .unwrap();
-            }
-            let rust: Vec<_> = rows
-                .iter()
-                .enumerate()
-                .map(|(id, row)| {
-                    serde_json::json!({"id": id,
-                        "creator": selected(&db, row).map(|c| write_id(c.write))})
-                })
-                .collect();
-            let mut input = history.input();
-            input["mode"] = "creation".into();
-            assert_eq!(
-                serde_json::Value::from(rust),
-                run_lean(&runner, &input),
-                "seed {seed}: {input}"
-            );
-            compared += 1;
-            db.close().await.unwrap();
-        }
-    }
-    assert!(compared > 40, "{compared} histories compared");
 }

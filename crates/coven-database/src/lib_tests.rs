@@ -17,16 +17,11 @@ pub(crate) fn store_id() -> StoreId {
     StoreId(SequentialIds::new().new_id())
 }
 
-/// The format crate's fixture entry, a creation naming [`TestStore::new`]'s store.
-pub(crate) fn store_log() -> coven_format::store_log::StoreLogEntry {
-    let mut entry = coven_format::test_utils::store_log();
-    let coven_format::store_log::StoreChange::CreateStore { store, name, .. } = &mut entry.change
-    else {
-        unreachable!("the format fixture creates a store")
-    };
-    *store = store_id();
-    *name = STORE_NAME.into();
-    entry
+pub(crate) fn keys(seed: u8) -> coven_format::admin::MemberPublicKeys {
+    coven_format::test_utils::keys_from_seed(seed).public_keys()
+}
+pub(crate) fn member(seed: u8) -> coven_foundation::id_source::MemberId {
+    coven_foundation::id_source::MemberId(uuid::Uuid::from_bytes([seed; 16]))
 }
 
 impl TestStore {
@@ -69,8 +64,8 @@ impl TestStore {
         device: coven_foundation::id_source::DeviceId,
         seed: u8,
     ) {
-        let keys = crate::store_log::tests::keys(seed);
-        let member = crate::store_log::tests::member(seed);
+        let keys = crate::tests::keys(seed);
+        let member = crate::tests::member(seed);
         database.inspect_writer(|db| {
             db.transaction(|db| {
                 db.internal_execute(
@@ -105,8 +100,8 @@ impl TestStore {
         circle: coven_foundation::id_source::CircleId,
     ) {
         let device = self.directory.settings().unwrap().device_id;
-        let keys = crate::store_log::tests::keys(1);
-        let member = crate::store_log::tests::member(1);
+        let keys = crate::tests::keys(1);
+        let member = crate::tests::member(1);
         database.inspect_writer(|db| {
             db.transaction(|db| {
                 db.internal_execute(
@@ -290,35 +285,24 @@ async fn try_remote_write(
         let store = crate::merge_store::MergeStore::new(db, &app);
         crate::write_sources::authored(db, &store, row.row, row.change, row.old).unwrap()
     });
-    let state = database.sync_state(vec![]).await.unwrap();
     let previous = crate::write::tests::records(database)
         .pop()
         .expect("local seed write")
         .header;
-    let device = coven_foundation::id_source::DeviceId(
-        state
-            .positions
-            .0
-            .iter()
-            .map(|p| p.device.0)
-            .max()
-            .unwrap()
-            .checked_add(1)
-            .unwrap(),
-    );
-    let timestamp = coven_merge::Timestamp::new(
-        previous.timestamp.milliseconds() + state.positions.0.len() as u64,
-        0,
-        device,
-    )
-    .unwrap();
+    for original in crate::write::tests::records(database) {
+        database.receive(original.into()).await?;
+    }
+    let applied = database.applied_slot().await?;
+    let device = coven_foundation::id_source::DeviceId(10_000 + applied);
+    let timestamp =
+        coven_merge::Timestamp::new(previous.timestamp.milliseconds() + applied + 1, 0, device)
+            .unwrap();
     let record = WriteRecord {
         header: WriteHeader {
             position: coven_merge::WriteId { device, number: 1 },
             timestamp,
-            had_read: state.positions,
-            store_log_read: state.store_log,
-            schema_version: schema_version.unwrap_or(state.schema_version),
+            read_through: applied,
+            schema_version: schema_version.unwrap_or(database.schema_version().await?),
             disposition: coven_format::write::WriteDisposition::Apply,
         },
         parts: vec![WritePart {
@@ -362,20 +346,21 @@ pub(crate) fn contents(
     })
 }
 
-/// Seed an independent authored log, with no reads of other devices.
+/// Seed counted metadata for merge-unit fixtures.
 pub(crate) fn applied(database: &crate::Database, stamp: coven_merge::Timestamp, number: u64) {
-    use coven_format::{merge_fields, value::WritePositions};
     database.inspect_writer(|db| {
+        let slot = crate::sequence::applied(db).unwrap() + 1;
         db.internal_execute(
-            "INSERT INTO _coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3)",
+            "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4)",
             crate::params![
-                merge_fields::encode_timestamp(&stamp).unwrap(),
-                number.to_be_bytes().as_slice(),
-                merge_fields::encode_write_positions(&WritePositions(vec![])).unwrap(),
+                coven_format::merge_fields::encode_timestamp(&stamp).unwrap(),
+                number.to_be_bytes(),
+                0u64.to_be_bytes(),
+                slot.to_be_bytes()
             ],
         )
         .unwrap();
-        db.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",crate::params![stamp.device().0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()]).unwrap();
+        crate::sequence::set_applied(db, slot).unwrap();
     });
 }
 
@@ -403,75 +388,4 @@ pub(crate) fn lean_model(runner: &std::ffi::OsStr, input: serde_json::Value) -> 
     serde_json::from_slice(&output.stdout).unwrap()
 }
 
-pub(crate) fn write_positions(numbers: [u64; 3]) -> coven_format::value::WritePositions {
-    use coven_format::value::WritePositions;
-    use coven_foundation::id_source::DeviceId;
-    use coven_merge::WriteId;
-    WritePositions(
-        numbers
-            .into_iter()
-            .enumerate()
-            .filter(|(_, number)| *number > 0)
-            .map(|(device, number)| WriteId {
-                device: DeviceId(device as u64 + 1),
-                number,
-            })
-            .collect(),
-    )
-}
-
-/// Replace consumed-log metadata with independent logs through the given positions.
-pub(crate) fn independent_logs(
-    database: &crate::Database,
-    passed: &coven_format::value::WritePositions,
-) {
-    database.inspect_writer(|db| {
-        db.internal_execute("DELETE FROM _coven_positions", [])
-            .unwrap();
-        db.internal_execute("DELETE FROM _coven_writes", [])
-            .unwrap();
-    });
-    // Seed only consumed writes from three independent authored logs.
-    for p in &passed.0 {
-        for number in 1..=p.number {
-            applied(
-                database,
-                coven_merge::Timestamp::new(number, 0, p.device).unwrap(),
-                number,
-            );
-        }
-    }
-}
-
-impl crate::Database {
-    /// Apply a received write published at the epoch, as no retirement affects.
-    pub(crate) async fn receive(
-        &self,
-        write: crate::DownloadedWrite,
-    ) -> Result<crate::ApplyOutcome, DbError> {
-        self.apply_downloaded::<crate::pending::tests::Record>(
-            write,
-            crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
-        )
-        .await
-    }
-
-    /// Apply a streamed received write, reporting with the test record.
-    pub(crate) async fn receive_stream<R, F>(
-        &self,
-        write: crate::DownloadedWriteStream<R>,
-        store_log: coven_format::value::EntryPositions,
-        authenticate: F,
-    ) -> Result<crate::ApplyOutcome, DbError>
-    where
-        R: std::io::Read + Send + 'static,
-        F: FnOnce() -> Result<(), DbError> + Send + 'static,
-    {
-        self.apply_downloaded_stream::<crate::pending::tests::Record, _, _>(
-            write,
-            store_log,
-            authenticate,
-        )
-        .await
-    }
-}
+pub(crate) use crate::sequence::tests::*;

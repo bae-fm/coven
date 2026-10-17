@@ -54,7 +54,7 @@ pub(crate) struct DatabaseRemovalView<'a> {
     schema: &'a WriteSchema,
     app: &'a AppView<'a>,
     updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
-    deleted: &'a BTreeMap<CircleId, crate::EntryId>,
+    deleted: &'a BTreeMap<CircleId, crate::Slot>,
     arriving: Option<(WriteId, Timestamp)>,
     rows: Option<RefCell<BTreeMap<RowId, EvaluatedRow>>>,
     edges: BTreeMap<RowId, BTreeSet<RowId>>,
@@ -68,7 +68,7 @@ impl<'a> DatabaseRemovalView<'a> {
         schema: &'a WriteSchema,
         app: &'a AppView<'a>,
         updates: &'a BTreeMap<RowId, RowUpdate<Value>>,
-        deleted: &'a BTreeMap<CircleId, crate::EntryId>,
+        deleted: &'a BTreeMap<CircleId, crate::Slot>,
         arriving: Option<(WriteId, Timestamp)>,
     ) -> Result<Self, DbError> {
         let mut edges = BTreeMap::<RowId, BTreeSet<RowId>>::new();
@@ -218,7 +218,7 @@ impl<'a> DatabaseRemovalView<'a> {
             rules,
             &state,
             &values,
-            |write| self.stamp(write),
+            |write| crate::sequence::write_order(self.database, write),
         )?;
         let facts = RemovalRow::Present {
             generation,

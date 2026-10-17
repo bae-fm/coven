@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
 
-use coven_format::{value::EntryPositions, write::WriteRecord};
+use coven_format::write::WriteRecord;
 use coven_foundation::{
     clock::FixedClock,
     id_source::{DeviceId, SequentialIds},
@@ -12,7 +12,7 @@ use serde_json::{json, Value};
 use crate::snapshot_write::tests::{frames, stream};
 use crate::tests::{applied, contents, lean_model, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
-use crate::{ApplyOutcome, Database, DbError, Migration, SnapshotError, SnapshotReload, WriteWait};
+use crate::{ApplyOutcome, Database, DbError, Migration, WriteWait};
 
 #[tokio::test]
 async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_applied_log() {
@@ -52,18 +52,7 @@ async fn bens_clock_behind_anas_write_raises_the_counter_and_records_every_appli
         (3_660_000, 4)
     );
     assert_eq!(write.position.number, 2);
-    let mut expected = vec![
-        WriteId {
-            device: ana,
-            number: 4,
-        },
-        WriteId {
-            device: carol,
-            number: 1,
-        },
-    ];
-    expected.sort();
-    assert_eq!(write.had_read.0, expected);
+    assert_eq!(write.read_through, 5);
     clock.set(UNIX_EPOCH - Duration::from_secs(1));
     sql(&database, "UPDATE notes SET title='Groceries'")
         .await
@@ -203,9 +192,7 @@ async fn open(store: &TestStore, clock: &Arc<FixedClock>) -> Database {
 
 async fn receive(db: &Database, write: &WriteRecord, streamed: bool) -> ApplyOutcome {
     if streamed {
-        db.receive_stream(stream(write), EntryPositions(vec![]), || Ok(()))
-            .await
-            .unwrap()
+        db.receive_stream(stream(write), || Ok(())).await.unwrap()
     } else {
         db.receive(write.clone().into()).await.unwrap()
     }
@@ -234,7 +221,11 @@ async fn far_future_writes_wait_only_for_causes_and_advance_stamps_after_clock_r
         assert!(writes[1].header.timestamp > writes[0].header.timestamp);
         assert_eq!(
             receive(&receiver, &writes[1], streamed).await,
-            ApplyOutcome::Waiting(WriteWait::Writes(vec![writes[0].header.position]))
+            ApplyOutcome::Waiting(WriteWait::Sources(vec![writes[1].parts[0].rows[0]
+                .sources
+                .generation
+                .clone()
+                .unwrap()]))
         );
         sql(
             &receiver,
@@ -270,7 +261,10 @@ async fn far_future_writes_wait_only_for_causes_and_advance_stamps_after_clock_r
             .unwrap();
         let outgoing = records(&receiver).pop().unwrap();
         assert!(outgoing.header.timestamp > writes[1].header.timestamp);
-        assert_eq!(outgoing.header.had_read.0, [writes[1].header.position]);
+        assert_eq!(outgoing.header.read_through, 2);
+        for write in &writes {
+            receive(&source, write, streamed).await;
+        }
         assert_eq!(
             receive(&source, &records(&receiver)[0], streamed).await,
             ApplyOutcome::Applied
@@ -312,21 +306,19 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
         .unwrap();
     let writes = records(&source);
     let before = contents(&receiver);
-    assert!(matches!(
-        receiver
-            .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
-                vec![snapshot.input()],
-                vec![stream(&writes[2])],
-                std::sync::Arc::new(crate::test_utils::TestAuthorship)
-            ))
-            .await,
-        Err(crate::DbError::Snapshot(
-            SnapshotError::MissingWrites { .. } | SnapshotError::WriteWaiting(_)
+    assert!(receiver
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &receiver,
+            vec![snapshot.input()],
+            vec![stream(&writes[2])],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship)
         ))
-    ));
+        .await
+        .is_err());
     assert_eq!(contents(&receiver), before);
     receiver
-        .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &receiver,
             vec![snapshot.input()],
             vec![] as Vec<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>,
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
@@ -340,9 +332,10 @@ async fn far_future_snapshot_and_tail_apply_with_their_causes_and_preserve_queue
     assert!(queued[0].header.timestamp > writes[0].header.timestamp);
     receiver_clock.set(UNIX_EPOCH - Duration::from_secs(1));
     receiver
-        .load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &receiver,
             vec![snapshot.input()],
-            writes.iter().rev().map(stream).collect(),
+            writes[1..].iter().map(stream).collect(),
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
@@ -433,7 +426,8 @@ async fn lean_differential_clocks() {
                             "snapshot": true, "causes": true,
                         }),
                     );
-                    db.load_snapshots::<crate::pending::tests::Record, _, _>(SnapshotReload::new(
+                    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+                        &db,
                         vec![snapshot.input()],
                         writes.iter().map(stream).collect(),
                         std::sync::Arc::new(crate::test_utils::TestAuthorship),
@@ -614,8 +608,7 @@ async fn schema_version_zero_round_trips_through_streamed_receive() {
         header: coven_format::write::WriteHeader {
             position: WriteId { device, number: 1 },
             timestamp: Timestamp::new(1_000, 0, device).unwrap(),
-            store_log_read: EntryPositions(vec![]),
-            had_read: coven_format::value::WritePositions(vec![]),
+            read_through: 0,
             schema_version: 0,
             disposition: coven_format::write::WriteDisposition::Migration,
         },
@@ -627,15 +620,12 @@ async fn schema_version_zero_round_trips_through_streamed_receive() {
             .unwrap();
     assert_eq!(input.header.header, record.header);
     assert_eq!(
-        db.receive_stream(input, EntryPositions(vec![]), || Ok(()))
-            .await
-            .unwrap(),
+        db.receive_stream(input, || Ok(())).await.unwrap(),
         ApplyOutcome::Applied
     );
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let state = db.sync_state(vec![]).await.unwrap();
-    assert_eq!(state.schema_version, 0);
-    assert_eq!(state.positions.0, [record.header.position]);
+    assert_eq!(db.schema_version().await.unwrap(), 0);
+    assert_eq!(db.applied_slot().await.unwrap(), 1);
     db.close().await.unwrap();
 }

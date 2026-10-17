@@ -300,6 +300,7 @@ async fn a_check_on_one_generated_column_can_fail_when_its_inputs_merge() {
     sql(&a, "INSERT INTO ranges(id,start,end) VALUES('r',0,1)")
         .await
         .unwrap();
+    a.receive(records(&a)[0].clone().into()).await.unwrap();
     b.receive(records(&a)[0].clone().into()).await.unwrap();
     sql(&a, "UPDATE ranges SET start=1").await.unwrap();
     sql(&b, "UPDATE ranges SET end=0").await.unwrap();
@@ -833,9 +834,10 @@ async fn generated_unique_claim_uses_the_write_that_set_its_generated_value() {
         let evaluated = view.evaluated(row).unwrap();
         assert_eq!(evaluated.values["folded"], Value::Text("plan".into()));
         assert_eq!(
-            evaluated.constraints.unique[&coven_merge::UniqueConstraint::from(["folded"])]
-                .timestamp,
-            writes[1].header.timestamp
+            evaluated.constraints.unique[&coven_merge::UniqueConstraint::from(["folded"])].order,
+            coven_merge::ClaimOrder::Local {
+                number: writes[1].header.position.number
+            }
         );
     });
     db.close().await.unwrap();
@@ -910,7 +912,7 @@ pub(crate) fn materialize_deleted(
                     panic!("database removal view: {error}")
                 }
             };
-            crate::removal::materialize(db, schema, &app, &view, &result, &Default::default())
+            crate::removal::materialize(db, schema, &app, &view, &result)
         })
     })
 }
@@ -931,11 +933,8 @@ pub(crate) async fn hidden_plan_note(db: &Database) {
     assert_eq!(losses(db)[0].2, [Rule::Unique(["title"].into())].into());
 }
 
-fn deleting_entry() -> crate::EntryId {
-    crate::EntryId {
-        device: coven_foundation::id_source::DeviceId(2),
-        number: 1,
-    }
+fn deleting_entry() -> crate::Slot {
+    crate::Slot(1)
 }
 
 /// A child moving its unique value and taking a parent that returns with the

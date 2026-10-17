@@ -1,48 +1,36 @@
-//! A breaking migration's raise snapshots, captured in the migration's own
-//! transaction through its empty marker, so no later app write can extend the
-//! cut (§17.1, §18.1). A capture is sent only after a completed catch-up that
-//! applied nothing past it; otherwise it is captured again from the current
-//! state, and the device's later writes join its prefix (§15). Sync seals
-//! these frames, the header gaining its snapshot identity only then, and
-//! sends them once the captured own prefix is confirmed.
-
-use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience, audience_text, counter, decoded, encoded};
-use crate::write_schema::WriteSchema;
-use crate::DbError;
-use coven_format::merge_fields;
-use coven_format::snapshot::{SnapshotEncoder, SnapshotHeader, SECTIONS};
-use coven_format::store_log::SnapshotId;
-use coven_format::value::{EntryPositions, WritePositions};
+//! The original queue prefix captured for an unpublished breaking raise.
+//!
+//! A capture fixes eligibility through its marker. Snapshot bytes are made from
+//! the counted base only after that prefix has acquired slots; later local
+//! originals remain outside it.
+use crate::internal_schema::WRITE_DEVICE_SQL;
+use crate::write_encoding::{audience, audience_text, counter};
+use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use coven_format::{admin::SnapshotId, snapshot::SnapshotHeader};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, WriteId};
 use rusqlite::params;
 
-/// One audience's captured raise: what its snapshot covers and the last own
-/// write, the migration marker, that must be confirmed before it is sent.
+/// A breaking raise's fixed original prefix and current counted coverage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RaiseCapture {
-    /// The audience the snapshot raises.
+    /// Audience raised by this capture.
     pub audience: Audience,
-    /// The schema version the raise publishes.
+    /// Schema version to announce.
     pub version: u32,
-    /// The migration marker: every own write through it precedes the snapshot.
+    /// Last captured original, including the migration marker.
     pub through: WriteId,
-    /// The captured write positions, the snapshot's coverage.
-    pub writes: WritePositions,
+    /// Applied slot when this capture was prepared.
+    pub covers: u64,
 }
 
-/// Capture every audience this device reads, replacing a capture an earlier,
-/// still unpublished migration left. Without a store there is nothing to
-/// raise; returns whether anything was captured.
 pub(crate) fn capture(
     db: &DatabaseConnection,
-    schema: &WriteSchema,
+    _schema: &WriteSchema,
     marker: WriteId,
     version: u32,
 ) -> Result<bool, DbError> {
-    let log = crate::store_log_tables::read(db)?;
-    let state = &log.replay.state;
+    let state = crate::store_state_tables::read(db)?;
     db.internal_execute("DELETE FROM _coven_raise_captures", [])?;
     let Some(member) = state
         .store
@@ -52,275 +40,120 @@ pub(crate) fn capture(
     else {
         return Ok(false);
     };
-    let audiences = std::iter::once(Audience::Store).chain(
+    for selected in std::iter::once(Audience::Store).chain(
         state
             .readable_circles(&member)
             .into_iter()
             .map(Audience::Circle),
-    );
-    for selected in audiences {
-        capture_audience(db, schema, selected, marker, version)?;
+    ) {
+        db.internal_execute("INSERT INTO _coven_raise_captures(audience,version,through,covers) VALUES(?1,?2,?3,?4)",params![audience_text(&selected),version,marker.number.to_be_bytes(),crate::sequence::applied(db)?.to_be_bytes()])?;
     }
     Ok(true)
 }
 
-/// Capture one audience's current state through `through`, this device's
-/// newest write, replacing any earlier capture of it.
-fn capture_audience(
-    db: &DatabaseConnection,
-    schema: &WriteSchema,
-    selected: Audience,
-    through: WriteId,
-    version: u32,
-) -> Result<(), DbError> {
-    let text = audience_text(&selected);
-    db.internal_execute(
-        "DELETE FROM _coven_raise_captures WHERE audience=?1",
-        [&text],
-    )?;
-    let id = SnapshotId {
-        audience: selected,
-        device: through.device,
-        number: 1,
-    };
-    let mut sequence = 0i64;
-    crate::snapshot_write::write(
-        db,
-        schema,
-        id,
-        |header| {
-            db.internal_execute(
-                "INSERT INTO _coven_raise_captures(audience,version,through,schema_version,writes,store_log,counts) VALUES(?1,?2,?3,?4,?5,?6,?7)",
-                params![
-                    text,
-                    version,
-                    through.number.to_be_bytes().as_slice(),
-                    header.schema_version,
-                    encoded(merge_fields::encode_write_positions(&header.writes))?,
-                    encoded(merge_fields::encode_entry_positions(&header.store_log))?,
-                    header.counts.iter().flat_map(|n| n.to_be_bytes()).collect::<Vec<_>>(),
-                ],
-            )?;
-            Ok(())
-        },
-        |frame| {
-            // The header frame is encoded again with the published identity.
-            if sequence > 0 {
-                db.internal_execute(
-                    "INSERT INTO _coven_raise_capture_frames(audience,sequence,frame) VALUES(?1,?2,?3)",
-                    params![text, sequence, frame],
-                )?;
-            }
-            sequence += 1;
-            Ok::<_, DbError>(())
-        },
-    )
-    .map_err(|error| match error {
-        crate::SnapshotWriteError::Database(error) | crate::SnapshotWriteError::Output(error) => {
-            error
-        }
-        crate::SnapshotWriteError::Format(error) => error.into(),
-    })?;
-    Ok(())
-}
-
-/// An addition-only update while captures wait to publish: each waiting
-/// raise moves to `version`, its audience captured again through this
-/// device's newest write, so every capture is taken at the version its raise
-/// publishes and the snapshot's header names it (§17.1; queue
-/// `RaiseCaptures.capture_at_raise_version`). Returns whether any waited.
 pub(crate) fn raise_to(
     db: &DatabaseConnection,
-    tables: &[crate::SyncedTable],
+    _tables: &[crate::SyncedTable],
     device: DeviceId,
     version: u32,
 ) -> Result<bool, DbError> {
-    let waiting = rows(db)?;
-    if waiting.is_empty() {
+    if captures(db, device)?.is_empty() {
         return Ok(false);
     }
-    let schema = WriteSchema::read(db, tables.to_vec())?;
-    let newest = newest_own(db, device)?;
-    for (audience, _, _, _) in waiting {
-        capture_audience(db, &schema, audience, newest, version)?;
-    }
+    let newest: Vec<u8> = db.query_row(
+        &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
+        [device.0.to_be_bytes()],
+        |r| r.get(0),
+    )?;
+    db.internal_execute(
+        "UPDATE _coven_raise_captures SET version=?1,through=?2,covers=?3",
+        params![version, newest, crate::sequence::applied(db)?.to_be_bytes()],
+    )?;
     Ok(true)
 }
 
-/// This device's newest write, which a capture taken again runs through.
-fn newest_own(db: &DatabaseConnection, device: DeviceId) -> Result<WriteId, DbError> {
-    crate::download::positions(db)?
-        .0
-        .into_iter()
-        .find(|id| id.device == device)
-        .ok_or(DbError::Invariant {
-            what: "a captured device has its own migration marker",
-        })
-}
-
-/// Before an audience's raise snapshot is prepared, after a completed
-/// catch-up: keep its capture if that catch-up applied nothing past it,
-/// otherwise capture the audience again through this device's newest write
-/// (§15's preparation rule; io `RaiseHistory`). A capture also goes stale
-/// once another audience's capture let own writes past its `through` upload.
-/// Returns the capture to send, or none when a later migration replaced it.
 pub(crate) fn prepare(
     db: &DatabaseConnection,
-    schema: &WriteSchema,
+    _schema: &WriteSchema,
     device: DeviceId,
     selected: &Audience,
     version: u32,
 ) -> Result<Option<RaiseCapture>, DbError> {
-    let Some(capture) = captures(db, device)?
-        .into_iter()
-        .find(|c| c.audience == *selected && c.version == version)
-    else {
-        return Ok(None);
-    };
-    let positions = crate::download::positions(db)?;
-    let remote = |positions: &WritePositions| -> Vec<WriteId> {
-        positions
-            .0
-            .iter()
-            .copied()
-            .filter(|id| id.device != device)
-            .collect()
-    };
-    let entries: EntryPositions = decoded(merge_fields::decode_entry_positions(&db.query_row(
-        "SELECT store_log FROM _coven_raise_captures WHERE audience=?1",
-        [audience_text(selected)],
-        |r| r.get::<_, Vec<u8>>(0),
-    )?))?;
-    let sendable = captured_through(db)?.unwrap_or(0);
-    if remote(&capture.writes) == remote(&positions)
-        && entries == crate::store_log::positions(db)?
-        && capture.through.number >= sendable
-    {
-        return Ok(Some(capture));
-    }
-    capture_audience(
-        db,
-        schema,
-        selected.clone(),
-        newest_own(db, device)?,
-        version,
+    db.internal_execute(
+        "UPDATE _coven_raise_captures SET covers=?1 WHERE audience=?2 AND version=?3",
+        params![
+            crate::sequence::applied(db)?.to_be_bytes(),
+            audience_text(selected),
+            version
+        ],
     )?;
     Ok(captures(db, device)?
         .into_iter()
-        .find(|c| c.audience == *selected))
+        .find(|capture| capture.audience == *selected && capture.version == version))
 }
 
-/// The newest own write any capture's prefix includes: the upload gate sends
-/// own writes through it before a raise is kept (§17.1).
 pub(crate) fn captured_through(db: &DatabaseConnection) -> Result<Option<u64>, DbError> {
-    Ok(rows(db)?
-        .into_iter()
-        .map(|(_, _, through, _)| through)
-        .max())
+    db.query_row("SELECT max(through) FROM _coven_raise_captures", [], |r| {
+        Ok(r.get::<_, Option<Vec<u8>>>(0)?.map(counter))
+    })
 }
 
-/// Received writes are interpreted under the captures as if their raises
-/// were kept: an uncovered older-version part is converted or excluded at
-/// the capture's version, as every device does once the raise is kept.
-pub(crate) fn provisional(
-    db: &DatabaseConnection,
-) -> Result<Vec<(Audience, u32, WritePositions)>, DbError> {
-    Ok(rows(db)?
-        .into_iter()
-        .map(|(audience, version, _, writes)| (audience, version, writes))
-        .collect())
-}
-
-pub(crate) fn captures(
-    db: &DatabaseConnection,
-    device: DeviceId,
-) -> Result<Vec<RaiseCapture>, DbError> {
-    Ok(rows(db)?
-        .into_iter()
-        .map(|(audience, version, through, writes)| RaiseCapture {
-            audience,
-            version,
-            through: WriteId {
-                device,
-                number: through,
-            },
-            writes,
-        })
-        .collect())
-}
-
-fn rows(db: &DatabaseConnection) -> Result<Vec<(Audience, u32, u64, WritePositions)>, DbError> {
+pub(crate) fn provisional(db: &DatabaseConnection) -> Result<Vec<(Audience, u32, u64)>, DbError> {
     db.query(
-        "SELECT audience,version,through,writes FROM _coven_raise_captures ORDER BY audience",
+        "SELECT audience,version,covers FROM _coven_raise_captures ORDER BY audience",
         [],
         |r| {
             Ok((
                 audience(&r.get::<_, String>(0)?)?,
                 r.get(1)?,
                 counter(r.get(2)?),
-                decoded(merge_fields::decode_write_positions(
-                    &r.get::<_, Vec<u8>>(3)?,
-                ))?,
             ))
         },
     )
 }
 
-/// Stream the captured plaintext under its published identity: a header
-/// frame for `id`, then the captured records and end marker unchanged.
-pub(crate) fn write<E>(
+pub(crate) fn captures(
     db: &DatabaseConnection,
-    id: SnapshotId,
-    version: u32,
-    begin: impl FnOnce(&SnapshotHeader) -> Result<(), E>,
-    mut emit: impl FnMut(Vec<u8>) -> Result<(), E>,
-) -> Result<(), crate::SnapshotWriteError<E>> {
-    let text = audience_text(&id.audience);
-    let captured = db
-        .query(
-            "SELECT version,schema_version,writes,store_log,counts FROM _coven_raise_captures WHERE audience=?1",
-            [&text],
-            |r| {
-                Ok((
-                    r.get::<_, u32>(0)?,
-                    r.get::<_, u32>(1)?,
-                    decoded(merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(2)?))?,
-                    decoded(merge_fields::decode_entry_positions(&r.get::<_, Vec<u8>>(3)?))?,
-                    r.get::<_, Vec<u8>>(4)?,
-                ))
-            },
-        )?
-        .pop();
-    let Some((captured_version, schema_version, writes, store_log, counts)) = captured else {
-        return Err(DbError::DamagedDatabase.into());
-    };
-    if captured_version != version || counts.len() != 8 * SECTIONS {
-        return Err(DbError::DamagedDatabase.into());
-    }
-    let mut sections = [0u64; SECTIONS];
-    for (section, bytes) in sections.iter_mut().zip(counts.chunks_exact(8)) {
-        *section = u64::from_be_bytes(bytes.try_into().expect("eight bytes"));
-    }
-    let (encoder, header_frame) = SnapshotEncoder::start(SnapshotHeader {
-        id,
-        schema_version,
-        writes,
-        store_log,
-        counts: sections,
-    })?;
-    begin(encoder.header()).map_err(crate::SnapshotWriteError::Output)?;
-    emit(header_frame).map_err(crate::SnapshotWriteError::Output)?;
-    db.for_each(
-        "SELECT frame FROM _coven_raise_capture_frames WHERE audience=?1 ORDER BY sequence",
-        [&text],
+    device: DeviceId,
+) -> Result<Vec<RaiseCapture>, DbError> {
+    db.query(
+        "SELECT audience,version,through,covers FROM _coven_raise_captures ORDER BY audience",
+        [],
         |r| {
-            emit(r.get::<_, Vec<u8>>(0).map_err(DbError::from)?)
-                .map_err(crate::SnapshotWriteError::Output)
+            Ok(RaiseCapture {
+                audience: audience(&r.get::<_, String>(0)?)?,
+                version: r.get(1)?,
+                through: WriteId {
+                    device,
+                    number: counter(r.get(2)?),
+                },
+                covers: counter(r.get(3)?),
+            })
         },
     )
 }
 
-/// Forget an audience's capture once its raise is published or superseded.
+pub(crate) fn write<E>(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    id: SnapshotId,
+    version: u32,
+    begin: impl FnOnce(&SnapshotHeader) -> Result<(), E>,
+    emit: impl FnMut(Vec<u8>) -> Result<(), E>,
+) -> Result<(), crate::SnapshotWriteError<E>> {
+    let capture = captures(db, id.device)?
+        .into_iter()
+        .find(|capture| capture.audience == id.audience && capture.version == version)
+        .ok_or(DbError::DamagedDatabase)?;
+    if crate::upload::unconfirmed(db, capture.through)?.is_some() {
+        return Err(DbError::ClaimUnsettled.into());
+    }
+    if capture.covers != crate::sequence::applied(db)? {
+        return Err(DbError::CaptureChanged.into());
+    }
+    crate::snapshot_write::write(db, schema, id, begin, emit)
+}
+
 pub(crate) fn discard(
     db: &DatabaseConnection,
     audience: &Audience,

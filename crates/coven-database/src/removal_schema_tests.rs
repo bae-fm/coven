@@ -314,9 +314,7 @@ async fn unnamed_checks_on_one_generated_column_keep_each_loss_identity() {
                     .collect::<Vec<_>>(),
                 [&expected]
             );
-            snapshots.push(
-                crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await,
-            );
+            snapshots.push(crate::tests::data(&db, coven_merge::Audience::Store));
             let target_store = TestStore::new();
             let target = target_store
                 .builder(tables(), migrations())
@@ -414,7 +412,11 @@ async fn unnamed_check_sqlite_differential() {
                 &schema.rules["notes"],
                 &state,
                 &values,
-                |_| record.header.timestamp,
+                |_| {
+                    Ok(coven_merge::ClaimOrder::Local {
+                        number: record.header.position.number,
+                    })
+                },
             )
             .unwrap()
             .failed_checks;

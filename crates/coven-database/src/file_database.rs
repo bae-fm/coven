@@ -148,7 +148,7 @@ impl FileDatabase {
         })
         .await
     }
-    /// The uploader's replayed state and its own record about `subject`, read
+    /// The uploader's applied state and its own record about `subject`, read
     /// in one committed state: the evidence a confirmed absence is judged
     /// with (§16.1). A device with no registration here has no removal or
     /// replacement either, so it reads as active.
@@ -166,7 +166,7 @@ impl FileDatabase {
                     .query(
                         "SELECT state FROM _coven_devices WHERE device=?1",
                         [uploader.0.to_be_bytes()],
-                        |r| crate::store_log_tables::device_state(r.get(0)?),
+                        |r| crate::store_state_tables::device_state(r.get(0)?),
                     )?
                     .pop()
                     .unwrap_or(crate::DeviceState::Active);

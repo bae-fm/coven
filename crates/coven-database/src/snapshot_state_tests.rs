@@ -44,6 +44,7 @@ async fn active_loss_records_require_their_merge_history_and_removed_rows_can_re
     };
     sql(a, "INSERT INTO notes VALUES('n',1,3)").await.unwrap();
     let initial = records(a)[0].clone();
+    a.receive(initial.clone().into()).await.unwrap();
     for database in [b, c, extra] {
         database.receive(initial.clone().into()).await.unwrap();
     }

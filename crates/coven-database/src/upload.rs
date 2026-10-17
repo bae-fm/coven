@@ -262,8 +262,12 @@ pub(crate) fn each_plaintext(
 
 pub(crate) fn prepare(
     database: &DatabaseConnection,
-    log: &crate::StoreLog,
-    select: impl FnOnce(&crate::StoreLog, u32, &WriteHeaderFrame) -> Result<WriteObjectPrefix, DbError>,
+    log: &crate::StoreState,
+    select: impl FnOnce(
+        &crate::StoreState,
+        u32,
+        &WriteHeaderFrame,
+    ) -> Result<WriteObjectPrefix, DbError>,
 ) -> Result<Option<WriteId>, DbError> {
     database.stream_transaction(|database| {
         let Some(entry) = oldest(database)? else {
@@ -297,7 +301,7 @@ pub(crate) fn unconfirmed(
 ) -> Result<Option<WriteId>, DbError> {
     Ok(db
         .query(
-            "SELECT number FROM _coven_uploads WHERE device=?1 AND number<=?2 ORDER BY number LIMIT 1",
+            "SELECT u.number FROM _coven_uploads u JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number WHERE u.device=?1 AND u.number<=?2 AND w.slot IS NULL ORDER BY u.number LIMIT 1",
             params![
                 through.device.0.to_be_bytes().as_slice(),
                 through.number.to_be_bytes().as_slice()
@@ -310,68 +314,6 @@ pub(crate) fn unconfirmed(
             },
         )?
         .pop())
-}
-
-pub(crate) fn succeeded(database: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {
-    database.stream_transaction(|database| {
-        let exists = database.query_row(
-            "SELECT EXISTS(SELECT 1 FROM _coven_uploads WHERE device=?1 AND number=?2)",
-            params![
-                write.device.0.to_be_bytes().as_slice(),
-                write.number.to_be_bytes().as_slice()
-            ],
-            |r| r.get::<_, bool>(0),
-        )?;
-        if !exists {
-            return Ok(false);
-        }
-        let entry = oldest(database)?
-            .filter(|e| e.write == write)
-            .ok_or(DbError::UploadNotOldest { write })?;
-        if entry.keys.is_none() {
-            return Err(DbError::UploadNotAttempted { write });
-        }
-        let (header, _, _) = plaintext(database, &entry)?;
-        crate::write_headers::retain(database, &header)?;
-        crate::pending::clear_log(database, crate::LogObject::Write(write))?;
-        database.internal_execute("DELETE FROM _coven_uploads WHERE rowid=?1", [entry.rowid])?;
-        Ok(true)
-    })
-}
-
-pub(crate) fn session(
-    database: &DatabaseConnection,
-    write: WriteId,
-) -> Result<Option<Vec<u8>>, DbError> {
-    database.query_row(
-        "SELECT (SELECT session FROM _coven_write_upload_sessions WHERE device=?1 AND number=?2)",
-        params![
-            write.device.0.to_be_bytes().as_slice(),
-            write.number.to_be_bytes().as_slice()
-        ],
-        |r| r.get(0),
-    )
-}
-
-pub(crate) fn keep_session(
-    database: &DatabaseConnection,
-    write: WriteId,
-    bytes: Vec<u8>,
-) -> Result<(), DbError> {
-    database.stream_transaction(|database| {
-        if oldest(database)?.is_none_or(|e| e.write != write || e.keys.is_none()) {
-            return Err(DbError::UploadNotOldest { write });
-        }
-        database.internal_execute(
-            "INSERT INTO _coven_write_upload_sessions(device,number,session) VALUES(?1,?2,?3) ON CONFLICT(device,number) DO UPDATE SET session=excluded.session",
-            params![
-                write.device.0.to_be_bytes().as_slice(),
-                write.number.to_be_bytes().as_slice(),
-                bytes
-            ],
-        )?;
-        Ok(())
-    })
 }
 
 #[cfg(test)]

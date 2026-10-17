@@ -1,19 +1,17 @@
 //! Install streamed plaintext with row replacement and local replay in one commit.
 
 use crate::merge_store::MergeStore;
-use crate::removal_view::DatabaseRemovalView;
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_metadata::SnapshotMetadata;
 use crate::sqlite::DatabaseConnection;
-use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
+use coven_format::admin::SnapshotId;
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
 use coven_format::snapshot_stream::SnapshotChunkDecoder;
-use coven_format::store_log::SnapshotId;
 use coven_merge::RowId;
 use rusqlite::params;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 use std::io::Read;
 
 /// Who signed a snapshot being loaded, and how to authenticate the other
@@ -32,61 +30,38 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
     reload: crate::SnapshotReload<R, W>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
-    database.transaction(|database| {
+    database.stream_transaction(|database| {
         let crate::SnapshotReload {
             snapshots,
-            writes,
-            absent,
+            slots,
+            target,
+            state,
+            cutoffs,
             boundaries,
-            expected_entries,
             operation,
             authorship,
         } = reload;
-        if let Some(expected) = expected_entries {
-            let current = database.query(
-                "SELECT device,number FROM _coven_store_log ORDER BY device,number",
-                [],
-                |row| crate::store_log_tables::entry_id(row, 0),
-            )?;
-            if current != expected {
-                return Err(DbError::StoreLogEntriesChanged);
+        if target < crate::sequence::applied(database)? {
+            return Err(invalid("reload target precedes committed applied slot"));
+        }
+        crate::store_state_tables::replace(database, &state)?;
+        database.internal_execute("DELETE FROM _coven_cutoffs", [])?;
+        for (slot, change) in cutoffs {
+            if slot.0 > target {
+                return Err(invalid("cut-off exceeds reload target"));
             }
+            crate::sequence::cutoff(database, slot, &change)?;
         }
-        if snapshots.is_empty() {
-            return Err(invalid("reload has no snapshots"));
+        let resets = crate::BoundaryCoverage::replace(database, boundaries)?;
+        if !resets.is_empty() {
+            crate::pending::reset(database)?;
         }
-        let mut selected = BTreeSet::new();
-        for source in &snapshots {
-            let audience = match source {
-                crate::SnapshotSource::Stored { id, .. } => &id.audience,
-                crate::SnapshotSource::Empty(audience) => audience,
-            };
-            if !selected.insert(audience.clone()) {
-                return Err(invalid("reload repeats an audience"));
-            }
-            // The rows being replaced, under the boundaries they were applied with.
-            crate::entry_inputs::original(database, schema, audience)?;
-        }
-        let applied = crate::download::positions(database)?;
-        let mut causes = BTreeSet::new();
-        for audience in &selected {
-            causes.extend(crate::entry_inputs::applied(database, audience)?);
-        }
-        if let Some(boundaries) = boundaries {
-            let resets = crate::BoundaryCoverage::replace(database, boundaries)?;
-            crate::pending::suppress(database, &resets)?;
-            crate::pending::refresh(database)?;
-        }
-        let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(database)?;
-        let visible = AppView::after(before, schema);
-        let old_store = MergeStore::from_schema(before, &schema.schema);
-        let deleted = crate::store_log_tables::deleted_circles(database)?;
-        let empty = BTreeMap::new();
-        let old =
-            DatabaseRemovalView::new(before, &old_store, schema, &visible, &empty, &deleted, None)?;
+        let mut coverage = crate::snapshot_coverage::SnapshotCoverage::new(target);
+        crate::download_stage::begin(database)?;
+        let mut touched = crate::published::restore(database, schema)?;
         crate::snapshot_state::create_tables(database)?;
-        let mut touched = BTreeSet::new();
         let mut loaded = Vec::new();
+        let mut selected = BTreeSet::new();
         for source in snapshots {
             match source {
                 crate::SnapshotSource::Stored {
@@ -95,90 +70,87 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
                     input,
                     author,
                 } => {
-                    let signer = SnapshotSigner {
-                        authorship: authorship.as_ref(),
-                        author: Some(author),
-                    };
-                    // The only parse of this body: a failure names the
-                    // snapshot, whose bytes sync then refuses (§19.1).
-                    let (header, rows, files) = read(database, schema, &id, prefix, input, &signer)
-                        .and_then(|(header, rows)| {
-                            let files = crate::database::file_retention::snapshot_references(
-                                database,
-                                &id.audience,
-                                schema,
-                            )?;
-                            Ok((header, rows, files))
-                        })
-                        .map_err(|error| SnapshotError::Body {
-                            snapshot: id.clone(),
-                            error: Box::new(error),
-                        })?;
-                    loaded.push(crate::LoadedSnapshot {
-                        id: id.clone(),
-                        files,
-                    });
-                    // Writes covered here but never applied individually are not
-                    // retained, so earlier inputs cannot reproduce this audience.
-                    if !header.writes.0.iter().all(|write| applied.covers(*write)) {
-                        crate::entry_inputs::forget(database, &id.audience, None)?;
+                    if !selected.insert(id.audience.clone()) {
+                        return Err(invalid("reload repeats an audience"));
                     }
-                    let store = MergeStore::from_snapshot(database, &schema.schema, &selected);
-                    let retained = crate::entry_inputs::retain(
+                    let (header, rows) = read(
                         database,
-                        crate::entry_inputs::Origin::Snapshot(&id),
-                        header.schema_version,
-                        &header.writes,
-                        &store,
+                        schema,
+                        &id,
+                        prefix,
+                        input,
+                        &SnapshotSigner {
+                            authorship: authorship.as_ref(),
+                            author: Some(author),
+                        },
+                    )
+                    .map_err(|error| SnapshotError::Body {
+                        snapshot: id.clone(),
+                        error: Box::new(error),
+                    })?;
+                    let files = crate::database::file_retention::snapshot_references(
+                        database,
+                        &id.audience,
                         schema,
                     )?;
-                    crate::entry_inputs::selected(database, &id.audience, retained)?;
-                    coverage.loaded(id.audience, header.writes);
+                    coverage.loaded(id.audience.clone(), header.covers)?;
+                    database.internal_execute(
+                        "DELETE FROM _coven_raise_captures WHERE audience=?1 AND version<=?2",
+                        params![
+                            crate::write_encoding::audience_text(&id.audience),
+                            header.schema_version
+                        ],
+                    )?;
+                    database.internal_execute(
+                        "DELETE FROM _coven_migration_losses WHERE audience=?1",
+                        [crate::write_encoding::audience_text(&id.audience)],
+                    )?;
                     touched.extend(rows);
+                    loaded.push(crate::LoadedSnapshot { id, files });
                 }
                 crate::SnapshotSource::Empty(audience) => {
+                    if !selected.insert(audience.clone()) {
+                        return Err(invalid("reload repeats an audience"));
+                    }
                     touched.extend(crate::snapshot_state::begin(database, schema, &audience)?);
-                    let store = MergeStore::from_snapshot(database, &schema.schema, &selected);
-                    let retained = crate::entry_inputs::retain(
-                        database,
-                        crate::entry_inputs::Origin::Empty(&audience),
-                        database.schema_version()?,
-                        &coven_format::value::WritePositions(Vec::new()),
-                        &store,
-                        schema,
-                    )?;
-                    crate::entry_inputs::selected(database, &audience, retained)?;
-                    coverage.loaded(audience, coven_format::value::WritePositions(Vec::new()));
+                    crate::ownership::clear_audience(database, &audience)?;
+                    coverage.loaded(audience, 0)?;
                 }
             }
         }
-        // Rows the loaded data replaces depend on the boundaries applied before
-        // and on those selecting it now; their local children are kept (§8.4).
-        causes.extend(
-            crate::Boundary::load_selected(database)?
-                .iter()
-                .filter(|boundary| selected.contains(&boundary.snapshot().audience))
-                .map(crate::Boundary::entry),
-        );
-        let current = MergeStore::from_snapshot(database, &schema.schema, &selected);
-        let mut affected = crate::write_apply::WriteApply::new(
-            database, schema, &current, &visible, &visible, &deleted,
-        )
-        .caused_by(causes)
-        .replace(&old, touched)?;
-        crate::snapshot_state::drop_tables(database)?;
-        affected.extend(crate::snapshot_writes::apply::<P, _>(
-            database, schema, writes, absent, coverage, &deleted,
-        )?);
-        // Waits for writes these positions now cover end with this commit.
-        crate::pending::clear_covered_writes(database)?;
-        // Retention sees the final state, including every replayed waiting write.
-        files.retain_rows(affected)?;
-        files.before_commit()?;
         for audience in &selected {
-            crate::entry_effects::clear_reload(database, audience)?;
+            database.internal_execute(
+                "DELETE FROM temp._coven_download_rows WHERE audience=?1",
+                [crate::write_encoding::audience_text(audience)],
+            )?;
         }
-        crate::entry_inputs::release(database)?;
+        // Move each loaded merge row's raw values into the common staging view.
+        let stored =
+            MergeStore::from_snapshot(database, &schema.schema, &selected).without_row_cache();
+        for audience in &selected {
+            database.for_each(
+                "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
+                [crate::write_encoding::audience_text(audience)],
+                |r| {
+                    let row = crate::row_queries::read_identity(r)?;
+                    crate::download_stage::put_values(
+                        database,
+                        &row,
+                        &stored.row_without_losses(&row)?.state,
+                    )
+                },
+            )?;
+        }
+        crate::snapshot_state::drop_tables(database)?;
+        crate::snapshot_writes::apply::<P, _>(database, schema, slots, &coverage)?;
+        for audience in &selected {
+            crate::reload_gate::clear_reload(database, audience)?;
+        }
+        crate::queued_writes::overlay(database, schema)?;
+        let deleted = crate::store_state_tables::deleted_circles(database)?;
+        crate::download_stage::materialize(database, before, schema, &deleted, touched, files)?;
+        crate::pending::clear_covered_slots(database)?;
+        files.before_commit()?;
         if let Some(operation) = operation {
             crate::operation::advance(database, &operation)?;
         }
@@ -224,7 +196,7 @@ pub(crate) fn read(
             let record = record.map_err(SnapshotError::Format)?;
             if !checked_header {
                 if let Some(header) = decoder.header() {
-                    check_header(database, schema, expected, header)?;
+                    check_header(schema, expected, header)?;
                     checked_header = true;
                 }
             }
@@ -285,8 +257,19 @@ pub(crate) fn read(
                 SnapshotRecord::Evidence(evidence) => {
                     crate::authorship::load(database, authorship, &expected.audience, &evidence)?
                 }
+                SnapshotRecord::Admin(original) => {
+                    crate::sequence_apply::retain(database, "admin", &original)?
+                }
+                SnapshotRecord::KeyCopy(original) => {
+                    crate::sequence_apply::retain(database, "key", &original)?
+                }
+                SnapshotRecord::Announcement(original) => {
+                    crate::sequence_apply::retain(database, "announcement", &original)?
+                }
+                SnapshotRecord::Claim(claim) => {
+                    database.internal_execute("INSERT INTO _coven_last_claims(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=max(number,excluded.number)",params![claim.device.0.to_be_bytes(),claim.number.to_be_bytes()])?;
+                }
                 SnapshotRecord::Authored(authored) => {
-                    crate::write_landing::agrees(database, &authored)?;
                     crate::write_sources::load_evidence(database, &authored)?;
                     carried.insert((
                         authored.header.position,
@@ -312,12 +295,12 @@ pub(crate) fn read(
     let header = decoder
         .header()
         .ok_or_else(|| invalid("snapshot has no header"))?;
-    check_header(database, schema, expected, header)?;
-    metadata.validate(&header.writes)?;
+    check_header(schema, expected, header)?;
+    metadata.validate(header.covers)?;
     crate::write_sources::forget_own_migration(
         database,
         &expected.audience,
-        &header.writes,
+        header.covers,
         &carried,
     )?;
     crate::snapshot_state::finish(database)?;
@@ -338,7 +321,6 @@ pub(crate) fn read(
 }
 
 fn check_header(
-    database: &DatabaseConnection,
     schema: &WriteSchema,
     expected: &SnapshotId,
     header: &SnapshotHeader,
@@ -354,20 +336,6 @@ fn check_header(
             database: *schema.versions.end(),
         }
         .into());
-    }
-    let mut missing = Vec::new();
-    for entry in &header.store_log.0 {
-        let number: Option<Vec<u8>> = database.query_row(
-            "SELECT max(number) FROM _coven_store_log WHERE device=?1",
-            [entry.device.0.to_be_bytes().as_slice()],
-            |r| r.get(0),
-        )?;
-        if number.map_or(0, crate::write_encoding::counter) < entry.number {
-            missing.push(*entry);
-        }
-    }
-    if !missing.is_empty() {
-        return Err(SnapshotError::StoreLog { missing }.into());
     }
     Ok(())
 }

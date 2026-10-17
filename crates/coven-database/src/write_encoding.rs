@@ -36,23 +36,15 @@ pub(crate) fn decode_failure(
     rusqlite::Error::FromSqlConversionFailure(column, kind, Box::new(error))
 }
 
-/// Writes and entries share a clock; fixed local entries count even before upload.
+/// Applied and locally queued originals share one timestamp clock.
 pub(crate) fn latest_timestamp(
     database: &crate::sqlite::DatabaseConnection,
 ) -> Result<Option<Timestamp>, DbError> {
-    // Applied writes and entries supply indexed maxima; the queue holds at most one entry.
-    database.query_row(
-        "SELECT max(timestamp) FROM (
-            SELECT max(timestamp) AS timestamp FROM _coven_writes UNION ALL
-            SELECT max(timestamp) FROM _coven_store_log UNION ALL
-            SELECT max(timestamp) FROM _coven_store_log_uploads)",
-        [],
-        |row| {
-            row.get::<_, Option<Vec<u8>>>(0)?
-                .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
-                .transpose()
-        },
-    )
+    database.query_row("SELECT max(timestamp) FROM _coven_writes", [], |row| {
+        row.get::<_, Option<Vec<u8>>>(0)?
+            .map(|bytes| decoded(coven_format::merge_fields::decode_timestamp(&bytes)))
+            .transpose()
+    })
 }
 
 pub(crate) fn timestamp(

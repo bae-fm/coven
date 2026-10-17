@@ -29,16 +29,6 @@ pub(crate) fn carry(
                 continue;
             }
         }
-        db.for_each::<_, crate::DbError>(
-            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1",
-            [&table.name],
-            |r| {
-                crate::fingerprint::forget_rows(
-                    db,
-                    std::iter::once(&crate::row_queries::read_identity(r)?),
-                )
-            },
-        )?;
         if !names.tables.contains_key(&table.name) {
             for child in ["_coven_references", "_coven_cells", "_coven_claims"] {
                 db.internal_execute(&format!("DELETE FROM {child} WHERE row_id IN (SELECT id FROM _coven_rows WHERE table_name=?1)"), [&table.name])?;
@@ -79,7 +69,15 @@ pub(crate) fn freeze(db: &DatabaseConnection, ids: Vec<i64>) -> Result<(), DbErr
             [id],
             crate::loss_record::read,
         )?;
-        crate::loss_record::put(db, &frozen(loss), Some(id))?;
+        let loss = frozen(loss);
+        db.internal_execute(
+            "INSERT INTO temp._coven_migration_frozen(audience,record) VALUES(?1,?2)",
+            params![
+                crate::write_encoding::audience_text(&loss.row.audience),
+                encoded(merge_fields::encode_loss(&loss))?
+            ],
+        )?;
+        crate::loss_record::put(db, &loss, Some(id))?;
     }
     Ok(())
 }
@@ -400,7 +398,7 @@ pub(crate) fn refresh(
     schema: &WriteSchema,
     tables: &BTreeSet<String>,
 ) -> Result<(), DbError> {
-    let deleted = crate::store_log_tables::deleted_circles(db)?;
+    let deleted = crate::store_state_tables::deleted_circles(db)?;
     for table in tables {
         db.for_each::<_, crate::DbError>(
             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE table_name=?1",

@@ -16,22 +16,7 @@ pub(crate) fn commit(
     store: &MergeStore<'_>,
     updates: &BTreeMap<RowId, RowUpdate<Value>>,
 ) -> Result<(), DbError> {
-    let write_id = retain_metadata(
-        database,
-        &coven_format::snapshot_rows::AppliedWrite {
-            id: record.header.position,
-            timestamp: record.header.timestamp,
-            had_read: record.header.had_read.clone(),
-        },
-    )?;
-    database.internal_execute(
-        "INSERT INTO _coven_positions(device,number) VALUES(?1,?2)
-         ON CONFLICT(device) DO UPDATE SET number=max(number,excluded.number)",
-        params![
-            record.header.position.device.0.to_be_bytes().as_slice(),
-            record.header.position.number.to_be_bytes().as_slice()
-        ],
-    )?;
+    let write_id = retain_original(database, &record.header, None)?;
     persist(
         database,
         updates,
@@ -50,23 +35,65 @@ pub(crate) fn retain_metadata(
     database: &DatabaseConnection,
     write: &coven_format::snapshot_rows::AppliedWrite,
 ) -> Result<i64, DbError> {
-    let stamp = encoded(merge_fields::encode_timestamp(&write.timestamp))?;
-    let past = encoded(merge_fields::encode_write_positions(&write.had_read))?;
-    let known=database.query(&format!("SELECT id,timestamp,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice()],|r| Ok((r.get::<_,i64>(0)?,r.get::<_,Vec<u8>>(1)?,r.get::<_,Vec<u8>>(2)?)))?;
-    if let Some((ordinal, old_stamp, old_past)) = known.into_iter().next() {
-        if old_stamp != stamp || old_past != past {
+    retain(
+        database,
+        write.id,
+        write.timestamp,
+        write.read_through,
+        Some(write.slot),
+    )
+}
+
+pub(crate) fn retain_original(
+    database: &DatabaseConnection,
+    header: &coven_format::write::WriteHeader,
+    slot: Option<coven_merge::Slot>,
+) -> Result<i64, DbError> {
+    retain(
+        database,
+        header.position,
+        header.timestamp,
+        header.read_through,
+        slot,
+    )
+}
+
+fn retain(
+    database: &DatabaseConnection,
+    id: WriteId,
+    timestamp: coven_merge::Timestamp,
+    read_through: u64,
+    slot: Option<coven_merge::Slot>,
+) -> Result<i64, DbError> {
+    let stamp = encoded(merge_fields::encode_timestamp(&timestamp))?;
+    let known = database.query(
+        &format!("SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
+        params![id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()],
+        |r| Ok((r.get::<_,i64>(0)?, r.get::<_,Vec<u8>>(1)?, r.get::<_,Vec<u8>>(2)?, r.get::<_,Option<Vec<u8>>>(3)?)))?;
+    if let Some((ordinal, old_stamp, old_past, old_slot)) = known.into_iter().next() {
+        if old_stamp != stamp
+            || crate::write_encoding::counter(old_past) != read_through
+            || slot
+                .zip(old_slot.as_ref())
+                .is_some_and(|(s, old)| s.0.to_be_bytes().as_slice() != old)
+        {
             return Err(DbError::InvalidWrite {
-                write: write.id,
-                error: coven_merge::MergeError::DuplicateWrite(write.id),
+                write: id,
+                error: coven_merge::MergeError::DuplicateWrite(id),
             });
+        }
+        if let Some(slot) = slot.filter(|_| old_slot.is_none()) {
+            database.internal_execute(
+                "UPDATE _coven_writes SET slot=?1 WHERE id=?2",
+                params![slot.0.to_be_bytes().as_slice(), ordinal],
+            )?;
         }
         return Ok(ordinal);
     }
     database.query_row(
-        "INSERT INTO _coven_writes(timestamp,number,had_read) VALUES(?1,?2,?3) RETURNING id",
-        params![stamp, write.id.number.to_be_bytes().as_slice(), past],
-        |r| r.get(0),
-    )
+        "INSERT INTO _coven_writes(timestamp,number,read_through,slot) VALUES(?1,?2,?3,?4) RETURNING id",
+        params![stamp, id.number.to_be_bytes().as_slice(), read_through.to_be_bytes().as_slice(), slot.map(|s|s.0.to_be_bytes().to_vec())],
+        |r| r.get(0))
 }
 
 pub(crate) fn persist(
@@ -162,7 +189,7 @@ pub(crate) fn queue(
     record: &WriteRecord,
 ) -> Result<(), DbError> {
     for part in &record.parts {
-        if crate::entry_effects::refuses_writes(database, &part.audience)? {
+        if crate::reload_gate::reloading(database, &part.audience)? {
             return Err(DbError::AudienceReloading(part.audience.clone()));
         }
         check_membership(database, record.header.position.device, &part.audience)?;
@@ -221,7 +248,6 @@ pub(crate) fn retain_queue(
         }
         crate::write_sources::complete(database, &record.header, &part.audience)?;
     }
-    crate::retained_writes::record(database, record)?;
     let encoder = encoded(WriteEncoder::new(record))?;
     let bytes = plaintext(database, encoder)?;
     database.internal_execute(

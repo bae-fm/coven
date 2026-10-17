@@ -185,6 +185,7 @@ impl MigrationSnapshot {
         schema: &Schema,
         synced: &BTreeSet<String>,
     ) -> Result<Self, DbError> {
+        crate::published::before_migration(db, schema)?;
         let mut tables = BTreeMap::new();
         for table in schema
             .tables

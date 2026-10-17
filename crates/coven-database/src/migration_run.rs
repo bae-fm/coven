@@ -176,10 +176,7 @@ pub(crate) fn run<'a>(
         )?);
     }
     if marker.is_none() && !steps.is_empty() {
-        // An addition changes no merge state, but each row's agreement leaf
-        // covers its table's columns: recompute the changed tables' leaves so
-        // the fingerprint is a function of the state, not of when a column
-        // arrived (§19.1).
+        // Added columns can change generated values and removal predicates.
         let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
         let changed = steps[0].before.changed_tables(&final_schema);
         let refresh: BTreeSet<String> = schema
@@ -210,6 +207,8 @@ fn finish(
 ) -> Result<coven_merge::WriteId, DbError> {
     let schema = crate::write_schema::WriteSchema::read(database, tables.to_vec())?;
     schema.with_evaluators(database, || {
+        database.batch("CREATE TEMP TABLE _coven_migration_frozen(audience TEXT NOT NULL,record BLOB NOT NULL)")?;
+        crate::published_migration::carry(database,names,&schema)?;
         let hidden = crate::migration_hidden::Hidden::before(database, initial_schema, names)?;
         let refresh = crate::migration_state::carry(database, initial_schema, names, &schema)?;
         crate::row_queries::register_schema(database, &schema.schema, tables)?;
@@ -234,14 +233,13 @@ fn finish(
             &store,
             &mut changed,
         )?;
-        let deleted = crate::store_log_tables::deleted_circles(database)?;
+        let deleted = crate::store_state_tables::deleted_circles(database)?;
         let mut changes = crate::write_record::changes(
             database, &schema, &before, &visible, &store, &changed, &deleted,
         )?;
         // Rows removal rules hide independently become ordinary deletes at
         // their generations (§17.1).
-        let selected = hidden.select(database, &schema, &visible)?;
-        hidden.freeze_dropped(database, &schema, &selected)?;
+        let selected = hidden.select();
         let mut deletes = Vec::new();
         for row in &selected {
             if let Some(change) = crate::migration_hidden::Hidden::delete(database, &store, row)? {
@@ -282,6 +280,9 @@ fn finish(
         record.parts.clear();
         crate::write_commit::queue(database, &schema, &record)?;
         crate::migration_state::refresh(database, &schema, &refresh)?;
+        crate::captured_changes::capture(database,record.header.position,record.header.schema_version)?;
+        database.internal_execute("INSERT INTO _coven_migration_losses(write_id,audience,record) SELECT ?1,audience,record FROM temp._coven_migration_frozen",[coven_format::merge_fields::encode_write_id(&record.header.position)?])?;
+        database.batch("DROP TABLE temp._coven_migration_frozen")?;
         snapshot.drop(database)?;
         Ok(record.header.position)
     })

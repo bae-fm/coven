@@ -2,12 +2,13 @@ use super::*;
 use crate::{DownloadedPartStream, DownloadedWriteStream};
 use coven_format::value::Value;
 use coven_format::write_stream::WriteEncoder;
-use std::io::Cursor;
+use coven_merge::{ColumnValue, Operation};
+use std::{collections::BTreeMap, io::Cursor};
 
 fn stream(record: &WriteRecord) -> DownloadedWriteStream<Cursor<Vec<u8>>> {
     let encoder = WriteEncoder::new(record).unwrap();
     DownloadedWriteStream {
-        published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+        signer: crate::test_utils::signer(),
         authorship: crate::test_utils::TestAuthorship::write(record),
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
@@ -34,14 +35,9 @@ async fn rejects_schema_violation(
     for streamed in [false, true] {
         let store = TestStore::new();
         let db = store.schema(tables.clone(), schema).await.unwrap();
-        let before = fingerprint(&db, Audience::Store).await;
+        let before = crate::tests::data(&db, Audience::Store);
         let result = if streamed {
-            db.receive_stream(
-                stream(&record),
-                coven_format::value::EntryPositions(Vec::new()),
-                || Ok(()),
-            )
-            .await
+            db.receive_stream(stream(&record), || Ok(())).await
         } else {
             db.receive(record.clone().into()).await
         };
@@ -49,9 +45,9 @@ async fn rejects_schema_violation(
             Ok(outcome) => accepted.push((streamed, outcome)),
             Err(DbError::Snapshot(_)) => {
                 assert_eq!(count(&db, "_coven_writes"), 0);
-                assert_eq!(count(&db, "_coven_positions"), 0);
+                assert_eq!(db.applied_slot().await.unwrap(), 0);
                 assert_eq!(count(&db, "_coven_rows"), 0);
-                assert_eq!(fingerprint(&db, Audience::Store).await, before);
+                assert_eq!(crate::tests::data(&db, Audience::Store), before);
             }
             Err(error) => panic!("expected schema validation failure: {error:?}"),
         }
@@ -118,31 +114,23 @@ async fn streamed_retarget_is_one_write_including_local_trigger_effects() {
     )
     .await
     .unwrap();
-    b.receive_stream(
-        stream(&records(&a)[0]),
-        coven_format::value::EntryPositions(Vec::new()),
-        || Ok(()),
-    )
-    .await
-    .unwrap();
+    b.receive_stream(stream(&records(&a)[0]), || Ok(()))
+        .await
+        .unwrap();
     sql(&a,"INSERT INTO parents VALUES('new'); UPDATE links SET parent='new'; DELETE FROM parents WHERE id='old'").await.unwrap();
-    b.receive_stream(
-        stream(&records(&a)[1]),
-        coven_format::value::EntryPositions(Vec::new()),
-        || Ok(()),
-    )
-    .await
-    .unwrap();
+    b.receive_stream(stream(&records(&a)[1]), || Ok(()))
+        .await
+        .unwrap();
     assert_eq!(count(&b, "links"), 1);
     assert_eq!(count(&b, "audit"), 1);
     assert_eq!(
-        fingerprint(&a, Audience::Store).await,
-        fingerprint(&b, Audience::Store).await
+        crate::tests::data(&a, Audience::Store),
+        crate::tests::data(&b, Audience::Store)
     );
 }
 
 #[tokio::test]
-async fn authentication_failure_rolls_back_rows_positions_losses_and_observation() {
+async fn authentication_failure_rolls_back_rows_slot_losses_and_observation() {
     let ids = SequentialIds::new();
     let sa = TestStore::with_ids(&ids);
     let sb = TestStore::with_ids(&ids);
@@ -158,33 +146,23 @@ async fn authentication_failure_rolls_back_rows_positions_losses_and_observation
     .await
     .unwrap();
     let record = records(&a).remove(0);
-    let before = fingerprint(&b, Audience::Store).await;
+    let before = crate::tests::data(&b, Audience::Store);
     assert!(b
-        .receive_stream(
-            stream(&record),
-            coven_format::value::EntryPositions(Vec::new()),
-            || Err(DbError::SyncStream(Box::new(std::io::Error::other(
-                "bad signature"
-            ))))
-        )
+        .receive_stream(stream(&record), || Err(DbError::SyncStream(Box::new(
+            std::io::Error::other("bad signature")
+        ))))
         .await
         .is_err());
     assert_eq!(count(&b, "notes"), 0);
     assert_eq!(count(&b, "_coven_writes"), 0);
-    assert_eq!(count(&b, "_coven_positions"), 0);
-    assert_eq!(fingerprint(&b, Audience::Store).await, before);
+    assert_eq!(b.applied_slot().await.unwrap(), 0);
+    assert_eq!(crate::tests::data(&b, Audience::Store), before);
     assert!(
         tokio::time::timeout(Duration::from_millis(20), observed.next())
             .await
             .is_err()
     );
-    b.receive_stream(
-        stream(&record),
-        coven_format::value::EntryPositions(Vec::new()),
-        || Ok(()),
-    )
-    .await
-    .unwrap();
+    b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(observed.next().await.unwrap(), ["first", "second"]);
 }
 
@@ -204,13 +182,7 @@ async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
     let mut record = records(&a).remove(0);
     record.header.schema_version = 0;
     b.exclude_version_zero().await;
-    b.receive_stream(
-        stream(&record),
-        b.store_log().await.unwrap().positions(),
-        || Ok(()),
-    )
-    .await
-    .unwrap();
+    b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(count(&b, "notes"), 0);
     assert_eq!(count(&b, "_coven_lost"), 2);
     let snapshot = crate::snapshot_write::tests::frames(&b, Audience::Store).await;
@@ -226,7 +198,7 @@ async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
 }
 
 #[tokio::test]
-async fn a_write_must_include_the_transitive_past_of_its_frontier() {
+async fn a_write_may_observe_an_earlier_prefix_than_the_latest_slot() {
     let ids = SequentialIds::new();
     let sa = TestStore::with_ids(&ids);
     let sb = TestStore::with_ids(&ids);
@@ -239,6 +211,7 @@ async fn a_write_must_include_the_transitive_past_of_its_frontier() {
         .unwrap();
     let wa = records(&a).remove(0);
     b.receive(wa.clone().into()).await.unwrap();
+    a.receive(wa.clone().into()).await.unwrap();
     c.receive(wa.into()).await.unwrap();
     sql(&b, "INSERT INTO notes VALUES('b','second','')")
         .await
@@ -249,17 +222,13 @@ async fn a_write_must_include_the_transitive_past_of_its_frontier() {
         .await
         .unwrap();
     let mut wc = records(&c).remove(0);
-    wc.header.had_read = WritePositions(vec![wb.header.position]);
+    wc.header.read_through = 1;
     a.receive(wb.into()).await.unwrap();
-    assert!(a
-        .receive_stream(
-            stream(&wc),
-            coven_format::value::EntryPositions(Vec::new()),
-            || Ok(())
-        )
-        .await
-        .is_err());
-    assert_eq!(count(&a, "notes"), 2);
+    assert_eq!(
+        a.receive_stream(stream(&wc), || Ok(())).await.unwrap(),
+        ApplyOutcome::Applied
+    );
+    assert_eq!(count(&a, "notes"), 3);
 }
 
 #[tokio::test]
@@ -290,20 +259,13 @@ async fn unknown_tables_and_columns_are_rejected_without_panicking() {
                 },
             );
         }
-        assert!(b
-            .receive_stream(
-                stream(&invalid),
-                coven_format::value::EntryPositions(Vec::new()),
-                || Ok(())
-            )
-            .await
-            .is_err());
+        assert!(b.receive_stream(stream(&invalid), || Ok(())).await.is_err());
         assert_eq!(count(&b, "notes"), 0);
     }
 }
 
 #[tokio::test]
-async fn a_stale_store_log_view_cannot_commit_a_download() {
+async fn an_unread_slot_prevents_a_later_slot_from_committing() {
     let ids = SequentialIds::new();
     let sa = TestStore::with_ids(&ids);
     let sb = TestStore::with_ids(&ids);
@@ -312,18 +274,27 @@ async fn a_stale_store_log_view_cannot_commit_a_download() {
     sql(&a, "INSERT INTO notes VALUES('one','first','')")
         .await
         .unwrap();
-    crate::store_log::tests::delete_circle(&b, CircleId(uuid::Uuid::from_u128(8)))
+    crate::tests::delete_circle(&b, CircleId(uuid::Uuid::from_u128(8)))
         .await
         .unwrap();
     let record = records(&a).remove(0);
     assert!(matches!(
-        b.receive_stream(
-            stream(&record),
-            coven_format::value::EntryPositions(Vec::new()),
-            || Ok(())
+        b.apply_slot::<crate::pending::tests::Record, _, _>(
+            crate::IncomingSlot {
+                slot: crate::Slot(3),
+                header: coven_format::sequence::SlotHeader {
+                    device: record.header.position.device,
+                    claim: 1,
+                    author: crate::tests::member(1),
+                    after: 2
+                },
+                content: crate::SlotContent::Writes(vec![stream(&record)]),
+            },
+            || Ok(()),
+            None
         )
         .await,
-        Err(DbError::StoreLogEntriesChanged)
+        Err(DbError::SequenceGap { .. })
     ));
     assert_eq!(count(&b, "notes"), 0);
 }
@@ -343,24 +314,14 @@ async fn a_panicking_authenticator_rolls_back_without_poisoning_the_writer() {
     let clone = b.clone();
     assert!(tokio::spawn(async move {
         clone
-            .receive_stream(
-                input,
-                coven_format::value::EntryPositions(Vec::new()),
-                || panic!("authenticator panicked"),
-            )
+            .receive_stream(input, || panic!("authenticator panicked"))
             .await
     })
     .await
     .unwrap_err()
     .is_panic());
     assert_eq!(count(&b, "notes"), 0);
-    b.receive_stream(
-        stream(&record),
-        coven_format::value::EntryPositions(Vec::new()),
-        || Ok(()),
-    )
-    .await
-    .unwrap();
+    b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(count(&b, "notes"), 1);
 }
 
@@ -403,6 +364,24 @@ mod memory {
             }
             next
         }
+    }
+
+    fn state_digest(db: &Database) -> coven_crypto::ObjectDigest {
+        db.inspect_writer_schema(|db,schema| {
+            let store=crate::merge_store::MergeStore::from_schema(db,&schema.schema).without_row_cache();
+            let mut digest=coven_crypto::ObjectHasher::new();
+            db.for_each("SELECT DISTINCT table_name,key,audience FROM _coven_rows ORDER BY table_name,key,audience",[],|r| {
+                let row=crate::row_queries::read_identity(r)?;
+                let state=store.row_without_losses(&row)?.state;
+                digest.update(&coven_format::merge_fields::encode_merge_row(&coven_format::snapshot_rows::MergeRow{state})?);
+                Ok::<_,DbError>(())
+            }).unwrap();
+            crate::loss_record::visit(db,&Audience::Store,|loss| {
+                digest.update(&coven_format::merge_fields::encode_loss(&loss)?);
+                Ok::<_,DbError>(())
+            }).unwrap();
+            digest.finish()
+        })
     }
 
     #[test]
@@ -457,7 +436,9 @@ mod memory {
             (&b, &a, Some("DELETE FROM parents"), 0),
         ] {
             if let Some(statement) = statement { sql(source, statement).await.unwrap(); }
-            let prepared = stream(&records(source).pop().unwrap());
+            let record=records(source).pop().unwrap();
+            source.receive_stream(stream(&record),||Ok(())).await.unwrap();
+            let prepared = stream(&record);
             // The source bytes represent the remote object: keep them alive
             // throughout measurement so releasing input cannot hide a retained
             // copy in the database's merge views.
@@ -467,11 +448,12 @@ mod memory {
             }).collect();
             assert!(held.iter().map(|bytes| bytes.len()).sum::<usize>() > 32 * 1024 * 1024);
             let input = || DownloadedWriteStream {
-                published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+                signer: crate::test_utils::signer(),
                 authorship: prepared.authorship.clone(),
                 header: prepared.header.clone(),
                 parts: held.iter().map(|bytes| DownloadedPartStream::Opened(Cursor::new(bytes.clone()))).collect(),
             };
+            let prior = state_digest(receiver);
             let baseline = LIVE.load(Ordering::SeqCst);
             PEAK.store(baseline, Ordering::SeqCst);
             let sqlite_baseline = unsafe {
@@ -479,12 +461,11 @@ mod memory {
                 rusqlite::ffi::sqlite3_memory_used()
             };
             assert!(sqlite_baseline > 0, "SQLite memory accounting must be enabled");
-            let prior = fingerprint(receiver, Audience::Store).await;
             let rows = count(receiver, "links");
-            assert!(receiver.receive_stream(input(), coven_format::value::EntryPositions(Vec::new()), || Err(DbError::TransactionEnded)).await.is_err());
+            assert!(receiver.receive_stream(input(), || Err(DbError::TransactionEnded)).await.is_err());
             assert_eq!(count(receiver, "links"), rows);
-            assert_eq!(fingerprint(receiver, Audience::Store).await, prior);
-            receiver.receive_stream(input(), coven_format::value::EntryPositions(Vec::new()), || Ok(())).await.unwrap();
+            assert_eq!(state_digest(receiver),prior);
+            receiver.receive_stream(input(), || Ok(())).await.unwrap();
             let rust_extra = PEAK.load(Ordering::SeqCst).checked_sub(baseline).unwrap();
             let sqlite_extra = unsafe { rusqlite::ffi::sqlite3_memory_highwater(0) } - sqlite_baseline;
             let extra = rust_extra + usize::try_from(sqlite_extra).unwrap();
@@ -493,7 +474,7 @@ mod memory {
             assert!(extra < 16 * 1024 * 1024, "{statement:?}: streamed merge retained {extra} additional heap bytes (Rust {rust_extra}, SQLite {sqlite_extra})");
             drop(held);
             assert_eq!(count(receiver, "links"), expected);
-            assert_eq!(fingerprint(&a, Audience::Store).await, fingerprint(&b, Audience::Store).await);
+            assert_eq!(crate::tests::data(&a,Audience::Store), crate::tests::data(&b,Audience::Store));
             assert_eq!(crate::file_write::tests::owned_paths(&sa).len(), 1, "queued copy");
         }
     });
@@ -519,30 +500,23 @@ async fn retargeting_a_reference_replaces_its_retained_pre_null_value() {
     sql(&b, "INSERT INTO links VALUES('link','old')")
         .await
         .unwrap();
+    b.receive(records(&b)[0].clone().into()).await.unwrap();
     c.receive(records(&b)[0].clone().into()).await.unwrap();
     // This author has never received the child, so its real delete has no child change.
     sql(&a, "DELETE FROM parents WHERE id='old'").await.unwrap();
     for db in [&b, &c] {
-        db.receive_stream(
-            stream(&records(&a)[1]),
-            coven_format::value::EntryPositions(Vec::new()),
-            || Ok(()),
-        )
-        .await
-        .unwrap();
+        db.receive_stream(stream(&records(&a)[1]), || Ok(()))
+            .await
+            .unwrap();
         assert_eq!(count(db, "_coven_written_values"), 1);
     }
     sql(&c, "UPDATE links SET parent='new'").await.unwrap();
-    b.receive_stream(
-        stream(&records(&c)[0]),
-        coven_format::value::EntryPositions(Vec::new()),
-        || Ok(()),
-    )
-    .await
-    .unwrap();
+    b.receive_stream(stream(&records(&c)[0]), || Ok(()))
+        .await
+        .unwrap();
     assert_eq!(
-        fingerprint(&b, Audience::Store).await,
-        fingerprint(&c, Audience::Store).await
+        crate::tests::data(&b, Audience::Store),
+        crate::tests::data(&c, Audience::Store)
     );
     for db in [a, b, c] {
         db.close().await.unwrap();
@@ -568,12 +542,7 @@ async fn a_constraint_refused_at_commit_reports_itself_and_keeps_the_handle_usab
     for streamed in [false, true] {
         let before = crate::tests::contents(&b);
         let error = if streamed {
-            b.receive_stream(
-                stream(&write),
-                coven_format::value::EntryPositions(Vec::new()),
-                || Ok(()),
-            )
-            .await
+            b.receive_stream(stream(&write), || Ok(())).await
         } else {
             b.receive(write.clone().into()).await
         }
@@ -657,20 +626,16 @@ async fn compare(lean: bool) {
             } else {
                 (if null { None } else { Some("A".to_owned()) }, Some(5))
             };
-            let mut fingerprints = Vec::new();
+            let mut states = Vec::new();
             for streamed in [false, true] {
                 for order in [[0, 1, 2], [0, 2, 1]] {
                     let fixture = TestStore::new();
                     let db = fixture.schema(tables(), SCHEMA).await.unwrap();
                     for i in order {
                         if streamed {
-                            db.receive_stream(
-                                stream(&writes[i]),
-                                coven_format::value::EntryPositions(Vec::new()),
-                                || Ok(()),
-                            )
-                            .await
-                            .unwrap();
+                            db.receive_stream(stream(&writes[i]), || Ok(()))
+                                .await
+                                .unwrap();
                         } else {
                             db.receive(writes[i].clone().into()).await.unwrap();
                         }
@@ -710,11 +675,11 @@ async fn compare(lean: bool) {
                     if lean {
                         compare_lean(&writes, &order, &db);
                     }
-                    fingerprints.push(fingerprint(&db, Audience::Store).await);
+                    states.push(crate::tests::data(&db, Audience::Store));
                     db.close().await.unwrap();
                 }
             }
-            assert!(fingerprints.windows(2).all(|pair| pair[0] == pair[1]));
+            assert!(states.windows(2).all(|pair| pair[0] == pair[1]));
         }
     }
 }
@@ -869,12 +834,7 @@ async fn incomplete_or_inconsistent_composite_references_are_refused() {
                 db.receive(writes[0].clone().into()).await.unwrap();
                 let before = crate::tests::contents(&db);
                 let result = if streamed {
-                    db.receive_stream(
-                        stream(&write),
-                        coven_format::value::EntryPositions(Vec::new()),
-                        || Ok(()),
-                    )
-                    .await
+                    db.receive_stream(stream(&write), || Ok(())).await
                 } else {
                     db.receive(write.clone().into()).await
                 };
@@ -928,6 +888,7 @@ async fn generated_composite_reference_keeps_the_inputs_of_its_tuple() {
     let b = sb.schema(tables(), schema).await.unwrap();
     sql(&a,"INSERT INTO parents VALUES('3',3),('4',3),('3',5); INSERT INTO children(id,x,y,b) VALUES('child',1,2,3)").await.unwrap();
     b.receive(records(&a)[0].clone().into()).await.unwrap();
+    a.receive(records(&a)[0].clone().into()).await.unwrap();
     sql(&a, "UPDATE children SET x=2").await.unwrap();
     sql(&b, "UPDATE children SET b=5").await.unwrap();
     let wa = records(&a).pop().unwrap();
@@ -936,8 +897,8 @@ async fn generated_composite_reference_keeps_the_inputs_of_its_tuple() {
         db.receive(write.into()).await.unwrap();
     }
     assert_eq!(
-        fingerprint(&a, Audience::Store).await,
-        fingerprint(&b, Audience::Store).await
+        crate::tests::data(&a, Audience::Store),
+        crate::tests::data(&b, Audience::Store)
     );
     a.close().await.unwrap();
     b.close().await.unwrap();
@@ -947,7 +908,6 @@ async fn generated_composite_reference_keeps_the_inputs_of_its_tuple() {
 async fn snapshots_require_one_setter_for_a_composite_reference() {
     use crate::snapshot_write::tests::{decode, frames, id, load_one};
     use coven_format::snapshot::{SnapshotEncoder, SnapshotRecord};
-    use coven_merge::WritePast;
     let sa = TestStore::new();
     let sb = TestStore::new();
     let a = sa.schema(tables(), SCHEMA).await.unwrap();
@@ -957,16 +917,11 @@ async fn snapshots_require_one_setter_for_a_composite_reference() {
         .unwrap();
     sql(&a, "UPDATE children SET a='A'").await.unwrap();
     let writes = records(&a);
-    let oracle = coven_merge::History::new(writes.iter().map(|record| {
-        let mut write = crate::test_utils::tests::merge_write(record);
-        let past = record.header.had_read.causal_past(record.header.position);
-        write.had_read = writes
+    let oracle = coven_merge::History::new(
+        writes
             .iter()
-            .map(|r| r.header.position)
-            .filter(|id| past.contains(id))
-            .collect();
-        write
-    }))
+            .map(|record| crate::test_utils::tests::merge_write(record, &writes)),
+    )
     .unwrap();
     let snapshot = frames(&a, Audience::Store).await;
     let (header, mut rows) = decode(&snapshot);

@@ -1,67 +1,40 @@
 //! The received interpretation of authenticated original changes: each
-//! part's direct admission by the selected boundaries and its own retirement
-//! window, then every admitted change's permission and data sources (§8,
+//! part's direct admission by the selected boundaries and the slot cut-off, then every admitted change's permission and data sources (§8,
 //! §8.8, §10, §17.1, §19.3). Original bytes stay retained; only this
 //! interpretation reaches the merge.
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
-use crate::{DbError, DownloadedPart, DownloadedWrite};
+use crate::DbError;
 use coven_format::{
     loss::LossCause,
     snapshot_rows::{ChangeVerdict, OriginalRow},
-    write::{RowChange, WriteDisposition, WriteHeader, WritePart, WriteRecord},
+    write::{RowChange, WriteDisposition, WriteHeader, WritePart},
     write_sources::ChangeId,
 };
 use coven_merge::{Audience, ColumnValue, Operation, Provenance, RowId};
 use std::collections::{BTreeMap, BTreeSet};
 
-pub(crate) fn accepted(
-    database: &DatabaseConnection,
-    schema: &WriteSchema,
-    download: DownloadedWrite,
-) -> Result<WriteRecord, DbError> {
-    crate::download::retain_sources(database, &download)?;
-    interpret(database, schema, download)
-}
-
-pub(crate) fn interpret(
-    database: &DatabaseConnection,
-    schema: &WriteSchema,
-    download: DownloadedWrite,
-) -> Result<WriteRecord, DbError> {
-    let parts: Vec<WritePart> = download
-        .parts
-        .into_iter()
-        .filter_map(|part| match part {
-            DownloadedPart::Opened(part) => Some(part),
-            DownloadedPart::Skipped(_) => None,
-        })
-        .collect();
-    let audiences: Vec<_> = parts.iter().map(|part| part.audience.clone()).collect();
-    let interpreter = Interpreter::new(database, schema, &download.header, &audiences)?;
-    let mut kept = Vec::new();
-    for part in parts {
-        kept.extend(interpreter.part(database, schema, part)?);
-    }
-    Ok(WriteRecord {
-        header: download.header,
-        parts: kept,
-    })
-}
-
 /// How a whole part is admitted before its changes are judged (§10, §17.1,
 /// §19.3).
 #[derive(Clone, Debug)]
 enum PartAdmission {
-    /// Its write landed outside its own retirement window.
-    Late,
+    /// A preceding removal or key replacement refuses the batch.
+    Refused,
     /// A kept reset ignores the part, dismissals included, with no loss.
-    Ignored(crate::EntryId),
+    Ignored(coven_merge::Slot),
     /// A breaking change excluded it, and no converter reaches its version:
     /// each original change is a frozen schema loss.
     Excluded(u32),
     /// Its changes are judged, then converted to this version if given.
-    Judged(Option<u32>),
+    Judged(Interpretation),
+}
+
+/// How admitted original columns reach the local schema.
+#[derive(Clone, Debug)]
+enum Interpretation {
+    Native,
+    Convert(u32),
+    Captured,
 }
 
 /// One write's received interpretation: every opened change's verdict,
@@ -88,28 +61,30 @@ impl Interpreter {
             parts: BTreeMap::new(),
             verdicts: BTreeMap::new(),
         };
-        // A write outside its own retirement window is consumed without effects
-        // or losses; later readers never rescue it (§10).
-        if crate::write_landing::late(database, header.position)? {
+        // A write after its cut-off is consumed without effects or losses (§10).
+        if crate::sequence::refused(database, header.position)? {
             for audience in audiences {
                 interpreter
                     .parts
-                    .insert(audience.clone(), PartAdmission::Late);
+                    .insert(audience.clone(), PartAdmission::Refused);
             }
             return Ok(interpreter);
         }
         let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
         for audience in audiences {
             // The part's direct admission before its changes' sources are followed.
+            let captured = crate::captured_changes::includes(database, header)?;
             let admission = match crate::write_boundary::WriteBoundary::part_verdict(
                 &boundaries,
                 header,
                 audience,
+                crate::sequence::write_slot(database, header.position)?,
             ) {
-                _ if header.disposition == WriteDisposition::Migration => {
-                    PartAdmission::Judged(None)
-                }
                 Some(ChangeVerdict::Ignored(entry)) => PartAdmission::Ignored(entry),
+                _ if captured => PartAdmission::Judged(Interpretation::Captured),
+                _ if header.disposition == WriteDisposition::Migration => {
+                    PartAdmission::Judged(Interpretation::Native)
+                }
                 // A late old-schema part the winning raise's converters reach is a
                 // candidate for admission at that version; without them it is excluded.
                 Some(ChangeVerdict::Excluded(version)) => {
@@ -118,12 +93,12 @@ impl Interpreter {
                         header.schema_version,
                         version,
                     ) {
-                        PartAdmission::Judged(Some(version))
+                        PartAdmission::Judged(Interpretation::Convert(version))
                     } else {
                         PartAdmission::Excluded(version)
                     }
                 }
-                _ => PartAdmission::Judged(None),
+                _ => PartAdmission::Judged(Interpretation::Native),
             };
             interpreter.parts.insert(audience.clone(), admission);
         }
@@ -152,8 +127,8 @@ impl Interpreter {
                 Some(PartAdmission::Ignored(entry)) => {
                     fixed.insert(row, ChangeVerdict::Ignored(*entry));
                 }
-                Some(PartAdmission::Late) => {
-                    fixed.insert(row, ChangeVerdict::Dropped);
+                Some(PartAdmission::Refused) => {
+                    fixed.insert(row, ChangeVerdict::Refused);
                 }
                 None => {
                     let verdict = crate::judge::stored(database, header, &row)?;
@@ -183,17 +158,19 @@ impl Interpreter {
         let admission = self.parts.get(&part.audience).ok_or(DbError::Invariant {
             what: "an interpreted part was judged with its write",
         })?;
-        if header.disposition == WriteDisposition::Migration {
+        if header.disposition == WriteDisposition::Migration
+            && !matches!(admission, PartAdmission::Judged(Interpretation::Captured))
+        {
             return Ok(None);
         }
         match admission {
-            PartAdmission::Late => {
+            PartAdmission::Refused => {
                 for row in part.records() {
                     crate::write_sources::admit(
                         database,
                         header,
                         row.row(),
-                        &ChangeVerdict::Dropped,
+                        &ChangeVerdict::Refused,
                     )?;
                 }
                 Ok(None)
@@ -281,15 +258,21 @@ impl Interpreter {
                     freeze(database, schema, header, &change, cause)?;
                 }
                 part.rows = applied;
-                if let Some(version) = converts {
-                    crate::migration_receive::convert(
+                match converts {
+                    Interpretation::Convert(version) => crate::migration_receive::convert(
                         &schema.conversions,
                         header.schema_version,
                         *version,
                         &mut part,
-                    )?;
+                    )?,
+                    Interpretation::Captured => {
+                        crate::captured_changes::project(database, schema, header, &mut part)?
+                    }
+                    Interpretation::Native => (),
                 }
-                crate::download_checks::part(schema, &part)?;
+                if !matches!(converts, Interpretation::Captured) {
+                    crate::download_checks::part(schema, &part)?;
+                }
                 Ok(Some(part))
             }
         }
@@ -459,7 +442,3 @@ fn freeze(
     crate::loss_record::put(database, &loss, None)?;
     crate::file_protection::retain_loss(database, schema, &loss)
 }
-
-#[cfg(test)]
-#[path = "interpretation_tests.rs"]
-mod tests;

@@ -1,8 +1,7 @@
 use super::*;
-use crate::pending::tests::Record;
 use crate::tests::TestStore;
 use crate::CommitScope;
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeSet;
 
 fn key_columns(scope: &KeyScope, into: &mut BTreeSet<String>) {
     match scope {
@@ -27,16 +26,11 @@ fn reads_key_rows_by_primary_key_and_name_every_other_column() {
         .unwrap();
     let device = DeviceId(1);
     let samples = [
-        PrerequisiteRows::Entry(EntryId { device, number: 1 }),
-        PrerequisiteRows::KeyCopy {
-            writer: device,
-            number: 1,
-        },
+        PrerequisiteRows::Slot,
+        PrerequisiteRows::Claim,
         PrerequisiteRows::Write(WriteId { device, number: 1 }),
         PrerequisiteRows::Device(device),
-        PrerequisiteRows::PeerPositions(device),
         PrerequisiteRows::Reload(Audience::Store),
-        PrerequisiteRows::Finality,
         PrerequisiteRows::Boundaries,
         PrerequisiteRows::ProviderAccess("ana@example.com".into()),
         PrerequisiteRows::Operation(crate::OperationId(1)),
@@ -77,26 +71,40 @@ fn reads_key_rows_by_primary_key_and_name_every_other_column() {
 async fn a_wait_observes_its_rows_outside_its_attempt() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let observed = std::sync::Arc::new(std::sync::Mutex::new(BTreeMap::new()));
-    let observe = |device: u64| {
+    let operations = [
+        db.start_operation(crate::NewOperation {
+            kind: "first".into(),
+            data: vec![],
+            started_by: "test".into(),
+            pauses_writes: false,
+        })
+        .await
+        .unwrap(),
+        db.start_operation(crate::NewOperation {
+            kind: "second".into(),
+            data: vec![],
+            started_by: "test".into(),
+            pauses_writes: false,
+        })
+        .await
+        .unwrap(),
+    ];
+    let observe = |number: usize| {
         let db = db.clone();
-        let observed = observed.clone();
+        let id = operations[number - 7];
         async move {
-            let next = {
-                let mut observed = observed.lock().unwrap();
-                let value: &mut u8 = observed.entry(DeviceId(device)).or_insert(0);
-                *value += 1;
-                observed
-                    .iter()
-                    .map(|(device, value)| (*device, vec![*value]))
-                    .collect::<BTreeMap<_, _>>()
-            };
-            db.complete_positions_observation(next, Vec::<Record>::new(), vec![], vec![])
-                .await
-                .unwrap();
+            let current = db.operation(id).await.unwrap().unwrap();
+            db.advance_operation(crate::OperationUpdate {
+                id,
+                previous: current.last_step,
+                last_step: current.last_step + 1,
+                data: vec![],
+            })
+            .await
+            .unwrap();
         }
     };
-    let seven = [PrerequisiteRows::PeerPositions(DeviceId(7))];
+    let seven = [PrerequisiteRows::Operation(operations[0])];
     // The attempt changes its own prerequisite: no evidence.
     let attempt = CommitScope::new();
     let commits = db.attempt_commits(attempt);
@@ -131,116 +139,24 @@ async fn a_wait_observes_its_rows_outside_its_attempt() {
     db.close().await.unwrap();
 }
 
-/// IO `PrerequisiteRows.only_partial_advances`: a wait on Ben's write 5 counts
-/// his position reaching 3, short of the write, as evidence; another writer's
-/// position is none.
 #[tokio::test]
-async fn a_write_wait_counts_a_partial_advance_of_its_writer() {
+async fn a_slot_wait_counts_each_prefix_advance() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let write = [PrerequisiteRows::Write(WriteId {
-        device: DeviceId(2),
-        number: 5,
-    })];
-    let mut wait = db.attempt_commits(CommitScope::new()).watch(&write);
-    db.test_cover_positions(vec![(3, 9)]).await.unwrap();
-    assert!(!wait.take_changed().unwrap());
-    db.test_cover_positions(vec![(2, 3)]).await.unwrap();
+    let mut wait = db
+        .attempt_commits(CommitScope::new())
+        .watch(&[PrerequisiteRows::Slot]);
+    let state = db.store_state().await.unwrap();
+    db.admin_fixture(
+        coven_format::admin::StoreChange::DeleteCircle {
+            circle: coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1)),
+        },
+        state,
+        None,
+    )
+    .await
+    .unwrap();
     assert!(wait.take_changed().unwrap());
+    assert!(!wait.take_changed().unwrap());
     db.close().await.unwrap();
-}
-
-fn key_values(scope: &KeyScope, into: &mut serde_json::Map<String, serde_json::Value>) {
-    match scope {
-        KeyScope::All => {}
-        KeyScope::In { column, values } => {
-            let [value] = values.as_slice() else {
-                panic!("one key value per column: {column}")
-            };
-            let value = match value {
-                SqlValue::Blob(bytes) => {
-                    serde_json::json!(u64::from_be_bytes(bytes.as_slice().try_into().unwrap()))
-                }
-                SqlValue::Text(text) => serde_json::json!(String::from_utf8(text.clone()).unwrap()),
-                SqlValue::Integer(n) => serde_json::json!(n),
-                _ => panic!("unexpected key value in {column}"),
-            };
-            into.insert(column.clone(), value);
-        }
-        KeyScope::And(left, right) => {
-            key_values(left, into);
-            key_values(right, into);
-        }
-        _ => panic!("a prerequisite keys rows by equality"),
-    }
-}
-
-/// IO `PrerequisiteRows.Prereq.rows`: each prerequisite reads the tables and
-/// primary keys the model names, in order (`reading_frame`,
-/// `named_row_matters`, `only_partial_advances`).
-#[test]
-#[ignore = "requires COVEN_IO_RUNNER"]
-fn io_differential_prerequisite_rows() {
-    use serde_json::json;
-    let device = DeviceId(2);
-    let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(4));
-    let samples = [
-        (
-            PrerequisiteRows::Entry(EntryId { device, number: 3 }),
-            json!({"kind": "entry", "device": 2, "number": 3}),
-        ),
-        (
-            PrerequisiteRows::KeyCopy {
-                writer: device,
-                number: 4,
-            },
-            json!({"kind": "key_copy", "writer": 2, "number": 4}),
-        ),
-        (
-            PrerequisiteRows::Write(WriteId { device, number: 5 }),
-            json!({"kind": "write", "device": 2, "number": 5}),
-        ),
-        (
-            PrerequisiteRows::Device(device),
-            json!({"kind": "device", "device": 2}),
-        ),
-        (
-            PrerequisiteRows::PeerPositions(device),
-            json!({"kind": "peer_positions", "device": 2}),
-        ),
-        (
-            PrerequisiteRows::Reload(Audience::Store),
-            json!({"kind": "reload", "audience": "store"}),
-        ),
-        (
-            PrerequisiteRows::Reload(Audience::Circle(circle)),
-            json!({"kind": "reload", "audience": circle.to_string()}),
-        ),
-        (PrerequisiteRows::Finality, json!({"kind": "finality"})),
-        (PrerequisiteRows::Boundaries, json!({"kind": "boundaries"})),
-        (
-            PrerequisiteRows::ProviderAccess("ana@example.com".into()),
-            json!({"kind": "provider_access", "account": "ana@example.com"}),
-        ),
-        (
-            PrerequisiteRows::Operation(crate::OperationId(6)),
-            json!({"kind": "operation", "id": 6}),
-        ),
-    ];
-    let mut cases = Vec::new();
-    let mut actual = Vec::new();
-    for (rows, model) in samples {
-        cases.push(json!({"check": "prerequisite_rows", "prereq": model}));
-        actual.push(serde_json::Value::Array(
-            rows.reads()
-                .iter()
-                .map(|read| {
-                    let mut key = serde_json::Map::new();
-                    key_values(&read.keys, &mut key);
-                    json!({"table": read.table, "key": key})
-                })
-                .collect(),
-        ));
-    }
-    assert_eq!(actual, crate::database_changes::tests::io_runner(&cases));
 }

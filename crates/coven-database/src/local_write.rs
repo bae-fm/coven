@@ -25,7 +25,7 @@ impl DatabaseConnection {
         #[cfg(test)]
         let _profile = self.profile_statements();
         self.local_transaction(|database, phase| {
-            let deleted_circles = crate::store_log_tables::deleted_circles(database)?;
+            let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
             let result = {
                 let _scope = database.authorization.write();
                 let result = sql(crate::SqlContext::new(files))?;

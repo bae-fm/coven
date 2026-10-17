@@ -13,7 +13,7 @@ pub(crate) struct Record {
 pub(crate) enum Subject {
     Number(u64),
     Audience(String),
-    Write(u64, u64),
+    Slot(u64),
 }
 impl From<u64> for Subject {
     fn from(value: u64) -> Self {
@@ -26,19 +26,9 @@ enum Reason {
     Missing,
     Refused,
     Update(u32),
-    Dropped,
+    WritesRefused,
 }
 impl Record {
-    /// The write a dropped-write report names.
-    pub(crate) fn dropped_write(&self) -> Option<coven_merge::WriteId> {
-        match (&self.subject, &self.reason) {
-            (Subject::Write(device, number), Reason::Dropped) => Some(coven_merge::WriteId {
-                device: DeviceId(*device),
-                number: *number,
-            }),
-            _ => None,
-        }
-    }
     pub(crate) fn access_key(&self) -> Option<&str> {
         match &self.reason {
             Reason::AccessKey(key) => Some(key),
@@ -72,23 +62,11 @@ impl PendingValue for Record {
             operation: Some(id),
         }
     }
-    fn dropped_write(
-        write: coven_merge::WriteId,
-        _reason: crate::DropReason,
-        reported_by: DeviceId,
-    ) -> Self {
+    fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, reported_by: DeviceId) -> Self {
         Self {
-            subject: Subject::Write(write.device.0, write.number),
+            subject: Subject::Slot(slot.0),
             reported_by,
-            reason: Reason::Dropped,
-            operation: None,
-        }
-    }
-    fn dropped_entry(entry: crate::EntryId, _reason: crate::DropReason) -> Self {
-        Self {
-            subject: entry.number.into(),
-            reported_by: entry.device,
-            reason: Reason::Dropped,
+            reason: Reason::WritesRefused,
             operation: None,
         }
     }
@@ -102,29 +80,20 @@ impl PendingValue for Record {
     fn operation(&self) -> Option<OperationId> {
         self.operation
     }
-    fn log_object(&self) -> Option<crate::LogObject> {
+    fn slot(&self) -> Option<crate::Slot> {
         match self.subject {
-            Subject::Write(device, number) => Some(crate::LogObject::Write(coven_merge::WriteId {
-                device: DeviceId(device),
-                number,
-            })),
-            Subject::Number(number) => matches!(self.reason, Reason::Dropped).then_some(
-                crate::LogObject::Entry(crate::EntryId {
-                    device: self.reported_by,
-                    number,
-                }),
-            ),
-            Subject::Audience(_) => None,
+            Subject::Slot(number) => Some(crate::Slot(number)),
+            _ => None,
         }
     }
     fn ends_when_covered(&self) -> bool {
-        !matches!(self.reason, Reason::Refused | Reason::Dropped)
+        !matches!(self.reason, Reason::Refused | Reason::WritesRefused)
     }
     fn can_retry(&self, version: &str, schema: u32) -> bool {
         match self.reason {
             Reason::Missing => true,
             Reason::AccessKey(_) => false,
-            Reason::Dropped => false,
+            Reason::WritesRefused => false,
             Reason::Refused => version != env!("CARGO_PKG_VERSION"),
             Reason::Update(required) => schema >= required,
         }
@@ -151,7 +120,7 @@ pub(crate) fn reported_operation(reported_by: DeviceId, id: OperationId) -> Reco
     }
 }
 async fn own(db: &Database) -> DeviceId {
-    db.sync_state(Vec::new()).await.unwrap().device
+    db.local_device().unwrap()
 }
 async fn record(db: &Database, subject: u64) -> Record {
     Record {
@@ -160,50 +129,6 @@ async fn record(db: &Database, subject: u64) -> Record {
         reason: Reason::Refused,
         operation: None,
     }
-}
-
-#[tokio::test]
-async fn subjects_and_reporters_are_independent_and_reasons_replace_atomically() {
-    let store = TestStore::new();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut live = db.subscribe_pending::<Record>();
-    assert!(live.next().await.unwrap().is_empty());
-    let local = record(&db, 2).await;
-    db.record_pending(local.clone()).await.unwrap();
-    assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&local));
-    let peer = Record {
-        reported_by: DeviceId(local.reported_by.0.wrapping_add(1)),
-        ..local.clone()
-    };
-    db.replace_pending_reports(vec![peer.clone()])
-        .await
-        .unwrap();
-    let mut expected = vec![local.clone(), peer.clone()];
-    expected.sort_by_key(|r| (r.subject.clone(), r.reported_by));
-    assert_eq!(live.next().await.unwrap(), expected);
-    let next = Record {
-        reason: Reason::Missing,
-        ..local.clone()
-    };
-    db.record_pending(next.clone()).await.unwrap();
-    let observed = live.next().await.unwrap();
-    assert_eq!(observed.len(), 2);
-    assert!(observed.contains(&next));
-    assert!(observed.contains(&peer));
-    assert!(db
-        .replace_pending_reports(vec![local.clone()])
-        .await
-        .is_err());
-    assert_eq!(db.pending::<Record>().await.unwrap(), observed);
-    db.clear_pending(local.subject).await.unwrap();
-    assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&peer));
-    db.record_pending(record(&db, 3).await).await.unwrap();
-    db.record_pending(record(&db, 4).await).await.unwrap();
-    assert_eq!(db.pending::<Record>().await.unwrap().len(), 3);
-    db.replace_pending_reports::<Record>(Vec::new())
-        .await
-        .unwrap();
-    assert_eq!(db.pending::<Record>().await.unwrap().len(), 2);
 }
 
 #[tokio::test]
@@ -407,33 +332,46 @@ async fn losing_a_pending_update_fails_an_already_running_subscription() {
 async fn judgments_clear_only_with_a_committed_changed_reset() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let entry = crate::EntryId {
-        device: DeviceId(1),
-        number: 1,
-    };
+    let entry = crate::Slot(1);
     db.check_boundary_fixture(crate::Boundary::Reset {
         entry,
-        snapshot: coven_format::store_log::SnapshotId {
+        snapshot: coven_format::admin::SnapshotId {
             audience: coven_merge::Audience::Store,
-            device: entry.device,
-            number: entry.number,
+            device: DeviceId(99),
+            number: 1,
         },
     })
     .await
     .unwrap();
-    let boundary = || crate::BoundaryCoverage {
-        entry: crate::EntryId {
-            device: DeviceId(1),
-            number: 1,
-        },
-        included: coven_format::value::WritePositions(Vec::new()),
-    };
+    let state = db.store_state().await.unwrap();
     let reload = |snapshots| crate::SnapshotReload::<std::io::Empty, std::io::Empty> {
         snapshots,
-        writes: Vec::new(),
-        absent: Vec::new(),
-        boundaries: Some(vec![boundary()]),
-        expected_entries: None,
+        slots: vec![crate::IncomingSlot {
+            slot: entry,
+            header: coven_format::sequence::SlotHeader {
+                device: DeviceId(99),
+                claim: 1,
+                author: crate::tests::member(1),
+                after: 0,
+            },
+            content: crate::SlotContent::Admin {
+                original: coven_format::floor::OriginalSlot {
+                    slot: entry,
+                    object: vec![1],
+                },
+                effect: None,
+            },
+        }],
+        target: 1,
+        state: state.clone(),
+        cutoffs: vec![],
+        boundaries: vec![crate::BoundaryCoverage {
+            boundary: crate::Boundary::Reset {
+                entry,
+                snapshot: state.resets[&coven_merge::Audience::Store].clone(),
+            },
+            included: 0,
+        }],
         operation: None,
         authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
     };
@@ -442,7 +380,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
         .load_snapshots::<crate::pending::tests::Record, _, _>(reload(Vec::new()))
         .await
         .is_err());
-    assert_eq!(db.pending::<Record>().await.unwrap().len(), 2);
+    assert_eq!(db.pending::<Record>().await.unwrap().len(), 1);
     db.load_snapshots::<crate::pending::tests::Record, _, _>(reload(vec![
         crate::SnapshotSource::Empty(coven_merge::Audience::Store),
     ]))
@@ -505,12 +443,12 @@ async fn a_failed_condition_change_rolls_back_its_completed_step() {
 }
 
 #[tokio::test]
-async fn a_writes_wait_ends_when_positions_cover_it_but_a_verdict_on_its_bytes_remains() {
+async fn a_writes_wait_ends_when_slots_cover_it_but_a_verdict_on_its_bytes_remains() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let reported_by = own(&db).await;
     let observed = |number, reason| Record {
-        subject: Subject::Write(7, number),
+        subject: Subject::Slot(number),
         reported_by,
         reason,
         operation: None,
@@ -521,21 +459,19 @@ async fn a_writes_wait_ends_when_positions_cover_it_but_a_verdict_on_its_bytes_r
     for record in [&waiting, &refused, &later] {
         db.record_pending(record.clone()).await.unwrap();
     }
-    // A loaded snapshot's positions pass writes 1 and 2 without applying
+    // A loaded snapshot covers slots 1 and 2 without applying
     // them: the wait ends, the refusal stays, the uncovered wait stays.
-    db.test_cover_positions(vec![(7, 2)]).await.unwrap();
+    db.commit_writer(|sql| {
+        crate::sequence::set_applied(sql, 2).unwrap();
+        crate::pending::clear_covered_slots(sql).unwrap();
+    });
     assert_eq!(
         db.pending::<Record>().await.unwrap(),
         vec![refused.clone(), later.clone()]
     );
     // Applying a write itself ends any record for it, verdicts included.
     for number in [2, 3] {
-        db.test_clear_log(crate::LogObject::Write(coven_merge::WriteId {
-            device: DeviceId(7),
-            number,
-        }))
-        .await
-        .unwrap();
+        db.commit_writer(|sql| crate::pending::clear_slot(sql, crate::Slot(number)).unwrap());
     }
     assert!(db.pending::<Record>().await.unwrap().is_empty());
 }
@@ -592,90 +528,6 @@ async fn a_completed_scan_replaces_exactly_its_own_class_of_records() {
     assert_eq!(live.next().await.unwrap(), std::slice::from_ref(&other));
 }
 
-#[tokio::test]
-async fn positions_observation_and_reports_commit_together_or_neither_does() {
-    use std::collections::BTreeMap;
-    let store = TestStore::new();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let local = record(&db, 1).await;
-    let peer = Record {
-        reported_by: DeviceId(local.reported_by.0.wrapping_add(1)),
-        ..local.clone()
-    };
-    let before = BTreeMap::from([(peer.reported_by, vec![1u8])]);
-    db.complete_positions_observation(
-        before.clone(),
-        vec![peer.clone()],
-        vec![local.subject.clone()],
-        vec![local.clone()],
-    )
-    .await
-    .unwrap();
-    let work = crate::test_utils::WorkCounter::default();
-    db.test_track_work(work.clone()).await.unwrap();
-    db.complete_positions_observation(
-        before.clone(),
-        vec![peer.clone()],
-        vec![local.subject.clone()],
-        vec![local.clone()],
-    )
-    .await
-    .unwrap();
-    db.replace_pending_reports(vec![peer.clone()])
-        .await
-        .unwrap();
-    assert_eq!(work.take().commits, 0);
-    db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE INSERT ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap());
-    let changed = Record {
-        reason: Reason::Missing,
-        ..peer.clone()
-    };
-    assert!(db
-        .complete_positions_observation(
-            BTreeMap::from([(peer.reported_by, vec![2u8])]),
-            vec![changed],
-            vec![],
-            Vec::<Record>::new()
-        )
-        .await
-        .is_err());
-    db.close().await.unwrap();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    assert_eq!(db.positions_observation::<Vec<u8>>().await.unwrap(), before);
-    let records = db.pending::<Record>().await.unwrap();
-    assert!(records.contains(&local));
-    assert!(records.contains(&peer));
-}
-
-#[tokio::test]
-async fn post_confirmation_and_failure_removal_are_atomic() {
-    let store = TestStore::new();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    let failure = record(&db, 1).await;
-    db.record_pending(failure.clone()).await.unwrap();
-    db.save_positions_post::<_, Record>(vec![1u8], None)
-        .await
-        .unwrap();
-    db.inspect_writer(|sql| sql.batch("CREATE TEMP TRIGGER fail_pending BEFORE DELETE ON _coven_pending BEGIN SELECT RAISE(ABORT,'injected pending failure'); END;").unwrap());
-    assert!(db
-        .save_positions_post::<_, Record>(vec![2u8], Some(failure.subject.clone()))
-        .await
-        .is_err());
-    db.close().await.unwrap();
-    let db = store.builder(vec![], vec![]).open().await.unwrap();
-    assert_eq!(db.positions_post::<Vec<u8>>().await.unwrap(), Some(vec![1]));
-    assert_eq!(db.pending::<Record>().await.unwrap(), vec![failure.clone()]);
-    db.save_positions_post::<_, Record>(vec![2u8], Some(failure.subject))
-        .await
-        .unwrap();
-    assert_eq!(db.positions_post::<Vec<u8>>().await.unwrap(), Some(vec![2]));
-    assert!(db.pending::<Record>().await.unwrap().is_empty());
-}
-
-/// A download's wait is written with its file's pending record and lives
-/// only as long as that record: a reason that waits for the app ends it, and
-/// clearing the record, by any path, deletes it (§16.5). No download wait
-/// exists without its record.
 #[tokio::test]
 async fn a_download_wait_lives_with_its_pending_record() {
     use crate::{RetrySubject, RetryWait};

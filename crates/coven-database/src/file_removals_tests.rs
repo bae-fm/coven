@@ -236,7 +236,7 @@ impl tokio::io::AsyncRead for CrashingReader {
 
 #[tokio::test]
 async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
-    use coven_format::value::{Value, WritePositions};
+    use coven_format::value::Value;
     use coven_merge::{Operation, Timestamp, WriteId};
     let store = TestStore::new();
     let db = store
@@ -245,12 +245,13 @@ async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
         .unwrap();
     attach(&db, b"original".to_vec(), true).await.unwrap();
     let mut record = crate::write::tests::records(&db).remove(0);
+    db.receive(record.clone().into()).await.unwrap();
     let original = record.header.position;
     record.header.position = WriteId {
         device: original.device,
         number: original.number + 1,
     };
-    record.header.had_read = WritePositions(vec![]);
+    record.header.read_through = 0;
     record.header.timestamp = Timestamp::new(
         record.header.timestamp.milliseconds() + 1,
         0,

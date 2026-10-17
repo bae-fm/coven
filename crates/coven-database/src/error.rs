@@ -76,6 +76,33 @@ impl From<rusqlite::Error> for CovenError {
 /// A failed database call or a write the database refuses (§5, §8, §14, §16).
 #[derive(Debug, thiserror::Error)]
 pub enum DbError {
+    /// Another claim must settle before this device reserves a new number.
+    #[error("a claim is already pending")]
+    ClaimPending,
+    /// No current claim exists for this operation.
+    #[error("there is no current claim")]
+    NoClaim,
+    /// Uncertain publication cannot be abandoned or resealed; a landed writes
+    /// batch cannot finish until its consumed state has committed.
+    #[error("the current claim has not settled or its writes have not applied")]
+    ClaimUnsettled,
+    /// The installation has exhausted its claim-number representation.
+    #[error("claim numbers exhausted")]
+    ClaimNumberExhausted,
+    /// The supplied floor evidence does not cover the attempted slot.
+    #[error("floor evidence does not cover the claim")]
+    InvalidClaimCoverage,
+    /// Slot application must extend the previously committed prefix.
+    #[error("slot {received:?} does not follow applied slot {applied}")]
+    SequenceGap {
+        /// Previously committed coverage.
+        applied: u64,
+        /// The received slot.
+        received: coven_merge::Slot,
+    },
+    /// A slot's readable original awaits an external prerequisite.
+    #[error("write awaits {0:?}")]
+    WriteWaiting(crate::WriteWait),
     /// A pending record or its subject could not be encoded, or a stored one
     /// could not be decoded as the requested record type (E5).
     #[error("invalid pending data: {0}")]
@@ -252,7 +279,7 @@ pub enum DbError {
     /// A downloaded write fails the merge's checks and is never applied (§19.1).
     #[error("invalid write {write:?}: {error}")]
     InvalidWrite {
-        /// The refused write's device and log number.
+        /// The refused write's device and write number.
         write: coven_merge::WriteId,
         /// The merge rule it broke.
         #[source]
@@ -519,45 +546,16 @@ pub enum DbError {
         /// Each failed byte removal or pending-record update.
         failures: Vec<DbError>,
     },
-    /// The supplied checked entry does not have a valid format encoding.
-    #[error("invalid store-log entry {entry:?}: {error}")]
-    InvalidStoreLogEntry {
-        /// The refused entry's position.
-        entry: crate::EntryId,
-        /// The format check that failed.
-        #[source]
-        error: coven_format::Error,
-    },
-    /// Replaying a stale or different set cannot replace the committed result.
-    #[error("store-log replay must cover exactly the applied entries and the incoming entry")]
-    StoreLogEntriesChanged,
-    /// An applied entry's immutable bytes or author-view check differ on repetition.
-    #[error("store-log entry {0:?} has different bytes or author-view check")]
-    StoreLogEntryChanged(crate::EntryId),
-    /// A fixed entry must be published before another is made.
-    #[error("store-log entry {0:?} is waiting for publication")]
-    StoreLogUploadPending(crate::EntryId),
     /// An operation no longer has the state expected by its caller.
     #[error("operation {0:?} changed or is absent")]
     OperationChanged(crate::OperationId),
-    /// This writer has reserved every key-copy number.
-    #[error("key-copy numbers exhausted")]
-    KeyCopyNumberExhausted,
     /// Self-replacement has paused app writes while queued objects settle
     /// and the new binding and custody are installed (§10, E9).
     #[error("member keys are changing; app writes are paused")]
     MemberKeysChanging,
-    /// Reservation or confirmation cannot skip a number or change fixed bytes.
-    #[error("key copy {writer:?}/{number} is not the next fixed upload")]
-    KeyUploadChanged {
-        /// Writer whose sequence must remain contiguous.
-        writer: coven_foundation::id_source::DeviceId,
-        /// Copy whose reservation or confirmation was rejected.
-        number: std::num::NonZeroU64,
-    },
-    /// This device has used every store-log number.
-    #[error("store-log entry numbers exhausted")]
-    StoreLogNumberExhausted,
+    /// The prepared raise no longer names the current counted prefix.
+    #[error("raise capture changed before snapshot creation")]
+    CaptureChanged,
     /// Loading plaintext supplied by sync failed without changing the database.
     #[error(transparent)]
     Snapshot(#[from] crate::SnapshotError),

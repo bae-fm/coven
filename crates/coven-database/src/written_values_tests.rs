@@ -111,7 +111,9 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
             db.transaction(|db| {
                 db.internal_execute("DELETE FROM _coven_rows WHERE table_name='parents' AND key=?1 AND generation=?2", crate::params![parent.key, 2u64.to_be_bytes().as_slice()])?;
                 db.materialize(|db| { db.internal_execute("INSERT INTO parents VALUES('parent')", [])?; Ok(()) })?;
-                for (column,row,write) in cells {
+                let row:i64=db.query_row("SELECT id FROM _coven_rows WHERE table_name='parents' AND key=?1 AND generation=?2",crate::params![parent.key,1u64.to_be_bytes()],|r|r.get(0))?;
+                db.internal_execute("DELETE FROM _coven_cells WHERE row_id=?1",[row])?;
+                for (column,_,write) in cells {
                     db.internal_execute("INSERT INTO _coven_cells(column_id,row_id,write_id) VALUES(?1,?2,?3)", crate::params![column,row,write])?;
                 }
                 let app = crate::write_rows::AppView::after(db,schema);
@@ -201,6 +203,9 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
     )
     .await
     .unwrap();
+    for write in records(&a) {
+        a.receive(write.into()).await.unwrap();
+    }
     a.receive(records(&b).remove(0).into()).await.unwrap();
     sql(&c, "DELETE FROM parents WHERE id='parent'")
         .await
@@ -363,8 +368,6 @@ async fn dropping_a_lost_reference_keeps_its_written_value_as_plain_data() {
 /// inputs other writes merged in; every arrival order records the written one.
 #[tokio::test]
 async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
-    use coven_crypto::StoreKey;
-    use coven_foundation::id_source::KeyId;
     let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL,a TEXT,b TEXT,label TEXT AS (coalesce(parent,'none')),joined TEXT AS (a||b))";
     let open = |store: &TestStore, seconds: u64| {
         store
@@ -382,16 +385,9 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
             ))
             .open()
     };
-    let fingerprint = |db: &Database| {
-        let key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_u128(1)), [7; 32]).derive();
+    let data = |db: &Database| {
         let db = db.clone();
-        async move {
-            db.sync_state(vec![(Audience::Store, key.fingerprint_hasher())])
-                .await
-                .unwrap()
-                .fingerprints[0]
-                .1
-        }
+        async move { crate::tests::data(&db, Audience::Store) }
     };
     // Each case: three concurrent writes stamped in this order, and the
     // generated column and values those writes set.
@@ -482,7 +478,7 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
             listed.sort();
             outcomes.push((
                 listed,
-                fingerprint(&receiver).await,
+                data(&receiver).await,
                 count(&receiver, "_coven_lost"),
             ));
             receiver.close().await.unwrap();

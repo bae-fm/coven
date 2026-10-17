@@ -45,9 +45,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
         let references = db
             .write_file_references(
                 DownloadedWriteStream {
-                    published: crate::test_utils::published(
-                        coven_format::value::StorageTime::UNIX_EPOCH,
-                    ),
+                    signer: crate::test_utils::signer(),
                     header,
                     parts: vec![DownloadedPartStream::Opened(std::io::Cursor::new(bytes))],
                     authorship: crate::test_utils::TestAuthorship::write(&write),
@@ -77,9 +75,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
         let skipped = db
             .write_file_references(
                 DownloadedWriteStream::<std::io::Cursor<Vec<u8>>> {
-                    published: crate::test_utils::published(
-                        coven_format::value::StorageTime::UNIX_EPOCH,
-                    ),
+                    signer: crate::test_utils::signer(),
                     header: header.clone(),
                     parts: vec![DownloadedPartStream::Skipped],
                     authorship: crate::test_utils::TestAuthorship::write(&write),
@@ -107,9 +103,7 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
     let unsupported = db
         .write_file_references(
             DownloadedWriteStream::<std::io::Cursor<Vec<u8>>> {
-                published: crate::test_utils::published(
-                    coven_format::value::StorageTime::UNIX_EPOCH,
-                ),
+                signer: crate::test_utils::signer(),
                 header,
                 parts: vec![DownloadedPartStream::Skipped],
                 authorship: crate::test_utils::TestAuthorship::write(&newer),
@@ -130,10 +124,7 @@ async fn file_loss_fixture() -> (
     coven_format::write::WriteRecord,
     FileId,
 ) {
-    use coven_format::{
-        value::{EntryPositions, WritePositions},
-        write::{WriteDisposition, WriteHeader, WritePart, WriteRecord},
-    };
+    use coven_format::write::{WriteDisposition, WriteHeader, WritePart, WriteRecord};
     use coven_merge::{Audience, Change, RowId, Timestamp, WriteId};
     let store = TestStore::new();
     let db = store
@@ -164,10 +155,9 @@ async fn file_loss_fixture() -> (
     };
     let mut record = WriteRecord {
         header: WriteHeader {
-            store_log_read: EntryPositions(vec![]),
             position: id,
             timestamp: Timestamp::new(1, 0, id.device).unwrap(),
-            had_read: WritePositions(vec![]),
+            read_through: 0,
             schema_version: 1,
             disposition: WriteDisposition::Apply,
         },
@@ -277,74 +267,9 @@ async fn a_schema_loss_protects_its_file_without_a_displayed_row_change() {
 }
 
 #[tokio::test]
-async fn reversible_inputs_protect_removed_file_losses_until_the_input_is_released() {
-    let (store, db, record, file) = file_loss_fixture().await;
-    db.inspect_writer_schema(|sql, schema| {
-        sql.transaction(|sql| {
-            crate::entry_inputs::original(sql, schema, &coven_merge::Audience::Store)
-        })
-        .unwrap()
-    });
-    db.write(|sql| {
-        sql.execute("DELETE FROM t", [])?;
-        Ok(())
-    })
-    .await
-    .unwrap();
-    assert!(db.lost_values().await.unwrap().is_empty());
-    let expected = (record.header.position.device, file);
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&expected));
-    db.close().await.unwrap();
-    let db = store
-        .schema(
-            vec![SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-                FileDecl::new(
-                    "files",
-                    1 << 30,
-                    Provenance::AppProvided,
-                    CacheFill::CacheLazy,
-                )
-                .with_location_column("x"),
-            )],
-            "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
-        )
-        .await
-        .unwrap();
-    assert!(db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&expected));
-    db.inspect_writer(|sql| {
-        sql.transaction(|sql| crate::entry_inputs::forget(sql, &coven_merge::Audience::Store, None))
-            .unwrap()
-    });
-    assert!(!db
-        .retained_files()
-        .await
-        .unwrap()
-        .references
-        .contains(&expected));
-}
-
-#[tokio::test]
 async fn a_dismissed_file_loss_releases_its_local_protection() {
     let (_store, db, record, file) = file_loss_fixture().await;
     let expected = (record.header.position.device, file);
-    // Settle the received write's landing, which retains its input until then.
-    db.advance_store_log_horizon(
-        db.store_log().await.unwrap(),
-        coven_format::value::StorageTime::UNIX_EPOCH,
-        coven_format::value::StorageTime::UNIX_EPOCH,
-    )
-    .await
-    .unwrap();
     assert!(db
         .retained_files()
         .await
@@ -354,6 +279,7 @@ async fn a_dismissed_file_loss_releases_its_local_protection() {
     db.dismiss_lost_values(&db.lost_values().await.unwrap())
         .await
         .unwrap();
+    crate::tests::publish(&db).await.unwrap();
     assert!(!db
         .retained_files()
         .await
@@ -418,9 +344,7 @@ async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
         .await
         .unwrap()
         .contains(&(DeviceId(4), file)));
-    // Dismissing the loss releases its own reference. The raise that excluded
-    // the write is not final, so its retained inputs still hold the file in
-    // case the raise drops and the write applies after all (§17.1).
+    // The published loss remains until the dismissal acquires a slot.
     db.dismiss_lost_values(&db.lost_values().await.unwrap())
         .await
         .unwrap();
@@ -486,8 +410,8 @@ fn candidates_of(device: DeviceId) -> BTreeSet<DeviceId> {
 }
 
 /// §16.5: a frozen loss keeps its file path protected. Dismissing it leaves
-/// the reversible input's protection, so no candidate appears; releasing that
-/// input, the last local reference, makes the path a candidate in the same
+/// the counted base's protection until the dismissal is applied. Applying it
+/// releases the last local reference and makes the path a candidate in the same
 /// transaction, without any listing of storage.
 #[tokio::test]
 async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
@@ -526,10 +450,7 @@ async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
         .await
         .unwrap()
         .is_empty());
-    db.inspect_writer(|sql| {
-        sql.transaction(|sql| crate::entry_inputs::forget(sql, &coven_merge::Audience::Store, None))
-            .unwrap()
-    });
+    crate::tests::publish(&db).await.unwrap();
     assert_eq!(
         db.file_candidates(candidates_of(device)).await.unwrap(),
         vec![FileCandidate {
@@ -592,19 +513,14 @@ async fn protected_candidates_settle_only_while_still_protected() {
         .is_empty());
 }
 
-/// A removed uploader's completed scan records its paths as candidates with
-/// the kept removal and the access it followed. Replay dropping that removal,
-/// which restores access, forgets the scan in the replay transaction, so a
-/// later cut-off scans again; a scan finishing after the drop records
-/// nothing. Access restored while the removal stays kept forgets it in the
-/// transaction recording that access, and a scan finishing while its access
-/// is not confirmed taken away records nothing (§16.5).
+/// A completed removal scan survives reopening; restored access invalidates it.
 #[tokio::test]
 async fn a_scan_stands_only_while_its_removal_is_kept() {
     let store = TestStore::new();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     let uploader = DeviceId(5);
-    let removal = crate::write_landing::tests::retire(&db, uploader, 1, "member", 100).await;
+    TestStore::register(&db, uploader, 1);
+    let removal = crate::tests::remove_device(&db, uploader).await;
     let found = FileId(uuid::Uuid::from_u128(11));
     // As replay records the account needed again, or revoked.
     let set_access = |db: &Database, intended: bool| {
@@ -653,25 +569,6 @@ async fn a_scan_stands_only_while_its_removal_is_kept() {
     db.close().await.unwrap();
     let db = store.builder(vec![], vec![]).open().await.unwrap();
     assert_eq!(db.file_scan(uploader).await.unwrap(), Some(removal));
-    crate::retirement_drain::tests::drop_retirement(&db, removal, uploader).await;
-    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
-    assert!(!db
-        .complete_file_scan(
-            uploader,
-            removal,
-            BTreeSet::new(),
-            account(),
-            BTreeSet::new()
-        )
-        .await
-        .unwrap());
-    assert_eq!(db.file_scan(uploader).await.unwrap(), None);
-    let again = crate::write_landing::tests::retire(&db, uploader, 2, "member", 200).await;
-    assert!(db
-        .complete_file_scan(uploader, again, BTreeSet::new(), account(), BTreeSet::new())
-        .await
-        .unwrap());
-    assert_eq!(db.file_scan(uploader).await.unwrap(), Some(again));
     // Restored access forgets the scan in that transaction; the candidates
     // it found stay. Revoking again restores no scan.
     set_access(&db, true);

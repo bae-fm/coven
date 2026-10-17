@@ -3,22 +3,13 @@
 /// Snapshots or their gap writes could not be loaded into this database.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
-    /// A downloaded gap write failed while the reload transaction was applying it.
-    #[error("reload write {write:?}: {error}")]
-    Write {
-        /// The supplied object's position, distinct from local queued writes.
-        write: coven_merge::WriteId,
-        /// The failed read, format or merge check.
-        #[source]
-        error: Box<crate::DbError>,
-    },
     /// A selected snapshot's plaintext failed while the reload transaction was
     /// reading it: the loader's format, schema and merge checks, or reading
     /// the input itself.
     #[error("reload snapshot {snapshot:?}: {error}")]
     Body {
         /// The supplied snapshot's identity.
-        snapshot: coven_format::store_log::SnapshotId,
+        snapshot: coven_format::admin::SnapshotId,
         /// The failed read or check.
         #[source]
         error: Box<crate::DbError>,
@@ -37,12 +28,6 @@ pub enum SnapshotError {
         /// Version prepared on the database connection.
         database: u32,
     },
-    /// Store-log entries are not carried by snapshots and must be applied first.
-    #[error("snapshot needs store-log entries {missing:?}")]
-    StoreLog {
-        /// The snapshot's store-log positions not yet present locally.
-        missing: Vec<coven_format::value::EntryId>,
-    },
     /// Authenticating another member's write that the snapshot carries needs
     /// a key this device has not opened yet (§8.8, D9): loading waits for it.
     #[error("snapshot write evidence needs key {key} of {audience:?}")]
@@ -51,23 +36,6 @@ pub enum SnapshotError {
         audience: coven_merge::Audience,
         /// The key the write named.
         key: coven_foundation::id_source::KeyId,
-    },
-    /// Required gap writes or causal predecessors were not supplied.
-    #[error("reload is missing writes {missing:?}")]
-    MissingWrites {
-        /// Positions not reached by the supplied snapshots and write streams.
-        missing: Vec<coven_merge::WriteId>,
-    },
-    /// A supplied write cannot yet apply under the normal download checks.
-    #[error("reload write cannot apply: {0:?}")]
-    WriteWaiting(crate::WriteWait),
-    /// The snapshot judged a covered write's own retirement window otherwise
-    /// than this device's replay does (§10). Its contributions cannot be
-    /// rebuilt here, so nothing loads; a snapshot made under the same verdict can.
-    #[error("snapshot judged write {write:?}'s retirement window otherwise")]
-    RetirementVerdict {
-        /// The covered write this device judged itself.
-        write: coven_merge::WriteId,
     },
     /// Individually valid records disagree with one another or the schema.
     #[error("inconsistent snapshot: {0}")]

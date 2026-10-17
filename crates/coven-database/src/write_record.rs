@@ -1,4 +1,5 @@
 //! Session changes, audience moves, and one causal write record.
+use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::merge_store::MergeStore;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded, timestamp};
@@ -7,7 +8,7 @@ use crate::write_schema::WriteSchema;
 use crate::DbError;
 use coven_format::{
     merge_fields,
-    value::{Value, WritePositions},
+    value::Value,
     write::{RowChange, RowExecution, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_foundation::id_source::{CircleId, DeviceId};
@@ -23,7 +24,7 @@ pub(crate) fn changes(
     after: &AppView<'_>,
     stored: &MergeStore<'_>,
     changed: &BTreeMap<AppKey, BTreeSet<String>>,
-    deleted: &BTreeMap<CircleId, crate::EntryId>,
+    deleted: &BTreeMap<CircleId, crate::Slot>,
 ) -> Result<BTreeMap<RowId, RowChange>, DbError> {
     let mut moved = BTreeMap::new();
     let mut keys: BTreeSet<_> = changed.keys().cloned().collect();
@@ -434,25 +435,20 @@ fn unordered(
 ) -> Result<WriteRecord, DbError> {
     let latest = crate::write_encoding::latest_timestamp(database)?;
     let timestamp = timestamp(latest, now, device)?;
-    let mut positions: BTreeMap<DeviceId,u64> = database.query(
-        "SELECT device,number FROM _coven_positions WHERE device>=x'0000000000000000' ORDER BY device", [],
-        |r| Ok((DeviceId(counter(r.get(0)?)),counter(r.get(1)?))),
-    )?.into_iter().collect();
-    let number = positions
-        .remove(&device)
+    let previous: Option<Vec<u8>> = database.query_row(
+        &format!("SELECT max(number) FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1"),
+        [device.0.to_be_bytes().as_slice()],
+        |r| r.get(0),
+    )?;
+    let number = previous
+        .map(counter)
         .unwrap_or(0)
         .checked_add(1)
         .expect("write numbers exhausted before timestamps");
     let header = WriteHeader {
         position: WriteId { device, number },
         timestamp,
-        store_log_read: crate::store_log::positions(database)?,
-        had_read: WritePositions(
-            positions
-                .into_iter()
-                .map(|(device, number)| WriteId { device, number })
-                .collect(),
-        ),
+        read_through: crate::sequence::applied(database)?,
         schema_version: database.schema_version()?,
         disposition: WriteDisposition::Apply,
     };

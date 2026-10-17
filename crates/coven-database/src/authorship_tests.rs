@@ -5,7 +5,7 @@ use crate::test_utils::TestAuthorship;
 use crate::tests::TestStore;
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::snapshot::{SnapshotEncoder, SnapshotRecord};
-use coven_format::value::{EntryPositions, Value, WritePositions};
+use coven_format::value::Value;
 use coven_format::write::{RowChange, WriteRecord};
 use coven_format::write_sources::{CellSource, ChangeId, WriteSources};
 use coven_merge::{Change, Operation};
@@ -27,7 +27,7 @@ fn row() -> RowId {
 fn overwrite() -> WriteRecord {
     let created = insert(0, 0);
     let mut write = insert(1, 0);
-    write.header.had_read = WritePositions(vec![created.header.position]);
+    write.header.read_through = 1;
     let creation = ChangeId {
         write: created.header.position,
         row: row(),
@@ -68,9 +68,7 @@ async fn source(store: &TestStore, writes: &[WriteRecord]) -> Database {
         TestStore::register(&db, write.header.position.device, 1);
     }
     for write in writes {
-        db.receive_stream(stream(write), EntryPositions(Vec::new()), || Ok(()))
-            .await
-            .unwrap();
+        db.receive_stream(stream(write), || Ok(())).await.unwrap();
     }
     db
 }

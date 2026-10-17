@@ -110,7 +110,7 @@ async fn grocery_title_and_errands_tag_are_one_unsigned_write() {
     let write = &writes[2];
     assert_eq!(write.header.position.number, 3);
     assert_eq!(write.header.schema_version, 1);
-    assert!(write.header.had_read.0.is_empty());
+    assert_eq!(write.header.read_through, 0);
     assert_eq!(write.parts.len(), 1);
     let rows = &write.parts[0].rows;
     assert_eq!(rows.len(), 2);
@@ -657,12 +657,8 @@ async fn deleted_circles_remove_rows_and_remain_refused_after_reopening() {
     let db = store.schema(tables(), SCHEMA).await.unwrap();
     store.join_circle(&db, circle);
     sql(&db,"INSERT INTO roots VALUES('r','before'),('other','unrelated'); INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','00000000-0000-4000-8000-00000000000a','r')").await.unwrap();
-    crate::store_log::tests::delete_circle(&db, circle)
-        .await
-        .unwrap();
-    crate::store_log::tests::delete_circle(&db, circle)
-        .await
-        .unwrap();
+    crate::tests::delete_circle(&db, circle).await.unwrap();
+    crate::tests::delete_circle(&db, circle).await.unwrap();
     assert_eq!(count(&db, "notes"), 0);
     assert_eq!(records(&db).len(), 1);
     db.close().await.unwrap();

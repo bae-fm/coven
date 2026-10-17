@@ -267,9 +267,7 @@ async fn losses(history: &FreezeHistory) -> Vec<Vec<Loss>> {
         a.receive(write.into()).await.unwrap();
     }
     if !history.circle_rows.is_empty() {
-        crate::store_log::tests::delete_circle(&a, circle_id())
-            .await
-            .unwrap();
+        crate::tests::delete_circle(&a, circle_id()).await.unwrap();
     }
     let mut all = vec![read(&a)];
     a.close().await.unwrap();

@@ -209,7 +209,7 @@ async fn permitted_local_and_shared_triggers_run_with_applying_false() {
 
 #[tokio::test]
 async fn app_reindex_cannot_write_an_internal_index() {
-    for name in ["_coven_write_position", "sqlite_autoindex__coven_columns_1"] {
+    for name in ["_coven_write_identity", "sqlite_autoindex__coven_columns_1"] {
         let store = TestStore::new();
         let error = store
             .builder(

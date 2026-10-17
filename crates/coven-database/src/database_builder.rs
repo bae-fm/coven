@@ -157,7 +157,6 @@ impl DatabaseBuilder {
             file_tasks: Arc::new(tokio::sync::RwLock::new(())),
             inner: Arc::new(RwLock::new(Some(DatabaseInner {
                 inputs,
-                store_log: Mutex::new(None),
                 access: DatabaseAccess {
                     writer: Mutex::new(writer),
                     readers: ReadPool::new(readers),

@@ -68,7 +68,7 @@ async fn confirmed_invitation_tokens_are_redacted() {
 }
 
 #[tokio::test]
-async fn replay_intention_journal_and_pending_roll_back_together() {
+async fn operation_intention_journal_and_pending_roll_back_together() {
     for table in [
         "_coven_provider_access",
         "_coven_operations",
@@ -76,26 +76,13 @@ async fn replay_intention_journal_and_pending_roll_back_together() {
     ] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        let before = db.local_store_log().await.unwrap().log;
-        let history = crate::store_log::tests::circle_history(
-            coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(2)),
-        );
         db.inspect_writer(|sql|sql.batch(&format!("CREATE TEMP TRIGGER refuse_access BEFORE INSERT ON {table} BEGIN SELECT RAISE(ABORT,'access failed'); END;")).unwrap());
         assert!(db
-            .apply_store_log_batch::<Record>(
-                before.clone(),
-                vec![crate::store_log::tests::checked(history[0].0.clone())],
-                history[0].1.clone(),
-                vec![],
-                vec![],
-                vec![],
-                vec![change(false)]
-            )
+            .start_operation_with_access::<Record>(change(false).operation, vec![change(false)])
             .await
             .is_err());
         db.close().await.unwrap();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
-        assert_eq!(db.local_store_log().await.unwrap().log, before);
         assert!(db
             .provider_access("account@example.com".into())
             .await
@@ -103,17 +90,9 @@ async fn replay_intention_journal_and_pending_roll_back_together() {
             .is_none());
         assert!(db.operations().await.unwrap().is_empty());
         assert!(db.pending::<Record>().await.unwrap().is_empty());
-        db.apply_store_log_batch::<Record>(
-            before,
-            vec![crate::store_log::tests::checked(history[0].0.clone())],
-            history[0].1.clone(),
-            vec![],
-            vec![],
-            vec![],
-            vec![change(false)],
-        )
-        .await
-        .unwrap();
+        db.start_operation_with_access::<Record>(change(false).operation, vec![change(false)])
+            .await
+            .unwrap();
         let state = db
             .provider_access("account@example.com".into())
             .await
@@ -123,7 +102,7 @@ async fn replay_intention_journal_and_pending_roll_back_together() {
         assert_eq!(state.granted, Some(true));
         assert_eq!(db.pending::<Record>().await.unwrap().len(), 1);
         assert_eq!(
-            db.operations().await.unwrap()[0].id,
+            db.operations().await.unwrap()[1].id,
             state.request.unwrap().operation
         );
     }

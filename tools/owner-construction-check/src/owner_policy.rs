@@ -23,6 +23,7 @@ pub(crate) const POLICY: Policy = Policy {
             "coven_tables",
             "coven_ownership_tables",
             "coven_input_tables",
+            "coven_sequence_tables",
         ],
     )),
     // One list for owner construction, runtime acquisition and task starts.
@@ -701,6 +702,9 @@ pub(crate) const POLICY: Policy = Policy {
         // A setup or admission exception borrows the gate for exact paths.
         "PublicationScope",
         "SnapshotMetadata",
+        // These readers borrow a connection for one committed read or transaction.
+        "DatabaseMetadata",
+        "ClaimBytes",
         "Circles",
         "FileWrite",
         "SqlReadContext",

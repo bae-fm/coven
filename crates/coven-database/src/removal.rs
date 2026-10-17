@@ -18,7 +18,6 @@ pub(crate) fn materialize(
     visible: &AppView<'_>,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
-    causes: &BTreeSet<crate::EntryId>,
 ) -> Result<(), DbError> {
     let mut removed_visible = BTreeSet::new();
     for id in &result.region {
@@ -123,109 +122,116 @@ pub(crate) fn materialize(
     }
     let ordered = dependency_order(actions, &dependencies, &parents);
     database.materialize(|database| {
-        // Kept local rows can only return with a synced parent coven inserts.
-        let kept = crate::local_effects::any(database)?;
         for id in ordered {
             let table = schema.table(&id.table);
             if removed_visible.contains(&id) {
                 // A native CASCADE may have already deleted another member of
                 // a removal cycle. No surviving synced child remains attached.
                 if let Some(values) = crate::write_rows::read_values(database, table, &id.key)? {
-                    // SQLite's own actions reach only local children; keep them
-                    // while the removal can still be reversed by replay (§8.4).
-                    let causes = crate::local_effects::provisional(database, &removal_causes(view, result, &id, causes)?)?;
-                    crate::local_effects::capture(database, schema, &id, &values, &causes)?;
-                    changed_once(database.app_execute(&format!("DELETE FROM main.{} WHERE {}",identifier(&table.name),predicate(table)),params_from_iter(key_columns(table).iter().map(|c| sql_value(&values[&c.name]))))?)?;
+                    changed_once(
+                        database.app_execute(
+                            &format!(
+                                "DELETE FROM main.{} WHERE {}",
+                                identifier(&table.name),
+                                predicate(table)
+                            ),
+                            params_from_iter(
+                                key_columns(table)
+                                    .iter()
+                                    .map(|c| sql_value(&values[&c.name])),
+                            ),
+                        )?,
+                    )?;
                 }
             } else {
                 let values = view.evaluated(&id)?.values;
-                if put(database,table,&id,&values,visible)? && kept {
-                    crate::local_effects::restore(database, schema, &id, &values)?;
-                }
+                put(database, table, &id, &values, visible)?;
             }
         }
-        for id in &result.region {
-            let row = view.evaluated(id)?;
-            if !row.facts.present() { continue; }
-            let state = view.state(id)?;
-            let old = view.prior(id)?;
-            let loss = old.loss.filter(|_| old.state.generation()==state.generation());
-            let columns:BTreeMap<_,_> = state.cells().iter().map(|(name,cell)| (name.clone(),cell.value.clone())).collect();
-            let row_ordinal: i64 = database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4", params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice()], |r| r.get(0))?;
-            crate::written_values::store(database,row_ordinal,&state,(!result.removed.contains_key(id)).then_some(&row.values))?;
-            let previous_claims: BTreeMap<i64,Vec<u8>> = database.query("SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1", [row_ordinal], |r| Ok((r.get(0)?,r.get(1)?)))?.into_iter().collect();
-            let mut claims = BTreeMap::new();
-            if result.removed.contains_key(id) {
-                for (constraint, claim) in &row.constraints.unique {
-                    let constraint = crate::row_queries::constraint(database, &id.table, constraint)?;
-                    claims.insert(constraint, claim.value.clone());
-                }
-            }
-            for constraint in previous_claims.keys().filter(|c| !claims.contains_key(c)) {
-                database.internal_execute("DELETE FROM _coven_claims WHERE row_id=?1 AND constraint_id=?2", params![row_ordinal,constraint])?;
-            }
-            for (constraint, value) in &claims {
-                if previous_claims.get(constraint) != Some(value) {
-                    database.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row_ordinal,constraint,audience_text(&id.audience),value])?;
-                }
-            }
-            if let Some(rules) = result.removed.get(id) {
-                let setters = state.cells().iter().map(|(n,c)| (n.clone(),c.write)).collect();
-                let values=encoded(merge_fields::encode_columns(&columns))?;
-                let setters=encoded(merge_fields::encode_setters(&setters))?;
-                let rules=encoded(merge_fields::encode_rules(rules))?;
-                match loss {
-                    Some(loss)=> {
-                        // Compare the stored fields so unchanged region neighbors
-                        // do not produce metadata writes or local trigger effects.
-                        database.internal_execute("UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3)",params![values,setters,rules,loss])?;
-                    }
-                    None=> { database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice(),values,setters,rules])?; }
-                }
-            } else {
-                if let Some(loss)=loss { database.internal_execute("DELETE FROM _coven_lost WHERE id=?1",[loss])?; }
-            }
-        }
-        Ok(())
-    })?;
-    Ok(())
+        record(database, view, result)
+    })
 }
 
-/// Store-log entries a row's removal depends on: the transaction's own causes,
-/// a deleted circle hiding it, and those hiding the parents it references.
-fn removal_causes(
+/// Store removal losses and reverse unique indexes without changing app rows.
+pub(crate) fn record(
+    database: &DatabaseConnection,
     view: &DatabaseRemovalView<'_>,
     result: &RemovalResult,
-    id: &RowId,
-    context: &BTreeSet<crate::EntryId>,
-) -> Result<BTreeSet<crate::EntryId>, DbError> {
-    let mut causes = context.clone();
-    let mut seen = BTreeSet::new();
-    let mut pending = vec![id.clone()];
-    while let Some(row) = pending.pop() {
-        if !seen.insert(row.clone()) {
+) -> Result<(), DbError> {
+    for id in &result.region {
+        let row = view.evaluated(id)?;
+        if !row.facts.present() {
             continue;
         }
-        for rule in result.removed.get(&row).into_iter().flatten() {
-            if let coven_merge::Rule::DeletedCircle(entry) = rule {
-                causes.insert(*entry);
+        let state = view.state(id)?;
+        let old = view.prior(id)?;
+        let loss = old
+            .loss
+            .filter(|_| old.state.generation() == state.generation());
+        let columns: BTreeMap<_, _> = state
+            .cells()
+            .iter()
+            .map(|(name, cell)| (name.clone(), cell.value.clone()))
+            .collect();
+        let row_ordinal: i64 = database.query_row("SELECT id FROM _coven_rows WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4", params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice()], |r| r.get(0))?;
+        crate::written_values::store(
+            database,
+            row_ordinal,
+            &state,
+            (!result.removed.contains_key(id)).then_some(&row.values),
+        )?;
+        let previous_claims: BTreeMap<i64, Vec<u8>> = database
+            .query(
+                "SELECT constraint_id,value FROM _coven_claims WHERE row_id=?1",
+                [row_ordinal],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )?
+            .into_iter()
+            .collect();
+        let mut claims = BTreeMap::new();
+        if result.removed.contains_key(id) {
+            for (constraint, claim) in &row.constraints.unique {
+                let constraint = crate::row_queries::constraint(database, &id.table, constraint)?;
+                claims.insert(constraint, claim.value.clone());
             }
         }
-        if let coven_merge::RemovalRow::Present {
-            deleted_circle,
-            references,
-            ..
-        } = view.evaluated(&row)?.facts
-        {
-            causes.extend(deleted_circle);
-            pending.extend(
-                references
-                    .into_values()
-                    .map(|reference| reference.parent.row),
-            );
+        for constraint in previous_claims.keys().filter(|c| !claims.contains_key(c)) {
+            database.internal_execute(
+                "DELETE FROM _coven_claims WHERE row_id=?1 AND constraint_id=?2",
+                params![row_ordinal, constraint],
+            )?;
+        }
+        for (constraint, value) in &claims {
+            if previous_claims.get(constraint) != Some(value) {
+                database.internal_execute("INSERT INTO _coven_claims(row_id,constraint_id,audience,value) VALUES(?1,?2,?3,?4) ON CONFLICT(row_id,constraint_id) DO UPDATE SET value=excluded.value", params![row_ordinal,constraint,audience_text(&id.audience),value])?;
+            }
+        }
+        if let Some(rules) = result.removed.get(id) {
+            let setters = state
+                .cells()
+                .iter()
+                .map(|(n, c)| (n.clone(), c.write))
+                .collect();
+            let values = encoded(merge_fields::encode_columns(&columns))?;
+            let setters = encoded(merge_fields::encode_setters(&setters))?;
+            let rules = encoded(merge_fields::encode_rules(rules))?;
+            match loss {
+                Some(loss) => {
+                    // Compare the stored fields so unchanged region neighbors
+                    // do not produce metadata writes or local trigger effects.
+                    database.internal_execute("UPDATE _coven_lost SET value=?1,set_by=?2,replaced_by=?3 WHERE id=?4 AND (value<>?1 OR set_by<>?2 OR replaced_by<>?3)",params![values,setters,rules,loss])?;
+                }
+                None => {
+                    database.internal_execute("INSERT INTO _coven_lost(table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by) VALUES(?1,?2,?3,?4,NULL,?5,?6,'rules',?7)",params![id.table,id.key,audience_text(&id.audience),state.generation().to_be_bytes().as_slice(),values,setters,rules])?;
+                }
+            }
+        } else {
+            if let Some(loss) = loss {
+                database.internal_execute("DELETE FROM _coven_lost WHERE id=?1", [loss])?;
+            }
         }
     }
-    Ok(causes)
+    Ok(())
 }
 
 /// Visit dependencies first. `dependencies` are immediate: a surviving child

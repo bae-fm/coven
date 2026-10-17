@@ -37,18 +37,36 @@ pub(crate) fn values(
 /// evidence, or a dismissal for after the write's rows. Nothing merges until
 /// the whole write is judged, since a foreign-key action and its causes can
 /// be anywhere in it (§8.8).
-pub(crate) fn frame(
+pub(crate) fn ignored(
     database: &DatabaseConnection,
     header: &WriteHeader,
     audience: &Audience,
+) -> Result<bool, DbError> {
+    Ok(matches!(
+        crate::write_boundary::WriteBoundary::part_verdict(
+            &crate::write_boundary::WriteBoundary::judging(database)?,
+            header,
+            audience,
+            crate::sequence::write_slot(database, header.position)?
+        ),
+        Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(_))
+    ))
+}
+
+pub(crate) fn frame(
+    database: &DatabaseConnection,
+    header: &WriteHeader,
+    ignored: bool,
     frame: WriteFrame,
 ) -> Result<(), DbError> {
-    crate::retained_writes::frame(database, header, audience, &frame)?;
     let record = match &frame {
         WriteFrame::Change(row) => PartRecord::Change(row),
         WriteFrame::Execution(execution) => PartRecord::Execution(execution),
         WriteFrame::Dismissal(dismissal) => {
-            dismissal.validate_past(header)?;
+            if ignored {
+                return Ok(());
+            }
+            crate::dismissal::validate_past(database, header, dismissal)?;
             database.internal_execute(
                 "INSERT INTO temp._coven_download_dismissals(record) VALUES(?1)",
                 [encoded(dismissal.encode())?],
@@ -56,18 +74,29 @@ pub(crate) fn frame(
             return Ok(());
         }
     };
-    crate::write_sources::validate(database, header, record)?;
+    if !ignored {
+        crate::write_sources::validate(database, header, record)?;
+    }
     crate::write_sources::retain(database, header, record)
 }
 
 /// Judge the whole streamed write, then stage each opened part's admitted
 /// changes one record at a time, as they were retained.
-fn stage(
+pub(crate) fn stage(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     header: &WriteHeader,
     opened: &[Audience],
 ) -> Result<(), DbError> {
+    let captured = crate::captured_changes::audiences(database, header)?;
+    let audiences: Vec<_> = opened
+        .iter()
+        .chain(captured.iter())
+        .cloned()
+        .collect::<BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    let opened = &audiences;
     let interpreter = crate::interpretation::Interpreter::new(database, schema, header, opened)?;
     let write = merge_fields::encode_write_id(&header.position)?;
     for audience in opened {
@@ -109,11 +138,55 @@ fn stage(
             let updates = store.apply(&record)?;
             crate::write_commit::commit(database, &record, &store, &updates)?;
             for (row, update) in updates {
-                retain_values(database, &row, &update.state)?;
+                put_values(database, &row, &update.state)?;
             }
         }
     }
+    crate::captured_changes::losses(database, schema, header)?;
+    let dismissals = database.query(
+        "SELECT record FROM temp._coven_download_dismissals ORDER BY id",
+        [],
+        |r| {
+            decoded(coven_format::dismissal::Dismissal::decode(
+                &r.get::<_, Vec<u8>>(0)?,
+            ))
+        },
+    )?;
+    let mut parts = BTreeMap::<Audience, WritePart>::new();
+    for dismissal in dismissals {
+        parts
+            .entry(dismissal.row.audience.clone())
+            .or_insert_with(|| WritePart {
+                audience: dismissal.row.audience.clone(),
+                rows: Vec::new(),
+                executions: Vec::new(),
+                dismissals: Vec::new(),
+            })
+            .dismissals
+            .push(dismissal);
+    }
+    crate::dismissal::apply(
+        database,
+        schema,
+        &WriteRecord {
+            header: header.clone(),
+            parts: parts.into_values().collect(),
+        },
+    )?;
+    database.internal_execute("DELETE FROM temp._coven_download_dismissals", [])?;
     Ok(())
+}
+
+pub(crate) fn put_values(
+    database: &DatabaseConnection,
+    row: &RowId,
+    state: &coven_merge::RowState<coven_format::value::Value>,
+) -> Result<(), DbError> {
+    database.internal_execute(
+        "DELETE FROM temp._coven_download_rows WHERE table_name=?1 AND key=?2 AND audience=?3",
+        params![row.table, row.key, audience_text(&row.audience)],
+    )?;
+    retain_values(database, row, state)
 }
 
 /// Keep raw values before app materialization can replace or cascade them.
@@ -138,64 +211,51 @@ pub(crate) fn retain_values(
     Ok(())
 }
 
-pub(crate) fn finish(
+/// Install app rows once after the counted and queued folds have completed.
+pub(crate) fn materialize(
     database: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
-    header: &WriteHeader,
-    opened: &[Audience],
-    deleted: &BTreeMap<coven_foundation::id_source::CircleId, crate::EntryId>,
+    deleted: &BTreeMap<coven_foundation::id_source::CircleId, coven_merge::Slot>,
+    mut touched: BTreeSet<RowId>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<(), DbError> {
-    stage(database, schema, header, opened)?;
-    let touched = database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?.into_iter().collect::<BTreeSet<_>>();
-    if !touched.is_empty() {
-        let prior = AppView::after(before, schema).without_row_cache();
-        let old_store = MergeStore::from_schema(before, &schema.schema).without_row_cache();
-        let empty = BTreeMap::new();
-        let old = crate::removal_view::DatabaseRemovalView::new(
-            before, &old_store, schema, &prior, &empty, deleted, None,
-        )?;
-        let current = MergeStore::from_staged(database, &schema.schema).without_row_cache();
-        let affected = crate::write_apply::WriteApply::new(
-            database, schema, &current, &prior, &prior, deleted,
-        )
-        .replace(&old, touched)?;
-        files.retain_rows(affected)?;
-    }
-    database.for_each::<_, crate::DbError>(
-        "SELECT record FROM temp._coven_download_dismissals ORDER BY id",
-        [],
-        |row| {
-            let dismissal = decoded(coven_format::dismissal::Dismissal::decode(
-                &row.get::<_, Vec<u8>>(0)?,
-            ))?;
-            crate::download::apply_opened(
-                database,
-                schema,
-                crate::DownloadedWrite {
-                    header: header.clone(),
-                    parts: vec![crate::DownloadedPart::Opened(WritePart {
-                        audience: dismissal.row.audience.clone(),
-                        rows: Vec::new(),
-                        executions: Vec::new(),
-                        dismissals: vec![dismissal],
-                    })],
-                },
-                deleted,
-            )?;
-            Ok(())
-        },
+    touched.extend(database.query("SELECT table_name,key,audience FROM temp._coven_download_rows ORDER BY table_name,key,audience",[],crate::row_queries::read_identity)?);
+    let prior = AppView::after(before, schema).without_row_cache();
+    let old_store = MergeStore::from_schema(before, &schema.schema).without_row_cache();
+    let empty = BTreeMap::new();
+    let old = crate::removal_view::DatabaseRemovalView::new(
+        before, &old_store, schema, &prior, &empty, deleted, None,
     )?;
-    // An empty migration or a write containing only skipped parts still advances.
-    let visible = AppView::after(database, schema);
-    let store = MergeStore::new(database, &visible);
-    let record = WriteRecord {
-        header: header.clone(),
-        parts: Vec::new(),
-    };
-    let updates = store.apply(&record)?;
-    crate::write_commit::commit(database, &record, &store, &updates)?;
+    let current = MergeStore::from_staged(database, &schema.schema).without_row_cache();
+    let affected =
+        crate::write_apply::WriteApply::new(database, schema, &current, &prior, &prior, deleted)
+            .replace(&old, touched)?;
+    files.retain_rows(affected)?;
     database
         .batch("DROP TABLE temp._coven_download_rows; DROP TABLE temp._coven_download_dismissals")
+}
+
+/// The counted projection's losses must be captured before the local overlay.
+pub(crate) fn count(database: &DatabaseConnection, schema: &WriteSchema) -> Result<(), DbError> {
+    let touched = database
+        .query(
+            "SELECT DISTINCT table_name,key,audience FROM _coven_rows",
+            [],
+            crate::row_queries::read_identity,
+        )?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let app = AppView::after(database, schema).without_row_cache();
+    let store = MergeStore::from_staged(database, &schema.schema).without_row_cache();
+    let empty = BTreeMap::new();
+    let deleted = crate::store_state_tables::deleted_circles(database)?;
+    let view = crate::removal_view::DatabaseRemovalView::new(
+        database, &store, schema, &app, &empty, &deleted, None,
+    )?;
+    view.prime(touched.iter().cloned())?;
+    let result =
+        coven_merge::recompute(&view, &view, touched).map_err(|e| e.into_db_error(None))?;
+    store.retain_materialization_values(&result.region)?;
+    crate::removal::record(database, &view, &result)
 }

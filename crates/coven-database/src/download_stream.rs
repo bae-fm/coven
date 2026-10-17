@@ -1,9 +1,9 @@
 //! Incremental write parts supplied by synchronization.
 
-use crate::{DownloadedPart, DownloadedWrite, SnapshotError};
+use crate::SnapshotError;
 use coven_format::chunks::CHUNK_SIZE;
 use coven_format::dismissal::WriteFrame;
-use coven_format::write::{PartRecord, WritePart};
+use coven_format::write::PartRecord;
 use coven_format::write_stream::{PartDecoder, WriteHeaderFrame};
 use std::io::Read;
 
@@ -14,9 +14,8 @@ pub struct DownloadedWriteStream<R> {
     pub header: WriteHeaderFrame,
     /// Opened plaintext or an explicit unreadable audience, in header order.
     pub parts: Vec<DownloadedPartStream<R>>,
-    /// The object's first complete publication time, from provider metadata,
-    /// and the signing key that authenticated it in its recorded view (§10).
-    pub published: crate::Published,
+    /// The key that authenticated this original in its authored view.
+    pub signer: coven_crypto::SigningKey,
     /// The signed header evidence and each opened part's keyed leaf hasher.
     pub authorship: WriteAuthorship,
 }
@@ -65,179 +64,121 @@ fn hash_frame(
 pub enum DownloadedPartStream<R> {
     /// A complete plaintext part stream, starting at its first byte.
     Opened(R),
-    /// Sync authenticated the part but the device does not have its key.
+    /// The part is outside this installation's current audience.
     Skipped,
 }
 
 impl<R: Read> DownloadedWriteStream<R> {
-    pub(crate) fn apply<P: crate::PendingValue>(
+    /// Stage one original inside its containing slot's transaction. The caller
+    /// materializes the complete batch only after all parts authenticate.
+    pub(crate) fn stage_selected(
         self,
         database: &crate::sqlite::DatabaseConnection,
-        before: &crate::sqlite::DatabaseConnection,
         schema: &crate::write_schema::WriteSchema,
-        files: &crate::file_write::FileWrite<'_>,
-        store_log: &coven_format::value::EntryPositions,
-        authenticate: impl FnOnce() -> Result<(), crate::DbError>,
-    ) -> Result<crate::ApplyOutcome, crate::DbError> {
-        crate::download::source_wait(database.stream_transaction(|database| {
-            if crate::store_log::positions(database)? != *store_log {
-                return Err(crate::DbError::StoreLogEntriesChanged);
-            }
-            let original_header = self.header.clone();
-            original_header.encode()?;
-            if self.header.parts.len() != self.parts.len()
-                || self.authorship.evidence.roots.len() != self.parts.len()
-            {
-                return Err(SnapshotError::Inconsistent(
-                    "write stream count differs from its header",
-                )
-                .into());
-            }
-            let write = self.header.header.position;
-            if crate::download::positions(database)?.covers(self.header.header.position) {
-                crate::write_commit::retain_metadata(
-                    database,
-                    &coven_format::snapshot_rows::AppliedWrite {
-                        id: self.header.header.position,
-                        timestamp: self.header.header.timestamp,
-                        had_read: self.header.header.had_read.clone(),
-                    },
-                )?;
-                for (index, (header, stream)) in
-                    self.header.parts.into_iter().zip(self.parts).enumerate()
-                {
-                    let DownloadedPartStream::Opened(input) = stream else {
-                        continue;
-                    };
-                    let audience = header.audience.clone();
-                    let mut root = self.authorship.root(index)?;
-                    read_part(input, header, &self.header.header, |frame| {
-                        hash_frame(&mut root, &frame)?;
-                        let (rows, executions) = match frame {
-                            WriteFrame::Change(row) => (vec![row], Vec::new()),
-                            WriteFrame::Execution(execution) => (Vec::new(), vec![execution]),
-                            WriteFrame::Dismissal(_) => (Vec::new(), Vec::new()),
-                        };
-                        crate::download::retain_source_rows(
-                            database,
-                            &DownloadedWrite {
-                                header: self.header.header.clone(),
-                                parts: vec![DownloadedPart::Opened(WritePart {
-                                    audience: audience.clone(),
-                                    rows,
-                                    executions,
-                                    dismissals: Vec::new(),
-                                })],
-                            },
-                        )
-                    })?;
-                    root.finish(database, write, &audience)?;
-                    crate::write_sources::complete(database, &self.header.header, &audience)?;
-                }
-                authenticate()?;
-                crate::authorship::retain_header(database, write, &self.authorship.evidence)?;
-                return Ok(crate::ApplyOutcome::AlreadyApplied);
-            }
-            let opened: Vec<_> = self
-                .header
-                .parts
-                .iter()
-                .zip(&self.parts)
-                .filter(|(_, stream)| matches!(stream, DownloadedPartStream::Opened(_)))
-                .map(|(part, _)| part.audience.clone())
-                .collect();
+        slot: coven_merge::Slot,
+        refused: bool,
+        selected: impl Fn(&coven_merge::Audience) -> bool,
+    ) -> Result<(), crate::DbError> {
+        let opened: Vec<_> = self
+            .header
+            .parts
+            .iter()
+            .zip(&self.parts)
+            .filter(|(part, stream)| {
+                selected(&part.audience) && matches!(stream, DownloadedPartStream::Opened(_))
+            })
+            .map(|(part, _)| part.audience.clone())
+            .collect();
+        if !refused {
             if let Some(wait) =
                 crate::download::prerequisite(database, &self.header.header, &opened)?
             {
-                return Ok(crate::ApplyOutcome::Waiting(wait));
+                return Err(crate::DbError::WriteWaiting(wait));
             }
-            for audience in &opened {
-                if crate::entry_effects::reloading(database, audience)? {
-                    return Ok(crate::ApplyOutcome::Waiting(crate::WriteWait::Reload(
-                        audience.clone(),
-                    )));
+        }
+        if !refused {
+            crate::merge_store::MergeStore::from_staged(database, &schema.schema).apply(
+                &coven_format::write::WriteRecord {
+                    header: self.header.header.clone(),
+                    parts: vec![],
+                },
+            )?;
+        }
+        crate::write_commit::retain_original(database, &self.header.header, Some(slot))?;
+        let original_header = self.header.clone();
+        let boundaries = crate::write_boundary::WriteBoundary::judging(database)?;
+        self.read_authenticated(
+            database,
+            |header, audience, frame| {
+                if !selected(audience) {
+                    return Ok(());
                 }
-            }
-            crate::pending::clear_log(
-                database,
-                crate::LogObject::Write(self.header.header.position),
-            )?;
-            let late = crate::write_landing::land::<P>(
-                database,
-                schema,
-                &self.header.header,
-                self.published,
-                &opened,
-                true,
-            )?;
-            crate::download_stage::begin(database)?;
-            let deleted = crate::store_log_tables::deleted_circles(database)?;
-            for (index, (header, stream)) in
-                self.header.parts.into_iter().zip(self.parts).enumerate()
-            {
-                let DownloadedPartStream::Opened(input) = stream else {
-                    continue;
-                };
-                let audience = header.audience.clone();
-                let mut root = self.authorship.root(index)?;
-                read_part(input, header, &self.header.header, |frame| {
-                    hash_frame(&mut root, &frame)?;
-                    if late {
-                        // Authored evidence and retained parts only: a late
-                        // write has no effects or losses (§10).
-                        crate::retained_writes::frame(
+                if refused {
+                    if let Some(record) = source_record(&frame) {
+                        crate::write_sources::retain(database, header, record)?;
+                        crate::write_sources::admit(
                             database,
-                            &self.header.header,
-                            &audience,
-                            &frame,
+                            header,
+                            record.row(),
+                            &coven_format::snapshot_rows::ChangeVerdict::Refused,
                         )?;
-                        let record = match &frame {
-                            WriteFrame::Change(row) => Some(PartRecord::Change(row)),
-                            WriteFrame::Execution(execution) => {
-                                Some(PartRecord::Execution(execution))
-                            }
-                            WriteFrame::Dismissal(_) => None,
-                        };
-                        if let Some(record) = record {
-                            crate::write_sources::validate(database, &self.header.header, record)?;
-                            crate::write_sources::retain(database, &self.header.header, record)?;
-                            crate::write_sources::admit(
-                                database,
-                                &self.header.header,
-                                record.row(),
-                                &coven_format::snapshot_rows::ChangeVerdict::Dropped,
-                            )?;
-                        }
-                        return Ok(());
                     }
-                    crate::download_stage::frame(database, &self.header.header, &audience, frame)
-                })?;
-                root.finish(database, write, &audience)?;
-                crate::write_sources::complete(database, &self.header.header, &audience)?;
-            }
-            authenticate()?;
-            crate::write_headers::retain(database, &original_header)?;
-            crate::authorship::retain_header(database, write, &self.authorship.evidence)?;
-            crate::download_stage::finish(
-                database,
-                before,
-                schema,
-                &self.header.header,
-                &opened,
-                &deleted,
-                files,
-            )?;
-            files.before_commit()?;
-            Ok(crate::ApplyOutcome::Applied)
-        }))
+                    return Ok(());
+                }
+                let ignored = matches!(
+                    crate::write_boundary::WriteBoundary::part_verdict(
+                        &boundaries,
+                        header,
+                        audience,
+                        Some(slot)
+                    ),
+                    Some(coven_format::snapshot_rows::ChangeVerdict::Ignored(_))
+                );
+                crate::download_stage::frame(database, header, ignored, frame)
+            },
+            |header, audience| {
+                if selected(audience) {
+                    crate::write_sources::complete(database, header, audience)?;
+                }
+                Ok(())
+            },
+        )?;
+        if !refused {
+            crate::download_stage::stage(database, schema, &original_header.header, &opened)?;
+        }
+        Ok(())
     }
 
-    /// Decode the whole write, checking each opened part against its signed
-    /// root and keeping the write's evidence for later snapshots.
-    pub(crate) fn read(
+    /// Retain authenticated source evidence without changing rows or admission.
+    pub(crate) fn retain_sources(
+        self,
+        db: &crate::sqlite::DatabaseConnection,
+    ) -> Result<(), crate::DbError> {
+        self.read_authenticated(
+            db,
+            |header, _, frame| {
+                if let Some(record) = source_record(&frame) {
+                    crate::write_sources::retain(db, header, record)?;
+                }
+                Ok(())
+            },
+            |header, audience| crate::write_sources::complete(db, header, audience),
+        )
+    }
+
+    fn read_authenticated(
         self,
         database: &crate::sqlite::DatabaseConnection,
-    ) -> Result<DownloadedWrite, crate::DbError> {
+        mut consume: impl FnMut(
+            &coven_format::write::WriteHeader,
+            &coven_merge::Audience,
+            WriteFrame,
+        ) -> Result<(), crate::DbError>,
+        mut complete: impl FnMut(
+            &coven_format::write::WriteHeader,
+            &coven_merge::Audience,
+        ) -> Result<(), crate::DbError>,
+    ) -> Result<(), crate::DbError> {
         if self.header.parts.len() != self.parts.len()
             || self.authorship.evidence.roots.len() != self.parts.len()
         {
@@ -245,48 +186,32 @@ impl<R: Read> DownloadedWriteStream<R> {
                 SnapshotError::Inconsistent("write stream count differs from its header").into(),
             );
         }
+
+        let original_header = self.header.clone();
         let write = self.header.header.position;
-        let mut parts = Vec::new();
         for (index, (header, stream)) in self.header.parts.into_iter().zip(self.parts).enumerate() {
-            let input = match stream {
-                DownloadedPartStream::Opened(input) => input,
-                DownloadedPartStream::Skipped => {
-                    parts.push(DownloadedPart::Skipped(header.audience));
-                    continue;
-                }
+            let DownloadedPartStream::Opened(input) = stream else {
+                continue;
             };
             let audience = header.audience.clone();
             let mut root = self.authorship.root(index)?;
-            let mut rows = Vec::new();
-            let mut executions = Vec::new();
-            let mut dismissals = Vec::new();
-            read_part(input, header, &self.header.header, |frame| {
+            read_part(input, header, |frame| {
                 hash_frame(&mut root, &frame)?;
-                match frame {
-                    WriteFrame::Change(row) => rows.push(row),
-                    WriteFrame::Execution(execution) => executions.push(execution),
-                    WriteFrame::Dismissal(dismissal) => dismissals.push(dismissal),
-                }
-                Ok::<_, crate::DbError>(())
-            })
-            .map_err(|error| match error {
-                // The stream's bytes violate the format, like a snapshot's.
-                crate::DbError::WriteFormat(error) => SnapshotError::Format(error).into(),
-                error => error,
+                consume(&self.header.header, &audience, frame)
             })?;
             root.finish(database, write, &audience)?;
-            parts.push(DownloadedPart::Opened(WritePart {
-                audience,
-                rows,
-                executions,
-                dismissals,
-            }));
+            complete(&self.header.header, &audience)?;
         }
-        crate::authorship::retain_header(database, write, &self.authorship.evidence)?;
-        Ok(DownloadedWrite {
-            header: self.header.header,
-            parts,
-        })
+        crate::write_headers::retain(database, &original_header)?;
+        crate::authorship::retain_header(database, write, &self.authorship.evidence)
+    }
+}
+
+fn source_record(frame: &WriteFrame) -> Option<PartRecord<'_>> {
+    match frame {
+        WriteFrame::Change(row) => Some(PartRecord::Change(row)),
+        WriteFrame::Execution(row) => Some(PartRecord::Execution(row)),
+        WriteFrame::Dismissal(_) => None,
     }
 }
 
@@ -295,8 +220,7 @@ impl<R: Read> DownloadedWriteStream<R> {
 pub(crate) fn read_part<R: Read, E: From<SnapshotError> + From<coven_format::Error>>(
     mut input: R,
     header: coven_format::write_stream::PartHeader,
-    write: &coven_format::write::WriteHeader,
-    mut consume: impl FnMut(WriteFrame) -> Result<(), E>,
+    consume: impl FnMut(WriteFrame) -> Result<(), E>,
 ) -> Result<(), E> {
     visit_part(
         header,
@@ -305,19 +229,7 @@ pub(crate) fn read_part<R: Read, E: From<SnapshotError> + From<coven_format::Err
                 .read_exact(chunk)
                 .map_err(|error| SnapshotError::Read(error).into())
         },
-        |frame| {
-            match &frame {
-                WriteFrame::Dismissal(dismissal) => dismissal.validate_past(write)?,
-                WriteFrame::Change(row) => {
-                    row.sources.validate_past(write)?;
-                    row.execution.sources.validate_past(write)?;
-                }
-                WriteFrame::Execution(execution) => {
-                    execution.execution.sources.validate_past(write)?
-                }
-            }
-            consume(frame)
-        },
+        consume,
     )?;
     let mut trailing = [0];
     loop {

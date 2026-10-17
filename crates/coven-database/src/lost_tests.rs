@@ -59,10 +59,7 @@ async fn losses_preserve_storage_classes_each_setter_and_every_replacement() {
         "write",
         encode_write_id(&setter(2)).unwrap(),
     );
-    let entry = EntryId {
-        device: DeviceId(u64::MAX),
-        number: u64::MAX,
-    };
+    let entry = coven_merge::Slot(u64::MAX);
     let values: BTreeMap<String, ColumnValue<WireValue>> = BTreeMap::from([
         ("a".into(), cell(WireValue::Null)),
         ("b".into(), cell(WireValue::Integer(i64::MIN))),
@@ -252,11 +249,7 @@ async fn corrupt_values_fail_typed_and_live_losses_recover_after_repair() {
     let values: BTreeMap<String, ColumnValue<WireValue>> =
         BTreeMap::from([("title".into(), cell(WireValue::Text("lost".into())))]);
     let setters = BTreeMap::from([("title".into(), setter(1))]);
-    let rules = encode_rules(&BTreeSet::from([Rule::DeletedCircle(EntryId {
-        device: DeviceId(1),
-        number: 1,
-    })]))
-    .unwrap();
+    let rules = encode_rules(&BTreeSet::from([Rule::DeletedCircle(coven_merge::Slot(1))])).unwrap();
     insert(
         &db,
         None,
@@ -383,6 +376,9 @@ mod dropped_schema {
         b_edit: &'static str,
     ) {
         sql(a, inserted).await.unwrap();
+        a.receive(records(a).last().unwrap().clone().into())
+            .await
+            .unwrap();
         b.receive(records(a).last().unwrap().clone().into())
             .await
             .unwrap();
@@ -396,7 +392,13 @@ mod dropped_schema {
 
     async fn assert_frozen(db: &Database, before: &[LostValue]) {
         let losses = db.lost_values().await.unwrap();
-        assert_eq!(losses.len(), 1);
+        assert_eq!(
+            losses.len(),
+            1,
+            "schema {}, slot {}",
+            db.schema_version().await.unwrap(),
+            db.applied_slot().await.unwrap()
+        );
         assert_eq!(
             (
                 &losses[0].table,
@@ -435,7 +437,7 @@ mod dropped_schema {
     /// A dropped table's cell loss stays displayed, frozen under the table's
     /// name; its original changes and verdicts stay as source evidence. A
     /// snapshot carries the loss to a device that never had the table, with
-    /// equal fingerprints, and dismissal removes it on both.
+    /// equal snapshot records, and dismissal removes it on both.
     #[tokio::test]
     async fn a_dropped_tables_losses_stay_frozen_under_its_name() {
         let ids = SequentialIds::new();
@@ -511,7 +513,7 @@ mod dropped_schema {
     /// A dropped column's cell loss stays frozen with the old name. A later
     /// migration adding a column of that name, then renaming it, moves only
     /// live cells: the frozen loss still names the dropped column, also after
-    /// a snapshot reload with equal fingerprints.
+    /// a snapshot reload with equal snapshot records.
     #[tokio::test]
     async fn a_dropped_columns_loss_keeps_its_name_through_reuse_and_rename() {
         let ids = SequentialIds::new();
@@ -589,10 +591,7 @@ mod dropped_schema {
         }
     }
 
-    /// A row left hidden by a non-final circle deletion keeps its active
-    /// removal record under the new schema; the record naming the dropped
-    /// column is kept whole as a frozen copy with its original rules. When the
-    /// deletion drops, the row returns and the frozen copy remains (§17.1).
+    /// Migration freezes deleted-circle values with their original columns.
     #[tokio::test]
     async fn a_hidden_rows_dropped_column_is_kept_in_a_frozen_whole_row_loss() {
         use crate::migration_state::tests::{circle_row, circle_schema, circle_tables};
@@ -604,9 +603,7 @@ mod dropped_schema {
         let row = circle_row();
         db.receive(row.into()).await.unwrap();
         let circle = coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1));
-        crate::store_log::tests::delete_circle(&db, circle)
-            .await
-            .unwrap();
+        crate::tests::delete_circle(&db, circle).await.unwrap();
         let hidden = db.lost_values().await.unwrap();
         assert_eq!(hidden.len(), 1);
         db.close().await.unwrap();
@@ -622,7 +619,7 @@ mod dropped_schema {
             .await
             .unwrap();
         let losses = db.lost_values().await.unwrap();
-        assert_eq!(losses.len(), 2, "{losses:#?}");
+        assert_eq!(losses.len(), 1, "{losses:#?}");
         let columns = |loss: &LostValue| match &loss.lost {
             Lost::Row(cells) => cells.iter().map(|c| c.column.clone()).collect::<Vec<_>>(),
             Lost::Cell(_) => panic!("{loss:?}"),
@@ -631,27 +628,13 @@ mod dropped_schema {
             .iter()
             .find(|l| matches!(l.target, crate::lost::LossTarget::Cells(_)))
             .unwrap();
-        assert_eq!(
-            (&frozen.lost, &frozen.replaced_by),
-            (&hidden[0].lost, &hidden[0].replaced_by)
-        );
+        assert_eq!(&frozen.lost, &hidden[0].lost);
+        assert!(matches!(
+            frozen.replaced_by,
+            Replacement::SchemaChange { version: 2 }
+        ));
         assert!(columns(frozen).contains(&"c".to_string()));
-        let active = losses
-            .iter()
-            .find(|l| matches!(l.target, crate::lost::LossTarget::Removed { .. }))
-            .unwrap();
-        assert!(!columns(active).contains(&"c".to_string()));
-        assert!(matches!(active.replaced_by, Replacement::Rules(_)));
-        let deletion = crate::store_log::tests::circle_history(circle)
-            .last()
-            .unwrap()
-            .0
-            .position;
-        crate::migration_state::tests::drop_entry(&db, deletion, circle).await;
-        assert_eq!(count(&db, "rows"), 1);
-        let losses = db.lost_values().await.unwrap();
-        assert_eq!(losses.len(), 1);
-        assert_eq!(losses[0].lost, frozen.lost);
+        assert_eq!(count(&db, "rows"), 0);
         db.close().await.unwrap();
     }
 }

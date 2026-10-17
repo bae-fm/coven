@@ -42,12 +42,7 @@ pub(crate) fn begin(
             [&audience],
         )?;
     }
-    for table in [
-        "_coven_rows",
-        "_coven_lost",
-        "_coven_fingerprint_leaves",
-        "_coven_fingerprint_sums",
-    ] {
+    for table in ["_coven_rows", "_coven_lost"] {
         database.internal_execute(
             &format!("DELETE FROM {table} WHERE audience=?1"),
             [&audience],
@@ -62,7 +57,7 @@ pub(crate) fn begin(
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch("CREATE TEMP TABLE _coven_snapshot_values(audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,columns BLOB NOT NULL,matched INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(audience,table_name,key)) WITHOUT ROWID;
-        CREATE TEMP TABLE _coven_snapshot_writes(device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,had_read BLOB NOT NULL,PRIMARY KEY(device,number)) WITHOUT ROWID;
+        CREATE TEMP TABLE _coven_snapshot_writes(device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(device,number)) WITHOUT ROWID;
         CREATE TEMP TABLE _coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
     Ok(())
 }

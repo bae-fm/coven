@@ -4,7 +4,7 @@ use crate::{sqlite::DatabaseConnection, DbError, NewOperation, OperationId, Pend
 use coven_crypto::SecretBytes;
 use coven_foundation::id_source::DeviceId;
 
-/// One account's intention derived from replay and this device's invitations.
+/// One account's intention derived from membership and this device's invitations.
 pub struct ProviderAccessChange {
     /// Provider account identity.
     pub account: String,
@@ -32,7 +32,7 @@ pub struct ProviderAccessRequest {
 /// A request makes confirmation unknown until the provider supplies evidence.
 #[derive(Debug)]
 pub struct ProviderAccess {
-    /// Latest replay/invitation intention.
+    /// Latest membership and invitation intention.
     pub intended: bool,
     /// Confirmed grant, or unknown when a request has no conclusive reply.
     pub granted: Option<bool>,
@@ -66,7 +66,7 @@ pub(crate) fn finish(
     Ok(())
 }
 
-/// Called inside the same transaction as replay or an invitation change.
+/// Called inside the same transaction as membership or an invitation change.
 pub(crate) fn adopt<P: PendingValue>(
     db: &DatabaseConnection,
     reporter: DeviceId,
@@ -96,7 +96,7 @@ pub(crate) fn adopt<P: PendingValue>(
             let record =
                 crate::operation::find(db, request.operation)?.ok_or(DbError::DamagedDatabase)?;
             // An in-flight completion must first account for its fixed target.
-            // Unchanged replay also preserves a previously reported failure.
+            // Unchanged membership also preserves a previously reported failure.
             if record.last_step == 1
                 || (record.last_step == 2 && before.intended == change.intended)
             {

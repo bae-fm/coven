@@ -2,6 +2,39 @@ use crate::{tests::*, *};
 use coven_foundation::id_source::DeviceId;
 
 #[test]
+fn schema_mapping_preserves_the_history_of_surviving_columns() {
+    let writes = vec![
+        write(
+            1,
+            1,
+            &[],
+            vec![(row(1), change(0, 0, &[("0", "first"), ("1", "drop")]))],
+        ),
+        write(2, 2, &[1], vec![(row(1), change(1, 1, &[("0", "lost")]))]),
+        write(3, 3, &[1], vec![(row(1), change(1, 1, &[("0", "winner")]))]),
+    ];
+    let original = fold(&writes, &[0, 1, 2]).remove(&row(1)).unwrap();
+    let mapped = original.clone().map_schema(row(2), |name, value| {
+        (name == "0").then_some(("renamed".into(), value))
+    });
+    assert_eq!(mapped.row(), &row(2));
+    assert_eq!(mapped.generations(), original.generations());
+    assert_eq!(mapped.generation(), original.generation());
+    assert_eq!(mapped.cells().len(), 1);
+    assert_eq!(mapped.cells()["renamed"], original.cells()["0"]);
+    assert_eq!(
+        mapped.lost()[&LostKey {
+            column: "renamed".into(),
+            write: id(2)
+        }],
+        original.lost()[&LostKey {
+            column: "0".into(),
+            write: id(2)
+        }]
+    );
+}
+
+#[test]
 fn grocery_titles_and_a_lost_value_that_stops_being_lost() {
     let writes = vec![
         write(

@@ -65,7 +65,6 @@ async fn independent_key_insert_refuses_invalid_uuid_and_rolls_back() {
             "_coven_uploads",
             "_coven_rows",
             "_coven_cells",
-            "_coven_positions",
         ] {
             assert_eq!(count(&db, table), 0, "{table}");
         }

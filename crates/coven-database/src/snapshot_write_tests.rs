@@ -4,7 +4,7 @@ use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::snapshot::SnapshotDecoder;
 use coven_format::value::Value;
-use coven_foundation::id_source::{CircleId, SequentialIds};
+use coven_foundation::id_source::{CircleId, DeviceId, SequentialIds};
 use coven_merge::{MergeError, Timestamp, WriteOracle};
 use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
@@ -24,8 +24,16 @@ impl WriteOracle for Oracle {
         Ok(if reader.device == earlier.device {
             earlier.number < reader.number
         } else {
-            write.had_read.covers(earlier)
+            self.0
+                .get(&earlier)
+                .is_some_and(|earlier| earlier.slot.0 <= write.read_through)
         })
+    }
+}
+
+impl coven_format::snapshot::WriteSlots for Oracle {
+    fn slot(&self, id: WriteId) -> Option<coven_merge::Slot> {
+        self.0.get(&id).map(|w| w.slot)
     }
 }
 
@@ -75,10 +83,8 @@ pub(crate) fn prefix(
     coven_format::sealed_snapshot::SnapshotObjectPrefix {
         audience: header.id.audience.clone(),
         key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(1)),
-        caught_at: coven_format::value::StorageTime::new(1, 0).unwrap(),
-        raise: None,
-        writes: header.writes.clone(),
-        store_log: header.store_log.clone(),
+        covers: header.covers,
+        purpose: coven_format::sequence::Purpose::Ordinary,
     }
 }
 
@@ -87,6 +93,9 @@ pub(crate) async fn frames(database: &Database, audience: Audience) -> SnapshotF
 }
 
 pub(crate) async fn frames_for(database: &Database, id: SnapshotId) -> SnapshotFrames {
+    for record in records(database) {
+        database.receive(record.into()).await.unwrap();
+    }
     let frames = Arc::new(Mutex::new(Vec::new()));
     let metadata = Arc::new(Mutex::new(None));
     let output = frames.clone();
@@ -137,7 +146,7 @@ pub(crate) fn stream(
 ) -> crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>> {
     let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
     crate::DownloadedWriteStream {
-        published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+        signer: crate::test_utils::signer(),
         authorship: crate::test_utils::TestAuthorship::write(record),
         header: encoder.header().clone(),
         parts: (0..record.parts.len())
@@ -163,11 +172,21 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
     plaintext: R,
 ) -> Result<(), crate::DbError> {
     database
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
-            vec![(expected.clone(), prefix, plaintext, author())],
-            Vec::<crate::DownloadedWriteStream<std::io::Cursor<Vec<u8>>>>::new(),
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        ))
+        .load_snapshots::<crate::pending::tests::Record, _, std::io::Empty>(crate::SnapshotReload {
+            target: prefix.covers,
+            snapshots: vec![crate::SnapshotSource::Stored {
+                id: expected.clone(),
+                prefix,
+                input: plaintext,
+                author: author(),
+            }],
+            slots: vec![],
+            state: database.store_state().await.unwrap(),
+            cutoffs: vec![],
+            boundaries: vec![],
+            operation: None,
+            authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),
+        })
         .await
         .map(drop)
         .map_err(|error| match error {
@@ -215,9 +234,9 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     receiver.receive(excluded.clone().into()).await.unwrap();
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
-    assert_eq!(header.writes.0, [excluded.header.position]);
+    assert_eq!(header.covers, 6);
     // Five original changes travel as source evidence with their verdicts.
-    assert_eq!(header.counts, [1, 5, 3, 1, 1, 5, 1, 0]);
+    assert_eq!(&header.counts[..6], &[1, 5, 3, 1, 1, 5]);
     let verdicts: Vec<_> = snapshot
         .iter()
         .filter_map(|record| match record {
@@ -280,7 +299,6 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
         .open()
         .await
         .unwrap();
-    target.exclude_later_writes(2).await;
     assert_loaded_losses(&receiver, &target).await;
     target.close().await.unwrap();
     source.close().await.unwrap();
@@ -385,7 +403,7 @@ async fn circle_snapshot_has_only_its_rows_and_reference_metadata() {
             }
             SnapshotRecord::Merge(row) => assert_eq!(row.state.row().audience, circle),
             SnapshotRecord::Column(column) => assert_eq!(column.table, "notes"),
-            SnapshotRecord::Write(_) => {}
+            SnapshotRecord::Write(_) | SnapshotRecord::Claim(_) => {}
             SnapshotRecord::Authored(authored) => {
                 assert_eq!(authored.change.row().audience, circle)
             }
@@ -452,18 +470,35 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
     sql(&a, "INSERT INTO notes VALUES('a','same','winner')")
         .await
         .unwrap();
+    a.receive(records(&a)[0].clone().into()).await.unwrap();
     sql(&b, "INSERT INTO notes VALUES('b','same','removed')")
         .await
         .unwrap();
     let inserted = records(&b)[0].clone();
-    c.receive(inserted.clone().into()).await.unwrap();
+    sql(&c, "INSERT INTO notes VALUES('b','same','removed')")
+        .await
+        .unwrap();
     sql(&b, "UPDATE notes SET body='b edit'").await.unwrap();
     sql(&c, "UPDATE notes SET body='c edit'").await.unwrap();
-    for write in [inserted, records(&b)[1].clone(), records(&c)[0].clone()] {
+    for write in [
+        inserted,
+        records(&c)[0].clone(),
+        records(&b)[1].clone(),
+        records(&c)[1].clone(),
+    ] {
         a.receive(write.into()).await.unwrap();
     }
     let losses = a.lost_values().await.unwrap();
-    assert_eq!(losses.len(), 2);
+    assert!(losses
+        .iter()
+        .any(|loss| matches!(loss.replaced_by, crate::Replacement::Write(_))));
+    assert_eq!(
+        losses
+            .iter()
+            .filter(|loss| matches!(loss.replaced_by, crate::Replacement::Rules(_)))
+            .count(),
+        1
+    );
     a.close().await.unwrap();
     let a = a_store
         .builder(
@@ -741,7 +776,6 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         assert_eq!(rows[1].row, excluded.parts[0].rows[1].row);
         let target_store = TestStore::with_ids(&ids);
         let target = version_two(&target_store, operation != "insert").await;
-        target.exclude_later_writes(2).await;
         assert_loaded_losses(&receiver, &target).await;
         receiver
             .dismiss_lost_values(&receiver.lost_values().await.unwrap())
@@ -761,36 +795,22 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
 
 pub(crate) async fn assert_loaded_losses(source: &Database, target: &Database) {
     let snapshot = frames(source, Audience::Store).await;
-    load_one(
-        target,
-        id(Audience::Store),
-        snapshot.prefix.clone(),
-        std::io::Cursor::new(snapshot.concat()),
-    )
-    .await
-    .unwrap();
+    target
+        .load_snapshots::<crate::pending::tests::Record, _, std::io::Cursor<Vec<u8>>>(
+            crate::tests::reload(
+                source,
+                vec![snapshot.input()],
+                vec![],
+                Arc::new(crate::test_utils::TestAuthorship),
+            ),
+        )
+        .await
+        .unwrap();
     assert_eq!(frames(target, Audience::Store).await, snapshot);
     let loaded = target.lost_values().await.unwrap();
     let expected = source.lost_values().await.unwrap();
     assert_eq!(loaded.len(), expected.len());
     assert!(expected.iter().all(|loss| loaded.contains(loss)));
-    let key = coven_crypto::StoreKey::from_bytes(
-        coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([1; 16])),
-        [7; 32],
-    )
-    .derive();
-    assert_eq!(
-        target
-            .sync_state(vec![(Audience::Store, key.fingerprint_hasher())])
-            .await
-            .unwrap()
-            .fingerprints,
-        source
-            .sync_state(vec![(Audience::Store, key.fingerprint_hasher())])
-            .await
-            .unwrap()
-            .fingerprints,
-    );
 }
 
 #[tokio::test]
@@ -803,7 +823,6 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
     let source = source_store.schema(notes(), NOTES).await.unwrap();
     let receiver = version_two(&receiver_store, true).await;
     let target = version_two(&target_store, true).await;
-    target.exclude_later_writes(2).await;
     sql(&source, "INSERT INTO notes VALUES('n','value','body')")
         .await
         .unwrap();

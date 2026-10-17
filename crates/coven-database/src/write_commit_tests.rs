@@ -30,8 +30,8 @@ fn circle_tables() -> Vec<SyncedTable> {
 }
 
 fn leave_circle(db: &Database) {
-    let other = crate::store_log::tests::keys(2);
-    let member = crate::store_log::tests::member(2);
+    let other = crate::tests::keys(2);
+    let member = crate::tests::member(2);
     db.inspect_writer(|db| {
         db.transaction(|db| {
             db.internal_execute(
@@ -280,7 +280,7 @@ async fn attaching_unchanged_bytes_still_requires_current_circle_membership() {
 const STEPS: &[(&str, &str)] = &[
     ("notes", "UPDATE"),
     ("_coven_writes", "INSERT"),
-    ("_coven_positions", "UPDATE"),
+    ("_coven_published_rows", "INSERT"),
     ("_coven_uploads", "INSERT"),
     ("_coven_rows", "INSERT"),
     ("_coven_cells", "INSERT"),
@@ -317,7 +317,8 @@ async fn seed(database: &Database) {
         .unwrap();
     let writes = records(database);
     let mut concurrent = writes[1].clone();
-    concurrent.header.had_read.0.push(writes[0].header.position);
+    database.receive(writes[0].clone().into()).await.unwrap();
+    concurrent.header.read_through = 1;
     let device = DeviceId(concurrent.header.position.device.0.checked_add(1).unwrap());
     concurrent.header.position = WriteId { device, number: 1 };
     concurrent.header.timestamp =
@@ -436,12 +437,7 @@ async fn the_queue_limit_reserves_key_ids_without_reserving_ciphertext() {
         matches!(result, Err(crate::DbError::TooLarge { .. })),
         "{result:?}"
     );
-    for table in [
-        "notes",
-        "_coven_writes",
-        "_coven_uploads",
-        "_coven_positions",
-    ] {
+    for table in ["notes", "_coven_writes", "_coven_uploads"] {
         assert_eq!(count(&db, table), 0, "{table}");
     }
     let encoder = coven_format::write_stream::WriteEncoder::new(&record).unwrap();

@@ -709,6 +709,7 @@ async fn a_downloaded_deletion_keeps_the_queued_copy_until_upload() {
         .await
         .unwrap();
     attach(&a, b"original".to_vec(), true).await.unwrap();
+    a.receive(records(&a)[0].clone().into()).await.unwrap();
     b.receive(records(&a).remove(0).into()).await.unwrap();
     b.write(|sql| {
         sql.execute("DELETE FROM files", [])?;

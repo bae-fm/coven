@@ -1,25 +1,10 @@
-//! Device-reset notices and the identity check's local reservations (§10, E5).
+//! Device-reset notices and committed member lists (§10, E5).
 
 use super::{Database, DbError};
 use crate::{CovenResult, LiveQuery};
 use coven_foundation::files::DeviceReset;
 
-pub use crate::device_reset::IdentityReservations;
-
 impl Database {
-    /// This database's own reserved counters, read from one snapshot.
-    pub async fn identity_reservations(&self) -> Result<IdentityReservations, DbError> {
-        self.call(|inner| {
-            let device = inner.access.device;
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(|db| crate::device_reset::reservations(db, device))
-        })
-        .await
-    }
-
     /// Store the replacement notice before the replacement handle is published.
     pub async fn record_device_reset(&self, reset: DeviceReset) -> Result<(), DbError> {
         self.call(move |inner| {
@@ -37,7 +22,7 @@ impl Database {
     }
 
     /// Store members and every device they registered, from the committed
-    /// replay (E9). `subscribe_members` runs the same query.
+    /// sequence prefix (E9). `subscribe_members` runs the same query.
     pub async fn members(&self) -> CovenResult<Vec<crate::MemberInfo>> {
         let device = self.local_device()?;
         self.read(move |sql| sql.members(device)).await

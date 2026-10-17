@@ -25,42 +25,6 @@ impl Database {
         .await
     }
 
-    /// Positions a reload must preserve, and the queue identities whose
-    /// plaintext the transaction itself replays. They are this device's applied
-    /// positions, which hold its own writes and every past they read; a write
-    /// made during staging reads no more (§15, io `staging_past_bounded`).
-    pub async fn reload_positions(
-        &self,
-    ) -> Result<
-        (
-            coven_format::value::WritePositions,
-            Vec<coven_merge::WriteId>,
-        ),
-        DbError,
-    > {
-        self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| {
-                reader.read_transaction(|| {
-                    let waiting = reader.query(
-                        "SELECT device,number FROM _coven_uploads ORDER BY device,number",
-                        [],
-                        |r| {
-                            Ok(coven_merge::WriteId {
-                                device: coven_foundation::id_source::DeviceId(
-                                    crate::write_encoding::counter(r.get(0)?),
-                                ),
-                                number: crate::write_encoding::counter(r.get(1)?),
-                            })
-                        },
-                    )?;
-                    Ok((crate::download::positions(reader)?, waiting))
-                })
-            })
-        })
-        .await
-    }
-
     /// Run the snapshot loader's format, schema and merge checks in a transaction
     /// that always rolls back, returning the uploaded files the snapshot names.
     /// File retention uses this for a snapshot no reload has read; a damaged
@@ -68,7 +32,7 @@ impl Database {
     /// authenticated sealed prefix alongside the opened plaintext.
     pub async fn validate_snapshot<R: std::io::Read + Send + 'static>(
         &self,
-        id: coven_format::store_log::SnapshotId,
+        id: coven_format::admin::SnapshotId,
         prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
         input: R,
         author: coven_foundation::id_source::MemberId,
@@ -106,40 +70,13 @@ impl Database {
         .await
     }
 
-    /// What preparing a snapshot of `audience` waits for before every covered
-    /// write's retirement-window verdict is final (§15). `signer` is this
-    /// device's member signing key; `latest` is the end of the last complete
-    /// store-log catch-up's receipt plus `WRITE_WINDOW`.
-    pub async fn snapshot_verdict_wait(
-        &self,
-        audience: coven_merge::Audience,
-        signer: coven_crypto::SigningKey,
-        latest: Option<coven_format::value::StorageTime>,
-    ) -> Result<Option<crate::VerdictWait>, DbError> {
-        self.call(move |inner| {
-            let reader = inner.access.readers.acquire_reader();
-            reader.with_reader(|reader| {
-                reader.read_transaction(|| {
-                    crate::write_landing::unsettled(
-                        reader,
-                        &audience,
-                        inner.access.device,
-                        &signer,
-                        latest,
-                    )
-                })
-            })
-        })
-        .await
-    }
-
     /// Stream an audience's plaintext snapshot frames from one committed reader
     /// transaction. `begin` receives metadata before any frame, so the consumer
     /// can write the sealed prefix and seal each subsequent frame as it arrives;
     /// commits on the writer connection continue throughout this call.
     pub async fn write_snapshot<B, F, E>(
         &self,
-        id: coven_format::store_log::SnapshotId,
+        id: coven_format::admin::SnapshotId,
         begin: B,
         emit: F,
     ) -> Result<(), crate::SnapshotWriteError<E>>
@@ -152,6 +89,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
                 reader.read_transaction(|| {
+                    inner.access.write_schema.prepare(reader)?;
                     crate::snapshot_write::write(
                         reader,
                         &inner.access.write_schema,
@@ -220,7 +158,7 @@ impl Database {
     /// identity, like `write_snapshot` but from the migration's capture.
     pub async fn write_raise_snapshot<B, F, E>(
         &self,
-        id: coven_format::store_log::SnapshotId,
+        id: coven_format::admin::SnapshotId,
         version: u32,
         begin: B,
         emit: F,
@@ -234,7 +172,15 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|reader| {
                 reader.read_transaction(|| {
-                    crate::raise_capture::write(reader, id, version, begin, emit)
+                    inner.access.write_schema.prepare(reader)?;
+                    crate::raise_capture::write(
+                        reader,
+                        &inner.access.write_schema,
+                        id,
+                        version,
+                        begin,
+                        emit,
+                    )
                 })
             })
         })
@@ -256,62 +202,14 @@ impl Database {
         .await
     }
 
-    /// Every audience's retained historical coverage evidence (§15).
-    pub async fn snapshot_witnesses(&self) -> Result<crate::SnapshotWitnesses, DbError> {
-        self.call(move |inner| {
-            inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(crate::snapshot_witnesses::read)
-        })
-        .await
-    }
-
-    /// Keep the landing of each checked counting snapshot just listed for
-    /// `audience` as historical coverage evidence, which outlives the
-    /// snapshot, its body and reopening (§15). `now`, the newest storage time
-    /// known, drops evidence a mature witness makes redundant. Unchanged
-    /// evidence takes no writer.
-    pub async fn record_snapshot_witnesses(
-        &self,
-        audience: coven_merge::Audience,
-        observed: Vec<(
-            coven_format::value::WritePositions,
-            coven_format::value::StorageTime,
-        )>,
-        now: Option<coven_format::value::StorageTime>,
-    ) -> Result<(), DbError> {
-        self.call(move |inner| {
-            let known = inner
-                .access
-                .readers
-                .acquire_reader()
-                .with_reader(crate::snapshot_witnesses::read)?;
-            if crate::snapshot_witnesses::update(known, &audience, &observed, now).is_none() {
-                return Ok(());
-            }
-            inner.access.with_writer(|writer| {
-                writer.transaction(|db| {
-                    let known = crate::snapshot_witnesses::read(db)?;
-                    match crate::snapshot_witnesses::update(known, &audience, &observed, now) {
-                        Some(changed) => crate::snapshot_witnesses::write(db, &changed, &audience),
-                        None => Ok(()),
-                    }
-                })
-            })
-        })
-        .await
-    }
-
     /// Load authenticated snapshots and gap writes supplied by sync. Each stored
     /// snapshot supplies its identity, authenticated prefix and plaintext. Snapshot
     /// frames and write parts are read in chunks of at most 64 KiB; only one
-    /// decoded write is retained at a time. Inputs may arrive in any order.
+    /// decoded write is retained at a time. Inputs name a fixed target and consecutive retained slots.
     ///
     /// Replaces the selected audiences and replays uncovered parts and waiting
     /// uploads in one transaction, parsing each snapshot body once. Every
-    /// audience finishes at common positions; missing history, read errors and
+    /// audience finishes at the common target slot; missing history, read errors and
     /// failed checks roll the whole load back, a body's failure as
     /// `SnapshotError::Body` naming that snapshot. Returns the uploaded files
     /// each stored snapshot names.

@@ -129,16 +129,20 @@ impl SqlAuthorization {
             ) {
                 state.integrity_checks += 1;
             }
-            let changes_tables = matches!(
-                context.action,
-                AuthAction::CreateTable { .. }
-                    | AuthAction::CreateTempTable { .. }
-                    | AuthAction::DropTable { .. }
-                    | AuthAction::DropTempTable { .. }
-                    | AuthAction::CreateVtable { .. }
-                    | AuthAction::DropVtable { .. }
-                    | AuthAction::AlterTable { .. }
-            );
+            // Internal staging tables cannot be named by app SQL. Their
+            // creation does not change which app rowids need protection.
+            let changes_tables = match context.action {
+                AuthAction::CreateTable { table_name }
+                | AuthAction::CreateTempTable { table_name }
+                | AuthAction::DropTable { table_name }
+                | AuthAction::DropTempTable { table_name }
+                | AuthAction::CreateVtable { table_name, .. }
+                | AuthAction::DropVtable { table_name, .. }
+                | AuthAction::AlterTable { table_name, .. } => {
+                    !crate::internal_schema::reserved_name(table_name)
+                }
+                _ => false,
+            };
             if state.internal {
                 state.tables_changed |= changes_tables;
                 return Authorization::Allow;

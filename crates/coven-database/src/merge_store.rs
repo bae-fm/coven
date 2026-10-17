@@ -5,10 +5,10 @@ use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, decoded};
 use crate::write_rows::AppView;
 use crate::DbError;
-use coven_format::{merge_fields, snapshot_rows::AppliedWrite, value::Value, write::WriteRecord};
+use coven_format::{merge_fields, value::Value, write::WriteRecord};
 use coven_merge::{
     Audience, Cell, ColumnValue, LostKey, LostValue, MergeError, RowId, RowState, RowUpdate,
-    Timestamp, WriteId, WriteOracle, WritePast,
+    Timestamp, WriteId, WriteOracle,
 };
 use rusqlite::params;
 use std::cell::RefCell;
@@ -16,7 +16,9 @@ use std::collections::{BTreeMap, BTreeSet};
 
 struct StoredWrite {
     ordinal: i64,
-    record: AppliedWrite,
+    timestamp: Timestamp,
+    read_through: u64,
+    slot: Option<coven_merge::Slot>,
 }
 
 struct WriteMetadata<'a> {
@@ -35,7 +37,10 @@ impl<'a> WriteMetadata<'a> {
         if self.writes.borrow().contains_key(&id) {
             return Ok(());
         }
-        let applied=self.database.query_row(&format!("SELECT id,timestamp,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],|r| Ok(StoredWrite { ordinal:r.get(0)?, record:AppliedWrite { id,timestamp:decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(1)?))?,had_read:decoded(merge_fields::decode_write_positions(&r.get::<_,Vec<u8>>(2)?))? } }))?;
+        let applied = self.database.query_row(
+            &format!("SELECT id,timestamp,read_through,slot FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
+            params![id.device.0.to_be_bytes().as_slice(),id.number.to_be_bytes().as_slice()],
+            |r| Ok(StoredWrite { ordinal:r.get(0)?, timestamp:decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(1)?))?, read_through:counter(r.get(2)?), slot:r.get::<_,Option<Vec<u8>>>(3)?.map(|s|coven_merge::Slot(counter(s))) }))?;
         self.writes.borrow_mut().insert(id, applied);
         Ok(())
     }
@@ -43,7 +48,7 @@ impl<'a> WriteMetadata<'a> {
         self.writes.borrow()[&id].ordinal
     }
     pub(crate) fn stamp(&self, id: WriteId) -> Timestamp {
-        self.writes.borrow()[&id].record.timestamp
+        self.writes.borrow()[&id].timestamp
     }
     fn retain(&self, row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<WriteId> {
         let timestamp = decoded(merge_fields::decode_timestamp(
@@ -55,13 +60,11 @@ impl<'a> WriteMetadata<'a> {
         };
         let applied = StoredWrite {
             ordinal: row.get(offset)?,
-            record: AppliedWrite {
-                id,
-                timestamp,
-                had_read: decoded(merge_fields::decode_write_positions(
-                    &row.get::<_, Vec<u8>>(offset + 3)?,
-                ))?,
-            },
+            timestamp,
+            read_through: counter(row.get(offset + 3)?),
+            slot: row
+                .get::<_, Option<Vec<u8>>>(offset + 4)?
+                .map(|s| coven_merge::Slot(counter(s))),
         };
         self.writes.borrow_mut().insert(id, applied);
         Ok(id)
@@ -70,15 +73,19 @@ impl<'a> WriteMetadata<'a> {
 
 impl WriteOracle for WriteMetadata<'_> {
     fn timestamp(&self, id: WriteId) -> Option<Timestamp> {
-        self.writes.borrow().get(&id).map(|w| w.record.timestamp)
+        self.writes.borrow().get(&id).map(|w| w.timestamp)
     }
     fn had_read(&self, reader: WriteId, earlier: WriteId) -> Result<bool, MergeError> {
         let writes = self.writes.borrow();
         let reader_metadata = writes
             .get(&reader)
             .ok_or(MergeError::MissingWrite(reader))?;
-        let past = reader_metadata.record.had_read.causal_past(reader);
-        Ok(past.contains(&earlier))
+        Ok(coven_merge::had_read(
+            reader,
+            reader_metadata.read_through,
+            earlier,
+            writes.get(&earlier).and_then(|w| w.slot),
+        ))
     }
 }
 
@@ -206,7 +213,7 @@ impl<'a> MergeStore<'a> {
         #[cfg(test)]
         self.database.record_merge_load(&id.table);
         let audience = audience_text(&id.audience);
-        let generations = self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.had_read FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?), self.metadata.retain(r,2)?)))?;
+        let generations = self.database.query("SELECT r.id,r.generation,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_rows r JOIN _coven_writes w ON w.id=r.write_id WHERE r.table_name=?1 AND r.key=?2 AND r.audience=?3 ORDER BY r.generation", params![id.table, id.key, audience], |r| Ok((r.get::<_,i64>(0)?, counter(r.get(1)?), self.metadata.retain(r,2)?)))?;
         let current = generations
             .last()
             .map(|(ordinal, generation, _)| (*ordinal, *generation));
@@ -263,7 +270,7 @@ impl<'a> MergeStore<'a> {
             for (column,key,parent) in self.database.query("SELECT c.column_name,f.identity,v.parent_table,v.parent_key,v.parent_audience,v.parent_generation FROM _coven_references v JOIN _coven_foreign_keys f ON f.id=v.foreign_key_id JOIN _coven_columns c ON c.id=v.column_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,decoded(merge_fields::decode_foreign_key(&r.get::<_,Vec<u8>>(1)?))?, coven_merge::Parent { row: RowId { table:r.get(2)?,key:r.get(3)?,audience:crate::write_encoding::audience(&r.get::<_,String>(4)?)? }, generation:counter(r.get(5)?) })))? {
                 references.entry(column).or_default().insert(key,parent);
             }
-            for (name, write) in self.database.query("SELECT c.column_name,w.id,w.timestamp,w.number,w.had_read FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,self.metadata.retain(r,1)?)))? {
+            for (name, write) in self.database.query("SELECT c.column_name,w.id,w.timestamp,w.number,w.read_through,w.slot FROM _coven_cells v JOIN _coven_columns c ON c.id=v.column_id JOIN _coven_writes w ON w.id=v.write_id WHERE v.row_id=?1", [ordinal], |r| Ok((r.get::<_,String>(0)?,self.metadata.retain(r,1)?)))? {
                 let parents = references.remove(&name).unwrap_or_default();
                 cells.insert(name.clone(), Cell { write, value: ColumnValue { value: values[&name].clone(), parents } });
             }
@@ -311,19 +318,23 @@ impl<'a> MergeStore<'a> {
         &self,
         record: &WriteRecord,
     ) -> Result<BTreeMap<RowId, RowUpdate<Value>>, DbError> {
-        let past = record.header.had_read.causal_past(record.header.position);
-        for id in past.frontier() {
-            self.metadata.load(*id)?;
+        let latest = self.database.query(
+            &format!("SELECT timestamp,number FROM _coven_writes WHERE (slot<=?1 OR ({WRITE_DEVICE_SQL}=?2 AND number<?3)) ORDER BY timestamp DESC LIMIT 1"),
+            params![record.header.read_through.to_be_bytes().as_slice(), record.header.position.device.0.to_be_bytes().as_slice(), record.header.position.number.to_be_bytes().as_slice()],
+            |r| { let stamp = decoded(merge_fields::decode_timestamp(&r.get::<_,Vec<u8>>(0)?))?; Ok(WriteId { device:stamp.device(), number:counter(r.get(1)?) }) })?.pop();
+        if let Some(latest) = latest {
+            self.metadata.load(latest)?;
         }
+        let past = coven_merge::SlotPast::new(
+            record.header.position,
+            record.header.read_through,
+            |id: &WriteId| self.metadata.writes.borrow().get(id).and_then(|w| w.slot),
+            latest,
+        );
         let write = coven_merge::Write {
             id: record.header.position,
             timestamp: record.header.timestamp,
-            had_read: {
-                let mut positions =
-                    coven_format::value::WritePositions(past.frontier().copied().collect());
-                positions.0.sort_by_key(|id| id.device);
-                positions
-            },
+            had_read: past,
             changes: record
                 .parts
                 .iter()

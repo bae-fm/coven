@@ -28,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub trait Authorship: Send + Sync {
     /// Open the evidence's sealed header with the store key its prefix names,
     /// and verify its header signature with the signing key of its device's
-    /// member, current in the header's recorded store-log view (D9).
+    /// member, current in the header's recorded prefix (D9).
     fn header(&self, evidence: &WriteEvidence) -> Result<WriteHeaderFrame, DbError>;
 
     /// The keyed leaf hasher of an audience's part sealed with this key (D11).
@@ -260,7 +260,8 @@ pub(crate) fn evidence(
     let mut needs = BTreeMap::<WriteId, Needs>::new();
     let mut creators = BTreeMap::new();
     let other = |write: WriteId| author.other(db, write);
-    crate::ownership::visit::<DbError>(db, audience, |row, creation| {
+    crate::snapshot_view::creations::<DbError>(db, audience, |creation| {
+        let row = creation.row.clone();
         if crate::ownership::owner_table(schema, &row.table) && other(creation.write)? {
             let claim =
                 (creation.creator.write != creation.write).then(|| creation.creator.clone());
@@ -273,18 +274,10 @@ pub(crate) fn evidence(
         }
         Ok(())
     })?;
-    for declaration in schema.declarations.iter().filter(|d| d.owner_only) {
-        let rows = db.query(
-            "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1 AND table_name=?2",
-            params![audience_text(audience), declaration.name],
-            crate::row_queries::read_identity,
-        )?;
-        let store = crate::merge_store::MergeStore::from_schema(db, &schema.schema);
-        for row in rows {
-            let state = store.row_without_losses(&row)?.state;
-            if !state.present() {
-                continue;
-            }
+    crate::snapshot_view::rows(db, schema, audience, |merged, _| {
+        let state = merged.state;
+        let row = state.row();
+        if crate::ownership::owner_table(schema, &row.table) && state.present() {
             for (column, cell) in state.cells() {
                 if other(cell.write)? {
                     needs.entry(cell.write).or_default().cells.push((
@@ -296,7 +289,8 @@ pub(crate) fn evidence(
                 }
             }
         }
-    }
+        Ok::<_, DbError>(())
+    })?;
     let current = db.schema_version()?;
     let mut evidence = Vec::new();
     for (write, needs) in needs {

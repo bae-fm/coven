@@ -48,7 +48,6 @@ mod retry;
 #[path = "database_sync.rs"]
 mod sync;
 pub use builder::{discarded_operations, DatabaseBuilder};
-pub use sync::IdentityReservations;
 
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]
@@ -60,8 +59,6 @@ pub struct Database {
 
 struct DatabaseInner {
     inputs: input_database::InputDatabase,
-    // Shared by the sync owner and its workers; only a committed replay replaces it.
-    store_log: Mutex<Option<crate::StoreLog>>,
     access: DatabaseAccess<StoreLock>,
     // The directory settings' store name, read under the writer lock. A creation
     // entry is prepared and applied only with this name (§9).
@@ -226,20 +223,6 @@ fn with_locked<T, R>(value: &Mutex<T>, run: impl FnOnce(&mut T) -> R) -> R {
 }
 
 impl DatabaseInner {
-    fn with_store_log<R, E: From<DbError>>(
-        &self,
-        run: impl FnOnce(&mut crate::StoreLog) -> Result<R, E>,
-    ) -> Result<R, E> {
-        with_locked(&self.store_log, |saved| {
-            if saved.is_none() {
-                *saved = Some(self.access.readers.acquire_reader().with_reader(|reader| {
-                    reader.read_transaction(|| crate::store_log_tables::read(reader))
-                })?);
-            }
-            run(saved.as_mut().expect("loaded store log"))
-        })
-    }
-
     fn call<R, E: From<DbError>>(&self, run: impl FnOnce(&Self) -> Result<R, E>) -> Result<R, E> {
         self.access.call(|| run(self))
     }

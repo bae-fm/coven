@@ -124,18 +124,6 @@ impl DatabaseConnection {
             |ctx| crate::loss_record::sort_key(ctx.get(0)?, &ctx.get::<Vec<u8>>(1)?),
         )?;
         connection.create_scalar_function(
-            "_coven_fingerprint_replace",
-            3,
-            FunctionFlags::SQLITE_UTF8
-                | FunctionFlags::SQLITE_DETERMINISTIC
-                | FunctionFlags::SQLITE_DIRECTONLY,
-            |ctx| {
-                // The first leaf at this identity adds to the set without a subtraction.
-                let old = ctx.get::<Option<[u8; 32]>>(1)?.unwrap_or_default();
-                Ok(crate::fingerprint::replace_sum(ctx.get(0)?, old, ctx.get(2)?).to_vec())
-            },
-        )?;
-        connection.create_scalar_function(
             "_coven_migration_key",
             -1,
             FunctionFlags::SQLITE_UTF8

@@ -517,6 +517,9 @@ async fn a_downloaded_clear_drops_original_facts_and_invalidates_the_reference()
     })
     .await
     .unwrap();
+    a.receive(crate::write::tests::records(&a)[0].clone().into())
+        .await
+        .unwrap();
     let reference = a.file_ref("files", "7").await.unwrap();
     b.receive(crate::write::tests::records(&a).remove(0).into())
         .await

@@ -26,8 +26,10 @@ async fn a_lost_composite_key_cell_keeps_the_parent_its_own_write_named() {
         device,
     )
     .unwrap();
-    incoming.header.had_read =
-        coven_format::value::WritePositions(vec![records[0].header.position]);
+    crate::tests::publish_through(&db, records[0].header.position.number)
+        .await
+        .unwrap();
+    incoming.header.read_through = 1;
     let Operation::Update(columns) = &mut incoming.parts[0].rows[0].change.operation else {
         panic!("update")
     };

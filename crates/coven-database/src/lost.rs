@@ -1,6 +1,6 @@
 //! Decoding the durable lost-value fields into the read API.
 
-use crate::{DbError, EntryId, RowKey, WriteId};
+use crate::{DbError, RowKey, Slot, WriteId};
 use coven_format::loss::{Loss, LossCause, LossValues};
 use coven_merge::Rule;
 use rusqlite::types::Value;
@@ -127,7 +127,7 @@ pub enum RemovalRule {
     /// The row belongs to a deleted circle.
     DeletedCircle {
         /// The kept entry responsible for the deletion.
-        entry: EntryId,
+        entry: Slot,
     },
     /// The same key is shown from another audience.
     OtherAudience,

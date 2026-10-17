@@ -246,7 +246,6 @@ impl<'a> FileWrite<'a> {
         }
         let (key, _) = file_row::lookup(db, self.schema, table, &key)?;
         file_row::set(db, self.schema, &key, None, self.device, self.ids)?;
-        self.forget_original(&key, &file.id)?;
         Ok(())
     }
 
@@ -331,9 +330,6 @@ impl<'a> FileWrite<'a> {
                         column: file.hash.clone(),
                     });
                 }
-            }
-            if new.as_ref().is_none_or(|r| !has_file(r)) {
-                self.forget_original(key, &file.id)?;
             }
         }
         Ok(())

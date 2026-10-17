@@ -1,9 +1,11 @@
-//! Members, devices and circles as the committed replay has them (E9, E12).
+//! Members, devices and circles as the committed prefix has them (E9, E12).
 //! Each call and its live subscription run the same query.
 
-use crate::{sqlite::DatabaseConnection, store_log::DeviceState, write_encoding::counter, DbError};
+use crate::{
+    sqlite::DatabaseConnection, store_state::DeviceState, write_encoding::counter, DbError,
+};
 use coven_crypto::{SealingKey, SigningKey};
-use coven_format::store_log::{MemberPublicKeys, MemberRole};
+use coven_format::admin::{MemberPublicKeys, MemberRole};
 use coven_foundation::id_source::{CircleId, DeviceId, MemberId};
 use rusqlite::types::Type;
 
@@ -22,7 +24,7 @@ pub struct MemberInfo {
     pub is_self: bool,
 }
 
-/// One of a member's device ids as replay has it (E9).
+/// One of a member's device ids in the committed prefix (E9).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeviceInfo {
     /// The device id.
@@ -51,9 +53,9 @@ pub struct CircleMemberInfo {
     pub is_self: bool,
 }
 
-use crate::store_log_tables::{circle, member};
+use crate::store_state_tables::{circle, member};
 
-/// The member using this device, once its registration has replayed.
+/// The member using this device, once its registration has applied.
 fn me(db: &DatabaseConnection, device: DeviceId) -> Result<Option<MemberId>, DbError> {
     Ok(db
         .query(
@@ -100,7 +102,7 @@ pub(crate) fn members(
                     Ok(DeviceInfo {
                         id: DeviceId(counter(r.get(0)?)),
                         name: r.get(1)?,
-                        state: crate::store_log_tables::device_state(r.get(2)?)?,
+                        state: crate::store_state_tables::device_state(r.get(2)?)?,
                     })
                 },
             )?;

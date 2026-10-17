@@ -70,12 +70,12 @@ async fn io_differential_wakes() {
             } else if let Some(Some(head)) = queued.front().copied() {
                 if choice == 1 {
                     // Retrying the attempt keeps its upload session.
-                    db.keep_write_upload_session(head, vec![written as u8])
-                        .await
-                        .unwrap();
+                    assert_eq!(attempt(&db, written as u8).await.unwrap(), Some(head));
                     actions.push(json!({"op": "update"}));
                 } else {
-                    assert!(db.upload_succeeded(head).await.unwrap());
+                    crate::tests::publish_through(&db, head.number)
+                        .await
+                        .unwrap();
                     queued.pop_front();
                     actions.push(json!({"op": "remove"}));
                 }

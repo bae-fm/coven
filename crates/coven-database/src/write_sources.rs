@@ -280,7 +280,7 @@ pub(crate) fn validate(
     match record {
         PartRecord::Change(row) => {
             row.encode().map_err(merge)?;
-            row.sources.validate_past(header)?;
+            validate_past(db, header, &row.sources)?;
             let incarnation = row
                 .change
                 .incarnation()
@@ -302,7 +302,7 @@ pub(crate) fn validate(
         }
     }
     let execution = record.execution();
-    execution.sources.validate_past(header)?;
+    validate_past(db, header, &execution.sources)?;
     if let Some(first) = execution.steps.first() {
         let incarnation = first
             .change
@@ -320,6 +320,23 @@ pub(crate) fn validate(
     Ok(())
 }
 
+pub(crate) fn validate_past(
+    db: &DatabaseConnection,
+    header: &WriteHeader,
+    sources: &WriteSources,
+) -> Result<(), DbError> {
+    for source in sources.changes() {
+        if !coven_merge::had_read(
+            header.position,
+            header.read_through,
+            source.write,
+            crate::sequence::write_slot(db, source.write)?,
+        ) {
+            return Err(invalid("write source is outside authored past"));
+        }
+    }
+    Ok(())
+}
 /// A copy names an original generation-zero creation of the same row in
 /// another audience (§8.8). A part this device opened proves or refutes it;
 /// a part it could not read leaves the authenticated claim as written.
@@ -506,7 +523,7 @@ pub(crate) fn complete(
 }
 
 /// Record this device's current interpretation under the original identity,
-/// replacing an earlier one: replay rebuilds interpret retained inputs again.
+/// replacing an earlier one when a reload judges the original under its new data.
 /// NULL means unjudged; receiving covered bytes alone never judges them.
 pub(crate) fn admit(
     db: &DatabaseConnection,
@@ -571,12 +588,12 @@ fn read_verdict(stored: Option<Vec<u8>>) -> Result<ChangeVerdict, DbError> {
     })
 }
 
-/// Every original change of an audience whose write these positions cover,
+/// Every original change of an audience whose containing slot is covered,
 /// with its part header and this device's verdict, in D7 section 5 order.
 pub(crate) fn visit_evidence<E: From<DbError>>(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
-    covered: &coven_format::value::WritePositions,
+    covered: u64,
     mut visit: impl FnMut(AuthoredChange) -> Result<(), E>,
 ) -> Result<(), E> {
     db.for_each(
@@ -588,7 +605,8 @@ pub(crate) fn visit_evidence<E: From<DbError>>(
             let header =
                 merge_fields::decode_write_header(&r.get::<_, Vec<u8>>(0).map_err(DbError::from)?)
                     .map_err(DbError::from)?;
-            if !covered.covers(header.position) {
+            if crate::sequence::write_slot(db, header.position)?.is_none_or(|slot| slot.0 > covered)
+            {
                 return Ok(());
             }
             let change = OriginalRow::decode(&r.get::<_, Vec<u8>>(2).map_err(DbError::from)?)
@@ -635,7 +653,7 @@ pub(crate) fn load_evidence(
 pub(crate) fn forget_own_migration(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
-    covered: &coven_format::value::WritePositions,
+    covered: u64,
     carried: &std::collections::BTreeSet<(WriteId, String, Vec<u8>)>,
 ) -> Result<(), DbError> {
     let own = crate::pending::own_device(db)?;
@@ -655,7 +673,7 @@ pub(crate) fn forget_own_migration(
     )? {
         let header = merge_fields::decode_write_header(&header)?;
         if header.disposition != coven_format::write::WriteDisposition::Migration
-            || !covered.covers(header.position)
+            || crate::sequence::write_slot(db,header.position)?.is_none_or(|slot|slot.0>covered)
         {
             continue;
         }

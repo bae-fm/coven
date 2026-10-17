@@ -1,13 +1,9 @@
-//! Checked entry boundaries, their immutable coverage, and replay selection.
+//! Checked entry boundaries, their immutable coverage, and slot selection.
 use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{audience, audience_text, counter, decoded, encoded};
-use crate::{DbError, StoreLogState, StoreVersion};
+use crate::write_encoding::{audience, audience_text, counter};
+use crate::{DbError, StoreState, StoreVersion};
 use coven_format::{
-    merge_fields,
-    snapshot_rows::ChangeVerdict,
-    store_log::{SnapshotId, StoreChange, StoreLogEntry},
-    value::{EntryId, WritePositions},
-    write::WriteHeader,
+    admin::SnapshotId, snapshot_rows::ChangeVerdict, value::Slot, write::WriteHeader,
 };
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
@@ -22,34 +18,16 @@ pub enum Boundary {
     SchemaChange(StoreVersion),
     /// A reset of the named snapshot's audience.
     Reset {
-        /// The reset's checked store-log identity.
-        entry: EntryId,
+        /// The reset's counted slot.
+        entry: Slot,
         /// Its snapshot, including the audience.
         snapshot: SnapshotId,
     },
 }
 
 impl Boundary {
-    /// Extract the boundary carried by an entry, including a currently dropped one.
-    pub fn from_entry(entry: &StoreLogEntry) -> Option<Self> {
-        match &entry.change {
-            StoreChange::RaiseSchema {
-                version, snapshot, ..
-            } => Some(Self::SchemaChange(StoreVersion {
-                number: *version,
-                snapshot: snapshot.clone(),
-                entry: entry.position,
-            })),
-            StoreChange::Reset { snapshot } => Some(Self::Reset {
-                entry: entry.position,
-                snapshot: snapshot.clone(),
-            }),
-            _ => None,
-        }
-    }
-
     /// The checked entry that owns this boundary.
-    pub fn entry(&self) -> EntryId {
+    pub fn entry(&self) -> Slot {
         match self {
             Self::SchemaChange(version) => version.entry,
             Self::Reset { entry, .. } => *entry,
@@ -64,20 +42,20 @@ impl Boundary {
         }
     }
 
-    /// Replay's no-op rule for a raise; a lower version never replaces a higher one.
-    pub fn schema_in_place(state: &StoreLogState, version: u32, snapshot: &SnapshotId) -> bool {
+    /// The no-op rule for a raise; a lower version never replaces a higher one.
+    pub fn schema_in_place(state: &StoreState, version: u32, snapshot: &SnapshotId) -> bool {
         state.schema.get(&snapshot.audience).is_some_and(|current| {
             version < current.number || (version == current.number && *snapshot == current.snapshot)
         })
     }
 
     /// Repeating the current reset does not introduce a new boundary.
-    pub fn reset_in_place(state: &StoreLogState, snapshot: &SnapshotId) -> bool {
+    pub fn reset_in_place(state: &StoreState, snapshot: &SnapshotId) -> bool {
         state.resets.get(&snapshot.audience) == Some(snapshot)
     }
 
-    /// Whether applying this checked boundary leaves the replayed state unchanged.
-    pub fn already_in_place(&self, state: &StoreLogState) -> bool {
+    /// Whether applying this checked boundary leaves the applied state unchanged.
+    pub fn already_in_place(&self, state: &StoreState) -> bool {
         match self {
             Self::SchemaChange(version) => {
                 Self::schema_in_place(state, version.number, &version.snapshot)
@@ -86,8 +64,8 @@ impl Boundary {
         }
     }
 
-    /// Realize a non-no-op boundary after replay's authority and conflict checks.
-    pub fn apply(&self, state: &mut StoreLogState) {
+    /// Realize a non-no-op boundary after the preceding prefix authorizes it.
+    pub fn apply(&self, state: &mut StoreState) {
         match self {
             Self::SchemaChange(version) => {
                 state
@@ -102,19 +80,6 @@ impl Boundary {
         }
     }
 
-    /// Effective boundaries in entry timestamp order. The input contains only
-    /// kept entries; the same no-op and effect functions are used during replay.
-    pub(crate) fn select(boundaries: impl IntoIterator<Item = Self>) -> impl Iterator<Item = Self> {
-        let mut state = StoreLogState::default();
-        boundaries.into_iter().filter(move |boundary| {
-            if boundary.already_in_place(&state) {
-                return false;
-            }
-            boundary.apply(&mut state);
-            true
-        })
-    }
-
     pub(crate) fn record(&self, database: &DatabaseConnection) -> Result<(), DbError> {
         let (kind, version) = match self {
             Self::SchemaChange(version) => ("schema", Some(version.number)),
@@ -123,9 +88,9 @@ impl Boundary {
         let entry = self.entry();
         let snapshot = self.snapshot();
         database.internal_execute(
-            "INSERT INTO _coven_boundaries(entry_device,entry_number,kind,version,audience,snapshot_device,snapshot_number)
-             VALUES(?1,?2,?3,?4,?5,?6,?7) ON CONFLICT(entry_device,entry_number) DO NOTHING",
-            params![entry.device.0.to_be_bytes().as_slice(), entry.number.to_be_bytes().as_slice(),
+            "INSERT INTO _coven_boundaries(slot,kind,version,audience,snapshot_device,snapshot_number)
+             VALUES(?1,?2,?3,?4,?5,?6) ON CONFLICT(slot) DO NOTHING",
+            params![entry.0.to_be_bytes().as_slice(),
                 kind, version, audience_text(&snapshot.audience),
                 snapshot.device.0.to_be_bytes().as_slice(), snapshot.number.to_be_bytes().as_slice()],
         )?;
@@ -133,28 +98,31 @@ impl Boundary {
     }
 
     pub(crate) fn load_selected(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
-        Ok(Self::select(retained(database)?.into_iter().map(|row| row.boundary)).collect())
+        Ok(retained(database)?
+            .into_iter()
+            .map(|row| row.boundary)
+            .collect())
     }
 }
 
-/// Authenticated coverage of the snapshot named by one checked entry. The entry
-/// supplies the audience and kind; callers cannot install an unrelated boundary.
+/// A checked raise or reset and its authenticated snapshot coverage.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct BoundaryCoverage {
-    /// The already checked raise/reset entry.
-    pub entry: EntryId,
-    /// Device-write positions authenticated by its snapshot prefix.
-    pub included: WritePositions,
+    /// The checked change, including its original slot and snapshot identity.
+    pub boundary: Boundary,
+    /// The slot coverage authenticated by its snapshot prefix.
+    pub included: u64,
 }
 
 impl BoundaryCoverage {
     pub(crate) fn record_inside(&self, database: &DatabaseConnection) -> Result<bool, DbError> {
+        self.boundary.record(database)?;
         let previous: (Option<Vec<u8>>, bool) = database.query_row(
-            "SELECT included,applied FROM _coven_boundaries WHERE entry_device=?1 AND entry_number=?2",
-            (self.entry.device.0.to_be_bytes().as_slice(), self.entry.number.to_be_bytes().as_slice()),
+            "SELECT included,applied FROM _coven_boundaries WHERE slot=?1",
+            [self.boundary.entry().0.to_be_bytes().as_slice()],
             |row| Ok((row.get(0)?, row.get(1)?)),
         )?;
-        let included = encoded(merge_fields::encode_write_positions(&self.included))?;
+        let included = self.included.to_be_bytes().to_vec();
         if let Some(checked) = previous.0 {
             if checked != included {
                 return Err(crate::snapshot_error::invalid(
@@ -166,36 +134,38 @@ impl BoundaryCoverage {
             return Ok(false);
         }
         database.internal_execute(
-            "UPDATE _coven_boundaries SET included=?3,applied=1 WHERE entry_device=?1 AND entry_number=?2",
-            params![self.entry.device.0.to_be_bytes().as_slice(), self.entry.number.to_be_bytes().as_slice(), included],
+            "UPDATE _coven_boundaries SET included=?2,applied=1 WHERE slot=?1",
+            params![self.boundary.entry().0.to_be_bytes().as_slice(), included],
         )?;
         Ok(true)
     }
 
     /// Install the reload's effective readable boundaries, retaining every
     /// checked coverage fact. The applied bit records the committed data view,
-    /// not replay selection. It also distinguishes a repeated reset reload.
+    /// not slot selection. It also distinguishes a repeated reset reload.
     pub(crate) fn replace(
         database: &DatabaseConnection,
         boundaries: Vec<Self>,
-    ) -> Result<Vec<EntryId>, DbError> {
-        let selected = Boundary::load_selected(database)?;
-        let selected_ids: BTreeSet<_> = selected.iter().map(Boundary::entry).collect();
+    ) -> Result<Vec<Slot>, DbError> {
         let mut ids = BTreeSet::new();
         for boundary in &boundaries {
-            if !selected_ids.contains(&boundary.entry) || !ids.insert(boundary.entry) {
+            if !ids.insert(boundary.boundary.entry()) {
                 return Err(crate::snapshot_error::invalid(
-                    "reload boundary is not a distinct effective checked entry",
+                    "reload repeats a boundary slot",
                 ));
             }
         }
-        let previous: BTreeSet<_> = database.query(
-            "SELECT entry_device,entry_number FROM _coven_boundaries WHERE applied=1 AND kind='reset'",
-            [], |row| crate::store_log_tables::entry_id(row, 0),
-        )?.into_iter().collect();
-        let changed_resets = selected
+        let previous: BTreeSet<_> = database
+            .query(
+                "SELECT slot FROM _coven_boundaries WHERE applied=1 AND kind='reset'",
+                [],
+                |row| crate::store_state_tables::slot(row, 0),
+            )?
+            .into_iter()
+            .collect();
+        let changed_resets = boundaries
             .iter()
-            .filter_map(|boundary| match boundary {
+            .filter_map(|coverage| match &coverage.boundary {
                 Boundary::Reset { entry, .. }
                     if ids.contains(entry) && !previous.contains(entry) =>
                 {
@@ -204,7 +174,7 @@ impl BoundaryCoverage {
                 _ => None,
             })
             .collect();
-        database.internal_execute("UPDATE _coven_boundaries SET applied=0 WHERE applied=1", [])?;
+        database.internal_execute("DELETE FROM _coven_boundaries", [])?;
         for boundary in boundaries {
             boundary.record_inside(database)?;
         }
@@ -214,15 +184,14 @@ impl BoundaryCoverage {
 
 struct RetainedBoundary {
     boundary: Boundary,
-    included: Option<WritePositions>,
+    included: Option<u64>,
     applied: bool,
 }
 
 fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbError> {
     database.query(
-        "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.entry_device,b.entry_number,b.included,b.applied
-         FROM _coven_store_log l JOIN _coven_boundaries b ON b.entry_device=l.device AND b.entry_number=l.number
-         WHERE l.outcome='kept' ORDER BY l.timestamp",
+        "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.slot,b.included,b.applied
+         FROM _coven_boundaries b ORDER BY b.slot",
         [],
         |row| {
             let snapshot = SnapshotId {
@@ -230,15 +199,14 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
                 device: DeviceId(counter(row.get(3)?)),
                 number: counter(row.get(4)?),
             };
-            let entry = crate::store_log_tables::entry_id(row, 5)?;
+            let entry = crate::store_state_tables::slot(row, 5)?;
             let boundary = match (row.get::<_, String>(0)?.as_str(), row.get::<_, Option<u32>>(1)?) {
                 ("schema", Some(number)) => Boundary::SchemaChange(StoreVersion { number, snapshot, entry }),
                 ("reset", None) => Boundary::Reset { entry, snapshot },
                 _ => return Err(rusqlite::Error::InvalidQuery),
             };
-            let included = row.get::<_, Option<Vec<u8>>>(7)?
-                .map(|bytes| decoded(merge_fields::decode_write_positions(&bytes))).transpose()?;
-            Ok(RetainedBoundary { boundary, included, applied: row.get(8)? })
+            let included = row.get::<_, Option<Vec<u8>>>(6)?.map(counter);
+            Ok(RetainedBoundary { boundary, included, applied: row.get(7)? })
         },
     )
 }
@@ -249,19 +217,19 @@ pub(crate) enum BoundaryRule {
     /// A raise excludes a part authored at an older schema version (§17.1).
     Raise(u32),
     /// A reset ignores a part whose write had not read this entry (§19.3).
-    Reset(EntryId),
+    Reset(Slot),
 }
 
 /// The boundary facts realized by the current data projection.
 pub(crate) struct WriteBoundary {
     pub(crate) audience: Audience,
     pub(crate) rule: BoundaryRule,
-    pub(crate) included: WritePositions,
+    pub(crate) included: u64,
 }
 
 impl WriteBoundary {
     pub(crate) fn load(database: &DatabaseConnection) -> Result<Vec<Self>, DbError> {
-        let mut state = StoreLogState::default();
+        let mut state = StoreState::default();
         let mut result = Vec::new();
         for row in retained(database)? {
             if row.boundary.already_in_place(&state) {
@@ -312,8 +280,9 @@ impl WriteBoundary {
         &self,
         header: &WriteHeader,
         audience: &Audience,
+        slot: Option<Slot>,
     ) -> Option<ChangeVerdict> {
-        if *audience != self.audience || self.included.covers(header.position) {
+        if *audience != self.audience || slot.is_some_and(|slot| slot.0 <= self.included) {
             return None;
         }
         match &self.rule {
@@ -321,7 +290,7 @@ impl WriteBoundary {
                 (header.schema_version < *version).then_some(ChangeVerdict::Excluded(*version))
             }
             BoundaryRule::Reset(entry) => {
-                (!header.store_log_read.covers(*entry)).then_some(ChangeVerdict::Ignored(*entry))
+                (header.read_through < entry.0).then_some(ChangeVerdict::Ignored(*entry))
             }
         }
     }
@@ -333,10 +302,11 @@ impl WriteBoundary {
         boundaries: &[Self],
         header: &WriteHeader,
         audience: &Audience,
+        slot: Option<Slot>,
     ) -> Option<ChangeVerdict> {
         let verdicts: Vec<_> = boundaries
             .iter()
-            .filter_map(|boundary| boundary.excludes(header, audience))
+            .filter_map(|boundary| boundary.excludes(header, audience, slot))
             .collect();
         verdicts
             .iter()

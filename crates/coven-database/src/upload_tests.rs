@@ -14,7 +14,7 @@ pub(crate) async fn selected(db: &Database) -> (WriteId, Option<WriteObjectPrefi
 }
 
 pub(crate) async fn attempt(db: &Database, byte: u8) -> Result<Option<WriteId>, DbError> {
-    db.prepare_write_upload(move |_, _, header| {
+    db.prepare_upload(move |_, _, header| {
         let key = coven_foundation::id_source::KeyId(uuid::Uuid::from_bytes([byte; 16]));
         Ok(WriteObjectPrefix {
             format: coven_format::FormatVersion::CURRENT,
@@ -96,31 +96,47 @@ async fn reads_only_the_oldest_write_as_header_and_audience_streams() {
     db.close().await.unwrap();
 }
 
+async fn landed(db: &Database, through: WriteId) {
+    db.begin_claim(crate::ClaimWork::Writes(through.number), |_| {
+        Ok(crate::ClaimAttempt {
+            path: coven_format::path::ObjectPath::slot(
+                crate::tests::store_id(),
+                1u64.try_into().unwrap(),
+            ),
+            bytes: Box::new(std::io::Cursor::new(vec![1, 2])),
+        })
+    })
+    .await
+    .unwrap();
+    db.settle_claim(crate::ClaimRead::Kept(Some(Box::new(
+        std::io::Cursor::new(vec![1, 2]),
+    ))))
+    .await
+    .unwrap();
+    assert!(db.finish_claim(None).await.is_err());
+    for record in records(db)
+        .into_iter()
+        .filter(|r| r.header.position.number <= through.number)
+    {
+        assert_eq!(
+            db.receive(record.into()).await.unwrap(),
+            crate::ApplyOutcome::Applied
+        );
+    }
+}
+
 #[tokio::test]
-async fn only_success_removes_a_write_and_its_session_and_advances_the_queue() {
+async fn only_confirmed_claims_remove_their_batch_atomically() {
     let store = TestStore::new();
     let db = store.schema(notes(), NOTES).await.unwrap();
     sql(&db, "INSERT INTO notes VALUES('1','title','body')")
         .await
         .unwrap();
+    let first = records(&db)[0].header.position;
+    landed(&db, first).await;
     sql(&db, "INSERT INTO notes VALUES('2','title','body')")
         .await
         .unwrap();
-    let ids: Vec<_> = records(&db).iter().map(|r| r.header.position).collect();
-    let first = ids[0];
-    assert!(matches!(
-        db.upload_succeeded(first).await,
-        Err(DbError::UploadNotAttempted { .. })
-    ));
-    assert_eq!(attempt(&db, 19).await.unwrap(), Some(first));
-    let fixed = selected(&db).await;
-    db.keep_write_upload_session(first, vec![1, 2])
-        .await
-        .unwrap();
-    assert!(matches!(
-        db.upload_succeeded(ids[1]).await,
-        Err(DbError::UploadNotOldest { .. })
-    ));
     db.inspect_writer(|db| {
         db.fail_at(
             "_coven_fail",
@@ -128,21 +144,16 @@ async fn only_success_removes_a_write_and_its_session_and_advances_the_queue() {
             "failed removal",
         )
     });
-    assert!(matches!(
-        db.upload_succeeded(first).await,
-        Err(DbError::Sqlite(_))
-    ));
-    assert_eq!(selected(&db).await, fixed);
-    assert_eq!(
-        db.write_upload_session(first).await.unwrap(),
-        Some(vec![1, 2])
-    );
+    assert!(db.finish_claim(None).await.is_err());
     assert_eq!(count(&db, "_coven_uploads"), 2);
+    assert_eq!(
+        db.current_claim().await.unwrap().unwrap().settlement,
+        crate::ClaimSettlement::Landed
+    );
     db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
-    assert!(db.upload_succeeded(first).await.unwrap());
-    assert!(!db.upload_succeeded(first).await.unwrap());
-    assert!(db.write_upload_session(first).await.unwrap().is_none());
-    assert_eq!(selected(&db).await, (ids[1], None));
+    db.finish_claim(None).await.unwrap();
+    assert_eq!(count(&db, "_coven_uploads"), 1);
+    assert_eq!(selected(&db).await.0.number, first.number + 1);
     assert_eq!(count(&db, "notes"), 2);
     db.close().await.unwrap();
 }
@@ -168,13 +179,12 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     assert_eq!(records(&db), original);
     db.inspect_writer(|db| db.batch("DROP TRIGGER _coven_fail").unwrap());
     assert!(matches!(
-        db.prepare_write_upload(|_, _, _| Err(DbError::StoreClosed))
-            .await,
+        db.prepare_upload(|_, _, _| Err(DbError::StoreClosed)).await,
         Err(DbError::StoreClosed)
     ));
     assert_eq!(selected(&db).await, (id, None));
     assert!(db
-        .prepare_write_upload(|_, _, _| Ok(WriteObjectPrefix {
+        .prepare_upload(|_, _, _| Ok(WriteObjectPrefix {
             format: coven_format::FormatVersion::CURRENT,
             store_key: coven_foundation::id_source::KeyId(uuid::Uuid::nil()),
             part_keys: vec![],
@@ -188,7 +198,7 @@ async fn key_selection_rolls_back_and_competing_attempts_keep_one_choice() {
     let kept = selected(&db).await;
     let key = kept.1.as_ref().unwrap().store_key;
     assert!([19, 99].iter().any(|byte| key.0.as_bytes() == &[*byte; 16]));
-    db.prepare_write_upload(|_, _, _| panic!("retry must keep the first keys"))
+    db.prepare_upload(|_, _, _| panic!("retry must keep the first keys"))
         .await
         .unwrap();
     assert_eq!(selected(&db).await, kept);
@@ -262,7 +272,8 @@ fn a_crash_after_recording_an_attempt_keeps_its_plaintext_and_keys() {
     assert_eq!(count(&db, "_coven_uploads"), 1);
     assert_eq!(runtime.block_on(attempt(&db, 42)).unwrap(), Some(expected));
     assert_eq!(runtime.block_on(selected(&db)), kept);
-    assert!(runtime.block_on(db.upload_succeeded(expected)).unwrap());
+    runtime.block_on(landed(&db, expected));
+    runtime.block_on(db.finish_claim(None)).unwrap();
     assert_eq!(count(&db, "_coven_uploads"), 0);
     runtime.block_on(db.close()).unwrap();
 }
@@ -277,7 +288,7 @@ async fn a_panicking_key_selector_releases_the_writer() {
     let clone = db.clone();
     assert!(tokio::spawn(async move {
         clone
-            .prepare_write_upload(|_, _, _| panic!("selector panicked"))
+            .prepare_upload(|_, _, _| panic!("selector panicked"))
             .await
     })
     .await
@@ -365,14 +376,14 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
         .await
         .unwrap();
         let id = attempt(&db, 9).await.unwrap().unwrap();
+        landed(&db, id).await;
         // This subprocess runs one test, so SQLite's global high-water counter
         // measures only these queue operations and their connection caches.
         let baseline = unsafe {
             rusqlite::ffi::sqlite3_memory_highwater(1);
             rusqlite::ffi::sqlite3_memory_used()
         };
-        db.keep_write_upload_session(id, vec![1; 32]).await.unwrap();
-        db.upload_succeeded(id).await.unwrap();
+        db.finish_claim(None).await.unwrap();
         let peak = unsafe { rusqlite::ffi::sqlite3_memory_highwater(0) };
         assert!(baseline > 0, "SQLite memory accounting must be enabled");
         assert!(

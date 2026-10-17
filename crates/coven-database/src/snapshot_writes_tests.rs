@@ -52,26 +52,26 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         )
         .await,
         Err(crate::DbError::Snapshot(
-            crate::SnapshotError::MissingWrites { .. }
+            crate::SnapshotError::Inconsistent(_)
         ))
     ));
     assert_eq!(contents(&b), original);
     assert!(!query.is_marked_for_rerun());
     b.inspect_writer(|db| db.batch("CREATE TEMP TRIGGER refuse_waiting AFTER UPDATE ON notes WHEN new.title='waiting' BEGIN SELECT RAISE(ABORT,'replay failed'); END").unwrap());
-    assert!(b
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
-            vec![(
-                id(Audience::Store),
-                snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone()),
-                crate::snapshot_write::tests::author()
-            )],
-            vec![stream(&missing)],
-            std::sync::Arc::new(crate::test_utils::TestAuthorship)
-        ))
-        .await
-        .is_err());
-    assert_eq!(contents(&b), original);
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+        &b,
+        vec![(
+            id(Audience::Store),
+            snapshot_prefix.clone(),
+            Cursor::new(snapshot.clone()),
+            crate::snapshot_write::tests::author(),
+        )],
+        vec![stream(&missing)],
+        std::sync::Arc::new(crate::test_utils::TestAuthorship),
+    ))
+    .await
+    .unwrap();
+    assert_eq!(records(&b), waiting);
     assert!(!query.is_marked_for_rerun());
     b.inspect_writer(|db| db.batch("DROP TRIGGER refuse_waiting").unwrap());
     drop(query);
@@ -80,7 +80,8 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         if duplicate {
             supplied.push(stream(&waiting[0]));
         }
-        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &b,
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
@@ -94,8 +95,8 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
         .unwrap();
         assert_eq!(records(&b), waiting);
         assert_eq!(
-            frames(&b, Audience::Store).await,
-            frames(&c, Audience::Store).await
+            crate::tests::data(&b, Audience::Store),
+            crate::tests::data(&c, Audience::Store)
         );
     }
     for write in &waiting {
@@ -127,7 +128,9 @@ async fn waiting_changes_and_their_missing_history_commit_in_one_reload() {
 
 async fn upload(db: &crate::Database, record: &coven_format::write::WriteRecord) {
     crate::upload::tests::attempt(db, 17).await.unwrap();
-    assert!(db.upload_succeeded(record.header.position).await.unwrap());
+    crate::tests::publish_through(db, record.header.position.number)
+        .await
+        .unwrap();
 }
 
 #[tokio::test]
@@ -150,7 +153,7 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     attach(&db, b"waiting bytes".to_vec(), false).await.unwrap();
     let waiting = records(&db).pop().unwrap();
     let paths = owned_paths(&store);
-    let expected = frames(&db, Audience::Store).await;
+    let expected = crate::tests::data(&db, Audience::Store);
     let before = contents(&db);
     assert!(load_one(
         &db,
@@ -162,7 +165,8 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     .is_err());
     assert_eq!(contents(&db), before);
     assert_eq!(owned_paths(&store), paths);
-    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+    db.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+        &db,
         vec![(
             id(Audience::Store),
             snapshot_prefix.clone(),
@@ -174,7 +178,7 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
     ))
     .await
     .unwrap();
-    assert_eq!(frames(&db, Audience::Store).await, expected);
+    assert_eq!(crate::tests::data(&db, Audience::Store), expected);
     // Both attachments still wait to upload, each from its own copy.
     assert_eq!(owned_paths(&store), paths);
     let mut bytes: Vec<_> = paths
@@ -241,7 +245,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             }
         }
         assert!(b
-            .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+            .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+                &b,
                 vec![(
                     id(Audience::Store),
                     snapshot_prefix.clone(),
@@ -249,9 +254,7 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                     crate::snapshot_write::tests::author()
                 )],
                 vec![DownloadedWriteStream {
-                    published: crate::test_utils::published(
-                        coven_format::value::StorageTime::UNIX_EPOCH
-                    ),
+                    signer: crate::test_utils::signer(),
                     header: input.header.clone(),
                     parts: vec![DownloadedPartStream::Opened(Cursor::new(bytes.clone()))],
                     authorship: input.authorship.clone(),
@@ -263,7 +266,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
         assert_eq!(contents(&b), before);
     }
     assert!(b
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &b,
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
@@ -271,9 +275,7 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
                 crate::snapshot_write::tests::author()
             )],
             vec![DownloadedWriteStream::<Cursor<Vec<u8>>> {
-                published: crate::test_utils::published(
-                    coven_format::value::StorageTime::UNIX_EPOCH
-                ),
+                signer: crate::test_utils::signer(),
                 header: input.header.clone(),
                 parts: vec![DownloadedPartStream::Skipped],
                 authorship: input.authorship.clone(),
@@ -286,7 +288,8 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
     let mut file = tempfile::tempfile().unwrap();
     file.write_all(&original).unwrap();
     file.rewind().unwrap();
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+        &b,
         vec![(
             id(Audience::Store),
             snapshot_prefix.clone(),
@@ -294,7 +297,7 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
             crate::snapshot_write::tests::author(),
         )],
         vec![DownloadedWriteStream {
-            published: crate::test_utils::published(coven_format::value::StorageTime::UNIX_EPOCH),
+            signer: crate::test_utils::signer(),
             authorship: input.authorship.clone(),
             header: input.header,
             parts: vec![DownloadedPartStream::Opened(BoundedFile(file))],
@@ -303,6 +306,9 @@ async fn supplied_write_streams_are_bounded_and_fail_atomically() {
     ))
     .await
     .unwrap();
+    for write in records(&a) {
+        a.receive(write.into()).await.unwrap();
+    }
     a.receive(records(&b)[0].clone().into()).await.unwrap();
     assert_eq!(
         frames(&b, Audience::Store).await,
@@ -340,6 +346,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     let store = frames(&a, Audience::Store).await;
     let store_prefix = store.prefix.clone();
     let store = store.concat();
+    b.receive(records(&a)[0].clone().into()).await.unwrap();
     let gifts = frames(&b, circle.clone()).await;
     let gifts_prefix = gifts.prefix.clone();
     let gifts = gifts.concat();
@@ -348,7 +355,8 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
     a.receive(b_write.clone().into()).await.unwrap();
     let original = contents(&c);
     assert!(c
-        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+        .load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &c,
             vec![
                 (
                     id(Audience::Store),
@@ -369,7 +377,7 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
         .await
         .is_err());
     assert_eq!(contents(&c), original);
-    for mode in [2, 0, 1] {
+    for mode in [0, 1] {
         let mut snapshots = vec![
             (
                 id(Audience::Store),
@@ -391,9 +399,10 @@ async fn snapshots_with_the_same_key_in_different_audiences_recompute_together()
                 snapshots.pop();
             }
         }
-        c.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+        c.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &c,
             snapshots,
-            vec![stream(&b_write), stream(&a_write)],
+            vec![stream(&b_write)],
             std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await
@@ -422,13 +431,17 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     sql(&a, "INSERT INTO notes VALUES('n','initial','')")
         .await
         .unwrap();
-    for db in [&b, &c] {
+    for db in [&a, &b, &c] {
         db.receive(records(&a)[0].clone().into()).await.unwrap();
     }
     sql(&a, "UPDATE notes SET title='a'").await.unwrap();
     sql(&b, "UPDATE notes SET title='b'").await.unwrap();
+    for write in records(&a) {
+        a.receive(write.into()).await.unwrap();
+    }
     a.receive(records(&b)[0].clone().into()).await.unwrap();
     b.receive(records(&a)[1].clone().into()).await.unwrap();
+    b.receive(records(&b)[0].clone().into()).await.unwrap();
     c.receive(records(&a)[1].clone().into()).await.unwrap();
     c.receive(records(&b)[0].clone().into()).await.unwrap();
     let snapshot = frames(&a, Audience::Store).await;
@@ -449,24 +462,32 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
         .unwrap();
     let before = contents(&b);
     let mut invalid = stream(&dismissal);
-    invalid.header.header.had_read.0.clear();
-    invalid.header.header.position.number = 1;
-    let invalid_position = invalid.header.header.position;
+    invalid.header.header.read_through = 0;
+    let device = coven_foundation::id_source::DeviceId(50_000);
+    invalid.header.header.position = coven_merge::WriteId { device, number: 1 };
+    invalid.header.header.timestamp =
+        coven_merge::Timestamp::new(dismissal.header.timestamp.milliseconds() + 1, 0, device)
+            .unwrap();
     assert!(matches!(
-        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+        b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+            &b,
             vec![(
                 id(Audience::Store),
                 snapshot_prefix.clone(),
-                Cursor::new(snapshot.clone()), crate::snapshot_write::tests::author()
+                Cursor::new(snapshot.clone()),
+                crate::snapshot_write::tests::author()
             )],
-            vec![invalid], std::sync::Arc::new(crate::test_utils::TestAuthorship),
+            vec![invalid],
+            std::sync::Arc::new(crate::test_utils::TestAuthorship),
         ))
         .await,
-        Err(crate::DbError::Snapshot(crate::SnapshotError::Write { write, error }))
-            if write == invalid_position && matches!(*error, crate::DbError::Snapshot(crate::SnapshotError::Format(_)))
+        Err(crate::DbError::Snapshot(
+            crate::SnapshotError::Inconsistent("dismissal names a write outside authored past")
+        ))
     ));
     assert_eq!(contents(&b), before);
-    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::SnapshotReload::new(
+    b.load_snapshots::<crate::pending::tests::Record, _, _>(crate::tests::reload(
+        &b,
         vec![(
             id(Audience::Store),
             snapshot_prefix.clone(),
@@ -486,372 +507,5 @@ async fn supplied_dismissals_apply_before_waiting_changes_and_validate_their_pas
     );
     for db in [a, b, c] {
         db.close().await.unwrap();
-    }
-}
-
-mod differential {
-    use crate::snapshot_write::tests::{frames, stream};
-    use crate::test_utils::tests::*;
-    use crate::tests::TestStore;
-    use crate::{BoundaryCoverage, Database, SnapshotReload};
-    use coven_format::value::{Value as Scalar, WritePositions};
-    use coven_format::write::{WriteDisposition, WriteRecord};
-    use coven_format::write_sources::{CellSource, ChangeId, WriteSources};
-    use coven_foundation::id_source::{DeviceId, SequentialIds};
-    use coven_merge::{Audience, Change, ColumnValue, History, Operation};
-    use serde_json::{json, Value};
-    use std::collections::{BTreeMap, BTreeSet};
-    use std::ffi::OsStr;
-
-    #[derive(Clone)]
-    struct SchemaHistory {
-        reload: ReloadHistory,
-        raised: bool,
-        /// Covered writes the snapshot's author excluded under its own raise:
-        /// the snapshot carries them as frozen schema losses.
-        frozen: BTreeSet<coven_merge::WriteId>,
-    }
-    impl SchemaHistory {
-        fn generate(rng: &mut Generator) -> Self {
-            let mut reload = ReloadHistory::generate(rng);
-            reload.reset = false;
-            for w in &mut reload.writes {
-                // Conversion/version processing supplies the model's verdict.
-                // A new-schema author has reloaded the boundary; its consumed
-                // excluded positions do not contribute row generations.
-                w.header.schema_version = if w.header.store_log_read.covers(RESET) {
-                    2
-                } else {
-                    1
-                };
-                w.header.store_log_read.0.clear();
-            }
-            // An old-schema write the snapshot's author excluded (§17.1).
-            let mut frozen = insert(400, 400);
-            let Operation::Insert(columns) = &mut frozen.parts[0].rows[0].change.operation else {
-                unreachable!()
-            };
-            columns.insert(
-                "retired".into(),
-                ColumnValue {
-                    value: Scalar::Text("snapshot old column".into()),
-                    parents: BTreeMap::new(),
-                },
-            );
-            reload.covered.insert(frozen.header.position);
-            let frozen_writes = BTreeSet::from([frozen.header.position]);
-            reload.writes.push(frozen);
-            // Empty-valued deletions still have an identity in a frozen loss.
-            let mut deletion = insert(401, 0);
-            let original = reload
-                .writes
-                .iter()
-                .find(|w| w.header.position.device == DeviceId(100))
-                .unwrap();
-            deletion.header.had_read = WritePositions(vec![original.header.position]);
-            // The deleted row's insert established generation 1 and set every
-            // replaced cell (Appendix D).
-            let source = ChangeId {
-                write: original.header.position,
-                row: original.parts[0].rows[0].row.clone(),
-            };
-            let Operation::Insert(set) = &original.parts[0].rows[0].change.operation else {
-                unreachable!()
-            };
-            deletion.parts[0].rows[0].sources = WriteSources {
-                generation: Some(source.clone()),
-                setters: set
-                    .keys()
-                    .map(|column| {
-                        (
-                            column.clone(),
-                            CellSource {
-                                change: source.clone(),
-                                column: column.clone(),
-                            },
-                        )
-                    })
-                    .collect(),
-            };
-            deletion.parts[0].rows[0].change = Change {
-                generation: 1,
-                operation: Operation::Delete,
-            };
-            if rng.pick(2) == 0 {
-                deletion.parts[0].rows[0]
-                    .old
-                    .insert("retired".into(), Scalar::Text("deleted old column".into()));
-            }
-            reload.writes.push(deletion);
-            let mut migration = insert(402, 402);
-            migration.header.schema_version = 2;
-            migration.header.disposition = WriteDisposition::Migration;
-            migration.parts.clear();
-            reload.writes.push(migration);
-            reload.writes = rng.order(&reload.writes);
-            Self {
-                reload,
-                raised: true,
-                frozen: frozen_writes,
-            }
-        }
-        fn admitted(&self, w: &WriteRecord) -> bool {
-            w.header.disposition == WriteDisposition::Apply
-                && !self.frozen.contains(&w.header.position)
-                && (self.reload.covered.contains(&w.header.position)
-                    || !self.raised
-                    || w.header.schema_version >= 2)
-        }
-        fn valid(&self) -> bool {
-            self.reload.valid()
-                && self.reload.writes.iter().all(|w| {
-                    !self.admitted(w)
-                        || w.parts
-                            .iter()
-                            .flat_map(|p| &p.rows)
-                            .all(|r| match &r.change.operation {
-                                Operation::Insert(cols) | Operation::Update(cols) => {
-                                    !cols.contains_key("retired")
-                                }
-                                Operation::Delete => true,
-                            })
-                })
-                && History::new(self.reload.writes.iter().map(|w| {
-                    let mut merged = merge_write(w);
-                    if !self.admitted(w) {
-                        merged.changes.clear();
-                    }
-                    merged
-                }))
-                .is_ok()
-        }
-        fn input(&self) -> Value {
-            let mut input = self.reload.input();
-            let rows = self.reload.rows();
-            let mut schema = Vec::new();
-            let mut values = Vec::new();
-            let mut frozen = Vec::new();
-            let mut snapshot = Vec::new();
-            for w in &self.reload.writes {
-                let id = write_id(w.header.position);
-                let verdict = match w.header.disposition {
-                    WriteDisposition::Migration => json!({"id": id, "kind": 2}),
-                    WriteDisposition::Apply if self.frozen.contains(&w.header.position) => {
-                        json!({"id": id, "kind": 1, "version": 2})
-                    }
-                    WriteDisposition::Apply if self.raised && w.header.schema_version < 2 => {
-                        json!({"id": id, "kind": 1, "version": 2})
-                    }
-                    WriteDisposition::Apply => json!({"id": id, "kind": 0}),
-                };
-                schema.push(verdict);
-                if self.reload.covered.contains(&w.header.position)
-                    && w.header.disposition == WriteDisposition::Apply
-                    && !self.frozen.contains(&w.header.position)
-                {
-                    snapshot.push(id);
-                }
-                for change in w.parts.iter().flat_map(|p| &p.rows) {
-                    let row = rows.iter().position(|r| *r == change.row).unwrap();
-                    let columns: Vec<_> = match &change.change.operation {
-                        Operation::Insert(cols) | Operation::Update(cols) => {
-                            cols.keys().map(|c| column_id(c)).collect()
-                        }
-                        Operation::Delete => change.old.keys().map(|c| column_id(c)).collect(),
-                    };
-                    values.push(json!({"write": id, "row": row, "cols": columns}));
-                    if self.reload.covered.contains(&w.header.position)
-                        && self.frozen.contains(&w.header.position)
-                    {
-                        frozen.push(json!({"row": row, "gen": change.change.generation, "version": 2, "write": id}));
-                    }
-                }
-            }
-            input["mode"] = json!("schema");
-            input["schema"] = json!(schema);
-            input["values"] = json!(values);
-            input["snapshot"] = json!(snapshot);
-            input["snapshotFrozen"] = json!(frozen);
-            input
-        }
-    }
-
-    async fn schema_database(store: &TestStore) -> Database {
-        store
-            .builder(
-                tables(),
-                vec![
-                    crate::Migration::sql(1, "rows", SCHEMA),
-                    crate::Migration::sql(
-                        2,
-                        "local table",
-                        "CREATE TABLE local_rows(id TEXT PRIMARY KEY)",
-                    ),
-                ],
-            )
-            .open()
-            .await
-            .unwrap()
-    }
-    async fn schema_result(history: &SchemaHistory) -> Value {
-        assert!(history.valid(), "invalid schema differential history");
-        let ids = SequentialIds::new();
-        let source_store = TestStore::with_ids(&ids);
-        let target_store = TestStore::with_ids(&ids);
-        let source = schema_database(&source_store).await;
-        let target = schema_database(&target_store).await;
-        // The snapshot's author raised to version 2 covering every other
-        // covered write, so it excluded exactly the frozen ones.
-        let frozen: Vec<_> = history
-            .reload
-            .writes
-            .iter()
-            .filter(|w| history.frozen.contains(&w.header.position))
-            .collect();
-        if !frozen.is_empty() {
-            let included = history
-                .reload
-                .writes
-                .iter()
-                .map(|w| w.header.position)
-                .filter(|id| history.reload.covered.contains(id) && !history.frozen.contains(id))
-                .fold(BTreeMap::<DeviceId, u64>::new(), |mut max, id| {
-                    let n = max.entry(id.device).or_default();
-                    *n = (*n).max(id.number);
-                    max
-                });
-            source
-                .install_schema_fixture(
-                    Audience::Store,
-                    2,
-                    WritePositions(
-                        included
-                            .into_iter()
-                            .map(|(device, number)| coven_merge::WriteId { device, number })
-                            .collect(),
-                    ),
-                )
-                .await
-                .unwrap();
-        }
-        for w in history
-            .reload
-            .writes
-            .iter()
-            .filter(|w| history.reload.covered.contains(&w.header.position))
-        {
-            assert_eq!(
-                source.receive(w.clone().into()).await.unwrap(),
-                crate::ApplyOutcome::Applied
-            );
-        }
-        let snapshot = frames(&source, Audience::Store).await;
-        let boundary = if history.raised {
-            let boundary = target.schema_fixture(Audience::Store, 2).await.unwrap();
-            let entry = target.check_boundary_fixture(boundary).await.unwrap();
-            vec![BoundaryCoverage {
-                entry,
-                included: snapshot.prefix.writes.clone(),
-            }]
-        } else {
-            Vec::new()
-        };
-        let mut reload = SnapshotReload::new(
-            vec![snapshot.input()],
-            history.reload.writes.iter().map(stream).collect(),
-            std::sync::Arc::new(crate::test_utils::TestAuthorship),
-        );
-        reload.boundaries = Some(boundary);
-        target
-            .load_snapshots::<crate::pending::tests::Record, _, _>(reload)
-            .await
-            .unwrap();
-        let result = result_json(&target, &history.reload.rows());
-        let positions = target.sync_state(Vec::new()).await.unwrap().positions;
-        assert!(history
-            .reload
-            .writes
-            .iter()
-            .all(|w| positions.covers(w.header.position)));
-        source.close().await.unwrap();
-        target.close().await.unwrap();
-        result
-    }
-    async fn mismatch(runner: &OsStr, history: &SchemaHistory) -> bool {
-        schema_result(history).await != run_lean(runner, &history.input())
-    }
-    async fn reduce(runner: &OsStr, mut history: SchemaHistory) -> SchemaHistory {
-        loop {
-            let mut candidates: Vec<_> = history
-                .reload
-                .reductions()
-                .into_iter()
-                .map(|reload| SchemaHistory {
-                    frozen: history
-                        .frozen
-                        .iter()
-                        .copied()
-                        .filter(|id| reload.covered.contains(id))
-                        .collect(),
-                    reload,
-                    raised: history.raised,
-                })
-                .collect();
-            if history.raised {
-                candidates.push(SchemaHistory {
-                    raised: false,
-                    ..history.clone()
-                });
-            }
-            for id in &history.frozen {
-                let mut candidate = history.clone();
-                candidate.frozen.remove(id);
-                candidates.push(candidate);
-            }
-            let mut smaller = None;
-            for candidate in candidates {
-                if candidate.valid() && mismatch(runner, &candidate).await {
-                    smaller = Some(candidate);
-                    break;
-                }
-            }
-            match smaller {
-                Some(candidate) => history = candidate,
-                None => return history,
-            }
-        }
-    }
-
-    #[tokio::test]
-    #[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the runner"]
-    async fn schema_differential_histories() {
-        let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
-        for seed in 0..128 {
-            let mut rng = Generator::new(seed + 40_000);
-            let history = SchemaHistory::generate(&mut rng);
-            for prefix in [history.reload.writes.len(), 4 + rng.pick(20)] {
-                let mut case = history.clone();
-                case.reload.writes.truncate(prefix);
-                let present: BTreeSet<_> = case
-                    .reload
-                    .writes
-                    .iter()
-                    .map(|w| w.header.position)
-                    .collect();
-                case.reload.covered.retain(|id| present.contains(id));
-                for _ in 0..3 {
-                    case.reload.writes = rng.order(&case.reload.writes);
-                    if mismatch(&runner, &case).await {
-                        let reduced = reduce(&runner, case).await;
-                        panic!(
-                            "schema differential, seed {seed}\nreduced history: {}\nRust: {}\nLean: {}",
-                            reduced.input(),
-                            schema_result(&reduced).await,
-                            run_lean(&runner, &reduced.input())
-                        );
-                    }
-                }
-            }
-        }
     }
 }

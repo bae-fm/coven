@@ -1,8 +1,7 @@
 use super::*;
-use crate::pending::tests::Record;
-use crate::store_log::tests::{keys, member};
 use crate::tests::TestStore;
-use crate::{EntryOutcome, StoreCircle, StoreDevice, StoreMember};
+use crate::tests::{keys, member};
+use crate::{StoreCircle, StoreDevice, StoreMember};
 use std::time::Duration;
 
 fn access() -> coven_format::MemberAccess {
@@ -29,9 +28,8 @@ fn store_member(seed: u8, role: MemberRole, removed: bool) -> (MemberId, StoreMe
 /// 2, and deleted circle 8 held 1.
 async fn fixture(db: &crate::Database) {
     let own = db.inspect_writer(|sql| sql.pending_device()).unwrap();
-    let log = db.store_log().await.unwrap();
-    let mut replay = log.replay;
-    replay.state.members = [
+    let mut state = db.store_state().await.unwrap();
+    state.members = [
         store_member(1, MemberRole::Admin, false),
         store_member(2, MemberRole::Member, false),
         store_member(3, MemberRole::Member, true),
@@ -42,7 +40,7 @@ async fn fixture(db: &crate::Database) {
         name: name.into(),
         state,
     };
-    replay.state.devices = [
+    state.devices = [
         (own, device(1, "mine", DeviceState::Active)),
         (DeviceId(20), device(2, "phone", DeviceState::Active)),
         (DeviceId(21), device(2, "lost", DeviceState::Removed)),
@@ -50,7 +48,7 @@ async fn fixture(db: &crate::Database) {
         (DeviceId(30), device(3, "gone", DeviceState::Removed)),
     ]
     .into();
-    replay.state.circles = [
+    state.circles = [
         (
             CircleId(uuid::Uuid::from_u128(7)),
             StoreCircle {
@@ -67,27 +65,19 @@ async fn fixture(db: &crate::Database) {
         ),
     ]
     .into();
-    let deletion = crate::EntryId {
-        device: own,
-        number: 1,
-    };
-    let entry = coven_format::store_log::StoreLogEntry {
-        position: deletion,
-        timestamp: coven_merge::Timestamp::new(1, 0, own).unwrap(),
-        author: member(1),
-        had_read: coven_format::value::EntryPositions(Vec::new()),
-        change: coven_format::store_log::StoreChange::DeleteCircle {
-            circle: CircleId(uuid::Uuid::from_u128(8)),
-        },
-    };
-    replay
-        .state
+    let deletion = coven_merge::Slot(1);
+    state
         .circle_deletions
         .insert(CircleId(uuid::Uuid::from_u128(8)), deletion);
-    replay.entries.insert(deletion, EntryOutcome::Kept);
-    db.apply_store_log::<Record>(crate::store_log::tests::checked(entry), replay, Vec::new())
-        .await
-        .unwrap();
+    db.admin_fixture(
+        coven_format::admin::StoreChange::DeleteCircle {
+            circle: CircleId(uuid::Uuid::from_u128(8)),
+        },
+        state,
+        None,
+    )
+    .await
+    .unwrap();
 }
 
 #[tokio::test]

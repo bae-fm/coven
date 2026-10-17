@@ -2,20 +2,18 @@
 //!
 //! A row's owner is the authenticated member whose write originally created
 //! it. Of several generation-zero inserts of one row, the one with the
-//! smallest timestamp is its creation on every device, whatever arrived first
-//! and whatever later checks decide about each insert. Updates, deletes,
+//! lowest slot, then write number, is its creation before permission checks. Updates, deletes,
 //! reinserts and audience copies keep that creation; a copy names the creation
 //! it copied. The record lives apart from merge generations and dismissible
 //! losses, so none of them can change it.
 
-use crate::internal_schema::WRITE_DEVICE_SQL;
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, decoded, encoded};
 use crate::DbError;
 use coven_format::merge_fields;
 use coven_format::write_sources::ChangeId;
 use coven_foundation::id_source::{DeviceId, MemberId};
-use coven_merge::{Audience, RowId, Timestamp, WriteId};
+use coven_merge::{Audience, RowId, WriteId};
 use rusqlite::params;
 
 /// A row's selected generation-zero insert and the creation it names.
@@ -42,64 +40,17 @@ pub(crate) fn creation(db: &DatabaseConnection, row: &RowId) -> Result<Option<Cr
     .map(|mut rows| rows.pop())
 }
 
-fn timestamp(db: &DatabaseConnection, write: WriteId) -> Result<Option<Timestamp>, DbError> {
-    let stamp: Option<Vec<u8>> = db.query_row(
-        &format!("SELECT (SELECT timestamp FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2)"),
-        params![
-            write.device.0.to_be_bytes().as_slice(),
-            write.number.to_be_bytes().as_slice()
-        ],
-        |r| r.get(0),
-    )?;
-    stamp
-        .map(|stamp| Ok(decoded(merge_fields::decode_timestamp(&stamp))?))
-        .transpose()
-}
-
-/// Offer a generation-zero insert as a row's creation. It is selected when no
-/// earlier insert is, and returns the creation it replaced: owner checks
-/// already made against that creation must be made again.
-pub(crate) fn offer(
-    db: &DatabaseConnection,
-    row: &RowId,
-    write: WriteId,
-    stamp: Timestamp,
-    creator: ChangeId,
-) -> Result<Offer, DbError> {
-    let previous = creation(db, row)?;
-    if let Some(previous) = &previous {
-        if previous.write == write {
-            return Ok(Offer::Kept);
-        }
-        let earlier = timestamp(db, previous.write)?.ok_or(DbError::DamagedDatabase)?;
-        if earlier < stamp {
-            return Ok(Offer::Kept);
-        }
-    }
-    put(
-        db,
-        row,
-        &Creation {
-            write,
-            creator: creator.clone(),
-        },
-    )?;
-    Ok(Offer::Selected { previous })
-}
-
 /// Offer a part's generation-zero inserts as creations, before any check
-/// decides about them (§8.8). Returns each row whose selected creation this
-/// replaced, with the replaced one.
+/// decides about them (§8.8).
 pub(crate) fn offer_part(
     db: &DatabaseConnection,
     header: &coven_format::write::WriteHeader,
     part: &coven_format::write::WritePart,
-) -> Result<Vec<(RowId, Option<Creation>)>, DbError> {
-    let mut replaced = Vec::new();
+) -> Result<(), DbError> {
     for change in &part.rows {
-        replaced.extend(offer_change(db, header, change)?);
+        offer_change(db, header, change)?;
     }
-    Ok(replaced)
+    Ok(())
 }
 
 /// Offer one original change as its row's creation if it is a
@@ -109,11 +60,11 @@ pub(crate) fn offer_change(
     db: &DatabaseConnection,
     header: &coven_format::write::WriteHeader,
     change: &coven_format::write::RowChange,
-) -> Result<Option<(RowId, Option<Creation>)>, DbError> {
+) -> Result<(), DbError> {
     if change.change.generation != 0
         || !matches!(change.change.operation, coven_merge::Operation::Insert(_))
     {
-        return Ok(None);
+        return Ok(());
     }
     let Some(table) = crate::source_names::table(
         db,
@@ -122,7 +73,7 @@ pub(crate) fn offer_change(
         db.schema_version()?,
     )?
     else {
-        return Ok(None);
+        return Ok(());
     };
     let row = RowId {
         table,
@@ -132,21 +83,19 @@ pub(crate) fn offer_change(
         write: header.position,
         row: change.row.clone(),
     });
-    Ok(
-        match offer(db, &row, header.position, header.timestamp, creator)? {
-            Offer::Selected { previous } => Some((row, previous)),
-            Offer::Kept => None,
-        },
-    )
-}
-
-/// Whether an offered insert became the row's creation.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum Offer {
-    /// An earlier insert, or this one, was already selected.
-    Kept,
-    /// This insert is now the creation, replacing this one if any.
-    Selected { previous: Option<Creation> },
+    // Counted state is installed before the queue. An established creation
+    // therefore stays selected when later slots or local originals arrive.
+    if creation(db, &row)?.is_none() {
+        put(
+            db,
+            &row,
+            &Creation {
+                write: header.position,
+                creator,
+            },
+        )?;
+    }
+    Ok(())
 }
 
 /// Record a creation as loaded or carried over unchanged.
@@ -208,7 +157,7 @@ pub(crate) fn visit<E: From<DbError>>(
     )
 }
 
-/// A device's member, as the store log recorded it.
+/// A device's member, as the counted membership records it.
 pub(crate) fn member(
     db: &DatabaseConnection,
     device: DeviceId,

@@ -91,7 +91,7 @@ pub(crate) fn constraints(
     rules: &TableRules,
     state: &RowState<Value>,
     values: &AppValues,
-    stamp: impl Fn(coven_merge::WriteId) -> coven_merge::Timestamp,
+    order: impl Fn(coven_merge::WriteId) -> Result<coven_merge::ClaimOrder, DbError>,
 ) -> Result<Constraints, DbError> {
     let values = unique_values(db, table, rules, values)?;
     let failed_checks = checks(db, table, rules)?;
@@ -100,21 +100,21 @@ pub(crate) fn constraints(
         let Some(value) = values.get(&claim.identity) else {
             continue;
         };
-        let timestamp = claim
+        let order = claim
             .dependencies
             .iter()
             .filter_map(|c| state.cells().get(c).map(|cell| cell.write))
-            .map(&stamp)
+            .map(&order)
+            .collect::<Result<Vec<_>, _>>()?
+            .into_iter()
             .max()
-            .unwrap_or_else(|| {
-                let write = state.generations()[&state.generation()];
-                stamp(write)
-            });
+            .map(Ok)
+            .unwrap_or_else(|| order(state.generations()[&state.generation()]))?;
         unique.insert(
             claim.identity.clone(),
             UniqueClaim {
                 value: value.clone(),
-                timestamp,
+                order,
             },
         );
     }

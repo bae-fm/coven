@@ -7,16 +7,8 @@ use std::sync::{Arc, Mutex};
 pub struct WorkCounts {
     /// Successful acquisitions of the writer connection, including read-only work.
     pub writer_holds: usize,
-    /// Reconstructions of the saved store log, including empty logs.
-    pub full_log_decodes: usize,
-    /// Applied store-log entries passed to the plaintext decoder.
-    pub entry_decodes: usize,
-    /// Locally reserved entries decoded from the publication queue.
-    pub queued_entry_decodes: usize,
     /// Successful durable transaction commits, including unchanged transactions.
     pub commits: usize,
-    /// Successful atomic installations of a ready entry batch and its replay.
-    pub store_log_commits: usize,
     /// Snapshot bodies the loader parsed, for loading, verification or
     /// file-reference checks.
     pub snapshot_reads: usize,

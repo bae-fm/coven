@@ -3,10 +3,11 @@ use crate::tests::{database_error, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration, RowIdentity, SyncedTable};
 use coven_format::write::WriteDisposition;
-use coven_foundation::id_source::{CircleId, KeyId};
+use coven_format::write::{WriteHeader, WriteRecord};
+use coven_foundation::id_source::{CircleId, DeviceId};
 use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use coven_merge::Timestamp;
-use coven_merge::{ColumnValue, Operation};
+use coven_merge::{Audience, WriteId};
 use rusqlite::params;
 use std::sync::Arc;
 use std::time::{Duration, UNIX_EPOCH};
@@ -22,15 +23,6 @@ async fn open(store: &TestStore) -> Database {
         .unwrap()
 }
 
-async fn fingerprint(db: &Database, audience: Audience) -> coven_crypto::Fingerprint {
-    let key = coven_crypto::StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [7; 32])
-        .derive();
-    db.sync_state(vec![(audience, key.fingerprint_hasher())])
-        .await
-        .unwrap()
-        .fingerprints[0]
-        .1
-}
 #[tokio::test]
 async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     let ids = SequentialIds::new();
@@ -53,7 +45,12 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     let writes = records(&source);
     assert_eq!(
         receiver.receive(writes[1].clone().into()).await.unwrap(),
-        ApplyOutcome::Waiting(WriteWait::Writes(vec![writes[0].header.position]))
+        ApplyOutcome::Waiting(WriteWait::Sources(vec![
+            coven_format::write_sources::ChangeId {
+                write: writes[0].header.position,
+                row: writes[0].parts[0].rows[0].row.clone()
+            }
+        ]))
     );
     assert_eq!(count(&receiver, "notes"), 0);
     assert_eq!(
@@ -73,8 +70,8 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
     assert_eq!(count(&receiver, "_coven_uploads"), 0);
     assert_eq!(count(&receiver, "_coven_writes"), 2);
     assert_eq!(
-        fingerprint(&source, Audience::Store).await,
-        fingerprint(&receiver, Audience::Store).await
+        crate::tests::data(&source, Audience::Store),
+        crate::tests::data(&receiver, Audience::Store)
     );
     receiver.close().await.unwrap();
     let receiver = open(&receiver_store).await;
@@ -86,7 +83,7 @@ async fn downloaded_writes_share_merge_and_observation_without_uploading() {
         .await
         .unwrap();
     let outgoing = records(&receiver);
-    assert_eq!(outgoing[0].header.had_read.0, [writes[1].header.position]);
+    assert_eq!(outgoing[0].header.read_through, 2);
     assert!(outgoing[0].header.timestamp > writes[1].header.timestamp);
     receiver.close().await.unwrap();
     source.close().await.unwrap();
@@ -114,10 +111,13 @@ async fn causal_gate_covers_other_devices_and_skipped_parts_count_as_applied() {
         .await
         .unwrap();
     let dependent = records(&b).remove(0);
-    assert_eq!(
-        c.receive(dependent.clone().into()).await.unwrap(),
-        ApplyOutcome::Waiting(WriteWait::Writes(vec![first.header.position]))
-    );
+    assert!(matches!(
+        c.receive(dependent.clone().into()).await,
+        Err(DbError::WriteFormat(coven_format::Error::Invalid {
+            field: "slot write read-through",
+            ..
+        }))
+    ));
     c.receive(first.clone().into()).await.unwrap();
     assert_eq!(
         c.receive(dependent.into()).await.unwrap(),
@@ -203,8 +203,8 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
         ("second".into(), "blue".into())
     );
     assert_eq!(count(&receiver, "_coven_cells"), 3);
-    assert_eq!(receiver.sync_state(vec![]).await.unwrap().schema_version, 2);
-    assert_eq!(source.sync_state(vec![]).await.unwrap().schema_version, 1);
+    assert_eq!(receiver.schema_version().await.unwrap(), 2);
+    assert_eq!(source.schema_version().await.unwrap(), 1);
     receiver.close().await.unwrap();
     source.close().await.unwrap();
 }
@@ -265,7 +265,7 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
     sql(&receiver, "INSERT INTO pins VALUES('n')")
         .await
         .unwrap();
-    let before = fingerprint(&receiver, Audience::Store).await;
+    let before = crate::tests::data(&receiver, Audience::Store);
     assert!(
         matches!(sql(&receiver,"DELETE FROM notes").await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="pinned locally")
     );
@@ -280,7 +280,7 @@ async fn local_delete_trigger_refuses_only_that_device_and_rolls_back_apply() {
     assert_eq!(count(&receiver, "_coven_writes"), 1);
     assert_eq!(count(&receiver, "_coven_lost"), 0);
     assert_eq!(count(&receiver, "_coven_uploads"), 0);
-    assert_eq!(fingerprint(&receiver, Audience::Store).await, before);
+    assert_eq!(crate::tests::data(&receiver, Audience::Store), before);
     receiver.close().await.unwrap();
     source.close().await.unwrap();
 }
@@ -426,9 +426,9 @@ async fn lost_references_keep_the_written_parent_in_every_arrival_order() {
         } else {
             expected_losses = Some(stored);
         }
-        let actual = fingerprint(&db, Audience::Store).await;
-        if let Some(expected) = expected {
-            assert_eq!(actual, expected, "{order:?}");
+        let actual = crate::tests::data(&db, Audience::Store);
+        if let Some(expected) = &expected {
+            assert_eq!(&actual, expected, "{order:?}");
         } else {
             expected = Some(actual);
         }
@@ -479,66 +479,6 @@ async fn circle_note(db: &Database, circle: CircleId, child: &str) {
 }
 
 #[tokio::test]
-async fn fingerprints_ignore_other_audience_removal_and_its_descendants() {
-    let ids = SequentialIds::new();
-    let a_store = TestStore::with_ids(&ids);
-    let b_store = TestStore::with_ids(&ids);
-    let both_store = TestStore::with_ids(&ids);
-    let reverse_store = TestStore::with_ids(&ids);
-    let a = circle_db(&a_store).await;
-    let b = circle_db(&b_store).await;
-    let both = circle_db(&both_store).await;
-    let reverse = circle_db(&reverse_store).await;
-    let ca = CircleId(uuid::Uuid::from_u128(10));
-    let cb = CircleId(uuid::Uuid::from_u128(11));
-    a_store.join_circle(&a, ca);
-    b_store.join_circle(&b, cb);
-    circle_note(&a, ca, "00000000-0000-4000-8000-000000000002").await;
-    circle_note(&b, cb, "00000000-0000-4000-8000-000000000003").await;
-    let ra = records(&a).remove(0);
-    let rb = records(&b).remove(0);
-    for (db, writes) in [
-        (&both, [ra.clone(), rb.clone()]),
-        (&reverse, [rb.clone(), ra.clone()]),
-    ] {
-        for write in writes {
-            db.receive(write.into()).await.unwrap();
-        }
-        assert_eq!(count(db, "notes"), 1);
-        assert_eq!(count(db, "children"), 1);
-        assert_eq!(count(db, "_coven_lost"), 2);
-        for (audience, source) in [(Audience::Circle(ca), &a), (Audience::Circle(cb), &b)] {
-            assert_eq!(
-                fingerprint(db, audience.clone()).await,
-                fingerprint(source, audience).await
-            );
-        }
-    }
-    let b_before = fingerprint(&both, Audience::Circle(cb)).await;
-    crate::store_log::tests::delete_circle(&both, ca)
-        .await
-        .unwrap();
-    assert_eq!(fingerprint(&both, Audience::Circle(cb)).await, b_before);
-    let visible: String = both
-        .read(|sql| Ok(sql.query_row("SELECT audience FROM notes", [], |r| r.get(0))?))
-        .await
-        .unwrap();
-    assert_eq!(visible, cb.to_string());
-    // A key can arrive after all writes; rekeying reads the same durable root.
-    let other_key =
-        coven_crypto::StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [9; 32])
-            .derive();
-    let rekeyed = both
-        .sync_state(vec![(Audience::Circle(cb), other_key.fingerprint_hasher())])
-        .await
-        .unwrap();
-    assert_ne!(rekeyed.fingerprints[0].1, b_before);
-    for db in [a, b, both, reverse] {
-        db.close().await.unwrap();
-    }
-}
-
-#[tokio::test]
 async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trigger_error() {
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
@@ -546,7 +486,7 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     let source = circle_db(&source_store).await;
     let receiver = circle_db(&receiver_store).await;
     let circle = CircleId(uuid::Uuid::from_u128(10));
-    crate::store_log::tests::delete_circle(&receiver, circle)
+    crate::tests::delete_circle(&receiver, circle)
         .await
         .unwrap();
     source_store.join_circle(&source, circle);
@@ -563,20 +503,18 @@ async fn deleted_circle_takes_out_late_downloads_and_deletion_rolls_back_on_trig
     assert_eq!(count(&receiver, "_coven_lost"), 2);
     source.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE DELETE ON notes", "keep circle"));
     assert!(
-        matches!(crate::store_log::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
+        matches!(crate::tests::delete_circle(&source, circle).await,Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(_,Some(message)))) if message=="keep circle")
     );
     assert_eq!(count(&source, "notes"), 1);
     assert_eq!(count(&source, "children"), 1);
-    let state = source.store_log().await.unwrap().replay.state;
+    let state = source.store_state().await.unwrap();
     assert!(!state.circle_deletions.contains_key(&circle));
     assert_eq!(count(&source, "_coven_lost"), 0);
     source.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
-    crate::store_log::tests::delete_circle(&source, circle)
-        .await
-        .unwrap();
+    crate::tests::delete_circle(&source, circle).await.unwrap();
     assert_eq!(
-        fingerprint(&source, Audience::Circle(circle)).await,
-        fingerprint(&receiver, Audience::Circle(circle)).await
+        crate::tests::data(&source, Audience::Circle(circle)),
+        crate::tests::data(&receiver, Audience::Circle(circle))
     );
     for db in [source, receiver] {
         db.close().await.unwrap();
@@ -599,9 +537,12 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
     ] {
         let store = TestStore::with_ids(&ids);
         let db = open(&store).await;
-        let included = WritePositions(included);
+        let included = included.len() as u64;
+        if included > 0 {
+            db.receive(initial.clone().into()).await.unwrap();
+        }
         assert!(db
-            .install_schema_fixture(coven_merge::Audience::Store, version, included.clone())
+            .install_schema_fixture(coven_merge::Audience::Store, version, included)
             .await
             .unwrap());
         db.close().await.unwrap();
@@ -612,7 +553,11 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
             .unwrap());
         assert_eq!(
             db.receive(initial.clone().into()).await.unwrap(),
-            ApplyOutcome::Applied
+            if included > 0 {
+                ApplyOutcome::AlreadyApplied
+            } else {
+                ApplyOutcome::Applied
+            }
         );
         assert_eq!(count(&db, "notes"), i64::from(!lost));
         assert_eq!(count(&db, "_coven_lost"), i64::from(lost));
@@ -637,35 +582,12 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
     circle_note(&source, circle, "00000000-0000-4000-8000-000000000002").await;
     sql(&source, "UPDATE notes SET title='late'").await.unwrap();
     let writes = records(&source);
-    let entry = coven_format::value::EntryId {
-        device: DeviceId(99),
-        number: 1,
-    };
-    // The update did not read the reset entry. It is ignored in the reset
-    // audience even when it read every write the snapshot covers (§19.3).
+    // Covered originals precede the reset; an uncovered old-prefix part is ignored.
     for (audience, included, skip_first, title) in [
-        (
-            Audience::Circle(circle),
-            vec![WriteId {
-                device: DeviceId(99),
-                number: 1,
-            }],
-            true,
-            None,
-        ),
-        (
-            Audience::Circle(circle),
-            vec![writes[0].header.position],
-            false,
-            Some("title"),
-        ),
-        (
-            Audience::Circle(circle),
-            vec![writes[1].header.position],
-            false,
-            Some("late"),
-        ),
-        (Audience::Store, vec![], false, Some("late")),
+        (Audience::Circle(circle), 0, true, None),
+        (Audience::Circle(circle), 1, false, Some("title")),
+        (Audience::Circle(circle), 2, false, Some("late")),
+        (Audience::Store, 0, false, Some("late")),
     ] {
         let store = TestStore::with_ids(&ids);
         let db = circle_db(&store).await;
@@ -678,9 +600,12 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
             writes[0].clone().into()
         };
         db.receive(first).await.unwrap();
-        let included = WritePositions(included);
+        if included == 2 {
+            db.receive(writes[1].clone().into()).await.unwrap();
+        }
+        let entry = crate::Slot(db.applied_slot().await.unwrap() + 1);
         assert!(db
-            .install_reset_fixture(entry, audience.clone(), included.clone())
+            .install_reset_fixture(entry, audience.clone(), included)
             .await
             .unwrap());
         db.close().await.unwrap();
@@ -697,7 +622,11 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
         }
         assert_eq!(
             db.receive(writes[1].clone().into()).await.unwrap(),
-            ApplyOutcome::Applied
+            if included == 2 {
+                ApplyOutcome::AlreadyApplied
+            } else {
+                ApplyOutcome::Applied
+            }
         );
         assert_eq!(
             db.read(|sql| Ok(sql.query("SELECT title FROM notes", [], |r| r.get::<_, String>(0))?))
@@ -707,12 +636,7 @@ async fn reset_ignores_unread_uncovered_parts_of_its_audience_only() {
         );
         // A reset ignores the write's part without a loss.
         assert!(db.lost_values().await.unwrap().is_empty());
-        assert!(db
-            .sync_state(Vec::new())
-            .await
-            .unwrap()
-            .positions
-            .covers(writes[1].header.position));
+        assert_eq!(db.applied_slot().await.unwrap(), 3);
         db.close().await.unwrap();
     }
     source.close().await.unwrap();
@@ -827,22 +751,15 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
         .await
         .unwrap();
     let mut writes = records(&source);
-    let entry = coven_format::value::EntryId {
-        device: DeviceId(99),
-        number: 1,
-    };
+    let entry = crate::Slot(2);
     receiver.receive(writes[0].clone().into()).await.unwrap();
     receiver
-        .install_reset_fixture(
-            entry,
-            Audience::Store,
-            WritePositions(vec![writes[0].header.position]),
-        )
+        .install_reset_fixture(entry, Audience::Store, 1)
         .await
         .unwrap();
     // Both successors were authored after reading the reset entry.
     for write in &mut writes[1..] {
-        write.header.store_log_read = coven_format::value::EntryPositions(vec![entry]);
+        write.header.read_through = entry.0;
     }
     for write in &writes[1..] {
         assert_eq!(
@@ -869,14 +786,13 @@ async fn a_reset_successor_can_read_another_post_reset_write() {
 async fn migration_download_advances_position_without_rows_or_losses() {
     let store = TestStore::new();
     let db = open(&store).await;
-    let before = fingerprint(&db, Audience::Store).await;
+    let before = crate::tests::data(&db, Audience::Store);
     let device = DeviceId(99);
     let record = WriteRecord {
         header: WriteHeader {
-            store_log_read: coven_format::value::EntryPositions(Vec::new()),
             position: WriteId { device, number: 1 },
             timestamp: Timestamp::new(1_000, 0, device).unwrap(),
-            had_read: WritePositions(vec![]),
+            read_through: 0,
             schema_version: 1,
             disposition: WriteDisposition::Migration,
         },
@@ -890,10 +806,7 @@ async fn migration_download_advances_position_without_rows_or_losses() {
         db.receive(record.clone().into()).await.unwrap(),
         ApplyOutcome::AlreadyApplied
     );
-    assert_eq!(
-        db.sync_state(vec![]).await.unwrap().positions.0,
-        [record.header.position]
-    );
+    assert_eq!(db.applied_slot().await.unwrap(), 1);
     for table in [
         "notes",
         "_coven_rows",
@@ -903,87 +816,13 @@ async fn migration_download_advances_position_without_rows_or_losses() {
     ] {
         assert_eq!(count(&db, table), 0);
     }
-    assert_eq!(fingerprint(&db, Audience::Store).await, before);
+    assert_eq!(crate::tests::data(&db, Audience::Store), before);
     sql(&db, "INSERT INTO notes VALUES('n','after migration','')")
         .await
         .unwrap();
-    assert_eq!(records(&db)[0].header.had_read.0, [record.header.position]);
+    assert_eq!(records(&db)[0].header.read_through, 1);
     db.close().await.unwrap();
 }
 
 #[path = "download_stream_tests.rs"]
 mod streams;
-
-fn pairs(positions: &WritePositions) -> Vec<[u64; 2]> {
-    positions.0.iter().map(|p| [p.device.0, p.number]).collect()
-}
-
-#[tokio::test]
-#[ignore = "requires the Lean executable; scripts/check.sh supplies COVEN_RECEIVE_LEAN"]
-async fn lean_differential_receive() {
-    let runner = std::env::var_os("COVEN_RECEIVE_LEAN")
-        .expect("COVEN_RECEIVE_LEAN must name the built Lean runner");
-    let store = TestStore::new();
-    let database = store.builder(vec![], vec![]).open().await.unwrap();
-    let mut cases = Vec::new();
-    let mut actual = Vec::new();
-    for a in 0..=2 {
-        for b in 0..=2 {
-            for c in 0..=2 {
-                let passed = crate::tests::write_positions([a, b, c]);
-                crate::tests::independent_logs(&database, &passed);
-                for device in 1..=3 {
-                    for number in 1..=3 {
-                        let write = WriteId {
-                            device: DeviceId(device),
-                            number,
-                        };
-                        if passed.covers(write) {
-                            continue; // Duplicate detection precedes prerequisite in production.
-                        }
-                        for x in 0..=2 {
-                            for y in 0..=2 {
-                                let mut reads = [0; 3];
-                                let mut others = (0..3).filter(|d| *d != device as usize - 1);
-                                reads[others.next().unwrap()] = x;
-                                reads[others.next().unwrap()] = y;
-                                let past = crate::tests::write_positions(reads);
-                                let header = WriteHeader {
-                                    position: write,
-                                    timestamp: Timestamp::new(100, 0, write.device).unwrap(),
-                                    had_read: past.clone(),
-                                    store_log_read: coven_format::value::EntryPositions(vec![]),
-                                    schema_version: 0,
-                                    disposition: WriteDisposition::Apply,
-                                };
-                                // Exercise the actual hold-until-ready function, including
-                                // its implicit preceding-own-write and metadata checks.
-                                let ready = database.inspect_writer(|db| {
-                                    match prerequisite(db, &header, &[]).unwrap() {
-                                        None => true,
-                                        Some(WriteWait::Writes(_)) => false,
-                                        other => panic!("unexpected prerequisite: {other:?}"),
-                                    }
-                                });
-                                cases.push(serde_json::json!({
-                                    "write": [device, number],
-                                    "past": pairs(&past),
-                                    "passed": pairs(&passed),
-                                }));
-                                actual.push(ready);
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
-    database.close().await.unwrap();
-    let expected: Vec<bool> =
-        serde_json::from_value(crate::tests::lean_model(&runner, serde_json::json!(&cases)))
-            .unwrap();
-    assert_eq!(expected.len(), cases.len());
-    for ((case, rust), lean) in cases.iter().zip(actual).zip(expected) {
-        assert_eq!(rust, lean, "receive decision differs: {case}");
-    }
-}

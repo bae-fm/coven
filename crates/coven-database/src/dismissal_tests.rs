@@ -1,11 +1,7 @@
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
 use crate::{Database, Migration};
-use coven_crypto::StoreKey;
-use coven_foundation::{
-    clock::FixedClock,
-    id_source::{KeyId, SequentialIds},
-};
+use coven_foundation::{clock::FixedClock, id_source::SequentialIds};
 use coven_merge::Audience;
 use std::{
     sync::Arc,
@@ -23,13 +19,13 @@ async fn open(store: &TestStore, schema: &'static str) -> Database {
         .unwrap()
 }
 
-async fn fingerprint(db: &Database) -> coven_crypto::Fingerprint {
-    let key = StoreKey::from_bytes(KeyId(uuid::Uuid::from_u128(1)), [7; 32]).derive();
-    db.sync_state(vec![(Audience::Store, key.fingerprint_hasher())])
-        .await
-        .unwrap()
-        .fingerprints[0]
-        .1
+async fn data(
+    db: &Database,
+) -> (
+    Vec<coven_merge::RowState<coven_format::value::Value>>,
+    Vec<coven_format::loss::Loss>,
+) {
+    crate::tests::data(db, Audience::Store)
 }
 
 #[tokio::test]
@@ -42,26 +38,26 @@ async fn dismissed_cell_is_removed_on_both_devices_and_after_reopen() {
     sql(&a, "INSERT INTO notes VALUES('n','initial','')")
         .await
         .unwrap();
-    b.receive(records(&a)[0].clone().into()).await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
     sql(&a, "UPDATE notes SET title='a'").await.unwrap();
     sql(&b, "UPDATE notes SET title='b'").await.unwrap();
-    a.receive(records(&b)[0].clone().into()).await.unwrap();
-    b.receive(records(&a)[1].clone().into()).await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
+    crate::author_judgement::tests::deliver(&b, &a).await;
     let loss = a.lost_values().await.unwrap();
     assert_eq!(loss.len(), 1);
     assert_eq!(loss, b.lost_values().await.unwrap());
-    let before = fingerprint(&a).await;
+    let before = data(&a).await;
     let mut live = a.subscribe_lost_values();
     assert_eq!(live.next().await.unwrap(), loss);
     a.dismiss_lost_values(&loss).await.unwrap();
     assert!(live.next().await.unwrap().is_empty());
     assert_eq!(count(&a, "_coven_lost"), 0);
-    assert_ne!(fingerprint(&a).await, before);
+    assert_ne!(data(&a).await, before);
     let dismissal = records(&a).last().unwrap().clone();
     b.receive(dismissal.clone().into()).await.unwrap();
     b.receive(dismissal.into()).await.unwrap();
     assert_eq!(count(&b, "_coven_lost"), 0);
-    assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
+    assert_eq!(data(&a).await, data(&b).await);
     let queued = records(&a).len();
     a.dismiss_lost_values(&loss).await.unwrap();
     assert_eq!(records(&a).len(), queued);
@@ -87,8 +83,8 @@ async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
     sql(&b, "INSERT INTO notes VALUES('b','same','b body')")
         .await
         .unwrap();
-    a.receive(records(&b)[0].clone().into()).await.unwrap();
-    b.receive(records(&a)[0].clone().into()).await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
+    crate::author_judgement::tests::deliver(&b, &a).await;
     let loss = a.lost_values().await.unwrap();
     assert_eq!(loss.len(), 1);
     a.dismiss_lost_values(&loss).await.unwrap();
@@ -99,14 +95,14 @@ async fn dismissed_removed_row_stays_deleted_and_concurrent_edit_is_lost() {
     )
     .await
     .unwrap();
-    a.receive(records(&b)[1].clone().into()).await.unwrap();
-    b.receive(records(&a)[1].clone().into()).await.unwrap();
+    crate::author_judgement::tests::deliver(&b, &a).await;
+    crate::author_judgement::tests::deliver(&a, &b).await;
     assert_eq!(
         a.lost_values().await.unwrap(),
         b.lost_values().await.unwrap()
     );
     assert!(a.lost_values().await.unwrap().iter().any(|loss| matches!(&loss.lost, crate::Lost::Cell(cell) if cell.value == crate::types::Value::Text("concurrent body".into()))));
-    assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
+    assert_eq!(data(&a).await, data(&b).await);
     sql(&a, "UPDATE notes SET title='other' WHERE id='a'")
         .await
         .unwrap();
@@ -148,8 +144,8 @@ async fn set_null_child_returns_when_its_removed_parent_is_dismissed() {
     )
     .await
     .unwrap();
-    a.receive(records(&b)[0].clone().into()).await.unwrap();
-    b.receive(records(&a)[0].clone().into()).await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
+    crate::author_judgement::tests::deliver(&b, &a).await;
     assert_eq!(count(&a, "children"), 0);
     let losses = a
         .lost_values()
@@ -171,7 +167,7 @@ async fn set_null_child_returns_when_its_removed_parent_is_dismissed() {
         );
         assert!(db.lost_values().await.unwrap().is_empty());
     }
-    assert_eq!(fingerprint(&a).await, fingerprint(&b).await);
+    assert_eq!(data(&a).await, data(&b).await);
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
@@ -187,7 +183,7 @@ async fn excluded_cells_can_be_dismissed_without_their_app_table() {
         .open()
         .await
         .unwrap();
-    let empty = fingerprint(&receiver).await;
+    let empty = data(&receiver).await;
     sql(&source, "INSERT INTO notes VALUES('n','excluded','body')")
         .await
         .unwrap();
@@ -199,7 +195,7 @@ async fn excluded_cells_can_be_dismissed_without_their_app_table() {
     assert_eq!(losses.len(), 1);
     receiver.dismiss_lost_values(&losses).await.unwrap();
     assert!(receiver.lost_values().await.unwrap().is_empty());
-    assert_eq!(fingerprint(&receiver).await, empty);
+    assert_eq!(data(&receiver).await, empty);
     assert_eq!(records(&receiver)[0].parts[0].dismissals.len(), 3);
     receiver.close().await.unwrap();
     source.close().await.unwrap();
@@ -220,14 +216,14 @@ async fn a_failed_dismissal_rolls_back_its_delete_losses_position_and_queue() {
         .unwrap();
     a.receive(records(&b)[0].clone().into()).await.unwrap();
     let losses = a.lost_values().await.unwrap();
-    let before = fingerprint(&a).await;
+    let before = data(&a).await;
     a.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));
     assert!(matches!(
         a.dismiss_lost_values(&losses).await,
         Err(crate::CovenError::Database(crate::DbError::Sqlite(_)))
     ));
     assert_eq!(a.lost_values().await.unwrap(), losses);
-    assert_eq!(fingerprint(&a).await, before);
+    assert_eq!(data(&a).await, before);
     assert_eq!(records(&a).len(), 1);
     a.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
     a.dismiss_lost_values(&losses).await.unwrap();

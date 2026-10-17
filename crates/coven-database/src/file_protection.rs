@@ -1,4 +1,4 @@
-//! Fixed remote paths named by current rows, losses and reversible inputs.
+//! Fixed remote paths named by current rows, losses and published rows.
 
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
 use coven_format::{
@@ -79,27 +79,6 @@ pub(crate) fn retain_loss(
     for (device, file) in &references {
         db.internal_execute("INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4) ON CONFLICT DO NOTHING",params![device.0.to_be_bytes(),file.0.as_bytes(),record.row.table,record.row.key])?;
     }
-    if !references.is_empty() {
-        for input in db.query(
-            "SELECT id FROM _coven_data_inputs WHERE audience=?1",
-            [crate::write_encoding::audience_text(&record.row.audience)],
-            |r| r.get::<_, i64>(0),
-        )? {
-            retain_input(db, input, &references)?;
-        }
-    }
-    Ok(())
-}
-
-pub(crate) fn retain_input(
-    db: &DatabaseConnection,
-    input: i64,
-    references: &BTreeSet<(DeviceId, FileId)>,
-) -> Result<(), DbError> {
-    for (device, file) in references {
-        db.internal_execute("INSERT INTO _coven_input_file_refs(device,file,input) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
-            params![device.0.to_be_bytes(),file.0.as_bytes(),input])?;
-    }
     Ok(())
 }
 
@@ -121,7 +100,6 @@ pub(crate) fn refresh(
         return Ok(());
     }
     let mut references = BTreeSet::new();
-    let mut audiences = BTreeSet::new();
     if let Some(location) = location {
         let visible = crate::write_rows::AppView::after(db, schema);
         if let Some(row) = visible.row(key)? {
@@ -135,7 +113,6 @@ pub(crate) fn refresh(
         params![key.0, key.1],
         |r| {
             let row = crate::row_queries::read_identity(r)?;
-            audiences.insert(crate::write_encoding::audience_text(&row.audience));
             let state = store.row_without_losses(&row)?.state;
             if let Some(cell) = state.cells().get(location) {
                 value(&cell.value.value, &mut references)?;
@@ -152,7 +129,6 @@ pub(crate) fn refresh(
         params![key.0, key.1],
         |r| {
             let record = crate::loss_record::read(r)?;
-            audiences.insert(crate::write_encoding::audience_text(&record.row.audience));
             loss(schema, &record, &mut references)
         },
     )?;
@@ -182,17 +158,6 @@ pub(crate) fn refresh(
             "INSERT INTO _coven_row_file_refs(device,file,table_name,key) VALUES(?1,?2,?3,?4)",
             params![device.0.to_be_bytes(), file.0.as_bytes(), key.0, key.1],
         )?;
-    }
-    // Later changes can be replayed from any retained origin of this audience.
-    // Its file protection ends with that input, in the same transaction.
-    for audience in audiences {
-        for input in db.query(
-            "SELECT id FROM _coven_data_inputs WHERE audience=?1",
-            [audience],
-            |r| r.get::<_, i64>(0),
-        )? {
-            retain_input(db, input, &references)?;
-        }
     }
     Ok(())
 }

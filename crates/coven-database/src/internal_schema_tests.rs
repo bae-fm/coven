@@ -96,26 +96,25 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_cache",
                 "_coven_cache_budgets",
                 "_coven_cache_writes",
-                "_coven_catch_up",
                 "_coven_cells",
                 "_coven_circle_deletions",
                 "_coven_circle_members",
                 "_coven_circles",
+                "_coven_claim_attempts",
+                "_coven_claim_chunks",
+                "_coven_claim_counters",
+                "_coven_claim_journal",
                 "_coven_claims",
                 "_coven_column_origins",
                 "_coven_columns",
                 "_coven_constraints",
                 "_coven_conversion_schemas",
                 "_coven_creations",
-                "_coven_data_inputs",
-                "_coven_data_losses",
-                "_coven_data_origins",
+                "_coven_cutoffs",
                 "_coven_data_reloads",
-                "_coven_data_rows",
                 "_coven_device_files",
                 "_coven_device_reset",
                 "_coven_devices",
-                "_coven_drained_devices",
                 "_coven_eager_cancel",
                 "_coven_eager_requests",
                 "_coven_eager_rows",
@@ -126,60 +125,46 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_file_scan_access",
                 "_coven_file_scans",
                 "_coven_file_uploads",
-                "_coven_finality",
-                "_coven_fingerprint_leaves",
-                "_coven_fingerprint_sums",
                 "_coven_foreign_keys",
-                "_coven_input_file_refs",
-                "_coven_key_publications",
-                "_coven_key_uploads",
-                "_coven_loaded_audiences",
-                "_coven_local_effect_causes",
-                "_coven_local_effect_rows",
-                "_coven_local_effects",
-                "_coven_log_downloads",
-                "_coven_log_inputs",
+                "_coven_last_claims",
                 "_coven_lost",
                 "_coven_members",
+                "_coven_migration_losses",
+        "_coven_migration_prefix",
                 "_coven_operations",
                 "_coven_owner_tables",
                 "_coven_part_leaves",
                 "_coven_part_proofs",
-                "_coven_peer_positions",
                 "_coven_pending",
-                "_coven_pending_resets",
                 "_coven_pin_requests",
-                "_coven_positions",
-                "_coven_positions_post",
                 "_coven_provider_access",
+                "_coven_published",
+                "_coven_published_creations",
+                "_coven_published_file_refs",
+                "_coven_published_losses",
+                "_coven_published_rows",
                 "_coven_queued_file_refs",
-                "_coven_raise_capture_frames",
                 "_coven_raise_captures",
                 "_coven_references",
-                "_coven_retirement_finality",
                 "_coven_retries",
                 "_coven_row_file_refs",
                 "_coven_rows",
+                "_coven_sequence",
+                "_coven_slot_records",
                 "_coven_snapshot_reservation",
                 "_coven_snapshot_schema",
-                "_coven_snapshot_witnesses",
-                "_coven_store_log",
-                "_coven_store_log_uploads",
+                "_coven_store",
                 "_coven_table_origins",
                 "_coven_upload_pause",
                 "_coven_uploads",
                 "_coven_user_files",
                 "_coven_write_evidence",
                 "_coven_write_headers",
-                "_coven_write_input_frames",
-                "_coven_write_inputs",
-                "_coven_write_landing_parts",
-                "_coven_write_landings",
                 "_coven_write_pause",
-                "_coven_write_upload_sessions",
+                "_coven_write_refusals",
                 "_coven_writes",
                 "_coven_written_values",
-                "sqlite_sequence"
+                "sqlite_sequence",
             ]
         );
         let cells = sql
@@ -223,10 +208,6 @@ mod fixture {
         // These expressions only need to prepare, never execute, in EXPLAIN.
         db.create_scalar_function("_coven_loss_order", 2, flags, |_| Ok(Vec::<u8>::new()))
             .unwrap();
-        db.create_scalar_function("_coven_fingerprint_replace", 3, flags, |_| {
-            Ok(vec![0u8; 32])
-        })
-        .unwrap();
         db.execute_batch("PRAGMA foreign_keys=ON; PRAGMA automatic_index=OFF;")
             .unwrap();
         let schema = crate::internal_schema::initial_schema();
@@ -253,57 +234,20 @@ mod fixture {
      INSERT INTO _coven_provider_access SELECT 'account_' || i,i%2,NULL,NULL,i,i%2 FROM fixture;
      INSERT INTO _coven_pending(subject,reporter,value,operation,object,coven_version)
        SELECT key,device,x'00',CASE WHEN i%2=0 THEN i END,
-              CAST(x'00' || device || n AS BLOB),'1' FROM fixture;
-     INSERT INTO _coven_store_log(device,number,record,timestamp,author_view,stored_at,outcome,retires_device,retires_member,keys_member,keys_signing)
-       SELECT device,n,zeroblob(128),CAST(n || device AS BLOB),x'00',zeroblob(12),'kept',
-              CASE WHEN i%3=0 THEN device END,CASE WHEN i%3=1 THEN member END,
-              CASE WHEN i%3=2 THEN member END,CASE WHEN i%3=2 THEN key END FROM fixture;
-     INSERT INTO _coven_retirement_finality SELECT n,device,n,zeroblob(12) FROM fixture;
-     INSERT INTO _coven_drained_devices SELECT n,device,n FROM fixture;
-     INSERT INTO _coven_snapshot_witnesses SELECT audience,device,n,zeroblob(12) FROM fixture;
-     INSERT INTO _coven_write_landings SELECT device,n,zeroblob(12),x'00',zeroblob(32),i%2 FROM fixture;
-     INSERT INTO _coven_write_landing_parts SELECT device,n,audience FROM fixture;
-     INSERT INTO _coven_store_log_uploads VALUES(counter(1),counter(1),zeroblob(128),CAST(counter(1) || counter(1) AS BLOB),zeroblob(16));
-     INSERT INTO _coven_key_publications SELECT n,n FROM fixture;
-     INSERT INTO _coven_log_inputs
-       SELECT CASE WHEN i%2=0 THEN 'entry' ELSE 'key' END,device,n,x'00',zeroblob(64) FROM fixture;
-     INSERT INTO _coven_log_downloads
-       SELECT CASE WHEN i%2=0 THEN 'entry' ELSE 'key' END,n,n FROM fixture;
-     INSERT INTO _coven_key_uploads
-       SELECT device,n,zeroblob(128),CASE WHEN i%4=0 THEN counter(1) END,
-              CASE WHEN i%4=0 THEN counter(1) END FROM fixture;
+              CAST(x'00' || n AS BLOB),'1' FROM fixture;
      INSERT INTO _coven_members SELECT member,key,key,x'00','member',i%2 FROM fixture;
      INSERT INTO _coven_bound_keys SELECT key,key FROM fixture;
      INSERT INTO _coven_devices SELECT n,member,'device ' || i,CASE i%3 WHEN 0 THEN 'active' WHEN 1 THEN 'removed' ELSE 'replaced' END FROM fixture;
      INSERT INTO _coven_circles SELECT 'circle_' || i,'circle ' || i FROM fixture;
      INSERT INTO _coven_circle_members SELECT 'circle_' || i,member FROM fixture;
-     INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,device,n FROM fixture;
-     INSERT INTO _coven_data_inputs SELECT i,audience,'snapshot',device,n,1,x'00' FROM fixture;
+     INSERT INTO _coven_circle_deletions SELECT 'circle_' || i,n FROM fixture;
      INSERT INTO _coven_row_file_refs SELECT device,substr(key,1,16),tab,key FROM fixture;
-     INSERT INTO _coven_input_file_refs SELECT device,substr(key,1,16),i FROM fixture;
-     INSERT INTO _coven_data_origins SELECT 'audience_' || i,i,x'' FROM fixture;
-     INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key,i%2 FROM fixture;
-     INSERT INTO _coven_data_rows SELECT i,tab,key,x'00' FROM fixture;
-     INSERT INTO _coven_data_losses SELECT i,0,x'00' FROM fixture;
-     INSERT INTO _coven_write_inputs SELECT audience,CAST(n || device AS BLOB),x'00' FROM fixture;
-     INSERT INTO _coven_write_input_frames SELECT audience,CAST(n || device AS BLOB),0,x'00' FROM fixture;
-     INSERT INTO _coven_boundaries SELECT device,n,'schema',1,audience,device,n,x'00',i,1 FROM fixture;
-     INSERT INTO _coven_pending_resets SELECT key,device,device,n FROM fixture;
-     INSERT INTO _coven_loaded_audiences SELECT 'audience_' || i FROM fixture;
-     INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,2,x'00',x'00',zeroblob(64) FROM fixture;
-     INSERT INTO _coven_raise_capture_frames SELECT 'audience_' || i,1,x'00' FROM fixture;
-     INSERT INTO _coven_local_effects SELECT i,tab,key,audience FROM fixture;
-     INSERT INTO _coven_local_effect_causes SELECT i,device,n FROM fixture;
-     INSERT INTO _coven_local_effect_rows SELECT i,0,tab,'row',NULL,x'00',
-       CASE WHEN i%2=0 THEN tab END,CASE WHEN i%2=0 THEN x'00' END FROM fixture;
-     INSERT INTO _coven_fingerprint_sums SELECT 'audience_' || i,zeroblob(32) FROM fixture;
-     INSERT INTO _coven_fingerprint_leaves SELECT audience,key,key,key FROM fixture;
+     INSERT INTO _coven_data_reloads SELECT 'audience_' || i,key FROM fixture;
+     INSERT INTO _coven_boundaries SELECT n,'schema',1,audience,device,n,counter(1),1 FROM fixture;
+     INSERT INTO _coven_raise_captures SELECT 'audience_' || i,2,n,n FROM fixture;
      INSERT INTO _coven_writes
-       SELECT i,CAST(n || device AS BLOB),n,x'00' FROM fixture;
-     INSERT INTO _coven_peer_positions SELECT n,x'00' FROM fixture;
-     INSERT INTO _coven_positions_post VALUES(1,x'00');
+       SELECT i,CAST(n || device AS BLOB),n,counter(0),n FROM fixture;
      INSERT INTO _coven_device_reset VALUES(1,zeroblob(8),counter(1));
-     INSERT INTO _coven_positions SELECT n,n FROM fixture;
      INSERT INTO _coven_write_headers SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_authored_parts SELECT CAST(device || n AS BLOB),audience,x'00',1 FROM fixture;
      INSERT INTO _coven_authored_changes SELECT CAST(device || n AS BLOB),audience,tab,key,x'00',NULL FROM fixture;
@@ -330,9 +274,8 @@ mod fixture {
        (table_name,key,audience,generation,column_id,value,set_by,frozen,replacement_kind,replaced_by)
        SELECT tab,key,audience,counter(1),CASE WHEN i%3=0 THEN i END,
               zeroblob(64),n,i%2,CASE WHEN i%3=0 THEN 'write' ELSE 'rules' END,n FROM fixture;
-     INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL FROM fixture;
+     INSERT INTO _coven_uploads SELECT device,n,zeroblob(256),NULL,NULL FROM fixture;
      INSERT INTO _coven_queued_file_refs SELECT device,substr(key,1,16),device,n FROM fixture;
-     INSERT INTO _coven_write_upload_sessions SELECT device,n,x'00' FROM fixture;
      INSERT INTO _coven_user_files SELECT tab,key,'file',key,key,n,zeroblob(13) FROM fixture;
      INSERT INTO _coven_file_removals SELECT 'removed_' || i,'files' FROM fixture;
      INSERT INTO _coven_cache_writes SELECT 'writing_' || i FROM fixture;
@@ -345,7 +288,7 @@ mod fixture {
        VALUES('join',1,zeroblob(13),1000),('provider',0,zeroblob(13),600000);
      INSERT INTO _coven_device_files SELECT device,substr(key,17,16),'path_' || i FROM fixture;
      INSERT INTO _coven_file_candidates SELECT device,substr(key,17,16) FROM fixture;
-     INSERT INTO _coven_file_scans SELECT n,device,n FROM fixture;
+     INSERT INTO _coven_file_scans SELECT n,n FROM fixture;
      INSERT INTO _coven_file_scan_access SELECT n,CASE WHEN i%2=0 THEN 'account' ELSE 'key' END,'account_' || i FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_write_pause VALUES(1,1);
@@ -361,6 +304,22 @@ mod fixture {
               CASE WHEN (i/64)%4=0 THEN key END FROM fixture;
      INSERT INTO _coven_cache_budgets(namespace,bytes) SELECT 'audience_' || i,counter(1048576) FROM fixture WHERE true ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes;
      INSERT INTO _coven_snapshot_values SELECT audience,tab,key,x'00',1 FROM fixture;
+     INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture');
+     INSERT INTO _coven_published VALUES(1);
+     INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00',i%2 FROM fixture;
+     INSERT INTO _coven_published_losses SELECT i,tab,key,audience,x'00' FROM fixture;
+     INSERT INTO _coven_published_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
+     INSERT INTO _coven_published_file_refs SELECT device,substr(key,17,16) FROM fixture;
+     INSERT INTO _coven_migration_prefix VALUES(1,counter(1),counter(4096),2);
+     INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
+     INSERT INTO _coven_last_claims SELECT n,n FROM fixture;
+     INSERT INTO _coven_claim_counters SELECT n,n FROM fixture;
+     INSERT INTO _coven_claim_journal SELECT device,n,NULL,i,'landed',1 FROM fixture;
+     INSERT INTO _coven_claim_attempts SELECT device,n,1,'store/seq/' || i FROM fixture;
+     INSERT INTO _coven_claim_chunks SELECT device,n,1,0,key FROM fixture;
+     INSERT INTO _coven_slot_records SELECT n,CASE i%3 WHEN 0 THEN 'admin' WHEN 1 THEN 'key' ELSE 'announcement' END,key FROM fixture;
+     INSERT INTO _coven_write_refusals SELECT n,n FROM fixture;
+     INSERT INTO _coven_cutoffs SELECT n,CASE WHEN i%3=0 THEN device END,CASE WHEN i%3<>0 THEN member END,CASE WHEN i%3=2 THEN key END FROM fixture;
      DROP TABLE fixture;
      COMMIT;"
 ).unwrap();
@@ -382,16 +341,16 @@ mod fixture {
                 .query_row(&format!("SELECT count(*) FROM {table}"), [], |r| r.get(0))
                 .unwrap();
             match table.as_str() {
-                "_coven_store_log_uploads"
+                "_coven_store"
+                | "_coven_published"
+                | "_coven_migration_prefix"
+                | "_coven_sequence"
                 | "_coven_snapshot_reservation"
                 | "_coven_snapshot_schema"
-                | "_coven_positions_post"
                 | "_coven_device_reset"
-                | "_coven_catch_up"
                 | "_coven_upload_pause"
                 | "_coven_write_pause"
-                | "_coven_eager_cancel"
-                | "_coven_finality" => {
+                | "_coven_eager_cancel" => {
                     assert_eq!(count, 1)
                 }
                 _ => assert!(
@@ -498,13 +457,14 @@ mod source {
             .unwrap();
         let pending = select_constant(&sources["pending.rs"].strings, "SELECT subject,");
         let losses = select_constant(&sources["loss_record.rs"].strings, "SELECT l.table_name,");
-        let columns = select_constant(
-            &sources["snapshot_write.rs"].strings,
-            "SELECT c.table_name,",
-        );
         let mut statements = Vec::new();
         for (file, source) in &sources {
-            if file == "internal_schema.rs" || file == "internal_schema_ownership.rs" {
+            if matches!(
+                file.as_str(),
+                "internal_schema.rs"
+                    | "internal_schema_ownership.rs"
+                    | "internal_schema_sequence.rs"
+            ) {
                 // The fixture explains each initial DDL statement before executing
                 // it; generated trigger bodies are explained separately below.
                 continue;
@@ -513,9 +473,7 @@ mod source {
                 let template = normalize(sql);
                 // These constants are fragments; their callers below append the
                 // predicate/order. Pending's SELECT is also executed on its own.
-                if (file == "loss_record.rs" && sql == &losses)
-                    || (file == "snapshot_write.rs" && sql == &columns)
-                {
+                if file == "loss_record.rs" && sql == &losses {
                     continue;
                 }
                 let sql = sql
@@ -524,7 +482,7 @@ mod source {
                         "{WRITE_DEVICE_SQL}",
                         crate::internal_schema::WRITE_DEVICE_SQL,
                     )
-                    .replace("{COLUMNS}", &columns)
+                    .replace("{select}", &losses)
                     .replace(
                         "{SELECT}",
                         if file == "pending.rs" {
@@ -538,6 +496,19 @@ mod source {
                 } else {
                     sql
                 };
+                let sql =
+                    if file == "published_migration.rs" && sql.starts_with("CREATE TEMP TABLE") {
+                        // The table exists in this fixture; explain the copied rows.
+                        sql.split_once(" AS ")
+                            .unwrap()
+                            .1
+                            .split(';')
+                            .next()
+                            .unwrap()
+                            .to_owned()
+                    } else {
+                        sql
+                    };
                 let keyword = sql
                     .split_whitespace()
                     .next()
@@ -646,10 +617,27 @@ mod source {
     }
 
     pub(super) fn staging_schema() -> String {
-        select_constant(
-            &sources()["snapshot_state.rs"].strings,
+        let sources = sources();
+        let mut sql = select_constant(
+            &sources["snapshot_state.rs"].strings,
             "CREATE TEMP TABLE _coven_snapshot_values",
-        )
+        ) + &select_constant(
+            &sources["snapshot_view.rs"].strings,
+            "CREATE TEMP TABLE _coven_snapshot_losses",
+        );
+        for name in ["published_migration.rs", "migration_run.rs"] {
+            for (_, literal) in &sources[name].strings {
+                for statement in literal.split(';').map(str::trim).filter(|s| {
+                    s.starts_with("CREATE TEMP TABLE _coven_carried_")
+                        || s.starts_with("CREATE TEMP TABLE _coven_migration_frozen")
+                        || s.starts_with("CREATE INDEX temp._coven_carried_")
+                }) {
+                    sql.push_str(statement);
+                    sql.push(';');
+                }
+            }
+        }
+        sql
     }
 
     fn literals(tokens: TokenStream, strings: &mut Vec<(usize, String)>) {
@@ -699,14 +687,11 @@ mod source {
             .map(|(table, column)| sql.replace("{metadata}", table).replace("{column}", column))
             .collect();
         }
-        if sql.contains("{FINAL}") {
-            assert!(matches!(
-                file,
-                "entry_inputs.rs" | "local_effects.rs" | "migration_hidden.rs"
-            ));
-            let condition =
-                select_constant(&sources()["entry_inputs.rs"].strings, "(l.stored_at <");
-            return vec![sql.replace("{FINAL}", &condition)];
+        if file == "loss_record.rs" && sql.contains("{table}") {
+            return ["_coven_lost", "temp._coven_snapshot_losses"]
+                .into_iter()
+                .map(|table| sql.replace("{table}", table))
+                .collect();
         }
         if sql.contains("{table}") || sql.contains("{child}") {
             let variable = if sql.contains("{table}") {
@@ -755,7 +740,6 @@ mod source {
                     | "file_row.rs"
                     | "file_write.rs"
                     | "key_scope.rs"
-                    | "local_effects.rs"
                     | "migration_run.rs"
                     | "migration_snapshot.rs"
                     | "removal.rs"
@@ -881,12 +865,12 @@ fn an_allowed_enumeration_does_not_hide_a_scanning_join() {
     let statements = source::statements(&db);
     let statement = statements
         .iter()
-        .find(|s| s.file == "snapshot_writes.rs" && s.sql.starts_with("SELECT u.rowid"))
+        .find(|s| s.file == "queued_writes.rs" && s.sql.contains("JOIN _coven_writes"))
         .unwrap();
     assert!(plans(&db, statement)
         .iter()
         .all(|plan| !unapproved_scan(statement, plan)));
-    db.execute_batch("DROP INDEX _coven_write_position")
+    db.execute_batch("DROP INDEX _coven_write_identity; DROP INDEX _coven_write_slot")
         .unwrap();
     assert!(plans(&db, statement)
         .iter()

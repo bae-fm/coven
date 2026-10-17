@@ -147,8 +147,8 @@ impl<'connection> SqlReadContext<'connection> {
         )?)
     }
 
-    pub(crate) fn store_log(&self) -> CovenResult<crate::StoreLog> {
-        Ok(crate::store_log_tables::read(self.database)?)
+    pub(crate) fn store_state(&self) -> CovenResult<crate::StoreState> {
+        Ok(crate::store_state_tables::read(self.database)?)
     }
 }
 
@@ -165,9 +165,9 @@ pub(crate) enum ReadOwner<'a> {
 }
 
 impl DatabaseReadHandle {
-    /// Applied entries and their replay from one committed read-only snapshot.
-    pub async fn store_log(&self) -> CovenResult<crate::StoreLog> {
-        self.read(|sql| sql.store_log()).await
+    /// Membership and audience state from one committed read-only snapshot.
+    pub async fn store_state(&self) -> CovenResult<crate::StoreState> {
+        self.read(|sql| sql.store_state()).await
     }
 }
 

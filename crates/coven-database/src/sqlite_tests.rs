@@ -682,9 +682,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     .await
     .unwrap();
     assert_eq!(next(&mut notes).await, ["title"]);
-    crate::store_log::tests::delete_circle(&db, circle)
-        .await
-        .unwrap();
+    crate::tests::delete_circle(&db, circle).await.unwrap();
     assert!(next(&mut notes).await.is_empty());
     assert_eq!(next(&mut audit).await, ["title"]);
     let losses = next(&mut lost).await;
@@ -692,7 +690,7 @@ async fn observation_and_local_write_sessions_cover_app_and_materialized_changes
     assert_eq!(
         losses[0].replaced_by,
         crate::Replacement::Rules(vec![crate::RemovalRule::DeletedCircle {
-            entry: db.store_log().await.unwrap().replay.state.circle_deletions[&circle]
+            entry: db.store_state().await.unwrap().circle_deletions[&circle]
         }])
     );
     db.close().await.unwrap();
@@ -963,7 +961,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
         };
         assert_eq!(held(&db), 1, "the writer still holds the uncommitted row");
         let rollback_failed = |error: DbError| matches!(error, DbError::RollbackFailed);
-        assert!(rollback_failed(db.key_uploads().await.unwrap_err()));
+        assert!(rollback_failed(db.current_claim().await.unwrap_err()));
         assert!(rollback_failed(db.write(|_| Ok(())).await.unwrap_err()));
         assert!(rollback_failed(db.schema_version().await.unwrap_err()));
         assert!(matches!(
@@ -977,7 +975,7 @@ async fn a_failed_rollback_fails_every_later_call_until_reopen() {
         db.close().await.unwrap();
         let db = open().await.unwrap();
         assert_eq!(held(&db), 0);
-        assert!(db.key_uploads().await.unwrap().is_empty());
+        assert!(db.current_claim().await.unwrap().is_none());
         db.close().await.unwrap();
     }
 }

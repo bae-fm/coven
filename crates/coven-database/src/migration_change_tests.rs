@@ -95,16 +95,14 @@ impl Case {
     /// A failed conversion commits nothing: no position passes and the
     /// original upload records stay as authored.
     async fn assert_unchanged(&self, before: &[WriteRecord]) {
-        let positions = self
-            .receiver
-            .sync_state(Vec::new())
-            .await
-            .unwrap()
-            .positions;
-        assert!(self
-            .writes
-            .iter()
-            .all(|w| !positions.covers(w.header.position)));
+        for write in &self.writes {
+            assert!(self
+                .receiver
+                .checked_write_header(write.header.position)
+                .await
+                .unwrap()
+                .is_none());
+        }
         assert_eq!(records(&self.source), before);
     }
 

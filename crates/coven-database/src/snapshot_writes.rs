@@ -1,228 +1,52 @@
-//! Apply supplied gap streams and waiting writes in causal order inside a reload.
-
-use crate::internal_schema::WRITE_DEVICE_SQL;
-use crate::snapshot_coverage::SnapshotCoverage;
-use crate::snapshot_error::{invalid, SnapshotError};
-use crate::sqlite::DatabaseConnection;
-use crate::write_encoding::{counter, decoded};
-use crate::write_rows::AppKey;
-use crate::write_schema::WriteSchema;
-use crate::{DbError, DownloadedWriteStream, WriteWait};
-use coven_format::{merge_fields, snapshot_rows::AppliedWrite};
-use coven_foundation::id_source::{CircleId, DeviceId};
-use coven_merge::{WriteId, WritePast};
-use std::collections::{BTreeMap, BTreeSet};
+//! Fold every retained slot needed by the selected audience prefixes.
+use crate::{
+    snapshot_coverage::SnapshotCoverage, snapshot_error::invalid, sqlite::DatabaseConnection,
+    write_schema::WriteSchema, DbError, IncomingSlot, SlotContent,
+};
 use std::io::Read;
-
-enum Source<R> {
-    Download(DownloadedWriteStream<R>),
-    Queue(i64),
-    Deleted(AppliedWrite),
-}
-
 pub(crate) fn apply<P: crate::PendingValue, R: Read>(
-    database: &DatabaseConnection,
+    db: &DatabaseConnection,
     schema: &WriteSchema,
-    downloads: Vec<DownloadedWriteStream<R>>,
-    absent: Vec<WriteId>,
-    mut coverage: SnapshotCoverage,
-    deleted: &BTreeMap<CircleId, crate::EntryId>,
-) -> Result<BTreeSet<AppKey>, DbError> {
-    let mut sources = BTreeMap::new();
-    let mut supplied = BTreeSet::new();
-    for download in downloads {
-        download.header.encode().map_err(SnapshotError::Format)?;
-        for (part, input) in download.header.parts.iter().zip(&download.parts) {
-            if matches!(input, crate::DownloadedPartStream::Opened(_)) {
-                coverage.opened(&part.audience);
+    slots: Vec<IncomingSlot<R>>,
+    coverage: &SnapshotCoverage,
+) -> Result<(), DbError> {
+    let mut applied = coverage.first()?;
+    crate::sequence::set_applied(db, applied)?;
+    for incoming in slots {
+        if applied.checked_add(1) != Some(incoming.slot.0)
+            || incoming.slot.0 > coverage.target
+            || incoming.header.after > applied
+        {
+            return Err(DbError::SequenceGap {
+                applied,
+                received: incoming.slot,
+            });
+        }
+        match incoming.content {
+            SlotContent::Writes(writes) => crate::sequence_apply::stage_writes::<P, _>(
+                db,
+                schema,
+                incoming.slot,
+                &incoming.header,
+                writes,
+                Some(coverage),
+            )?,
+            SlotContent::Admin { original, .. } => {
+                crate::sequence_apply::retain(db, "admin", &original)?
+            }
+            SlotContent::KeyCopy(original) => crate::sequence_apply::retain(db, "key", &original)?,
+            SlotContent::Announcement(original) => {
+                crate::sequence_apply::retain(db, "announcement", &original)?
             }
         }
-        let header = &download.header.header;
-        if !supplied.insert(header.position) {
-            return Err(invalid("reload repeats a supplied write"));
-        }
-        coverage.include(header.position);
-        for past in &header.had_read.0 {
-            coverage.include(*past);
-        }
-        sources.insert(
-            (header.timestamp, header.position, false),
-            Source::Download(download),
-        );
+        crate::sequence::note_claim(db, &incoming.header)?;
+        applied = incoming.slot.0;
+        crate::sequence::set_applied(db, applied)?;
     }
-    let mut queued = BTreeSet::new();
-    database.for_each(
-        "SELECT u.rowid,u.device,u.number,w.timestamp,w.had_read FROM _coven_uploads u
-         LEFT JOIN _coven_writes w ON substr(w.timestamp,9,8)=u.device AND w.number=u.number
-         ORDER BY u.device,u.number",
-        [],
-        |r| {
-            let rowid: i64 = r.get(0)?;
-            let write = AppliedWrite {
-                id: WriteId {
-                    device: DeviceId(counter(r.get(1)?)),
-                    number: counter(r.get(2)?),
-                },
-                timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(3)?))?,
-                had_read: decoded(merge_fields::decode_write_positions(
-                    &r.get::<_, Vec<u8>>(4)?,
-                ))?,
-            };
-            coverage.include(write.id);
-            for past in write.had_read.0 {
-                coverage.include(past);
-            }
-            queued.insert(write.id);
-            sources.insert((write.timestamp, write.id, true), Source::Queue(rowid));
-            Ok::<_, DbError>(())
-        },
-    )?;
-    // A deleted write some loaded audience lacks: retention kept it until the
-    // store's newest snapshot covered it, so the store's selection or kept
-    // state holds its metadata, and its number advances like any write's (§15).
-    for id in absent {
-        if supplied.contains(&id) || queued.contains(&id) {
-            return Err(invalid("absent write also has a supplied stream"));
-        }
-        let write = database.query_row(&format!("SELECT timestamp,had_read FROM _coven_writes WHERE {WRITE_DEVICE_SQL}=?1 AND number=?2"),
-            (id.device.0.to_be_bytes().as_slice(), id.number.to_be_bytes().as_slice()), |r| Ok(AppliedWrite {
-                id, timestamp: decoded(merge_fields::decode_timestamp(&r.get::<_, Vec<u8>>(0)?))?,
-                had_read: decoded(merge_fields::decode_write_positions(&r.get::<_, Vec<u8>>(1)?))?,
-            }))?;
-        sources.insert((write.timestamp, id, false), Source::Deleted(write));
+    if applied != coverage.target {
+        return Err(invalid("reload lacks slots through its fixed target"));
     }
-    coverage.start(database)?;
-    let mut affected = BTreeSet::new();
-    for source in sources.into_values() {
-        let downloaded = match &source {
-            Source::Download(stream) => Some(stream.header.header.position),
-            _ => None,
-        };
-        let result = (|| -> Result<(), DbError> {
-            let supplied = matches!(source, Source::Download(_));
-            let published = match &source {
-                Source::Download(stream) => Some(stream.published),
-                _ => None,
-            };
-            let write = match source {
-                Source::Download(stream) => {
-                    crate::write_headers::retain(database, &stream.header)?;
-                    let write = stream.read(database)?;
-                    crate::retained_writes::download(database, &write)?;
-                    write
-                }
-                Source::Deleted(write) => {
-                    let positions = crate::download::positions(database)?;
-                    if !positions.covers(write.id) {
-                        let past = write.had_read.causal_past(write.id);
-                        let missing: Vec<_> = past
-                            .frontier()
-                            .copied()
-                            .filter(|id| !positions.covers(*id))
-                            .collect();
-                        if !missing.is_empty() {
-                            return Err(SnapshotError::MissingWrites { missing }.into());
-                        }
-                        database.internal_execute("INSERT INTO _coven_positions(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number", (write.id.device.0.to_be_bytes().as_slice(), write.id.number.to_be_bytes().as_slice()))?;
-                    }
-                    return Ok(());
-                }
-                Source::Queue(rowid) => database
-                    .query_row(
-                        "SELECT record FROM _coven_uploads WHERE rowid=?1",
-                        [rowid],
-                        |r| {
-                            decoded(coven_format::write_stream::decode_plaintext(
-                                &r.get::<_, Vec<u8>>(0)?,
-                            ))
-                        },
-                    )?
-                    .into(),
-            };
-            if (supplied && queued.contains(&write.header.position))
-                || crate::download::positions(database)?.covers(write.header.position)
-            {
-                if supplied {
-                    crate::download::retain_sources(database, &write)?;
-                }
-                // Validate supplied copies; the queue's original record is the same write.
-                crate::write_commit::retain_metadata(
-                    database,
-                    &AppliedWrite {
-                        id: write.header.position,
-                        timestamp: write.header.timestamp,
-                        had_read: write.header.had_read,
-                    },
-                )?;
-                return Ok(());
-            }
-            let opened: Vec<_> = write
-                .parts
-                .iter()
-                .filter_map(|part| match part {
-                    crate::DownloadedPart::Opened(part) => Some(part.audience.clone()),
-                    crate::DownloadedPart::Skipped(_) => None,
-                })
-                .collect();
-            if let Some(wait) = crate::download::prerequisite(database, &write.header, &opened)? {
-                return Err(match wait {
-                    WriteWait::Writes(missing) => SnapshotError::MissingWrites { missing },
-                    wait => SnapshotError::WriteWaiting(wait),
-                }
-                .into());
-            }
-            if let Some(published) = published {
-                crate::write_landing::land::<P>(
-                    database,
-                    schema,
-                    &write.header,
-                    published,
-                    &opened,
-                    false,
-                )?;
-            }
-            if supplied {
-                crate::download::retain_sources(database, &write)?;
-            }
-            let write = coverage.uncovered(write)?;
-            if supplied {
-                affected.extend(crate::download::apply_opened(
-                    database, schema, write, deleted,
-                )?);
-            } else {
-                let record = crate::interpretation::interpret(database, schema, write)?;
-                affected.extend(crate::download::apply_interpreted(
-                    database, schema, &record, deleted,
-                )?);
-            }
-            Ok(())
-        })();
-        let result = match result {
-            Err(DbError::MissingWriteSources(sources)) => {
-                Err(SnapshotError::WriteWaiting(WriteWait::Sources(sources)).into())
-            }
-            result => result,
-        };
-        match downloaded {
-            Some(_)
-                if matches!(
-                    &result,
-                    Err(DbError::Snapshot(
-                        SnapshotError::MissingWrites { .. } | SnapshotError::WriteWaiting(_)
-                    ))
-                ) =>
-            {
-                result?
-            }
-            Some(write) => result.map_err(|error| SnapshotError::Write {
-                write,
-                error: Box::new(error),
-            })?,
-            None => result?,
-        }
-    }
-    coverage.finish(database)?;
-    Ok(affected)
+    Ok(())
 }
 
 #[cfg(test)]

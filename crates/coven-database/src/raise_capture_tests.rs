@@ -2,34 +2,30 @@ use crate::snapshot_write::tests::{decode, prefix, SnapshotFrames};
 use crate::tests::TestStore;
 use crate::write::tests::{notes, records, sql, NOTES};
 use crate::{Database, Migration};
+use coven_format::admin::SnapshotId;
 use coven_format::snapshot::SnapshotRecord;
-use coven_format::store_log::SnapshotId;
 use coven_format::value::Value;
 use coven_format::write::WriteDisposition;
-use coven_merge::{Audience, Timestamp, WriteId};
+use coven_merge::{Audience, WriteId};
 use std::sync::{Arc, Mutex};
 
 /// Make this database's own device the creator of a store, so a breaking
 /// migration has audiences to capture.
 pub(crate) async fn connect(db: &Database) {
-    let device = db.sync_state(Vec::new()).await.unwrap().device;
-    let (mut entry, mut replay) = crate::store_log::tests::circle_history(
-        coven_foundation::id_source::CircleId(uuid::Uuid::from_u128(1)),
-    )
-    .remove(0);
-    let creator = entry.position;
-    entry.position.device = device;
-    entry.timestamp = Timestamp::new(1, 0, device).unwrap();
-    let added = replay.state.devices.remove(&creator.device).unwrap();
-    replay.state.devices.insert(device, added);
-    replay.entries.clear();
-    replay
-        .entries
-        .insert(entry.position, crate::EntryOutcome::Kept);
-    db.apply_store_log::<crate::pending::tests::Record>(
-        crate::store_log::tests::checked(entry),
-        replay,
-        Vec::new(),
+    let device = db.local_device().unwrap();
+    TestStore::register(db, device, 1);
+    let mut state = db.store_state().await.unwrap();
+    state.store = Some(crate::StoreIdentity {
+        id: crate::tests::store_id(),
+        name: crate::tests::STORE_NAME.into(),
+    });
+    db.admin_fixture(
+        coven_format::admin::StoreChange::AddDevice {
+            name: "Local".into(),
+            replaces: None,
+        },
+        state,
+        None,
     )
     .await
     .unwrap();
@@ -68,10 +64,15 @@ fn queue(db: &Database) -> Vec<(u64, Vec<u8>, Option<Vec<u8>>)> {
 }
 
 async fn raise_frames(db: &Database, number: u64, version: u32) -> SnapshotFrames {
+    let through = db.raise_captures().await.unwrap()[0].through.number;
+    crate::tests::publish_through(db, through).await.unwrap();
+    db.prepare_raise_capture(Audience::Store, version)
+        .await
+        .unwrap();
     let frames = Arc::new(Mutex::new(Vec::new()));
     let metadata = Arc::new(Mutex::new(None));
     let (output, start) = (frames.clone(), metadata.clone());
-    let device = db.sync_state(Vec::new()).await.unwrap().device;
+    let device = db.local_device().unwrap();
     db.write_raise_snapshot(
         SnapshotId {
             audience: Audience::Store,
@@ -142,7 +143,11 @@ async fn attempted_and_untried_records_survive_successive_migrations() {
         assert_eq!(captures[0].version, version);
         assert_eq!(captures[0].through.number, version as u64 + 1);
         assert_eq!(
-            db.sync_state(Vec::new()).await.unwrap().breaking_version,
+            db.raise_captures()
+                .await
+                .unwrap()
+                .first()
+                .map_or(0, |c| c.version),
             version
         );
         db.close().await.unwrap();
@@ -163,19 +168,18 @@ async fn the_capture_stops_at_the_marker_and_later_app_writes_stay_outside() {
         .open()
         .await
         .unwrap();
-    let device = db.sync_state(Vec::new()).await.unwrap().device;
+    let device = db.local_device().unwrap();
     sql(&db, "UPDATE notes SET title='after the marker'")
         .await
         .unwrap();
     let capture = db.raise_captures().await.unwrap().remove(0);
     assert_eq!(capture.audience, Audience::Store);
     assert_eq!(capture.through, WriteId { device, number: 2 });
-    assert!(capture.writes.covers(capture.through));
-    assert!(!capture.writes.covers(WriteId { device, number: 3 }));
+    assert_eq!(capture.covers, 1);
     // Sealing names the published identity; the rows are the captured ones.
     let (header, records) = decode(&raise_frames(&db, 7, 2).await);
     assert_eq!(header.id.number, 7);
-    assert_eq!(header.writes, capture.writes);
+    assert_eq!(header.covers, db.applied_slot().await.unwrap());
     let titles: Vec<_> = records
         .iter()
         .filter_map(|record| match record {
@@ -227,11 +231,7 @@ async fn the_unconfirmed_prefix_names_each_own_write_through_the_marker() {
                 number
             })
         );
-        let write = crate::upload::tests::attempt(&db, 1)
-            .await
-            .unwrap()
-            .unwrap();
-        assert!(db.upload_succeeded(write).await.unwrap());
+        crate::tests::publish_through(&db, number).await.unwrap();
     }
     // The later app write is still queued; it is not part of the prefix.
     assert_eq!(db.unconfirmed_own_prefix(through).await.unwrap(), None);
@@ -253,7 +253,14 @@ async fn without_a_store_nothing_is_captured_and_no_raise_is_intended() {
         .await
         .unwrap();
     assert!(db.raise_captures().await.unwrap().is_empty());
-    assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 0);
+    assert_eq!(
+        db.raise_captures()
+            .await
+            .unwrap()
+            .first()
+            .map_or(0, |c| c.version),
+        0
+    );
     assert_eq!(
         records(&db)[1].header.disposition,
         WriteDisposition::Migration
@@ -319,6 +326,7 @@ async fn a_migrated_device_judges_received_writes_under_its_capture() {
     let store = TestStore::new();
     let db = migrated(&store).await;
     let capture = db.raise_captures().await.unwrap().remove(0);
+    let mut later = records(&db).remove(0);
     // An old-schema write from a peer that has not updated converts as the
     // kept raise will judge it, instead of waiting for that raise (§17.1).
     let outcome = crate::tests::try_remote_update_at(
@@ -332,42 +340,30 @@ async fn a_migrated_device_judges_received_writes_under_its_capture() {
     .unwrap();
     assert_eq!(outcome, crate::ApplyOutcome::Applied);
     assert_eq!(title(&db).await, "remote");
-    let remote = db
-        .sync_state(Vec::new())
-        .await
-        .unwrap()
-        .positions
-        .0
-        .into_iter()
-        .find(|id| id.device != capture.through.device)
-        .unwrap();
-    assert!(!capture.writes.covers(remote));
-    // That write is past the capture, so preparing the raise captures again;
-    // the snapshot then holds the converted row (§15).
+    let remote = db.applied_slot().await.unwrap();
+    assert!(capture.covers < remote);
     let again = db
         .prepare_raise_capture(Audience::Store, 2)
         .await
         .unwrap()
         .unwrap();
-    assert!(again.writes.covers(remote));
+    assert_eq!(again.covers, remote);
     assert_eq!(again.through, capture.through);
     let (header, records) = decode(&raise_frames(&db, 3, 2).await);
-    assert_eq!(header.writes, again.writes);
+    assert_eq!(header.covers, again.covers);
     assert!(records.iter().any(|record| matches!(
         record,
         SnapshotRecord::Synced(row) if row.columns["title"].value == Value::Text("remote".into())
     )));
     // Without a capture of its audience the write still waits for the raise.
     db.discard_raise_capture(Audience::Store, 2).await.unwrap();
-    let waiting = crate::tests::try_remote_update_at(
-        &db,
-        "notes",
-        "n",
-        &[("title", Value::Text("later".into()))],
-        Some(1),
-    )
-    .await
-    .unwrap();
+    let device = coven_foundation::id_source::DeviceId(50_000);
+    later.header.position = WriteId { device, number: 1 };
+    later.header.timestamp =
+        coven_merge::Timestamp::new(later.header.timestamp.milliseconds() + 100, 0, device)
+            .unwrap();
+    later.header.read_through = db.applied_slot().await.unwrap();
+    let waiting = db.receive(later.into()).await.unwrap();
     assert_eq!(
         waiting,
         crate::ApplyOutcome::Waiting(crate::WriteWait::SchemaPublication(2))
@@ -376,55 +372,39 @@ async fn a_migrated_device_judges_received_writes_under_its_capture() {
 }
 
 #[tokio::test]
-async fn an_unchanged_capture_is_kept_and_a_recapture_takes_in_later_own_writes() {
+async fn refreshing_coverage_preserves_the_original_captured_prefix() {
     let store = TestStore::new();
     let db = migrated(&store).await;
     let capture = db.raise_captures().await.unwrap().remove(0);
     sql(&db, "UPDATE notes SET title='after the marker'")
         .await
         .unwrap();
-    // Nothing remote applied since: the migration's capture is sent, and
-    // the later app write stays outside it, waiting for a kept raise.
-    let kept = db
-        .prepare_raise_capture(Audience::Store, 2)
+    crate::tests::publish_through(&db, capture.through.number)
         .await
-        .unwrap()
         .unwrap();
-    assert_eq!(kept, capture);
-    assert_eq!(
-        db.sync_state(Vec::new()).await.unwrap().captured_through,
-        Some(capture.through.number)
-    );
-    crate::tests::remote_update(&db, "notes", "n", &[("body", Value::Text("peer".into()))]).await;
-    // Now the capture is behind: it is taken again through the newest own
-    // write, which joins the prefix the upload gate sends first (§17.1).
     let again = db
         .prepare_raise_capture(Audience::Store, 2)
         .await
         .unwrap()
         .unwrap();
-    let own = WriteId {
-        device: capture.through.device,
-        number: capture.through.number + 1,
-    };
-    assert_eq!(again.through, own);
-    assert!(again.writes.covers(own));
+    assert_eq!(again.through, capture.through);
+    assert_eq!(again.covers, db.applied_slot().await.unwrap());
     assert_eq!(
-        db.sync_state(Vec::new()).await.unwrap().captured_through,
-        Some(own.number)
+        db.captured_through().await.unwrap(),
+        Some(capture.through.number)
     );
+    assert_eq!(queue(&db).len(), 1);
     assert_eq!(
         db.unconfirmed_own_prefix(again.through).await.unwrap(),
-        Some(WriteId {
-            device: own.device,
-            number: 1
-        })
+        None
     );
-    // A capture replaced by a later migration prepares nothing.
     assert_eq!(
         db.prepare_raise_capture(Audience::Store, 3).await.unwrap(),
         None
     );
+    let (_, records) = decode(&raise_frames(&db, 3, 2).await);
+    assert!(records.iter().any(|r|matches!(r,SnapshotRecord::Synced(row) if row.columns["title"].value==Value::Text("title".into()))));
+    assert_eq!(title(&db).await, "after the marker");
     db.close().await.unwrap();
 }
 
@@ -444,7 +424,14 @@ async fn an_addition_moves_a_waiting_raise_to_its_version() {
     let moved = db.raise_captures().await.unwrap();
     assert_eq!(moved.len(), 1);
     assert_eq!((moved[0].version, moved[0].through), (3, before.through));
-    assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 3);
+    assert_eq!(
+        db.raise_captures()
+            .await
+            .unwrap()
+            .first()
+            .map_or(0, |c| c.version),
+        3
+    );
     let (header, _) = decode(&raise_frames(&db, 1, 3).await);
     assert_eq!(header.schema_version, 3);
     // Its raise published, a later addition raises nothing.
@@ -458,6 +445,13 @@ async fn an_addition_moves_a_waiting_raise_to_its_version() {
     ));
     let db = store.builder(notes(), four).open().await.unwrap();
     assert!(db.raise_captures().await.unwrap().is_empty());
-    assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 3);
+    assert_eq!(
+        db.raise_captures()
+            .await
+            .unwrap()
+            .first()
+            .map_or(0, |c| c.version),
+        0
+    );
     db.close().await.unwrap();
 }

@@ -1,4 +1,4 @@
-//! The common durable loss record, shared by snapshots and fingerprints.
+//! The common durable loss record and its snapshot projection.
 
 use crate::sqlite::DatabaseConnection;
 use crate::write_encoding::{audience_text, counter, encoded};
@@ -15,10 +15,20 @@ pub(crate) const SELECT: &str = "SELECT l.table_name,l.key,l.audience,l.generati
 pub(crate) fn visit<E: From<DbError>>(
     database: &DatabaseConnection,
     audience: &Audience,
+    visit: impl FnMut(Loss) -> Result<(), E>,
+) -> Result<(), E> {
+    visit_table(database, audience, "_coven_lost", visit)
+}
+
+pub(crate) fn visit_table<E: From<DbError>>(
+    database: &DatabaseConnection,
+    audience: &Audience,
+    table: &str,
     mut visit: impl FnMut(Loss) -> Result<(), E>,
 ) -> Result<(), E> {
+    let select = SELECT.replace("_coven_lost", table);
     database.for_each(
-        &format!("{SELECT} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.frozen,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 WHEN 'excluded' THEN 2 WHEN 'dependency' THEN 3 ELSE 4 END,CASE WHEN l.replacement_kind IN ('excluded','dependency','unauthorized') THEN substr(l.replaced_by,1,16) END"),
+        &format!("{select} WHERE l.audience=?1 ORDER BY l.table_name,l.key,l.generation,_coven_loss_order(c.column_name,l.set_by),l.frozen,CASE l.replacement_kind WHEN 'write' THEN 0 WHEN 'rules' THEN 1 WHEN 'excluded' THEN 2 WHEN 'dependency' THEN 3 ELSE 4 END,CASE WHEN l.replacement_kind IN ('excluded','dependency','unauthorized') THEN substr(l.replaced_by,1,16) END"),
         [audience_text(audience)],
         |r| visit(read(r).map_err(DbError::from)?),
     )
@@ -106,6 +116,15 @@ pub(crate) fn put(
     loss: &Loss,
     id: Option<i64>,
 ) -> Result<(), DbError> {
+    put_table(database, loss, id, "_coven_lost")
+}
+
+pub(crate) fn put_table(
+    database: &DatabaseConnection,
+    loss: &Loss,
+    id: Option<i64>,
+    table: &str,
+) -> Result<(), DbError> {
     let (column, value, setter) = match &loss.values {
         LossValues::Cell { column, cell } => (
             Some(if loss.frozen {
@@ -145,10 +164,14 @@ pub(crate) fn put(
             encoded(merge_fields::encode_unauthorized(*write, reason))?,
         ),
     };
-    database.internal_execute("INSERT INTO _coven_lost(id,table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,frozen) VALUES(?11,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET table_name=excluded.table_name,key=excluded.key,audience=excluded.audience,generation=excluded.generation,column_id=excluded.column_id,value=excluded.value,set_by=excluded.set_by,replacement_kind=excluded.replacement_kind,replaced_by=excluded.replaced_by,frozen=excluded.frozen",params![loss.row.table,loss.row.key,audience_text(&loss.row.audience),loss.generation.to_be_bytes().as_slice(),column,value,setter,kind,cause,loss.frozen,id])?;
-    if loss.frozen {
-        crate::fingerprint::loss(database, loss)?;
-    }
+    // A captured migration may name a frozen loss already present in the counted
+    // prefix. Its immutable identity keeps one record when the queue is folded.
+    let id = if id.is_none() && loss.frozen {
+        database.query_row(&format!("SELECT (SELECT id FROM {table} WHERE table_name=?1 AND key=?2 AND audience=?3 AND generation=?4 AND column_id IS ?5 AND set_by=?6 AND replacement_kind=?7 AND replaced_by=?8 AND frozen=1)"),params![loss.row.table,loss.row.key,audience_text(&loss.row.audience),loss.generation.to_be_bytes(),column,setter,kind,cause],|r|r.get(0))?
+    } else {
+        id
+    };
+    database.internal_execute(&format!("INSERT INTO {table}(id,table_name,key,audience,generation,column_id,value,set_by,replacement_kind,replaced_by,frozen) VALUES(?11,?1,?2,?3,?4,?5,?6,?7,?8,?9,?10) ON CONFLICT(id) DO UPDATE SET table_name=excluded.table_name,key=excluded.key,audience=excluded.audience,generation=excluded.generation,column_id=excluded.column_id,value=excluded.value,set_by=excluded.set_by,replacement_kind=excluded.replacement_kind,replaced_by=excluded.replaced_by,frozen=excluded.frozen"),params![loss.row.table,loss.row.key,audience_text(&loss.row.audience),loss.generation.to_be_bytes().as_slice(),column,value,setter,kind,cause,loss.frozen,id])?;
     Ok(())
 }
 

@@ -1,38 +1,28 @@
 //! The rows whose commits can change what a waiting operation needs (§3.1,
 //! SP waiting; IO `WaitingEvidence`). A commit changing one of a wait's rows
 //! is evidence for that wait; no other commit is. The rows are exactly what
-//! the waiting work reads, except that a write's writer position counts even
-//! when it stops short of the write (IO `PrerequisiteRows`).
+//! the waiting work reads, including advancement of the shared prefix.
 
 use crate::key_scope::KeyScope;
 use crate::observation::{CommitSubscription, TableRead};
 use crate::sql_value::SqlValue;
-use crate::{EntryId, WriteId};
+use crate::WriteId;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::Audience;
 
 /// Committed state a waiting operation names.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PrerequisiteRows {
-    /// A store-log entry: received, applied, or published by this device.
-    Entry(EntryId),
-    /// A key-copy object: received, or published by this device.
-    KeyCopy {
-        /// The publishing device.
-        writer: DeviceId,
-        /// Its number.
-        number: u64,
-    },
-    /// A write: its writer's applied position, this device's queue, its landing.
+    /// The applied store prefix.
+    Slot,
+    /// This installation's active claim and settlement.
+    Claim,
+    /// An original write's queue and counted prefix.
     Write(WriteId),
     /// A device's registration.
     Device(DeviceId),
-    /// The positions a peer posted.
-    PeerPositions(DeviceId),
     /// An audience's pending reload.
     Reload(Audience),
-    /// The finality horizon.
-    Finality,
     /// The reset and schema boundaries.
     Boundaries,
     /// A provider account's access record.
@@ -97,31 +87,9 @@ fn rows(table: &str, key: &[(&str, SqlValue)], columns: &[&str]) -> TableRead {
     }
 }
 
-const STORE_LOG: &[&str] = &[
-    "record",
-    "timestamp",
-    "author_view",
-    "stored_at",
-    "outcome",
-    "beaten_device",
-    "beaten_number",
-    "target",
-    "retires_device",
-    "retires_member",
-    "keys_member",
-    "keys_signing",
-    "registers_device",
-];
-const LOG_INPUTS: &[&str] = &["observation", "bytes"];
-const STORE_LOG_UPLOADS: &[&str] = &["record", "timestamp", "sealing_key"];
-const KEY_UPLOADS: &[&str] = &["bytes", "before_device", "before_number"];
-const POSITIONS: &[&str] = &["number"];
-const UPLOADS: &[&str] = &["record", "sealing_keys"];
-const WRITE_LANDINGS: &[&str] = &["stored_at", "header", "signer", "late"];
+const UPLOADS: &[&str] = &["record", "sealing_keys", "claim"];
 const DEVICES: &[&str] = &["member", "name", "state"];
-const PEER_POSITIONS: &[&str] = &["observation"];
-const DATA_RELOADS: &[&str] = &["subject", "update_required"];
-const FINALITY: &[&str] = &["horizon"];
+const DATA_RELOADS: &[&str] = &["subject"];
 const BOUNDARIES: &[&str] = &[
     "kind",
     "version",
@@ -129,7 +97,6 @@ const BOUNDARIES: &[&str] = &[
     "snapshot_device",
     "snapshot_number",
     "included",
-    "input",
     "applied",
 ];
 const PROVIDER_ACCESS: &[&str] = &["intended", "granted", "invitation", "operation", "target"];
@@ -138,62 +105,23 @@ const OPERATIONS: &[&str] = &["kind", "last_step", "data", "started_by"];
 impl PrerequisiteRows {
     pub(crate) fn reads(&self) -> Vec<TableRead> {
         match self {
-            Self::Entry(entry) => {
-                let at = [
-                    ("device", device(entry.device)),
-                    ("number", number(entry.number)),
-                ];
-                vec![
-                    rows("_coven_store_log", &at, STORE_LOG),
-                    rows(
-                        "_coven_log_inputs",
-                        &[
-                            ("kind", text("entry")),
-                            ("writer", device(entry.device)),
-                            ("number", number(entry.number)),
-                        ],
-                        LOG_INPUTS,
-                    ),
-                    rows("_coven_store_log_uploads", &at, STORE_LOG_UPLOADS),
-                ]
-            }
-            Self::KeyCopy { writer, number: n } => vec![
-                rows(
-                    "_coven_log_inputs",
-                    &[
-                        ("kind", text("key")),
-                        ("writer", device(*writer)),
-                        ("number", number(*n)),
-                    ],
-                    LOG_INPUTS,
-                ),
-                rows(
-                    "_coven_key_uploads",
-                    &[("writer", device(*writer)), ("number", number(*n))],
-                    KEY_UPLOADS,
-                ),
-            ],
+            Self::Slot => vec![rows("_coven_sequence", &[], &["applied"])],
+            Self::Claim => vec![rows(
+                "_coven_claim_journal",
+                &[],
+                &["through", "operation", "settlement", "finished"],
+            )],
             Self::Write(write) => {
                 let at = [
                     ("device", device(write.device)),
                     ("number", number(write.number)),
                 ];
                 vec![
-                    rows(
-                        "_coven_positions",
-                        &[("device", device(write.device))],
-                        POSITIONS,
-                    ),
+                    rows("_coven_sequence", &[], &["applied"]),
                     rows("_coven_uploads", &at, UPLOADS),
-                    rows("_coven_write_landings", &at, WRITE_LANDINGS),
                 ]
             }
             Self::Device(id) => vec![rows("_coven_devices", &[("device", device(*id))], DEVICES)],
-            Self::PeerPositions(id) => vec![rows(
-                "_coven_peer_positions",
-                &[("device", device(*id))],
-                PEER_POSITIONS,
-            )],
             Self::Reload(audience) => vec![rows(
                 "_coven_data_reloads",
                 &[(
@@ -202,7 +130,6 @@ impl PrerequisiteRows {
                 )],
                 DATA_RELOADS,
             )],
-            Self::Finality => vec![rows("_coven_finality", &[], FINALITY)],
             Self::Boundaries => vec![rows("_coven_boundaries", &[], BOUNDARIES)],
             Self::ProviderAccess(account) => vec![rows(
                 "_coven_provider_access",

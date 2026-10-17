@@ -26,19 +26,11 @@ pub enum WriteCheckpoint {
     Finished,
 }
 
-/// Publication facts for a write a test applies as already authenticated,
-/// signed by a fixed key no fixture member binds: no member-key replacement
-/// names it, so only device retirements decide its window (§10).
-pub fn published(stored_at: coven_format::value::StorageTime) -> crate::Published {
-    let mut secret = b"CVMK\x01".to_vec();
-    secret.extend([0xA5; 64]);
-    crate::Published {
-        stored_at,
-        signer: coven_crypto::MemberKeys::from_secret_bytes(&secret)
-            .expect("fixed fixture pair")
-            .public_keys()
-            .signing,
-    }
+/// Fixed member key used to authenticate fixture writes.
+pub fn signer() -> coven_crypto::SigningKey {
+    coven_format::test_utils::keys_from_seed(0xA5)
+        .public_keys()
+        .signing
 }
 
 /// Declarations for a UUID-keyed notes table in the store audience.
@@ -69,33 +61,43 @@ impl TestAuthorship {
     }
 
     fn path(write: coven_merge::WriteId) -> String {
-        format!(
-            "{}/devices/{}/{}",
-            Self::STORE,
-            write.device.0,
-            write.number
-        )
+        format!("{}/seq/{}", Self::STORE, write.number)
     }
 
     /// The evidence and hashers a stream of this record carries.
     pub fn write(record: &coven_format::write::WriteRecord) -> crate::WriteAuthorship {
         let encoder = coven_format::write_stream::WriteEncoder::new(record).unwrap();
+        Self::for_header(
+            encoder.header(),
+            record
+                .parts
+                .iter()
+                .map(coven_format::authorship::part_leaves)
+                .collect(),
+        )
+    }
+
+    /// Seal an explicit stream header, including unopened parts.
+    pub(crate) fn for_header(
+        frame: &coven_format::write_stream::WriteHeaderFrame,
+        leaves: Vec<Vec<coven_format::authorship::Leaf>>,
+    ) -> crate::WriteAuthorship {
         let key = Self::key();
         let prefix = coven_format::sealed_write::WriteObjectPrefix {
             format: coven_format::FormatVersion::CURRENT,
             store_key: key.id(),
-            part_keys: vec![key.id(); record.parts.len()],
+            part_keys: vec![key.id(); frame.parts.len()],
         }
         .encode()
         .unwrap();
         let sealed = key
             .derive()
             .seal_object_chunk(
-                &Self::path(record.header.position),
+                &Self::path(frame.header.position),
                 &prefix,
                 0,
                 0,
-                encoder.header_frame(),
+                &frame.encode().unwrap(),
             )
             .unwrap();
         let mut header = ((sealed.len() - coven_crypto::SEALED_OBJECT_CHUNK_OVERHEAD) as u32)
@@ -107,20 +109,13 @@ impl TestAuthorship {
             evidence: crate::HeaderEvidence {
                 prefix,
                 header,
-                roots: record
-                    .parts
+                roots: leaves
                     .iter()
-                    .map(|part| {
-                        coven_format::authorship::root(
-                            &hasher,
-                            &coven_format::authorship::part_leaves(part),
-                        )
-                        .unwrap()
-                    })
+                    .map(|leaves| coven_format::authorship::root(&hasher, leaves).unwrap())
                     .collect(),
                 signature: [0; 64],
             },
-            hashers: record.parts.iter().map(|_| Some(hasher.clone())).collect(),
+            hashers: frame.parts.iter().map(|_| Some(hasher.clone())).collect(),
         }
     }
 }

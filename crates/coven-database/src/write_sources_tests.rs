@@ -5,7 +5,6 @@ use crate::{
     ApplyOutcome,
 };
 use coven_format::write::WriteRecord;
-use coven_merge::WritePast;
 use serde_json::json;
 use std::collections::BTreeSet;
 
@@ -493,47 +492,29 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
         .await
         .unwrap();
     let writes = records(&source);
-    target
-        .receive(crate::DownloadedWrite {
-            header: writes[0].header.clone(),
-            parts: vec![crate::DownloadedPart::Skipped(coven_merge::Audience::Store)],
-        })
-        .await
-        .unwrap();
+    let mut skipped = crate::snapshot_write::tests::stream(&writes[0]);
+    skipped.parts = vec![crate::DownloadedPartStream::Skipped];
+    skipped.authorship.hashers = vec![None];
+    target.receive_stream(skipped, || Ok(())).await.unwrap();
     let before = crate::tests::contents(&target);
     let stream = || crate::snapshot_write::tests::stream(&writes[0]);
     assert!(target
-        .receive_stream(
-            stream(),
-            coven_format::value::EntryPositions(vec![]),
-            || Err(DbError::DamagedDatabase)
-        )
+        .retain_write_sources(stream(), || Err(DbError::DamagedDatabase))
         .await
         .is_err());
     assert_eq!(crate::tests::contents(&target), before);
     let update = || crate::snapshot_write::tests::stream(&writes[1]);
     assert!(matches!(
-        target
-            .receive_stream(
-                update(),
-                coven_format::value::EntryPositions(vec![]),
-                || Ok(())
-            )
-            .await
-            .unwrap(),
+        target.receive_stream(update(), || Ok(())).await.unwrap(),
         ApplyOutcome::Waiting(crate::WriteWait::Sources(_))
     ));
     assert_eq!(crate::tests::contents(&target), before);
     assert_eq!(
         target
-            .receive_stream(
-                stream(),
-                coven_format::value::EntryPositions(vec![]),
-                || Ok(())
-            )
+            .retain_write_sources(stream(), || Ok(()))
             .await
             .unwrap(),
-        ApplyOutcome::AlreadyApplied
+        ()
     );
     assert_eq!(crate::write::tests::count(&target, "notes"), 0);
     target.inspect_writer(|db| {
@@ -571,7 +552,10 @@ async fn covered_source_streams_authenticate_atomically_and_refuse_conflicting_c
             }
             _ => unreachable!(),
         }
-        assert!(target.receive(record.into()).await.is_err());
+        assert!(target
+            .retain_write_sources(crate::snapshot_write::tests::stream(&record), || Ok(()))
+            .await
+            .is_err());
         assert_eq!(crate::tests::contents(&target), retained);
     }
     for db in [source, target] {
@@ -659,7 +643,7 @@ fn input(history: &[WriteRecord]) -> serde_json::Value {
     let row_id = |row: &RowId| rows.iter().position(|r| r == row).unwrap();
     let column_id = |name: &str| columns.iter().position(|n| *n == name).unwrap();
     let writes: Vec<_> = history.iter().enumerate().map(|(index,w)| {
-        let past = w.header.had_read.causal_past(w.header.position);
+        let past = crate::test_utils::tests::merge_write(w,history).had_read;
         let changes: Vec<_> = w.parts.iter().flat_map(|p| &p.rows).map(|row| {
             let (kind,columns) = match &row.change.operation {
                 Operation::Insert(c) => (0,c.keys().map(|c| column_id(c)).collect::<Vec<_>>()),

@@ -71,10 +71,7 @@ async fn a_trigger_ending_the_transaction_returns_its_original_sqlite_error() {
         "_coven_rows",
         "_coven_cells",
         "_coven_writes",
-        "_coven_positions",
         "_coven_lost",
-        "_coven_fingerprint_leaves",
-        "_coven_fingerprint_sums",
     ] {
         assert_eq!(count(&b, table), 0, "{table}");
     }
@@ -151,7 +148,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
         });
         let old_rows = query.next().await.unwrap();
         // Count actual row mutations, including repeated changes to one table,
-        // local trigger effects, losses, fingerprints and applied positions.
+        // local trigger effects, losses and the applied slot.
         db.inspect_writer(|writer| {
             writer.batch("CREATE TEMP TABLE failure_step(number INTEGER NOT NULL,fail_at INTEGER NOT NULL); INSERT INTO failure_step VALUES(0,1)").unwrap();
             for (index, table) in before.keys().filter(|name| !name.starts_with("sqlite_")).enumerate() {
@@ -170,9 +167,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             let result = if streamed {
                 let encoder = coven_format::write_stream::WriteEncoder::new(&incoming).unwrap();
                 let input = crate::DownloadedWriteStream {
-                    published: crate::test_utils::published(
-                        coven_format::value::StorageTime::UNIX_EPOCH,
-                    ),
+                    signer: crate::test_utils::signer(),
                     authorship: crate::test_utils::TestAuthorship::write(&incoming),
                     header: encoder.header().clone(),
                     parts: (0..incoming.parts.len())
@@ -188,12 +183,7 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
                         })
                         .collect(),
                 };
-                db.receive_stream(
-                    input,
-                    coven_format::value::EntryPositions(Vec::new()),
-                    || Ok(()),
-                )
-                .await
+                db.receive_stream(input, || Ok(())).await
             } else {
                 db.receive(incoming.clone().into()).await
             };
@@ -250,18 +240,17 @@ async fn failure_after_every_remote_mutation_rolls_back_rows_metadata_and_notifi
             rows,
             vec![
                 ("a".into(), "A".into(), "remote".into()),
-                ("c".into(), "collision".into(), "local".into()),
+                ("b".into(), "collision".into(), "initial".into()),
                 ("new".into(), "new".into(), "inserted".into())
             ]
         );
         assert!(!db.lost_values().await.unwrap().is_empty());
-        assert_eq!(count(&db, "tags"), 1);
+        assert_eq!(count(&db, "tags"), 2);
         assert!(db
-            .sync_state(Vec::new())
+            .checked_write_header(incoming.header.position)
             .await
             .unwrap()
-            .positions
-            .covers(incoming.header.position));
+            .is_some());
         assert_eq!(
             records(&db).len(),
             1,
@@ -288,7 +277,9 @@ async fn assert_rejected_download(
     for _ in 0..2 {
         let error = database.receive(record.clone()).await.unwrap_err();
         assert!(
-            matches!(error, DbError::InvalidWrite { write, error } if write == record.header.position && error == expected)
+            matches!(&error, DbError::InvalidWrite { write, error } if *write == record.header.position && *error == expected)
+                || matches!(&error, DbError::WriteFormat(coven_format::Error::Merge(error)) if *error == expected),
+            "{error:?}"
         );
         assert_eq!(contents(database), before);
         assert!(!query.is_marked_for_rerun());
@@ -370,29 +361,6 @@ async fn a_downloaded_update_naming_a_stale_deleted_generation_is_refused() {
     for db in [a, b] {
         db.close().await.unwrap();
     }
-}
-
-#[tokio::test]
-async fn a_locally_built_invalid_write_still_panics_and_rolls_back() {
-    let store = TestStore::new();
-    let db = store.schema(notes(), NOTES).await.unwrap();
-    sql(&db, "INSERT INTO notes VALUES('n','original','')")
-        .await
-        .unwrap();
-    // Simulate broken local numbering: the next authored position repeats an
-    // already-applied write, which must remain an internal invariant failure.
-    db.inspect_writer(|db| {
-        db.internal_execute("DELETE FROM _coven_positions", [])
-            .unwrap()
-    });
-    let before = contents(&db);
-    let writer = db.clone();
-    let panic = tokio::spawn(async move { sql(&writer, "UPDATE notes SET title='invalid'").await })
-        .await
-        .unwrap_err();
-    assert!(panic.is_panic());
-    assert_eq!(contents(&db), before);
-    db.close().await.unwrap();
 }
 
 #[tokio::test]

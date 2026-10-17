@@ -10,7 +10,6 @@ use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
 use crate::{Database, LostValue, Replacement, RowAuthorizationFailure, RowIdentity, SyncedTable};
 use coven_format::snapshot_rows::ChangeVerdict;
-use coven_format::value::EntryPositions;
 use coven_format::write::{RowChange, WriteRecord};
 use coven_foundation::id_source::SequentialIds;
 use coven_merge::{Audience, ColumnValue};
@@ -116,9 +115,7 @@ impl Devices {
 
 /// Deliver one write, as its author's device published it.
 pub(crate) async fn receive(to: &Database, record: &WriteRecord) -> crate::ApplyOutcome {
-    to.receive_stream(stream(record), EntryPositions(Vec::new()), || Ok(()))
-        .await
-        .unwrap()
+    to.receive_stream(stream(record), || Ok(())).await.unwrap()
 }
 
 pub(crate) fn key(table: &str, key: &str) -> RowId {
@@ -598,105 +595,6 @@ async fn snapshots_carry_verdicts_and_refusals() {
         devices.carol.lost_values().await.unwrap()
     );
     devices.close().await;
-}
-
-/// Tracks and the reviews that cascade from them, with no owner tables: the
-/// restoration below is the data rule's, whoever owns the rows.
-const CASCADE: &str = "CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY, title TEXT);
-CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(id) ON DELETE CASCADE, body TEXT);";
-
-/// The cascade restoration witness (B18 `cascade_reversed`). Ben's track
-/// delete replaced the title another of his devices set, in a write that
-/// later lands outside its device's retirement window. Replay drops that
-/// write, so the delete used dropped data; its cascade to Ana's review is
-/// dropped with it as a dependent change, and both rows return with their
-/// original values, the review with Ana's setter (§8, §8.8, §10).
-#[tokio::test]
-async fn a_dropped_cause_restores_the_rows_its_actions_changed() {
-    use crate::pending::tests::Record;
-    use crate::write_landing::tests::{at, retire, DAY};
-    let declared = || {
-        ["tracks", "reviews"]
-            .map(|table| SyncedTable::new(table, RowIdentity::SharedKey))
-            .to_vec()
-    };
-    let ids = SequentialIds::new();
-    let stores: Vec<_> = (0..4).map(|_| TestStore::with_ids(&ids)).collect();
-    let mut dbs = Vec::new();
-    for store in &stores {
-        dbs.push(store.schema(declared(), CASCADE).await.unwrap());
-    }
-    let [ben, other, ana, target] = [&dbs[0], &dbs[1], &dbs[2], &dbs[3]];
-    sql(ben, "INSERT INTO tracks VALUES('t','Song')")
-        .await
-        .unwrap();
-    deliver(ben, other).await;
-    deliver(ben, ana).await;
-    sql(other, "UPDATE tracks SET title='Renamed' WHERE id='t'")
-        .await
-        .unwrap();
-    deliver(other, ben).await;
-    sql(ana, "INSERT INTO reviews VALUES('r','t','good')")
-        .await
-        .unwrap();
-    deliver(ana, ben).await;
-    sql(ben, "DELETE FROM tracks WHERE id='t'").await.unwrap();
-    let ben_writes = records(ben);
-    let (create, delete) = (&ben_writes[0], ben_writes.last().unwrap());
-    let rename = &records(other)[0];
-    let review = &records(ana)[0];
-    for (write, day) in [(create, 0), (rename, 31), (review, 0), (delete, 0)] {
-        target
-            .apply_downloaded::<Record>(
-                write.clone().into(),
-                crate::test_utils::published(at(day * DAY)),
-            )
-            .await
-            .unwrap();
-    }
-    assert_eq!(count(target, "tracks"), 0);
-    assert_eq!(count(target, "reviews"), 0);
-    assert_eq!(
-        verdict(target, delete, &key("reviews", "r")),
-        ChangeVerdict::Derived(causes(delete, &[("tracks", "t")]))
-    );
-    retire(target, stores[1].device(), 1, "device", 0).await;
-    assert_eq!(
-        text(target, "SELECT title FROM tracks WHERE id='t'"),
-        Some("Song".into())
-    );
-    assert_eq!(
-        text(target, "SELECT body FROM reviews WHERE id='r'"),
-        Some("good".into())
-    );
-    assert_eq!(
-        verdict(target, rename, &key("tracks", "t")),
-        ChangeVerdict::Dropped
-    );
-    assert_eq!(
-        verdict(target, delete, &key("tracks", "t")),
-        ChangeVerdict::Dependent(vec![ChangeId {
-            write: rename.header.position,
-            row: key("tracks", "t"),
-        }])
-    );
-    assert_eq!(
-        verdict(target, delete, &key("reviews", "r")),
-        ChangeVerdict::Dependent(causes(delete, &[("tracks", "t")]))
-    );
-    let lost = lost(target, "reviews", "r").await;
-    assert!(
-        lost.iter().any(|value| matches!(
-            &value.replaced_by,
-            Replacement::DataDependency { write, sources }
-                if *write == delete.header.position && sources.len() == 1
-                    && sources[0].table == "tracks"
-        )),
-        "{lost:?}"
-    );
-    for db in dbs {
-        db.close().await.unwrap();
-    }
 }
 
 /// Codes have INTEGER keys that tags hold as text. Codes are unowned, so Ana

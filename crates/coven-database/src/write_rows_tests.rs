@@ -222,9 +222,7 @@ async fn a_note_cannot_be_added_to_gifts_after_its_deletion_was_applied() {
     let store = TestStore::new();
     let database = store.schema(tables(), SCHEMA).await.unwrap();
     let gifts = CircleId(uuid::Uuid::parse_str(ANA).unwrap());
-    crate::store_log::tests::delete_circle(&database, gifts)
-        .await
-        .unwrap();
+    crate::tests::delete_circle(&database, gifts).await.unwrap();
     let error = database
         .write(|context| {
             context.execute("INSERT INTO notes VALUES(?1,'Gift nine',?2)", [NOTE, ANA])?;

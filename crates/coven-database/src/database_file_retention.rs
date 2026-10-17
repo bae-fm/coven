@@ -3,7 +3,7 @@
 use super::Database;
 use crate::file_protection::value as retain_value;
 use crate::{
-    DbError, DownloadedPartStream, DownloadedWriteStream, EntryId, FileEvidence, UnprovenFiles,
+    DbError, DownloadedPartStream, DownloadedWriteStream, FileEvidence, Slot, UnprovenFiles,
 };
 use coven_format::{value::Value, write::RowChange};
 use coven_foundation::id_source::{DeviceId, FileId};
@@ -14,7 +14,7 @@ use std::ops::RangeInclusive;
 
 /// Local references read in one database transaction.
 pub struct FileRetention {
-    /// Fixed paths named by rows, losses, reversible inputs, waiting writes or
+    /// Fixed paths named by rows, losses, published rows, waiting writes or
     /// this device's upload queue.
     pub references: BTreeSet<(DeviceId, FileId)>,
 }
@@ -26,7 +26,7 @@ impl Database {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 db.read_transaction(|| {
-                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_input_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((DeviceId(u64::from_be_bytes(r.get(0)?)),FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
+                    let references = db.query("SELECT device,file FROM _coven_row_file_refs UNION SELECT device,file FROM _coven_published_file_refs UNION SELECT device,file FROM _coven_queued_file_refs UNION SELECT device,file FROM _coven_file_uploads", [], |r| Ok((DeviceId(u64::from_be_bytes(r.get(0)?)),FileId(uuid::Uuid::from_bytes(r.get(1)?)))))?.into_iter().collect();
                     Ok(FileRetention { references })
                 })
             })
@@ -74,7 +74,7 @@ impl Database {
                 let DownloadedPartStream::Opened(input) = part else {
                     unreachable!("every part opened");
                 };
-                crate::download_stream::read_part(input, header, &write.header.header, |frame| {
+                crate::download_stream::read_part(input, header, |frame| {
                     if let coven_format::dismissal::WriteFrame::Change(row) = frame {
                         retain_change(&inner.access.write_schema, &row, &mut references)?;
                     }
@@ -181,15 +181,15 @@ impl Database {
 
     /// The kept removal whose cut-off this device scanned `device`'s file
     /// folder after, if it did.
-    pub async fn file_scan(&self, device: DeviceId) -> Result<Option<EntryId>, DbError> {
+    pub async fn file_scan(&self, device: DeviceId) -> Result<Option<Slot>, DbError> {
         self.call(move |inner| {
             let reader = inner.access.readers.acquire_reader();
             reader.with_reader(|db| {
                 Ok(db
                     .query(
-                        "SELECT entry_device,entry_number FROM _coven_file_scans WHERE device=?1",
+                        "SELECT slot FROM _coven_file_scans WHERE device=?1",
                         [device.0.to_be_bytes()],
-                        |r| crate::store_log_tables::entry_id(r, 0),
+                        |r| crate::store_state_tables::slot(r, 0),
                     )?
                     .pop())
             })
@@ -200,14 +200,14 @@ impl Database {
     /// Record a complete listing of a removed uploader's file folder, taken
     /// after `removal` cut its access off, with every path it found as a
     /// candidate and the `accounts` and `keys` whose confirmed removal it
-    /// followed. Returns false, recording nothing, once `removal` is no longer
-    /// kept or any of that access is no longer confirmed taken away: that
+    /// followed. Returns false, recording nothing, when `removal` is not a
+    /// counted cut-off for this device or access is not confirmed taken away: that
     /// listing cannot stand for the last one. A later transaction recording
     /// any of it restored deletes the scan (§16.5).
     pub async fn complete_file_scan(
         &self,
         device: DeviceId,
-        removal: EntryId,
+        removal: Slot,
         files: BTreeSet<FileId>,
         accounts: BTreeSet<String>,
         keys: BTreeSet<String>,
@@ -216,8 +216,8 @@ impl Database {
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
                     let kept: bool = db.query_row(
-                        "SELECT EXISTS(SELECT 1 FROM _coven_store_log WHERE device=?1 AND number=?2 AND outcome='kept')",
-                        params![removal.device.0.to_be_bytes(), removal.number.to_be_bytes()],
+                        "SELECT EXISTS(SELECT 1 FROM _coven_cutoffs c JOIN _coven_devices d ON d.device=?1 WHERE c.slot=?2 AND (c.device=d.device OR (c.member=d.member AND c.signing IS NULL)))",
+                        params![device.0.to_be_bytes(), removal.0.to_be_bytes()],
                         |r| r.get(0),
                     )?;
                     if !kept || !taken_away(db, &accounts, &keys)? {
@@ -227,11 +227,10 @@ impl Database {
                         insert_candidate(db, device, file)?;
                     }
                     db.internal_execute(
-                        "INSERT INTO _coven_file_scans(device,entry_device,entry_number) VALUES(?1,?2,?3) ON CONFLICT(device) DO UPDATE SET entry_device=excluded.entry_device,entry_number=excluded.entry_number",
+                        "INSERT INTO _coven_file_scans(device,slot) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET slot=excluded.slot",
                         params![
                             device.0.to_be_bytes(),
-                            removal.device.0.to_be_bytes(),
-                            removal.number.to_be_bytes()
+                            removal.0.to_be_bytes()
                         ],
                     )?;
                     db.internal_execute(
@@ -315,7 +314,7 @@ pub struct FileCandidate {
     pub device: DeviceId,
     /// The file's fixed id.
     pub file: FileId,
-    /// A local row, loss, reversible input, queued write or upload still names it.
+    /// A local row, loss, published row, queued write or upload still names it.
     pub protected: bool,
 }
 
@@ -327,18 +326,6 @@ fn insert_candidate(
     db.internal_execute(
         "INSERT INTO _coven_file_candidates(device,file) VALUES(?1,?2) ON CONFLICT DO NOTHING",
         params![device.0.to_be_bytes(), file.0.as_bytes()],
-    )?;
-    Ok(())
-}
-
-/// In the replay transaction: a scan whose removal is no longer kept no
-/// longer stands for the last listing; the next cut-off scans again.
-pub(crate) fn forget_dropped_scans(db: &crate::sqlite::DatabaseConnection) -> Result<(), DbError> {
-    db.internal_execute(
-        "DELETE FROM _coven_file_scans WHERE NOT EXISTS(
-            SELECT 1 FROM _coven_store_log l WHERE l.device=entry_device
-            AND l.number=entry_number AND l.outcome='kept')",
-        [],
     )?;
     Ok(())
 }

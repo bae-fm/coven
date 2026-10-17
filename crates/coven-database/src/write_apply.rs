@@ -16,9 +16,7 @@ pub(crate) struct WriteApply<'a> {
     store: &'a MergeStore<'a>,
     before: &'a AppView<'a>,
     visible: &'a AppView<'a>,
-    deleted: &'a BTreeMap<CircleId, crate::EntryId>,
-    /// Entries whose replacement of this data the transaction installs (§9).
-    causes: BTreeSet<crate::EntryId>,
+    deleted: &'a BTreeMap<CircleId, crate::Slot>,
 }
 
 impl<'a> WriteApply<'a> {
@@ -28,7 +26,7 @@ impl<'a> WriteApply<'a> {
         store: &'a MergeStore<'a>,
         before: &'a AppView<'a>,
         visible: &'a AppView<'a>,
-        deleted: &'a BTreeMap<CircleId, crate::EntryId>,
+        deleted: &'a BTreeMap<CircleId, crate::Slot>,
     ) -> Self {
         Self {
             database,
@@ -37,15 +35,7 @@ impl<'a> WriteApply<'a> {
             before,
             visible,
             deleted,
-            causes: BTreeSet::new(),
         }
-    }
-
-    /// Rows this application takes out depend on these entries as well as on
-    /// their own removal rules; local children they change are kept (§8.4).
-    pub(crate) fn caused_by(mut self, causes: BTreeSet<crate::EntryId>) -> Self {
-        self.causes = causes;
-        self
     }
 
     pub(crate) fn apply(
@@ -53,6 +43,16 @@ impl<'a> WriteApply<'a> {
         record: Option<&WriteRecord>,
         mut touched: BTreeSet<RowId>,
     ) -> Result<BTreeSet<crate::write_rows::AppKey>, DbError> {
+        if let Some(record) = record {
+            crate::published::capture_rows(
+                self.database,
+                self.store,
+                record
+                    .parts
+                    .iter()
+                    .flat_map(|p| p.dismissals.iter().map(|d| &d.row)),
+            )?;
+        }
         let updates = match record {
             Some(record) => self.store.apply(record)?,
             None => BTreeMap::new(),
@@ -90,25 +90,7 @@ impl<'a> WriteApply<'a> {
             },
         )?;
         if let Some(record) = record {
-            let dismissed = crate::dismissal::apply(self.database, self.schema, record)?;
-            if !dismissed.is_empty() {
-                // Read the committed merge effects and the acknowledged losses
-                // inside this same transaction, without cached pre-dismissal rows.
-                let visible = AppView::after(self.database, self.schema);
-                let store = MergeStore::new(self.database, &visible);
-                let view = DatabaseRemovalView::new(
-                    self.database,
-                    &store,
-                    self.schema,
-                    &visible,
-                    &empty,
-                    self.deleted,
-                    None,
-                )?;
-                let result = coven_merge::recompute_fingerprint(&view, &view, dismissed)
-                    .map_err(|error| error.into_db_error(Some(record.header.position)))?;
-                crate::fingerprint::update(self.database, &view, &result)?;
-            }
+            crate::dismissal::apply(self.database, self.schema, record)?;
         }
         Ok(affected)
     }
@@ -143,20 +125,13 @@ impl<'a> WriteApply<'a> {
         new.prime(touched.iter().cloned())?;
         let removal = coven_merge::recompute(old, new, touched.clone())
             .map_err(|error| error.into_db_error(write))?;
-        let fingerprint = coven_merge::recompute_fingerprint(old, new, touched)
-            .map_err(|error| error.into_db_error(write))?;
         self.store.retain_materialization_values(&removal.region)?;
+        if write.is_some() {
+            crate::published::capture_rows(self.database, self.store, &removal.region)?;
+        }
         persist()?;
         self.database.batch("PRAGMA defer_foreign_keys=ON")?;
-        crate::removal::materialize(
-            self.database,
-            self.schema,
-            self.visible,
-            new,
-            &removal,
-            &self.causes,
-        )?;
-        crate::fingerprint::update(self.database, new, &fingerprint)?;
+        crate::removal::materialize(self.database, self.schema, self.visible, new, &removal)?;
         Ok(removal
             .region
             .into_iter()

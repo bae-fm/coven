@@ -587,67 +587,43 @@ async fn opening_checks_integrity_once_for_all_its_connections() {
 
 #[tokio::test]
 async fn callback_panics_release_the_writer_and_reserve_nothing() {
-    let mut poisoned = Vec::new();
-    for callback in ["store log", "key upload", "operation entry"] {
+    for work in [
+        crate::ClaimWork::Writes(1),
+        crate::ClaimWork::Operation(crate::OperationId(1)),
+    ] {
         let store = TestStore::new();
         let db = store.builder(vec![], vec![]).open().await.unwrap();
         let call = db.clone();
         let panic = tokio::spawn(async move {
-            let entry = crate::tests::store_log();
-            match callback {
-                "store log" => {
-                    call.prepare_store_log(
-                        entry.author,
-                        entry.change,
-                        |_, _, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
-                    )
-                    .await
-                    .unwrap();
-                }
-                "key upload" => {
-                    call.prepare_key_upload(|_| -> Result<Vec<u8>, DbError> {
-                        std::panic::panic_any(123_u64)
-                    })
-                    .await
-                    .unwrap();
-                }
-                "operation entry" => {
-                    call.prepare_operation_entry(
-                        entry.author,
-                        entry.change,
-                        |_, _, _| -> Result<_, DbError> { std::panic::panic_any(123_u64) },
-                    )
-                    .await
-                    .unwrap();
-                }
-                _ => unreachable!(),
-            }
+            call.begin_claim(
+                work,
+                |_| -> Result<crate::ClaimAttempt<std::io::Empty>, DbError> {
+                    std::panic::panic_any(123u64)
+                },
+            )
+            .await
+            .unwrap();
         })
         .await
         .unwrap_err();
         assert_eq!(*panic.into_panic().downcast::<u64>().unwrap(), 123);
-        let reuse = tokio::spawn(async move {
-            assert!(db.local_store_log().await.unwrap().upload.is_none());
-            assert!(db.operations().await.unwrap().is_empty());
-            assert_eq!(
-                db.prepare_key_upload(|_| Ok::<_, DbError>(vec![7]))
-                    .await
-                    .unwrap()
-                    .bytes,
-                vec![7]
-            );
-            db.write(|_| Ok(())).await.unwrap();
-            db.close().await.unwrap();
-        })
-        .await;
-        if reuse.is_err() {
-            poisoned.push(callback);
-        }
+        assert!(db.current_claim().await.unwrap().is_none());
+        let claim = db
+            .begin_claim(crate::ClaimWork::Writes(1), |_| {
+                Ok(crate::ClaimAttempt {
+                    path: coven_format::path::ObjectPath::slot(
+                        crate::tests::store_id(),
+                        1u64.try_into().unwrap(),
+                    ),
+                    bytes: Box::new(std::io::Cursor::new(vec![7])),
+                })
+            })
+            .await
+            .unwrap();
+        assert_eq!(claim.number, 1);
+        db.write(|_| Ok(())).await.unwrap();
+        db.close().await.unwrap();
     }
-    assert!(
-        poisoned.is_empty(),
-        "callbacks poisoned the writer: {poisoned:?}"
-    );
 }
 
 #[tokio::test]

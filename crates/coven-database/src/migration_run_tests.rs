@@ -336,7 +336,7 @@ async fn a_migration_write_failure_rolls_back_schema_data_and_metadata() {
 #[tokio::test]
 async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() {
     use coven_format::{
-        value::{Value, WritePositions},
+        value::Value,
         write::{RowChange, WriteHeader, WritePart, WriteRecord},
     };
     use coven_foundation::id_source::DeviceId;
@@ -349,17 +349,17 @@ async fn a_hidden_row_is_deleted_at_its_generation_and_reinsertion_follows_it() 
         .await
         .unwrap();
     let original = records(&db).remove(0);
+    db.receive(original.clone().into()).await.unwrap();
     let id = WriteId {
         device: DeviceId(99),
         number: 1,
     };
     let record = WriteRecord {
         header: WriteHeader {
-            store_log_read: coven_format::value::EntryPositions(Vec::new()),
             position: id,
             timestamp: Timestamp::new(original.header.timestamp.milliseconds() + 1, 0, id.device)
                 .unwrap(),
-            had_read: WritePositions(vec![original.header.position]),
+            read_through: 1,
             schema_version: 1,
             disposition: WriteDisposition::Apply,
         },
@@ -741,6 +741,7 @@ async fn a_deleted_hidden_row_freezes_old_names_and_its_delete_reads_the_cell_lo
     .await
     .unwrap();
     let original = records(&db).remove(0);
+    db.receive(original.clone().into()).await.unwrap();
     sql(
         &db,
         "UPDATE notes SET title='concurrent' WHERE id='removed'",
@@ -804,6 +805,7 @@ async fn a_renamed_unique_constraint_replaces_the_dropped_columns_constraint() {
     .await
     .unwrap();
     let original = records(&db).remove(0);
+    db.receive(original.clone().into()).await.unwrap();
     let timestamp = original.header.timestamp;
     let remote = downloaded_update(
         original,
@@ -859,7 +861,7 @@ fn downloaded_update(
     after: coven_merge::Timestamp,
     columns: &[(&str, &str, &str)],
 ) -> coven_format::write::WriteRecord {
-    use coven_format::value::{Value, WritePositions};
+    use coven_format::value::Value;
     use coven_foundation::id_source::DeviceId;
     use coven_merge::{Change, ColumnValue, Operation, Timestamp, WriteId};
     let past = original.header.position;
@@ -869,7 +871,7 @@ fn downloaded_update(
     };
     original.header.position = id;
     original.header.timestamp = Timestamp::new(after.milliseconds() + 1, 0, id.device).unwrap();
-    original.header.had_read = WritePositions(vec![past]);
+    original.header.read_through = past.number;
     let key = coven_format::key::encode_key(&[Value::Text(key.into())]).unwrap();
     original.parts[0].rows.retain(|row| row.row.key == key);
     assert_eq!(original.parts[0].rows.len(), 1);

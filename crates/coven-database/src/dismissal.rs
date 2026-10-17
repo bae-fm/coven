@@ -89,7 +89,7 @@ pub(crate) fn dismiss(
                 ),
             }
         }
-        let deleted = crate::store_log_tables::deleted_circles(database)?;
+        let deleted = crate::store_state_tables::deleted_circles(database)?;
         let affected = crate::write_apply::WriteApply::new(
             database, schema, &store, &visible, &visible, &deleted,
         )
@@ -155,9 +155,6 @@ pub(crate) fn apply(
             if !matches {
                 continue;
             }
-            if loss.frozen {
-                crate::fingerprint::forget_loss(database, &loss)?;
-            }
             let keep = if let LossValues::Row(cells) = &mut loss.values {
                 cells.remove(&dismissal.column);
                 !cells.is_empty()
@@ -184,6 +181,24 @@ pub(crate) fn apply(
         crate::file_protection::refresh(database, schema, &key)?;
     }
     Ok(affected)
+}
+
+pub(crate) fn validate_past(
+    database: &DatabaseConnection,
+    header: &coven_format::write::WriteHeader,
+    dismissal: &Dismissal,
+) -> Result<(), DbError> {
+    if !coven_merge::had_read(
+        header.position,
+        header.read_through,
+        dismissal.write,
+        crate::sequence::write_slot(database, dismissal.write)?,
+    ) {
+        return Err(crate::snapshot_error::invalid(
+            "dismissal names a write outside authored past",
+        ));
+    }
+    Ok(())
 }
 
 #[cfg(test)]

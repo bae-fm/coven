@@ -167,6 +167,46 @@ impl<V> RowState<V> {
         &self.lost
     }
 
+    /// Carry a row through a schema change. The caller supplies the surviving
+    /// identity and maps each column value, including its reference identities.
+    /// Dropped columns disappear; generations, setters and replacers stay fixed.
+    pub fn map_schema(
+        mut self,
+        row: RowId,
+        mut column: impl FnMut(String, ColumnValue<V>) -> Option<(String, ColumnValue<V>)>,
+    ) -> Self {
+        self.row = row;
+        self.cells = self
+            .cells
+            .into_iter()
+            .filter_map(|(name, cell)| {
+                let (name, value) = column(name, cell.value)?;
+                Some((
+                    name,
+                    Cell {
+                        write: cell.write,
+                        value,
+                    },
+                ))
+            })
+            .collect();
+        self.lost = self
+            .lost
+            .into_iter()
+            .filter_map(|(key, lost)| {
+                let (name, value) = column(key.column, lost.value)?;
+                Some((
+                    LostKey {
+                        column: name,
+                        write: key.write,
+                    },
+                    LostValue { value, ..lost },
+                ))
+            })
+            .collect();
+        self
+    }
+
     /// §8.5: a unique claim is ordered by the latest winning setter of any of
     /// its columns. Null reference substitutions keep that setter.
     pub fn claim_order(

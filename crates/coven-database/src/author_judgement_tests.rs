@@ -3,7 +3,6 @@ use crate::snapshot_write::tests::stream;
 use crate::tests::TestStore;
 use crate::write::tests::{count, records, sql};
 use crate::{Database, RowIdentity, SyncedTable};
-use coven_format::value::EntryPositions;
 use coven_foundation::id_source::{MemberId, SequentialIds};
 use coven_merge::Audience;
 
@@ -51,18 +50,16 @@ pub(crate) const ANA: u8 = 1;
 pub(crate) const BEN: u8 = 2;
 
 pub(crate) fn member(seed: u8) -> MemberId {
-    crate::store_log::tests::member(seed)
+    crate::tests::member(seed)
 }
 
 /// Deliver every write `from` has queued that `to` has not applied.
 pub(crate) async fn deliver(from: &Database, to: &Database) {
-    let applied = to.sync_state(Vec::new()).await.unwrap().positions;
     for record in records(from) {
-        if !applied.covers(record.header.position) {
-            to.receive_stream(stream(&record), EntryPositions(Vec::new()), || Ok(()))
-                .await
-                .unwrap();
-        }
+        from.receive_stream(stream(&record), || Ok(()))
+            .await
+            .unwrap();
+        to.receive_stream(stream(&record), || Ok(())).await.unwrap();
     }
 }
 

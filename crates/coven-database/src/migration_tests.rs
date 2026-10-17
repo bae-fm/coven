@@ -665,6 +665,7 @@ mod queued {
         sql(&db, "INSERT INTO notes VALUES('42','one','body')")
             .await
             .unwrap();
+        db.receive(records(&db)[0].clone().into()).await.unwrap();
         peer.receive(records(&db).remove(0).into()).await.unwrap();
         sql(&peer, "UPDATE notes SET title='other device'")
             .await
@@ -792,7 +793,14 @@ mod queued {
         let actual = records(&db);
         // The original record keeps its schema; the batch raises once, to 4.
         assert_eq!(actual[0].header.schema_version, 1);
-        assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 4);
+        assert_eq!(
+            db.raise_captures()
+                .await
+                .unwrap()
+                .first()
+                .map_or(0, |c| c.version),
+            4
+        );
         let current = state(&db, &actual[0].parts[0].rows[0].row);
         assert!(!current.cells().contains_key("color"));
         assert_eq!(current.cells()["length"].write, actual[1].header.position);
@@ -838,7 +846,14 @@ mod queued {
         assert_eq!(records(&db), original);
         assert!(db.operations().await.unwrap().is_empty());
         assert!(db.raise_captures().await.unwrap().is_empty());
-        assert_eq!(db.sync_state(Vec::new()).await.unwrap().breaking_version, 0);
+        assert_eq!(
+            db.raise_captures()
+                .await
+                .unwrap()
+                .first()
+                .map_or(0, |c| c.version),
+            0
+        );
         db.close().await.unwrap();
         let db = store
             .builder(notes(), migrations())
@@ -875,10 +890,7 @@ mod queued {
 
     #[tokio::test]
     async fn a_late_new_schema_title_competes_with_the_title_setter_and_leaves_the_slug() {
-        use coven_format::{
-            value::WritePositions,
-            write::{WriteHeader, WritePart, WriteRecord},
-        };
+        use coven_format::write::{WriteHeader, WritePart, WriteRecord};
         use coven_foundation::{clock::FixedClock, id_source::DeviceId};
         use coven_merge::{Audience, Change, ColumnValue, Timestamp, WriteId};
         use std::{
@@ -904,10 +916,9 @@ mod queued {
         let row = original[0].parts[0].rows[0].row.clone();
         let record = WriteRecord {
             header: WriteHeader {
-                store_log_read: coven_format::value::EntryPositions(Vec::new()),
                 position: late,
                 timestamp: Timestamp::new(old_stamp + 1, 0, late.device).unwrap(),
-                had_read: WritePositions(vec![original[0].header.position]),
+                read_through: 1,
                 schema_version: 2,
                 disposition: WriteDisposition::Apply,
             },
@@ -953,6 +964,9 @@ mod queued {
                 }],
             }],
         };
+        for write in records(&db) {
+            db.receive(write.into()).await.unwrap();
+        }
         assert_eq!(
             db.receive(record.into()).await.unwrap(),
             ApplyOutcome::Applied
