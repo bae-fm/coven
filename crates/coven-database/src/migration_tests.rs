@@ -647,6 +647,14 @@ pub(crate) mod declarations {
                 "CREATE TABLE cache(value TEXT); INSERT INTO cache VALUES('candidate')",
                 false,
             ),
+            (
+                "CREATE TABLE cache(value TEXT); ALTER TABLE cache ADD COLUMN color TEXT CHECK(color <> '')",
+                false,
+            ),
+            (
+                "CREATE TABLE cache(value TEXT); CREATE INDEX cache_values ON cache(value)",
+                false,
+            ),
             ("SELECT 1", false),
         ] {
             for populated in [false, true] {
@@ -767,6 +775,26 @@ pub(crate) mod declarations {
     #[tokio::test]
     async fn migration_kind_mismatches_roll_back_every_pending_step() {
         compare(None).await;
+    }
+
+    #[tokio::test]
+    async fn local_only_addition_commits_without_raising_the_synced_schema() {
+        let store = TestStore::new();
+        let db = store.builder(notes(), vec![
+            Migration::addition(1, "notes", NOTES),
+            Migration::addition(2, "local cache", "CREATE TABLE cache(value TEXT); INSERT INTO cache VALUES('kept'); CREATE INDEX cache_values ON cache(value)"),
+        ]).open().await.unwrap();
+        assert_eq!(
+            db.applied_migrations().unwrap()[1].change,
+            crate::MigrationChange::NoChange
+        );
+        assert_eq!(db.schema_version().await.unwrap(), 2);
+        assert!(db.operations().await.unwrap().is_empty());
+        db.close().await.unwrap();
+        assert_eq!(
+            committed(&store).tables["cache"],
+            vec![vec![crate::types::Value::Text("kept".into())]]
+        );
     }
 
     #[tokio::test]

@@ -53,11 +53,17 @@ abbrev Classifier := Step → Bool → Bool
 def byStatements : Classifier := fun s _ => s.schemaBreaking || s.writesRows
 
 /-- The first declaration that disagrees with the runtime classification.
-Local-only changes have neither breaking evidence bit and accept addition. -/
+Local-only changes have neither breaking evidence bit and require addition. -/
 def mismatch : List Step → Option Nat
   | [] => none
   | s :: rest => if s.declaration.isBreaking == byStatements s false then mismatch rest
       else some s.version
+
+/-- A local-only migration has no breaking evidence and must declare addition;
+neither an old-write converter nor a drop policy can make it breaking. -/
+theorem local_only_requires_addition (version : Nat) (declaration : Declaration) :
+    mismatch [⟨version, false, false, declaration⟩] = none ↔ declaration = .addition := by
+  cases declaration <;> simp [mismatch, byStatements, Declaration.isBreaking]
 
 /-- All pending migrations form one transaction. `candidate` includes schema,
 rows, queued originals, losses, source evidence and migration bookkeeping. -/

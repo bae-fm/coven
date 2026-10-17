@@ -3532,7 +3532,8 @@ Neither choice ever changes an upload record.
 transaction. Coven then checks the final schema against the schema rules (§9,
 Appendix A) and the tables the app declares, which describe only the newest
 version, and checks each migration's declared kind against the kind §18.1 finds.
-A migration that changes only local tables may be declared `addition`. If a rule
+A migration classified as local-only (§18.1) must be declared `addition`;
+declaring it `breaking` is refused. If a rule
 fails, or a declared kind doesn't match, nothing commits; a kind mismatch fails
 with `DbError::MigrationKindMismatch { version }`. Migration 1 makes `notes(id)`
 and migration 2 renames `id` to `note_id`: only the final schema has to match
@@ -3545,6 +3546,8 @@ addition would otherwise drop them silently. The model refuses a breaking
 change declared as an addition and an addition declared as breaking, and
 commits no part of the run when either happens
 ([`undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch`](proofs/queue/CovenQueue/ConversionChain.lean)).
+The same check requires `addition` for a local-only migration
+([`local_only_requires_addition`](proofs/queue/CovenQueue/ConversionChain.lean)).
 
 **The raise.** A breaking change raises the store's schema version, which every
 device shares. Whichever device's app updates first makes the raise, whoever's
@@ -6302,7 +6305,7 @@ Write-ups explain each model and state its assumptions:
 | Claim | Theorems | File | Section |
 |---|---|---|---|
 | *Body.* A migration's kind follows its statements; deciding by the rows a device holds makes devices disagree | `statement_plans_agree`, `row_classification_diverges` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.1 |
-| *Body.* A breaking change declared as an addition, and an addition declared as breaking, are refused, and no part of the run commits | `undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.3 |
+| *Body.* A breaking change declared as an addition, and an addition declared as breaking, are refused, and no part of the run commits; a migration that changes only local tables must be declared `addition` | `undeclared_breaking_refused`, `declared_breaking_addition_refused`, `accepted_prefix_does_not_commit_on_mismatch`, `local_only_requires_addition` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.3 |
 | Migrating keeps every queued original, tried or untried | `conversions_preserve_uploads`, `conversions_preserve_attempt`, `conversions_preserve_untried` | `proofs/queue/CovenQueue/Conversion.lean` | §18.5 |
 | Capturing freezes the queue through the marker; later writes don't delay it | `captured_prefix`, `later_writes_do_not_delay` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |
 | The captured writes are published once; writes after the marker wait for the raise; originals and their order are kept | `confirm_captured`, `confirmation_not_repeated`, `tail_waits`, `raise_without_waiting`, `originals_preserved` | `proofs/sequence/CovenSequence/RaiseQueue.lean` | §18.5 |

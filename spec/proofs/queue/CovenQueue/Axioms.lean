@@ -1,5 +1,7 @@
 import CovenQueue
 
+#print axioms CovenQueue.Chain.local_only_requires_addition
+
 #print axioms CovenQueue.own_earlier_read
 #print axioms CovenQueue.first_key_usable
 #print axioms CovenQueue.first_key_excludes_known_recipient
