@@ -387,8 +387,8 @@ impl History {
             .collect()
     }
 
-    /// Open a required signed box only after its introduction supplies a
-    /// matching commitment. Boxes for other recipients still record exposure.
+    /// Open addressed boxes tentatively; an introduction must supply a matching
+    /// commitment before use. Other recipients' routing still records exposure.
     pub(crate) fn acquire(
         &self,
         ring: &mut StoreKeyring,
@@ -482,3 +482,7 @@ fn held_hash(ring: &StoreKeyring, audience: &Audience, key: KeyId) -> Option<[u8
         },
     }
 }
+
+#[cfg(test)]
+#[path = "history_tests.rs"]
+pub(crate) mod tests;

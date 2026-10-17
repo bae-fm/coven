@@ -11,6 +11,12 @@ name = "SequenceApply"
 name = "SequenceJson"
 
 [[lean_lib]]
+name = "SequenceKeys"
+
+[[lean_lib]]
+name = "SequenceInput"
+
+[[lean_lib]]
 name = "SequenceTests"
 
 [[lean_exe]]

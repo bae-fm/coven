@@ -6,6 +6,7 @@ The Lean package in [`sequence/`](sequence/) backs the normative sequence rules:
 [owner selection (§8.8)](../coven.md#88-owner-tables),
 [admin prefixes (§9)](../coven.md#9-members-and-roles),
 [cut-offs (§10)](../coven.md#10-device-identity),
+[audience keys and revocation (§11)](../coven.md#11-keys),
 [audience reads (§14.4)](../coven.md#144-writes),
 [snapshots and retention (§15)](../coven.md#15-snapshots), and
 [operation journals (§18)](../coven.md#18-operations), in the order described by
@@ -186,6 +187,85 @@ original device, number, timestamp, schema, bytes and `readThrough`.
 
 A batch is cut off when it was "made under a replaced key". A batch that the
 member's other devices make under the new key counts.
+
+## Audience keys and revocation
+
+[`Keys`](sequence/CovenSequence/Keys.lean) projects the same authenticated
+sequence into introductions, copies and other slots. An introduction is
+projected only from an applied creation or rotation. Every authenticated copy
+retains its exact audience, key id, recipient and sealing credential, including
+an unbound candidate's copy. `credentials` uses the sequence ledger's `member`
+and `keyGen` fields, with circle membership supplied by the audience policy. Custody is
+separate from both authorization and introduction.
+
+- `introduction_slot`, `copy_slot`, `publish_prefix`: every retained event has
+  its actual positive sequence position; the finite runner and sequence fold
+  agree. `accepted_from_introduction` excludes acceptance before introduction.
+  `introduction_accepts` accepts matching tentative material at that slot;
+  missing custody or conflicting commitments do not establish acceptance.
+- `routed_exposure`, `removed_exposure`, `retired_credential_exposure`: every
+  key routed to any credential retained by an excluded member/device is
+  exposed. Opening or deleting a local copy is irrelevant to that conclusion.
+  Exposure is computed from routing and current membership, including
+  candidates never bound and credentials retired while their member stays.
+- `first_newest_usable`, `first_not_exposed`: a new first attempt selects the
+  greatest introduction slot among authorized, accepted, held, unexposed keys.
+  The theorem does not assume key ids or copy slots order introductions.
+  `metadata_newest_held` selects the newest accepted held store key regardless
+  of exposure. `sending_current` connects this selection to Rust's selector;
+  its departed-circle branch implements §14.6 for eligible old originals.
+- `removal_publishable`, `rotation_publishable`: with one accepted store key
+  held, exposure creates no missing encryption dependency. Removal needs only
+  the metadata key. Rotation additionally needs its generated material and
+  the recipients' current public credentials; no old circle key or recipient
+  private key is needed. These are sealing-dependency results for authorized,
+  caught-up writers, not promises of custody unlock, provider success or progress
+  past a blocked slot. `rotation_prefix_metadata` preserves that metadata key
+  before every copy and before the introduction itself.
+- `routes_current`, `routes_complete`, `rotation_effect`: the rotation plan
+  copies the generated key to each listed current audience member's exact
+  credential, then introduces it in the following slot. The member list must
+  include every current audience member. Store creation's introduction-before-
+  creator-copy exception is represented by ordinary sequence events.
+- `rotation_unexposed`, `rotation_usable`, `rotation_selected`: when the key
+  is fresh even among tentative copies, membership remains fixed during those
+  slots, and the writer holds its generated material, completed rotation makes
+  it the selected key. All older introduction slots precede publication.
+  `rotation_preserves_old` retains historical acceptance.
+- `exposed_header_view`, `metadata_reveals_no_protected_content`,
+  `store_key_does_not_open_box`: opening the outer store envelope reveals its
+  complete metadata, including administrative operation contents. With public
+  routing and lengths fixed, varying separately sealed content whose key is
+  unknown does not change the observation. An exposed store key also opens
+  store data sealed with that key; it does not supply circle keys or recipient
+  private credentials. Encryption and sealed boxes are ideal observation
+  functions, not cryptographic implementations or security reductions.
+  Distinct key identities represent independently generated, non-aliasing
+  secrets under §2's random-generation assumption; hash tokens check material
+  under a named key. The model does not prove random-key collision bounds.
+- `first_attempt_confidential`, `revocation`, `rotation_revokes`: at the applied
+  prefix used for selection, no exposed key opens newly protected content.
+  Once that prefix excludes every credential retained by the removed/stolen
+  device, none of its routed keys can be selected. Rotation constructs such a
+  key; subsequent selections must re-establish the condition at each catch-up.
+  Secrets acquired outside the modeled generation/copy protocol are excluded.
+- `revoked_write_no_effect` composes the confidentiality claim with `cutoff`:
+  late writes by a removed device/member or under a replaced credential have
+  no row, unique-value or owner effects, even if their ciphertext still opens.
+  Together with `device_stops` and `stopped_stays`, these state §3's Revocation
+  claim: a blocked reader cannot claim knowledge of a later removal.
+
+[`KeysExamples`](sequence/CovenSequence/KeysExamples.lean) checks the limits:
+`retry_readable_after_rotation` preserves old attempted bytes;
+`late_copy_exposes_selected_key` permits disclosure by a copy landing after
+the selecting read; `departed_circle_original_can_use_exposed_key` preserves
+§14.6's first send of previously authored circle edits. An unbound recipient
+still exposes a key (`unbound_recipient_exposes_key`). These are counterexamples
+to stronger claims, not discrepancies with Rust. `device_removal_keeps_credentials`
+proves that removing an installation does not retire its member's shared
+secret: excluding a stolen device's retained member credential requires
+replacement (or removing that member). Rotation cannot erase previously
+downloaded ciphertext or secrets.
 
 ## Unique values and owner rows
 
@@ -575,8 +655,9 @@ Build with `cd spec/proofs/sequence && lake build`; the executable is
 `.lake/build/bin/sequenceRunner`. It reads one JSON object to EOF on stdin and
 prints one JSON answer. Invalid input reports an error on stderr and exits 1.
 `SequenceTests.lean` checks cases through the JSON entry point during the build.
-All fields below are required; identifiers are natural numbers, members lie in
-`0..member_count-1`, and slots, claim numbers and write numbers are positive.
+All fields below are required; identifiers are natural numbers. The `apply`
+case bounds members by `member_count`; slots, claim numbers and write numbers
+are positive.
 
 **`settle`** calls `Settle.settle`. Bytes are opaque strings compared exactly.
 `recorded` supplies `device`, `number`, `slot`, `bytes`, and `digest`. A present
@@ -697,12 +778,39 @@ zero-based input indices, preserving input order, independently of slot order:
 Answer: `[[],[0],[0]]`. The last write reads its own predecessor but not the
 intervening remote write. Only supplied writes can appear in an answer.
 
+**`keys`** in [`SequenceKeys`](sequence/SequenceKeys.lean) calls `Keys.publish`,
+`accepted`, `exposed`, `firstKey`, `sendingKey`, and `metadataKey`. `slots` is
+the key projection at positions `1..slots.length`: an `introduce` event carries
+`audience`, `key`, `hash`; a `copy` carries `audience`, `key`, `member`,
+`credential`; `other` preserves unrelated positions. `held` supplies
+`{audience,key,hash}` custody records. `current` supplies
+`{audience,member,credential}` for current audience members, omitting excluded
+members. Hashes and exact public credentials are equality-preserving tokens.
+`writer` and `store` identify the selecting member and store audience;
+`audiences` and `keys` (`{audience,key}`) select the requested observations.
+Duplicate custody, binding or query records are rejected.
+
+The answer contains `keys` with `accepted`/`exposed` flags, `selection` for
+each audience with `first` (key or null) and `sending` (key, unavailable key,
+or `removed`/`notAllowed` error), and `metadata` (key or null). `first` is
+restricted to current members. `sending` also permits the old-circle-original
+case; eligibility of those originals is checked outside this projection.
+
+**`rotation`** takes the same fields and `rotation:{audience,key,hash,members}`.
+The fresh generated key must already be in custody. The runner requires a
+current writer, an accepted held store key, and a member list covering every
+current audience member. It rejects reuse of an introduced or tentatively
+copied key. Output contains the exact copy/introduction `slots`, final
+`through`, and the key observations `after`. Membership is fixed across this
+plan; interleaved membership changes require another prefix and selection.
+
 ## Rust comparisons
 
 The ignored differential tests use `COVEN_SEQUENCE_LEAN` to run the same JSON
 cases through `sequenceRunner`. `scripts/check.sh` selects each comparison when
 its Rust crate or the sequence package changes and checks the exact test names.
-Every comparison enumerates bounded cases and adds deterministic seeded cases.
+Comparisons enumerate bounded cases or exercise publication histories; merge
+and settlement comparisons also include deterministic seeded cases.
 
 - `coven-database` calls the durable claim settlement API and checks its saved
   verdict. Complete-byte digests are computed in Rust; the kept-slot inputs have
@@ -728,6 +836,20 @@ Every comparison enumerates bounded cases and adds deterministic seeded cases.
 - `coven-merge` calls `SlotPast::contains` for every pair of supplied writes,
   including batches and shuffled input order. Histories satisfy the model's
   own-number publication and monotone authored-read premises.
+- `coven-sync`'s `history::tests::sequence_key_selection_matches_lean` compares
+  the actual history selectors, acceptance and exposure over custody subsets,
+  introduction prefixes, opposite id/introduction ordering, repeated copies,
+  equal/conflicting commitments, mismatched material, removed/unbound members,
+  retired credentials and departed-circle originals. Membership facts are
+  supplied at the selector boundary; the administration comparison covers
+  their application.
+- `sequence_sync::sequence_keys::tests::sequence_rotation_matches_lean` calls
+  real removal, replacement and rotation operations. It compares the published
+  slots and selected keys, opens each recipient's generated box, checks the
+  outer metadata key, and reconstructs history from the database's retained
+  originals. It covers exposed-store-key publication, consecutive store/circle
+  rotations and replaced credentials. `rotation_does_not_need_preceding_circle_material`
+  additionally exercises the real installer without old circle custody.
 
 Authentication, row/source validation and the merge are outside the sequence
 runner's abstraction. The comparisons supply their inputs at those boundaries;
@@ -756,8 +878,8 @@ they do not replace the separate byte-format, merge or queue tests.
   batch decoding into individual original writes is not modelled. A device whose app
   cannot apply a slot stops before it; that stop is not modelled.
 - Reload models changed readable audiences and their local write gates.
-  Key delivery, circle invitation and the policy choosing the followed set
-  remain abstract; a newly readable audience must load its own prefix.
+  Delivery failures, circle invitation and the policy choosing the followed
+  set remain abstract; a newly readable audience must load its own prefix.
 - `Model` takes authenticated claim numbers and complete-slot digests as
   inputs (`Rules.number`, `Rules.digest`). No SHA-256 implementation or
   cryptographic security proof is included. Hash collision resistance and

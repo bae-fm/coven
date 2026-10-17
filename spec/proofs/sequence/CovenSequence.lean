@@ -22,3 +22,5 @@ import CovenSequence.QueueReload
 import CovenSequence.RaiseQueue
 import CovenSequence.Claims
 import CovenSequence.Membership
+import CovenSequence.Keys
+import CovenSequence.KeysExamples

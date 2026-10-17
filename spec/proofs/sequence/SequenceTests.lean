@@ -452,4 +452,58 @@ def row (id : Nat) (live : Bool) (value : Option Nat) (inputs : List (List Nat))
     {"author":0,"number":1,"slot":3,"read_through":0},
     {"author":0,"number":2,"slot":2,"read_through":0}]})
 
+def keyCase (slots held current : List Json) : Json := json% {
+  "kind":"keys", "slots":$(slots), "held":$(held), "current":$(current),
+  "writer":1,"store":0,"audiences":[0,1],
+  "keys":[{"audience":0,"key":9},{"audience":0,"key":1},{"audience":1,"key":7}]}
+
+#eval do
+  let old := json% {"kind":"introduce","audience":0,"key":9,"hash":10}
+  let copied := json% {"kind":"copy","audience":0,"key":1,"member":1,"credential":2}
+  let introduced := json% {"kind":"introduce","audience":0,"key":1,"hash":20}
+  let exposed := json% {"kind":"copy","audience":0,"key":9,"member":2,"credential":1}
+  let held := [json% {"audience":0,"key":9,"hash":10}, json% {"audience":0,"key":1,"hash":20}]
+  let current := [json% {"audience":0,"member":1,"credential":2}]
+  let before ← run (keyCase [old, exposed, copied] held current)
+  checkField before ["keys","1","accepted"] (toJson false)
+  checkField before ["selection","0","sending"] (json% {"unavailable":9})
+  checkField before ["metadata"] (toJson (9 : Nat))
+  let after ← run (keyCase [old, exposed, copied, introduced] held current)
+  checkField after ["selection","0","first"] (toJson (1 : Nat))
+  checkField after ["metadata"] (toJson (1 : Nat))
+  let late := json% {"kind":"copy","audience":0,"key":1,"member":2,"credential":1}
+  let disclosed ← run (keyCase [old, exposed, copied, introduced, late] held current)
+  checkField disclosed ["selection","0","sending"] (json% {"unavailable":1})
+  checkField disclosed ["metadata"] (toJson (1 : Nat))
+  let mismatch ← run (keyCase [old, introduced] [json% {"audience":0,"key":1,"hash":99}] current)
+  checkField mismatch ["keys","1","accepted"] (toJson false)
+  let conflict ← run (keyCase [old, introduced,
+    json% {"kind":"introduce","audience":0,"key":1,"hash":99}] held current)
+  checkField conflict ["keys","1","accepted"] (toJson false)
+  checkField conflict ["metadata"] (toJson (9 : Nat))
+  let departed ← run (keyCase [old, json% {"kind":"introduce","audience":1,"key":7,"hash":30},
+    json% {"kind":"copy","audience":1,"key":7,"member":1,"credential":2}]
+    (held ++ [json% {"audience":1,"key":7,"hash":30}]) current)
+  checkField departed ["selection","1","first"] Json.null
+  checkField departed ["selection","1","sending"] (json% {"key":7})
+  let removed ← run (keyCase [old] held [])
+  checkField removed ["selection","0","sending"] (json% {"error":"removed"})
+  let rotate := json% {"kind":"rotation", "slots":$([old, exposed]), "held":$(held),
+    "current":$(current),"writer":1,"store":0,"audiences":[0],
+    "keys":[{"audience":0,"key":9},{"audience":0,"key":1}],
+    "rotation":{"audience":0,"key":1,"hash":20,"members":[1,2]}}
+  let rotated ← run rotate
+  checkField rotated ["slots"] (toJson [copied, introduced])
+  checkField rotated ["through"] (toJson (4 : Nat))
+  checkField rotated ["after","selection","0","first"] (toJson (1 : Nat))
+  checkField rotated ["after","keys","0","accepted"] (toJson true)
+  rejects (json% {"kind":"keys","slots":[],"held":$(held ++ held),"current":[],
+    "writer":1,"store":0,"audiences":[],"keys":[]})
+  rejects (json% {"kind":"rotation","slots":$([old]),"held":$(held),"current":$(current),
+    "writer":1,"store":0,"audiences":[],"keys":[],
+    "rotation":{"audience":0,"key":1,"hash":20,"members":[]}})
+  rejects (json% {"kind":"rotation","slots":$([old,copied]),"held":$(held),"current":$(current),
+    "writer":1,"store":0,"audiences":[],"keys":[],
+    "rotation":{"audience":0,"key":1,"hash":20,"members":[1]}})
+
 end SequenceTests

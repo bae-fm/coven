@@ -1,4 +1,6 @@
 import SequenceApply
+import SequenceInput
+import SequenceKeys
 import CovenSequence.Settle
 import CovenSequence.Causality
 import CovenSequence.Reload
@@ -7,22 +9,7 @@ import CovenSequence.Reload
 namespace SequenceJson
 open CovenSequence Lean
 open SequenceApply (sig Config Audience Row)
-
-def nat (j : Json) (key : String) : Except String Nat := j.getObjValAs? Nat key
-
-def positive (j : Json) (key : String) : Except String Nat := do
-  let n ← nat j key
-  if n = 0 then throw s!"{key} must be positive"
-  return n
-
-def distinct [DecidableEq α] (xs : List α) (name : String) : Except String Unit := do
-  if xs.eraseDups.length != xs.length then throw s!"duplicate {name}"
-
-def pair (j : Json) : Except String (Nat × Nat) := do
-  let xs ← j.getArr?
-  match xs.toList with
-  | [a, b] => return (← fromJson? a, ← fromJson? b)
-  | _ => throw "expected a pair of natural numbers"
+open SequenceInput
 
 def readRole (j : Json) : Except String Role := do
   match ← j.getObjValAs? String "role" with
@@ -207,6 +194,8 @@ def run (j : Json) : Except String Json := do
   | "reselect" => readReselect j
   | "apply" => readApply j
   | "past" => readPast j
+  | "keys" => SequenceKeys.readKeys j
+  | "rotation" => SequenceKeys.readRotation j
   | _ => throw "unknown case kind"
 
 end SequenceJson

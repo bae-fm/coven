@@ -151,3 +151,7 @@ impl SequenceSync {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_keys_tests.rs"]
+mod tests;

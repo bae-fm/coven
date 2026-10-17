@@ -171,9 +171,11 @@ cryptographic and environmental assumptions.
   claim progress. Contention has no fairness bound.
 - Admin work either claims or undoes its recorded artifacts.
   Failed undo remains journaled and reported (§18).
-- **Revocation:** catch up before sending. First attempts use the newest usable key (§10, §11).
+- **Revocation:** catch up before sending. First attempts use the newest usable key
+  (§10, §11; [`revocation`](proofs/sequence/CovenSequence/Keys.lean)).
   A blocked slot follows [§6](#stuck-devices), so a later removal cannot be read past it.
-- Writes after device or member removal, or credential replacement, have no effects.
+- Writes claimed after their device or member is removed, or their signing
+  credential retires, have no effects.
   Record their refusal; there is no grace period for late claims (§10).
 - Prior attempts retain their inner bytes and keys. Provider cut-off remains separate;
   in-flight key copies retain §11's residual disclosure window.
@@ -2492,9 +2494,9 @@ No removal of Ana enters the sequence.
 
 - Store keys encrypt store data and metadata; circle keys encrypt circle data.
   Member signing/sealing pairs and provider credentials have separate purposes.
-- Every slot's device and claim number, and every inner write's part audiences,
-  are sealed under the store key. All members can read those headers before
-  deciding which audience-encrypted parts to open; the provider cannot.
+- The store key seals slot device/claim numbers and inner write part audiences.
+  Its exposure reveals those headers, its store data and admin contents;
+  circle parts and recipient boxes still need their own keys.
 - Each file has its own key inside its encrypted row ([§16](#16-files)).
 - Creation and rotation introduce an audience key by random id and SHA-256
   of its exact 32 bytes. These fields stay encrypted; removals carry no keys.
@@ -2517,17 +2519,18 @@ No removal of Ana enters the sequence.
 - Check tentative recipients against the later binding or introduction.
   A candidate never bound still received the key; undo cannot erase that exposure.
 - Before first sending data, use the newest usable audience key by introduction slot.
-  It must be authorized, held in custody, and have no known exposed copy.
+  It must be introduced, authorized, held, and unexposed in the applied prefix.
 - If none is usable, acquire a replacement or rotate through §18.
   An admin outside a circle cannot rotate its key.
 - Several rotations may follow each other. Introduced older keys remain readable;
   new data uses the newest usable key.
-- Admin metadata may use the newest accepted store key held, even when exposed.
-  Exposure cannot prevent removal or rotation.
+- Admin metadata may use the newest accepted store key held, even if exposed.
+  Removal and rotation need no unexposed key.
 - Retried inner writes keep the keys fixed on their first attempt (§6).
   Circle parts authored before leaving follow [§14.6](#146-leaving-a-circle).
 - Key replacement retires the preceding sealing credential.
   Copies to it remain exposure even though the member's id stays active.
+  Device removal alone does not retire the member's shared keys (§13).
 - Share historical keys with current audience members whose credential lacks a copy.
   A retry does not require another copy already present in the sequence.
 - Ana and Ben may both supply K to Carol in different slots.
