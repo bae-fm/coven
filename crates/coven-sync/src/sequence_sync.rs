@@ -37,6 +37,7 @@ pub(crate) struct Session {
 
 /// Owns sequence progress. App commits use the database independently; every
 /// publisher shares this owner's serialization and actual blocked state.
+#[derive(Clone)]
 pub struct SequenceSync {
     database: Database,
     storage: Arc<dyn Storage>,
@@ -49,12 +50,14 @@ pub struct SequenceSync {
     ids: coven_foundation::id_source::IdSourceRef,
     waits: Arc<crate::RetryWaits>,
     files: crate::Files,
-    session: Mutex<Session>,
+    session: Arc<Mutex<Session>>,
     /// Admin access an operation holds in memory until its key is made (§4).
-    admin_access: std::sync::Mutex<
-        std::collections::BTreeMap<
-            coven_database::OperationId,
-            Arc<dyn coven_storage::AccessKeyAdmin>,
+    admin_access: Arc<
+        std::sync::Mutex<
+            std::collections::BTreeMap<
+                coven_database::OperationId,
+                Arc<dyn coven_storage::AccessKeyAdmin>,
+            >,
         >,
     >,
 }
@@ -113,7 +116,7 @@ impl SequenceSync {
             ids,
             waits,
             files,
-            session: Mutex::new(Session {
+            session: Arc::new(Mutex::new(Session {
                 history,
                 through,
                 floor: None,
@@ -121,11 +124,21 @@ impl SequenceSync {
                 scanned: 1,
                 swept: None,
                 locked,
-            }),
-            admin_access: std::sync::Mutex::new(std::collections::BTreeMap::new()),
+            })),
+            admin_access: Arc::new(std::sync::Mutex::new(std::collections::BTreeMap::new())),
         };
         sync.publish_join_requests().await?;
         Ok(sync)
+    }
+
+    /// Use candidate credentials while retaining this installation's exact
+    /// progress and serialization. Failed setup can keep the old provider
+    /// without replaying history the candidate already applied.
+    pub fn reconnect(&self, storage: Arc<dyn Storage>) -> Self {
+        Self {
+            storage,
+            ..self.clone()
+        }
     }
 
     pub(crate) fn store(&self) -> StoreId {

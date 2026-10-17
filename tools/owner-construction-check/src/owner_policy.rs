@@ -366,6 +366,11 @@ pub(crate) const POLICY: Policy = Policy {
             "SequenceSync",
             "open",
         ),
+        (
+            "crates/coven-sync/src/sequence_sync.rs",
+            "SequenceSync",
+            "reconnect",
+        ),
         // An operation's call runs as its own task, so a dropped app future
         // cannot abandon a provider request already sent (§18).
         (
@@ -499,6 +504,10 @@ pub(crate) const POLICY: Policy = Policy {
         // Setup, unlocking, starting and loading compose a connection's
         // sequence owner, loop and credential owner at runtime.
         (CONNECTION, "StorageConnections", "attach"),
+        (CONNECTION, "StorageConnections", "sequence"),
+        (CONNECTION, "StorageConnections", "activate"),
+        (CONNECTION, "StorageConnections", "setup_connection"),
+        (CONNECTION, "StorageConnections", "forget_store_keys"),
         // A started loop's connection attempts outlive the start call; close
         // stops and awaits them. Stopping releases the client after the pass.
         (CONNECTION_CONTROL, "StorageConnections", "start"),

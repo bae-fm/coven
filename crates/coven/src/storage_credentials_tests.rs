@@ -1,5 +1,108 @@
 use super::*;
 
+async fn assert_original_connection_uploads(f: &Fixture) {
+    assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_some());
+    let provider = f.connector.providers.lock().unwrap()[0].clone();
+    let key = provider.s3_credentials().await.unwrap();
+    assert_eq!(key.access_key_id, "member-key");
+    f.advance(Duration::from_secs(1));
+    f.handle
+        .write(|sql| {
+            sql.execute("INSERT INTO notes VALUES('retained','still connected')", [])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    status(&f.handle, |state| {
+        matches!(state, SyncStatus::Synced { finished_at } if *finished_at >= f.clock.now())
+    })
+    .await;
+    assert!(f.handle.test_queued_writes().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn failed_key_forgetting_keeps_the_running_connection() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.app.fail_next_keychain_operation();
+    assert!(f.handle.forget_store_keys().await.is_err());
+    assert_eq!(
+        f.handle.store_key_state().unwrap(),
+        StoreKeyState::Available
+    );
+    assert_original_connection_uploads(&f).await;
+    f.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn key_forgetting_performs_no_fallible_custody_reads_after_removal() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.app.fail_keychain_operations_after(&[1]);
+    f.handle.forget_store_keys().await.unwrap();
+    assert_eq!(f.handle.store_key_state().unwrap(), StoreKeyState::Locked);
+    assert!(matches!(
+        &*f.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Stopped
+    ));
+    f.app.fail_keychain_operations_after(&[]);
+    f.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_setup_claim_keeps_the_running_connection() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    let before = f.handle.restore_code().await.unwrap();
+    f.storage
+        .set_faults(Faults {
+            read_failures: [(
+                ObjectPath::floor(f.directory.id()),
+                StorageFailure::PermissionDenied,
+            )]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(f.setup().await.is_err());
+    f.storage.set_faults(Faults::none()).await;
+    assert_eq!(f.handle.restore_code().await.unwrap(), before);
+    assert_original_connection_uploads(&f).await;
+    f.handle.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn failed_setup_custody_commit_keeps_the_running_connection() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    let before = f.handle.restore_code().await.unwrap();
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage
+        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
+        .await;
+    let setup = f.setup();
+    tokio::pin!(setup);
+    tokio::select! {
+        result = &mut setup => panic!("setup did not reach its claim: {result:?}"),
+        _ = entering => {}
+    }
+    // Unlock persists its held ring; the following credential read fails.
+    f.app.fail_keychain_operations_after(&[1]);
+    resume.send(()).unwrap();
+    assert!(matches!(
+        setup.await,
+        Err(StorageSetupError::SecureStorage(_))
+    ));
+    assert_eq!(f.handle.restore_code().await.unwrap(), before);
+    assert_original_connection_uploads(&f).await;
+    f.handle.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn setup_key_failure_restores_the_separate_synced_values() {
     use coven_crypto::custody::{Keychain, StoreKeychain};

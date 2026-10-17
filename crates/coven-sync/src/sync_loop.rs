@@ -14,6 +14,8 @@ enum Command {
     Start,
     Now,
     Stop,
+    Pause(oneshot::Sender<()>),
+    Resume,
     Close(oneshot::Sender<Result<(), SyncError>>),
 }
 impl SyncLoop {
@@ -41,6 +43,21 @@ impl SyncLoop {
     pub fn stop(&self) -> Result<(), SyncError> {
         self.commands
             .send(Command::Stop)
+            .map_err(|_| DbError::StoreClosed.into())
+    }
+    /// Wait for the active pass, retaining its started state, pending work and
+    /// retry schedule while the owner prepares a connection or custody change.
+    pub async fn pause(&self) -> Result<(), SyncError> {
+        let (send, receive) = oneshot::channel();
+        self.commands
+            .send(Command::Pause(send))
+            .map_err(|_| DbError::StoreClosed)?;
+        receive.await.map_err(|_| DbError::StoreClosed.into())
+    }
+    /// Continue the retained loop after a failed connection or custody change.
+    pub fn resume(&self) -> Result<(), SyncError> {
+        self.commands
+            .send(Command::Resume)
             .map_err(|_| DbError::StoreClosed.into())
     }
     /// Finish active work and this connection's transfers, then end this
@@ -130,6 +147,7 @@ async fn run(
         }
     }
     let mut started = false;
+    let mut paused = false;
     let mut pending = false;
     let mut idle = sync.clock.sleep(Duration::from_secs(30));
     let mut closing = None;
@@ -152,7 +170,11 @@ async fn run(
                 futures_util::future::select_all(wakes).await;
             }
         };
-        let previous = match sync.database.retry_wait(RetrySubject::Sync).await {
+        let previous = match if paused {
+            Ok(None)
+        } else {
+            sync.database.retry_wait(RetrySubject::Sync).await
+        } {
             Ok(wait) => wait,
             Err(error) => {
                 status.publish(SyncStatus::Failed {
@@ -161,7 +183,9 @@ async fn run(
                 break;
             }
         };
-        let due = retry.ready(&sync.waits) && sync.waits.due(RetrySubject::Sync, previous.as_ref());
+        let due = !paused
+            && retry.ready(&sync.waits)
+            && sync.waits.due(RetrySubject::Sync, previous.as_ref());
         let cooldown = sync.waits.cooldown_wake();
         tokio::select! {
             biased;
@@ -183,6 +207,11 @@ async fn run(
                     }
                 }
                 Some(Command::Now) => pending |= started,
+                Some(Command::Pause(reply)) => {
+                    paused = true;
+                    let _ = reply.send(());
+                }
+                Some(Command::Resume) => paused = false,
                 Some(Command::Stop) => {
                     started = false;
                     pending = false;
@@ -197,7 +226,7 @@ async fn run(
                 // Transfers outlive this connection's loop; the store's
                 // owner closes them. This connection's transfers finish first.
                 Some(Command::Close(reply)) => {
-                    let result = if started {
+                    let result = if started && !paused {
                         sync.files.set_storage(None, std::future::ready(Ok(()))).await
                     } else {
                         Ok(())
@@ -206,13 +235,13 @@ async fn run(
                     break;
                 }
                 None => {
-                    if started {
+                    if started && !paused {
                         let _ = sync.files.set_storage(None, std::future::ready(Ok(()))).await;
                     }
                     break;
                 }
             },
-            changed = changes.next(), if started => match changed {
+            changed = changes.next(), if started && !paused => match changed {
                 Ok(()) => pending = true,
                 Err(DbError::StoreClosed) => break,
                 Err(error) => {
@@ -220,15 +249,15 @@ async fn run(
                     started = false;
                 }
             },
-            _ = &mut idle, if started && !pending => pending = true,
-            _ = sync.state.pass_requested(), if started && !pending => pending = true,
+            _ = &mut idle, if started && !paused && !pending => pending = true,
+            _ = sync.state.pass_requested(), if started && !paused && !pending => pending = true,
             // A wait armed outside this loop changes the schedule to wake on.
-            changed = rearmed.changed(), if started => if changed.is_err() { break },
-            _ = work_wake, if started && !(pending && due) => pending = true,
+            changed = rearmed.changed(), if started && !paused => if changed.is_err() { break },
+            _ = work_wake, if started && !paused && !(pending && due) => pending = true,
             _ = async {
                 if let Some(wake) = cooldown { wake.await } else { std::future::pending::<()>().await }
-            }, if started && pending && !due => {}
-            _ = std::future::ready(()), if started && pending && due => {
+            }, if started && !paused && pending && !due => {}
+            _ = std::future::ready(()), if started && !paused && pending && due => {
                 pending = false;
                 if let Err(error) = changes.take_changed() {
                     status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });

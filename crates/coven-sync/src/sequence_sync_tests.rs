@@ -812,3 +812,27 @@ mod differential {
         eprintln!("sequence read: {exhaustive} exhaustive + 24 seeded storage passes");
     }
 }
+
+#[tokio::test]
+async fn a_replacement_connection_keeps_progress_when_the_original_continues() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let replacement = ana.sync.reconnect(Arc::new(ana.storage.clone()));
+    insert(
+        ana.database(),
+        "candidate",
+        "applied before custody failure",
+    )
+    .await;
+    replacement.pass().await.unwrap();
+    let applied = ana.database().applied_slot().await.unwrap();
+    drop(replacement);
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.database().applied_slot().await.unwrap(), applied);
+    insert(ana.database(), "original", "after custody failure").await;
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.database().applied_slot().await.unwrap(), applied + 1);
+    assert_eq!(rows(ana.database()).await.len(), 2);
+    ana.database().close().await.unwrap();
+}

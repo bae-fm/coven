@@ -76,4 +76,9 @@ impl TestCoven {
     pub fn fail_next_keychain_operation(&self) {
         self.keychain.fail_next_operation();
     }
+
+    #[cfg(test)]
+    pub(crate) fn fail_keychain_operations_after(&self, successes: &[usize]) {
+        self.keychain.fail_operations_after(successes);
+    }
 }

@@ -160,7 +160,7 @@ pub(crate) struct StorageConnections {
     /// Whether custody held storage credentials when last observed: start
     /// connects only then, without reading custody before the first attempt.
     configured: AtomicBool,
-    /// Bumped by each start, stop and close: a connection attempt or a
+    /// Changed by a new start, stop or close: a connection attempt or a
     /// queued stop acts only while no later request has superseded it.
     epoch: AtomicU64,
     /// Wakes a connection attempt's backoff when stopping is requested.
@@ -303,20 +303,29 @@ impl StorageConnections {
         live: &mut Connection,
         storage: Arc<StorageConnection>,
     ) -> Result<(), SyncError> {
+        let sync = self.sequence(storage.clone(), live).await?;
+        self.files
+            .set_storage(Some(storage), std::future::ready(Ok(())))
+            .await?;
+        self.activate(live, sync, false)
+    }
+
+    /// Compose a candidate without replacing the committed connection.
+    async fn sequence(
+        &self,
+        storage: Arc<StorageConnection>,
+        previous: &Connection,
+    ) -> Result<Arc<SequenceSync>, SyncError> {
+        if let Connection::Active(previous) = previous {
+            return Ok(Arc::new(previous.sync.reconnect(storage)));
+        }
         let keys = self
             .keys
             .lock()
             .expect("store keys lock poisoned")
             .clone()
             .ok_or(KeyError::StoreClosed)?;
-        // Transfers follow the connection, also while the loop is stopped.
-        self.files
-            .set_storage(
-                Some(storage.clone() as Arc<dyn Storage>),
-                std::future::ready(Ok(())),
-            )
-            .await?;
-        let sync = Arc::new(
+        Ok(Arc::new(
             SequenceSync::open(
                 self.database.clone(),
                 storage,
@@ -331,7 +340,16 @@ impl StorageConnections {
                 self.files.clone(),
             )
             .await?,
-        );
+        ))
+    }
+
+    /// Install the sequence owner only after connection custody commits.
+    fn activate(
+        &self,
+        live: &mut Connection,
+        sync: Arc<SequenceSync>,
+        start: bool,
+    ) -> Result<(), SyncError> {
         let codes = RestoreCodes::new(
             self.store(),
             self.database.clone(),
@@ -341,13 +359,14 @@ impl StorageConnections {
             Some(sync.clone()),
         );
         let sync_loop = SyncLoop::new(sync.clone(), Some(codes.clone()));
+        let started = if start { sync_loop.start() } else { Ok(()) };
         *self.control.lock().expect("loop control poisoned") = Some(sync_loop.clone());
         *live = Connection::Active(Live {
             sync,
             sync_loop,
             codes,
         });
-        Ok(())
+        started
     }
 
     /// Release the current connection after its active pass and transfers.
@@ -542,48 +561,66 @@ impl StorageConnections {
             _ => coven_format::MemberAccess::ProviderAccount(storage.account().await?),
         };
         let mut live = self.live.lock().await;
-        // One sequence owner applies at a time: the previous one finishes its
-        // pass before the candidate catches up.
-        self.release(&mut live).await.map_err(setup_error)?;
-        let (commit, restore_code) = self
-            .codes
-            .prepare_setup(
-                ConnectionCredentials {
-                    location: config.clone(),
-                    credentials,
-                },
-                sign_in,
-                self.initial_name.clone(),
-            )
-            .await
-            .map_err(setup_error)?;
-        self.attach(&mut live, storage).await.map_err(setup_error)?;
-        let claimed = match &*live {
-            Connection::Active(candidate) => {
-                self.claim_setup(&candidate.sync, access, device_name).await
-            }
-            _ => Err(SyncError::NoStorage),
-        };
-        if let Err(error) = claimed {
-            let released = self.release(&mut live).await;
-            // The previous status returns: setup changed nothing.
-            let shown = self.publish_released(Ok(()));
-            return Err(setup_error(
-                [released, shown].into_iter().filter_map(Result::err).fold(
-                    error,
-                    |operation, cleanup| SyncError::Cleanup {
-                        operation: Box::new(operation),
-                        cleanup: Box::new(cleanup),
-                    },
-                ),
-            ));
+        // The old provider remains installed until every fallible setup step
+        // succeeds. Its stopped or started state survives a rejected candidate.
+        if let Connection::Active(previous) = &*live {
+            previous.sync_loop.pause().await.map_err(setup_error)?;
         }
-        // The claims are final and their keys applied; custody, location and
-        // code commit now, with no compensation left to keep.
-        drop(commit().map_err(setup_error)?);
+        let prepared = async {
+            let (commit, restore_code) = self
+                .codes
+                .prepare_setup(
+                    ConnectionCredentials {
+                        location: config.clone(),
+                        credentials,
+                    },
+                    sign_in,
+                    self.initial_name.clone(),
+                )
+                .await?;
+            let sync = self.sequence(storage.clone(), &live).await?;
+            self.claim_setup(&sync, access, device_name).await?;
+            // Claims may use file transfers; only the custody commit runs
+            // inside the transfer exclusion needed to replace their provider.
+            self.files
+                .set_storage(Some(storage), async { commit().map(drop) })
+                .await?;
+            Ok::<_, SyncError>((sync, restore_code))
+        }
+        .await;
+        let (sync, restore_code) = match prepared {
+            Ok(prepared) => prepared,
+            Err(mut error) => {
+                if let Connection::Active(previous) = &*live {
+                    if let Err(cleanup) = previous.sync_loop.resume() {
+                        error = SyncError::Cleanup {
+                            operation: Box::new(error),
+                            cleanup: Box::new(cleanup),
+                        };
+                    }
+                }
+                return Err(setup_error(error));
+            }
+        };
+        let released = match std::mem::replace(&mut *live, Connection::Released) {
+            Connection::Active(previous) => previous.close().await,
+            _ => Ok(()),
+        };
+        let started = self.activate(&mut live, sync, true);
         self.configured.store(true, Ordering::SeqCst);
-        if let Connection::Active(candidate) = &*live {
-            candidate.sync_loop.start().map_err(setup_error)?;
+        // Custody and provider are committed. Worker failures now belong to
+        // sync status; setup must return the connection it published.
+        let result = match (released, started) {
+            (Ok(()), result) | (result, Ok(())) => result,
+            (Err(operation), Err(cleanup)) => Err(SyncError::Cleanup {
+                operation: Box::new(operation),
+                cleanup: Box::new(cleanup),
+            }),
+        };
+        if let Err(error) = result {
+            self.publications.publish(SyncStatus::Failed {
+                error: error.into(),
+            });
         }
         Ok(StorageSetup {
             connection: ConnectedStorage {
@@ -738,15 +775,47 @@ impl StorageConnections {
     pub(crate) async fn forget_store_keys(self: &Arc<Self>) -> Result<(), KeyError> {
         self.call(|owner| async move {
             let mut live = owner.live.lock().await;
-            let released = owner.release(&mut live).await;
-            owner.forget_keys()?;
-            owner
-                .publish_released(released)
-                .map_err(|error| match error {
-                    SyncError::SecureStorage(error) => error,
-                    SyncError::Database(DbError::StoreClosed) => KeyError::StoreClosed,
-                    error => KeyError::Unavailable(Box::new(error)),
-                })
+            let result = async {
+                if let Connection::Active(previous) = &*live {
+                    previous.sync_loop.pause().await?;
+                }
+                if let Err(mut error) = owner
+                    .files
+                    .set_storage(None, async { owner.forget_keys().map_err(SyncError::from) })
+                    .await
+                {
+                    if let Connection::Active(previous) = &*live {
+                        if let Err(cleanup) = previous.sync_loop.resume() {
+                            error = SyncError::Cleanup {
+                                operation: Box::new(error),
+                                cleanup: Box::new(cleanup),
+                            };
+                        }
+                    }
+                    return Err(error);
+                }
+                owner.control.lock().expect("loop control poisoned").take();
+                let released = match std::mem::replace(&mut *live, Connection::Released) {
+                    Connection::Active(previous) => previous.close().await,
+                    _ => Ok(()),
+                };
+                // Forgetting succeeded. A worker release failure belongs to
+                // status; no later custody read can turn removal into an error.
+                owner.publications.publish(match released {
+                    Err(error) => SyncStatus::Failed {
+                        error: error.into(),
+                    },
+                    Ok(()) if owner.configured.load(Ordering::SeqCst) => SyncStatus::Stopped,
+                    Ok(()) => SyncStatus::Disconnected,
+                });
+                Ok(())
+            }
+            .await;
+            result.map_err(|error| match error {
+                SyncError::SecureStorage(error) => error,
+                SyncError::Database(DbError::StoreClosed) => KeyError::StoreClosed,
+                error => KeyError::Unavailable(Box::new(error)),
+            })
         })
         .await
     }
