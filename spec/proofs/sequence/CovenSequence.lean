@@ -13,3 +13,5 @@ import CovenSequence.Deadline
 import CovenSequence.Causality
 import CovenSequence.LiveClaims
 import CovenSequence.Owners
+import CovenSequence.Authority
+import CovenSequence.Preparations

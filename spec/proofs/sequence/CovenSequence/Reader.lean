@@ -17,8 +17,8 @@ A device reads one audience with one reader. A reader of audience `A`:
   shows the slot at or above the first kept slot. A slot with a part or
   announcement for `A` needs `A`'s key. Other audiences' parts are not read:
   the slot's clear metadata says they are not `A`'s;
-- applies a valid raise of `A` by loading the raise body and replaying the
-  buffered slots after its coverage, all checked against the floor;
+- applies a valid raise or reset of `A` by loading its prepared body; a raise
+  replays the suffix after coverage, while a reset discards that suffix;
 - reloads from the floor's snapshot for `A`, with `A`'s key, when that covers
   more than it applied.
 
@@ -26,8 +26,8 @@ A device reads one audience with one reader. A reader of audience `A`:
 at or above the first kept slot every record is genuine; every audience's
 snapshot covers the slot before the first kept slot; each audience's floor
 snapshot was validly announced and its body is the state it covers; a valid
-raise's body, if present, is the raiser's migrated rows, and it is present
-while the floor has not covered the raise.
+boundary's body, if present, holds its prepared rows, and it is present
+while the floor has not covered the boundary.
 -/
 
 namespace CovenSequence
@@ -58,10 +58,10 @@ structure Reader (S : Sig) where
   /-- Slot records fetched and not yet checked against the floor. -/
   buf : Nat → Option (Slot S)
 
-/-- The rows after applying `x` at `k`, when it is not a valid raise of `A`. -/
+/-- The rows after applying `x` at `k`, when it is not a valid raise or reset of `A`. -/
 def rowsStep (A : S.Aud) (L : Ledger S) (P : AudLedger S) (rows : S.Rows) (k : Nat) (x : Slot S) :
     S.Rows :=
-  if touches A x && audValid R L P k A x then applyWrite R A P.version rows x else rows
+  if touches A x && audValid R L P k A x then applyWrite R A P.version P.lastReset rows x else rows
 
 /-- A reader's steps against fixed storage, holding `A`'s key or not. -/
 inductive ReadStep (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader S → Prop
@@ -69,19 +69,19 @@ inductive ReadStep (A : S.Aud) (key : Bool) (st : Store S) : Reader S → Reader
       ReadStep A key st d { d with buf := fun j => if j = i then st.slot i else d.buf j }
   | apply (d : Reader S) (x : Slot S) (hb : d.buf (d.pos + 1) = some x)
       (hf : st.floor.start ≤ d.pos + 1)
-      (hnr : ∀ au v c p, x = .raise au A v c p → audValid R d.ledger d.aud (d.pos + 1) A x = false)
+      (hnr : ∀ au v c p, x = .boundary au A v c p → audValid R d.ledger d.aud (d.pos + 1) A x = false)
       (hk : touches A x = true → key = true) :
       ReadStep A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) x,
         audStep R d.ledger d.aud (d.pos + 1) A x, rowsStep R A d.ledger d.aud d.rows (d.pos + 1) x, d.buf⟩
-  | raise (d : Reader S) (au : S.Dev) (v c : Nat) (p : S.Path)
-      (hb : d.buf (d.pos + 1) = some (.raise au A v c p)) (hf : st.floor.start ≤ d.pos + 1)
-      (hv : audValid R d.ledger d.aud (d.pos + 1) A (.raise au A v c p) = true) (hk : key = true)
+  | boundary (d : Reader S) (au : S.Dev) (v : Boundary) (c : Nat) (p : S.Path)
+      (hb : d.buf (d.pos + 1) = some (.boundary au A v c p)) (hf : st.floor.start ≤ d.pos + 1)
+      (hv : audValid R d.ledger d.aud (d.pos + 1) A (.boundary au A v c p) = true) (hk : key = true)
       (L' : Ledger S) (P' : AudLedger S) (rows : S.Rows) (hbody : st.body p = some (L', P', rows))
       (get : Nat → Slot S)
       (hget : ∀ i, c < i → i ≤ d.pos → d.buf i = some (get i) ∧ st.floor.start ≤ i) :
-      ReadStep A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) (.raise au A v c p),
-        audStep R d.ledger d.aud (d.pos + 1) A (.raise au A v c p),
-        replay R A get d.aud.refused v rows (c + 1) (d.pos - c), d.buf⟩
+      ReadStep A key st d ⟨d.pos + 1, ledgerStep R d.ledger (d.pos + 1) (.boundary au A v c p),
+        audStep R d.ledger d.aud (d.pos + 1) A (.boundary au A v c p),
+        finishBoundary R A get d.aud.refused v d.aud.lastReset rows (c + 1) (d.pos - c), d.buf⟩
   | reload (d : Reader S) (L : Ledger S) (P : AudLedger S) (rows : S.Rows)
       (hc : d.pos < st.floor.covers A) (hk : key = true)
       (hb : st.body (st.floor.path A) = some (L, P, rows)) :
@@ -112,9 +112,9 @@ structure Good (st : Store S) (seq : Nat → Slot S) : Prop where
   floor_announced : ∀ A, st.floor.covers A = 0 ∨
     ∃ a au, 1 ≤ a ∧ a ≤ st.head ∧ seq a = .snapshot au A (st.floor.covers A) (st.floor.path A) ∧
       AppliedTo R seq A a
-  raise_body : ∀ A r au v c p, 1 ≤ r → r ≤ st.head → seq r = .raise au A v c p → AppliedTo R seq A r →
-    (st.floor.covers A < r → ∃ L' P', st.body p = some (L', P', R.migrate v (rowsAt R seq A c))) ∧
-    (∀ L' P' rows, st.body p = some (L', P', rows) → rows = R.migrate v (rowsAt R seq A c))
+  boundary_body : ∀ A r au v c p, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → AppliedTo R seq A r →
+    (st.floor.covers A < r → ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c))) ∧
+    (∀ L' P' rows, st.body p = some (L', P', rows) → rows = preparedRows R v p (rowsAt R seq A c))
 
 /-- A reader of `A` holds the state of the prefix it applied, and every buffered
 record at or above the first kept slot is genuine. -/
@@ -134,22 +134,22 @@ theorem step_maxCover (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) (x 
   · split
     · cases x with
       | writes a g parts => simp only [audEffect]; split <;> simp
-      | snapshot a b c p => simp only [audEffect]; exact Nat.le_max_left _ _
+      | snapshot a b c p | prepare a b v c p => simp only [audEffect]; exact Nat.le_max_left _ _
       | _ => simp [audEffect]
     · simp [refuseAud]
   · exact Nat.le_refl _
 
-theorem step_lastRaise (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) (x : Slot S) :
-    P.lastRaise ≤ (audStep R L P k A x).lastRaise := by
+theorem step_lastBoundary (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) (x : Slot S) :
+    P.lastBoundary ≤ (audStep R L P k A x).lastBoundary := by
   unfold audStep
   split
   · split
     · rename_i hv
       cases x with
       | writes a g parts => simp only [audEffect]; split <;> simp
-      | raise a b v c p =>
-        simp [audValid] at hv
-        simp [audEffect]; omega
+      | boundary a b v c p =>
+        simp only [audValid, Bool.and_eq_true, decide_eq_true_eq] at hv
+        simp only [audEffect]; omega
       | _ => simp [audEffect]
     · simp [refuseAud]
   · exact Nat.le_refl _
@@ -165,8 +165,8 @@ theorem maxCover_mono (seq : Nat → Slot S) (A : S.Aud) (j : Nat) :
       · subst hj; exact Nat.le_refl _
       · exact Nat.le_trans (ih (by omega)) (step_maxCover R _ _ _ _ _)
 
-theorem lastRaise_mono (seq : Nat → Slot S) (A : S.Aud) (j : Nat) :
-    ∀ k, j ≤ k → (audAt R seq A j).lastRaise ≤ (audAt R seq A k).lastRaise
+theorem lastBoundary_mono (seq : Nat → Slot S) (A : S.Aud) (j : Nat) :
+    ∀ k, j ≤ k → (audAt R seq A j).lastBoundary ≤ (audAt R seq A k).lastBoundary
   | k, hk => by
     induction k with
     | zero => have : j = 0 := by omega
@@ -174,7 +174,7 @@ theorem lastRaise_mono (seq : Nat → Slot S) (A : S.Aud) (j : Nat) :
     | succ k ih =>
       by_cases hj : j = k + 1
       · subst hj; exact Nat.le_refl _
-      · exact Nat.le_trans (ih (by omega)) (step_lastRaise R _ _ _ _ _)
+      · exact Nat.le_trans (ih (by omega)) (step_lastBoundary R _ _ _ _ _)
 
 theorem applied_aud (seq : Nat → Slot S) (A : S.Aud) {j : Nat} (hj : 1 ≤ j) (h : AppliedTo R seq A j) :
     audAt R seq A j = audEffect (audAt R seq A (j - 1)) j A (seq j) := by
@@ -189,9 +189,9 @@ theorem announced_maxCover (seq : Nat → Slot S) (A : S.Aud) {a : Nat} {au : S.
   rw [applied_aud R seq A ha happ, hs]
   simp only [audEffect]; exact Nat.le_max_right _ _
 
-theorem raise_lastRaise (seq : Nat → Slot S) (A : S.Aud) {r : Nat} {au : S.Dev} {v c : Nat}
-    {p : S.Path} (hr : 1 ≤ r) (hs : seq r = .raise au A v c p) (happ : AppliedTo R seq A r) :
-    (audAt R seq A r).lastRaise = r := by
+theorem boundary_lastBoundary (seq : Nat → Slot S) (A : S.Aud) {r : Nat} {au : S.Dev} {v : Boundary} {c : Nat}
+    {p : S.Path} (hr : 1 ≤ r) (hs : seq r = .boundary au A v c p) (happ : AppliedTo R seq A r) :
+    (audAt R seq A r).lastBoundary = r := by
   rw [applied_aud R seq A hr happ, hs]
   simp [audEffect]
 
@@ -232,19 +232,19 @@ theorem read_ok {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S
     simp only [rowsStep]
     rw [hd.ledger, hd.aud, hd.rows]
     cases hs : seq (d.pos + 1) with
-    | raise au a v c p =>
-      rw [rowsAt_raise R seq A d.pos hs]
+    | boundary au a v c p =>
+      rw [rowsAt_boundary R seq A d.pos hs]
       by_cases ha : a = A
       · subst ha
         have hf' := hnr au v c p hs
         rw [hd.ledger, hd.aud, hs] at hf'
         simp [hf', touches]
-      · have : touches A (Slot.raise au a v c p) = false := by simp [touches, ha]
+      · have : touches A (Slot.boundary au a v c p) = false := by simp [touches, ha]
         simp [this, ha]
     | _ =>
-      have hnr' : ∀ au a v c p, seq (d.pos + 1) ≠ .raise au a v c p := by intro _ _ _ _ _; simp [hs]
+      have hnr' : ∀ au a v c p, seq (d.pos + 1) ≠ .boundary au a v c p := by intro _ _ _ _ _; simp [hs]
       rw [rowsAt_other R seq A d.pos hnr', hs]
-  | raise au v c p hb hf hv hk L' P' rows hbody get hget =>
+  | boundary au v c p hb hf hv hk L' P' rows hbody get hget =>
     obtain ⟨_, hhead, hxs⟩ := checked_genuine R hd hb hf
     rw [hd.ledger, hd.aud] at hv
     refine ⟨by simp only; rw [hd.ledger, ledgerAt_succ, ← hxs],
@@ -253,13 +253,13 @@ theorem read_ok {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) {A : S
     have happ : AppliedTo R seq A (d.pos + 1) := by
       refine ⟨by rw [← hxs]; simp [touches], ?_⟩
       simp only [Nat.add_sub_cancel]; rw [← hxs]; exact hv
-    have hrows : rows = R.migrate v (rowsAt R seq A c) :=
-      (g.raise_body A (d.pos + 1) au v c p (by omega) hhead hxs.symm happ).2 L' P' rows hbody
-    rw [rowsAt_raise R seq A d.pos hxs.symm]
+    have hrows : rows = preparedRows R v p (rowsAt R seq A c) :=
+      (g.boundary_body A (d.pos + 1) au v c p (by omega) hhead hxs.symm happ).2 L' P' rows hbody
+    rw [rowsAt_boundary R seq A d.pos hxs.symm]
     simp only [true_and, hv, ite_true]
     rw [hrows, hd.aud]
     have hc : c < d.pos + 1 := by simp [audValid] at hv; omega
-    apply replay_congr
+    apply finishBoundary_congr
     intro i h1 h2
     obtain ⟨hgi, hfi⟩ := hget i (by omega) (by omega)
     exact (checked_genuine R hd hgi hfi).2.2
@@ -344,7 +344,7 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
     intro i h1 h2
     rw [g.kept_genuine i (by omega), g.first_genuine i (by omega) h2]
   -- The plain case: fetch the next slot and apply it.
-  have plain : (∀ au v c p, seq (d.pos + 1) = .raise au A v c p →
+  have plain : (∀ au v c p, seq (d.pos + 1) = .boundary au A v c p →
       audValid R d.ledger d.aud (d.pos + 1) A (seq (d.pos + 1)) = false) →
       ∃ lo n d', ReadStep R A true st (fetched st d lo n) d' ∧ d.pos < d'.pos := by
     intro hnr
@@ -355,15 +355,15 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
     · rw [fetched_pos]; omega
     · simpa using hnr
   cases hs : seq (d.pos + 1) with
-  | raise au a v c p =>
-    by_cases hva : a = A ∧ audValid R d.ledger d.aud (d.pos + 1) A (.raise au a v c p) = true
+  | boundary au a v c p =>
+    by_cases hva : a = A ∧ audValid R d.ledger d.aud (d.pos + 1) A (.boundary au a v c p) = true
     · obtain ⟨rfl, hv⟩ := hva
       have happ : AppliedTo R seq a (d.pos + 1) := by
         refine ⟨by rw [hs]; simp [touches], ?_⟩
         simp only [Nat.add_sub_cancel]; rw [hs, ← hd.ledger, ← hd.aud]; exact hv
-      obtain ⟨L', P', hb⟩ := (g.raise_body a (d.pos + 1) au v c p (by omega) (by omega) hs happ).1
+      obtain ⟨L', P', hb⟩ := (g.boundary_body a (d.pos + 1) au v c p (by omega) (by omega) hs happ).1
         (by omega)
-      -- The raise covers the floor's snapshot.
+      -- Either boundary kind covers the floor's snapshot.
       have hcov : st.floor.covers a ≤ c := by
         rcases g.floor_announced a with h0 | ⟨a', au', ha1, hahead, has, haapp⟩
         · omega
@@ -374,9 +374,9 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
               rw [hd.aud] at hv; simp [audValid] at hv; omega
             omega
           · have hne : a' ≠ d.pos + 1 := by intro he; rw [he, hs] at has; cases has
-            have hlr := raise_lastRaise R seq a (by omega) hs happ
-            have hmono := lastRaise_mono R seq a (d.pos + 1) (a' - 1) (by omega)
-            have hsv : (audAt R seq a (a' - 1)).lastRaise ≤ st.floor.covers a := by
+            have hlr := boundary_lastBoundary R seq a (by omega) hs happ
+            have hmono := lastBoundary_mono R seq a (d.pos + 1) (a' - 1) (by omega)
+            have hsv : (audAt R seq a (a' - 1)).lastBoundary ≤ st.floor.covers a := by
               have := haapp.2
               rw [has] at this
               simp [audValid] at this
@@ -384,7 +384,7 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
             omega
       have hc : c < d.pos + 1 := by simp [audValid] at hv; omega
       refine ⟨c + 1, d.pos + 1 - c, _,
-        ReadStep.raise (fetched st d (c + 1) (d.pos + 1 - c)) au v c p ?_ ?_ (by simpa using hv) rfl
+        ReadStep.boundary (fetched st d (c + 1) (d.pos + 1 - c)) au v c p ?_ ?_ (by simpa using hv) rfl
           L' P' _ hb seq ?_, by simp⟩
       · rw [fetched_pos, fetched_buf_in st d (by omega) (by omega), hslot _ (by omega) (by omega), hs]
       · rw [fetched_pos]; omega
@@ -397,7 +397,7 @@ theorem read_progress {st : Store S} {seq : Nat → Slot S} (g : Good R st seq) 
       rw [hs] at he
       cases he
       rw [hs]
-      cases h : audValid R d.ledger d.aud (d.pos + 1) A (.raise au A v c p)
+      cases h : audValid R d.ledger d.aud (d.pos + 1) A (.boundary au A v c p)
       · rfl
       · exact absurd ⟨rfl, h⟩ hva
   | _ =>
@@ -465,7 +465,7 @@ theorem keyless_passes_only_others {st : Store S} {seq : Nat → Slot S} {A : S.
     cases h : touches A x
     · rfl
     · exact absurd (hk h) (by simp)
-  | raise _ _ _ _ _ _ _ hk => cases hk
+  | boundary _ _ _ _ _ _ _ hk => cases hk
   | reload _ _ _ _ hk => cases hk
 
 /-- **A reader stops at a slot it should read but cannot.** A reader of `A`

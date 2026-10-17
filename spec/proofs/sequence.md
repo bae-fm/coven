@@ -11,12 +11,15 @@ the audit with the other proofs.
 Slot `<store>/seq/<n>` is claimed create-once. It holds an admin entry, one
 device's batch of writes for a sync pass (one part per audience it writes to),
 a key copy, a snapshot announcement for one audience ("audience `A` as of slot
-`c` is at path `p`"), or a schema raise of one audience, which announces its
-snapshot the same way. The audiences are the store and each circle. Every
+`c` is at path `p`"), a preparation announcement, or a schema raise or reset
+that activates its matching preparation. The audiences are the store and each circle. Every
 device applies slots in strict order.
 
-Five results are checked counterexamples, and each one is the reason for a rule:
+Checked counterexamples explain the rules:
 
+- **Earlier live losers retain their claims.** Deleting the winner lets an
+  earlier live loser return before a new claimant
+  ([Unique values and owner rows](#unique-values-and-owner-rows)).
 - **Snapshots cover the last raise.** A snapshot announced after a raise must
   cover that raise; C6 alone is not enough
   ([Snapshots and deletion](#snapshots-and-deletion)).
@@ -38,25 +41,28 @@ Five results are checked counterexamples, and each one is the reason for a rule:
 
 [`Model`](sequence/CovenSequence/Model.lean) keeps every type abstract: devices,
 members, unique keys, paths, batches, rows, audiences, and admin operations
-other than membership (roles, renames, access, circle membership), whose state
-is `aux`. The rules are abstract too: authority, who may write to an audience,
+other than membership and roles (renames, access, circle membership), whose state
+is `aux`. Authority for membership and store resets is concrete in `Authority`;
+other rules remain abstract: who may write to an audience,
 the effect of other operations, the merge, the converter of old-version parts,
 and the database part of a migration.
 
 For each audience `A`, a device's state has three parts:
 
 - **The ledger** holds what admin slots and key copies decide, the same for
-  every audience. That is members, devices and their removal, member key
+  every audience. That is members and roles, devices and their removal, member key
   generations, `aux`, key copies and refused admin slots. It also holds, per
   device, the last claim number of the slots it claimed: every device numbers
   every slot it claims with one counter, and every slot records its number.
 - **`A`'s audience ledger** holds the first slot that claimed each unique value
-  or owner row of `A`, `A`'s announced snapshots, its schema version, its last
-  raise, and its refused parts.
+  or owner row of `A`, `A`'s announced snapshots and preparations, its schema version,
+  its last raise or reset, its last reset, and its refused parts.
 - **`A`'s rows** come from the abstract merge. A part at an older version is
   converted to `A`'s version. A valid raise of `A` at slot `r` covering `c`
   loads the raiser's migrated rows as of `c`. It then replays the counted `A`
-  parts of slots `c+1` to `r-1`, converted to the new version.
+  parts of slots `c+1` to `r-1`, converted to the new version. A reset loads
+  its chosen rows and discards that suffix. Subsequent writes pass the
+  authored-read reset gate before conversion.
 
 Only admin slots and key copies change the ledger, besides the claim number
 every slot records, and only slots with a part or announcement for `A` change
@@ -70,10 +76,11 @@ These are the validity rules:
 - **A part counts** when its device is registered and not removed, its member
   is a member, the part was made under that member's current key generation,
   the device may write to `A`, and the part's version is one `A` has reached.
-- **A raise of `A`** must cover every snapshot of `A` announced before it (C6)
-  and `A`'s last raise, and must raise the version.
-- **A snapshot of `A`** must cover less than its own slot and must cover `A`'s
-  last raise (the version rule).
+- **A raise or reset of `A`** requires a matching announced preparation and
+  audience authority. Its coverage must include every earlier announcement
+  (C6) and the last raise or reset. A raise must increase the version.
+- **Every announcement of `A`** covers less than its own slot, never decreases
+  announced coverage and covers the last raise or reset (the version rule).
 
 ## Claiming a slot
 
@@ -128,7 +135,7 @@ storage model:
   position hold the same state, on any good storages, for example before and
   after a deletion.
 
-## The removal cut-off
+## Authored causal past
 
 [`Causality`](sequence/CovenSequence/Causality.lean) records each write's
 original device, number, timestamp, schema, bytes and `readThrough`.
@@ -140,6 +147,8 @@ original device, number, timestamp, schema, bytes and `readThrough`.
   within-slot write order consumes every cause first. Receivers agree on
   exactly the authored prefix plus own predecessors, including predecessors
   outside that prefix. A later claim does not add intervening remote writes.
+
+## The removal cut-off
 
 [`Cutoff`](sequence/CovenSequence/Cutoff.lean):
 
@@ -194,6 +203,19 @@ These are permanent abstract claims. Unique values that can be released use
   the selected original write and its authenticated member. The move's slot
   does not become the creation slot.
 
+## Authority and roles
+
+[`Authority`](sequence/CovenSequence/Authority.lean) specializes admission
+without changing entry effects or the ordered ledger.
+
+- `every_prefix_has_admin`, `last_admin_refused`: from the creation binding
+  containing an admin, every applied prefix retains one; a candidate effect
+  leaving none is refused.
+- `applied_membership_authorized`: each applied add, remove or role change
+  was authored by an active admin in the preceding slot state.
+- `store_reset_authorized`: a store reset requires an admin in that state;
+  circle resets and schema raises retain their own audience authority policy.
+
 ## Snapshots and deletion
 
 [`Reader`](sequence/CovenSequence/Reader.lean) models a reader of one audience
@@ -207,23 +229,24 @@ bytes, its genuine content. A reader steps in four ways:
    the fetch shows the slot at or above the first kept slot. A slot with a part
    or announcement for `A` needs `A`'s key. Other audiences' parts are not
    read; the slot's clear metadata says they are not `A`'s.
-3. **Raise:** it applies a valid raise of `A` by loading the raise body and
-   replaying the buffered slots after the raise's coverage, all checked against
-   the floor.
+3. **Raise or reset:** it loads the matching prepared body. A raise replays
+   buffered slots after coverage, checked against the floor; a reset replaces
+   rows without replaying that suffix.
 4. **Reload:** with `A`'s key, it reloads from the floor's snapshot for `A` when
    that covers more than it applied.
 
 [`Retention`](sequence/CovenSequence/Retention.lean) models what happens to
 storage meanwhile:
 
-- **Claims:** a claim of the next slot, its raise body uploaded first.
+- **Claims:** a claim of the next slot, its preparation body uploaded before
+  announcement and still present when activated.
 - **Stale creates:** a stale create of an earlier slot, which is stored only if
   that slot was deleted.
 - **Floor write:** retention writes the floor record conditionally and never
   backwards. Each audience's snapshot is validly announced with its body
   stored, and the first kept slot is covered by every audience's snapshot.
 - **Deletion:** retention then deletes slots below the first kept slot, and
-  bodies no floor names and no raise above the floor needs.
+  bodies no floor names and no raise or reset above the floor needs.
 - **Uploads:** a body uploaded to a fresh path.
 
 There is no separate step that advertises a floor before it takes effect. The
@@ -235,18 +258,8 @@ what make one conditional floor write safe.
 - at or above the first kept slot, records are genuine;
 - each audience's floor snapshot was validly announced, and its body is the
   state it covers;
-- a valid raise's body, when present, is the raiser's migrated rows, and it
-  stays present while the floor has not covered the raise.
-
-[`Deadline`](sequence/CovenSequence/Deadline.lean):
-
-- `bounded_retention`: successful snapshot service U, grace G, maintenance
-  spacing P (including a successful conditional floor write), and deletion
-  service D delete a ready prefix within U+G+P+D. Coverage witnesses must stay
-  usable through the floor update; no device acknowledgements occur in the model.
-- `uncovered_has_no_deadline`: missing coverage in any relevant audience
-  prevents the retention gate at every time. `cut_delete_allowed` connects
-  the service's floor bound to the concrete storage deletion step.
+- a valid boundary's body, when present, is its prepared rows, and it stays
+  present while the floor has not covered the boundary.
 
 - `read_ok`, `reads_ok`: every reader step from a sound reader gives a sound
   reader, whatever was deleted or recreated below the floor. Retained slots are
@@ -259,10 +272,10 @@ what make one conditional floor write safe.
 - `joiner_reaches_head`: a joiner of `A` that loads the floor's snapshot for `A`
   and follows storage reaches the state of a device that applied every slot.
 
-**The raise hold.** The proof of `read_progress` needs every valid raise of `A`
+**The coverage argument.** The proof of `read_progress` needs every valid raise or reset of `A`
 above the floor's coverage to cover the floor's snapshot. C6 gives this for a
-snapshot announced before the raise. The version rule gives it for one
-announced after: such a snapshot covers the raise. So no retention hold is
+snapshot announced before the entry. The version rule gives it for one
+announced after: such a snapshot covers the entry. So no retention hold is
 needed.
 
 - `ReaderExamples.slot4_refused`: a snapshot covering slot 2, announced at slot
@@ -273,6 +286,33 @@ needed.
   floor naming that snapshot has a true body and genuine kept slots. A joiner
   with the key still never moves past slot 2 while the head is 4, because slot
   3 is a valid raise whose replay needs the deleted slot 2.
+
+[`Preparations`](sequence/CovenSequence/Preparations.lean):
+
+- `ordinary_covers_boundary`: an ordinary announcement covers every preceding
+  applied raise and reset. The generalized `read_progress` and `reaches_head`
+  prove progress with both kinds under the same floor rule.
+  `ordinary_matches_schema_reset` proves the captured schema and reset
+  equal the state immediately before announcement.
+- `announcement_uploaded`, `activation_requires_preparation`: upload precedes
+  the announcement; activation requires an earlier matching counted
+  announcement. `activated_is_usable` admits its coverage only after activation.
+- `preparation_no_effect`, `abandoned_supplies_no_coverage`,
+  `abandoned_not_usable`: a separately announced preparation that never takes
+  effect changes neither rows nor schema/reset and supplies no usable snapshot.
+- `reset_replaces`: reset loads the chosen rows without replaying pre-reset
+  writes after the capture. Body honesty and the batch reset filter are
+  explicit model boundaries.
+
+[`Deadline`](sequence/CovenSequence/Deadline.lean):
+
+- `bounded_retention`: successful snapshot service U, grace G, maintenance
+  spacing P (including a successful conditional floor write), and deletion
+  service D delete a ready prefix within U+G+P+D. Coverage witnesses must stay
+  usable through the floor update; no device acknowledgements occur in the model.
+- `uncovered_has_no_deadline`: missing coverage in any relevant audience
+  prevents the retention gate at every time. `cut_delete_allowed` connects
+  the service's floor bound to the concrete storage deletion step.
 
 ## Audiences and devices
 
@@ -402,8 +442,10 @@ sending it and creates only what it recorded, signed with its id.
 
 ## Assumptions and what is not modelled
 
-- Snapshot and raise bodies are honest: each is the announcer's state as of its
-  coverage, or the raiser's migrated rows.
+- Snapshot bodies are honest: ordinary bodies contain the covered state;
+  raise bodies contain migrated rows; reset bodies contain the chosen rows.
+  Floor reload uses ordinary snapshots; prepared bodies are consumed at their
+  matching entries. Direct floor loading of a prepared body is not modelled.
 - Admin slots and key copies are readable by every member device. So are a
   slot's device, claim number and each part's audience: they are sealed under
   the store key, which every member holds, and the provider sees only the slot

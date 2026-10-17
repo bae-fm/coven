@@ -80,3 +80,18 @@ import CovenSequence
 #print axioms CovenSequence.Owners.later_claim_preserves_creator
 #print axioms CovenSequence.Owners.move_preserves_owner
 #print axioms CovenSequence.Owners.retained_creator
+
+#print axioms CovenSequence.Authority.every_prefix_has_admin
+#print axioms CovenSequence.Authority.applied_membership_authorized
+#print axioms CovenSequence.Authority.last_admin_refused
+#print axioms CovenSequence.Preparations.ordinary_covers_boundary
+#print axioms CovenSequence.Preparations.preparation_announced
+#print axioms CovenSequence.Preparations.activation_requires_preparation
+#print axioms CovenSequence.Preparations.preparation_no_effect
+#print axioms CovenSequence.Preparations.reset_replaces
+#print axioms CovenSequence.Preparations.abandoned_supplies_no_coverage
+#print axioms CovenSequence.Authority.store_reset_authorized
+#print axioms CovenSequence.Preparations.activated_is_usable
+#print axioms CovenSequence.Preparations.announcement_uploaded
+#print axioms CovenSequence.Preparations.abandoned_not_usable
+#print axioms CovenSequence.Preparations.ordinary_matches_schema_reset

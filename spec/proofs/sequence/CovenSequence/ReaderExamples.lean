@@ -13,8 +13,8 @@ The version rule refuses that announcement: a snapshot announced at slot `a`
 must cover the last raise of its audience before `a`. So the floor can never
 name it (`Good.floor_announced`), and `deletion_keeps_reachable` holds.
 
-Slots, in one audience: 1 and 2 are batches; 3 raises to version 1 with a
-snapshot covering slot 1; 4 announces a snapshot covering slot 2, from before
+Slots, in one audience: 1 is a batch; 2 announces a preparation covering 1;
+3 raises to version 1 using that preparation; 4 announces a snapshot covering slot 2, from before
 the raise. A device can produce slot 4: it captures at slot 2, its claim of
 slot 3 is refused by the raise, and it claims slot 4 with the same snapshot.
 -/
@@ -24,7 +24,7 @@ namespace CovenSequence.ReaderExamples
 open CovenSequence
 
 /-- One device of one member, one audience; paths are numbers. -/
-def sig : Sig where
+abbrev sig : Sig where
   Dev := Unit
   Mem := Unit
   Key := Unit
@@ -38,6 +38,7 @@ def sig : Sig where
 
 def ledger0 : Ledger sig where
   member := fun _ => true
+  role := fun _ => .admin
   deviceOf := fun _ => some ()
   removed := fun _ => false
   keyGen := fun _ => 0
@@ -50,7 +51,9 @@ def aud0 : AudLedger sig where
   owner := fun _ => none
   snapshots := []
   maxCover := 0
-  lastRaise := 0
+  lastBoundary := 0
+  lastReset := 0
+  preparations := []
   version := 0
   refused := fun _ => false
 
@@ -62,6 +65,9 @@ def rules : Rules sig where
   merge := fun (r : List Nat) (b : Nat) => r ++ [b]
   convert := fun _ _ b => b
   migrate := fun v (r : List Nat) => r ++ [1000 + v]
+  resetRows := fun _ => []
+  boundaryAllowed := fun _ _ _ _ => true
+  sinceReset := fun _ b => b
   number := fun _ => 0
   ledger0 := ledger0
   aud0 := fun _ => aud0
@@ -71,8 +77,8 @@ def part (b : Nat) : Unit → Option (WPart sig) := fun _ => some ⟨0, [], b⟩
 
 def seqEx : Nat → Slot sig
   | 1 => .writes () 0 (part 10)
-  | 2 => .writes () 0 (part 20)
-  | 3 => .raise () () 1 1 (1 : Nat)
+  | 2 => .prepare () () (.raise 1) 1 (1 : Nat)
+  | 3 => .boundary () () (.raise 1) 1 (1 : Nat)
   | 4 => .snapshot () () 2 (2 : Nat)
   | _ => .writes () 0 (fun _ => none)
 
@@ -82,7 +88,7 @@ and meets C6. -/
 theorem slot4_refused :
     audValid rules (ledgerAt rules seqEx 3) (audAt rules seqEx () 3) 4 () (seqEx 4) = false ∧
     active (ledgerAt rules seqEx 3) () = true ∧ 2 < 4 ∧
-    (audAt rules seqEx () 3).lastRaise = 3 ∧
+    (audAt rules seqEx () 3).lastBoundary = 3 ∧
     audValid rules (ledgerAt rules seqEx 2) (audAt rules seqEx () 2) 3 () (seqEx 3) = true ∧
     (audAt rules seqEx () 2).maxCover ≤ 1 := by
   decide
@@ -145,11 +151,11 @@ theorem stale_floor_strands_joiner :
         have h3 := hb 3 x' hb'
         simp [st, seqEx] at h3
         subst h3
-        have := hnr () 1 1 (1 : Nat) rfl
+        have := hnr () (.raise 1) 1 (1 : Nat) rfl
         rw [hl, ha, hp] at this
         revert this
         decide
-      | raise au v c p' hb' hf hv hk L' P' rows hbody get hget =>
+      | boundary au v c p' hb' hf hv hk L' P' rows hbody get hget =>
         exfalso
         rw [hp] at hb'
         have h3 := hb 3 _ hb'

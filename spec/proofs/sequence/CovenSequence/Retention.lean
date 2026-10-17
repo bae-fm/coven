@@ -6,7 +6,7 @@ import CovenSequence.Claim
 
 What happens to storage while devices read it:
 
-- a claim stores the next slot (its raise body, if any, uploaded first);
+- a claim stores the next slot (its prepared body, if any, uploaded first);
 - a stale create of an earlier slot: create-once refuses it while the slot is
   kept, and stores it if the slot was deleted;
 - retention writes the floor record conditionally, never backwards: every
@@ -14,8 +14,8 @@ What happens to storage while devices read it:
   audience's snapshot is validly announced with its body stored, and the
   first kept slot is covered by every audience's snapshot;
 - retention deletes slots below the first kept slot, and snapshot bodies no
-  floor names and no raise above the floor needs;
-- a snapshot body is uploaded to a fresh path no applied raise names.
+  floor names and no raise or reset above the floor needs;
+- a snapshot body is uploaded to a fresh path no applied raise or reset names.
 
 There is no separate step that advertises a floor before it takes effect:
 the floor record is written, then slots below it are deleted. A reader's
@@ -29,8 +29,11 @@ variable {S : Sig} (R : Rules S)
 /-- Storage steps, for the claimed sequence `seq`. -/
 inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
   | claim (st : Store S)
-      (hbody : ∀ A au v c p, seq (st.head + 1) = .raise au A v c p → AppliedTo R seq A (st.head + 1) →
-        ∃ L' P', st.body p = some (L', P', R.migrate v (rowsAt R seq A c))) :
+      (hprepared : ∀ A au v c p, seq (st.head + 1) = .prepare au A v c p →
+        AppliedTo R seq A (st.head + 1) →
+        ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c)))
+      (hbody : ∀ A au v c p, seq (st.head + 1) = .boundary au A v c p → AppliedTo R seq A (st.head + 1) →
+        ∃ L' P', st.body p = some (L', P', preparedRows R v p (rowsAt R seq A c))) :
       StoreStep seq st
         { st with
           slot := fun i => if i = st.head + 1 then some (seq (st.head + 1)) else st.slot i
@@ -48,11 +51,11 @@ inductive StoreStep (seq : Nat → Slot S) : Store S → Store S → Prop
   | delete (st : Store S) (i : Nat) (hi : i < st.floor.start) :
       StoreStep seq st { st with slot := fun j => if j = i then none else st.slot j }
   | deleteBody (st : Store S) (p : S.Path) (hp : ∀ A, p ≠ st.floor.path A)
-      (hraise : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .raise au A v c p → AppliedTo R seq A r →
+      (hraise : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → AppliedTo R seq A r →
         r ≤ st.floor.covers A) :
       StoreStep seq st { st with body := fun q => if q = p then none else st.body q }
   | upload (st : Store S) (p : S.Path) (b : Ledger S × AudLedger S × S.Rows) (hp : st.body p = none)
-      (hfree : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .raise au A v c p → ¬ AppliedTo R seq A r) :
+      (hfree : ∀ A r au v c, 1 ≤ r → r ≤ st.head → seq r = .boundary au A v c p → ¬ AppliedTo R seq A r) :
       StoreStep seq st { st with body := fun q => if q = p then some b else st.body q }
 
 theorem store_mono {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R seq st st') :
@@ -66,7 +69,7 @@ theorem store_mono {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
 theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R seq st st')
     (g : Good R st seq) : Good R st' seq := by
   cases s with
-  | claim hbody =>
+  | claim hprepared hbody =>
     refine ⟨fun i h1 h2 => ?_, fun i hi => ?_, fun i hi => ?_, fun i hi => ?_, g.start_le,
       fun A => by simp only; have := g.covers_le A; omega, g.floor_body, fun A => ?_,
       fun A r au v c p h1 h2 h3 h4 => ?_⟩
@@ -96,10 +99,10 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
         have := Option.some.inj hb'
         simp only [Prod.mk.injEq] at this
         exact this.2.2.symm
-      · exact g.raise_body A r au v c p h1 (by omega) h3 h4
+      · exact g.boundary_body A r au v c p h1 (by omega) h3 h4
   | create i x hi hih =>
     refine ⟨g.first_genuine, g.first_out, fun j hj => ?_, fun j hj => ?_, g.start_le, g.covers_le,
-      g.floor_body, g.floor_announced, g.raise_body⟩
+      g.floor_body, g.floor_announced, g.boundary_body⟩
     · simp only at hj ⊢
       by_cases hji : j = i
       · subst hji; omega
@@ -115,11 +118,11 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
   | writeFloor F hstart hcov hle hhead hann hbody =>
     exact ⟨g.first_genuine, g.first_out, g.slot_out, fun j hj => g.kept_genuine j (by simp only at hj; omega),
       hle, hhead, hbody, hann, fun A r au v c p h1 h2 h3 h4 =>
-        ⟨fun hlt => (g.raise_body A r au v c p h1 h2 h3 h4).1 (by have := hcov A; simp only at hlt; omega),
-         (g.raise_body A r au v c p h1 h2 h3 h4).2⟩⟩
+        ⟨fun hlt => (g.boundary_body A r au v c p h1 h2 h3 h4).1 (by have := hcov A; simp only at hlt; omega),
+         (g.boundary_body A r au v c p h1 h2 h3 h4).2⟩⟩
   | delete i hi =>
     refine ⟨g.first_genuine, g.first_out, fun j hj => ?_, fun j hj => ?_, g.start_le, g.covers_le,
-      g.floor_body, g.floor_announced, g.raise_body⟩
+      g.floor_body, g.floor_announced, g.boundary_body⟩
     · simp only; by_cases h : j = i
       · simp [h]
       · simp only [h, ite_false]; exact g.slot_out j hj
@@ -132,10 +135,10 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
     · simp only [Ne.symm (hp A), ite_false]; exact g.floor_body A
     · by_cases hq : q = p
       · subst hq; have := hraise A r au v c h1 h2 h3 h4; simp only at hlt; omega
-      · simp only [hq, ite_false]; exact (g.raise_body A r au v c q h1 h2 h3 h4).1 hlt
+      · simp only [hq, ite_false]; exact (g.boundary_body A r au v c q h1 h2 h3 h4).1 hlt
     · by_cases hq : q = p
       · subst hq; simp at hb
-      · simp only [hq, ite_false] at hb; exact (g.raise_body A r au v c q h1 h2 h3 h4).2 L' P' rows hb
+      · simp only [hq, ite_false] at hb; exact (g.boundary_body A r au v c q h1 h2 h3 h4).2 L' P' rows hb
   | upload p b hp hfree =>
     refine ⟨g.first_genuine, g.first_out, g.slot_out, g.kept_genuine, g.start_le, g.covers_le,
       fun A => ?_, g.floor_announced, fun A r au v c q h1 h2 h3 h4 => ?_⟩
@@ -143,7 +146,7 @@ theorem store_good {seq : Nat → Slot S} {st st' : Store S} (s : StoreStep R se
         intro he; have := g.floor_body A; rw [he, hp] at this; cases this
       simp only [hne, ite_false]; exact g.floor_body A
     · have hne : q ≠ p := by intro he; subst he; exact hfree A r au v c h1 h2 h3 h4
-      simp only [hne, ite_false]; exact g.raise_body A r au v c q h1 h2 h3 h4
+      simp only [hne, ite_false]; exact g.boundary_body A r au v c q h1 h2 h3 h4
 
 /-- **Storage steps keep every sound reader sound**: its buffered records
 were checked against a floor that only moves forward. -/

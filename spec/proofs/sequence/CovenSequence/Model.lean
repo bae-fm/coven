@@ -4,8 +4,8 @@
 One numbered sequence per store. Slot `k` holds one of: an admin entry, one
 device's batch of data writes for a sync pass (with one part per audience it
 writes to), a key copy, a snapshot announcement for one audience ("audience
-`A` as of slot `c` is at path `p`"), or a schema raise of one audience, which
-announces that audience's raise snapshot the same way. The audiences are the
+`A` as of slot `c` is at path `p`"), a preparation announcement, or a schema raise or reset of one audience
+that activates its previously announced body. The audiences are the
 store and each circle. A slot's kind, and which audiences its parts or
 announcement belong to, and its device and claim number, are readable by every
 member device: the kind in the clear, the rest sealed under the store key.
@@ -14,13 +14,13 @@ Every device applies slots in strict order, so its state is a function of the
 prefix it applied. For each audience `A` the state has three parts:
 
 - the *ledger*: what admin slots decide, the same for every audience. That is
-  members, devices and their removal, member key generations, other admin
-  state (roles, names, access, circle membership) abstractly as `aux`, key
+  members and roles, devices and their removal, member key generations, other admin
+  state (names, access, circle membership) abstractly as `aux`, key
   copies, refused admin slots, and per device the last claim number it
   claimed;
 - the *audience ledger* of `A`: the first slot that claimed each unique value
   or owner row of `A`, `A`'s announced snapshots, its schema version, its last
-  raise, and its refused parts;
+  raise or reset, preparations, and its refused parts;
 - the *rows* of `A`, through an abstract deterministic merge. A part made at an
   older version is converted by the app's abstract converter. A raise of `A`
   covering `c` replaces the rows with the raiser's migrated rows as of `c` and
@@ -52,7 +52,7 @@ structure Sig where
   Batch : Type
   /-- One audience's merged rows. -/
   Rows : Type
-  /-- Admin operations other than membership: roles, renames, access, circles. -/
+  /-- Admin operations other than membership and roles: renames, access, circles. -/
   Op : Type
   /-- The admin state those operations change. -/
   Aux : Type
@@ -68,10 +68,16 @@ attribute [instance] Sig.decDev Sig.decMem Sig.decKey Sig.decPath Sig.decAud
 
 variable {S : Sig}
 
+inductive Role where
+  | member
+  | admin
+  deriving DecidableEq
+
 /-- Admin entries. -/
 inductive Entry (S : Sig) where
-  | addMember (m : S.Mem)
+  | addMember (m : S.Mem) (role : Role)
   | removeMember (m : S.Mem)
+  | changeRole (m : S.Mem) (role : Role)
   | addDevice (d : S.Dev) (m : S.Mem)
   | removeDevice (d : S.Dev)
   | replaceKey (m : S.Mem)
@@ -84,6 +90,12 @@ structure WPart (S : Sig) where
   claims : List S.Key
   batch : S.Batch
 
+/-- An admin action that activates a prepared audience snapshot. -/
+inductive Boundary where
+  | raise (version : Nat)
+  | reset
+  deriving DecidableEq
+
 /-- What a slot holds. Each kind names the device that claimed it. -/
 inductive Slot (S : Sig) where
   | admin (author : S.Dev) (e : Entry S)
@@ -92,11 +104,13 @@ inductive Slot (S : Sig) where
   | writes (author : S.Dev) (keyGen : Nat) (parts : S.Aud → Option (WPart S))
   | keyCopy (author : S.Dev) (recipient : S.Mem) (keyGen : Nat)
   | snapshot (author : S.Dev) (aud : S.Aud) (covers : Nat) (path : S.Path)
-  | raise (author : S.Dev) (aud : S.Aud) (version : Nat) (covers : Nat) (path : S.Path)
+  | prepare (author : S.Dev) (aud : S.Aud) (kind : Boundary) (covers : Nat) (path : S.Path)
+  | boundary (author : S.Dev) (aud : S.Aud) (kind : Boundary) (covers : Nat) (path : S.Path)
 
 /-- What admin slots decide. -/
 structure Ledger (S : Sig) where
   member : S.Mem → Bool
+  role : S.Mem → Role
   /-- The member each device was registered to. Never changes once set. -/
   deviceOf : S.Dev → Option S.Mem
   removed : S.Dev → Bool
@@ -116,8 +130,10 @@ structure AudLedger (S : Sig) where
   snapshots : List (Nat × Nat × S.Path)
   /-- The largest coverage of an announced snapshot. -/
   maxCover : Nat
-  /-- The slot of the last raise. -/
-  lastRaise : Nat
+  /-- The slot of the last raise or reset. -/
+  lastBoundary : Nat
+  lastReset : Nat
+  preparations : List (Boundary × Nat × S.Path)
   version : Nat
   refused : Nat → Bool
 
@@ -135,6 +151,10 @@ structure Rules (S : Sig) where
   convert : Nat → Nat → S.Batch → S.Batch
   /-- `migrate version rows`: the database part of the raise's migrations. -/
   migrate : Nat → S.Rows → S.Rows
+  resetRows : S.Path → S.Rows
+  boundaryAllowed : Ledger S → S.Dev → S.Aud → Boundary → Bool
+  /-- Keep only each batch's writes whose authored reads include the reset. -/
+  sinceReset : Nat → S.Batch → S.Batch
   /-- The claim number a slot carries: its device's counter at the claim. -/
   number : Slot S → Nat
   ledger0 : Ledger S
@@ -158,8 +178,9 @@ def counts (L : Ledger S) (d : S.Dev) (g : Nat) : Bool :=
 
 /-- The checks of an entry that do not depend on roles. -/
 def structural (L : Ledger S) : Entry S → Bool
-  | .addMember m => !L.member m
+  | .addMember m _ => !L.member m
   | .removeMember m => L.member m
+  | .changeRole m _ => L.member m
   | .addDevice d m => (L.deviceOf d).isNone && L.member m
   | .removeDevice d => (L.deviceOf d).isSome && !L.removed d
   | .replaceKey m => L.member m
@@ -168,11 +189,14 @@ def structural (L : Ledger S) : Entry S → Bool
 /-- An entry's effect. Removing a member removes every device registered to
 it, so re-adding the member does not revive them. -/
 def applyEntry (L : Ledger S) : Entry S → Ledger S
-  | .addMember m => { L with member := fun x => if x = m then true else L.member x }
+  | .addMember m role =>
+    { L with member := fun x => if x = m then true else L.member x
+             role := fun x => if x = m then role else L.role x }
   | .removeMember m =>
     { L with
       member := fun x => if x = m then false else L.member x
       removed := fun d => L.removed d || L.deviceOf d == some m }
+  | .changeRole m role => { L with role := fun x => if x = m then role else L.role x }
   | .addDevice d m => { L with deviceOf := fun x => if x = d then some m else L.deviceOf x }
   | .removeDevice d => { L with removed := fun x => if x = d then true else L.removed x }
   | .replaceKey m => { L with keyGen := fun x => if x = m then L.keyGen m + 1 else L.keyGen x }
@@ -200,7 +224,8 @@ def author : Slot S → S.Dev
   | .writes d _ _ => d
   | .keyCopy d _ _ => d
   | .snapshot d _ _ _ => d
-  | .raise d _ _ _ _ => d
+  | .prepare d _ _ _ _ => d
+  | .boundary d _ _ _ _ => d
 
 /-- Record a claimed slot's number for its device, whether or not the slot is
 valid: a refused slot was still claimed. -/
@@ -221,7 +246,7 @@ def ledgerStep (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
 def touches (A : S.Aud) : Slot S → Bool
   | .writes _ _ parts => (parts A).isSome
   | .snapshot _ a _ _ => decide (a = A)
-  | .raise _ a _ _ _ => decide (a = A)
+  | .prepare _ a _ _ _ | .boundary _ a _ _ _ => decide (a = A)
   | _ => false
 
 /-- Whether slot `k`'s part for `A` is valid, against the ledger and `A`'s
@@ -229,19 +254,24 @@ ledger as of slot `k-1`.
 
 - A part counts under the removal cut-off, when its device may write to `A`,
   and at a version `A` has reached.
-- A snapshot must cover less than its own slot and cover `A`'s last raise:
-  it is at `A`'s version (the version rule).
-- A raise must cover every snapshot of `A` announced before it (C6) and `A`'s
-  last raise, and raise the version. -/
+- Every announcement covers less than its own slot, never decreases
+  announced coverage and covers the last raise or reset.
+- A boundary requires its matching preparation, audience authority and
+  coverage of every earlier announcement. A raise increases the version. -/
 def audValid (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) : Slot S → Bool
   | .writes d g parts =>
     match parts A with
     | some w => counts L d g && R.mayWrite L d A && decide (w.version ≤ P.version)
     | none => true
-  | .snapshot d _ c _ => active L d && decide (c < k) && decide (P.lastRaise ≤ c)
-  | .raise d _ v c _ =>
-    active L d && decide (c < k) && decide (P.maxCover ≤ c) && decide (P.lastRaise ≤ c) &&
-      decide (P.version < v)
+  | .snapshot d _ c _ =>
+    active L d && decide (c < k) && decide (P.maxCover ≤ c) && decide (P.lastBoundary ≤ c)
+  | .prepare d _ kind c _ =>
+    active L d && decide (c < k) && decide (P.maxCover ≤ c) && decide (P.lastBoundary ≤ c) &&
+      (match kind with | .raise v => decide (P.version < v) | .reset => true)
+  | .boundary d _ kind c p =>
+    active L d && R.boundaryAllowed L d A kind && decide (c < k) && decide (P.maxCover ≤ c) &&
+      decide (P.lastBoundary ≤ c) && decide ((kind, c, p) ∈ P.preparations) &&
+      (match kind with | .raise v => decide (P.version < v) | .reset => true)
   | _ => true
 
 /-- First slot wins: a key keeps its owner; an unowned key claimed at `k` goes
@@ -257,7 +287,12 @@ def audEffect (P : AudLedger S) (k : Nat) (A : S.Aud) : Slot S → AudLedger S
     | some w => { P with owner := claimAll P.owner k w.claims }
     | none => P
   | .snapshot _ _ c p => { P with snapshots := (k, c, p) :: P.snapshots, maxCover := max P.maxCover c }
-  | .raise _ _ v _ _ => { P with version := v, lastRaise := k }
+  | .prepare _ _ kind c p =>
+    { P with preparations := (kind, c, p) :: P.preparations, maxCover := max P.maxCover c }
+  | .boundary _ _ kind _ _ =>
+    { P with lastBoundary := k
+             lastReset := match kind with | .raise _ => P.lastReset | .reset => k
+             version := match kind with | .raise v => v | .reset => P.version }
   | _ => P
 
 def refuseAud (P : AudLedger S) (k : Nat) : AudLedger S :=
@@ -278,20 +313,33 @@ def audAt (seq : Nat → Slot S) (A : S.Aud) : Nat → AudLedger S
   | k + 1 => audStep R (ledgerAt R seq k) (audAt seq A k) (k + 1) A (seq (k + 1))
 
 /-- A slot's part for `A` applied to `A`'s rows, converted to `version`. -/
-def applyWrite (A : S.Aud) (version : Nat) (rows : S.Rows) : Slot S → S.Rows
+def applyWrite (A : S.Aud) (version reset : Nat) (rows : S.Rows) : Slot S → S.Rows
   | .writes _ _ parts =>
     match parts A with
-    | some w => R.merge rows (R.convert w.version version w.batch)
+    | some w => R.merge rows (R.convert w.version version (R.sinceReset reset w.batch))
     | none => rows
   | _ => rows
 
 /-- Re-apply the `A` parts of slots `lo .. lo+n-1` from `get`, skipping refused
 ones, converted to `v`. -/
-def replay (A : S.Aud) (get : Nat → Slot S) (refused : Nat → Bool) (v : Nat) :
+def replay (A : S.Aud) (get : Nat → Slot S) (refused : Nat → Bool) (v reset : Nat) :
     S.Rows → Nat → Nat → S.Rows
   | rows, _, 0 => rows
   | rows, lo, n + 1 =>
-    replay A get refused v (if refused lo then rows else applyWrite R A v rows (get lo)) (lo + 1) n
+    replay A get refused v reset (if refused lo then rows else applyWrite R A v reset rows (get lo)) (lo + 1) n
+
+/-- Prepared bodies differ by purpose; reset contents are chosen by the
+resetting device, while a raise migrates the covered prefix. -/
+def preparedRows (kind : Boundary) (path : S.Path) (rows : S.Rows) : S.Rows :=
+  match kind with | .raise v => R.migrate v rows | .reset => R.resetRows path
+
+/-- A raise converts the uncovered suffix. A reset discards that suffix:
+none of it could have read the reset's not-yet-claimed slot. -/
+def finishBoundary (A : S.Aud) (get : Nat → Slot S) (refused : Nat → Bool)
+    (kind : Boundary) (reset : Nat) (rows : S.Rows) (lo n : Nat) : S.Rows :=
+  match kind with
+  | .raise v => replay R A get refused v reset rows lo n
+  | .reset => rows
 
 /-- Audience `A`'s rows after slots `1..k`. A valid raise of `A` at `k+1`
 covering `c` loads the migrated rows as of `c` and replays slots `c+1..k`. -/
@@ -299,14 +347,14 @@ def rowsAt (seq : Nat → Slot S) (A : S.Aud) : Nat → S.Rows
   | 0 => R.rows0 A
   | k + 1 =>
     match seq (k + 1) with
-    | .raise d a v c p =>
+    | .boundary d a v c p =>
       if _h : c < k + 1 ∧ a = A ∧
-          audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (.raise d a v c p) = true then
-        replay R A seq (audAt R seq A k).refused v (R.migrate v (rowsAt seq A c)) (c + 1) (k - c)
+          audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (.boundary d a v c p) = true then
+        finishBoundary R A seq (audAt R seq A k).refused v (audAt R seq A k).lastReset (preparedRows R v p (rowsAt seq A c)) (c + 1) (k - c)
       else rowsAt seq A k
     | x =>
       if touches A x && audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A x then
-        applyWrite R A (audAt R seq A k).version (rowsAt seq A k) x
+        applyWrite R A (audAt R seq A k).version (audAt R seq A k).lastReset (rowsAt seq A k) x
       else rowsAt seq A k
 termination_by k => k
 
@@ -332,12 +380,12 @@ theorem audAt_succ (seq : Nat → Slot S) (A : S.Aud) (k : Nat) :
 theorem rowsAt_zero (seq : Nat → Slot S) (A : S.Aud) : rowsAt R seq A 0 = R.rows0 A := by
   rw [rowsAt]
 
-/-- The rows step at a raise slot. -/
-theorem rowsAt_raise (seq : Nat → Slot S) (A : S.Aud) (k : Nat) {d a v c p}
-    (hs : seq (k + 1) = .raise d a v c p) :
+/-- The rows step at a raise or reset slot. -/
+theorem rowsAt_boundary (seq : Nat → Slot S) (A : S.Aud) (k : Nat) {d a v c p}
+    (hs : seq (k + 1) = .boundary d a v c p) :
     rowsAt R seq A (k + 1) =
-      if a = A ∧ audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (.raise d a v c p) = true then
-        replay R A seq (audAt R seq A k).refused v (R.migrate v (rowsAt R seq A c)) (c + 1) (k - c)
+      if a = A ∧ audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (.boundary d a v c p) = true then
+        finishBoundary R A seq (audAt R seq A k).refused v (audAt R seq A k).lastReset (preparedRows R v p (rowsAt R seq A c)) (c + 1) (k - c)
       else rowsAt R seq A k := by
   rw [rowsAt]
   simp only [hs]
@@ -356,26 +404,34 @@ theorem rowsAt_raise (seq : Nat → Slot S) (A : S.Aud) (k : Nat) {d a v c p}
       exact absurd ⟨hc, hv.1, hv.2⟩ h
     · rfl
 
-/-- The rows step at any slot that is not a raise. -/
+/-- The rows step at any slot that is not a raise or reset. -/
 theorem rowsAt_other (seq : Nat → Slot S) (A : S.Aud) (k : Nat)
-    (hs : ∀ d a v c p, seq (k + 1) ≠ .raise d a v c p) :
+    (hs : ∀ d a v c p, seq (k + 1) ≠ .boundary d a v c p) :
     rowsAt R seq A (k + 1) =
       if touches A (seq (k + 1)) && audValid R (ledgerAt R seq k) (audAt R seq A k) (k + 1) A (seq (k + 1)) then
-        applyWrite R A (audAt R seq A k).version (rowsAt R seq A k) (seq (k + 1))
+        applyWrite R A (audAt R seq A k).version (audAt R seq A k).lastReset (rowsAt R seq A k) (seq (k + 1))
       else rowsAt R seq A k := by
   rw [rowsAt]
   cases h : seq (k + 1) with
-  | raise d a v c p => exact absurd h (hs d a v c p)
+  | boundary d a v c p => exact absurd h (hs d a v c p)
   | _ => simp
 
 /-- A replay reads only the slots it replays. -/
-theorem replay_congr (A : S.Aud) (g₁ g₂ : Nat → Slot S) (refused : Nat → Bool) (v : Nat) :
+theorem replay_congr (A : S.Aud) (g₁ g₂ : Nat → Slot S) (refused : Nat → Bool) (v reset : Nat) :
     ∀ (n : Nat) (rows : S.Rows) (lo : Nat), (∀ i, lo ≤ i → i < lo + n → g₁ i = g₂ i) →
-      replay R A g₁ refused v rows lo n = replay R A g₂ refused v rows lo n
+      replay R A g₁ refused v reset rows lo n = replay R A g₂ refused v reset rows lo n
   | 0, _, _, _ => rfl
   | n + 1, rows, lo, h => by
     simp only [replay]
     rw [h lo (Nat.le_refl _) (by omega)]
-    exact replay_congr A g₁ g₂ refused v n _ (lo + 1) (fun i h1 h2 => h i (by omega) (by omega))
+    exact replay_congr A g₁ g₂ refused v reset n _ (lo + 1) (fun i h1 h2 => h i (by omega) (by omega))
+
+theorem finishBoundary_congr (A : S.Aud) (g₁ g₂ : Nat → Slot S) (refused : Nat → Bool)
+    (kind : Boundary) (reset n : Nat) (rows : S.Rows) (lo : Nat)
+    (same : ∀ i, lo ≤ i → i < lo + n → g₁ i = g₂ i) :
+    finishBoundary R A g₁ refused kind reset rows lo n = finishBoundary R A g₂ refused kind reset rows lo n := by
+  cases kind with
+  | raise v => exact replay_congr R A g₁ g₂ refused v reset n rows lo same
+  | reset => rfl
 
 end CovenSequence

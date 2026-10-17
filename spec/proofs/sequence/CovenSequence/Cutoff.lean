@@ -162,7 +162,7 @@ theorem cutoff (seq : Nat → Slot S) {j k : Nat} (hjk : j ≤ k) {d : S.Dev} {g
   refine ⟨hinv, ?_, ?_, ?_⟩
   · rw [ledgerAt_succ, hw]; simp [ledgerStep, ledgerValid, ledgerEffect]
   · rw [audAt_succ]; simp [audStep, hinv, htouch]
-  · have hnr : ∀ d a v c p, seq (k + 1) ≠ .raise d a v c p := by intro _ _ _ _ _; simp [hw]
+  · have hnr : ∀ d a v c p, seq (k + 1) ≠ .boundary d a v c p := by intro _ _ _ _ _; simp [hw]
     rw [rowsAt_other R seq A k hnr]
     simp [hinv]
 

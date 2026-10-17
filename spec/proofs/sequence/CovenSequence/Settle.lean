@@ -273,27 +273,30 @@ def adminRules : Rules adminSig where
   merge := fun r _ => r
   convert := fun _ _ b => b
   migrate := fun _ r => r
+  resetRows := fun _ => ()
+  boundaryAllowed := fun _ _ _ _ => true
+  sinceReset := fun _ b => b
   number := fun
     | .admin true _ => 1
-    | .admin false (.addMember _) => 1
+    | .admin false (.addMember _ _) => 1
     | .admin false _ => 2
     | _ => 0
-  ledger0 := ⟨fun m => m, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
+  ledger0 := ⟨fun m => m, fun _ => .admin, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
     fun _ => 0⟩
-  aud0 := fun _ => ⟨fun _ => none, [], 0, 0, 0, fun _ => false⟩
+  aud0 := fun _ => ⟨fun _ => none, [], 0, 0, 0, [], 0, fun _ => false⟩
   rows0 := fun _ => ()
 
 open CovenSequence in
 /-- Device `true` adds member `false`; device `false` removes it. -/
 def adminLanded : Nat → Slot adminSig
-  | 1 => .admin true (.addMember false)
+  | 1 => .admin true (.addMember false .member)
   | 2 => .admin false (.removeMember false)
   | _ => .admin false (.other ())
 
 open CovenSequence in
 /-- Device `false` adds member `false` and removes it. -/
 def adminLost : Nat → Slot adminSig
-  | 1 => .admin false (.addMember false)
+  | 1 => .admin false (.addMember false .member)
   | 2 => .admin false (.removeMember false)
   | _ => .admin false (.other ())
 
@@ -311,8 +314,8 @@ theorem admin_state_cannot_settle :
     (ledgerAt adminRules adminLanded 2).claims true = 1 ∧
     (ledgerAt adminRules adminLost 2).claims true = 0 ∧
     (ledgerAt adminRules adminLanded 2).member false = false ∧
-    adminLanded 1 = .admin true (.addMember false) ∧
-    adminLost 1 ≠ .admin true (.addMember false) := by
+    adminLanded 1 = .admin true (.addMember false .member) ∧
+    adminLost 1 ≠ .admin true (.addMember false .member) := by
   refine ⟨rfl, rfl, rfl, rfl, rfl, fun h => ?_⟩
   simp only [adminLost] at h
   injection h with h1

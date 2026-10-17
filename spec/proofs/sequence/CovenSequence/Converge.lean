@@ -6,7 +6,7 @@ import CovenSequence.Model
 A device's state for an audience is a function of the prefix of slots it
 applied: any two devices that applied the same slots `1..k` have the same
 ledger, audience ledger and rows. Readers that follow storage reach exactly
-this state (`read_sound`), so devices agree on every prefix they share.
+this state (`read_ok`), so devices agree on every prefix they share.
 -/
 
 namespace CovenSequence
@@ -42,18 +42,18 @@ theorem rows_prefix (seq₁ seq₂ : Nat → Slot S) (A : S.Aud) :
       have hs := h (k + 1) (by omega) (Nat.le_refl _)
       have hk := ih k (by omega) (fun i h1 h2 => h i h1 (by omega))
       cases hx : seq₁ (k + 1) with
-      | raise d a v c p =>
-        have hx₂ : seq₂ (k + 1) = .raise d a v c p := hs ▸ hx
-        rw [rowsAt_raise R seq₁ A k hx, rowsAt_raise R seq₂ A k hx₂, hl, ha, hk]
+      | boundary d a v c p =>
+        have hx₂ : seq₂ (k + 1) = .boundary d a v c p := hs ▸ hx
+        rw [rowsAt_boundary R seq₁ A k hx, rowsAt_boundary R seq₂ A k hx₂, hl, ha, hk]
         split
         · rename_i hv
           have hc : c < k + 1 := by have := hv.2; simp [audValid] at this; omega
           rw [ih c hc (fun i h1 h2 => h i h1 (by omega))]
-          exact replay_congr R A seq₁ seq₂ _ v _ _ _ (fun i h1 h2 => h i (by omega) (by omega))
+          exact finishBoundary_congr R A seq₁ seq₂ _ v _ _ _ _ (fun i h1 h2 => h i (by omega) (by omega))
         · rfl
       | _ =>
-        have hnr : ∀ d a v c p, seq₁ (k + 1) ≠ .raise d a v c p := by intro _ _ _ _ _; simp [hx]
-        have hnr₂ : ∀ d a v c p, seq₂ (k + 1) ≠ .raise d a v c p := hs ▸ hnr
+        have hnr : ∀ d a v c p, seq₁ (k + 1) ≠ .boundary d a v c p := by intro _ _ _ _ _; simp [hx]
+        have hnr₂ : ∀ d a v c p, seq₂ (k + 1) ≠ .boundary d a v c p := hs ▸ hnr
         rw [rowsAt_other R seq₁ A k hnr, rowsAt_other R seq₂ A k hnr₂, hl, ha, hk, hs]
 
 /-- **Convergence.** For every audience, the state after `k` slots depends
