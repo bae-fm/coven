@@ -44,6 +44,7 @@ pub(crate) struct KeyRecord {
     pub(crate) member: MemberId,
     pub(crate) access_key_id: String,
     pub(crate) author: MemberId,
+    pub(crate) signing: SigningKey,
 }
 
 /// Changes to existing domain values, rather than a copy of the entire state
@@ -218,6 +219,7 @@ impl History {
                 member: *member,
                 access_key_id: access_key_id.clone(),
                 author: header.author,
+                signing: self.state.members[&header.author].keys.signing,
             });
         }
         if let Some((member, keys)) = bound {

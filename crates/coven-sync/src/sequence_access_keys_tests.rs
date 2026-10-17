@@ -4,6 +4,31 @@ use coven_format::admin::StoreChange;
 use coven_storage::Storage;
 use std::sync::Arc;
 
+// §13 and E9: a delivery is authenticated by the applied entry recording its key.
+#[tokio::test]
+async fn a_delivery_uses_the_signing_key_at_its_recorded_slot() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let replacement = ana
+        .sync
+        .replace_member_access_key(ben.identity.member(), Arc::new(group.storage.key_admin()))
+        .await
+        .unwrap();
+    ana.sync.replace_member_keys().await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let delivered = ben.sync.delivered_access_key(Some("ben")).await.unwrap();
+    assert_eq!(
+        delivered.map(|key| key.access_key_id),
+        Some(replacement.key.credentials.access_key_id)
+    );
+    for device in [&ana, &ben] {
+        device.sync.database.close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn an_admin_replacement_delivers_records_and_leaves_the_console_key_owed() {
     let group = Group::new();

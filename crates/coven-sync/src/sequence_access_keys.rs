@@ -445,14 +445,13 @@ impl SequenceSync {
         if held == Some(access_key_id.as_str()) {
             return Ok(None);
         }
-        let recorders: Vec<MemberId> = session
+        let records: Vec<_> = session
             .history
             .key_records
             .iter()
             .filter(|record| record.member == me.member() && record.access_key_id == *access_key_id)
-            .map(|record| record.author)
             .collect();
-        if recorders.is_empty() {
+        if records.is_empty() {
             return Ok(None);
         }
         for object in self
@@ -464,19 +463,19 @@ impl SequenceSync {
             let Ok(routing) = access_key_delivery::routing(&bytes) else {
                 continue;
             };
-            if !recorders.contains(&routing.author) {
-                continue;
-            }
-            let Some(author) = session.history.state.members.get(&routing.author) else {
-                continue;
-            };
-            let Ok(key) =
-                access_key_delivery::open(&me, &author.keys.signing, object.path.as_str(), &bytes)
-            else {
-                continue;
-            };
-            if key.access_key_id == *access_key_id {
-                return Ok(Some(key));
+            for record in records
+                .iter()
+                .filter(|record| record.author == routing.author)
+            {
+                // §13, E9: later replacements do not revoke this entry's signature.
+                let Ok(key) =
+                    access_key_delivery::open(&me, &record.signing, object.path.as_str(), &bytes)
+                else {
+                    continue;
+                };
+                if key.access_key_id == *access_key_id {
+                    return Ok(Some(key));
+                }
             }
         }
         Ok(None)
