@@ -630,9 +630,9 @@
   - announcement: one kind-15 frame:
     `snapshot:SnapshotId | covers:u64 | purpose:Purpose | digest:32 bytes`.
     Its coverage is below this slot. The digest is SHA-256 of the complete
-    snapshot, and its signed prefix must agree on coverage and purpose.
-    Readers check the digest when reading the body; application and coverage
-    can use the verified prefix and announcement without another body read.
+    snapshot. Applying the announcement uses only these signed fields; a reader
+    loading the body checks it against the digest and its prefix against
+    the announced coverage and purpose.
 - A writes slot's body streams across 64-KiB chunks; there is no enclosing
   bounded collection or frame. Check every length before allocation and
   stream each inner write. Every other slot holds its two frames in one

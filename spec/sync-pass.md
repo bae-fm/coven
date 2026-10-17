@@ -41,8 +41,9 @@ A pass reads slots, applies them, claims waiting work, then performs effects.
   Removal and old-key cut-offs consume writes without effects and record `WritesRefused` (§10).
 - **Key copy:** record its signed routing and exposure, and open a required
   copy for this device's member (§11). A copy for someone else need not be opened.
-- **Snapshot announcement:** check its named snapshot's signed prefix, purpose and
-  coverage (§15). Applying the announcement does not load its rows.
+- **Snapshot announcement:** check its signed coverage and purpose under §15.
+  Applying it reads no snapshot body, so a body deleted by an abandoned
+  operation's undo cannot stop the device.
 - An unavailable required key reports `KeyUnavailable`; a newer schema or format
   reports `UpdateRequired`. A damaged complete object reports its `Refused` cause.
 - Any slot that cannot apply follows [§6's stuck-device rule](coven.md#stuck-devices).

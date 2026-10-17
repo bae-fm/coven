@@ -3083,8 +3083,10 @@ It holds rows, merge records, losses and the evidence needed for old writes.
   ([`preparation_no_effect`, `abandoned_supplies_no_coverage`, `abandoned_not_usable`](proofs/sequence/CovenSequence/Preparations.lean)).
 - Select the newest applicable snapshot for the audience's schema and reset.
   A missing key, required update or damaged body waits; do not choose an older snapshot to bypass it.
-- Check the signed prefix before using coverage, then the entire signature
-  and body before loading ([D9](format.md#d9-sealed-objects)).
+- Applying an announcement uses its own signed coverage and purpose and reads no
+  body. Loading a snapshot checks the body against the announced digest, then its
+  signature and prefix ([D9](format.md#d9-sealed-objects)). An undone preparation's
+  deleted body therefore never blocks a reader that does not load it.
 - Request a snapshot when new encoded parts exceed the last snapshot's size,
   or 1 MiB without one. Retention also requests missing coverage below that threshold.
 
