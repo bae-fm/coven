@@ -11,7 +11,9 @@ Neither package proves the binary encodings in `format.md`.
 [Objects.lean](storage/CovenStorage/Objects.lean) models slots, snapshots and
 files as paths with immutable contents. `create_preserves` and
 `stored_history_preserved` retain occupied objects. `settled_iff_equal` requires
-complete byte equality to settle a retry. `retry_fixed` and
+complete byte equality to settle a retry. `conversion_preserves_upload` keeps
+tried and untried records unchanged; `first_attempt_keeps_original` preserves
+the untried record through sealing. `retry_fixed` and
 `retries_identical` keep the attempt unchanged. The nonce results assume the
 modeled encoder and path assignment; they do not establish cipher security.
 

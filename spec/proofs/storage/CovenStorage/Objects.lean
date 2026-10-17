@@ -137,16 +137,21 @@ inductive Upload where
   | tried (attempt : Attempt)
   deriving DecidableEq, Repr
 
-/-- §18.5 permits changing only untried plaintext, preserving its identity. -/
-def convert (f : Bytes → Bytes) : Upload → Upload
-  | .untried d => .untried { d with plaintext := f d.plaintext }
-  | .tried a => .tried a
+/-- §18.3, §18.5–§18.6, D5.2: conversion interprets received changes;
+it never rewrites an upload, whether tried or untried. -/
+def convert (_ : Bytes → Bytes) (u : Upload) : Upload := u
+
+theorem conversion_preserves_upload (f : Bytes → Bytes) (u : Upload) :
+    convert f u = u := rfl
 
 /-- §6.3, Appendix C.2: the first attempt fixes the key and format; a retry ignores
 new choices. The returned attempted state commits before encryption. -/
 def prepare (key format : Nat) : Upload → Attempt
   | .untried d => ⟨d, key, format⟩
   | .tried a => a
+
+theorem first_attempt_keeps_original (d : Draft) (key format : Nat) (f : Bytes → Bytes) :
+    prepare key format (convert f (.untried d)) = ⟨d, key, format⟩ := rfl
 
 theorem retry_fixed (a : Attempt) (key format : Nat) (f : Bytes → Bytes) :
     prepare key format (convert f (.tried a)) = a := rfl

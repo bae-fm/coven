@@ -59,6 +59,8 @@ import CovenStorage
 #print axioms CovenStorage.retry_preserves_time
 #print axioms CovenStorage.stored_history_preserved
 #print axioms CovenStorage.settled_iff_equal
+#print axioms CovenStorage.conversion_preserves_upload
+#print axioms CovenStorage.first_attempt_keeps_original
 #print axioms CovenStorage.retry_fixed
 #print axioms CovenStorage.fresh_path_separates_nonces
 #print axioms CovenStorage.nonce_exclusivity
