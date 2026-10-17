@@ -444,3 +444,35 @@ async fn a_pass_publishes_checked_join_requests_to_the_subscription() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+/// A request waiting for the app's decision does not keep an expired invite
+/// open: the next pass takes its grant back (§12.2).
+#[tokio::test]
+async fn an_invite_waiting_for_a_decision_still_expires() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let invite = invite(&ana).await;
+    let carol = join(&group, &invite.code, "Carol's phone").await;
+    ana.sync.pass().await.unwrap();
+    assert_eq!(ana.sync.join_requests().await.unwrap().len(), 1);
+    group.clock.set(invite.expires_at);
+    ana.sync.pass().await.unwrap();
+    assert!(ana.sync.join_requests().await.unwrap().is_empty());
+    assert!(ana
+        .sync
+        .database
+        .operations()
+        .await
+        .unwrap()
+        .iter()
+        .all(|record| record.kind != "invite"));
+    for device in [&ana, &carol.device] {
+        device.sync.database.close().await.unwrap();
+    }
+}

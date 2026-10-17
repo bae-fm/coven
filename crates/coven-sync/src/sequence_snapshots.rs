@@ -81,16 +81,22 @@ impl SequenceSync {
             if pending.contains(&capture.audience) {
                 continue;
             }
-            self.start_request(
-                session,
-                ring,
-                member,
-                Request::Snapshot(SnapshotRequest {
-                    audience: capture.audience,
-                    purpose: Purpose::Raise(capture.version),
-                }),
-                "coven",
-            )
+            let result = self
+                .start_request(
+                    session,
+                    ring,
+                    member,
+                    Request::Snapshot(SnapshotRequest {
+                        audience: capture.audience.clone(),
+                        purpose: Purpose::Raise(capture.version),
+                    }),
+                    "coven",
+                )
+                .await
+                .map(drop);
+            self.own_work(result, |request| {
+                matches!(request, Request::Snapshot(raise) if raise.audience == capture.audience)
+            })
             .await?;
         }
         if self.database.raise_captures().await?.is_empty() {
@@ -184,16 +190,22 @@ impl SequenceSync {
                 false
             };
             if growth > threshold || aged {
-                self.start_request(
-                    session,
-                    ring,
-                    member,
-                    Request::Snapshot(SnapshotRequest {
-                        audience,
-                        purpose: Purpose::Ordinary,
-                    }),
-                    "coven",
-                )
+                let result = self
+                    .start_request(
+                        session,
+                        ring,
+                        member,
+                        Request::Snapshot(SnapshotRequest {
+                            audience: audience.clone(),
+                            purpose: Purpose::Ordinary,
+                        }),
+                        "coven",
+                    )
+                    .await
+                    .map(drop);
+                self.own_work(result, |request| {
+                    matches!(request, Request::Snapshot(snapshot) if snapshot.audience == audience)
+                })
                 .await?;
             }
         }

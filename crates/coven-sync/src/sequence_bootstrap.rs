@@ -65,6 +65,33 @@ impl SequenceSync {
         Ok(ring)
     }
 
+    /// The store key that sealed this installation's newest applied original
+    /// while custody holds no store key: syncing needs it unlocked first (§11).
+    pub async fn missing_store_key(
+        database: &coven_database::Database,
+        keys: &coven_crypto::custody::KeySession<StoreKeyring>,
+    ) -> Result<Option<KeyId>, SyncError> {
+        if keys.read()?.is_some() {
+            return Ok(None);
+        }
+        let Some(newest) = database
+            .original_slots()
+            .await?
+            .into_iter()
+            .max_by_key(|original| original.slot)
+        else {
+            return Ok(None);
+        };
+        let length = coven_format::sealed_slot::SlotObjectPrefix::length(&newest.object)?;
+        let prefix = coven_format::sealed_slot::SlotObjectPrefix::decode(
+            newest
+                .object
+                .get(..length)
+                .ok_or(coven_format::Error::Truncated)?,
+        )?;
+        Ok(Some(prefix.key))
+    }
+
     /// Open this member's store keys from their copies in storage, keep them
     /// in custody and read forward, without sending (§11, E5).
     pub async fn unlock(&self) -> Result<(), SyncError> {

@@ -22,7 +22,6 @@ impl SyncLoop {
     /// `codes` installs a delivered S3 key on this device after each pass (§13).
     pub fn new(sync: Arc<SequenceSync>, codes: Option<crate::RestoreCodes>) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
-        sync.state.publish(SyncStatus::Stopped);
         tokio::spawn(run(sync, codes, receiver));
         Self { commands }
     }
@@ -129,10 +128,18 @@ async fn run(
     let mut started = false;
     let mut pending = false;
     let mut idle = sync.clock.sleep(Duration::from_secs(30));
+    let mut closing = None;
     loop {
-        let mut wakes = sync.waits.evidence_wakes();
+        // A requested pass waits only for the connection's backoff; an idle
+        // loop also wakes for operations' waits and their evidence.
+        let mut wakes = if pending {
+            Vec::new()
+        } else {
+            sync.waits.evidence_wakes()
+        };
         wakes.extend(sync.waits.next_wake(|subject| {
-            matches!(subject, RetrySubject::Operation(_) | RetrySubject::Sync)
+            *subject == RetrySubject::Sync
+                || (!pending && matches!(subject, RetrySubject::Operation(_)))
         }));
         let work_wake = async {
             if wakes.is_empty() {
@@ -157,7 +164,13 @@ async fn run(
             command = commands.recv() => match command {
                 Some(Command::Start) => {
                     if !started {
-                        match sync.files.set_storage(Some(sync.storage.clone()), std::future::ready(Ok(()))).await {
+                        // This connection starts its own backoff; the
+                        // provider's cooldown holds across connections.
+                        let ready = async {
+                            sync.waits.clear(RetrySubject::Sync).await?;
+                            sync.files.set_storage(Some(sync.storage.clone()), std::future::ready(Ok(()))).await
+                        };
+                        match ready.await {
                             Ok(()) => {
                                 started = true;
                                 pending = true;
@@ -190,7 +203,7 @@ async fn run(
                     } else {
                         Ok(())
                     };
-                    let _ = reply.send(result);
+                    closing = Some((reply, result));
                     break;
                 }
                 None => {
@@ -212,9 +225,7 @@ async fn run(
             _ = sync.state.pass_requested(), if started && !pending => pending = true,
             // A wait armed outside this loop changes the schedule to wake on.
             changed = rearmed.changed(), if started => if changed.is_err() { break },
-            // A requested pass evaluates every due wait; waking for one
-            // again would starve it.
-            _ = work_wake, if started && !pending => pending = true,
+            _ = work_wake, if started && !(pending && due) => pending = true,
             _ = async {
                 if let Some(wake) = cooldown { wake.await } else { std::future::pending::<()>().await }
             }, if started && pending && !due => {}
@@ -269,6 +280,13 @@ async fn run(
                 idle = sync.clock.sleep(Duration::from_secs(30));
             }
         }
+    }
+    // The connection's owners are released before the closer learns so.
+    drop(changes);
+    drop(codes);
+    drop(sync);
+    if let Some((reply, result)) = closing {
+        let _ = reply.send(result);
     }
 }
 

@@ -499,7 +499,12 @@ impl SequenceSync {
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         for record in self.database.operations().await? {
-            if record.kind != INVITE || !self.operation_ready(&record, ring).await? {
+            if record.kind != INVITE {
+                continue;
+            }
+            // Expiry takes back the grant even while a request waits for the app.
+            let expired = InviteWork::read(&record)?.expired(self.clock.now());
+            if !expired && !self.operation_ready(&record, ring).await? {
                 continue;
             }
             let scope = self.waits.begin_attempt(record.id);

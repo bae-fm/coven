@@ -260,6 +260,43 @@ impl SequenceSync {
         }
     }
 
+    /// Whether a journaled operation already carries `request`'s kind of work.
+    pub(crate) async fn journaled(
+        &self,
+        carries: impl Fn(&Request) -> bool,
+    ) -> Result<bool, SyncError> {
+        for record in self.database.operations().await? {
+            if record.kind == "sequence"
+                && carries(&serde_json::from_slice::<SequenceOperation>(&record.data)?.request)
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    /// Coven's own work started in a pass: once journaled, its failure is the
+    /// operation's to report and retry under its backoff, and the pass goes
+    /// on (E5). A failure before journaling, or one stopping this
+    /// installation, ends the pass.
+    pub(crate) async fn own_work(
+        &self,
+        result: Result<(), SyncError>,
+        carries: impl Fn(&Request) -> bool,
+    ) -> Result<(), SyncError> {
+        match result {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                self.state.check()?;
+                if self.journaled(carries).await? {
+                    Ok(())
+                } else {
+                    Err(error)
+                }
+            }
+        }
+    }
+
     pub(crate) async fn resume_administration(
         &self,
         session: &mut Session,

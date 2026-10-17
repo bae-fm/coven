@@ -137,8 +137,15 @@ impl SequenceSync {
                     .find(|intro| intro.audience == audience)
                     .is_some_and(|intro| session.history.exposed(&audience, intro.key))
             {
-                self.install_key(session, ring, member, audience, None)
-                    .await?;
+                let rotates = |request: &Request| matches!(request, Request::Change(StoreChange::RotateKey { audience: rotated, .. }) if *rotated == audience);
+                // A journaled rotation resumes under its own backoff.
+                if self.journaled(rotates).await? {
+                    continue;
+                }
+                let result = self
+                    .install_key(session, ring, member, audience.clone(), None)
+                    .await;
+                self.own_work(result, rotates).await?;
             }
         }
         Ok(())
