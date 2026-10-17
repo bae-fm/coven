@@ -1919,8 +1919,9 @@ An undo removes everything the journal recorded, and nothing may be left behind.
   of the device that made it, so §14.3 can find it if everything else is lost.
 - **Deleting what's already gone succeeds,** so retrying an undo is safe.
 - **A failed undo stays.** It keeps both causes, the rejection and the undo
-  failure, reports them, and retries. Cancelling the call can't report success
-  while cleanup is still owed.
+  failure, in the call's error and the app's pending list, and retries. The undo
+  failure determines what permits a retry; the rejected action is never tried
+  again. Cancelling the call can't report success while cleanup is still owed.
 - **Disclosed keys stay disclosed.** A key copy already claimed is history. It has
   told its recipient the key, and undo can't take that back, so it still counts as
   exposure (§12.2).
@@ -1937,6 +1938,9 @@ An undo removes everything the journal recorded, and nothing may be left behind.
   completion or confirmed undo.
 - **Dropped calls keep going.** If the app drops the call, the journal stays.
   Temporary failures and failed undos retry with the shared backoff (§6.7).
+  A normal pass resumes an S3 key replacement from its recorded step, including
+  its claim or undo. After reopening, a step that needs provider admin access
+  waits for the person to supply it again (§20.10).
 - **Waits are visible.** Each wait records its first unmet condition (§19.1). The
   app may ask for a retry, but it can't discard a reload or provider work that is
   required.
@@ -6270,6 +6274,8 @@ Write-ups explain each model and state its assumptions:
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | An operation occupies at most one slot; a landed one passed validation against the slots before it; a confirmed undo leaves neither slot bytes nor anything it made | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
+| A replacement waits until due; a due delivery can finish, and its claim's rejection reaches its undo | `not_due_unchanged`, `due_delivery_finishes`, `claim_rejection_reaches_undo` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §11.4 |
+| A failed undo keeps its rejection and cleanup failure; without admin access it stays owed, and only successful cleanup ends it | `failed_undo_keeps_both_causes`, `reopened_undo_needs_admin`, `undo_finishes_only_after_success` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |
 | Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |

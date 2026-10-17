@@ -2296,6 +2296,9 @@ pub enum PendingReason {
     DeleteAccessKey(AccessKeyToDelete),
     FileUnavailable(FileMissingReason),
     Failed(LocalFailure),
+    Rejected(OperationRejection),
+    /// Both causes stay visible; the cleanup cause determines retry (§11.3).
+    Cleanup { operation: Box<PendingReason>, cleanup: Box<PendingReason> },
     Paused,
     /// Provider work needs the storage account's admin access again; coven
     /// holds it for one operation only (§20.10).

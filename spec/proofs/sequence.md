@@ -580,6 +580,17 @@ after slot deletion is proved separately below.
   that cannot be cancelled is covered by the reclaim of keys tagged with their
   device, outside this model.
 
+[`AccessKeyReplacement`](sequence/CovenSequence/AccessKeyReplacement.lean)
+models the S3 replacement owner's delivery, child claim and undo. A retry
+whose backoff has not ended preserves the journal (`not_due_unchanged`);
+a successful due delivery finishes (`due_delivery_finishes`). A refused child
+claim reaches its parent's undo (`claim_rejection_reaches_undo`). Failed undo
+keeps both the rejection and cleanup failure (`failed_undo_keeps_both_causes`),
+including missing admin access after reopening (`reopened_undo_needs_admin`).
+Only successful cleanup with admin access ends undo
+(`undo_finishes_only_after_success`). Provider outcomes and retry eligibility
+are inputs; this does not prove provider progress or Rust task ownership.
+
 ## Settling a claim whose slot was deleted
 
 [`Settle`](sequence/CovenSequence/Settle.lean). Each copy numbers all its slot
@@ -839,6 +850,17 @@ current audience member. It rejects reuse of an introduced or tentatively
 copied key. Output contains the exact copy/introduction `slots`, final
 `through`, and the key observations `after`. Membership is fixed across this
 plan; interleaved membership changes require another prefix and selection.
+
+**`accessReplacement`** calls `AccessKeyReplacement.resume`. It takes `phase`
+(`delivering`, `recording`, or `undo`), `due` and `admin` booleans, a nullable
+`rejection` number for a refused child claim, and nullable `failure` and
+`previous_failure` strings (`network` or `admin`). An `undo` phase also takes
+its original `reason` number. The answer contains `retained`, nullable
+`rejection`, and nullable `failure`: the operation and its durable pending
+cause after the attempt. A finished operation has no durable pending cause.
+The Rust comparison `access_replacement_retries_and_undo_match_lean` runs real
+delivery retries and rejected-claim cleanup, including reopening without
+retained admin access, and compares these observations.
 
 **`queueReload`** supplies one of four `scenario` values. `reset` carries the
 actual queue's write numbers, schemas, authored-read slots and row keys, the

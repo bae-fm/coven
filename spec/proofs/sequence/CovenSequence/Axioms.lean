@@ -53,6 +53,13 @@ import SequenceApply
 #print axioms CovenSequence.Operation.forgetful_lands_twice
 #print axioms CovenSequence.Operation.eager_undo_leaks
 
+#print axioms CovenSequence.AccessKeyReplacement.not_due_unchanged
+#print axioms CovenSequence.AccessKeyReplacement.due_delivery_finishes
+#print axioms CovenSequence.AccessKeyReplacement.failed_undo_keeps_both_causes
+#print axioms CovenSequence.AccessKeyReplacement.reopened_undo_needs_admin
+#print axioms CovenSequence.AccessKeyReplacement.undo_finishes_only_after_success
+#print axioms CovenSequence.AccessKeyReplacement.claim_rejection_reaches_undo
+
 #print axioms CovenSequence.ClaimRecord.remember_number
 #print axioms CovenSequence.Claims.witness
 #print axioms CovenSequence.Claims.ge

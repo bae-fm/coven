@@ -220,6 +220,15 @@ pub enum PendingReason {
     FileUnavailable(FileMissingReason),
     /// A local failure prevented progress.
     Failed(LocalFailure),
+    /// The action was refused; an enclosing cleanup may still be owed (§11.3).
+    Rejected(crate::OperationRejection),
+    /// Both the initiating failure and the failure preventing undo (§11.3).
+    Cleanup {
+        /// The failure that made cleanup necessary.
+        operation: Box<PendingReason>,
+        /// The current condition preventing cleanup.
+        cleanup: Box<PendingReason>,
+    },
     /// Work awaits the app’s next action, such as approval or resuming a transfer.
     Paused,
     /// Provider work needs the storage account's admin access again, which
@@ -250,7 +259,7 @@ pub enum Retry {
 impl PendingRecord {
     /// Retry according to the cause and the owner of the unfinished work.
     pub fn retry(&self) -> Retry {
-        match (&self.subject, &self.reason) {
+        match (&self.subject, self.reason.retry_cause()) {
             (
                 PendingSubject::File { .. },
                 PendingReason::FileUnavailable(FileMissingReason::Source(_)),
@@ -318,10 +327,18 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
 }
 
 impl PendingReason {
+    /// Cleanup retries its own unmet condition, retaining the initiating cause.
+    pub(crate) fn retry_cause(&self) -> &Self {
+        match self {
+            Self::Cleanup { cleanup, .. } => cleanup.retry_cause(),
+            reason => reason,
+        }
+    }
+
     /// How the failure this reason reports clears; `None` for a wait or a
     /// verdict, which are not failures.
     pub(crate) fn clears(&self) -> Option<Clears> {
-        match self {
+        match self.retry_cause() {
             Self::Failed(
                 LocalFailure::Database | LocalFailure::Disk | LocalFailure::KeyCustody,
             ) => Some(Clears::ByItself),
@@ -341,9 +358,10 @@ impl PendingReason {
             | Self::AccountInUse { .. } => Retry::Automatic,
             Self::Storage { failure, .. } if automatic_storage(*failure) => Retry::Automatic,
             Self::Refused(_) | Self::UpdateRequired(_) => Retry::AfterUpdate,
-            Self::WritesRefused { .. } | Self::Removed | Self::MemberKeysReplaced { .. } => {
-                Retry::Never
-            }
+            Self::Rejected(_)
+            | Self::WritesRefused { .. }
+            | Self::Removed
+            | Self::MemberKeysReplaced { .. } => Retry::Never,
             _ => Retry::AppAction,
         }
     }
@@ -409,12 +427,12 @@ impl PendingValue for PendingRecord {
     }
     fn ends_when_covered(&self) -> bool {
         !matches!(
-            self.reason,
+            self.reason.retry_cause(),
             PendingReason::Refused(_) | PendingReason::WritesRefused { .. }
         )
     }
     fn can_retry(&self, recorded_version: &str, schema_version: u32) -> bool {
-        match &self.reason {
+        match self.reason.retry_cause() {
             PendingReason::Refused(_) => recorded_version != env!("CARGO_PKG_VERSION"),
             PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version }) => {
                 schema_version >= *version

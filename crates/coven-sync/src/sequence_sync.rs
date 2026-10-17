@@ -51,7 +51,7 @@ pub struct SequenceSync {
     waits: Arc<crate::RetryWaits>,
     files: crate::Files,
     session: Arc<Mutex<Session>>,
-    /// Admin access an operation holds in memory until its key is made (§20.10).
+    /// Admin access borrowed in memory for individual provider operations (§20.10).
     admin_access: Arc<
         std::sync::Mutex<
             std::collections::BTreeMap<
@@ -200,6 +200,8 @@ impl SequenceSync {
         // Provider work, rotation and retention send for this installation;
         // one still loading before its registration sends none of them.
         if self.registered(&session) {
+            self.resume_key_replacements(&mut session, &mut ring, &member)
+                .await?;
             self.resume_access(&mut session, &mut ring, &member).await?;
             self.resume_invites(&mut session, &mut ring, &member)
                 .await?;

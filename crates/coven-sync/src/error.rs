@@ -167,7 +167,11 @@ impl SyncError {
                 audience: Audience::Store,
                 key: *key,
             },
-            SyncError::Cleanup { cleanup, .. } => cleanup.pending_reason(provider),
+            SyncError::Rejected(reason) => PendingReason::Rejected(reason.clone()),
+            SyncError::Cleanup { operation, cleanup } => PendingReason::Cleanup {
+                operation: Box::new(operation.pending_reason(provider)),
+                cleanup: Box::new(cleanup.pending_reason(provider)),
+            },
             _ => PendingReason::Failed(error.local_failure()),
         }
     }

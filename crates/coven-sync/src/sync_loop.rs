@@ -82,7 +82,7 @@ async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, Sy
         .find(|record| {
             matches!(record.subject, crate::PendingSubject::Operation { kind, .. } if kind.coven_owned())
                 && matches!(
-                    record.reason,
+                    record.reason.retry_cause(),
                     crate::PendingReason::Storage { .. }
                         | crate::PendingReason::Refused(_)
                         | crate::PendingReason::Failed(_)

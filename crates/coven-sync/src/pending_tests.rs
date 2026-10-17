@@ -1,6 +1,71 @@
 use super::*;
 
 #[test]
+fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
+    assert_eq!(
+        PendingReason::Rejected(crate::OperationRejection::NotAllowed).retry(),
+        Retry::Never
+    );
+    let update = RequiredUpdate::AppSchema { version: 3 };
+    for (cause, retry, before, after) in [
+        (
+            PendingReason::Storage {
+                provider: CloudProvider::S3,
+                failure: StorageFailure::Network,
+            },
+            Retry::Automatic,
+            true,
+            true,
+        ),
+        (
+            PendingReason::AdminAccessRequired,
+            Retry::AppAction,
+            false,
+            false,
+        ),
+        (
+            PendingReason::UpdateRequired(update),
+            Retry::AfterUpdate,
+            false,
+            true,
+        ),
+        (PendingReason::Removed, Retry::Never, false, false),
+    ] {
+        let error = crate::SyncError::Cleanup {
+            operation: Box::new(crate::SyncError::Rejected(
+                crate::OperationRejection::NotAllowed,
+            )),
+            cleanup: Box::new(crate::SyncError::Pending(Box::new(PendingRecord {
+                subject: PendingSubject::Connection,
+                reason: cause.clone(),
+            }))),
+        };
+        let record = PendingRecord {
+            subject: PendingSubject::Operation {
+                id: OperationId(1),
+                kind: OperationKind::ReplaceAccessKey,
+            },
+            reason: error.pending_reason(CloudProvider::S3),
+        };
+        let encoded = serde_json::to_vec(&record).unwrap();
+        let reopened: PendingRecord = serde_json::from_slice(&encoded).unwrap();
+        assert_eq!(reopened, record);
+        assert_eq!(
+            reopened.reason,
+            PendingReason::Cleanup {
+                operation: Box::new(PendingReason::Rejected(
+                    crate::OperationRejection::NotAllowed
+                )),
+                cleanup: Box::new(cause),
+            }
+        );
+        assert_eq!(reopened.retry(), retry);
+        assert_eq!(reopened.can_retry(env!("CARGO_PKG_VERSION"), 2), before);
+        assert_eq!(reopened.can_retry(env!("CARGO_PKG_VERSION"), 3), after);
+    }
+}
+
+#[test]
 fn conditional_conflicts_retry_without_becoming_throttling() {
     let record = PendingRecord {
         subject: PendingSubject::Connection,

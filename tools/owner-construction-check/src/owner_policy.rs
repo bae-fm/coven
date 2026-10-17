@@ -350,6 +350,18 @@ pub(crate) const POLICY: Policy = Policy {
             "SequenceSync",
             "change_key",
         ),
+        // S3 replacement attempts own their provider requests even when the
+        // app drops the initial call or the call supplying admin access (§11.4).
+        (
+            "crates/coven-sync/src/sequence_access_keys.rs",
+            "SequenceSync",
+            "replace_member_access_key",
+        ),
+        (
+            "crates/coven-sync/src/sequence_access_keys_retry.rs",
+            "SequenceSync",
+            "retry_with_admin_access",
+        ),
         (
             "crates/coven/src/bootstrap.rs",
             "<free>",

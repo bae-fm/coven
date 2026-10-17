@@ -320,7 +320,7 @@ impl SequenceSync {
             .retain_operations(&records.iter().map(|r| r.id).collect());
         for record in records {
             if record.kind == "sequence"
-                && record.started_by != super::sequence_invites::INVITE
+                && !parent_owned(&record)
                 && self.operation_ready(&record, ring).await?
             {
                 self.run_administration(session, ring, member, record.id)
@@ -337,17 +337,24 @@ impl SequenceSync {
         member: &MemberIdentity,
         id: OperationId,
     ) -> Result<Option<u64>, SyncError> {
+        let record = self
+            .database
+            .operation(id)
+            .await?
+            .ok_or(SyncError::NotPending(id))?;
+        if parent_owned(&record) {
+            // The parent records the failure and owns its retry scope (§11.4).
+            return self.advance_administration(session, ring, member, id).await;
+        }
         let scope = self.waits.begin_attempt(id);
         let result = scope
             .run(self.advance_administration(session, ring, member, id))
             .await;
         if let Err(error) = &result {
             if let Some(record) = self.database.operation(id).await? {
-                if record.started_by != super::sequence_invites::INVITE {
-                    let work: SequenceOperation = serde_json::from_slice(&record.data)?;
-                    self.record_operation_error(id, work.kind(), error, ring)
-                        .await?;
-                }
+                let work: SequenceOperation = serde_json::from_slice(&record.data)?;
+                self.record_operation_error(id, work.kind(), error, ring)
+                    .await?;
             }
         } else {
             self.waits.clear_evidence(id);
@@ -355,6 +362,23 @@ impl SequenceSync {
                 .forget(coven_database::RetrySubject::Operation(id));
         }
         result
+    }
+
+    /// An unfinished claim belongs to the parent that fixed its exact request (§11.2).
+    pub(crate) async fn pending_change(
+        &self,
+        change: &StoreChange,
+        started_by: &str,
+    ) -> Result<Option<OperationId>, SyncError> {
+        for record in self.database.operations().await? {
+            if record.kind == "sequence" && record.started_by == started_by {
+                let work: SequenceOperation = serde_json::from_slice(&record.data)?;
+                if matches!(&work.request, Request::Change(existing) if existing == change) {
+                    return Ok(Some(record.id));
+                }
+            }
+        }
+        Ok(None)
     }
 
     async fn advance_administration(
@@ -830,6 +854,13 @@ mod route {
             sealing: coven_crypto::SealingKey::from_bytes(sealing),
         })
     }
+}
+
+fn parent_owned(record: &OperationRecord) -> bool {
+    matches!(
+        record.started_by.as_str(),
+        super::sequence_invites::INVITE | super::sequence_access_keys::REPLACE_ACCESS_KEY
+    )
 }
 
 fn required_copies(

@@ -23,7 +23,7 @@ use coven_storage::{
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
 
-const REPLACE_ACCESS_KEY: &str = "replace-access-key";
+pub(crate) const REPLACE_ACCESS_KEY: &str = "replace-access-key";
 
 #[derive(Serialize, Deserialize)]
 enum Step {
@@ -72,6 +72,18 @@ impl SequenceSync {
     /// access is used (§14.3, E9).
     pub async fn replace_member_access_key(
         self: &Arc<Self>,
+        member: MemberId,
+        admin: Arc<dyn AccessKeyAdmin>,
+    ) -> Result<AccessKeyReplacement, SyncError> {
+        let owner = self.clone();
+        // The request and its journal outlive the app's waiter (§11.4).
+        tokio::spawn(async move { owner.begin_key_replacement(member, admin).await })
+            .await
+            .map_err(|error| SyncError::disk(std::io::Error::other(error)))?
+    }
+
+    async fn begin_key_replacement(
+        &self,
         member: MemberId,
         admin: Arc<dyn AccessKeyAdmin>,
     ) -> Result<AccessKeyReplacement, SyncError> {
@@ -126,10 +138,8 @@ impl SequenceSync {
             .lock()
             .expect("admin access poisoned")
             .insert(id, admin);
-        let result = self
-            .advance_key_replacement(&mut session, &mut ring, &identity, id)
-            .await;
-        self.finish_key_replacement(id, result, &ring).await
+        self.run_key_replacement(&mut session, &mut ring, &identity, id)
+            .await?
     }
 
     /// Record a key made in the provider's console as this member's own (§14.3).
@@ -150,83 +160,6 @@ impl SequenceSync {
             },
         })
         .await
-    }
-
-    /// Resume work waiting with `AdminAccessRequired`, holding this admin
-    /// access for that operation only (§20.10).
-    pub async fn retry_with_admin_access(
-        self: &Arc<Self>,
-        id: OperationId,
-        admin: Arc<dyn AccessKeyAdmin>,
-    ) -> Result<(), SyncError> {
-        let record = self
-            .database
-            .operation(id)
-            .await?
-            .ok_or(SyncError::NotPending(id))?;
-        self.admin_access
-            .lock()
-            .expect("admin access poisoned")
-            .insert(id, admin);
-        let mut session = self.session.lock().await;
-        let identity = self
-            .member
-            .read()?
-            .ok_or(StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.ring(&mut session, &identity).await?;
-        self.read_forward(&mut session, &mut ring, &identity)
-            .await?;
-        self.settle_open(&mut session, &mut ring, &identity).await?;
-        match record.kind.as_str() {
-            REPLACE_ACCESS_KEY => {
-                let result = self
-                    .advance_key_replacement(&mut session, &mut ring, &identity, id)
-                    .await;
-                self.finish_key_replacement(id, result, &ring)
-                    .await
-                    .map(drop)
-            }
-            super::sequence_invites::INVITE => {
-                self.retry_invite(&mut session, &mut ring, &identity, id)
-                    .await
-            }
-            _ => Err(SyncError::NotPending(id)),
-        }
-    }
-
-    async fn finish_key_replacement(
-        &self,
-        id: OperationId,
-        result: Result<KeyProgress, SyncError>,
-        ring: &StoreKeyring,
-    ) -> Result<AccessKeyReplacement, SyncError> {
-        let error = match result {
-            Ok(KeyProgress::Done(replacement)) => {
-                self.admin_access
-                    .lock()
-                    .expect("admin access poisoned")
-                    .remove(&id);
-                return Ok(replacement);
-            }
-            Ok(KeyProgress::Waiting(reason)) => SyncError::Pending(Box::new(PendingRecord {
-                subject: PendingSubject::Operation {
-                    id,
-                    kind: OperationKind::ReplaceAccessKey,
-                },
-                reason,
-            })),
-            Err(error) => error,
-        };
-        if self.database.operation(id).await?.is_some() {
-            self.record_operation_error(id, OperationKind::ReplaceAccessKey, &error, ring)
-                .await?;
-        } else {
-            self.admin_access
-                .lock()
-                .expect("admin access poisoned")
-                .remove(&id);
-        }
-        Err(error)
     }
 
     async fn advance_key_replacement(
@@ -322,8 +255,21 @@ impl SequenceSync {
                             principal: key.principal.clone(),
                         },
                     };
-                    work.step = match self
-                        .start_request(
+                    let result = if let Some(child) =
+                        self.pending_change(&change, REPLACE_ACCESS_KEY).await?
+                    {
+                        self.run_administration(session, ring, identity, child)
+                            .await
+                    } else if session.history.key_records.iter().any(|record| {
+                        record.member == work.member
+                            && record.access_key_id == key.credentials.access_key_id
+                            && record.author == identity.member()
+                    }) {
+                        // A settled entry stays final even if another access
+                        // change applied before this parent resumed (§14.3).
+                        Ok(None)
+                    } else {
+                        self.start_request(
                             session,
                             ring,
                             identity,
@@ -331,7 +277,8 @@ impl SequenceSync {
                             REPLACE_ACCESS_KEY,
                         )
                         .await
-                    {
+                    };
+                    work.step = match result {
                         Ok(_) => Step::Deleting { key },
                         Err(SyncError::Rejected(reason)) => Step::Undo { key, reason },
                         Err(error) => return Err(error),
@@ -374,32 +321,48 @@ impl SequenceSync {
                     return Ok(KeyProgress::Done(AccessKeyReplacement { key, old_key }));
                 }
                 Step::Undo { key, reason } => {
-                    let Some(admin) = admin else {
-                        return Ok(KeyProgress::Waiting(PendingReason::AdminAccessRequired));
-                    };
-                    match self.storage.delete(&path).await {
-                        Ok(()) => (),
-                        Err(error) if error.failure() == StorageFailure::NotFound => (),
-                        Err(error) => return Err(error.into()),
-                    }
-                    if self.storage.status(&path).await?.is_some() {
-                        return Err(StorageFailure::Protocol
-                            .with_source("the key delivery remains after deletion")
-                            .into());
-                    }
-                    admin
-                        .revoke(&key.credentials.access_key_id, &key.principal)
-                        .await?;
-                    if admin
-                        .key_exists(&key.credentials.access_key_id, &key.principal)
-                        .await?
-                    {
-                        return Err(
+                    let undo = async {
+                        let Some(admin) = admin else {
+                            return Err(SyncError::Pending(Box::new(PendingRecord {
+                                subject: PendingSubject::Operation {
+                                    id,
+                                    kind: OperationKind::ReplaceAccessKey,
+                                },
+                                reason: PendingReason::AdminAccessRequired,
+                            })));
+                        };
+                        match self.storage.delete(&path).await {
+                            Ok(()) => (),
+                            Err(error) if error.failure() == StorageFailure::NotFound => (),
+                            Err(error) => return Err(error.into()),
+                        }
+                        if self.storage.status(&path).await?.is_some() {
+                            return Err(StorageFailure::Protocol
+                                .with_source("the key delivery remains after deletion")
+                                .into());
+                        }
+                        admin
+                            .revoke(&key.credentials.access_key_id, &key.principal)
+                            .await?;
+                        if admin
+                            .key_exists(&key.credentials.access_key_id, &key.principal)
+                            .await?
+                        {
+                            return Err(
                             crate::sequence_sync::access_keys::DeleteAccessKeyError::StillPresent
                                 .into(),
                         );
+                        }
+                        self.database.finish_operation(id).await?;
+                        Ok::<_, SyncError>(())
                     }
-                    self.database.finish_operation(id).await?;
+                    .await;
+                    if let Err(cleanup) = undo {
+                        return Err(SyncError::Cleanup {
+                            operation: Box::new(SyncError::Rejected(reason)),
+                            cleanup: Box::new(cleanup),
+                        });
+                    }
                     return Err(SyncError::Rejected(reason));
                 }
             }
@@ -620,3 +583,6 @@ enum KeyProgress {
 #[cfg(test)]
 #[path = "sequence_access_keys_tests.rs"]
 mod tests;
+
+#[path = "sequence_access_keys_retry.rs"]
+mod retry;

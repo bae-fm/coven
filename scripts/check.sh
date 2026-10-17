@@ -291,6 +291,7 @@ proofs() {
             effects::tests::sequence_differential::sequence_admin_matches_lean \
             history::tests::sequence_key_selection_matches_lean \
             sequence_sync::sequence_keys::tests::key_custody_preparation_matches_lean \
+            sequence_sync::sequence_access_keys::retry::tests::access_replacement_retries_and_undo_match_lean \
             sequence_sync::sequence_keys::tests::sequence_rotation_matches_lean
     fi
 

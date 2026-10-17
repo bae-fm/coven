@@ -5,6 +5,7 @@ import CovenSequence.Settle
 import CovenSequence.Causality
 import CovenSequence.Reload
 import CovenSequence.QueueReloadExamples
+import CovenSequence.AccessKeyReplacement
 
 /-! One case per process; malformed inputs fail on stderr with nonzero exit. -/
 namespace SequenceJson
@@ -267,6 +268,38 @@ def readQueueReload (j : Json) : Except String Json := do
       ("later_counts", toJson (counts later () newGeneration))]
   | _ => throw "unknown queue reload scenario"
 
+def replacementFailure (j : Json) (field : String) : Except String (Option AccessKeyReplacement.Failure) := do
+  match ← j.getObjValAs? (Option String) field with
+  | none => return none
+  | some "network" => return some .network
+  | some "admin" => return some .adminRequired
+  | _ => throw "unknown replacement failure"
+
+def readAccessReplacement (j : Json) : Except String Json := do
+  let phase ← match ← j.getObjValAs? String "phase" with
+    | "delivering" => pure AccessKeyReplacement.Phase.delivering
+    | "recording" => pure .recording
+    | "undo" => pure (.undo (← nat j "reason"))
+    | _ => throw "unknown replacement phase"
+  let failure ← replacementFailure j "failure"
+  let previous ← replacementFailure j "previous_failure"
+  let initial := previous.map fun f => match phase with
+    | .undo reason => AccessKeyReplacement.Cause.cleanup reason f
+    | _ => .failed f
+  let result := AccessKeyReplacement.resume ⟨phase, initial⟩
+    (← j.getObjValAs? Bool "due") (← j.getObjValAs? Bool "admin")
+    (← j.getObjValAs? (Option Nat) "rejection") failure
+  let cause := if result.phase = .finished then none else result.cause
+  let reason := match cause with
+    | some (.rejected r) | some (.cleanup r _) => some r
+    | _ => none
+  let failure := match cause with
+    | some (.failed .network) | some (.cleanup _ .network) => some "network"
+    | some (.failed .adminRequired) | some (.cleanup _ .adminRequired) => some "admin"
+    | _ => none
+  return Json.mkObj [("retained", toJson (result.phase != .finished)),
+    ("rejection", toJson reason), ("failure", toJson failure)]
+
 def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
@@ -276,6 +309,7 @@ def run (j : Json) : Except String Json := do
   | "past" => readPast j
   | "keys" => SequenceKeys.readKeys j
   | "keyCustody" => SequenceKeys.readCustody j
+  | "accessReplacement" => readAccessReplacement j
   | "rotation" => SequenceKeys.readRotation j
   | "queueReload" => readQueueReload j
   | _ => throw "unknown case kind"

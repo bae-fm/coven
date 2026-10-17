@@ -1,6 +1,6 @@
 //! The invite owns its binding claim's retries and rejection cleanup (§11).
 use super::*;
-use crate::sequence_sync::sequence_operations::{Request, SequenceOperation};
+use crate::sequence_sync::sequence_operations::Request;
 
 impl SequenceSync {
     pub(super) async fn run_invite(
@@ -49,15 +49,9 @@ impl SequenceSync {
         // The exact requested entry identifies this invite's unfinished claim.
         // Resume it before testing completion: a landed claim still needs its
         // journal settled, and a rejection must reach its parent's undo.
-        for record in self.database.operations().await? {
-            if record.kind == "sequence" && record.started_by == INVITE {
-                let work: SequenceOperation = serde_json::from_slice(&record.data)?;
-                if matches!(&work.request, Request::Change(existing) if existing == &change) {
-                    self.run_administration(session, ring, member, record.id)
-                        .await?;
-                    return Ok(());
-                }
-            }
+        if let Some(id) = self.pending_change(&change, INVITE).await? {
+            self.run_administration(session, ring, member, id).await?;
+            return Ok(());
         }
         let binding = match &change {
             StoreChange::AddMember { member, keys, .. }

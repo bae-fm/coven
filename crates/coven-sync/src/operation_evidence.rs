@@ -64,7 +64,7 @@ fn needs(reason: &PendingReason, reload: Option<OperationId>) -> Needs {
         rows,
         ..Needs::default()
     };
-    let mut needs = match reason {
+    let mut needs = match reason.retry_cause() {
         PendingReason::Missing { path } => rows(object_rows(path)),
         PendingReason::Waits(prerequisite) => match prerequisite {
             Prerequisite::SequenceCatchUp => rows(vec![PrerequisiteRows::Slot]),
@@ -119,7 +119,7 @@ impl RetryWaits {
                 continue;
             };
             if pending.retry() == Retry::Automatic {
-                let reload = match pending.reason {
+                let reload = match pending.reason.retry_cause() {
                     PendingReason::Waits(Prerequisite::Reload(_)) => database
                         .first_operation("sequence")
                         .await?

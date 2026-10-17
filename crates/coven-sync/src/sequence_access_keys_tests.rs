@@ -710,6 +710,16 @@ async fn reclaim(profile: S3ProfileName) {
         .lock()
         .unwrap()
         .insert(operation, fake.admin.clone());
+    // Its failed mint waits under backoff while the sweep uses retained access.
+    ana.sync
+        .record_operation_error(
+            operation,
+            OperationKind::ReplaceAccessKey,
+            &SyncError::from(StorageFailure::Network),
+            &group.ring,
+        )
+        .await
+        .unwrap();
     // Another device has claimed the removal; Ana has not applied it.
     carol
         .sync
