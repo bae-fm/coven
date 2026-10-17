@@ -256,17 +256,70 @@ impl Database {
         &self,
         subject: S,
     ) -> Result<(), DbError> {
+        self.clear_pending_checked(subject, crate::pending::recorded, |_| Ok(()))
+            .await
+            .map(drop)
+    }
+
+    /// Settle only the condition the consumer actually checked, using the
+    /// subject's indexed lookup and the same pending transaction as deletion.
+    pub(crate) async fn clear_pending_if<P: crate::PendingValue>(
+        &self,
+        file: crate::FileRef,
+        subject: P::Subject,
+        checked: impl Fn(&P) -> bool + Send + 'static,
+    ) -> Result<Option<crate::RetrySubject>, DbError>
+    where
+        P::Subject: Send + 'static,
+    {
+        self.clear_pending_checked(
+            subject,
+            move |db, subject| {
+                Ok(crate::pending::find::<P>(db, subject)?.is_some_and(|record| checked(&record)))
+            },
+            move |db| {
+                let retry =
+                    crate::file_queue::upload_id(db, &file)?.map(crate::RetrySubject::Upload);
+                if let Some(retry) = retry {
+                    crate::retry::clear(db, retry)?;
+                }
+                Ok(retry)
+            },
+        )
+        .await
+        .map(Option::flatten)
+    }
+
+    async fn clear_pending_checked<S, F, T>(
+        &self,
+        subject: S,
+        checked: F,
+        settled: impl FnOnce(&crate::sqlite::DatabaseConnection) -> Result<T, DbError> + Send + 'static,
+    ) -> Result<Option<T>, DbError>
+    where
+        S: serde::Serialize + Send + 'static,
+        T: Send + 'static,
+        F: Fn(&crate::sqlite::DatabaseConnection, &S) -> Result<bool, DbError> + Send + 'static,
+    {
         self.call(move |inner| {
-            let recorded = inner
+            let should_clear = inner
                 .access
                 .readers
                 .acquire_reader()
-                .with_reader(|reader| crate::pending::recorded(reader, &subject))?;
-            if !recorded {
-                return Ok(());
+                .with_reader(|db| checked(db, &subject))?;
+            if !should_clear {
+                return Ok(None);
             }
             inner.access.with_writer(|writer| {
-                writer.pending_transaction(|db| crate::pending::clear(db, &subject))
+                writer.pending_transaction(|db| {
+                    // Another writer may have replaced this condition since
+                    // the committed read; deletion checks that current record.
+                    if checked(db, &subject)? {
+                        crate::pending::clear(db, &subject)?;
+                        return settled(db).map(Some);
+                    }
+                    Ok(None)
+                })
             })
         })
         .await

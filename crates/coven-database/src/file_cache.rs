@@ -386,12 +386,19 @@ pub(super) fn evict(db: &DatabaseConnection, file: &FileRef) -> Result<Vec<Strin
         Ok(paths)
     })
 }
-/// Pin a whole cached file, or one still queued here, whose upload carries
-/// the pin to the stored file. Whether either held the file.
-pub(super) fn pin_complete(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+/// Pin a verified whole cache file or reserve a queued source's later pin.
+pub(super) fn pin_complete(
+    db: &DatabaseConnection,
+    file: &FileRef,
+) -> Result<Option<super::PinnedFile>, DbError> {
     let id = id(file)?;
-    Ok(db.internal_execute("UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",(file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE))?==1
-        || crate::file_queue::set_pinned(db, file, true)?)
+    if db.internal_execute(
+        "UPDATE _coven_cache SET pinned=1 WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND checked_hash=?3",
+        (file.namespace(),id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),
+    )? == 1 {
+        return Ok(Some(super::PinnedFile::Cached));
+    }
+    Ok(crate::file_queue::set_pinned(db, file, true)?.then_some(super::PinnedFile::Queued))
 }
 pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     db.internal_execute(

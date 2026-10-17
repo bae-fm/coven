@@ -103,7 +103,7 @@ mod write_sources;
 pub use authorship::{Authorship, HeaderEvidence};
 pub use coven_merge::Slot;
 pub use coven_merge::WriteId;
-pub use database::file_database::{CacheReservation, FileDatabase};
+pub use database::file_database::{CacheReservation, FileDatabase, PinnedFile};
 pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, UnprovenFiles,

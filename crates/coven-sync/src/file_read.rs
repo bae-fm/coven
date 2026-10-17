@@ -14,6 +14,8 @@ use coven_foundation::files::{FileArea, FileName, StoreReadLock};
 use coven_storage::{ByteRange, ObjectPath};
 use std::sync::Arc;
 
+use super::file_error::TransferError;
+
 const REQUEST_BYTES: u64 = 1024 * 1024;
 /// An open, checked file reference; subsequent row changes cannot redirect it.
 /// Its shared store lock prevents deletion until the stream and its I/O finish,
@@ -24,7 +26,11 @@ pub struct FileStream {
     state: tokio::sync::Mutex<ReadState>,
 }
 enum OpenFile {
-    Local(LocalFileStream),
+    Local {
+        stream: LocalFileStream,
+        owner: Arc<FilesInner>,
+        file: FileRef,
+    },
     Uploaded(Arc<UploadedFile>),
 }
 struct ReadState {
@@ -62,11 +68,35 @@ impl Files {
     /// stored bytes (§16.1).
     pub async fn open_file_stream(&self, file: &FileRef) -> Result<FileStream, FileReadError> {
         self.inner.check_open()?;
-        let source = match self.inner.database.open_local(file).await? {
-            Some(local) => OpenFile::Local(local),
-            None => OpenFile::Uploaded(Arc::new(
-                UploadedFile::open(self.inner.clone(), file.clone()).await?,
-            )),
+        let local = self
+            .inner
+            .database
+            .open_local(file)
+            .await
+            .map_err(FileReadError::from);
+        let local = match local {
+            Ok(local) => local,
+            Err(error) => return self.inner.complete_local_read(file, Err(error)).await,
+        };
+        let source = match local {
+            Some(stream) => OpenFile::Local {
+                stream,
+                owner: self.inner.clone(),
+                file: file.clone(),
+            },
+            None => {
+                let opened = UploadedFile::open(self.inner.clone(), file.clone()).await;
+                let opened = match opened {
+                    Ok(opened) => opened,
+                    Err(error) => {
+                        return self
+                            .inner
+                            .complete_download(file, Err(error.into()), false)
+                            .await
+                    }
+                };
+                OpenFile::Uploaded(Arc::new(opened))
+            }
         };
         Ok(FileStream {
             id: file.id().to_string(),
@@ -90,7 +120,7 @@ impl FileStream {
     /// Complete plaintext size.
     pub fn plaintext_size(&self) -> u64 {
         match &self.source {
-            OpenFile::Local(file) => file.plaintext_size(),
+            OpenFile::Local { stream, .. } => stream.plaintext_size(),
             OpenFile::Uploaded(file) => file.header.size(),
         }
     }
@@ -99,7 +129,17 @@ impl FileStream {
     /// returned plaintext bounded independently of the requested range length.
     pub async fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError> {
         match &self.source {
-            OpenFile::Local(file) => Ok(file.read_at(offset, len).await?),
+            OpenFile::Local {
+                stream,
+                owner,
+                file,
+            } => {
+                let read = stream
+                    .read_at(offset, len)
+                    .await
+                    .map_err(FileReadError::from);
+                owner.complete_local_read(file, read).await
+            }
             OpenFile::Uploaded(file) => {
                 file.check_range(offset, len)?;
                 let mut state = self.state.lock().await;
@@ -114,15 +154,33 @@ impl FileStream {
                 } else if !sequential {
                     state.hash = None;
                 }
-                let bytes = file.range(offset, len).await?;
+                let read = file.range(offset, len).await;
+                let bytes = match read {
+                    Ok(bytes) => bytes,
+                    Err(error) => {
+                        return file
+                            .owner
+                            .complete_download(&file.file, Err(error.into()), false)
+                            .await
+                    }
+                };
+                let mut whole = false;
                 if let Some(hash) = &mut state.hash {
                     hash.update(&bytes);
                 }
                 if offset + len == file.header.size() {
                     if let Some(hash) = state.hash.take() {
                         if hash.finish() != file.file.content_hash() {
-                            return Err(file.integrity());
+                            return file
+                                .owner
+                                .complete_download(
+                                    &file.file,
+                                    Err(TransferError::Refused(crate::Refusal::ContentHash)),
+                                    false,
+                                )
+                                .await;
                         }
+                        whole = true;
                     }
                 }
                 state.end = Some(offset + len);
@@ -134,12 +192,22 @@ impl FileStream {
                     let start = offset + len;
                     state.ahead = Some(tokio::spawn(async move {
                         let length = (ahead.header.size() - start).min(REQUEST_BYTES);
-                        if let Err(error) = ahead.range(start, length).await {
+                        let result = ahead
+                            .range(start, length)
+                            .await
+                            .map_err(TransferError::from);
+                        if let Err(error) = ahead
+                            .owner
+                            .complete_download(&ahead.file, result, false)
+                            .await
+                        {
                             tracing::debug!(?error, "file read-ahead failed");
                         }
                     }));
                 }
-                Ok(bytes)
+                file.owner
+                    .complete_download(&file.file, Ok(bytes), whole)
+                    .await
             }
         }
     }
@@ -276,9 +344,8 @@ impl UploadedFile {
         Ok(())
     }
     /// Fetch every chunk into the cache, authenticating each, then compare the
-    /// whole plaintext with the row's content hash. A mismatch is the inner
-    /// error: complete authenticated bytes that are not this file (§16.3).
-    pub(crate) async fn download(&self) -> Result<Result<(), crate::Refusal>, FileReadError> {
+    /// whole plaintext with the row's content hash (§16.3).
+    pub(crate) async fn download(&self) -> Result<(), TransferError> {
         let mut index = 0;
         let mut hash = ContentHasher::new();
         while index < self.header.chunk_count() {
@@ -295,11 +362,11 @@ impl UploadedFile {
             index = last + 1;
         }
         if hash.finish() != self.file.content_hash() {
-            return Ok(Err(crate::Refusal::ContentHash));
+            return Err(TransferError::Refused(crate::Refusal::ContentHash));
         }
-        Ok(Ok(()))
+        Ok(())
     }
-    pub(crate) async fn keep_whole(&self) -> Result<(), FileReadError> {
+    pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
         let name = FileName::new(self.owner.ids.new_id().to_string()).expect("UUID cache name");
         let reservation = self.owner.database.reserve_cache_file(name.clone()).await?;
         let target = self.owner.directory.file(FileArea::Cache, &name);
@@ -333,7 +400,7 @@ impl UploadedFile {
             index = last + 1;
         }
         if hash.finish() != self.file.content_hash() {
-            return Err(self.integrity());
+            return Err(TransferError::Refused(crate::Refusal::ContentHash));
         }
         writer.finish().await?;
         let _cache = self.owner.cache.write().await;

@@ -56,7 +56,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                 let item = f.files.inner.database.uploads().await.unwrap().remove(0);
                 assert!(matches!(
                     f.files.inner.upload(&item).await,
-                    Err(UploadFailure::Storage(_))
+                    Err(TransferError::File(FileReadError::Storage(_)))
                 ));
                 f.files
                     .inner
@@ -111,14 +111,14 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
                 Provenance::UserProvided => assert!(
                     matches!(
                         result,
-                        Err(UploadFailure::File(FileReadError::UserFileChanged { .. }))
+                        Err(TransferError::File(FileReadError::UserFileChanged { .. }))
                     ),
                     "{result:?}"
                 ),
                 Provenance::AppProvided => assert!(
                     matches!(
                         result,
-                        Err(UploadFailure::File(FileReadError::Integrity { .. }))
+                        Err(TransferError::File(FileReadError::Integrity { .. }))
                     ),
                     "{result:?}"
                 ),
@@ -282,7 +282,7 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
     assert_eq!(item.file, file);
     assert!(matches!(
         f.files.inner.upload(&item).await,
-        Err(UploadFailure::File(FileReadError::UserFileChanged { .. }))
+        Err(TransferError::File(FileReadError::UserFileChanged { .. }))
     ));
     assert_eq!(f.storage.request_count(), 0);
     assert_eq!(
@@ -315,7 +315,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
             .store(false, std::sync::atomic::Ordering::Release);
         assert!(matches!(
             f.files.inner.upload(&item).await,
-            Err(UploadFailure::Storage(_))
+            Err(TransferError::File(FileReadError::Storage(_)))
         ));
         f.files
             .inner
@@ -605,7 +605,7 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
     assert!(matches!(
         f.files.inner.upload(&item).await,
-        Err(UploadFailure::File(FileReadError::UserFileChanged { .. }))
+        Err(TransferError::File(FileReadError::UserFileChanged { .. }))
     ));
     assert_eq!(f.storage.request_count(), 0);
     f.close().await;
@@ -770,13 +770,12 @@ mod differential {
                     f.storage.set_online(true);
                     let settlement = match &result {
                         Ok(true) => "stored",
-                        Err(UploadFailure::Storage(error))
-                        | Err(UploadFailure::File(FileReadError::Storage(error)))
+                        Err(TransferError::File(FileReadError::Storage(error)))
                             if error.failure() == StorageFailure::Network =>
                         {
                             "pending"
                         }
-                        Err(UploadFailure::Refused(crate::Refusal::WrongIdentity { .. })) => {
+                        Err(TransferError::Refused(crate::Refusal::WrongIdentity { .. })) => {
                             "refused"
                         }
                         other => panic!("unexpected attempt result {other:?}"),

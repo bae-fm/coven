@@ -188,7 +188,7 @@ impl FilesInner {
     /// Send the file to the path and key its attaching write fixed. Confirmed
     /// storage retires the queue row and changes no app row (§16.5). Returns
     /// false when paused between parts.
-    pub(super) async fn upload(&self, item: &FileUpload) -> Result<bool, UploadFailure> {
+    pub(super) async fn upload(&self, item: &FileUpload) -> Result<bool, TransferError> {
         let coven_format::file_reference::FileReference { device, id, key } =
             item.file.reference().map_err(FileReadError::from)?;
         let path = ObjectPath::file(self.directory.id(), device, id);
@@ -272,12 +272,12 @@ impl FilesInner {
         storage: &dyn coven_storage::Storage,
         path: &coven_storage::ObjectPath,
         expected: (u64, coven_crypto::ObjectDigest),
-    ) -> Result<(), UploadFailure> {
+    ) -> Result<(), TransferError> {
         coven_storage::PublicationGate::check(self.send.as_ref(), path)?;
         match crate::identity::settle_occupied(storage, path, expected).await {
             Ok(()) => Ok(()),
             Err(SyncError::Storage(error)) => Err(error.into()),
-            Err(SyncError::Damaged(object)) => Err(UploadFailure::Refused(object.failure)),
+            Err(SyncError::Damaged(object)) => Err(TransferError::Refused(object.failure)),
             Err(error) => Err(coven_storage::StorageFailure::Protocol
                 .with_source(error)
                 .into()),
@@ -294,7 +294,7 @@ struct FileTransfer<'a> {
     total: u64,
 }
 impl FileTransfer<'_> {
-    async fn read_encrypted(&self, offset: u64, length: usize) -> Result<Vec<u8>, UploadFailure> {
+    async fn read_encrypted(&self, offset: u64, length: usize) -> Result<Vec<u8>, TransferError> {
         let header = FileHeader::new(self.item.file.plaintext_size());
         let end = offset
             .checked_add(length as u64)
@@ -344,11 +344,11 @@ impl FileTransfer<'_> {
     }
 }
 impl crate::recorded_upload::UploadSource for FileTransfer<'_> {
-    type Error = UploadFailure;
-    async fn read(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, UploadFailure> {
+    type Error = TransferError;
+    async fn read(&mut self, offset: u64, length: usize) -> Result<Vec<u8>, TransferError> {
         self.read_encrypted(offset, length).await
     }
-    async fn save(&mut self, session: UploadSession) -> Result<(), UploadFailure> {
+    async fn save(&mut self, session: UploadSession) -> Result<(), TransferError> {
         self.owner
             .database
             .record_session(self.item.id, session.encode()?)

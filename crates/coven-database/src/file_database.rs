@@ -30,6 +30,14 @@ pub struct FileDatabase {
     access: FileDatabaseAccess,
 }
 
+/// What supplied an already-complete pin without a download.
+pub enum PinnedFile {
+    /// A complete cache file whose content hash was verified.
+    Cached,
+    /// A local source still awaiting upload; pinning did not verify its bytes.
+    Queued,
+}
+
 impl FileDatabase {
     /// Use an open writer for uploads and cache operations.
     pub fn new(database: Database) -> Self {
@@ -192,9 +200,19 @@ impl FileDatabase {
         wait: Option<crate::RetryWait>,
     ) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
+            return Ok(());
         };
         database.record_pending_retry(record, subject, wait).await
+    }
+    /// The persisted wait for this fixed download; read-only handles keep none.
+    pub async fn download_wait(
+        &self,
+        subject: crate::RetrySubject,
+    ) -> Result<Option<crate::RetryWait>, DbError> {
+        match &self.access {
+            FileDatabaseAccess::Writer(database) => database.retry_wait(subject).await,
+            FileDatabaseAccess::Reader(_) => Ok(None),
+        }
     }
     /// Every download's persisted retry wait (§16.5), read without the
     /// writer. A read-only handle persists none.
@@ -206,16 +224,56 @@ impl FileDatabase {
         };
         database.download_retry_waits().await
     }
-    /// Clear this device's record about a file once its read completes.
-    pub async fn clear_file_pending<S: serde::Serialize + Send + 'static>(
+    /// Clear only conditions the completed read actually checked. The
+    /// predicate and deletion share the pending transaction. The record's
+    /// download wait and any queued upload wait end with it; return the
+    /// upload subject so the caller can discard its in-memory timer.
+    pub async fn clear_file_pending<P: crate::PendingValue>(
         &self,
-        subject: S,
-    ) -> Result<(), DbError> {
+        file: &FileRef,
+        subject: P::Subject,
+        checked: impl Fn(&P) -> bool + Send + 'static,
+    ) -> Result<Option<crate::RetrySubject>, DbError>
+    where
+        P::Subject: Send + 'static,
+    {
         let FileDatabaseAccess::Writer(database) = &self.access else {
-            return Err(read_only());
+            return Ok(None);
         };
-        database.clear_pending(subject).await
+        database
+            .clear_pending_if::<P>(file.clone(), subject, checked)
+            .await
     }
+    /// Record a local source failure only while its upload remains queued.
+    /// The retry is selected from the current upload wait and committed with
+    /// the record, so concurrent upload completion cannot leave a stale failure.
+    pub async fn fail_local_read<P: crate::PendingValue>(
+        &self,
+        file: &FileRef,
+        record: P,
+        next: impl FnOnce(Option<crate::RetryWait>) -> Result<crate::RetryWait, DbError>
+            + Send
+            + 'static,
+    ) -> Result<Option<(crate::RetrySubject, crate::RetryWait)>, DbError> {
+        let FileDatabaseAccess::Writer(_) = &self.access else {
+            return Ok(None);
+        };
+        let file = file.clone();
+        self.run(move |db, _, _, _| {
+            db.pending_transaction(|db| {
+                let Some(id) = file_queue::upload_id(db, &file)? else {
+                    return Ok(None);
+                };
+                let subject = crate::RetrySubject::Upload(id);
+                let wait = next(crate::retry::find(db, subject)?)?;
+                crate::pending::save(db, &record)?;
+                crate::retry::save(db, subject, &wait)?;
+                Ok(Some((subject, wait)))
+            })
+        })
+        .await
+    }
+
     /// Durable queue, including files whose row changed after attachment.
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.read(file_queue::read).await
@@ -562,7 +620,7 @@ impl FileDatabase {
     /// Pin a complete, previously checked cache file, or a file still queued
     /// here, atomically if one exists. The presence check and state change
     /// share a transaction with eviction and with the upload's completion.
-    pub async fn pin_complete(&self, file: &FileRef) -> Result<bool, DbError> {
+    pub async fn pin_complete(&self, file: &FileRef) -> Result<Option<PinnedFile>, DbError> {
         let file = file.clone();
         self.run(move |db, schema, _, _| {
             db.transaction(|db| {

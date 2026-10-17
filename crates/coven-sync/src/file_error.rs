@@ -71,7 +71,7 @@ pub enum FileReadError {
     },
     /// A database failure, retaining its cause.
     #[error(transparent)]
-    Database(#[from] DbError),
+    Database(DbError),
     /// A disk failure, retaining its cause.
     #[error(transparent)]
     Disk(#[from] DiskError),
@@ -81,6 +81,15 @@ pub enum FileReadError {
     /// A provider failure, retaining its classification and native cause.
     #[error(transparent)]
     Storage(#[from] StorageError),
+}
+impl From<DbError> for FileReadError {
+    fn from(error: DbError) -> Self {
+        match error {
+            DbError::Disk(error) => Self::Disk(error),
+            DbError::Lock(error) => Self::Lock(error),
+            error => Self::Database(error),
+        }
+    }
 }
 impl From<LocalFileError> for FileReadError {
     fn from(error: LocalFileError) -> Self {
@@ -99,39 +108,41 @@ impl From<LocalFileError> for FileReadError {
                 end,
                 size,
             },
-            LocalFileError::Database(error) => Self::Database(error),
+            LocalFileError::Database(error) => error.into(),
             LocalFileError::Disk(error) => Self::Disk(error),
             LocalFileError::Lock(error) => Self::Lock(error),
         }
     }
 }
 
-/// An upload attempt failed. Its pending record keeps the category; the
-/// native cause stays in this process's log.
+/// A file transfer retains its typed cause and exact refusal. The pending
+/// record keeps the category before the app-facing error merges content checks.
 #[derive(Debug, thiserror::Error)]
-pub(crate) enum UploadFailure {
-    /// The immutable destination contains different bytes.
-    #[error("file upload was refused: {0:?}")]
+pub(crate) enum TransferError {
+    /// Content or immutable identity verification failed.
+    #[error("file transfer was refused: {0:?}")]
     Refused(crate::Refusal),
-    /// Reading or checking the source failed.
+    /// Reading, storing or checking bytes failed.
     #[error(transparent)]
     File(#[from] FileReadError),
-    /// The provider failed.
-    #[error(transparent)]
-    Storage(#[from] StorageError),
 }
 
-impl From<DbError> for UploadFailure {
+impl From<StorageError> for TransferError {
+    fn from(error: StorageError) -> Self {
+        Self::File(error.into())
+    }
+}
+impl From<DbError> for TransferError {
     fn from(error: DbError) -> Self {
         Self::File(error.into())
     }
 }
-impl From<DiskError> for UploadFailure {
+impl From<DiskError> for TransferError {
     fn from(error: DiskError) -> Self {
         Self::File(error.into())
     }
 }
-impl From<LocalFileError> for UploadFailure {
+impl From<LocalFileError> for TransferError {
     fn from(error: LocalFileError) -> Self {
         Self::File(error.into())
     }

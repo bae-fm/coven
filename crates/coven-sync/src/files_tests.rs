@@ -573,9 +573,31 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
         files.read_file(&file).await,
         Err(FileReadError::Integrity { .. })
     ));
+    let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
+    assert!(matches!(
+        records.as_slice(),
+        [crate::PendingRecord {
+            reason: crate::PendingReason::Refused(crate::Refusal::ContentHash),
+            ..
+        }]
+    ));
+    assert_eq!(stream.read_at(23, 1).await.unwrap(), vec![73]);
+    assert_eq!(
+        b.database.pending::<crate::PendingRecord>().await.unwrap(),
+        records,
+        "a verified range cannot settle a whole-file hash refusal"
+    );
     assert!(matches!(
         files.pin(std::slice::from_ref(&file)).await,
         Err(FileReadError::Integrity { .. })
+    ));
+    let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
+    assert!(matches!(
+        records.as_slice(),
+        [crate::PendingRecord {
+            reason: crate::PendingReason::Refused(crate::Refusal::ContentHash),
+            ..
+        }]
     ));
     assert_eq!(
         b.database

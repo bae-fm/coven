@@ -6,6 +6,183 @@ use coven_database::RetrySubject;
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_storage::{test_utils::Faults, StorageFailure};
 
+#[tokio::test]
+async fn local_reads_settle_only_the_source_condition_they_checked() {
+    let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    let file = f.original("original", b"kept original").await;
+    f.files.stop_background_for_counts().await;
+    let source = f.root.path().join("original");
+    let moved = f.root.path().join("moved");
+    std::fs::rename(&source, &moved).unwrap();
+    assert!(matches!(
+        f.files.read_file(&file).await,
+        Err(FileReadError::UserFileMissing { .. })
+    ));
+    assert_eq!(
+        file_records(&f).await,
+        [crate::PendingReason::FileUnavailable(
+            crate::FileMissingReason::Source(crate::FileSourceFailure::Missing)
+        )]
+    );
+    let uploads = f.files.inner.database.uploads().await.unwrap();
+    assert_eq!(uploads[0].retry.unwrap().failures, 1);
+    assert!(f
+        .files
+        .inner
+        .database
+        .download_waits()
+        .await
+        .unwrap()
+        .is_empty());
+    std::fs::rename(&moved, &source).unwrap();
+    assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept original");
+    assert!(file_records(&f).await.is_empty());
+    assert!(f.files.inner.database.uploads().await.unwrap()[0]
+        .retry
+        .is_none());
+
+    f.storage.set_online(false);
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.retry_uploads_now().await.unwrap();
+    let failed_upload = file_records(&f).await;
+    assert!(matches!(
+        failed_upload.as_slice(),
+        [crate::PendingReason::Storage {
+            failure: StorageFailure::Network,
+            ..
+        }]
+    ));
+    assert_eq!(f.files.read_file(&file).await.unwrap(), b"kept original");
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    assert_eq!(file_records(&f).await, failed_upload);
+    assert_eq!(f.queue().await.files.len(), 1);
+    f.close().await;
+}
+
+#[tokio::test]
+async fn read_only_downloads_keep_typed_errors_without_writing_pending_records() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = f.uploaded("read-only", vec![24; 100]).await;
+    f.files.stop_background_for_counts().await;
+    let reader = builder(&f.directory, &f.ids, &f.clock, &f.declarations)
+        .open_read_only()
+        .await
+        .unwrap();
+    let files = Files::new(
+        FileDatabase::read_only(reader.clone()),
+        f.directory.clone(),
+        Some(f.storage.clone()),
+        f.send.clone(),
+        Arc::new(crate::RetryWaits::in_memory(f.clock.clone())),
+        f.ids.clone(),
+        crate::TransferLimits::default(),
+    );
+    f.storage.set_online(false);
+    assert!(
+        matches!(files.read_file(&file).await, Err(FileReadError::Storage(ref error))
+        if error.failure() == StorageFailure::Network)
+    );
+    f.storage.set_online(true);
+    assert_eq!(files.read_file(&file).await.unwrap(), vec![24; 100]);
+    assert!(file_records(&f).await.is_empty());
+    files.close().await;
+    reader.close().await.unwrap();
+    f.close().await;
+}
+
+#[tokio::test]
+async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() {
+    for pin in [false, true] {
+        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let file = f.uploaded("explicit", vec![19; CHUNK * 2]).await;
+        f.files.stop_background_for_counts().await;
+        f.storage.set_online(false);
+        let error = if pin {
+            f.files.pin(std::slice::from_ref(&file)).await.unwrap_err()
+        } else {
+            f.files.read_file(&file).await.unwrap_err()
+        };
+        assert!(
+            matches!(error, FileReadError::Storage(ref error) if error.failure() == StorageFailure::Network)
+        );
+        assert!(matches!(
+            file_records(&f).await.as_slice(),
+            [crate::PendingReason::Storage {
+                failure: StorageFailure::Network,
+                ..
+            }]
+        ));
+        assert_eq!(
+            f.files.inner.database.download_waits().await.unwrap().len(),
+            1
+        );
+        f.storage.set_online(true);
+        if pin {
+            f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+        } else {
+            assert_eq!(f.files.read_file(&file).await.unwrap(), vec![19; CHUNK * 2]);
+        }
+        assert!(file_records(&f).await.is_empty());
+        assert!(f
+            .files
+            .inner
+            .database
+            .download_waits()
+            .await
+            .unwrap()
+            .is_empty());
+        f.close().await;
+    }
+}
+
+#[tokio::test]
+async fn empty_file_open_records_a_missing_connection() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = f.uploaded("empty", Vec::new()).await;
+    f.files
+        .set_storage(None, std::future::ready(Ok(())))
+        .await
+        .unwrap();
+    assert!(matches!(
+        f.files.open_file_stream(&file).await,
+        Err(FileReadError::NoStorage)
+    ));
+    assert_eq!(file_records(&f).await, [crate::PendingReason::NoStorage]);
+    f.files
+        .set_storage(Some(f.storage.clone()), std::future::ready(Ok(())))
+        .await
+        .unwrap();
+    assert!(f.files.read_file(&file).await.unwrap().is_empty());
+    assert!(file_records(&f).await.is_empty());
+    f.close().await;
+}
+
+#[tokio::test]
+async fn explicit_authentication_failure_is_a_permanent_file_refusal() {
+    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = f.uploaded("damaged", vec![20; CHUNK]).await;
+    f.storage.corrupt_byte(&f.path(&file), 15).await.unwrap();
+    assert!(matches!(
+        f.files.read_file(&file).await,
+        Err(FileReadError::Integrity { .. })
+    ));
+    assert!(matches!(
+        file_records(&f).await.as_slice(),
+        [crate::PendingReason::Refused(
+            crate::Refusal::Decryption { .. }
+        )]
+    ));
+    assert!(f
+        .files
+        .inner
+        .database
+        .download_waits()
+        .await
+        .unwrap()
+        .is_empty());
+    f.close().await;
+}
+
 fn clock() -> Arc<FixedClock> {
     Arc::new(FixedClock::new(
         SystemTime::UNIX_EPOCH + Duration::from_secs(1000),

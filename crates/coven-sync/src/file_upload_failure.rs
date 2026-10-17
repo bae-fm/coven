@@ -2,7 +2,7 @@
 
 use crate::FileSourceFailure;
 use crate::{
-    files::file_error::{FileReadError, UploadFailure},
+    files::file_error::{FileReadError, TransferError},
     files::FilesInner,
     FileMissingReason, LocalFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite,
     Retry, SyncError,
@@ -13,10 +13,10 @@ use coven_storage::StorageFailure;
 impl FilesInner {
     /// The first unmet condition a failed attempt leaves for its file (§19.1):
     /// a missing or changed source is the uploader's own `FileUnavailable`.
-    fn upload_reason(&self, error: &UploadFailure) -> PendingReason {
+    fn upload_reason(&self, error: &TransferError) -> PendingReason {
         match error {
-            UploadFailure::Refused(reason) => PendingReason::Refused(reason.clone()),
-            UploadFailure::Storage(error) | UploadFailure::File(FileReadError::Storage(error)) => {
+            TransferError::Refused(reason) => PendingReason::Refused(reason.clone()),
+            TransferError::File(FileReadError::Storage(error)) => {
                 if error.failure() == StorageFailure::CatchUpRequired {
                     return PendingReason::Waits(Prerequisite::SequenceCatchUp);
                 }
@@ -28,24 +28,24 @@ impl FilesInner {
                     None => PendingReason::NoStorage,
                 }
             }
-            UploadFailure::File(FileReadError::NoStorage) => PendingReason::NoStorage,
-            UploadFailure::File(FileReadError::UserFileMissing { .. }) => {
+            TransferError::File(FileReadError::NoStorage) => PendingReason::NoStorage,
+            TransferError::File(FileReadError::UserFileMissing { .. }) => {
                 PendingReason::FileUnavailable(FileMissingReason::Source(
                     FileSourceFailure::Missing,
                 ))
             }
-            UploadFailure::File(FileReadError::UserFileChanged { .. }) => {
+            TransferError::File(FileReadError::UserFileChanged { .. }) => {
                 PendingReason::FileUnavailable(FileMissingReason::Source(
                     FileSourceFailure::Changed,
                 ))
             }
-            UploadFailure::File(FileReadError::Integrity { .. }) => PendingReason::FileUnavailable(
+            TransferError::File(FileReadError::Integrity { .. }) => PendingReason::FileUnavailable(
                 FileMissingReason::Source(FileSourceFailure::Integrity),
             ),
-            UploadFailure::File(FileReadError::Disk(_) | FileReadError::Lock(_)) => {
+            TransferError::File(FileReadError::Disk(_) | FileReadError::Lock(_)) => {
                 PendingReason::Failed(LocalFailure::Disk)
             }
-            UploadFailure::File(_) => PendingReason::Failed(LocalFailure::Database),
+            TransferError::File(_) => PendingReason::Failed(LocalFailure::Database),
         }
     }
 
@@ -56,7 +56,7 @@ impl FilesInner {
     pub(super) async fn record_failure(
         &self,
         item: &FileUpload,
-        error: &UploadFailure,
+        error: &TransferError,
     ) -> Result<(), SyncError> {
         let subject = RetrySubject::Upload(item.id);
         let file = PendingSubject::File {

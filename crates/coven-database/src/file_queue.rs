@@ -224,6 +224,17 @@ pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> 
         .collect()
 }
 
+/// The queued upload owning this fixed file, by its unique identity index.
+pub(crate) fn upload_id(db: &DatabaseConnection, file: &FileRef) -> Result<Option<i64>, DbError> {
+    Ok(db
+        .query(
+            "SELECT id FROM _coven_file_uploads WHERE device=?1 AND file=?2",
+            (file.uploader().0.to_be_bytes(), file.id().0.as_bytes()),
+            |row| row.get(0),
+        )?
+        .pop())
+}
+
 /// Whether this device's queue still holds the file, so its local source
 /// remains the authoritative copy (§16.1).
 pub(crate) fn queued(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
