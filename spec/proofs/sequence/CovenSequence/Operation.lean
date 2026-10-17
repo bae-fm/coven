@@ -5,14 +5,16 @@ import CovenSequence.Claim
 
 Every admin action is an operation, a journal entry. It validates against the
 latest slot it read, records each pre-claim artifact in the journal before
-creating it (sealed key copies, snapshot bodies: the provider's storage of them
-is abstract here), then claims the next slot. The journal records the slot it
+creating it (snapshot bodies and other deletable preparation outside the
+sequence), then claims the entry slot. Already claimed key copies and snapshot
+announcements are permanent sequence history; their publication is outside
+this entry-claim model. The journal records the slot it
 is claiming before the request is sent.
 
 - The claim lands (its bytes are at the slot): the operation completes.
 - Another device took the slot: read on, validate again against the new
   slots, and claim the next one.
-- No longer allowed: undo every recorded artifact, then delete the journal. A
+- No longer allowed: undo every recorded deletable artifact, then delete the journal. A
   failed undo is a step not taken; the record stays and the undo retries.
 
 A crash loses nothing the steps use: every step is conditioned on the journal
@@ -20,7 +22,7 @@ and on storage, which survive, and a restart takes the same steps. Claim
 requests already sent survive the crash and can land at any later time.
 Other devices claim slots at any time.
 
-The operation's bytes for slot `n` are `ours n`: they name the operation and
+The operation's entry bytes for slot `n` are `ours n`: they name the operation and
 the slot, so they are unique per attempt and a resend is the same attempt.
 
 An artifact create is a request that, once sent, can land at any time until it
@@ -34,10 +36,17 @@ namespace CovenSequence.Operation
 
 open CovenSequence.Claim (Store create create_extends Extends)
 
-/-- Bytes in the sequence: this operation's claim of slot `n`, or another
-device's claim. -/
+/-- Published preparation remains sequence history after its operation ends. -/
+inductive Preparation where
+  | keyCopy
+  | announcement
+  deriving DecidableEq
+
+/-- This operation's entry claim, already published preparation, or another
+device's claim. Preparations are never deletable artifacts. -/
 inductive Bytes where
   | ours (n : Nat)
+  | preparation (kind : Preparation) (value : Nat)
   | other (x : Nat)
   deriving DecidableEq
 
@@ -65,7 +74,7 @@ structure World (A : Type) where
   slots : Store Bytes
   /-- Slots of this operation's sent claim requests that have not landed. -/
   inflight : List Nat
-  /-- The provider's storage of this operation's artifacts. -/
+  /-- Deletable preparation outside the sequence; never key-copy or announcement slots. -/
   artifacts : List A
   /-- Artifact create requests sent and not yet ended: each may land at any
   time until it ends (it lands, fails, or is cancelled). -/
@@ -512,14 +521,14 @@ theorem steps_inv [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp :
   | step s _ ih => exact ih (step_inv hp s hi hq) (step_req s hi hq)
 
 /-- **The claim loop and journal.** From validation over any slots holding
-none of its bytes, through any interleaving of its own steps, crashes and
+none of its entry bytes, through any interleaving of its own steps, crashes and
 restarts, late-landing requests and other devices' claims:
 
-- its bytes occupy at most one slot (it never lands twice);
-- a landed operation's bytes are at its slot, whose predecessors were all
+- its entry bytes occupy at most one slot (the entry never lands twice);
+- a landed operation's entry bytes are at its slot, whose predecessors were all
   filled when it validated, and validation held against them;
-- an undone operation has no bytes in the sequence, now or later, and none of
-  its recorded artifacts remains in storage, now or later: its undo ran only
+- an undone operation has no entry bytes in the sequence, now or later, and
+  none of its recorded deletable artifacts remains in storage, now or later: its undo ran only
   after every create it sent had ended. -/
 theorem operation_outcome [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : PrefixOnly allowed)
     (s0 : Store Bytes) (h0 : ∀ n m, s0 n ≠ some (.ours m)) {w : World A}
@@ -548,6 +557,53 @@ theorem operation_outcome [DecidableEq A] {allowed : Store Bytes → Nat → Boo
       rcases hi.recorded a (by simp [ha]) with ⟨j, hj', _⟩ | ⟨n, hn⟩
       · simp [hj] at hj'
       · rw [hu] at hn; cases hn
+
+/-- Operation steps never erase or replace an occupied history slot. -/
+theorem step_preserves_history [DecidableEq A] {allowed : Store Bytes → Nat → Bool}
+    {fault : Fault} {w w' : World A} (step : Step allowed fault w w') :
+    Extends w.slots w'.slots := by
+  cases step with
+  | land => exact create_extends _ _ _
+  | other => exact create_extends _ _ _
+  | _ => intro _ _ h; exact h
+
+theorem steps_preserve_history [DecidableEq A] {allowed : Store Bytes → Nat → Bool}
+    {fault : Fault} {w w' : World A} (run : Steps allowed fault w w') :
+    Extends w.slots w'.slots := by
+  induction run with
+  | refl => intro _ _ h; exact h
+  | step s _ ih => intro i b h; exact ih i b (step_preserves_history s i b h)
+
+/-- In particular, confirmed undo keeps every already claimed key copy and
+announcement. Their multi-slot publication is outside this entry-claim model. -/
+theorem undo_keeps_preparation [DecidableEq A] {allowed : Store Bytes → Nat → Bool}
+    {w w' : World A} (run : Steps allowed .none w w')
+    {i : Nat} {kind : Preparation} {value : Nat}
+    (h : w.slots i = some (.preparation kind value)) :
+    w'.slots i = some (.preparation kind value) :=
+  steps_preserve_history run i _ h
+
+/-- Undo can remove its temporary snapshot body while its announcement and
+key copy remain in history; absence of every byte would be a false claim. -/
+theorem undone_retains_history :
+    let initial : Store Bytes := fun i =>
+      if i = 1 then some (.preparation .keyCopy 7)
+      else if i = 2 then some (.preparation .announcement 8) else none
+    ∃ w : World Nat, Steps (fun _ _ => false) .none (start initial) w ∧
+      w.result = some .undone ∧ w.artifacts = [] ∧
+      w.slots 1 = some (.preparation .keyCopy 7) ∧
+      w.slots 2 = some (.preparation .announcement 8) := by
+  intro initial
+  refine ⟨_, Steps.step (Step.record _ [] 8 rfl)
+    (Steps.step (Step.sendArt _ [8] 8 rfl (by simp))
+    (Steps.step (Step.landArt _ 8 (by simp))
+    (Steps.step (Step.giveUp _ [8] .prep 3 rfl (Or.inl rfl) ⟨?_, rfl⟩ rfl)
+    (Steps.step (Step.undoOne _ [8] 8 rfl (Or.inl (by simp [start])))
+    (Steps.step (Step.finishUndo _ (by simp) (by simp [start])) (Steps.refl _)))))),
+    rfl, by simp [start], rfl, rfl⟩
+  intro i hi hlt
+  have h : i = 1 ∨ i = 2 := by omega
+  rcases h with rfl | rfl <;> simp [start, initial]
 
 /-- **Counterexample: a restart that forgets its claim lands twice.** The
 operation claims slot 1, the request lands, and a restart that does not

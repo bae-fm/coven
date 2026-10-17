@@ -239,8 +239,8 @@ Queued writes eventually claim a slot, given that their prerequisites succeed,
 storage works, and the device isn't always beaten to the next slot. Nothing bounds
 how often a device can lose that race.
 
-Admin work either claims its slot or undoes everything its journal recorded. An
-undo that fails stays in the journal and is reported (§11.3).
+Admin work either claims its entry or undoes its deletable preparation; claimed
+history stays. A failed undo stays in the journal and is reported (§11.3).
 
 #### 2.7 Storage bounds
 
@@ -1908,7 +1908,9 @@ by itself:
 
 #### 11.3 Undo
 
-An undo removes everything the journal recorded, and nothing may be left behind.
+An undo removes the preparation the journal still owns outside the sequence.
+Claimed key copies and snapshot announcements stay in history; an abandoned
+snapshot body is deleted (§16.3).
 
 - **Wait first.** Before deleting anything, wait for, or cancel, every request
   already sent. Then delete by the recorded name and confirm it's absent. An undo
@@ -1968,12 +1970,13 @@ it; bytes merely sent don't advance it.
 
 #### 11.6 What the proofs cover
 
-The model proves that an operation keeps its recorded work and in-flight
-requests accounted for at every step, occupies at most one slot, lands only
-after passing its check against every slot before it, and, once undone, leaves
-neither slot bytes nor anything it made. It keeps all slots and proves safety,
-not that an operation eventually finishes; §5.3 covers settling after slots are
-deleted.
+The model follows the entry claim and deletable preparation. The entry occupies
+at most one slot and lands only after validation against its preceding slots.
+Confirmed undo leaves no entry bytes or deletable artifacts; already claimed
+key copies and announcements remain.
+
+The model keeps all slots. It does not model the separate claims that publish
+preparation, or prove eventual completion; §5.3 covers settlement after deletion.
 
 ### 12. Keys and encryption
 
@@ -6291,7 +6294,8 @@ Write-ups explain each model and state its assumptions:
 | Membership and role changes apply only from an active admin in the preceding state; leaving no admin is refused; every prefix after creation keeps an admin | `applied_membership_authorized`, `last_admin_refused`, `every_prefix_has_admin` | `proofs/sequence/CovenSequence/Authority.lean` | §10.2, §10.4 |
 | A member with no active device can still register a new one | `member_without_active_device_can_register` | `proofs/sequence/SequenceApply.lean` | §10.2 |
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
-| An operation occupies at most one slot; a landed one passed validation against the slots before it; a confirmed undo leaves neither slot bytes nor anything it made | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
+| An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo leaves no entry bytes or deletable artifacts. Separate preparation claims are not modeled | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
+| Operation steps preserve already claimed history, including key copies and announcements after undo | `steps_preserve_history`, `undo_keeps_preparation`, `undone_retains_history` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3, §11.6 |
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
 | A replacement waits until due; a due delivery can finish, and its claim's rejection reaches its undo | `not_due_unchanged`, `due_delivery_finishes`, `claim_rejection_reaches_undo` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §11.4 |
 | A failed undo keeps its rejection and cleanup failure; without admin access it stays owed, and only successful cleanup ends it | `failed_undo_keeps_both_causes`, `reopened_undo_needs_admin`, `undo_finishes_only_after_success` | `proofs/sequence/CovenSequence/AccessKeyReplacement.lean` | §14.3 |

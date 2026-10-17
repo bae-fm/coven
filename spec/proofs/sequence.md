@@ -543,13 +543,13 @@ landed under the existing claim protocol; it precedes the raise slot (§18.5).
 
 ## Operations
 
-[`Operation`](sequence/CovenSequence/Operation.lean) models one admin operation
-as a journal entry:
+[`Operation`](sequence/CovenSequence/Operation.lean) models an admin operation's entry claim
+and deletable preparation in a journal:
 
-- it records each pre-claim artifact before sending its create;
+- it records each deletable artifact before sending its create;
 - it records the slot it claims before sending the claim, and resolves that
   claim before doing anything else;
-- its bytes name the operation and the slot.
+- its entry bytes name the operation and the slot.
 
 A crash loses nothing the steps use. Every step reads the journal and storage,
 and a restart takes the same steps. Sent claim requests survive crashes and can
@@ -559,6 +559,10 @@ ended. It deletes by recorded name and confirms absence before deleting the
 journal. Other devices claim slots at any time. Validation (`allowed`) reads
 only slots `1..n-1`.
 
+Key copies and snapshot announcements are sequence slots, never deletable
+artifacts. Their separate publication claims are outside this model; already
+published preparation is included in its starting history.
+
 This operation model retains sequence slots. Its results are safety properties,
 not a promise that storage requests or contention eventually succeed. Settlement
 after slot deletion is proved separately below.
@@ -566,11 +570,14 @@ after slot deletion is proved separately below.
 - `step_inv`, `step_req`, `steps_inv`: every step keeps the invariants. One of
   them is that every create still in flight is recorded while the journal
   exists, and outlives it only for a landed operation.
-- `operation_outcome`: over any interleaving, the operation's bytes occupy at
-  most one slot. A landed operation's bytes are at its slot; the slots before
+- `operation_outcome`: over any interleaving, the operation's entry occupies at
+  most one slot. A landed entry's bytes are at its slot; the slots before
   it were filled when it validated, and validation held against them. An
-  undone operation has no bytes in the sequence, now or later, and none of its
-  recorded artifacts remains in storage.
+  undone operation has no entry bytes in the sequence, now or later, and none
+  of its recorded deletable artifacts remains in storage.
+- `steps_preserve_history`, `undo_keeps_preparation`: operation steps retain
+  every occupied history slot. `undone_retains_history` exhibits an undo that
+  deletes a snapshot body while its announcement and a key copy remain.
 - `forgetful_lands_twice` is a checked counterexample. A restart that does not
   resolve its recorded claim validates again after the first claim landed. It
   then claims the next slot and lands there too.

@@ -49,6 +49,10 @@ import SequenceApply
 #print axioms CovenSequence.Operation.step_req
 #print axioms CovenSequence.Operation.step_inv
 #print axioms CovenSequence.Operation.steps_inv
+#print axioms CovenSequence.Operation.step_preserves_history
+#print axioms CovenSequence.Operation.steps_preserve_history
+#print axioms CovenSequence.Operation.undo_keeps_preparation
+#print axioms CovenSequence.Operation.undone_retains_history
 #print axioms CovenSequence.Operation.operation_outcome
 #print axioms CovenSequence.Operation.forgetful_lands_twice
 #print axioms CovenSequence.Operation.eager_undo_leaks
