@@ -278,14 +278,10 @@ impl CloudKitStorage {
                 .share()?
                 .currentUserParticipant()
                 .ok_or(StorageFailure::Authentication)?;
+            // The current user participant is the signed-in account. Live, its
+            // user record reads `__defaultOwner__` (CKCurrentUserDefaultName),
+            // never the record name the current-user fetch returns.
             let identity = person.userIdentity();
-            if identity
-                .userRecordID()
-                .is_none_or(|id| id.recordName().to_string() != current)
-            {
-                return Err(StorageFailure::Protocol
-                    .with_source("CloudKit participant disagrees with signed-in account"));
-            }
             // Every participant this adapter adds is looked up by email. Keep
             // that invitation identity on reconnect; an opaque current-user id
             // would not compare equal to this member's existing access entry.
