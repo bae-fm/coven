@@ -22,6 +22,67 @@ fn raw(loss: &Loss) -> Vec<u8> {
 }
 
 #[test]
+fn frozen_change_decoding_refuses_parent_maps() {
+    let mut original = test_utils::excluded_loss();
+    let LossValues::Row(cells) = &mut original.values else {
+        unreachable!()
+    };
+    for cell in cells.values_mut() {
+        cell.value.parents.clear();
+    }
+    let write = test_utils::write().header.position;
+    for cause in [
+        LossCause::Dependency {
+            write,
+            sources: vec![crate::write_sources::ChangeId {
+                write,
+                row: original.row.clone(),
+            }],
+        },
+        LossCause::NotAuthorized {
+            write,
+            reason: AuthorizationFailure::NotOwner {
+                owner: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(7)),
+            },
+        },
+        LossCause::NotAuthorized {
+            write,
+            reason: AuthorizationFailure::InvalidForeignKeyEffect,
+        },
+        original.cause.clone(),
+    ] {
+        let mut loss = original.clone();
+        loss.cause = cause;
+        let (_, mut decoder) = encoder(1);
+        assert_eq!(
+            decoder.frame(&raw(&loss), &test_utils::oracle()).unwrap(),
+            Some(SnapshotRecord::Loss(loss.clone()))
+        );
+        let bytes = crate::merge_fields::encode_loss(&loss).unwrap();
+        assert_eq!(crate::merge_fields::decode_loss(&bytes).unwrap(), loss);
+        let LossValues::Row(cells) = &mut loss.values else {
+            unreachable!()
+        };
+        cells.values_mut().next().unwrap().value.parents.insert(
+            coven_merge::ForeignKey::new(["parent"], "t", ["id"]),
+            Parent {
+                row: test_utils::row(),
+                generation: 1,
+            },
+        );
+        let mut bytes = Encoder::new();
+        loss.put(&mut bytes).unwrap();
+        assert!(
+            crate::merge_fields::decode_loss(&bytes.bytes).is_err(),
+            "{:?}",
+            loss.cause
+        );
+        let (_, mut decoder) = encoder(1);
+        assert!(decoder.frame(&raw(&loss), &test_utils::oracle()).is_err());
+    }
+}
+
+#[test]
 fn every_loss_uses_one_section_without_write_headers_or_merge_metadata() {
     let empty = test_utils::oracle();
     let mut losses = test_utils::retained_losses();

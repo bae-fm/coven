@@ -571,7 +571,8 @@ pub fn excluded_loss() -> crate::loss::Loss {
         values: LossValues::Row(
             values
                 .into_iter()
-                .map(|(name, value)| {
+                .map(|(name, mut value)| {
+                    value.parents.clear();
                     (
                         name,
                         Cell {

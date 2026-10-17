@@ -423,13 +423,13 @@
   - A cell's generation is its incarnation; a removed row's is its generation
     when captured. Both are positive and odd. A removed row's
     cells and rules are nonempty. An excluded row keeps the generation of
-    its row change; inserts and updates keep their new values and parents,
-    deletes their old scalar values with empty parent maps.
+    its row change; inserts and updates keep their new scalar values,
+    deletes their old scalar values. Original parent evidence is retained separately.
   - Dependent and unauthorized values name their own write as setter and
     have empty parent maps; the identity remains for a delete with no old
     values.
   - `frozen` is true for schema-excluded, dependent and unauthorized rows, and for losses frozen by a breaking
-    migration. Migration-frozen values have empty parent maps, keeping their
+    migration. All frozen values have empty parent maps, keeping their
     written scalar values and names independently of the current schema.
     Active losses follow merge and removal rules; frozen ones do not.
     Dropping a table or column freezes its affected pending losses with

@@ -387,7 +387,7 @@ impl Loss {
             name(n)?;
             positive(cell.write.number)?;
             crate::merge_wire::column(&cell.value)?;
-            if self.frozen && !self.cause.freezes_change() {
+            if self.frozen {
                 require(
                     cell.value.parents.is_empty(),
                     "frozen references",
