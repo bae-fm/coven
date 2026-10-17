@@ -412,6 +412,29 @@ impl SequenceSync {
         }
     }
 
+    /// Resume one invite with freshly supplied admin access.
+    pub(crate) async fn retry_invite(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        id: OperationId,
+    ) -> Result<(), SyncError> {
+        match self.advance_invite(session, ring, member, id).await? {
+            InviteProgress::Waiting(reason) if reason != PendingReason::Paused => {
+                Err(SyncError::Pending(Box::new(PendingRecord {
+                    subject: PendingSubject::Operation {
+                        id,
+                        kind: OperationKind::Invite,
+                    },
+                    reason,
+                    reported_by: self.device,
+                })))
+            }
+            _ => Ok(()),
+        }
+    }
+
     /// Advance this device's invites in a pass: grant, read the request
     /// under backoff, revoke on expiry, and finish decided work.
     pub(crate) async fn resume_invites(

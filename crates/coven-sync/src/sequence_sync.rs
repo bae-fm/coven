@@ -28,6 +28,8 @@ pub(crate) struct Session {
     blocked: Option<PendingRecord>,
     /// The next slot a member without store keys inspects for its copies.
     scanned: u64,
+    /// The retired devices whose keys the last stray-key listing judged.
+    swept: Option<std::collections::BTreeSet<DeviceId>>,
 }
 
 /// Owns sequence progress. App commits use the database independently; every
@@ -111,6 +113,7 @@ impl SequenceSync {
                 floor: None,
                 blocked,
                 scanned: 1,
+                swept: None,
             }),
             admin_access: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
@@ -130,12 +133,9 @@ impl SequenceSync {
     /// then perform the effects of its applied administrative state.
     pub async fn pass(&self) -> Result<SyncStatus, SyncError> {
         let mut session = self.session.lock().await;
-        let captured = self
-            .database
-            .waiting_snapshot_headers()
-            .await?
-            .last()
-            .map(|write| write.header.position.number);
+        let waiting = self.database.waiting_snapshot_headers().await?;
+        let first = waiting.first().map(|write| write.header.position);
+        let captured = waiting.last().map(|write| write.header.position.number);
         let member = self
             .member
             .read()?
@@ -143,12 +143,18 @@ impl SequenceSync {
         let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
-        if let Some(through) = captured {
+        if let (Some(through), Some(first)) = (captured, first) {
+            // The queue's first write names a wait for its sealing key; a
+            // later send that succeeds settles that condition.
+            let subject = PendingSubject::Write(coven_merge::WriteId {
+                device: first.device,
+                number: first.number,
+            });
             match self
                 .send_writes(&mut session, &mut ring, &member, through)
                 .await
             {
-                Ok(()) => (),
+                Ok(()) => self.database.clear_pending(subject).await?,
                 Err(SyncError::KeyUnavailable(key)) => {
                     let audience = session
                         .history
@@ -159,7 +165,7 @@ impl SequenceSync {
                         .unwrap_or(Audience::Store);
                     self.database
                         .record_pending(PendingRecord {
-                            subject: PendingSubject::Audience(audience.clone()),
+                            subject,
                             reason: PendingReason::KeyUnavailable { audience, key },
                             reported_by: self.device,
                         })
@@ -176,6 +182,7 @@ impl SequenceSync {
             self.resume_access(&mut session, &mut ring, &member).await?;
             self.resume_invites(&mut session, &mut ring, &member)
                 .await?;
+            self.resume_member_keys(&mut session, &mut ring).await?;
             self.rotate_exposed(&mut session, &mut ring, &member)
                 .await?;
             self.retain_sequence(&mut session, &mut ring, &member)
@@ -183,6 +190,7 @@ impl SequenceSync {
             self.retain_snapshots(&session).await?;
             self.request_snapshots(&mut session, &mut ring, &member)
                 .await?;
+            self.sweep_stray_access_keys(&mut session, &member).await?;
             self.retain_files(&session, &ring, &member).await?;
             self.files.sync_files().await?;
         }
@@ -438,7 +446,12 @@ impl SequenceSync {
                 }
                 coven_database::DeviceState::Active => (),
             }
-            if session.history.state.members[&device.member].keys != member.keys().public_keys() {
+            // This member's own replacement binds its kept candidate before
+            // custody installs it (§18.1).
+            let current = session.history.state.members[&device.member].keys;
+            if current != member.keys().public_keys()
+                && member.candidate().map(|keys| keys.public_keys()) != Some(current)
+            {
                 return Err(SyncError::MemberKeysReplaced {
                     member: device.member,
                 });
@@ -602,6 +615,7 @@ impl History {
                 frame: SlotFrame::Admin(change),
                 original,
             } => {
+                self.note_named_key(&change);
                 let effect = match self.validate(&received.header, slot, &change) {
                     Ok(mut effect) => {
                         if let Some(effect) = &mut effect {
@@ -705,10 +719,14 @@ impl History {
 pub(crate) mod access_keys;
 #[path = "sequence_access.rs"]
 mod sequence_access;
+#[path = "sequence_access_keys.rs"]
+mod sequence_access_keys;
 #[path = "sequence_bootstrap.rs"]
 pub(crate) mod sequence_bootstrap;
 #[path = "sequence_claim.rs"]
 mod sequence_claim;
+#[path = "sequence_credentials.rs"]
+mod sequence_credentials;
 #[path = "sequence_files.rs"]
 mod sequence_files;
 #[path = "sequence_invites.rs"]
@@ -717,6 +735,8 @@ mod sequence_invites;
 pub(crate) mod sequence_join;
 #[path = "sequence_keys.rs"]
 mod sequence_keys;
+#[path = "sequence_member_keys.rs"]
+mod sequence_member_keys;
 #[path = "sequence_operations.rs"]
 pub(crate) mod sequence_operations;
 #[path = "sequence_reload.rs"]

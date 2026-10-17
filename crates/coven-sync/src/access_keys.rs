@@ -115,3 +115,28 @@ impl crate::SequenceSync {
         Ok(self.database.clear_access_key(access_key_id).await?)
     }
 }
+
+/// The pending `DeleteAccessKey` work in a discarded operation journal (§10).
+/// A reset carries these into its replacement database; a key the old copy
+/// made but never recorded is reclaimed after its device's retirement (§13).
+pub fn owed_access_key_deletions(
+    records: &[coven_database::OperationRecord],
+) -> Result<Vec<coven_database::AccessKeyDeletion>, crate::SyncError> {
+    let mut deletions = Vec::new();
+    for record in records
+        .iter()
+        .filter(|record| record.kind == "delete-access-key")
+    {
+        let Deletion { key } = serde_json::from_slice(&record.data)?;
+        deletions.push(coven_database::AccessKeyDeletion {
+            key,
+            operation: coven_database::NewOperation {
+                kind: record.kind.clone(),
+                data: record.data.clone(),
+                started_by: "coven".into(),
+                pauses_writes: false,
+            },
+        });
+    }
+    Ok(deletions)
+}

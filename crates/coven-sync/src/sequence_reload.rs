@@ -271,6 +271,72 @@ impl SequenceSync {
         }
     }
 
+    /// Reload readable audiences from the floor's snapshots, or else from
+    /// their newest usable announced snapshots, and the following slots,
+    /// keeping this device's id and waiting writes (§19.2). It cannot bypass
+    /// a blocked slot.
+    pub async fn reload_from_snapshot(&self) -> Result<(), SyncError> {
+        let mut session = self.session.lock().await;
+        let member = self
+            .member
+            .read()?
+            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.ring(&mut session, &member).await?;
+        self.read_forward(&mut session, &mut ring, &member).await?;
+        self.settle_open(&mut session, &mut ring, &member).await?;
+        if let Some(floor) = session.floor.clone() {
+            return self
+                .reload_floor(&mut session, floor, &mut ring, &member)
+                .await;
+        }
+        let history = session.history.clone();
+        let readable: Vec<_> = std::iter::once(Audience::Store)
+            .chain(
+                history
+                    .state
+                    .readable_circles(&member.member())
+                    .into_iter()
+                    .map(Audience::Circle),
+            )
+            .collect();
+        let mut selected = Vec::new();
+        let mut preserved = Vec::new();
+        for audience in readable {
+            match history.announcements.values().rev().find(|announcement| {
+                announcement.snapshot.audience == audience && history.usable(announcement)
+            }) {
+                Some(announcement) => {
+                    selected.push(self.select(announcement.clone(), &ring).await?)
+                }
+                None => preserved.push(audience),
+            }
+        }
+        if selected.is_empty() {
+            return Err(coven_storage::StorageFailure::NotFound
+                .with_source("no usable snapshot is announced for a readable audience")
+                .into());
+        }
+        let target = session.through;
+        if let Some(newer) = self
+            .install_selected(
+                &mut session,
+                selected,
+                preserved,
+                target,
+                history,
+                &mut ring,
+                &member,
+                None,
+            )
+            .await?
+        {
+            return self
+                .reload_floor(&mut session, newer, &mut ring, &member)
+                .await;
+        }
+        Ok(())
+    }
+
     pub(crate) async fn reload_activation(
         &self,
         session: &mut Session,

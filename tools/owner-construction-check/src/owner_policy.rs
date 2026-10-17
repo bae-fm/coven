@@ -318,6 +318,46 @@ pub(crate) const POLICY: Policy = Policy {
             "in_memory",
         ),
         ("crates/coven-sync/src/sync_loop.rs", "SyncLoop", "new"),
+        // Credential changes run as owned tasks, so a dropped app future
+        // cannot leave custody and the live connection disagreeing.
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "new",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "replace_member_keys",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "replace_access_key",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "update_credentials",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "install_oauth",
+        ),
+        (
+            "crates/coven-sync/src/restore_codes.rs",
+            "RestoreCodes",
+            "adopt_delivered_key",
+        ),
+        // A sign-in's custody: device custody once per opened installation,
+        // session custody per completed sign-in until publication (§4).
+        (
+            "crates/coven-sync/src/sign_in.rs",
+            "DeviceCredentials",
+            "new",
+        ),
+        ("crates/coven-sync/src/sign_in.rs", "SessionSignIn", "new"),
         // The sequence owner composes its file transfers and pass state.
         (
             "crates/coven-sync/src/sequence_sync.rs",

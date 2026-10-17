@@ -30,10 +30,11 @@ enum Command {
 }
 impl SyncLoop {
     /// Compose a stopped loop for an open, connected sequence owner.
-    pub fn new(sync: Arc<SequenceSync>) -> Self {
+    /// `codes` installs a delivered S3 key on this device after each pass (§13).
+    pub fn new(sync: Arc<SequenceSync>, codes: Option<crate::RestoreCodes>) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
         let (status, subscription) = watch::channel(LoopStatus::Stopped);
-        tokio::spawn(run(sync, receiver, status));
+        tokio::spawn(run(sync, codes, receiver, status));
         Self {
             commands,
             status: subscription,
@@ -72,8 +73,28 @@ impl SyncLoop {
         receive.await.map_err(|_| DbError::StoreClosed)?
     }
 }
+/// A pass, then the delivered S3 key this member's applied history records,
+/// unless this device already uses it (§13).
+async fn pass(sync: &SequenceSync, codes: Option<&crate::RestoreCodes>) -> Result<(), SyncError> {
+    sync.pass().await?;
+    if let Some(codes) = codes {
+        let held = match codes.connection().await? {
+            Some(coven_storage::ConnectionCredentials {
+                credentials: coven_storage::StorageCredentials::S3(held),
+                ..
+            }) => Some(held.access_key_id),
+            _ => None,
+        };
+        if let Some(key) = sync.delivered_access_key(held.as_deref()).await? {
+            codes.adopt_delivered_key(key).await?;
+        }
+    }
+    Ok(())
+}
+
 async fn run(
     sync: Arc<SequenceSync>,
+    codes: Option<crate::RestoreCodes>,
     mut commands: mpsc::UnboundedReceiver<Command>,
     status: watch::Sender<LoopStatus>,
 ) {
@@ -157,7 +178,7 @@ async fn run(
                     break;
                 }
                 status.send_replace(LoopStatus::Running);
-                match sync.pass().await {
+                match pass(&sync, codes.as_ref()).await {
                     Ok(_) => match sync.waits.clear(RetrySubject::Sync).await {
                         Ok(()) => {
                             status.send_replace(LoopStatus::Waiting);

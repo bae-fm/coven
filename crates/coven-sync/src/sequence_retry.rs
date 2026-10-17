@@ -1,12 +1,40 @@
 //! Operation waits use their own prerequisites and persisted retry deadlines.
 use crate::{
     sequence_sync::SequenceSync, PendingReason, PendingRecord, PendingSubject, Retry, SyncError,
+    SyncStatus,
 };
 use coven_crypto::StoreKeyring;
 use coven_database::{OperationId, OperationRecord, RetrySubject};
 use coven_merge::Audience;
 
 impl SequenceSync {
+    /// Make an operation's retry or undo due now, from its recorded progress.
+    /// It cannot resurrect an invalidated action or bypass provider cooldown
+    /// or the stuck-device rule (E6).
+    pub async fn retry_pending_operation(&self, id: OperationId) -> Result<SyncStatus, SyncError> {
+        if self.database.operation(id).await?.is_none() {
+            return Err(SyncError::NotPending(id));
+        }
+        if let Some(pending) = self.database.operation_pending::<PendingRecord>(id).await? {
+            if pending.retry() == Retry::Never {
+                return Err(SyncError::Pending(Box::new(pending)));
+            }
+            self.database.clear_pending(pending.subject).await?;
+        }
+        if self
+            .database
+            .retry_wait(RetrySubject::Operation(id))
+            .await?
+            .is_some()
+        {
+            self.database
+                .clear_retry(RetrySubject::Operation(id))
+                .await?;
+        }
+        self.waits.forget(RetrySubject::Operation(id));
+        self.pass().await
+    }
+
     pub(crate) async fn operation_ready(
         &self,
         record: &OperationRecord,

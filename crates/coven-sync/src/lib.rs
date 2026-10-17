@@ -14,8 +14,10 @@ mod pending;
 mod pending_encoding;
 mod recorded_upload;
 mod refusal;
+mod restore_codes;
 mod sealed_stream;
 mod sequence_sync;
+mod sign_in;
 mod slot_object;
 mod snapshot_authorship;
 mod snapshot_object;
@@ -49,11 +51,19 @@ pub use pending::{
     PendingSubject, Prerequisite, ProviderAccessAction, RequiredUpdate, Retry,
 };
 pub use refusal::Refusal;
+pub use restore_codes::{read_connection, RestoreCodes};
 pub use sequence_state::{SyncState, SyncStatus};
+pub use sequence_sync::access_keys::owed_access_key_deletions;
 pub use sequence_sync::access_keys::DeleteAccessKeyError;
 pub use sequence_sync::sequence_join::JoinOutcome;
 pub use sequence_sync::SequenceSync;
+pub use sign_in::{DeviceCredentials, SessionSignIn};
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]
 mod tests;
+
+/// Compensation retained until setup has committed its keys and applied origin.
+pub type StorageRollback = Box<dyn FnOnce() -> Result<(), SyncError> + Send>;
+/// Credential and settings commit performed after remote setup has succeeded.
+pub type StorageCommit = Box<dyn FnOnce() -> Result<StorageRollback, SyncError> + Send>;
