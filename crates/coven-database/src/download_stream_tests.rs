@@ -281,6 +281,7 @@ async fn an_unread_slot_prevents_a_later_slot_from_committing() {
     assert!(matches!(
         b.apply_slot::<crate::pending::tests::Record, _, _>(
             crate::IncomingSlot {
+                digest: [0x31; 32],
                 slot: crate::Slot(3),
                 header: coven_format::sequence::SlotHeader {
                     device: record.header.position.device,

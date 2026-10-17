@@ -109,7 +109,7 @@ impl PrerequisiteRows {
             Self::Claim => vec![rows(
                 "_coven_claim_journal",
                 &[],
-                &["through", "operation", "settlement", "finished"],
+                &["through", "operation", "settlement", "singleton"],
             )],
             Self::Write(write) => {
                 let at = [

@@ -26,21 +26,44 @@ pub(crate) fn set_applied(db: &DatabaseConnection, slot: u64) -> Result<(), DbEr
 
 pub(crate) fn claims(db: &DatabaseConnection) -> Result<Vec<LastClaim>, DbError> {
     db.query(
-        "SELECT device,number FROM _coven_last_claims ORDER BY device",
+        "SELECT device,number,digest FROM _coven_last_claims ORDER BY device",
         [],
         |r| {
             Ok(LastClaim {
                 device: DeviceId(counter(r.get(0)?)),
                 number: counter(r.get(1)?),
+                digest: r.get(2)?,
             })
         },
     )
 }
 
-pub(crate) fn note_claim(db: &DatabaseConnection, header: &SlotHeader) -> Result<(), DbError> {
-    db.internal_execute("INSERT INTO _coven_last_claims(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=max(number,excluded.number)",
-        params![header.device.0.to_be_bytes().as_slice(),header.claim.to_be_bytes().as_slice()])?;
+/// Coverage orders observations from different audience snapshots and their suffixes.
+pub(crate) fn note_record(
+    db: &DatabaseConnection,
+    claim: &LastClaim,
+    through: u64,
+) -> Result<(), DbError> {
+    db.internal_execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,?2,?3,?4) ON CONFLICT(device) DO UPDATE SET number=excluded.number,digest=excluded.digest,through=excluded.through WHERE excluded.through>=through AND excluded.number>=number",
+        params![claim.device.0.to_be_bytes(),claim.number.to_be_bytes(),claim.digest,through.to_be_bytes()])?;
     Ok(())
+}
+
+pub(crate) fn note_claim(
+    db: &DatabaseConnection,
+    header: &SlotHeader,
+    slot: Slot,
+    digest: [u8; 32],
+) -> Result<(), DbError> {
+    note_record(
+        db,
+        &LastClaim {
+            device: header.device,
+            number: header.claim,
+            digest: Some(digest),
+        },
+        slot.0,
+    )
 }
 
 pub(crate) fn write_slot(db: &DatabaseConnection, write: WriteId) -> Result<Option<Slot>, DbError> {

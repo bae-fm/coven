@@ -184,7 +184,7 @@ pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Resu
         )?;
     }
     for (id, device) in &state.devices {
-        database.internal_execute("INSERT INTO _coven_last_claims(device,number) VALUES(?1,zeroblob(8)) ON CONFLICT(device) DO NOTHING",[id.0.to_be_bytes().as_slice()])?;
+        database.internal_execute("INSERT INTO _coven_last_claims(device,number,digest,through) VALUES(?1,zeroblob(8),NULL,zeroblob(8)) ON CONFLICT(device) DO NOTHING",[id.0.to_be_bytes().as_slice()])?;
         database.internal_execute(
             "INSERT INTO _coven_devices(device,member,name,state) VALUES(?1,?2,?3,?4)",
             params![

@@ -125,6 +125,7 @@ pub(crate) async fn publish_through(db: &Database, through: u64) -> Result<(), D
     let outcome = db
         .apply_slot::<crate::pending::tests::Record, _, _>(
             crate::IncomingSlot {
+                digest: [0x31; 32],
                 slot: Slot(applied + 1),
                 header: coven_format::sequence::SlotHeader {
                     device,
@@ -175,6 +176,7 @@ impl Database {
             .map_or_else(|| crate::tests::member(1), |d| d.member);
         self.apply_slot::<crate::pending::tests::Record, _, _>(
             crate::IncomingSlot {
+                digest: [0x31; 32],
                 slot,
                 header: coven_format::sequence::SlotHeader {
                     device,
@@ -211,6 +213,7 @@ impl Database {
             .map_or(Slot(applied + 1), crate::Boundary::entry);
         self.apply_slot::<crate::pending::tests::Record, std::io::Empty, _>(
             crate::IncomingSlot {
+                digest: [0x31; 32],
                 slot,
                 header: coven_format::sequence::SlotHeader {
                     device: coven_foundation::id_source::DeviceId(99),
@@ -378,6 +381,7 @@ pub(crate) fn reload<R, W>(
             let slot = Slot(first + i as u64 + 1);
             let device = write.header.header.position.device;
             crate::IncomingSlot {
+                digest: [0x31; 32],
                 slot,
                 header: coven_format::sequence::SlotHeader {
                     device,

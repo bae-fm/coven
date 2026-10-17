@@ -39,7 +39,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                 crate::sequence_apply::retain(db, "announcement", &original)?
             }
         }
-        crate::sequence::note_claim(db, &incoming.header)?;
+        crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         applied = incoming.slot.0;
         crate::sequence::set_applied(db, applied)?;
     }

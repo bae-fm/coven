@@ -124,7 +124,7 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("judgement reads every audience's unpublished raise"),
 ("reload_gate.rs", "SELECT audience FROM _coven_data_reloads", "_coven_data_reloads") =>
     Some("sync schedules every audience awaiting replacement data"),
-("sequence.rs", "SELECT device,number FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>
+("sequence.rs", "SELECT device,number,digest FROM _coven_last_claims ORDER BY device", "_coven_last_claims") =>
     Some("snapshot coverage records each device's last consumed claim"),
 ("snapshot_write.rs", "SELECT timestamp,number,read_through,slot FROM _coven_writes WHERE slot<=?1 ORDER BY {WRITE_DEVICE_SQL},number", "_coven_writes") =>
     Some("the snapshot emits the counted write history in canonical identity order"),

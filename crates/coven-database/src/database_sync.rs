@@ -337,7 +337,7 @@ impl Database {
             .await
     }
 
-    /// Claim numbers recorded by every consumed slot, including refusals.
+    /// Claim numbers and complete-slot digests recorded by every consumed slot, including refusals.
     pub async fn last_claims(&self) -> Result<Vec<coven_format::snapshot::LastClaim>, DbError> {
         self.call(|inner| inner.access.with_committed(crate::sequence::claims))
             .await
@@ -433,7 +433,7 @@ impl Database {
         .await
     }
 
-    /// Detect a foreign use of this installation's id against its full journal.
+    /// Whether the open claim attempted this path. Finished journals are deleted.
     pub async fn attempted_claim(
         &self,
         path: coven_format::path::ObjectPath,

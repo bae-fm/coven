@@ -80,7 +80,10 @@ macro_rules! coven_sequence_tables {
         $visit!(_coven_last_claims, "
             CREATE TABLE _coven_last_claims (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
-                number BLOB NOT NULL CHECK(length(number)=8)
+                number BLOB NOT NULL CHECK(length(number)=8),
+                digest BLOB CHECK(digest IS NULL OR length(digest)=32),
+                through BLOB NOT NULL CHECK(length(through)=8),
+                CHECK((number=x'0000000000000000')=(digest IS NULL))
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_claim_counters, "
@@ -95,12 +98,11 @@ macro_rules! coven_sequence_tables {
                 number BLOB NOT NULL CHECK(length(number)=8),
                 through BLOB CHECK(through IS NULL OR length(through)=8),
                 operation INTEGER,
-                settlement TEXT NOT NULL CHECK(settlement IN ('unknown','retry','not-landed','landed')),
-                finished INTEGER NOT NULL CHECK(finished IN (0,1)),
+                settlement TEXT NOT NULL CHECK(settlement IN ('unknown','retry','not-landed','landed','device-id-in-use')),
+                singleton INTEGER NOT NULL UNIQUE CHECK(singleton=1),
                 CHECK((through IS NULL)<>(operation IS NULL)),
                 PRIMARY KEY(device,number)
             ) STRICT, WITHOUT ROWID;
-            CREATE UNIQUE INDEX _coven_claim_current ON _coven_claim_journal(finished) WHERE finished=0;
         ");
         $visit!(_coven_claim_attempts, "
             CREATE TABLE _coven_claim_attempts (
@@ -108,8 +110,9 @@ macro_rules! coven_sequence_tables {
                 number BLOB NOT NULL,
                 attempt INTEGER NOT NULL,
                 path TEXT NOT NULL,
+                digest BLOB CHECK(digest IS NULL OR length(digest)=32),
                 PRIMARY KEY(device,number,attempt),
-                FOREIGN KEY(device,number) REFERENCES _coven_claim_journal(device,number)
+                FOREIGN KEY(device,number) REFERENCES _coven_claim_journal(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
             CREATE INDEX _coven_claim_paths ON _coven_claim_attempts(path);
         ");
@@ -121,7 +124,7 @@ macro_rules! coven_sequence_tables {
                 chunk INTEGER NOT NULL,
                 bytes BLOB NOT NULL CHECK(length(bytes)<=65536),
                 PRIMARY KEY(device,number,attempt,chunk),
-                FOREIGN KEY(device,number,attempt) REFERENCES _coven_claim_attempts(device,number,attempt)
+                FOREIGN KEY(device,number,attempt) REFERENCES _coven_claim_attempts(device,number,attempt) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
         $visit!(_coven_slot_records, "

@@ -110,8 +110,8 @@ async fn exact_attempts_and_claim_numbers_survive_reopening() {
     );
     db.finish_claim(None).await.unwrap();
     db.finish_operation(id).await.unwrap();
-    assert!(db.attempted_claim(expected).await.unwrap());
-    assert!(db.attempted_claim(second.path).await.unwrap());
+    assert!(!db.attempted_claim(expected).await.unwrap());
+    assert!(!db.attempted_claim(second.path).await.unwrap());
     let id = operation(&db).await;
     let next = attempt(directory.id(), 3, b"third");
     assert_eq!(
@@ -126,47 +126,53 @@ async fn exact_attempts_and_claim_numbers_survive_reopening() {
 
 #[tokio::test]
 async fn compacted_claim_settlement_matches_sequence_settle_examples() {
-    // Settle: last included claim >= attempted claim establishes publication.
-    for included in 0..=2 {
+    // Sequence.Settle: both the number and the complete attempted bytes matter.
+    let mut hash = coven_crypto::ObjectHasher::new();
+    hash.update(b"claim one");
+    let ours = *hash.finish().as_bytes();
+    for (included, digest, expected) in [
+        (0, None, ClaimSettlement::NotLanded),
+        (1, Some(ours), ClaimSettlement::Landed),
+        (1, Some([0x42; 32]), ClaimSettlement::DeviceIdInUse),
+        (2, Some(ours), ClaimSettlement::DeviceIdInUse),
+        (2, Some([0x42; 32]), ClaimSettlement::DeviceIdInUse),
+    ] {
         let (_temp, directory, db) = open().await;
         let id = operation(&db).await;
         let object = attempt(directory.id(), 3, b"claim one");
         db.begin_claim(ClaimWork::Operation(id), move |_| Ok(object))
             .await
             .unwrap();
-        assert!(db
-            .settle_claim(ClaimRead::Compacted {
-                first: 3,
-                covers: 5,
-                last_claim: included
-            })
-            .await
-            .is_err());
-        assert!(db
-            .settle_claim(ClaimRead::Compacted {
-                first: 4,
-                covers: 2,
-                last_claim: included
-            })
-            .await
-            .is_err());
-        let verdict = db
-            .settle_claim(ClaimRead::Compacted {
+        for (first, covers) in [(3, 5), (4, 2)] {
+            assert!(db
+                .settle_claim(ClaimRead::Compacted {
+                    first,
+                    covers,
+                    last_claim: included,
+                    digest,
+                })
+                .await
+                .is_err());
+        }
+        assert_eq!(
+            db.settle_claim(ClaimRead::Compacted {
                 first: 4,
                 covers: 5,
                 last_claim: included,
+                digest,
             })
             .await
-            .unwrap();
+            .unwrap(),
+            expected
+        );
+        db.close().await.unwrap();
+        let db = builder(directory).open().await.unwrap();
         assert_eq!(
-            verdict,
-            if included >= 1 {
-                ClaimSettlement::Landed
-            } else {
-                ClaimSettlement::NotLanded
-            }
+            db.settle_claim(ClaimRead::Kept(None)).await.unwrap(),
+            expected
         );
         db.finish_claim(None).await.unwrap();
+        assert!(db.current_claim().await.unwrap().is_none());
         db.close().await.unwrap();
     }
 }

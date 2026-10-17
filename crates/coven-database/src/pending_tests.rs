@@ -347,6 +347,7 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     let reload = |snapshots| crate::SnapshotReload::<std::io::Empty, std::io::Empty> {
         snapshots,
         slots: vec![crate::IncomingSlot {
+            digest: [0x31; 32],
             slot: entry,
             header: coven_format::sequence::SlotHeader {
                 device: DeviceId(99),

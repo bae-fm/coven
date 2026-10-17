@@ -14,6 +14,8 @@ pub struct IncomingSlot<R> {
     pub slot: Slot,
     /// The authenticated device, claim, author and preceding prefix.
     pub header: SlotHeader,
+    /// SHA-256 of every complete sealed slot byte, including its signature.
+    pub digest: [u8; 32],
     /// Opened content and the policy decisions made against the preceding prefix.
     pub content: SlotContent<R>,
 }
@@ -113,7 +115,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
             SlotContent::Announcement(original) => retain(db, "announcement", &original)?,
         }
         authenticate()?;
-        crate::sequence::note_claim(db, &incoming.header)?;
+        crate::sequence::note_claim(db, &incoming.header, incoming.slot, incoming.digest)?;
         crate::sequence::set_applied(db, incoming.slot.0)?;
         crate::queued_writes::overlay(db, schema)?;
         let deleted = crate::store_state_tables::deleted_circles(db)?;

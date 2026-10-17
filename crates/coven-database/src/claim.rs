@@ -34,6 +34,8 @@ pub enum ClaimSettlement {
     NotLanded,
     /// Exact bytes or the floor snapshot establish publication.
     Landed,
+    /// Authenticated claim evidence belongs to another copy of this device id.
+    DeviceIdInUse,
 }
 
 /// A claim retains every attempt, including attempts that lost contention.
@@ -63,6 +65,8 @@ pub enum ClaimRead {
         covers: u64,
         /// This device's last included claim in that snapshot.
         last_claim: u64,
+        /// Digest paired with that number; absent exactly when it is zero.
+        digest: Option<[u8; 32]>,
     },
 }
 
@@ -72,12 +76,13 @@ fn settlement(text: String) -> rusqlite::Result<ClaimSettlement> {
         "retry" => Ok(ClaimSettlement::Retry),
         "not-landed" => Ok(ClaimSettlement::NotLanded),
         "landed" => Ok(ClaimSettlement::Landed),
+        "device-id-in-use" => Ok(ClaimSettlement::DeviceIdInUse),
         _ => Err(rusqlite::Error::InvalidQuery),
     }
 }
 
 fn metadata(db: &DatabaseConnection) -> Result<Option<Claim>, DbError> {
-    db.query("SELECT device,number,through,operation,settlement FROM _coven_claim_journal WHERE finished=0", [], |r| {
+    db.query("SELECT device,number,through,operation,settlement FROM _coven_claim_journal WHERE singleton=1", [], |r| {
         let work = match (r.get::<_,Option<Vec<u8>>>(2)?, r.get::<_,Option<i64>>(3)?) {
             (Some(n),None) => ClaimWork::Writes(counter(n)),
             (None,Some(id)) => ClaimWork::Operation(OperationId(id)),
@@ -125,7 +130,7 @@ pub(crate) fn begin<E: From<DbError>, R: Read>(
     };
     db.internal_execute("INSERT INTO _coven_claim_counters(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=excluded.number",
         params![device.0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()])?;
-    db.internal_execute("INSERT INTO _coven_claim_journal(device,number,through,operation,settlement,finished) VALUES(?1,?2,?3,?4,'unknown',0)",
+    db.internal_execute("INSERT INTO _coven_claim_journal(device,number,through,operation,settlement,singleton) VALUES(?1,?2,?3,?4,'unknown',1)",
         params![device.0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice(),through,operation])?;
     let path = attempt.path.clone();
     append(db, device, number, attempt)?;
@@ -165,14 +170,25 @@ fn append(
             attempt.path.as_str()
         ],
     )?;
+    let mut hash = coven_crypto::ObjectHasher::new();
     for chunk in 0i64.. {
         let bytes = read_chunk(&mut attempt.bytes)?;
         if bytes.is_empty() {
             break;
         }
+        hash.update(&bytes);
         db.internal_execute("INSERT INTO _coven_claim_chunks(device,number,attempt,chunk,bytes) VALUES(?1,?2,?3,?4,?5)",
             params![device.0.to_be_bytes(),number.to_be_bytes(),ordinal,chunk,bytes])?;
     }
+    db.internal_execute(
+        "UPDATE _coven_claim_attempts SET digest=?4 WHERE device=?1 AND number=?2 AND attempt=?3",
+        params![
+            device.0.to_be_bytes(),
+            number.to_be_bytes(),
+            ordinal,
+            hash.finish().as_bytes()
+        ],
+    )?;
     Ok(())
 }
 
@@ -265,7 +281,7 @@ pub(crate) fn retry(
     }
     append(db, claim.device, claim.number, attempt)?;
     db.internal_execute(
-        "UPDATE _coven_claim_journal SET settlement='unknown' WHERE finished=0",
+        "UPDATE _coven_claim_journal SET settlement='unknown' WHERE singleton=1",
         [],
     )?;
     Ok(())
@@ -275,7 +291,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
     let claim = current(db)?.ok_or(DbError::NoClaim)?;
     if matches!(
         claim.settlement,
-        ClaimSettlement::Landed | ClaimSettlement::NotLanded
+        ClaimSettlement::Landed | ClaimSettlement::NotLanded | ClaimSettlement::DeviceIdInUse
     ) {
         return Ok(claim.settlement);
     }
@@ -283,28 +299,47 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
         .attempts
         .last()
         .expect("a journal starts with its first attempt");
-    let landed = match read {
-        ClaimRead::Kept(Some(bytes)) => Some(equal(db, bytes)?),
-        ClaimRead::Kept(None) => None,
+    let (result, name) = match read {
+        ClaimRead::Kept(Some(bytes)) => {
+            if equal(db, bytes)? {
+                (ClaimSettlement::Landed, "landed")
+            } else {
+                (ClaimSettlement::NotLanded, "not-landed")
+            }
+        }
+        ClaimRead::Kept(None) => (ClaimSettlement::Retry, "retry"),
         ClaimRead::Compacted {
             first,
             covers,
             last_claim,
+            digest,
         } => {
             let slot = attempt.slot_number().ok_or(DbError::InvalidClaimCoverage)?;
             if first <= slot.0 || covers < first - 1 {
                 return Err(DbError::InvalidClaimCoverage);
             }
-            Some(last_claim >= claim.number)
+            if last_claim < claim.number {
+                (ClaimSettlement::NotLanded, "not-landed")
+            } else if last_claim > claim.number {
+                (ClaimSettlement::DeviceIdInUse, "device-id-in-use")
+            } else {
+                let attempted_digest: Vec<u8> = db.query_row(
+                    "SELECT digest FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
+                    params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()],
+                    |r| r.get(0),
+                )?;
+                if digest.as_ref().map(|value| value.as_slice())
+                    == Some(attempted_digest.as_slice())
+                {
+                    (ClaimSettlement::Landed, "landed")
+                } else {
+                    (ClaimSettlement::DeviceIdInUse, "device-id-in-use")
+                }
+            }
         }
     };
-    let (result, name) = match landed {
-        Some(true) => (ClaimSettlement::Landed, "landed"),
-        Some(false) => (ClaimSettlement::NotLanded, "not-landed"),
-        None => (ClaimSettlement::Retry, "retry"),
-    };
     db.internal_execute(
-        "UPDATE _coven_claim_journal SET settlement=?1 WHERE finished=0",
+        "UPDATE _coven_claim_journal SET settlement=?1 WHERE singleton=1",
         [name],
     )?;
     Ok(result)
@@ -335,10 +370,7 @@ pub(crate) fn finish(db: &DatabaseConnection) -> Result<(), DbError> {
         }
         _ => (),
     }
-    db.internal_execute(
-        "UPDATE _coven_claim_journal SET finished=1 WHERE finished=0",
-        [],
-    )?;
+    db.internal_execute("DELETE FROM _coven_claim_journal WHERE singleton=1", [])?;
     Ok(())
 }
 

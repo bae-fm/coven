@@ -182,13 +182,23 @@ async fn apply(
     slot: u64,
     writes: Vec<WriteRecord>,
 ) -> Result<ApplyOutcome, DbError> {
+    apply_claim(db, slot, slot, [0x31; 32], writes).await
+}
+async fn apply_claim(
+    db: &Database,
+    slot: u64,
+    claim: u64,
+    digest: [u8; 32],
+    writes: Vec<WriteRecord>,
+) -> Result<ApplyOutcome, DbError> {
     let device = writes[0].header.position.device;
     db.apply_slot::<Pending, _, _>(
         IncomingSlot {
+            digest,
             slot: Slot(slot),
             header: SlotHeader {
                 device,
-                claim: slot,
+                claim,
                 author: member(device.0 as u128),
                 after: slot - 1,
             },
@@ -198,6 +208,35 @@ async fn apply(
         None,
     )
     .await
+}
+
+#[tokio::test]
+async fn greatest_claim_keeps_its_digest_and_equal_claim_uses_the_later_slot() {
+    let (_temp, db) = open(false).await;
+    for (slot, claim, digest, expected) in [
+        (1, 3, [1; 32], [1; 32]),
+        (2, 2, [2; 32], [1; 32]),
+        (3, 3, [3; 32], [3; 32]),
+    ] {
+        apply_claim(
+            &db,
+            slot,
+            claim,
+            digest,
+            vec![insert(10, slot, slot, &slot.to_string(), &slot.to_string())],
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            db.last_claims().await.unwrap(),
+            [coven_format::snapshot::LastClaim {
+                device: DeviceId(10),
+                number: 3,
+                digest: Some(expected),
+            }]
+        );
+    }
+    db.close().await.unwrap();
 }
 async fn rows(db: &Database) -> Vec<(String, String)> {
     db.read(|sql| {
@@ -217,6 +256,7 @@ async fn applied_slot_and_all_effects_commit_together() {
     let one = insert(10, 1, 1, "a", "first");
     let two = insert(10, 2, 2, "b", "second");
     let incoming = IncomingSlot {
+        digest: [0x31; 32],
         slot: Slot(1),
         header: SlotHeader {
             device: DeviceId(10),
@@ -327,6 +367,7 @@ async fn admin(
 ) {
     db.apply_slot::<Pending, std::io::Empty, _>(
         IncomingSlot {
+            digest: [0x31; 32],
             slot: Slot(slot),
             header: SlotHeader {
                 device: DeviceId(99),
@@ -411,6 +452,7 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
                 .signing;
             db.apply_slot::<Pending, _, _>(
                 IncomingSlot {
+                    digest: [0x31; 32],
                     slot: Slot(5),
                     header: SlotHeader {
                         device: DeviceId(10),
@@ -539,6 +581,91 @@ impl Authorship for NoSnapshotEvidence {
 }
 
 #[tokio::test]
+async fn snapshot_claim_digests_survive_loading_and_writing() {
+    use coven_format::{
+        admin::SnapshotId,
+        sealed_snapshot::SnapshotObjectPrefix,
+        sequence::Purpose,
+        snapshot::{LastClaim, SnapshotEncoder, SnapshotHeader, SnapshotRecord, SECTIONS},
+    };
+    let (_temp, db) = open(false).await;
+    let id = SnapshotId {
+        device: DeviceId(99),
+        number: 1,
+        audience: Audience::Store,
+    };
+    let prefix = SnapshotObjectPrefix {
+        audience: Audience::Store,
+        key: coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(1)),
+        covers: 2,
+        purpose: Purpose::Ordinary,
+    };
+    let claims = vec![
+        LastClaim {
+            device: DeviceId(10),
+            number: 1,
+            digest: Some([0x42; 32]),
+        },
+        LastClaim {
+            device: DeviceId(20),
+            number: 0,
+            digest: None,
+        },
+    ];
+    let mut counts = [0; SECTIONS];
+    counts[11] = claims.len() as u64;
+    let (mut encoder, mut bytes) = SnapshotEncoder::start(SnapshotHeader {
+        id: id.clone(),
+        schema_version: 1,
+        covers: prefix.covers,
+        counts,
+    })
+    .unwrap();
+    for claim in &claims {
+        bytes.extend(
+            encoder
+                .record(SnapshotRecord::Claim(claim.clone()))
+                .unwrap(),
+        );
+    }
+    bytes.extend(encoder.finish().unwrap());
+    for _ in 0..2 {
+        db.load_snapshots::<Pending, _, std::io::Empty>(SnapshotReload {
+            snapshots: vec![SnapshotSource::Stored {
+                id: id.clone(),
+                prefix: prefix.clone(),
+                input: Cursor::new(bytes),
+                author: member(99),
+            }],
+            slots: vec![],
+            target: 2,
+            state: StoreState::default(),
+            cutoffs: vec![],
+            boundaries: vec![],
+            operation: None,
+            authorship: std::sync::Arc::new(NoSnapshotEvidence),
+        })
+        .await
+        .unwrap();
+        assert_eq!(db.last_claims().await.unwrap(), claims);
+        let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let captured = output.clone();
+        db.write_snapshot(
+            id.clone(),
+            |_| Ok::<_, std::convert::Infallible>(()),
+            move |frame| {
+                captured.lock().unwrap().extend(frame);
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+        bytes = std::mem::take(&mut *output.lock().unwrap());
+    }
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
     let (_temp, db) = open(false).await;
     db.write(|sql| {
@@ -555,6 +682,7 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
     let input = |target| SnapshotReload {
         snapshots: vec![SnapshotSource::<Cursor<Vec<u8>>>::Empty(Audience::Store)],
         slots: vec![IncomingSlot {
+            digest: [0x31; 32],
             slot: Slot(1),
             header: SlotHeader {
                 device: DeviceId(10),
@@ -592,7 +720,8 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
             db.last_claims().await.unwrap(),
             [coven_format::snapshot::LastClaim {
                 device: DeviceId(10),
-                number: 1
+                number: 1,
+                digest: Some([0x31; 32]),
             }]
         );
     }
@@ -603,6 +732,7 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
 async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
     let (_temp, db) = open(false).await;
     let incoming = || IncomingSlot::<std::io::Empty> {
+        digest: [0x31; 32],
         slot: Slot(1),
         header: SlotHeader {
             device: DeviceId(10),

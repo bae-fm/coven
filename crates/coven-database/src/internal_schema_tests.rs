@@ -312,11 +312,11 @@ mod fixture {
      INSERT INTO _coven_published_file_refs SELECT device,substr(key,17,16) FROM fixture;
      INSERT INTO _coven_migration_prefix VALUES(1,counter(1),counter(4096),2);
      INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
-     INSERT INTO _coven_last_claims SELECT n,n FROM fixture;
+     INSERT INTO _coven_last_claims SELECT n,n,key,n FROM fixture;
      INSERT INTO _coven_claim_counters SELECT n,n FROM fixture;
-     INSERT INTO _coven_claim_journal SELECT device,n,NULL,i,'landed',1 FROM fixture;
-     INSERT INTO _coven_claim_attempts SELECT device,n,1,'store/seq/' || i FROM fixture;
-     INSERT INTO _coven_claim_chunks SELECT device,n,1,0,key FROM fixture;
+     INSERT INTO _coven_claim_journal SELECT device,n,NULL,i,'landed',1 FROM fixture WHERE i=1;
+     INSERT INTO _coven_claim_attempts SELECT counter(1),counter(1),i,'store/seq/' || i,key FROM fixture;
+     INSERT INTO _coven_claim_chunks SELECT counter(1),counter(1),i,0,key FROM fixture;
      INSERT INTO _coven_slot_records SELECT n,CASE i%3 WHEN 0 THEN 'admin' WHEN 1 THEN 'key' ELSE 'announcement' END,key FROM fixture;
      INSERT INTO _coven_write_refusals SELECT n,n FROM fixture;
      INSERT INTO _coven_cutoffs SELECT n,CASE WHEN i%3=0 THEN device END,CASE WHEN i%3<>0 THEN member END,CASE WHEN i%3=2 THEN key END FROM fixture;
@@ -350,6 +350,7 @@ mod fixture {
                 | "_coven_device_reset"
                 | "_coven_upload_pause"
                 | "_coven_write_pause"
+                | "_coven_claim_journal"
                 | "_coven_eager_cancel" => {
                     assert_eq!(count, 1)
                 }

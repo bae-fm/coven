@@ -267,7 +267,11 @@ pub(crate) fn read(
                     crate::sequence_apply::retain(database, "announcement", &original)?
                 }
                 SnapshotRecord::Claim(claim) => {
-                    database.internal_execute("INSERT INTO _coven_last_claims(device,number) VALUES(?1,?2) ON CONFLICT(device) DO UPDATE SET number=max(number,excluded.number)",params![claim.device.0.to_be_bytes(),claim.number.to_be_bytes()])?;
+                    crate::sequence::note_record(
+                        database,
+                        &claim,
+                        decoder.header().expect("record follows header").covers,
+                    )?;
                 }
                 SnapshotRecord::Authored(authored) => {
                     crate::write_sources::load_evidence(database, &authored)?;
