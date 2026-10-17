@@ -18,6 +18,60 @@ structure Selection (Audience : Type) where
   covers : Nat
   deriving DecidableEq
 
+/-- Explicit reload chooses the latest applicable announcement for an audience.
+The candidates have already passed the schema/reset applicability check. Floor
+bootstrap and deletion-driven reselection have their own selection rules. -/
+def newest : List (Selection A) → Option (Selection A)
+  | [] => none
+  | candidate :: rest =>
+    match newest rest with
+    | none => some candidate
+    | some selected => some (if selected.slot < candidate.slot then candidate else selected)
+
+theorem newest_mem (candidates : List (Selection A)) (selected : Selection A)
+    (h : newest candidates = some selected) : selected ∈ candidates := by
+  induction candidates generalizing selected with
+  | nil => cases h
+  | cons candidate rest ih =>
+    simp only [newest] at h
+    split at h
+    · cases h; exact List.mem_cons_self
+    · rename_i previous hp
+      split at h
+      · cases h; exact List.mem_cons_self
+      · cases h; exact List.mem_cons_of_mem _ (ih _ hp)
+
+/-- No applicable announcement is later than the selected one. -/
+theorem newest_latest (candidates : List (Selection A)) (selected : Selection A)
+    (h : newest candidates = some selected) :
+    ∀ candidate ∈ candidates, candidate.slot ≤ selected.slot := by
+  induction candidates generalizing selected with
+  | nil => cases h
+  | cons candidate rest ih =>
+    simp only [newest] at h
+    split at h
+    · rename_i empty
+      have hr : rest = [] := by
+        cases rest with
+        | nil => rfl
+        | cons x xs => simp only [newest] at empty; split at empty <;> cases empty
+      cases h; simp [hr]
+    · rename_i previous hp
+      have bound := ih _ hp
+      split at h
+      · rename_i later
+        cases h
+        intro x hx
+        rcases List.mem_cons.mp hx with rfl | hx
+        · exact Nat.le_refl _
+        · exact Nat.le_trans (bound x hx) (Nat.le_of_lt later)
+      · rename_i later
+        cases h
+        intro x hx
+        rcases List.mem_cons.mp hx with rfl | hx
+        · omega
+        · exact bound x hx
+
 def replaces [DecidableEq A] (old next : Selection A) : Bool :=
   decide (old.slot < next.slot ∧ next.audience = old.audience ∧ old.covers ≤ next.covers)
 

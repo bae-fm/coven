@@ -161,6 +161,10 @@ def readSelection (j : Json) : Except String (Reload.Selection Nat) := do
   if covers ≥ slot then throw "snapshot coverage must precede its announcement"
   return ⟨slot, ← nat j "audience", covers⟩
 
+def readSelectReload (j : Json) : Except String Json := do
+  let candidates ← (← j.getObjValAs? (List Json) "candidates").mapM readSelection
+  return toJson ((Reload.newest candidates).map (·.slot))
+
 /-- The same reselection decision used by the monotonicity theorems.
 Authentication and the reason for retrying are supplied by the Rust fixture. -/
 def readReselect (j : Json) : Except String Json := do
@@ -341,6 +345,7 @@ def run (j : Json) : Except String Json := do
   | "retention" => readRetention j
   | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))
   | "reselect" => readReselect j
+  | "selectReload" => readSelectReload j
   | "apply" => readApply j
   | "past" => readPast j
   | "keys" => SequenceKeys.readKeys j

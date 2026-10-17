@@ -285,6 +285,7 @@ proofs() {
             sequence_sync::sequence_reload::tests::sequence_blocked_floor_matches_lean \
             sequence_sync::sequence_retention::tests::sequence_audience_coverage_matches_lean \
             sequence_sync::sequence_retention::tests::sequence_daily_retention_matches_lean \
+            sequence_sync::sequence_reload::operation::tests::sequence_reload_selection_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_reload_reselection_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_queue_reset_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_queue_breaking_raise_matches_lean \

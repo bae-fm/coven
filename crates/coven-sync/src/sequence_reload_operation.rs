@@ -90,7 +90,9 @@ impl SequenceSync {
             None => {
                 self.read_forward(&mut session, &mut ring, &member).await?;
                 self.settle_open(&mut session, &mut ring, &member).await?;
-                let selections = selections(&session.history, session.floor.as_ref(), &member);
+                // An explicit reload chooses the newest applicable announcements
+                // (§16.2). The floor selects starts only after deletion (§16.5).
+                let selections = selections(&session.history, None, &member);
                 if !selections
                     .iter()
                     .any(|selection| matches!(selection, Selection::Stored(_)))

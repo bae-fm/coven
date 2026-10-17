@@ -6320,6 +6320,7 @@ Write-ups explain each model and state its assumptions:
 | Claim | Theorems | File | Section |
 |---|---|---|---|
 | Model premise, for preparation announcements only: the storage step that claims a preparation announcement requires its body to be in storage already, and the theorem reads that premise back. Ordinary announcements carry no such premise | `announcement_uploaded` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.2 |
+| Among candidates already checked for applicability, explicit reload selects one with no later candidate, independently of the floor | `newest_mem`, `newest_latest` | `proofs/sequence/CovenSequence/Reload.lean` | §16.2 |
 | A counted ordinary announcement covers the latest raise and reset, and matches the schema and reset state | `ordinary_covers_boundary`, `ordinary_matches_schema_reset` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |
 | *Body.* A stale capture announced after a raise is refused; accepting it would strand a joiner | `slot4_refused`, `stale_floor_strands_joiner` | `proofs/sequence/CovenSequence/ReaderExamples.lean` | §16.3 |
 | Activating a prepared snapshot needs an earlier matching announcement, which makes its coverage usable | `activation_requires_preparation`, `activated_is_usable` | `proofs/sequence/CovenSequence/Preparations.lean` | §16.3 |

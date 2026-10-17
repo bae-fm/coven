@@ -1,3 +1,4 @@
+use super::{ReloadWork, Selection};
 use crate::sequence_sync::sequence_reload::tests::stored_floor;
 use crate::sequence_sync::tests::*;
 use crate::{SequenceSync, SyncError};
@@ -820,4 +821,121 @@ async fn sequence_queue_self_replacement_matches_lean() {
         crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
         "{input}"
     );
+}
+
+async fn newest_with_floor(damaged: bool) -> (Value, Value) {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let older = ana.sync.snapshot(Audience::Store).await.unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    insert(ana.database(), "newer", "after the floor").await;
+    ana.sync.pass().await.unwrap();
+    let newest = ana.sync.snapshot(Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let session = ben.sync.session.lock().await;
+    assert_eq!(session.floor.as_ref().unwrap().header.snapshots, [older]);
+    let path = crate::snapshot_object::path(
+        group.store,
+        &session.history.announcements[&newest].snapshot,
+    )
+    .unwrap();
+    let candidates: Vec<_> = session
+        .history
+        .announcements
+        .iter()
+        .filter(|(_, a)| a.snapshot.audience == Audience::Store && session.history.usable(a))
+        .map(|(slot, a)| json!({"slot":slot.0,"audience":0,"covers":a.covers}))
+        .collect();
+    drop(session);
+    // Hold both possible selections so the retained operation exposes which
+    // announcement the public reload chose, independently of equal final rows.
+    let old_path = crate::snapshot_object::path(
+        group.store,
+        &ana.sync.session.lock().await.history.announcements[&older].snapshot,
+    )
+    .unwrap();
+    ben.storage
+        .set_faults(Faults {
+            read_failures: [
+                (path.clone(), StorageFailure::PermissionDenied),
+                (old_path, StorageFailure::PermissionDenied),
+            ]
+            .into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ben.sync.reload_from_snapshot().await.is_err());
+    let record = ben
+        .database()
+        .first_operation("sequence-reload")
+        .await
+        .unwrap()
+        .unwrap();
+    let ReloadWork::Loading { selections, .. } = serde_json::from_slice(&record.data).unwrap()
+    else {
+        panic!("reload must retain its selection")
+    };
+    let Selection::Stored((slot, _)) = &selections[0] else {
+        panic!("store has announced snapshots")
+    };
+    assert_eq!(
+        *slot, newest,
+        "an existing floor must not select an older body"
+    );
+    let actual = json!(slot.0);
+    ben.storage.set_faults(Faults::none()).await;
+    if damaged {
+        group.storage.corrupt_byte(&path, 0).await.unwrap();
+        assert!(ben.sync.reload_from_snapshot().await.is_err());
+        assert!(ben
+            .database()
+            .first_operation("sequence-reload")
+            .await
+            .unwrap()
+            .is_some());
+    } else {
+        // A later announcement does not replace a selection already journaled.
+        ana.sync.snapshot(Audience::Store).await.unwrap();
+        ben.sync.reload_from_snapshot().await.unwrap();
+        assert!(ben
+            .database()
+            .first_operation("sequence-reload")
+            .await
+            .unwrap()
+            .is_none());
+    }
+    assert_eq!(rows(ben.database()).await, rows(ana.database()).await);
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+    (
+        json!({"kind":"selectReload","candidates":candidates}),
+        actual,
+    )
+}
+
+#[tokio::test]
+async fn an_explicit_reload_selects_the_newest_snapshot_even_with_a_floor() {
+    for damaged in [false, true] {
+        newest_with_floor(damaged).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN"]
+async fn sequence_reload_selection_matches_lean() {
+    for damaged in [false, true] {
+        let (input, actual) = newest_with_floor(damaged).await;
+        assert_eq!(
+            actual,
+            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input)
+        );
+    }
 }
