@@ -1,6 +1,6 @@
 //! Recoverable upload failures make progress without an app retry.
 use super::*;
-use crate::{FileMissingReason, FileSourceFailure, LocalFailure, Retry};
+use crate::{FileMissingReason, FileSourceFailure, Retry};
 
 #[tokio::test]
 async fn restored_sources_upload_after_backoff_without_provider_probes() {
@@ -107,7 +107,7 @@ async fn a_disk_failure_retries_after_its_backoff() {
     );
     assert_eq!(
         f.upload_reason(&file).await,
-        Some(PendingReason::Failed(LocalFailure::Disk))
+        Some(PendingReason::Failed(crate::LocalFailure::Disk))
     );
     assert_eq!(retry_in(&f), Some(Duration::from_secs(1)));
     std::fs::remove_file(&path).unwrap();
