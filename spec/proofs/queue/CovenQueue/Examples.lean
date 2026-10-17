@@ -66,7 +66,7 @@ example : commitInto (.reloading raised (.load [])) = .audienceReloading ∧
     commitInto (finishReload (.reloading raised (.load [])) (some (.load [0]))) =
       .accepted raised := by decide
 
-def rename : Conversion := ⟨2, some (fun xs => 99 :: xs)⟩
+def rename : Conversion := ⟨2, .convert (fun xs => 99 :: xs)⟩
 def firstRecord : Record := record 0 1 1
 def attempt : Attempt := ⟨firstRecord, 2, [7]⟩
 

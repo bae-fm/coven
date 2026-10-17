@@ -17,17 +17,17 @@ def records (setterOnly : Bool) (n : Nat) : Record :=
     else if n = 4 then [⟨1, 1, .del, ⟨some (if setterOnly then 0 else 1), [(0, 2)]⟩, .values []⟩]
     else [] }
 
-/-- Write 1 already lost its receive interpretation without a converter.
+/-- Write 1 already lost its receive interpretation by an explicit drop choice.
 The upload record remains ordinary; later callbacks cannot revive this loss. -/
 def history (mode : Bool) : History := fun w =>
   ⟨if w = 1 then { records mode w with disposition := .lost 2 } else records mode w, none⟩
 
 theorem excluded_source_keeps_original (mode : Bool) :
-    convertRecord ⟨2, none⟩ (fun _ => none) (records mode 1) = (history mode 1).record := by
+    convertRecord ⟨2, .drop⟩ (fun _ => none) (records mode 1) = (history mode 1).record := by
   cases mode <;> decide
 
 def raised : View := ⟨some ⟨⟨10, [⟨0, 1⟩]⟩, 2⟩, none, []⟩
-def conversion : Conversion := ⟨2, some (fun xs => xs.map (· + 100))⟩
+def conversion : Conversion := ⟨2, .convert (fun xs => xs.map (· + 100))⟩
 
 theorem history_body (mode : Bool) (w : Nat) :
     (history mode w).record.body = (records mode w).body := by
@@ -181,31 +181,31 @@ def secondRaise : View := ⟨some ⟨⟨11, [⟨0, 1⟩, ⟨0, 2⟩]⟩, 3⟩, n
     (preparedValid conversion raised (history true) (valid true)) raised [1]⟩
 
 theorem covered_drop_stays_dropped :
-    retained (preparedState ⟨3, some id⟩ secondRaise (history true) (valid true)) 1 1 = false := by
+    retained (preparedState ⟨3, .convert id⟩ secondRaise (history true) (valid true)) 1 1 = false := by
   apply dropped_stays_dropped
   decide
 
 theorem covered_loss_keeps_cause :
-    classifyChange (preparedHistory ⟨3, some id⟩ secondRaise (history true))
-      (preparedValid ⟨3, some id⟩ secondRaise (history true) (valid true)) secondRaise 1
+    classifyChange (preparedHistory ⟨3, .convert id⟩ secondRaise (history true))
+      (preparedValid ⟨3, .convert id⟩ secondRaise (history true) (valid true)) secondRaise 1
       (edit 1 0 0 21) = .frozen (.schemaChange 2 1) := by decide
 
 theorem covered_snapshot_keeps_partial_write :
-    let next := preparedState ⟨3, some id⟩ secondRaise (history true) (valid true)
+    let next := preparedState ⟨3, .convert id⟩ secondRaise (history true) (valid true)
     retained next 2 0 = true ∧ retained next 2 1 = false := by
   dsimp only
-  have root0 : retained (preparedState ⟨3, some id⟩ secondRaise (history true) (valid true)) 0 0 = true := by
+  have root0 : retained (preparedState ⟨3, .convert id⟩ secondRaise (history true) (valid true)) 0 0 = true := by
     rw [retained_eq]; rfl
-  have root1 : retained (preparedState ⟨3, some id⟩ secondRaise (history true) (valid true)) 0 1 = true := by
+  have root1 : retained (preparedState ⟨3, .convert id⟩ secondRaise (history true) (valid true)) 0 1 = true := by
     rw [retained_eq]; rfl
   constructor
   · rw [retained_eq]
     change (true && true && [0, 0].all (fun a => retained
-      (preparedState ⟨3, some id⟩ secondRaise (history true) (valid true)) a 0)) = true
+      (preparedState ⟨3, .convert id⟩ secondRaise (history true) (valid true)) a 0)) = true
     simp [root0]
   · rw [retained_eq]
     change (true && true && [0, 1].all (fun a => retained
-      (preparedState ⟨3, some id⟩ secondRaise (history true) (valid true)) a 1)) = false
+      (preparedState ⟨3, .convert id⟩ secondRaise (history true) (valid true)) a 1)) = false
     simp [root1, covered_drop_stays_dropped]
 
 end CovenQueue.DataExamples

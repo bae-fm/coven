@@ -2,11 +2,15 @@ import CovenQueue.Pending
 
 namespace CovenQueue
 
+/-- A breaking migration must choose how to interpret late old-version writes.
+Callbacks model successful, validated results; a failing reload never commits. -/
+inductive OldWrites where
+  | drop
+  | convert (values : List Nat → List Nat)
+
 structure Conversion where
   version : Nat
-  /-- An absent callback marks the record lost. Present callbacks model
-  successful, validated results; a failing migration never commits its reload. -/
-  convert : Option (List Nat → List Nat)
+  oldWrites : OldWrites
 
 inductive ConversionPlan where
   | keep
@@ -17,9 +21,9 @@ def conversionPlan (c : Conversion) (r : Record) : ConversionPlan :=
   if r.version < c.version then
     match r.disposition with
     | .lost _ | .migration => .keep
-    | .ordinary => match c.convert with
-      | none => .lost c.version
-      | some f => .convert c.version f
+    | .ordinary => match c.oldWrites with
+      | .drop => .lost c.version
+      | .convert f => .convert c.version f
   else .keep
 
 /-- Determine direct schema admission before running any value converter.
@@ -56,10 +60,10 @@ theorem conversion_preserves_identity (c : Conversion)
     (convertRecord c losses r).identity = r.identity := by
   simp only [convertRecord, ConversionPlan.record, ConversionPlan.prepare]; split <;> rfl
 
-theorem missing_converter_preserves_values (version : Nat) (r : Record)
+theorem explicit_drop_preserves_values (version : Nat) (r : Record)
     (losses : Nat → Option (CovenMerge.LossCause Nat)) (old : r.version < version)
     (ordinary : r.disposition = .ordinary) :
-    convertRecord ⟨version, none⟩ losses r = { r with disposition := .lost version } := by
+    convertRecord ⟨version, .drop⟩ losses r = { r with disposition := .lost version } := by
   simp [convertRecord, ConversionPlan.record, ConversionPlan.prepare, conversionPlan, old, ordinary, ConversionPlan.change]
 
 theorem lost_never_reconverted (c : Conversion)

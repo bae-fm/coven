@@ -8,13 +8,13 @@ breaking when its schemas before and after differ by more than new tables and
 columns, or when a statement inserts, updates or deletes rows of a synced
 table, whether or not any row matches. A write at version `v` under a kept
 raise to `r` takes the converters of the breaking steps after `v` through
-`r`, in version order; one without a converter makes it lost. An empty
+`r`, in version order; an explicit drop choice makes it lost. An empty
 range converts by the identity (Rust `migration_receive::available`).
 
 `Classifier` names how a device decides a step is breaking from its
 statements and its own run's row effects. Deciding by statements
 (`byStatements`) ignores the rows, so every device derives the same plan
-(`statement_plans_agree`). Deciding by rows changed (Rust before T252,
+(`statement_plans_agree`). Deciding by rows changed (the row-based alternative,
 `byRows`) depends on the device's data: a step that fills a new column from
 existing rows is breaking on a device with rows and an addition on one
 without, and the two devices interpret the same late write differently
@@ -22,14 +22,29 @@ without, and the two devices interpret the same late write differently
 
 namespace CovenQueue.Chain
 
+/-- Additions carry no old-write policy; breaking declarations require one. -/
+inductive Declaration where
+  | addition
+  | breaking (oldWrites : OldWrites)
+
+def Declaration.isBreaking : Declaration → Bool
+  | .addition => false
+  | .breaking _ => true
+
+/-- Additions impose no conversion; a breaking declaration chooses explicitly. -/
+def Declaration.conversion : Declaration → Option (List Nat → List Nat)
+  | .addition => some id
+  | .breaking .drop => none
+  | .breaking (.convert f) => some f
+
 /-- One app migration step as every device runs it: whether its schemas
 differ beyond additions, whether a statement writes rows of a synced table,
-and its supplied converter. -/
+and its declared kind and old-write policy. -/
 structure Step where
   version : Nat
   schemaBreaking : Bool
   writesRows : Bool
-  convert : Option (List Nat → List Nat)
+  declaration : Declaration
 
 /-- How a device classifies a step, given whether its own run changed rows. -/
 abbrev Classifier := Step → Bool → Bool
@@ -37,7 +52,52 @@ abbrev Classifier := Step → Bool → Bool
 /-- §17.1 as decided: the statements alone. -/
 def byStatements : Classifier := fun s _ => s.schemaBreaking || s.writesRows
 
-/-- Rust before T252: a writing statement counted only if it changed a row. -/
+/-- The first declaration that disagrees with the runtime classification.
+Local-only changes have neither breaking evidence bit and accept addition. -/
+def mismatch : List Step → Option Nat
+  | [] => none
+  | s :: rest => if s.declaration.isBreaking == byStatements s false then mismatch rest
+      else some s.version
+
+/-- All pending migrations form one transaction. `candidate` includes schema,
+rows, queued originals, losses, source evidence and migration bookkeeping. -/
+def commitMigrations {State : Type} (steps : List Step) (before candidate : State) :
+    State × Option Nat :=
+  match mismatch steps with
+  | some version => (before, some version)
+  | none => (candidate, none)
+
+theorem mismatch_preserves_state {State : Type} (steps : List Step)
+    (before candidate : State) (version : Nat) (refused : mismatch steps = some version) :
+    commitMigrations steps before candidate = (before, some version) := by
+  simp [commitMigrations, refused]
+
+theorem undeclared_breaking_refused {State : Type} (s : Step) (rest : List Step)
+    (before candidate : State) (declared : s.declaration = .addition)
+    (breaking : byStatements s false = true) :
+    commitMigrations (s :: rest) before candidate = (before, some s.version) := by
+  simp [commitMigrations, mismatch, declared, Declaration.isBreaking, breaking]
+
+theorem declared_breaking_addition_refused {State : Type} (s : Step) (rest : List Step)
+    (before candidate : State) (policy : OldWrites)
+    (declared : s.declaration = .breaking policy) (addition : byStatements s false = false) :
+    commitMigrations (s :: rest) before candidate = (before, some s.version) := by
+  simp [commitMigrations, mismatch, declared, Declaration.isBreaking, addition]
+
+theorem accepted_prefix_does_not_commit_on_mismatch {State : Type}
+    (prior suffix : List Step) (before candidate : State) (version : Nat)
+    (accepted : mismatch prior = none) (refused : mismatch suffix = some version) :
+    commitMigrations (prior ++ suffix) before candidate = (before, some version) := by
+  apply mismatch_preserves_state
+  induction prior with
+  | nil => exact refused
+  | cons s rest ih =>
+    simp only [mismatch] at accepted
+    split at accepted
+    · simp [mismatch, *]
+    · contradiction
+
+/-- The row-based alternative: a writing statement counted only if it changed a row. -/
 def byRows : Classifier := fun s changed => s.schemaBreaking || (s.writesRows && changed)
 
 /-- A classifier that never consults the device's own row effects. -/
@@ -52,10 +112,10 @@ def between (classify : Classifier) (changed : Nat → Bool) (steps : List Step)
   steps.filter fun s => classify s (changed s.version) && decide (older < s.version) &&
     decide (s.version ≤ raise)
 
-/-- Compose converters in version order; a breaking step without one fails. -/
+/-- Compose converters in version order; an explicit drop choice excludes the write. -/
 def chain : List Step → Option (List Nat → List Nat)
   | [] => some id
-  | s :: rest => match s.convert, chain rest with
+  | s :: rest => match s.declaration.conversion, chain rest with
     | some f, some g => some (g ∘ f)
     | _, _ => none
 
@@ -87,9 +147,10 @@ theorem statement_plans_agree (classify : Classifier) (independent : DataIndepen
 /-- One breaking step that is the raise is the per-raise `Conversion` the
 receive proofs take, so every `Conversion` theorem applies to it. -/
 theorem one_step_is_conversion (classify : Classifier) (changed : Nat → Bool) (s : Step)
-    (breaking : classify s (changed s.version) = true) (r : Record) :
+    (breaking : classify s (changed s.version) = true) (policy : OldWrites)
+    (declared : s.declaration = .breaking policy) (r : Record) :
     (plan classify changed [s] s.version r).record =
-      (conversionPlan ⟨s.version, s.convert⟩ r).record := by
+      (conversionPlan ⟨s.version, policy⟩ r).record := by
   unfold plan conversionPlan
   by_cases older : r.version < s.version
   · simp only [older, ite_true]
@@ -99,9 +160,7 @@ theorem one_step_is_conversion (classify : Classifier) (changed : Nat → Bool) 
     | ordinary =>
       simp only [between, List.filter, breaking, decide_eq_true older, Nat.le_refl,
         decide_true, Bool.and_self]
-      rcases convert : s.convert with _ | f
-      · simp [chain, convert]
-      · simp [chain, convert]
+      cases policy <;> simp [chain, declared, Declaration.conversion]
   · simp [older]
 
 /-- A range without breaking steps has the identity conversion. -/
@@ -155,32 +214,32 @@ theorem newest_breaking_write_admitted (steps : List Step) (newest raise entry :
 /-- Every retained breaking step needs a converter, including when additions
 follow it. An empty range satisfies this requirement. -/
 theorem chain_available_iff (steps : List Step) :
-    (chain steps).isSome = steps.all (fun s => s.convert.isSome) := by
+    (chain steps).isSome = steps.all (fun s => s.declaration.conversion.isSome) := by
   induction steps with
   | nil => rfl
   | cons s rest ih =>
     simp only [chain, List.all_cons]
-    cases s.convert <;> cases h : chain rest <;> simp_all
+    cases s.declaration.conversion <;> cases h : chain rest <;> simp_all
 
 /-- One retained breaking step still uses exactly its callback, even when
-its version precedes the raise. Absence still excludes the older write. -/
+its version precedes the raise. An explicit drop still excludes the older write. -/
 theorem retained_step_required (classify : Classifier) (changed : Nat → Bool)
     (steps : List Step) (raise : Nat) (r : Record) (s : Step)
     (old : r.version < raise) (ordinary : r.disposition = .ordinary)
     (retained : between classify changed steps r.version raise = [s]) :
     plan classify changed steps raise r =
-      match s.convert with
+      match s.declaration.conversion with
       | none => .lost raise
       | some f => .convert raise f := by
   simp only [plan, old, ite_true, ordinary, retained, chain]
-  cases s.convert <;> rfl
+  cases s.declaration.conversion <;> rfl
 
-/-- An older write cannot skip a breaking step whose converter is absent,
+/-- An older write cannot skip a breaking step whose policy drops old writes,
 regardless of the other steps and additions through the raise. -/
-theorem below_breaking_needs_converter (steps : List Step) (raise : Nat) (r : Record)
+theorem explicit_drop_excludes_older (steps : List Step) (raise : Nat) (r : Record)
     (s : Step) (member : s ∈ steps) (breaking : byStatements s false = true)
     (older : r.version < s.version) (through : s.version ≤ raise)
-    (missing : s.convert = none) (ordinary : r.disposition = .ordinary) :
+    (drop : s.declaration = .breaking .drop) (ordinary : r.disposition = .ordinary) :
     plan byStatements (fun _ => false) steps raise r = .lost raise := by
   have retained : s ∈ between byStatements (fun _ => false) steps r.version raise := by
     simp [between, member, breaking, older, through]
@@ -191,14 +250,14 @@ theorem below_breaking_needs_converter (steps : List Step) (raise : Nat) (r : Re
       have all := chain_available_iff (between byStatements (fun _ => false) steps r.version raise)
       rw [found] at all
       have supplied := List.all_eq_true.mp all.symm s retained
-      simp [missing] at supplied
+      simp [drop, Declaration.conversion] at supplied
   have old : r.version < raise := by omega
   simp [plan, old, ordinary, absent]
 
 /-- Migration 2 adds `slug` and fills it from `title`, with a converter that
 fills it for a late write. Ana's device had notes; Ben's ran it on an empty
 table, as a fresh device does. -/
-def slug : Step := ⟨2, false, true, some fun values => values ++ [1]⟩
+def slug : Step := ⟨2, false, true, .breaking (.convert fun values => values ++ [1])⟩
 
 def lateEdit : Record :=
   ⟨⟨⟨3, 9⟩, 9, [], []⟩, 1, .ordinary, [⟨0, 0, .upd, ⟨none, []⟩, .values [5]⟩]⟩
@@ -218,14 +277,14 @@ theorem statement_classification_converts :
   decide
 
 /-- An addition after breaking version 2 leaves a version-2 write unchanged,
-but version 1 still uses the retained converter, or loses if it is absent. -/
+but version 1 still uses the retained converter, or loses under an explicit drop choice. -/
 theorem addition_raise_cases :
-    let addition : Step := ⟨3, false, false, none⟩
-    let missing : Step := { slug with convert := none }
+    let addition : Step := ⟨3, false, false, .addition⟩
+    let dropped : Step := { slug with declaration := .breaking .drop }
     let atTwo := { lateEdit with version := 2 }
-    (plan byStatements (fun _ => false) [missing, addition] 3 atTwo).record
+    (plan byStatements (fun _ => false) [dropped, addition] 3 atTwo).record
         (fun _ => none) atTwo = { atTwo with version := 3 } ∧
-    (plan byStatements (fun _ => false) [missing, addition] 3 lateEdit).record
+    (plan byStatements (fun _ => false) [dropped, addition] 3 lateEdit).record
         (fun _ => none) lateEdit = { lateEdit with disposition := .lost 3 } ∧
     ((plan byStatements (fun _ => false) [slug, addition] 3 lateEdit).record
         (fun _ => none) lateEdit).body =

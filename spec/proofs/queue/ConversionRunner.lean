@@ -12,9 +12,18 @@ private def run (input : Json) : Except String Json := do
   let steps ← (← input.getObjValAs? (List Json) "steps").mapM fun step => do
     let version ← step.getObjValAs? Nat "version"
     let breaking ← step.getObjValAs? Bool "breaking"
-    let digit ← step.getObjValAs? (Option Nat) "digit"
-    pure (⟨version, breaking, false,
-      digit.map fun d xs => xs.map fun x => x * 10 + d⟩ : Chain.Step)
+    let declaration ← step.getObjValAs? String "declaration"
+    let kind ← match declaration with
+      | "addition" => pure Chain.Declaration.addition
+      | "drop" => pure (.breaking .drop)
+      | "convert" => do
+        let digit ← step.getObjValAs? Nat "digit"
+        pure (.breaking (.convert fun xs => xs.map fun x => x * 10 + digit))
+      | _ => throw "unknown migration declaration"
+    pure (⟨version, breaking, false, kind⟩ : Chain.Step)
+  let (committed, mismatch) := Chain.commitMigrations steps version raise
+  if mismatch.isSome then
+    return Json.mkObj [("mismatch", toJson mismatch), ("version", toJson committed)]
   let original : Record :=
     ⟨⟨⟨2, 1⟩, 1, [], []⟩, version, .ordinary,
       [⟨0, 1, .ins, ⟨none, []⟩, .values values⟩]⟩

@@ -49,7 +49,7 @@ import CovenQueue
 #print axioms CovenQueue.change_value_accounted
 #print axioms CovenQueue.applied_has_no_dropped_source
 #print axioms CovenQueue.changes_converge
-#print axioms CovenQueue.missing_converter_preserves_values
+#print axioms CovenQueue.explicit_drop_preserves_values
 #print axioms CovenQueue.dependent_change_not_converted
 #print axioms CovenQueue.independent_change_converted
 #print axioms CovenQueue.frozen_change_preserved
@@ -104,4 +104,9 @@ import CovenQueue
 #print axioms CovenQueue.Chain.chain_available_iff
 #print axioms CovenQueue.Chain.retained_step_required
 #print axioms CovenQueue.Chain.addition_raise_cases
-#print axioms CovenQueue.Chain.below_breaking_needs_converter
+#print axioms CovenQueue.Chain.explicit_drop_excludes_older
+
+#print axioms CovenQueue.Chain.mismatch_preserves_state
+#print axioms CovenQueue.Chain.undeclared_breaking_refused
+#print axioms CovenQueue.Chain.declared_breaking_addition_refused
+#print axioms CovenQueue.Chain.accepted_prefix_does_not_commit_on_mismatch
