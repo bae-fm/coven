@@ -68,6 +68,49 @@ impl Group {
         (original, self.open(temp, identity).await)
     }
     pub(crate) async fn open(&self, temp: tempfile::TempDir, identity: MemberIdentity) -> Device {
+        self.open_with(
+            temp,
+            identity,
+            Some(self.ring.clone()),
+            self.storage.for_device(),
+        )
+        .await
+    }
+    /// A new installation of `identity` whose store custody holds no key yet,
+    /// reaching storage through `storage` (§12).
+    pub(crate) async fn newcomer(
+        &self,
+        identity: MemberIdentity,
+        storage: MemoryStorage,
+    ) -> Device {
+        let (temp, _) = self.directory();
+        self.open_with(temp, identity, None, storage).await
+    }
+    /// A new installation's unpublished directory.
+    pub(crate) fn directory(&self) -> (tempfile::TempDir, coven_foundation::files::StoreDir) {
+        let temp = tempfile::tempdir().unwrap();
+        let directory = StoreLayout::new(temp.path().into())
+            .create_store_dir(self.store, "sequence tests", self.ids.as_ref())
+            .unwrap();
+        (temp, directory)
+    }
+    /// A group on a provider that shares the store with accounts.
+    pub(crate) fn shared() -> Self {
+        let mut group = Self::new();
+        group.storage = MemoryStorage::builder()
+            .provider(coven_storage::CloudProvider::Dropbox)
+            .clock(group.clock.clone())
+            .build()
+            .unwrap();
+        group
+    }
+    pub(crate) async fn open_with(
+        &self,
+        temp: tempfile::TempDir,
+        identity: MemberIdentity,
+        ring: Option<StoreKeyring>,
+        storage: MemoryStorage,
+    ) -> Device {
         let directory = StoreLayout::new(temp.path().into()).store_dir(&self.store);
         let database = DatabaseBuilder::new(directory.clone())
             .synced_tables(vec![SyncedTable::new("notes", RowIdentity::SharedKey)])
@@ -87,9 +130,7 @@ impl Group {
                 .await
                 .unwrap(),
         );
-        let storage = self
-            .storage
-            .for_device()
+        let storage = storage
             .with_publication_gate(state.clone())
             .with_cooldown(waits.clone());
         let ids: coven_foundation::id_source::IdSourceRef = self.ids.clone();
@@ -109,7 +150,11 @@ impl Group {
                 directory,
                 device,
                 Arc::new(
-                    KeySession::store(Arc::new(InMemoryCustody::new(self.ring.clone()))).unwrap(),
+                    KeySession::store(Arc::new(match ring {
+                        Some(ring) => InMemoryCustody::new(ring),
+                        None => InMemoryCustody::empty(),
+                    }))
+                    .unwrap(),
                 ),
                 Arc::new(
                     KeySession::member(Arc::new(InMemoryCustody::new(identity.clone()))).unwrap(),

@@ -1,0 +1,178 @@
+//! The first store keys of an installation whose custody holds none, and
+//! the registration that follows its admission (§12).
+
+use super::{SequenceSync, Session};
+use crate::{floor_object, slot_object, snapshot_object::RoutedKey, SyncError};
+use coven_crypto::{MemberIdentity, StoreKeyring};
+use coven_format::{floor::OriginalSlot, sealed_slot::SlotKind};
+use coven_foundation::id_source::{DeviceId, KeyId};
+use coven_storage::{ObjectPath, StorageFailure};
+
+/// What storage supplied to a member that holds no store key yet.
+pub(crate) enum Bootstrap {
+    /// Copies routed to this member opened these keys. They stay tentative
+    /// until the history introducing them authenticates.
+    Keys(StoreKeyring),
+    /// The sequence exists, but no copy for this member was found; reading
+    /// it needs this key.
+    Missing(KeyId),
+    /// Neither a floor nor a first slot exists.
+    Empty,
+}
+
+/// How this member's binding stands in the applied history (§12).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum MemberBinding {
+    /// The member id is bound to this installation's pair, by `device`.
+    Bound { device: DeviceId },
+    /// The member id is absent from the applied history.
+    Absent,
+    /// The member id is bound to another pair.
+    Replaced,
+    /// The member was removed.
+    Removed,
+}
+
+impl SequenceSync {
+    /// Custody's keyring, or the store keys this member's own copies supply
+    /// when custody holds none (§12.1). Nothing enters custody here: a slot
+    /// persists the keys it applies with.
+    pub(crate) async fn ring(
+        &self,
+        session: &mut Session,
+        member: &MemberIdentity,
+    ) -> Result<StoreKeyring, SyncError> {
+        if let Some(ring) = self.keys.read()? {
+            return Ok(ring);
+        }
+        match self.bootstrap_keys(session, member).await? {
+            Bootstrap::Keys(ring) => Ok(ring),
+            Bootstrap::Missing(key) => Err(SyncError::KeyUnavailable(key)),
+            Bootstrap::Empty => Err(StorageFailure::NotFound
+                .with_source("the store has neither a floor nor a first slot")
+                .into()),
+        }
+    }
+
+    /// Start the key scan after `slot`: a joiner's copies follow its invite.
+    pub(crate) fn scan_after(&self, session: &mut Session, slot: u64) {
+        session.scanned = session.scanned.max(slot.saturating_add(1));
+    }
+
+    /// The floor's copies come first; without one for this member, inspect
+    /// slot kinds and copy routing from the scan position to the first miss.
+    /// This applies nothing and advances no applied slot. The scan position
+    /// moves past every slot read, so a later poll reads only new slots.
+    pub(crate) async fn bootstrap_keys(
+        &self,
+        session: &mut Session,
+        member: &MemberIdentity,
+    ) -> Result<Bootstrap, SyncError> {
+        let mut keys = Vec::new();
+        let mut needed = None;
+        if let Some((key, routed)) = floor_object::routed_keys(
+            &self.database,
+            self.storage.as_ref(),
+            &ObjectPath::floor(self.store()),
+            member,
+        )
+        .await?
+        {
+            needed = Some(key);
+            keys.extend(routed);
+        }
+        if !keys.iter().any(|key| matches!(key, RoutedKey::Store(_))) {
+            let mut next = session.scanned.max(1);
+            while let Some(input) = self.fetch(&self.path(next)?).await? {
+                let path = self.path(next)?;
+                let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
+                needed.get_or_insert(prefix.key);
+                if let SlotKind::KeyCopy(copy) = &prefix.kind {
+                    if copy.routing.held_by(member) {
+                        let object = slot_object::read_exact(
+                            &mut input.local_bytes().await?,
+                            (input.object().size)
+                                .min(coven_format::sequence::MAX_BOUNDED_SLOT as u64)
+                                as usize,
+                            &path,
+                        )?;
+                        let original = OriginalSlot {
+                            slot: coven_merge::Slot(next),
+                            object,
+                        };
+                        keys.extend(crate::snapshot_object::routed_key(
+                            &original,
+                            self.store(),
+                            member,
+                        )?);
+                    }
+                }
+                next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
+                session.scanned = next;
+            }
+        }
+        let mut ring: Option<StoreKeyring> = None;
+        let mut circles = Vec::new();
+        for key in keys {
+            match (key, &mut ring) {
+                (RoutedKey::Store(key), None) => ring = Some(StoreKeyring::new(key)),
+                (key @ RoutedKey::Store(_), Some(ring)) => key.insert(ring)?,
+                (key @ RoutedKey::Circle(_), _) => circles.push(key),
+            }
+        }
+        Ok(match (ring, needed) {
+            (Some(mut ring), _) => {
+                for key in circles {
+                    key.insert(&mut ring)?;
+                }
+                Bootstrap::Keys(ring)
+            }
+            (None, Some(key)) => Bootstrap::Missing(key),
+            (None, None) => Bootstrap::Empty,
+        })
+    }
+
+    /// This member's binding in the applied history.
+    pub(crate) fn admission(&self, session: &Session, member: &MemberIdentity) -> MemberBinding {
+        let keys = member.keys().public_keys();
+        match session.history.state.members.get(&member.member()) {
+            None => MemberBinding::Absent,
+            Some(current) if current.removed => MemberBinding::Removed,
+            Some(current) if current.keys != keys => MemberBinding::Replaced,
+            Some(_) => match session
+                .history
+                .bindings
+                .iter()
+                .rev()
+                .find(|binding| binding.member == member.member() && binding.keys == keys)
+            {
+                Some(binding) => MemberBinding::Bound {
+                    device: binding.device,
+                },
+                None => MemberBinding::Replaced,
+            },
+        }
+    }
+}
+
+/// Check a restored member's pair before it can register: an old restore
+/// code cannot bind its keys back (§12.1).
+pub(crate) fn restorable(
+    admission: MemberBinding,
+    member: &MemberIdentity,
+) -> Result<(), SyncError> {
+    match admission {
+        MemberBinding::Bound { .. } => Ok(()),
+        MemberBinding::Removed => Err(SyncError::Removed),
+        MemberBinding::Replaced => Err(SyncError::MemberKeysReplaced {
+            member: member.member(),
+        }),
+        MemberBinding::Absent => Err(SyncError::Rejected(crate::OperationRejection::TargetGone(
+            crate::EntryTarget::Member(member.member()),
+        ))),
+    }
+}
+
+#[cfg(test)]
+#[path = "sequence_bootstrap_tests.rs"]
+mod tests;

@@ -29,6 +29,15 @@ pub(crate) struct Introduction {
     pub(crate) hash: [u8; 32],
 }
 
+/// A member id bound to a key pair by a counted entry, with its authoring
+/// device: a joiner is admitted only by its approving device's binding (§12.2).
+#[derive(Clone)]
+pub(crate) struct Binding {
+    pub(crate) member: MemberId,
+    pub(crate) keys: coven_crypto::MemberPublicKeys,
+    pub(crate) device: DeviceId,
+}
+
 /// Changes to existing domain values, rather than a copy of the entire state
 /// at every prefix. Writes resolve their original credentials by `read_through`.
 #[derive(Clone, Default)]
@@ -39,6 +48,7 @@ pub(crate) struct History {
     pub(crate) announcements: BTreeMap<Slot, SnapshotAnnouncement>,
     pub(crate) boundaries: Vec<coven_database::BoundaryCoverage>,
     pub(crate) cutoffs: Vec<(Slot, StoreChange)>,
+    pub(crate) bindings: Vec<Binding>,
     members: BTreeMap<MemberId, BTreeMap<u64, StoreMember>>,
     devices: BTreeMap<DeviceId, BTreeMap<u64, StoreDevice>>,
     circles: BTreeMap<CircleId, BTreeMap<u64, StoreCircle>>,
@@ -165,7 +175,20 @@ impl History {
 
     /// Install only the effect validated against this preceding state. Invalid
     /// admin attempts still consume their slot and retain their signed original.
-    pub(crate) fn accept_admin(&mut self, slot: Slot, effect: &AdminEffect) {
+    pub(crate) fn accept_admin(&mut self, slot: Slot, header: &SlotHeader, effect: &AdminEffect) {
+        let bound = match &effect.change {
+            StoreChange::CreateStore { admin, .. } => Some((header.author, *admin)),
+            StoreChange::AddMember { member, keys, .. }
+            | StoreChange::ReplaceMemberKeys { member, keys, .. } => Some((*member, *keys)),
+            _ => None,
+        };
+        if let Some((member, keys)) = bound {
+            self.bindings.push(Binding {
+                member,
+                keys,
+                device: header.device,
+            });
+        }
         changed(
             &self.state.members,
             &effect.state.members,

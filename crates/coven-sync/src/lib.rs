@@ -6,6 +6,7 @@ mod error;
 mod floor_object;
 mod history;
 mod identity;
+mod joining_identity;
 mod object_input;
 mod operation_rejection;
 mod operation_types;
@@ -40,6 +41,7 @@ pub use coven_database::WriteCutoff;
 pub use credential_custody::{commit_credentials, CredentialRollback};
 pub use error::{DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
+pub use joining_identity::JoiningIdentity;
 pub use operation_rejection::{EntryTarget, OperationRejection};
 pub use operation_types::*;
 pub use pending::{
@@ -49,6 +51,7 @@ pub use pending::{
 pub use refusal::Refusal;
 pub use sequence_state::{SyncState, SyncStatus};
 pub use sequence_sync::access_keys::DeleteAccessKeyError;
+pub use sequence_sync::sequence_join::JoinOutcome;
 pub use sequence_sync::SequenceSync;
 
 #[cfg(test)]

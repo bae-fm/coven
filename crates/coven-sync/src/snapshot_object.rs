@@ -220,12 +220,29 @@ pub(crate) fn history(
 
 /// Bootstrap may use a box before knowing its signer's history. The resulting
 /// key is tentative until the original slots and enclosing object authenticate.
-pub(crate) fn open_routing(
+/// A store or circle key opened from a copy routed to this member.
+pub(crate) enum RoutedKey {
+    Store(coven_crypto::StoreKey),
+    Circle(coven_crypto::CircleKey),
+}
+
+impl RoutedKey {
+    pub(crate) fn insert(self, ring: &mut StoreKeyring) -> Result<(), SyncError> {
+        match self {
+            Self::Store(key) => ring.insert_store_key(key)?,
+            Self::Circle(key) => ring.insert_circle_key(key)?,
+        }
+        Ok(())
+    }
+}
+
+/// Bootstrap may open a box before knowing its signer's history. The key is
+/// tentative until the original slots and enclosing object authenticate.
+pub(crate) fn routed_key(
     original: &OriginalSlot,
     store: coven_foundation::id_source::StoreId,
-    ring: &mut StoreKeyring,
     member: &MemberIdentity,
-) -> Result<(), SyncError> {
+) -> Result<Option<RoutedKey>, SyncError> {
     use coven_format::sealed_slot::{BoundedSlot, SlotKind, SlotObjectPrefix};
     let path = ObjectPath::slot(
         store,
@@ -233,22 +250,31 @@ pub(crate) fn open_routing(
     );
     let object = checked(&path, BoundedSlot::decode(&original.object))?;
     let SlotKind::KeyCopy(copy) = &object.prefix.kind else {
-        return Ok(());
+        return Ok(None);
     };
     if !copy.routing.held_by(member) {
-        return Ok(());
+        return Ok(None);
     }
     let context =
         SlotObjectPrefix::copy_context(object.prefix.format, object.prefix.key, &copy.routing)?;
-    match copy.routing.audience {
+    Ok(Some(match copy.routing.audience {
         coven_merge::Audience::Store => {
-            let key = copy.open_store_key(member, path.as_str(), &context)?;
-            ring.insert_store_key(key)?;
+            RoutedKey::Store(copy.open_store_key(member, path.as_str(), &context)?)
         }
         coven_merge::Audience::Circle(_) => {
-            let key = copy.open_circle_key(member, path.as_str(), &context)?;
-            ring.insert_circle_key(key)?;
+            RoutedKey::Circle(copy.open_circle_key(member, path.as_str(), &context)?)
         }
+    }))
+}
+
+pub(crate) fn open_routing(
+    original: &OriginalSlot,
+    store: coven_foundation::id_source::StoreId,
+    ring: &mut StoreKeyring,
+    member: &MemberIdentity,
+) -> Result<(), SyncError> {
+    match routed_key(original, store, member)? {
+        Some(key) => key.insert(ring),
+        None => Ok(()),
     }
-    Ok(())
 }

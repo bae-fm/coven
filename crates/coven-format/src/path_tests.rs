@@ -132,3 +132,19 @@ fn file_scans_keep_device_prefixes_and_snapshot_paths_keep_their_audience() {
         );
     }
 }
+
+#[test]
+fn only_join_request_paths_name_an_invite() {
+    let invite = InviteId(uuid::Uuid::from_u128(17));
+    assert_eq!(
+        ObjectPath::join_request(STORE_ID, invite).join_request_invite(),
+        Some(invite)
+    );
+    for path in [
+        ObjectPath::floor(STORE_ID),
+        ObjectPath::slot(STORE_ID, NonZeroU64::MIN),
+        ObjectPath::access_key(STORE_ID, &crate::test_utils::member_id(), invite.0),
+    ] {
+        assert_eq!(path.join_request_invite(), None);
+    }
+}

@@ -69,6 +69,12 @@ impl ObjectPath {
     pub fn join_request(store: StoreId, invite: InviteId) -> Self {
         Self(format!("{store}/join-requests/{invite}"))
     }
+    /// The invite named by a join request's path.
+    pub fn join_request_invite(&self) -> Option<InviteId> {
+        self.relative()
+            .strip_prefix("join-requests/")
+            .map(|invite| InviteId(invite.parse().expect("validated invite id")))
+    }
     /// A member's new S3 key, sealed to them, named by its mint attempt (§13).
     pub fn access_key(
         store: StoreId,

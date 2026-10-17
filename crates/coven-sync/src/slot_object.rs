@@ -100,6 +100,28 @@ pub(crate) fn read_error(path: &ObjectPath, error: std::io::Error) -> SyncError 
     }
 }
 
+/// A complete slot's clear prefix: its kind, sealing key and any copy
+/// routing. It authenticates nothing until the slot's signature verifies.
+pub(crate) fn clear_prefix(
+    mut input: RetainedBytes,
+    path: &ObjectPath,
+) -> Result<SlotObjectPrefix, SyncError> {
+    let size = input.len();
+    let head = read_exact(
+        &mut input,
+        size.min(SlotObjectPrefix::MAX_LENGTH as u64) as usize,
+        path,
+    )?;
+    let length = checked(path, SlotObjectPrefix::length(&head))?;
+    checked(
+        path,
+        SlotObjectPrefix::decode(
+            head.get(..length)
+                .ok_or_else(|| damaged(path, Refusal::from(coven_format::Error::Truncated)))?,
+        ),
+    )
+}
+
 pub(crate) fn open(
     mut input: RetainedBytes,
     path: &ObjectPath,

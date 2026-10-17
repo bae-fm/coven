@@ -35,10 +35,7 @@ impl SequenceSync {
                 .member
                 .read()?
                 .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-            let mut ring = owner
-                .keys
-                .read()?
-                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+            let mut ring = owner.ring(&mut session, &member).await?;
             owner.read_forward(&mut session, &mut ring, &member).await?;
             owner.settle_open(&mut session, &mut ring, &member).await?;
             owner

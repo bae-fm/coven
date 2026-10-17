@@ -1,0 +1,891 @@
+//! The inviting device's one-time invitation, its join request and the
+//! approval that binds the request's exact pair (§12.2, §12.3).
+
+use super::{sequence_operations::Request, SequenceSync, Session};
+use crate::{
+    Invite, InviteAccess, InviteTarget, JoinRequest, OperationKind, OperationRejection,
+    PendingReason, PendingRecord, PendingSubject, ProviderAccessAction, SyncError,
+};
+use coven_crypto::{InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring};
+use coven_database::{
+    NewOperation, OperationId, OperationRecord, OperationUpdate, ProviderAccessChange,
+};
+use coven_format::{
+    admin::{MemberRole, StoreChange},
+    codes::InviteCode,
+    sealed_single::SingleChunkObject,
+    MemberAccess, Object,
+};
+use coven_foundation::id_source::{InviteId, MemberId};
+use coven_merge::Audience;
+use coven_storage::{
+    AccessKeyAdmin, CloudProvider, InviteStorage, MintScope, ObjectPath, S3Credentials,
+    S3MemberKey, StorageFailure, StorageInvitation,
+};
+use serde::{Deserialize, Serialize};
+use std::{collections::BTreeSet, time::Duration};
+
+pub(crate) const INVITE: &str = "invite";
+
+/// How an invited person reaches storage, as the invite's journal keeps it.
+#[derive(Serialize, Deserialize)]
+pub(crate) enum InviteGrant {
+    /// The provider shares the store with this account.
+    Account { email: String },
+    /// An S3 key and who holds it, made in the console or by coven.
+    S3Key(S3MemberKey),
+    /// Coven makes the key with admin access; each mint call names it
+    /// afresh from this scope (§4).
+    Minting(MintScope),
+}
+
+impl InviteGrant {
+    fn member_access(&self) -> Result<MemberAccess, SyncError> {
+        match self {
+            Self::Account { email } => Ok(MemberAccess::ProviderAccount(email.clone())),
+            Self::S3Key(key) => Ok(MemberAccess::S3AccessKey {
+                access_key_id: key.credentials.access_key_id.clone(),
+                principal: key.principal.clone(),
+            }),
+            Self::Minting(_) => Err(SyncError::InvitationChanged),
+        }
+    }
+}
+
+/// What approving the invite's request binds to its member id.
+#[derive(Clone, Copy, Serialize, Deserialize)]
+pub(crate) enum InviteBinding {
+    /// A fresh id with this role and the invite's access.
+    Add { role: MemberRole },
+    /// An existing active id keeps its role, circles, devices and recorded
+    /// access; only its pair changes.
+    Replace,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) enum InviteState {
+    /// Storage access is being granted.
+    Grant,
+    /// The code is shown; the request, once read and checked, waits for the app.
+    Waiting {
+        invitation: StorageInvitation,
+        request: Option<Vec<u8>>,
+    },
+    /// The app approved this checked request.
+    Approving { request: Vec<u8> },
+    /// A kept replacement records the invite's new S3 key for its member.
+    Recording,
+    /// Take back what the invite granted.
+    Revoking,
+    /// Nothing granted remains owed; delete the request object.
+    Settled,
+}
+
+#[derive(Serialize, Deserialize)]
+pub(crate) struct InviteWork {
+    id: InviteId,
+    member: MemberId,
+    binding: InviteBinding,
+    access: InviteGrant,
+    secret: SecretText,
+    expires_at: std::time::SystemTime,
+    state: InviteState,
+}
+
+impl InviteWork {
+    fn read(record: &OperationRecord) -> Result<Self, SyncError> {
+        Ok(serde_json::from_slice(&record.data)?)
+    }
+    fn update(&self, record: &OperationRecord) -> Result<OperationUpdate, SyncError> {
+        Ok(OperationUpdate {
+            id: record.id,
+            previous: record.last_step,
+            last_step: record
+                .last_step
+                .checked_add(1)
+                .ok_or(SyncError::SequenceExhausted)?,
+            data: serde_json::to_vec(self)?,
+        })
+    }
+    fn secret(&self) -> Result<InviteSecret, SyncError> {
+        Ok(InviteSecret::from_bytes(serde_json::from_str(
+            self.secret.as_str(),
+        )?))
+    }
+    fn account(&self) -> Option<&str> {
+        match &self.access {
+            InviteGrant::Account { email } => Some(email),
+            _ => None,
+        }
+    }
+    /// An invite still open: its account stays shared (§13).
+    fn open(&self) -> bool {
+        !matches!(self.state, InviteState::Revoking | InviteState::Settled)
+    }
+    fn expired(&self, now: std::time::SystemTime) -> bool {
+        now >= self.expires_at
+            && matches!(self.state, InviteState::Grant | InviteState::Waiting { .. })
+    }
+}
+
+impl SequenceSync {
+    /// Accounts that this device's open invites still need shared.
+    pub(crate) async fn invited_accounts(&self) -> Result<BTreeSet<String>, SyncError> {
+        let mut accounts = BTreeSet::new();
+        for record in self.database.operations().await? {
+            if record.kind == INVITE {
+                let work = InviteWork::read(&record)?;
+                if work.open() {
+                    accounts.extend(work.account().map(str::to_owned));
+                }
+            }
+        }
+        Ok(accounts)
+    }
+
+    /// Fix the member id and storage access, grant that access, and return
+    /// the code to show (§12.2). The invite expires a day later by this
+    /// device's clock.
+    pub async fn create_invite(
+        &self,
+        target: InviteTarget,
+        access: InviteAccess,
+    ) -> Result<Invite, SyncError> {
+        let mut session = self.session.lock().await;
+        let member = self
+            .member
+            .read()?
+            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.ring(&mut session, &member).await?;
+        self.read_forward(&mut session, &mut ring, &member).await?;
+        self.settle_open(&mut session, &mut ring, &member).await?;
+        let me = member.member();
+        let state = &session.history.state;
+        if !self.registered(&session)
+            || !state
+                .members
+                .get(&me)
+                .is_some_and(|value| !value.removed && value.role == MemberRole::Admin)
+        {
+            return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+        }
+        if !session.history.owns_storage(me) {
+            return Err(StorageFailure::NotStoreOwner.into());
+        }
+        let provider = self.storage.config().provider();
+        let (target_member, binding) = match target {
+            InviteTarget::NewMember { role } => {
+                (MemberId(self.ids.new_id()), InviteBinding::Add { role })
+            }
+            InviteTarget::ReplaceMemberKeys { member: target } => {
+                let Some(existing) = state.members.get(&target).filter(|value| !value.removed)
+                else {
+                    return Err(SyncError::Rejected(OperationRejection::TargetGone(
+                        crate::EntryTarget::Member(target),
+                    )));
+                };
+                // Replacing this installation's own pair stops the device that
+                // must finish the invite; members replace their own keys directly.
+                if target == me {
+                    return Err(SyncError::Rejected(OperationRejection::NotAllowed));
+                }
+                if let InviteAccess::ProviderAccount { email } = &access {
+                    let account = MemberAccess::ProviderAccount(email.trim().to_ascii_lowercase());
+                    if !existing.access.same_credential(&account) {
+                        return Err(StorageFailure::InvalidConfiguration
+                            .with_source(
+                                "a replacement invite shares the member's recorded account",
+                            )
+                            .into());
+                    }
+                }
+                (target, InviteBinding::Replace)
+            }
+        };
+        let id = InviteId(self.ids.new_id());
+        let mut admin = None;
+        let grant = match access {
+            InviteAccess::ProviderAccount { email } => {
+                let email = email.trim().to_ascii_lowercase();
+                if email.is_empty() {
+                    return Err(StorageFailure::InvalidConfiguration
+                        .with_source("invite account is empty")
+                        .into());
+                }
+                if provider == CloudProvider::S3 {
+                    return Err(StorageFailure::InvalidConfiguration
+                        .with_source("an S3 invitation needs its own access key")
+                        .into());
+                }
+                InviteGrant::Account { email }
+            }
+            InviteAccess::S3AccessKey {
+                access_key_id,
+                secret_access_key,
+            } => {
+                if access_key_id.is_empty() || secret_access_key.as_str().is_empty() {
+                    return Err(StorageFailure::InvalidConfiguration
+                        .with_source("invite access key is empty")
+                        .into());
+                }
+                InviteGrant::S3Key(S3MemberKey {
+                    credentials: S3Credentials {
+                        access_key_id,
+                        secret_access_key,
+                    },
+                    principal: coven_format::S3Principal::Console,
+                })
+            }
+            InviteAccess::S3AdminAccess(access) => {
+                admin = Some(access);
+                // The key is tagged with the invite; its member is not bound yet.
+                InviteGrant::Minting(MintScope::new(
+                    self.store(),
+                    &format!("invite-{}", id.0),
+                    self.device,
+                    self.ids.new_id(),
+                ))
+            }
+        };
+        if !matches!(grant, InviteGrant::Account { .. }) && provider != CloudProvider::S3 {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("an access-key invitation requires S3")
+                .into());
+        }
+        let secret = InviteSecret::generate()?;
+        let work = InviteWork {
+            id,
+            member: target_member,
+            binding,
+            access: grant,
+            secret: SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?),
+            expires_at: self
+                .clock
+                .now()
+                .checked_add(Duration::from_secs(86_400))
+                .ok_or(
+                    StorageFailure::InvalidConfiguration
+                        .with_source("the clock cannot represent the invite's expiry"),
+                )?,
+            state: InviteState::Grant,
+        };
+        let changes = match work.account() {
+            Some(account) => vec![self.account_change(account, true)?],
+            None => Vec::new(),
+        };
+        let operation = self
+            .database
+            .start_operation_with_access::<PendingRecord>(
+                NewOperation {
+                    kind: INVITE.into(),
+                    data: serde_json::to_vec(&work)?,
+                    started_by: "create_invite".into(),
+                    pauses_writes: false,
+                },
+                changes,
+            )
+            .await?;
+        if let Some(admin) = admin {
+            self.admin_access
+                .lock()
+                .expect("admin access poisoned")
+                .insert(operation, admin);
+        }
+        self.resume_access(&mut session, &mut ring, &member).await?;
+        match self
+            .advance_invite(&mut session, &mut ring, &member, operation)
+            .await?
+        {
+            InviteProgress::Shown(invite) => Ok(invite),
+            InviteProgress::Waiting(reason) => Err(SyncError::Pending(Box::new(PendingRecord {
+                subject: PendingSubject::Operation {
+                    id: operation,
+                    kind: OperationKind::Invite,
+                },
+                reason,
+                reported_by: self.device,
+            }))),
+            InviteProgress::Finished => Err(SyncError::InvitationChanged),
+        }
+    }
+
+    /// Checked requests waiting for this device's decision.
+    pub async fn join_requests(&self) -> Result<Vec<JoinRequest>, SyncError> {
+        let mut requests = Vec::new();
+        for record in self.database.operations().await? {
+            if record.kind != INVITE {
+                continue;
+            }
+            let work = InviteWork::read(&record)?;
+            if let InviteState::Waiting {
+                request: Some(bytes),
+                ..
+            } = &work.state
+            {
+                requests.push(self.present_request(&work, bytes)?);
+            }
+        }
+        Ok(requests)
+    }
+
+    /// Approve exactly this checked request: claim copies of every store key
+    /// and the held circle keys for its pair, then bind the pair (§12.2).
+    pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
+        self.decide(request.invite, Some(request), true).await
+    }
+
+    /// Decline the request and take back the access its invite granted.
+    pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
+        self.decide(request.invite, Some(request), false).await
+    }
+
+    /// Cancel an invite before anyone joins with it, taking back its access.
+    pub async fn cancel_invite(&self, invite: InviteId) -> Result<(), SyncError> {
+        self.decide(invite, None, false).await
+    }
+
+    async fn decide(
+        &self,
+        invite: InviteId,
+        request: Option<&JoinRequest>,
+        approve: bool,
+    ) -> Result<(), SyncError> {
+        let mut session = self.session.lock().await;
+        let member = self
+            .member
+            .read()?
+            .ok_or(StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.ring(&mut session, &member).await?;
+        self.read_forward(&mut session, &mut ring, &member).await?;
+        self.settle_open(&mut session, &mut ring, &member).await?;
+        let record = self
+            .database
+            .operations()
+            .await?
+            .into_iter()
+            .filter(|record| record.kind == INVITE)
+            .find(|record| InviteWork::read(record).is_ok_and(|work| work.id == invite))
+            .ok_or(SyncError::InvitationChanged)?;
+        let mut work = InviteWork::read(&record)?;
+        if work.expired(self.clock.now()) {
+            return Err(SyncError::InvitationChanged);
+        }
+        let stored = match &work.state {
+            InviteState::Waiting { request, .. } => request.clone(),
+            InviteState::Grant if !approve && request.is_none() => None,
+            _ => return Err(SyncError::InvitationChanged),
+        };
+        if let Some(request) = request {
+            let bytes = stored.as_ref().ok_or(SyncError::InvitationChanged)?;
+            if self.present_request(&work, bytes)? != *request {
+                return Err(SyncError::InvitationChanged);
+            }
+        }
+        work.state = if approve {
+            InviteState::Approving {
+                request: stored.ok_or(SyncError::InvitationChanged)?,
+            }
+        } else {
+            InviteState::Revoking
+        };
+        self.database
+            .advance_operation(work.update(&record)?)
+            .await?;
+        loop {
+            match self
+                .advance_invite(&mut session, &mut ring, &member, record.id)
+                .await?
+            {
+                InviteProgress::Finished => return Ok(()),
+                InviteProgress::Waiting(reason) => {
+                    return Err(SyncError::Pending(Box::new(PendingRecord {
+                        subject: PendingSubject::Operation {
+                            id: record.id,
+                            kind: OperationKind::Invite,
+                        },
+                        reason,
+                        reported_by: self.device,
+                    })))
+                }
+                InviteProgress::Shown(_) => (),
+            }
+        }
+    }
+
+    /// Advance this device's invites in a pass: grant, read the request
+    /// under backoff, revoke on expiry, and finish decided work.
+    pub(crate) async fn resume_invites(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        for record in self.database.operations().await? {
+            if record.kind != INVITE || !self.operation_ready(&record, ring).await? {
+                continue;
+            }
+            let scope = self.waits.begin_attempt(record.id);
+            let result = scope
+                .run(self.advance_invite(session, ring, member, record.id))
+                .await;
+            let reason = match result {
+                Ok(InviteProgress::Waiting(reason)) => reason,
+                Ok(_) => {
+                    self.waits.clear_evidence(record.id);
+                    self.waits
+                        .forget(coven_database::RetrySubject::Operation(record.id));
+                    continue;
+                }
+                Err(error) => self.error_reason(&error),
+            };
+            let pending = SyncError::Pending(Box::new(PendingRecord {
+                subject: PendingSubject::Operation {
+                    id: record.id,
+                    kind: OperationKind::Invite,
+                },
+                reason,
+                reported_by: self.device,
+            }));
+            self.record_operation_error(record.id, OperationKind::Invite, &pending, ring)
+                .await?;
+            self.state.check()?;
+        }
+        Ok(())
+    }
+
+    async fn advance_invite(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        id: OperationId,
+    ) -> Result<InviteProgress, SyncError> {
+        loop {
+            let record = self
+                .database
+                .operation(id)
+                .await?
+                .ok_or(coven_database::DbError::OperationChanged(id))?;
+            let mut work = InviteWork::read(&record)?;
+            if work.expired(self.clock.now()) {
+                work.state = InviteState::Revoking;
+                self.database
+                    .advance_operation(work.update(&record)?)
+                    .await?;
+                continue;
+            }
+            match &work.state {
+                InviteState::Grant => {
+                    let invitation = match &work.access {
+                        InviteGrant::Minting(scope) => {
+                            let admin = self
+                                .admin_access
+                                .lock()
+                                .expect("admin access poisoned")
+                                .get(&id)
+                                .cloned();
+                            let Some(admin) = admin else {
+                                return Ok(InviteProgress::Waiting(
+                                    PendingReason::AdminAccessRequired,
+                                ));
+                            };
+                            let minted = self.mint_checked(admin.as_ref(), scope).await;
+                            self.admin_access
+                                .lock()
+                                .expect("admin access poisoned")
+                                .remove(&id);
+                            work.access = InviteGrant::S3Key(minted?);
+                            self.database
+                                .advance_operation(work.update(&record)?)
+                                .await?;
+                            continue;
+                        }
+                        InviteGrant::Account { email } => {
+                            let access = self
+                                .database
+                                .provider_access(email.clone())
+                                .await?
+                                .ok_or(coven_database::DbError::DamagedDatabase)?;
+                            if access.request.is_some() || access.granted != Some(true) {
+                                return Ok(InviteProgress::Waiting(
+                                    PendingReason::ProviderPending {
+                                        action: ProviderAccessAction::Grant,
+                                        account: email.clone(),
+                                    },
+                                ));
+                            }
+                            StorageInvitation::decode(
+                                access
+                                    .invitation
+                                    .as_ref()
+                                    .ok_or(coven_database::DbError::DamagedDatabase)?
+                                    .as_bytes(),
+                            )?
+                        }
+                        InviteGrant::S3Key(_) => {
+                            StorageInvitation::for_account(self.storage.config())?
+                        }
+                    };
+                    work.state = InviteState::Waiting {
+                        invitation,
+                        request: None,
+                    };
+                    let invite = self.invite_value(session, &work)?;
+                    self.database
+                        .advance_operation(work.update(&record)?)
+                        .await?;
+                    return Ok(InviteProgress::Shown(invite));
+                }
+                InviteState::Waiting {
+                    request: Some(_), ..
+                } => {
+                    return Ok(InviteProgress::Waiting(PendingReason::Paused));
+                }
+                InviteState::Waiting {
+                    request: None,
+                    invitation,
+                } => {
+                    let path = ObjectPath::join_request(self.store(), work.id);
+                    let bytes = match self.storage.read(&path).await {
+                        Ok(bytes) => bytes,
+                        Err(error) if error.failure() == StorageFailure::NotFound => {
+                            return Ok(InviteProgress::Waiting(PendingReason::Missing { path }));
+                        }
+                        Err(error) => return Err(error.into()),
+                    };
+                    let request = self.open_request(&work, &bytes)?;
+                    work.state = InviteState::Waiting {
+                        invitation: invitation.clone(),
+                        request: Some(request),
+                    };
+                    self.database
+                        .advance_operation(work.update(&record)?)
+                        .await?;
+                    return Ok(InviteProgress::Waiting(PendingReason::Paused));
+                }
+                InviteState::Approving { request } => {
+                    let decoded = decode_request(request)?;
+                    let change = match work.binding {
+                        InviteBinding::Add { role } => StoreChange::AddMember {
+                            member: work.member,
+                            keys: decoded.keys,
+                            role,
+                            access: work.access.member_access()?,
+                        },
+                        InviteBinding::Replace => {
+                            let current = session
+                                .history
+                                .state
+                                .members
+                                .get(&work.member)
+                                .filter(|value| !value.removed)
+                                .ok_or(SyncError::Rejected(OperationRejection::TargetGone(
+                                    crate::EntryTarget::Member(work.member),
+                                )))?;
+                            StoreChange::ReplaceMemberKeys {
+                                member: work.member,
+                                expected: current.keys,
+                                keys: decoded.keys,
+                            }
+                        }
+                    };
+                    // A replacement already binding this pair is satisfied.
+                    let bound = matches!(&change, StoreChange::ReplaceMemberKeys { expected, keys, .. } if expected == keys);
+                    if !bound {
+                        match self
+                            .start_request(session, ring, member, Request::Change(change), INVITE)
+                            .await
+                        {
+                            Ok(_) => (),
+                            Err(SyncError::Rejected(reason)) => {
+                                // A rejected approval is reported, not retried
+                                // with a new entry; its grants are taken back.
+                                work.state = InviteState::Revoking;
+                                self.database
+                                    .advance_operation(work.update(&record)?)
+                                    .await?;
+                                Box::pin(self.advance_invite(session, ring, member, id)).await?;
+                                return Err(SyncError::Rejected(reason));
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                    work.state = match (&work.binding, &work.access) {
+                        (InviteBinding::Replace, InviteGrant::S3Key(_)) => InviteState::Recording,
+                        _ => InviteState::Settled,
+                    };
+                    self.database
+                        .advance_operation(work.update(&record)?)
+                        .await?;
+                }
+                InviteState::Recording => {
+                    let change = StoreChange::SetAccess {
+                        member: work.member,
+                        access: work.access.member_access()?,
+                    };
+                    self.start_request(session, ring, member, Request::Change(change), INVITE)
+                        .await?;
+                    work.state = InviteState::Settled;
+                    self.database
+                        .advance_operation(work.update(&record)?)
+                        .await?;
+                }
+                InviteState::Revoking => {
+                    // A replacement invite takes back only its own new grant,
+                    // never access its active member already holds (§12.2).
+                    let deletions = match work.access.member_access() {
+                        Ok(access @ MemberAccess::S3AccessKey { .. }) => {
+                            let retained = matches!(work.binding, InviteBinding::Replace)
+                                && session.history.state.members.get(&work.member).is_some_and(
+                                    |value| !value.removed && value.access.same_credential(&access),
+                                );
+                            if retained {
+                                Vec::new()
+                            } else {
+                                vec![self.key_deletion(&access)?]
+                            }
+                        }
+                        _ => Vec::new(),
+                    };
+                    work.state = InviteState::Settled;
+                    self.database
+                        .record_access_key_deletions::<PendingRecord>(
+                            Some(work.update(&record)?),
+                            deletions,
+                        )
+                        .await?;
+                }
+                InviteState::Settled => {
+                    // Provider deletion is idempotent, including an absent request.
+                    match self
+                        .storage
+                        .delete(&ObjectPath::join_request(self.store(), work.id))
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(error) if error.failure() == StorageFailure::NotFound => (),
+                        Err(error) => return Err(error.into()),
+                    }
+                    self.admin_access
+                        .lock()
+                        .expect("admin access poisoned")
+                        .remove(&id);
+                    let changes = match work.account() {
+                        Some(account) => {
+                            let others = self.invited_accounts_except(id).await?;
+                            let used = session.history.state.members.values().any(|value| {
+                                !value.removed
+                                    && value.access.same_credential(&MemberAccess::ProviderAccount(
+                                        account.to_owned(),
+                                    ))
+                            });
+                            vec![self.account_change(account, used || others.contains(account))?]
+                        }
+                        None => Vec::new(),
+                    };
+                    self.database
+                        .finish_operation_with_access::<PendingRecord>(id, changes)
+                        .await?;
+                    return Ok(InviteProgress::Finished);
+                }
+            }
+        }
+    }
+
+    async fn invited_accounts_except(
+        &self,
+        id: OperationId,
+    ) -> Result<BTreeSet<String>, SyncError> {
+        let mut accounts = BTreeSet::new();
+        for record in self.database.operations().await? {
+            if record.kind == INVITE && record.id != id {
+                let work = InviteWork::read(&record)?;
+                if work.open() {
+                    accounts.extend(work.account().map(str::to_owned));
+                }
+            }
+        }
+        Ok(accounts)
+    }
+
+    fn account_change(
+        &self,
+        account: &str,
+        intended: bool,
+    ) -> Result<ProviderAccessChange, SyncError> {
+        Ok(ProviderAccessChange {
+            operation: NewOperation {
+                kind: "provider-access".into(),
+                data: serde_json::to_vec(account)?,
+                started_by: "coven".into(),
+                pauses_writes: false,
+            },
+            account: account.to_owned(),
+            intended,
+            initially_granted: false,
+            needs_invitation: intended,
+            owner: true,
+        })
+    }
+
+    fn key_deletion(
+        &self,
+        access: &MemberAccess,
+    ) -> Result<coven_database::AccessKeyDeletion, SyncError> {
+        let MemberAccess::S3AccessKey {
+            access_key_id,
+            principal,
+        } = access
+        else {
+            unreachable!("an S3 key's access");
+        };
+        let key = coven_database::AccessKeyToDelete {
+            access_key_id: access_key_id.clone(),
+            principal: principal.clone(),
+            member: None,
+        };
+        let data = serde_json::to_vec(&super::access_keys::Deletion { key: key.clone() })?;
+        Ok(coven_database::AccessKeyDeletion {
+            key,
+            operation: NewOperation {
+                kind: "delete-access-key".into(),
+                data,
+                started_by: "coven".into(),
+                pauses_writes: false,
+            },
+        })
+    }
+
+    /// Make a key under names fresh for this call and check it from the
+    /// member's side, or roll back what the call made (§4).
+    pub(crate) async fn mint_checked(
+        &self,
+        admin: &dyn AccessKeyAdmin,
+        template: &MintScope,
+    ) -> Result<S3MemberKey, SyncError> {
+        let scope = MintScope::new(
+            template.store,
+            &template.member,
+            template.device,
+            self.ids.new_id(),
+        );
+        let error = match admin.mint(&scope).await {
+            Ok(key) => match admin.probe(&scope, &key.credentials).await {
+                Ok(()) => return Ok(key),
+                Err(error) => SyncError::Storage(error),
+            },
+            Err(error) => SyncError::Storage(error),
+        };
+        match admin.roll_back(&scope).await {
+            Ok(()) => Err(error),
+            Err(cleanup) => Err(SyncError::Cleanup {
+                operation: Box::new(error),
+                cleanup: Box::new(SyncError::Storage(cleanup)),
+            }),
+        }
+    }
+
+    fn invite_value(&self, session: &Session, work: &InviteWork) -> Result<Invite, SyncError> {
+        let InviteState::Waiting { invitation, .. } = &work.state else {
+            unreachable!("a shown invite is waiting");
+        };
+        let storage = match &work.access {
+            InviteGrant::Account { .. } => InviteStorage::Account(invitation.clone()),
+            InviteGrant::S3Key(key) => InviteStorage::S3 {
+                invitation: invitation.clone(),
+                credentials: key.credentials.clone(),
+            },
+            InviteGrant::Minting(_) => unreachable!("minted before granting"),
+        };
+        let store = session
+            .history
+            .state
+            .store
+            .as_ref()
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let initial_key = session
+            .history
+            .introductions
+            .iter()
+            .find(|intro| intro.audience == Audience::Store)
+            .ok_or(coven_database::DbError::DamagedDatabase)?
+            .key;
+        let code = InviteCode {
+            store: store.id,
+            name: store.name.clone(),
+            invite: work.id,
+            member: work.member,
+            secret: work.secret()?,
+            initial_key,
+            inviting_writer: self.device,
+            read_through: session.through,
+            storage: storage.encode()?,
+        }
+        .to_text()?;
+        Ok(Invite {
+            id: work.id,
+            member: work.member,
+            code: code.to_string(),
+            expires_at: work.expires_at,
+        })
+    }
+
+    /// Open and check a request: it repeats the invite's id and member id,
+    /// and its own new signing key verifies it (§12.2).
+    fn open_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<Vec<u8>, SyncError> {
+        let envelope = SingleChunkObject::decode(bytes)?;
+        let SingleChunkObject::JoinRequest { signature, .. } = &envelope;
+        let path = ObjectPath::join_request(self.store(), work.id);
+        let plain = work.secret()?.join_request_key().open_object_chunk(
+            path.as_str(),
+            &envelope.prefix().encode()?,
+            0,
+            0,
+            envelope.chunk(),
+        )?;
+        let request = decode_request(&plain)?;
+        if request.invite != work.id || request.member != work.member {
+            return Err(SyncError::InvitationChanged);
+        }
+        let mut hasher = ObjectHasher::new();
+        hasher.update(&envelope.signed_bytes()?);
+        request
+            .keys
+            .signing
+            .verify_object(path.as_str(), &hasher.finish(), signature)?;
+        Ok(plain.to_vec())
+    }
+
+    fn present_request(&self, work: &InviteWork, bytes: &[u8]) -> Result<JoinRequest, SyncError> {
+        let request = decode_request(bytes)?;
+        Ok(JoinRequest {
+            invite: request.invite,
+            member: request.member,
+            keys: request.keys,
+            device_name: request.device_name,
+            provider_account_email: work.account().map(str::to_owned),
+            record: bytes.to_vec(),
+        })
+    }
+}
+
+/// How far one call advanced an invite.
+pub(crate) enum InviteProgress {
+    /// Access is granted and the code can be shown.
+    Shown(Invite),
+    /// The invite waits on this condition.
+    Waiting(PendingReason),
+    /// The invite's work is done.
+    Finished,
+}
+
+fn decode_request(bytes: &[u8]) -> Result<coven_format::objects::JoinRequest, SyncError> {
+    match Object::decode(bytes)? {
+        Object::JoinRequest(request) => Ok(request),
+        _ => Err(SyncError::InvitationChanged),
+    }
+}
+
+#[cfg(test)]
+#[path = "sequence_invites_tests.rs"]
+mod tests;

@@ -93,6 +93,19 @@ impl SequenceSync {
         self.submit(Request::Change(change)).await.map(drop)
     }
 
+    /// Register this installation for its member once the applied history
+    /// binds the member's current pair (§12). `replaces` names this member's
+    /// earlier installation that a reset supersedes.
+    pub async fn register_device(
+        self: &std::sync::Arc<Self>,
+        name: String,
+        replaces: Option<coven_foundation::id_source::DeviceId>,
+    ) -> Result<(), SyncError> {
+        self.submit(Request::Change(StoreChange::AddDevice { name, replaces }))
+            .await
+            .map(drop)
+    }
+
     /// Capture the counted audience prefix, upload it, then claim its announcement.
     pub async fn snapshot(
         self: &std::sync::Arc<Self>,
@@ -143,15 +156,15 @@ impl SequenceSync {
                 .member
                 .read()?
                 .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-            let mut ring = owner
-                .keys
-                .read()?
-                .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
+            let mut ring = owner.ring(&mut session, &member).await?;
             owner.read_forward(&mut session, &mut ring, &member).await?;
             owner.settle_open(&mut session, &mut ring, &member).await?;
             owner
                 .resume_administration(&mut session, &mut ring, &member)
                 .await?;
+            if let Request::Change(StoreChange::AddDevice { .. }) = &request {
+                super::sequence_bootstrap::restorable(owner.admission(&session, &member), &member)?;
+            }
             owner
                 .start_request(&mut session, &mut ring, &member, request, "operation")
                 .await

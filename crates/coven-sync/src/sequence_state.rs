@@ -76,6 +76,11 @@ impl Default for SyncState {
 }
 impl PublicationGate for SyncState {
     fn check(&self, path: &ObjectPath) -> Result<(), StorageError> {
+        // A join request is the bootstrap step before any sequence state
+        // exists; the stuck-device rule governs only sequence-derived sends.
+        if path.join_request_invite().is_some() {
+            return Ok(());
+        }
         if self.check().is_err()
             || (path.file_id().is_some() && !*self.registered.lock().expect("sync state poisoned"))
         {

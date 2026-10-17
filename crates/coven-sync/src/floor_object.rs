@@ -27,6 +27,47 @@ pub(crate) struct FloorObject {
     pub(crate) copies: Vec<OriginalSlot>,
 }
 
+/// The floor's sealing key and the key copies in its clear prefix routed to
+/// this member, read before any store key is held (§12). The keys stay
+/// tentative until the floor and its history authenticate.
+pub(crate) async fn routed_keys(
+    database: &Database,
+    storage: &dyn Storage,
+    path: &ObjectPath,
+    member: &MemberIdentity,
+) -> Result<
+    Option<(
+        coven_foundation::id_source::KeyId,
+        Vec<snapshot_object::RoutedKey>,
+    )>,
+    SyncError,
+> {
+    let response = match storage.stream_object(path, None).await {
+        Ok(response) => response,
+        Err(error) if error.failure() == StorageFailure::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let input = ObjectInput::receive_response(database, storage, path, response).await?;
+    let mut raw = input.local_bytes().await?;
+    let prefix = read_exact(&mut raw, FloorPrefixDecoder::HEADER_LENGTH, path)?;
+    let mut decoder = checked(path, FloorPrefixDecoder::start(&prefix))?;
+    let key = decoder.key;
+    let mut keys = Vec::new();
+    while decoder.remaining() > 0 {
+        let mut bytes = read_exact(&mut raw, 12, path)?;
+        let length = checked(path, decoder.copy_length(&bytes))?;
+        bytes.extend(read_exact(&mut raw, length - bytes.len(), path)?);
+        let original = checked(path, decoder.copy(&bytes))?;
+        keys.extend(snapshot_object::routed_key(
+            &original,
+            path.store(),
+            member,
+        )?);
+    }
+    checked(path, decoder.finish())?;
+    Ok(Some((key, keys)))
+}
+
 impl FloorObject {
     /// Reuse authenticated unchanged bytes; the fresh GET still observes the
     /// floor revision after the caller's sequence reads.

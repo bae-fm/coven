@@ -26,6 +26,8 @@ pub(crate) struct Session {
     through: u64,
     floor: Option<FloorObject>,
     blocked: Option<PendingRecord>,
+    /// The next slot a member without store keys inspects for its copies.
+    scanned: u64,
 }
 
 /// Owns sequence progress. App commits use the database independently; every
@@ -43,6 +45,13 @@ pub struct SequenceSync {
     waits: Arc<crate::RetryWaits>,
     files: crate::Files,
     session: Mutex<Session>,
+    /// Admin access an operation holds in memory until its key is made (§4).
+    admin_access: std::sync::Mutex<
+        std::collections::BTreeMap<
+            coven_database::OperationId,
+            Arc<dyn coven_storage::AccessKeyAdmin>,
+        >,
+    >,
 }
 
 impl SequenceSync {
@@ -66,10 +75,12 @@ impl SequenceSync {
         let identity = member
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let mut ring = keys
-            .read()?
-            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let history = History::restore(&originals, directory.id(), &mut ring, &identity)?;
+        // An installation still loading its first keys has applied nothing.
+        let history = match keys.read()? {
+            Some(mut ring) => History::restore(&originals, directory.id(), &mut ring, &identity)?,
+            None if originals.is_empty() => History::default(),
+            None => return Err(coven_storage::StorageFailure::MemberKeysMissing.into()),
+        };
         let blocked = database
             .pending::<PendingRecord>()
             .await?
@@ -99,7 +110,9 @@ impl SequenceSync {
                 through,
                 floor: None,
                 blocked,
+                scanned: 1,
             }),
+            admin_access: std::sync::Mutex::new(std::collections::BTreeMap::new()),
         })
     }
 
@@ -127,7 +140,7 @@ impl SequenceSync {
             .member
             .read()?
             .ok_or(StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.keys.read()?.ok_or(StorageFailure::MemberKeysMissing)?;
+        let mut ring = self.ring(&mut session, &member).await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         self.settle_open(&mut session, &mut ring, &member).await?;
         if let Some(through) = captured {
@@ -157,21 +170,37 @@ impl SequenceSync {
         }
         self.resume_administration(&mut session, &mut ring, &member)
             .await?;
-        self.resume_access(&mut session, &mut ring, &member).await?;
-        self.rotate_exposed(&mut session, &mut ring, &member)
-            .await?;
-        self.retain_sequence(&mut session, &mut ring, &member)
-            .await?;
-        self.retain_snapshots(&session).await?;
-        self.request_snapshots(&mut session, &mut ring, &member)
-            .await?;
-        self.retain_files(&session, &ring, &member).await?;
-        self.files.sync_files().await?;
+        // Provider work, rotation and retention send for this installation;
+        // one still loading before its registration sends none of them.
+        if self.registered(&session) {
+            self.resume_access(&mut session, &mut ring, &member).await?;
+            self.resume_invites(&mut session, &mut ring, &member)
+                .await?;
+            self.rotate_exposed(&mut session, &mut ring, &member)
+                .await?;
+            self.retain_sequence(&mut session, &mut ring, &member)
+                .await?;
+            self.retain_snapshots(&session).await?;
+            self.request_snapshots(&mut session, &mut ring, &member)
+                .await?;
+            self.retain_files(&session, &ring, &member).await?;
+            self.files.sync_files().await?;
+        }
         let status = SyncStatus::Synced {
             through: session.through,
         };
         self.state.set(status.clone());
         Ok(status)
+    }
+
+    /// Whether the applied history registers this installation as active.
+    pub(crate) fn registered(&self, session: &Session) -> bool {
+        session
+            .history
+            .state
+            .devices
+            .get(&self.device)
+            .is_some_and(|device| device.active())
     }
 
     pub(crate) async fn fetch(&self, path: &ObjectPath) -> Result<Option<ObjectInput>, SyncError> {
@@ -440,7 +469,8 @@ impl SequenceSync {
             ..
         } = &mut incoming.content
         {
-            effect.provider = history.provider_changes(member.member())?;
+            effect.provider =
+                history.provider_changes(member.member(), &self.invited_accounts().await?)?;
             if !effect.reload.is_empty() {
                 let required = effect.reload.clone();
                 // Persist the audience gates before reading any replacement body.
@@ -593,7 +623,7 @@ impl History {
                                     effect.reload.push(Audience::Circle(*circle));
                                 }
                             }
-                            self.accept_admin(slot, effect);
+                            self.accept_admin(slot, &received.header, effect);
                         }
                         effect
                     }
@@ -675,10 +705,16 @@ impl History {
 pub(crate) mod access_keys;
 #[path = "sequence_access.rs"]
 mod sequence_access;
+#[path = "sequence_bootstrap.rs"]
+pub(crate) mod sequence_bootstrap;
 #[path = "sequence_claim.rs"]
 mod sequence_claim;
 #[path = "sequence_files.rs"]
 mod sequence_files;
+#[path = "sequence_invites.rs"]
+mod sequence_invites;
+#[path = "sequence_join.rs"]
+pub(crate) mod sequence_join;
 #[path = "sequence_keys.rs"]
 mod sequence_keys;
 #[path = "sequence_operations.rs"]

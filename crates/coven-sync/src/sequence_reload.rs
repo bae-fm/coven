@@ -439,7 +439,8 @@ impl SequenceSync {
                 state: at_target.state.clone(),
                 cutoffs: at_target.cutoffs.clone(),
                 boundaries: at_target.boundaries.clone(),
-                provider: at_target.provider_changes(member.member())?,
+                provider: at_target
+                    .provider_changes(member.member(), &self.invited_accounts().await?)?,
                 operation: None,
                 authorship,
             })

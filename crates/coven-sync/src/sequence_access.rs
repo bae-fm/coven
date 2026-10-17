@@ -31,7 +31,13 @@ impl History {
         }
     }
 
-    pub(crate) fn provider_changes(&self, member: MemberId) -> Result<ProviderChanges, SyncError> {
+    /// Intentions after this state: an account stays shared while an active
+    /// member or one of this device's open invites uses it (§13).
+    pub(crate) fn provider_changes(
+        &self,
+        member: MemberId,
+        invited: &BTreeSet<String>,
+    ) -> Result<ProviderChanges, SyncError> {
         let mut changes = ProviderChanges::default();
         let mut accounts = BTreeSet::new();
         let mut keys = BTreeSet::new();
@@ -50,6 +56,7 @@ impl History {
                     if !accounts.insert(account.clone()) {
                         continue;
                     }
+                    let intended = intended || invited.contains(&account);
                     changes.accounts.push(ProviderAccessChange {
                         operation: NewOperation {
                             kind: "provider-access".into(),
