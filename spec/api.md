@@ -116,6 +116,13 @@ pub struct UuidText(pub Uuid);
 pub trait Clock: Send + Sync {
     /// The wall clock's current time.
     fn now(&self) -> SystemTime;
+    /// Monotonic elapsed time, including system sleep; readings never decrease.
+    /// Only differences between readings of this clock are meaningful.
+    fn elapsed(&self) -> Duration;
+    /// Controlled clocks override this to wait for their supplied time.
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>> {
+        Box::pin(tokio::time::sleep(duration))
+    }
 }
 
 /// A shared clock supplied when opening a store (§20.2).
@@ -202,12 +209,15 @@ pub struct ObjectPath { /* private fields */ }
 
 impl ObjectPath {
     /// Parses a listed or recorded path, refusing paths outside the store's layout.
-    pub fn parse(value: &str) -> Result<Self, StorageError>;
+    pub fn parse(value: &str) -> Result<Self, PathError>;
     /// The path bound into the object's encryption.
     pub fn as_str(&self) -> &str;
     /// Whether this is the floor path, which permits conditional replacement.
     pub fn is_replaceable(&self) -> bool;
 }
+
+/// A path outside the canonical object layout.
+pub struct PathError;
 
 /// A prefix of the validated object layout (§4).
 pub struct ObjectPrefix { /* private fields */ }
@@ -239,6 +249,8 @@ impl ByteRange {
 pub struct StorageTime(/* seconds: u64, nanos: u32 */);
 
 impl StorageTime {
+    /// Validates the nanosecond fraction.
+    pub fn new(seconds: u64, nanos: u32) -> Result<Self, coven_format::Error>;
     pub fn seconds(self) -> u64;
     pub fn nanos(self) -> u32;
 }
@@ -260,6 +272,9 @@ pub struct StoredObject {
     /// Opaque identity that changes when replaced encrypted bytes change (§4).
     /// It is not a checksum or proof of byte equality.
     pub revision: String,
+    /// Opaque native replacement condition from this same observation. It can
+    /// differ from the revision identity, such as an S3 ETag and version id.
+    pub replace_token: String,
     /// Native checksum, including its algorithm, encoding and scope.
     pub checksum: Option<ObjectChecksum>,
 }
@@ -282,18 +297,6 @@ pub enum ChecksumValue {
     Crc32cBase64(String),
     Crc32Base64(String),
     Sha1Base64(String),
-}
-
-/// Encrypted response bytes with bounded buffering (§4).
-pub struct StorageStream { /* private fields */ }
-
-impl StorageStream {
-    /// Metadata of the complete published object accompanying this logical read,
-    /// including its storage time (§9). Any native lookup is charged under §3.1.
-    pub fn metadata(&self) -> &StoredObject;
-    /// The next bounded buffer, EOF, or the original typed storage failure.
-    /// A native asset request is charged separately from this logical stream.
-    pub async fn next(&mut self) -> Result<Option<Vec<u8>>, StorageError>;
 }
 
 /// A database or store call's result, retaining its typed cause (§20.3).
@@ -491,34 +494,30 @@ pub enum DbError {
 
 /// Why snapshots or their gap writes could not be checked or loaded (§15, §19.2).
 pub enum SnapshotError {
-    /// A downloaded gap write failed while the reload was applying it.
-    Write { write: WriteId, error: Box<DbError> },
+    /// Reading or checking a selected snapshot's plaintext failed.
+    Body { snapshot: SnapshotId, error: Box<DbError> },
     /// Reading the plaintext supplied by sync failed.
     Read(std::io::Error),
     /// A frame or its merge state failed the format's checks.
     Format(coven_format::Error),
     /// The snapshot needs a different app schema (§17).
     Schema { snapshot: u32, database: u32 },
-    /// Required snapshot evidence or retained sequence slots are absent.
-    MissingSlots { missing: Vec<Slot> },
-    /// These gap writes or causal predecessors were not supplied.
-    MissingWrites { missing: Vec<WriteId> },
-    /// A supplied write cannot apply yet.
-    WriteWaiting(WriteWait),
+    /// Authenticating a snapshot's original write evidence needs this key.
+    KeyUnavailable { audience: Audience, key: KeyId },
     /// Individually valid records disagree with one another or the schema.
     Inconsistent(&'static str),
 }
 
 /// What a downloaded write waits for before it can apply (§6, §19.1).
 pub enum WriteWait {
-    /// The authored prefix or its authenticated snapshot is not available.
-    SequenceThrough(Slot),
-    /// Writes that must apply first, including the author's preceding write.
-    Writes(Vec<WriteId>),
+    /// The original's authored sequence prefix has not been applied.
+    Slot(u64),
+    /// These original row changes are unavailable even if their slots were consumed.
+    Sources(Vec<coven_format::write_sources::ChangeId>),
     /// The app must support this schema version.
     SchemaVersion(u32),
     /// This device's breaking migration awaits its raise and reload.
-    SchemaRaise(u32),
+    SchemaPublication(u32),
     /// The audience's reload has not committed its replacement data.
     Reload(Audience),
 }
@@ -755,10 +754,8 @@ pub enum CryptoError {
     Authentication,
     /// A sealed value was truncated or had invalid framing.
     Malformed,
-    /// The stored object has an unrecognized kind.
-    UnknownKind(u8),
-    /// The stored object uses a format version this reader does not support.
-    UnsupportedVersion(u16),
+    /// An opened key's audience or identity disagrees with its routing prefix.
+    KeyIdentity,
     /// The X25519 public key has low order.
     WeakSealingKey,
     /// The Ed25519 public key is invalid or weak.
@@ -2839,6 +2836,8 @@ impl FileRangeStream<'_> {
 }
 
 pub enum FileReadError {
+    /// This file uses a newer coven format.
+    UpdateRequired(RequiredUpdate),
     /// Remote status or uncached bytes were requested with no storage connected.
     NoStorage,
     /// Storage confirms absence; the uploader is active, with no local source failure.

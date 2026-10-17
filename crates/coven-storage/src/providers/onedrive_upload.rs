@@ -361,7 +361,7 @@ impl OneDriveStorage {
             .await?;
         if !response.status().is_success() {
             let error = http::response_error(PROVIDER, response).await;
-            if error.retryable() {
+            if error.retryable() || error.failure() == StorageFailure::Conflict {
                 return Err(error);
             }
             return self.copy_refused(publication, session, error).await;

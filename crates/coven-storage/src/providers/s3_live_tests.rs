@@ -123,7 +123,7 @@ fn report(detection: &crate::S3Detection, config: &StorageConfig) {
         Ok(state) => println!("bucket versioning={state:?}"),
         Err(error) => println!("bucket versioning=Unknown cause={error}"),
     }
-    for observation in &detection.observations {
+    for observation in &detection.results {
         println!(
             "detect {:?} held={} {}",
             observation.probe, observation.held, observation.detail
@@ -552,7 +552,7 @@ async fn s3_certification() {
     };
     report(&detection, &settings.config);
     // A named profile is certified with its own settings, which the safety
-    // check below compares with the observations; otherwise the detected ones.
+    // check below compares with the results; otherwise the detected ones.
     let StorageConfig::S3 { profile: named, .. } = &settings.config else {
         unreachable!()
     };

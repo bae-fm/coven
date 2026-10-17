@@ -157,7 +157,7 @@ pub const DETECTED_S3_SETTINGS: S3Settings = S3Settings {
 /// A detection whose every observation agrees with these settings.
 pub fn conforming_detection(settings: S3Settings) -> S3Detection {
     let completion = settings.multipart_timestamp == S3MultipartTimestamp::Completion;
-    let observations = [
+    let results = [
         (S3Probe::Signing(settings.signing), true),
         (S3Probe::SinglePut(settings.single_put), true),
         (S3Probe::PartialUploadHidden, true),
@@ -195,7 +195,7 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
             .multipart()
             .map(|condition| (S3Probe::CopyPublication(condition), true)),
     )
-    .map(|(probe, held)| S3Observation {
+    .map(|(probe, held)| S3ProbeResult {
         probe,
         held,
         detail: "memory".into(),
@@ -204,6 +204,6 @@ pub fn conforming_detection(settings: S3Settings) -> S3Detection {
     S3Detection {
         versioning: Ok(S3BucketVersioning::Disabled),
         settings,
-        observations,
+        results,
     }
 }

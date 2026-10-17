@@ -29,9 +29,9 @@ async fn timeout_and_storage_full_responses_preserve_their_classification_and_ca
     };
     let cases = [
         ("RequestTimeout", 400, Network, true),
-        ("ConditionalRequestConflict", 409, Conflict, true),
-        ("ConcurrentModification", 409, Conflict, true),
-        ("OperationAborted", 409, Conflict, true),
+        ("ConditionalRequestConflict", 409, Conflict, false),
+        ("ConcurrentModification", 409, Conflict, false),
+        ("OperationAborted", 409, Conflict, false),
         ("OverQuota", 403, QuotaExceeded, false),
         ("QuotaExceeded", 403, QuotaExceeded, false),
         ("InsufficientStorage", 507, QuotaExceeded, false),

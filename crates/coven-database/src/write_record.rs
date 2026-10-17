@@ -444,7 +444,7 @@ fn unordered(
         .map(counter)
         .unwrap_or(0)
         .checked_add(1)
-        .expect("write numbers exhausted before timestamps");
+        .ok_or(DbError::WriteNumberExhausted)?;
     let header = WriteHeader {
         position: WriteId { device, number },
         timestamp,
@@ -525,3 +525,7 @@ fn columns(values: &AppValues) -> BTreeMap<String, ColumnValue<Value>> {
         })
         .collect()
 }
+
+#[cfg(test)]
+#[path = "write_record_tests.rs"]
+mod tests;

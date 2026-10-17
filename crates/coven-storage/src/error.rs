@@ -212,11 +212,11 @@ impl StorageError {
         }
     }
 
-    /// Transport interruptions, conditional conflicts and throttling invite retry.
+    /// Transport interruptions and provider throttling invite retry.
     pub fn retryable(&self) -> bool {
         matches!(
             self.failure(),
-            StorageFailure::Network | StorageFailure::Conflict | StorageFailure::RateLimited
+            StorageFailure::Network | StorageFailure::RateLimited
         )
     }
 }

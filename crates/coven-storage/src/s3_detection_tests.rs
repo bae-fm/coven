@@ -38,7 +38,7 @@ fn failed(result: Result<(), StorageSetupError>) -> StorageCheck {
 fn derivation_keeps_each_held_behavior_and_conforming_settings_pass() {
     let detection = conforming_detection(SERVICE);
     let derived = S3Detection::derive(
-        detection.observations.clone(),
+        detection.results.clone(),
         SERVICE,
         detection.versioning.clone(),
     );
@@ -50,16 +50,16 @@ fn derivation_keeps_each_held_behavior_and_conforming_settings_pass() {
 fn setup_requires_the_prefix_scoped_bucket_listing() {
     let mut detection = conforming_detection(SERVICE);
     detection
-        .observations
+        .results
         .retain(|observation| observation.probe != S3Probe::BucketList);
     assert_eq!(failed(detection.check(&SERVICE)), StorageCheck::Behavior);
-    detection.observations.push(S3Observation {
+    detection.results.push(S3ProbeResult {
         probe: S3Probe::BucketList,
         held: false,
         detail: "PermissionDenied HTTP 403".into(),
     });
     assert_eq!(failed(detection.check(&SERVICE)), StorageCheck::Behavior);
-    detection.observations.last_mut().unwrap().held = true;
+    detection.results.last_mut().unwrap().held = true;
     detection.check(&SERVICE).unwrap();
 }
 
@@ -68,7 +68,7 @@ fn checks_run_in_order_and_name_the_first_failure() {
     let nothing_held = S3Detection {
         versioning: Ok(S3BucketVersioning::Disabled),
         settings: SERVICE,
-        observations: Vec::new(),
+        results: Vec::new(),
     };
     assert_eq!(
         failed(nothing_held.check(&SERVICE)),
@@ -150,7 +150,7 @@ fn a_start_timestamp_needs_an_enforced_copy_dated_by_publication() {
         ..SERVICE
     });
     detection.check(&detection.settings).unwrap();
-    for observation in &mut detection.observations {
+    for observation in &mut detection.results {
         if observation.probe == S3Probe::CopyTimestamp {
             observation.held = false;
         }
@@ -162,7 +162,7 @@ fn a_start_timestamp_needs_an_enforced_copy_dated_by_publication() {
     // Derivation still takes the enforced copy condition, so setup names
     // the copy's timestamp, not a create-once failure (§4).
     let derived = S3Detection::derive(
-        detection.observations.clone(),
+        detection.results.clone(),
         SERVICE,
         detection.versioning.clone(),
     );

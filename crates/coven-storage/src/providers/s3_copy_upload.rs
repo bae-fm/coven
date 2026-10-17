@@ -370,7 +370,10 @@ impl S3Storage {
             {
                 Ok(_) => Ok(()),
                 Err(error)
-                    if error.failure() == StorageFailure::AlreadyExists || error.retryable() =>
+                    if matches!(
+                        error.failure(),
+                        StorageFailure::AlreadyExists | StorageFailure::Conflict
+                    ) || error.retryable() =>
                 {
                     match self.confirm_marker(path, bytes.len() as u64, &token).await {
                         Ok(()) => Ok(()),

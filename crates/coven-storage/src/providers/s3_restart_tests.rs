@@ -373,13 +373,13 @@ async fn gcs_copy_conflict_during_recovery_invalidates_the_recorded_session() {
 }
 
 #[tokio::test]
-async fn single_put_conflict_remains_retryable_without_becoming_throttling() {
+async fn single_put_conflict_retains_its_class_for_publication_recovery() {
     for gcs in [false, true] {
         let (_server, storage, remote, _faults) = fixture(gcs).await;
         remote.lock().unwrap().forced_error = Some((conflict_code(gcs), 409));
         let error = storage.create(&path(), b"data").await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::Conflict);
-        assert!(error.retryable());
+        assert!(!error.retryable());
         remote.lock().unwrap().forced_error = None;
         storage.create(&path(), b"data").await.unwrap();
         assert_eq!(storage.read(&path()).await.unwrap(), b"data");

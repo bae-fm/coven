@@ -1,6 +1,6 @@
 //! What S3 detection observed, the settings derived from it, and the setup
 //! safety check of effective settings against it (§4). The probes themselves
-//! run in the adapter; this is the pure decision over their observations.
+//! run in the adapter; this is the pure decision over their results.
 use crate::{
     S3BucketVersioning, S3Checksums, S3CopyCondition, S3CopyPublication, S3Listing,
     S3MultipartTimestamp, S3Profile, S3ResponseHeaders, S3Revision, S3Settings, S3Signing,
@@ -13,15 +13,15 @@ use std::sync::Arc;
 pub struct S3Detection {
     /// Bucket versioning, or the native refusal that left it unknown.
     pub versioning: Result<S3BucketVersioning, Arc<StorageError>>,
-    /// Settings derived from the observations; prefill advanced settings with them.
+    /// Settings derived from the results; prefill advanced settings with them.
     pub settings: S3Settings,
     /// One observation per probe, in the order run.
-    pub observations: Vec<S3Observation>,
+    pub results: Vec<S3ProbeResult>,
 }
 
 /// One probe's outcome.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct S3Observation {
+pub struct S3ProbeResult {
     /// The behavior probed.
     pub probe: S3Probe,
     /// Whether the behavior held, as described on each probe.
@@ -77,17 +77,17 @@ pub(crate) const COPY_CONDITIONS: [S3CopyCondition; 3] = [
 ];
 
 impl S3Detection {
-    /// Derive settings from observations. Where no behavior holds, `plain`'s
+    /// Derive settings from results. Where no behavior holds, `plain`'s
     /// value stays and [`Self::check`] names the failure.
     pub(crate) fn derive(
-        observations: Vec<S3Observation>,
+        results: Vec<S3ProbeResult>,
         plain: S3Settings,
         versioning: Result<S3BucketVersioning, Arc<StorageError>>,
     ) -> Self {
         let detection = Self {
             versioning,
             settings: plain,
-            observations,
+            results,
         };
         let held = |probe| detection.held(probe);
         let first = |candidates: &[S3Probe]| candidates.iter().copied().find(|probe| held(*probe));
@@ -151,12 +151,12 @@ impl S3Detection {
 
     /// Whether this probe's behavior held; an unrun probe did not.
     pub fn held(&self, probe: S3Probe) -> bool {
-        self.observations
+        self.results
             .iter()
             .any(|observation| observation.probe == probe && observation.held)
     }
 
-    /// Refuses settings that contradict the observations, naming the first
+    /// Refuses settings that contradict the results, naming the first
     /// failed check as setup would: CreateOnce, MultipartCreateOnce,
     /// PublicationTime, then Behavior.
     pub fn check(&self, settings: &S3Settings) -> Result<(), StorageSetupError> {

@@ -13,7 +13,7 @@ pub enum DeleteAccessKeyError {
     StillPresent,
     /// The read failed.
     #[error("reading the S3 key's state failed")]
-    ObservationFailed(#[source] StorageError),
+    ReadFailed(#[source] StorageError),
 }
 
 #[cfg(test)]
@@ -49,7 +49,7 @@ impl crate::SequenceSync {
         if admin
             .key_exists(&key.access_key_id, &key.principal)
             .await
-            .map_err(DeleteAccessKeyError::ObservationFailed)?
+            .map_err(DeleteAccessKeyError::ReadFailed)?
         {
             return Err(DeleteAccessKeyError::StillPresent.into());
         }

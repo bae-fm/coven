@@ -89,6 +89,9 @@ pub enum DbError {
     /// The installation has exhausted its claim-number representation.
     #[error("claim numbers exhausted")]
     ClaimNumberExhausted,
+    /// This installation has exhausted its positive original-write identities.
+    #[error("write numbers exhausted")]
+    WriteNumberExhausted,
     /// The supplied floor evidence does not cover the attempted slot.
     #[error("floor evidence does not cover the claim")]
     InvalidClaimCoverage,

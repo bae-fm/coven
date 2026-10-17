@@ -603,7 +603,7 @@ pub(super) async fn hold_copy(state: &Mutex<Remote>, headers: &HeaderMap) {
 /// second stages over it, copies and deletes it, so the first copy finds no
 /// source. It settles by the destination: an occupied path holding the same
 /// bytes, which the caller's comparison accepts, or, when the second copy
-/// published nothing, a retryable conflict whose retry publishes (§4,
+/// published nothing, a conflict whose repeated create publishes (§4,
 /// `CopyPublication.Recorded.shared_never_fails`,
 /// `shared_occupied_identical`, `retry_publishes`).
 #[tokio::test]
@@ -640,7 +640,7 @@ async fn every_object_copy_settles_a_copy_whose_shared_temporary_is_gone() {
         );
         let first = first.unwrap_err();
         assert_eq!(first.failure(), StorageFailure::Conflict);
-        assert!(first.retryable());
+        assert!(!first.retryable());
         assert!(storage.status(&path).await.unwrap().is_none());
         storage.create(&path, b"bytes").await.unwrap();
         assert_eq!(storage.read(&path).await.unwrap(), b"bytes");

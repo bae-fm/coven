@@ -1,9 +1,9 @@
 //! S3 detection (§4): native probes against the user's bucket, under the
 //! store's reserved `<store>/.coven-check/<run>/` prefix, deleted afterwards.
-//! Only fixed labels, status codes and server times enter observations.
+//! Only fixed labels, status codes and server times enter results.
 use super::*;
 use crate::s3_detection::{COPY_CONDITIONS, SIGNERS, SINGLE_PUTS};
-use crate::{S3Detection, S3Observation, S3Probe};
+use crate::{S3Detection, S3Probe, S3ProbeResult};
 use aws_sdk_s3::operation::head_object::HeadObjectOutput;
 use coven_format::value::StorageTime;
 use coven_foundation::id_source::StoreId;
@@ -37,7 +37,7 @@ pub(crate) async fn detect(
     };
     let base = profile::settings(endpoint.as_ref(), profile.as_ref())?.unwrap_or(profile::PLAIN);
     let run = ids.new_id();
-    let mut observations = Vec::new();
+    let mut results = Vec::new();
     let mut chosen = None;
     let mut refusal = None;
     for signing in SIGNERS {
@@ -53,7 +53,7 @@ pub(crate) async fn detect(
         let result = candidate
             .list_page(S3Listing::V1, &namespace, None, None, Some(0))
             .await;
-        observations.push(observation(
+        results.push(observation(
             S3Probe::Signing(signing),
             result.is_ok(),
             outcome(&result),
@@ -77,7 +77,7 @@ pub(crate) async fn detect(
         prefix: namespace(&storage, store, run),
         s: &storage,
         clock,
-        observations,
+        results,
         written: BTreeSet::new(),
         intended: BTreeSet::new(),
         uploads: Vec::new(),
@@ -85,7 +85,7 @@ pub(crate) async fn detect(
     let result = probes.run().await;
     let cleanup = probes.cleanup().await;
     crate::transfer::with_cleanup(result, cleanup)?;
-    Ok(S3Detection::derive(probes.observations, base, versioning))
+    Ok(S3Detection::derive(probes.results, base, versioning))
 }
 
 fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
@@ -95,8 +95,8 @@ fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
     )
 }
 
-fn observation(probe: S3Probe, held: bool, detail: impl Into<String>) -> S3Observation {
-    S3Observation {
+fn observation(probe: S3Probe, held: bool, detail: impl Into<String>) -> S3ProbeResult {
+    S3ProbeResult {
         probe,
         held,
         detail: detail.into(),
@@ -142,8 +142,8 @@ struct Probes<'a> {
     s: &'a S3Storage,
     prefix: String,
     clock: ClockRef,
-    observations: Vec<S3Observation>,
-    /// Every confirmed publication, for the listing visibility observations.
+    results: Vec<S3ProbeResult>,
+    /// Every confirmed publication, for the listing visibility results.
     written: BTreeSet<String>,
     /// Names recorded before sending, whether or not publication was answered.
     intended: BTreeSet<String>,
@@ -156,7 +156,7 @@ impl Probes<'_> {
         format!("{}{name}", self.prefix)
     }
     fn observe(&mut self, probe: S3Probe, held: bool, detail: impl Into<String>) {
-        self.observations.push(observation(probe, held, detail));
+        self.results.push(observation(probe, held, detail));
     }
 
     async fn run(&mut self) -> Result<(), StorageError> {

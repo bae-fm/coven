@@ -52,7 +52,7 @@ impl StorageConnector for Overwrites {
         Ok(S3Detection {
             versioning: Ok(coven_storage::S3BucketVersioning::Disabled),
             settings: DETECTED_S3_SETTINGS,
-            observations: Vec::new(),
+            results: Vec::new(),
         })
     }
     async fn check_new_s3_store(

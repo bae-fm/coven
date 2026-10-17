@@ -42,11 +42,12 @@ pub use coven_database::{
     Lost, LostCell, LostValue, Migration, MigrationChange, MigrationContext, MigrationError,
     MigrationOutcome, Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
     ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
-    RowChange, RowIdentity, RowKey, SchemaError, SqlContext, SqlReadContext, SyncedTable, ToSql,
-    UnsentWork, UserFile, WriteBatch, WriteId,
+    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlContext, SqlReadContext,
+    SyncedTable, ToSql, UnsentWork, UserFile, WriteBatch, WriteId, WriteWait,
 };
 /// An admin entry is identified by the slot containing it (§9).
 pub type EntryId = Slot;
+pub use coven_format::value::StorageTime;
 pub use coven_format::{IamPolicy, MemberAccess, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
@@ -70,9 +71,9 @@ pub use coven_storage::providers::{
 pub use coven_storage::{AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey};
 pub use coven_storage::{
     ByteRange, ChecksumValue, CloudProvider, DropboxAccess, DropboxLocation, OAuthAccess,
-    ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, S3BucketVersioning, S3Checksums,
-    S3CopyCondition, S3CopyPublication, S3Credentials, S3Detection, S3Listing,
-    S3MultipartTimestamp, S3Observation, S3Probe, S3Profile, S3ProfileName, S3ResponseHeaders,
+    ObjectChecksum, ObjectPath, ObjectPrefix, OwnBucketReason, PathError, S3BucketVersioning,
+    S3Checksums, S3CopyCondition, S3CopyPublication, S3Credentials, S3Detection, S3Listing,
+    S3MultipartTimestamp, S3Probe, S3ProbeResult, S3Profile, S3ProfileName, S3ResponseHeaders,
     S3Revision, S3Settings, S3Signing, S3SinglePut, StorageConfig, StorageError, StorageFailure,
     StoredObject,
 };
@@ -89,11 +90,12 @@ pub use coven_format::admin::{MemberRole, SnapshotId};
 pub use coven_storage::{ProviderSignOut, RetainedAccess, RetainedAccessReason};
 pub use coven_sync::{
     AccessKeyReplacement, AccessKeyToDelete, Circle, CircleMemberInfo, DamagedObject,
-    DeviceIdEvidence, DeviceInfo, DeviceState, EntryTarget, FileMissingReason, FileSourceFailure,
-    Invite, InviteAccess, InviteTarget, JoinRequest, LocalFailure, MemberInfo, OldKeyDeletion,
-    OperationError, OperationId, OperationKind, OperationRejection, PendingReason, PendingRecord,
-    PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError,
-    SyncFailure, SyncStatus, WriteCutoff,
+    DeleteAccessKeyError, DeviceIdEvidence, DeviceInfo, DeviceState, EntryTarget,
+    FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteTarget, JoinRequest,
+    LocalFailure, MemberInfo, OldKeyDeletion, OperationError, OperationId, OperationKind,
+    OperationRejection, PendingReason, PendingRecord, PendingSubject, Prerequisite,
+    ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError, SyncFailure, SyncStatus,
+    WriteCutoff,
 };
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]

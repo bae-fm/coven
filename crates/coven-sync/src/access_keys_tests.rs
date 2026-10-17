@@ -93,7 +93,7 @@ async fn only_a_successful_delete_and_absent_read_clear_the_durable_obligation()
             | (
                 Ok(()),
                 Err(expected),
-                Err(SyncError::AccessKeyNotDeleted(DeleteAccessKeyError::ObservationFailed(error))),
+                Err(SyncError::AccessKeyNotDeleted(DeleteAccessKeyError::ReadFailed(error))),
             ) => {
                 assert_eq!(error.failure(), expected);
             }

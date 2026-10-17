@@ -466,7 +466,7 @@ async fn a_locked_copy_waits_for_a_retry_and_keeps_its_temporary() {
     state.lock().unwrap().lock_copy = true;
     let error = storage.finish_upload(&mut upload).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Conflict);
-    assert!(error.retryable());
+    assert!(!error.retryable());
     assert_eq!(
         error.retry_after(),
         Some(crate::RetryAfter::Wait(std::time::Duration::from_secs(30)))

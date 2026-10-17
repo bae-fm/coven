@@ -2,6 +2,20 @@ use super::*;
 use std::error::Error;
 
 #[test]
+fn retryable_reports_only_transport_interruptions_and_throttling() {
+    for failure in [StorageFailure::Network, StorageFailure::RateLimited] {
+        assert!(StorageError::from(failure).retryable());
+    }
+    for failure in [
+        StorageFailure::Conflict,
+        StorageFailure::AlreadyExists,
+        StorageFailure::Authentication,
+    ] {
+        assert!(!StorageError::from(failure).retryable(), "{failure:?}");
+    }
+}
+
+#[test]
 fn encoding_preserves_an_opaque_cause() {
     let error = StorageFailure::Encoding.with_source(std::io::Error::new(
         std::io::ErrorKind::InvalidData,
