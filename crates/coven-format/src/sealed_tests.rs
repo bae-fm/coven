@@ -422,7 +422,6 @@ mod sequence {
         sealed_stream::StreamObjectLayout,
         test_utils as f,
         tests::hex,
-        writes_slot::{BatchPiece, WritesSlotDecoder},
     };
     use coven_crypto::ObjectHasher;
 
@@ -616,34 +615,26 @@ mod sequence {
         assert_eq!(prefix.kind, SlotKind::Writes);
         let path = f::slot_path(6);
         let plain = open_stream(&bytes, prefix_length, path.as_str()).unwrap();
-        let mut decoder = WritesSlotDecoder::new(path.clone());
-        let mut inner = Vec::new();
-        let expected = [
-            hex(include_str!("../fixtures/sealed-write.hex")),
-            hex(include_str!("../fixtures/sealed-migration-write.hex")),
-        ];
-        let headers = [f::chunked_write().header, migration_header()];
-        let mut count = 0;
-        for chunk in plain.chunks(65536) {
-            let mut input = chunk;
-            while let Some(piece) = decoder.next(&mut input).unwrap() {
-                match piece {
-                    BatchPiece::Header(header) => assert_eq!(header, f::slot_header(6, 5)),
-                    BatchPiece::Write { length } => {
-                        assert_eq!(length, expected[count].len() as u64);
-                        decoder.check_header(&headers[count]).unwrap();
-                    }
-                    BatchPiece::Bytes(bytes) => inner.extend_from_slice(bytes),
-                    BatchPiece::EndWrite => {
-                        assert_eq!(inner, expected[count]);
-                        inner.clear();
-                        count += 1;
-                    }
-                }
-            }
+        let slot = f::slot_header(6, 5);
+        let mut expected = slot.encode(&path).unwrap();
+        expected.extend_from_slice(&2u64.to_be_bytes());
+        let mut previous = None;
+        for (inner, header) in [
+            (
+                hex(include_str!("../fixtures/sealed-write.hex")),
+                f::chunked_write().header,
+            ),
+            (
+                hex(include_str!("../fixtures/sealed-migration-write.hex")),
+                migration_header(),
+            ),
+        ] {
+            crate::writes_slot::check_write(&slot, previous, &header).unwrap();
+            previous = Some(header.position.number);
+            expected.extend_from_slice(&(inner.len() as u64).to_be_bytes());
+            expected.extend(inner);
         }
-        decoder.finish().unwrap();
-        assert_eq!(count, 2);
+        assert_eq!(plain, expected);
         assert!(open_stream(&bytes, prefix_length, f::slot_path(7).as_str()).is_err());
         for index in [
             0,
