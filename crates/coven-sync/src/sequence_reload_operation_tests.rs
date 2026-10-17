@@ -655,3 +655,95 @@ async fn sequence_queue_newly_readable_matches_lean() {
         )
     );
 }
+
+async fn self_replacement() -> Value {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    insert(ana.database(), "old", "old binding").await;
+    let original = ana
+        .database()
+        .waiting_snapshot_headers()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let (codes, _) = codes(
+        &ana,
+        coven_crypto::custody::Keychain::in_memory("queue-binding").unwrap(),
+    );
+    codes.replace_member_keys().await.unwrap();
+    let current = ana.sync.member.read().unwrap().unwrap();
+    let session = ana.sync.session.lock().await;
+    let signer = session.history.write_signer(&original).unwrap();
+    let old_authenticates = signer == ana.identity.keys().public_keys().signing;
+    let new_authenticates = signer == current.keys().public_keys().signing;
+    let old = ana.sync.check_binding(&session, &ana.identity);
+    assert!(
+        matches!(&old, Err(crate::SyncError::MemberKeysReplaced { .. })),
+        "{old:?}"
+    );
+    let new = ana.sync.check_binding(&session, &current);
+    new.as_ref().unwrap();
+    assert!(old_authenticates);
+    assert!(!new_authenticates);
+    drop(session);
+    // Pre-existing originals drained before replacement; the same immutable
+    // read-through on a new tail would demand that now-retired credential.
+    assert!(ana
+        .database()
+        .waiting_snapshot_headers()
+        .await
+        .unwrap()
+        .is_empty());
+    insert(ana.database(), "new", "new binding").await;
+    let after = ana
+        .database()
+        .waiting_snapshot_headers()
+        .await
+        .unwrap()
+        .pop()
+        .unwrap();
+    let after_send = ana
+        .sync
+        .session
+        .lock()
+        .await
+        .history
+        .write_signer(&after)
+        .unwrap()
+        == current.keys().public_keys().signing;
+    assert!(after_send);
+    ana.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    codes.replace_member_keys().await.unwrap();
+    let session = ana.sync.session.lock().await;
+    let later = ana.sync.check_binding(&session, &current);
+    assert!(
+        matches!(&later, Err(crate::SyncError::MemberKeysReplaced { .. })),
+        "{later:?}"
+    );
+    drop(session);
+    assert_eq!(rows(ana.database()).await.len(), 2);
+    codes.close().await;
+    ana.database().close().await.unwrap();
+    json!({"old_authenticates":old_authenticates,"new_authenticates":new_authenticates,
+        "old_counts":old.is_ok(),"new_counts":new.is_ok(),"after_send":after_send,"later_counts":later.is_ok()})
+}
+
+#[tokio::test]
+async fn a_replaced_binding_cannot_send_an_original_authored_before_it() {
+    self_replacement().await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_queue_self_replacement_matches_lean() {
+    assert_eq!(
+        self_replacement().await,
+        crate::tests::run_lean(
+            "COVEN_SEQUENCE_LEAN",
+            &json!({"kind":"queueReload", "scenario":"selfReplacement"})
+        )
+    );
+}

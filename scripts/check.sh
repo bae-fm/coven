@@ -283,6 +283,7 @@ proofs() {
             sequence_sync::sequence_reload::operation::tests::sequence_queue_reset_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_queue_breaking_raise_matches_lean \
             sequence_sync::sequence_reload::operation::tests::sequence_queue_newly_readable_matches_lean \
+            sequence_sync::sequence_reload::operation::tests::sequence_queue_self_replacement_matches_lean \
             sequence_sync::sequence_claim::tests::differential::sequence_kept_settlement_matches_lean \
             effects::tests::sequence_differential::sequence_admin_matches_lean \
             history::tests::sequence_key_selection_matches_lean \
