@@ -393,7 +393,7 @@ impl Probes<'_> {
             return Ok(());
         }
         let v2 = self.visible(S3Listing::V2).await?;
-        let agrees = v1.is_none() || v1 == v2;
+        let agrees = v1.is_some() && v1 == v2;
         let held = v2.is_some() && agrees;
         let detail = format!("{} agrees_with_v1={agrees}", detail(&v2));
         self.observe(S3Probe::Listing(S3Listing::V2), held, detail);

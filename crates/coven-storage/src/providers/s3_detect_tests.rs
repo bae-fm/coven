@@ -127,6 +127,7 @@ struct Remote {
     frozen: Option<u64>,
     /// The status a V2 listing with `max-keys=0` answers instead of a page.
     empty_v2_listing: Option<u16>,
+    incomplete_v1_listing: bool,
     bucket_heads: usize,
 }
 
@@ -416,6 +417,7 @@ fn list(state: &Remote, q: &BTreeMap<String, String>) -> Response<Body> {
     let entries: Vec<_> = state
         .objects
         .iter()
+        .filter(|_| v2 || !state.incomplete_v1_listing)
         .filter(|(key, _)| {
             !state.hidden.contains(*key)
                 && key.starts_with(prefix)
@@ -473,6 +475,7 @@ impl Fixture {
             fail_copies: false,
             frozen: None,
             empty_v2_listing: None,
+            incomplete_v1_listing: false,
             bucket_heads: 0,
         }));
         let server = TestServer::new(Router::new().fallback(serve).with_state(state.clone())).await;
@@ -871,6 +874,47 @@ impl coven_foundation::clock::Clock for Pauses {
         self.0.lock().unwrap().push(duration);
         Box::pin(std::future::ready(()))
     }
+}
+
+#[tokio::test]
+async fn complete_v2_does_not_pass_when_v1_never_completes() {
+    let fixture = Fixture::new(RUSTFS).await;
+    fixture.state.lock().unwrap().incomplete_v1_listing = true;
+    let clock = Arc::new(Pauses::default());
+    let storage = S3Storage::with_settings(
+        fixture.location(None),
+        credentials(),
+        clock.clone(),
+        Arc::new(UuidIds),
+        Arc::new(crate::NoCooldown),
+        profile::PLAIN,
+    )
+    .unwrap();
+    let mut probes = Probes {
+        s: &storage,
+        prefix: namespace(&storage, STORE, uuid::Uuid::from_bytes([7; 16])),
+        clock: clock.clone(),
+        results: Vec::new(),
+        written: BTreeSet::new(),
+        intended: BTreeSet::new(),
+        uploads: Vec::new(),
+    };
+    probes
+        .put(&probes.key("published"), b"visible", None)
+        .await
+        .unwrap();
+    probes.listings(true).await.unwrap();
+    assert_eq!(clock.0.lock().unwrap().len(), RETRIES as usize);
+    for protocol in [S3Listing::V1, S3Listing::V2] {
+        let observation = probes
+            .results
+            .iter()
+            .find(|observation| observation.probe == S3Probe::Listing(protocol))
+            .unwrap();
+        assert!(!observation.held, "{protocol:?}");
+    }
+    probes.cleanup().await.unwrap();
+    fixture.assert_clean();
 }
 
 /// A marker the server never dates later fails detection after the 1 second
