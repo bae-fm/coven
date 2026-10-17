@@ -19,6 +19,7 @@ import CovenSequence.Authority
 import CovenSequence.Registration
 import CovenSequence.Preparations
 import CovenSequence.QueueReload
+import CovenSequence.QueueReloadExamples
 import CovenSequence.RaiseQueue
 import CovenSequence.Claims
 import CovenSequence.Membership

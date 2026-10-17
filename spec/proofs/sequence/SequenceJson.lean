@@ -4,6 +4,7 @@ import SequenceKeys
 import CovenSequence.Settle
 import CovenSequence.Causality
 import CovenSequence.Reload
+import CovenSequence.QueueReloadExamples
 
 /-! One case per process; malformed inputs fail on stderr with nonzero exit. -/
 namespace SequenceJson
@@ -187,6 +188,44 @@ def readPast (j : Json) : Except String Json := do
   return toJson (writes.map fun w => writes.zipIdx.filterMap fun (a, i) =>
     if Causality.Past (·.bytes) w a then some i else none)
 
+open QueueReload QueueReloadExamples ReaderExamples in
+/-- Directed witnesses use the same definitions as the counterexample
+theorems. Rust compares these projections with real reloads, SQL checks and
+historical signature verification; row payloads and slot numbers are omitted. -/
+def readQueueReload (j : Json) : Except String Json := do
+  match ← j.getObjValAs? String "scenario" with
+  | "reset" =>
+    return Json.mkObj [
+      ("retained", toJson (install rules unclaimed admitted resetQueued (plan .reset)
+        (fun _ => resetLoaded)).authored.queue.length),
+      ("replayed", toJson (reapplied unclaimed admitted () resetLoaded resetQueued.authored.queue).length),
+      ("after_replayed", toJson (reapplied unclaimed admitted () resetLoaded [resetAfter]).length)]
+  | "breakingRaise" =>
+    return Json.mkObj [
+      ("before_allowed", toJson (permission raiseRules freshKey
+        (ledgerAt raiseRules raiseHistory 2) (raiseBefore.rows ()) () () 7)),
+      ("after_allowed", toJson (permission raiseRules freshKey raiseLoaded.ledger raiseLoaded.rows () () 7)),
+      ("new_schema", toJson (raiseQueued.authored.queue.all (fun w => w.schema == raiseLoaded.aud.version)))]
+  | "newlyReadable" =>
+    return Json.mkObj [
+      ("before_allowed", toJson (permission circleRules freshKey
+        (ledgerAt circleRules circleHistory 1) [] true () 8)),
+      ("after_allowed", toJson (permission circleRules freshKey circleLoaded.ledger circleLoaded.rows true () 8)),
+      ("empty_key_allowed", toJson (permission circleRules freshKey circleLoaded.ledger [] true () 7)),
+      ("loaded_key_allowed", toJson (permission circleRules freshKey circleLoaded.ledger circleLoaded.rows true () 7))]
+  | "selfReplacement" =>
+    let old := ledgerAt rules replacementHistory 2
+    let current := ledgerAt rules replacementHistory 3
+    let later := applyEntry rules current (.replaceKey ())
+    return Json.mkObj [
+      ("old_authenticates", toJson (counts old () 0)),
+      ("new_authenticates", toJson (counts old () 1)),
+      ("old_counts", toJson (counts current () 0)),
+      ("new_counts", toJson (counts current () 1)),
+      ("after_send", toJson (canSendOriginal rules replacementHistory 3 replacementAfter 1)),
+      ("later_counts", toJson (counts later () 1))]
+  | _ => throw "unknown queue reload scenario"
+
 def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
@@ -196,6 +235,7 @@ def run (j : Json) : Except String Json := do
   | "past" => readPast j
   | "keys" => SequenceKeys.readKeys j
   | "rotation" => SequenceKeys.readRotation j
+  | "queueReload" => readQueueReload j
   | _ => throw "unknown case kind"
 
 end SequenceJson

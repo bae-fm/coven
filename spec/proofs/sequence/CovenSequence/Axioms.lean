@@ -135,6 +135,17 @@ import SequenceApply
 #print axioms CovenSequence.QueueReload.during_preserves_queue
 #print axioms CovenSequence.QueueReload.during_numbered
 #print axioms CovenSequence.QueueReload.write_during_reload
+#print axioms CovenSequence.QueueReload.ungated_originals_preserved
+#print axioms CovenSequence.QueueReload.ungated_numbered
+#print axioms CovenSequence.QueueReload.ungated_exactly_once
+#print axioms CovenSequence.QueueReload.unread_reset_excludes
+#print axioms CovenSequence.QueueReload.permission_same_view
+#print axioms CovenSequence.QueueReload.changed_binding_cannot_send
+#print axioms CovenSequence.QueueReloadExamples.reset_counterexample
+#print axioms CovenSequence.QueueReloadExamples.breaking_raise_counterexample
+#print axioms CovenSequence.QueueReloadExamples.newly_readable_counterexample
+#print axioms CovenSequence.QueueReloadExamples.self_replacement_counterexample
+#print axioms CovenSequence.QueueReloadExamples.later_replacement_counterexample
 #print axioms CovenSequence.RaiseQueue.captured_prefix
 #print axioms CovenSequence.RaiseQueue.later_writes_do_not_delay
 #print axioms CovenSequence.RaiseQueue.confirm_captured

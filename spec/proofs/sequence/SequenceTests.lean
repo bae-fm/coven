@@ -505,5 +505,19 @@ def keyCase (slots held current : List Json) : Json := json% {
   rejects (json% {"kind":"rotation","slots":$([old,copied]),"held":$(held),"current":$(current),
     "writer":1,"store":0,"audiences":[],"keys":[],
     "rotation":{"audience":0,"key":1,"hash":20,"members":[1]}})
+-- Each gate-free witness refutes equivalence even though queue bookkeeping
+-- preserves the originals. These are executable projections, not axioms.
+#eval do
+  check (json% {"kind":"queueReload","scenario":"reset"})
+    (json% {"retained":1,"replayed":0,"after_replayed":1})
+  check (json% {"kind":"queueReload","scenario":"breakingRaise"})
+    (json% {"before_allowed":true,"after_allowed":false,"new_schema":true})
+  check (json% {"kind":"queueReload","scenario":"newlyReadable"})
+    (json% {"before_allowed":false,"after_allowed":true,
+      "empty_key_allowed":true,"loaded_key_allowed":false})
+  check (json% {"kind":"queueReload","scenario":"selfReplacement"})
+    (json% {"old_authenticates":true,"new_authenticates":false,
+      "old_counts":false,"new_counts":true,"after_send":true,"later_counts":false})
+  rejects (json% {"kind":"queueReload","scenario":"unknown"})
 
 end SequenceTests

@@ -55,6 +55,29 @@ theorem commit_numbered (s : Causality.Local S.Dev Stamp (S.Aud → Option S.Bat
 def canCommit (s : State S Stamp) (p : Plan S) (bytes : S.Aud → Option S.Batch) : Prop :=
   ∀ A, (bytes A).isSome = true → A ∈ s.follows ∧ writable (p.reason A) = true
 
+/-- The app transition with the reload and replacement gates removed. It
+authors against the committed view, including during required reloads or
+self-replacement. It does not pretend that staging has already installed.
+`During` supplies the actual gate; counterexamples use this transition alone. -/
+def queueApp (s : State S Stamp) (d : S.Dev) (t : Stamp) (schema : Nat)
+    (bytes : S.Aud → Option S.Batch) (rows : S.Aud → S.Rows) : State S Stamp :=
+  { s with authored := Causality.commit s.authored d t schema bytes, rows }
+
+/-- Commit checks use the same committed membership and rows as SQL. The
+row predicate represents the app schema's key, reference and owner checks;
+it is not an assumption that those checks survive installation. -/
+def permission (R : Rules S) (rowCheck : S.Rows → S.Batch → Bool)
+    (L : Ledger S) (rows : S.Rows) (d : S.Dev) (A : S.Aud) (batch : S.Batch) : Bool :=
+  active L d && R.mayWrite L d A && rowCheck rows batch
+
+/-- D5/D9 authenticate originals at their authored prefix. Successful sending
+also requires that same credential to pass the current binding cut-off.
+Cryptographic verification itself is outside the sequence model. -/
+def canSendOriginal (R : Rules S) (seq : Nat → Slot S) (current : Nat)
+    (w : Write S Stamp) (generation : Nat) : Bool :=
+  counts (ledgerAt R seq w.readThrough) w.device generation &&
+    counts (ledgerAt R seq current) w.device generation
+
 def consumed (slot : Write S Stamp → Option Nat) (target : Nat) (w : Write S Stamp) : Bool :=
   match slot w with | none => false | some n => decide (n ≤ target)
 
@@ -201,7 +224,7 @@ does not change this state; failed reloads have no installation transition. -/
 inductive During (p : Plan S) : State S Stamp → State S Stamp → Prop
   | app (s : State S Stamp) (d : S.Dev) (t : Stamp) (schema : Nat) (bytes : S.Aud → Option S.Batch)
       (allowed : canCommit s p bytes) (rows : S.Aud → S.Rows) :
-      During p s { s with authored := Causality.commit s.authored d t schema bytes, rows }
+      During p s (queueApp s d t schema bytes rows)
 
 theorem during_preserves_queue {p : Plan S} {s s' : State S Stamp} (step : During p s s') :
     s.authored.queue <+: s'.authored.queue ∧ s'.authored.applied = s.authored.applied := by
@@ -222,5 +245,67 @@ theorem write_during_reload (R : Rules S) (slot : Write S Stamp → Option Nat)
     (install R slot admitted committed p loaded).authored.queue =
       s.authored.queue ++ [Causality.author s.authored d t schema bytes] ∧
     (Causality.author s.authored d t schema bytes).readThrough = s.authored.applied := ⟨rfl, rfl⟩
+
+/-- Removing either gate still preserves every original, for every reload
+reason. Preservation does not assert eligibility, permission or equivalence. -/
+theorem ungated_originals_preserved (R : Rules S) (slot : Write S Stamp → Option Nat)
+    (admitted : S.Aud → Write S Stamp → Bool) (s : State S Stamp) (p : Plan S)
+    (loaded : S.Aud → Reader S) (d : S.Dev) (t : Stamp) (v : Nat)
+    (bytes : S.Aud → Option S.Batch) (rows : S.Aud → S.Rows) :
+    (install R slot admitted (queueApp s d t v bytes rows) p loaded).authored.queue =
+      s.authored.queue ++ [Causality.author s.authored d t v bytes] ∧
+    (install R slot admitted (queueApp s d t v bytes rows) p loaded).authored.nextNumber =
+      s.authored.nextNumber + 1 := ⟨rfl, rfl⟩
+
+theorem ungated_numbered (s : State S Stamp) (numbered : Numbered s.authored)
+    (d : S.Dev) (t : Stamp) (v : Nat) (bytes : S.Aud → Option S.Batch)
+    (rows : S.Aud → S.Rows) : Numbered (queueApp s d t v bytes rows).authored :=
+  commit_numbered s.authored numbered d t v bytes
+
+/-- The newly appended original is replayed once if eligible, even when
+the app transition bypasses a required-reload or replacement gate. -/
+theorem ungated_exactly_once (slot : Write S Stamp → Option Nat)
+    (admitted : S.Aud → Write S Stamp → Bool) (A : S.Aud) (loaded : Reader S)
+    (s : State S Stamp) (numbered : Numbered s.authored) (d : S.Dev) (t : Stamp)
+    (v : Nat) (bytes : S.Aud → Option S.Batch) (rows : S.Aud → S.Rows)
+    (counts : eligible slot admitted A loaded (Causality.author s.authored d t v bytes) = true) :
+    ((reapplied slot admitted A loaded (queueApp s d t v bytes rows).authored.queue).map
+      (·.number)).count s.authored.nextNumber = 1 := by
+  exact (queued_exactly_once slot admitted A loaded _
+    (ungated_numbered s numbered d t v bytes rows).1 _
+    (by simp [queueApp, Causality.commit]) counts).2
+
+/-- A required reset beyond the app's committed view excludes the new write,
+even though installation preserves its original for publication. -/
+theorem unread_reset_excludes (slot : Write S Stamp → Option Nat)
+    (admitted : S.Aud → Write S Stamp → Bool) (A : S.Aud) (loaded : Reader S)
+    (s : State S Stamp) (d : S.Dev) (t : Stamp) (v : Nat)
+    (bytes : S.Aud → Option S.Batch) (unread : s.authored.applied < loaded.aud.lastReset) :
+    eligible slot admitted A loaded (Causality.author s.authored d t v bytes) = false := by
+  simp [eligible, Causality.author, Nat.not_le.mpr unread]
+
+/-- The row verdict is stable when its inputs are equal. Required reloads
+do not supply this premise: they replace rows and may change membership. -/
+theorem permission_same_view (R : Rules S) (rowCheck : S.Rows → S.Batch → Bool)
+    (before after : Ledger S) (oldRows newRows : S.Rows) (d : S.Dev) (A : S.Aud)
+    (batch : S.Batch) (membership : before = after) (rows : oldRows = newRows) :
+    permission R rowCheck before oldRows d A batch =
+      permission R rowCheck after newRows d A batch := by rw [membership, rows]
+
+/-- No credential both authenticates an old-prefix original and passes the
+new binding. Holding both private keys cannot change these public checks. -/
+theorem changed_binding_cannot_send (R : Rules S) (seq : Nat → Slot S) (current : Nat)
+    (w : Write S Stamp) (m : S.Mem)
+    (oldOwner : (ledgerAt R seq w.readThrough).deviceOf w.device = some m)
+    (newOwner : (ledgerAt R seq current).deviceOf w.device = some m)
+    (changed : (ledgerAt R seq w.readThrough).keyGen m ≠ (ledgerAt R seq current).keyGen m)
+    (generation : Nat) : canSendOriginal R seq current w generation = false := by
+  simp only [canSendOriginal, counts, oldOwner, newOwner]
+  by_cases old : (ledgerAt R seq w.readThrough).keyGen m = generation
+  · have new : (ledgerAt R seq current).keyGen m ≠ generation := by
+      intro h
+      exact changed (old.trans h.symm)
+    simp [new]
+  · simp [old]
 
 end CovenSequence.QueueReload
