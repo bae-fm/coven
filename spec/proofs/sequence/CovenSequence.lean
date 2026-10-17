@@ -5,4 +5,6 @@ import CovenSequence.Cutoff
 import CovenSequence.Unique
 import CovenSequence.Reader
 import CovenSequence.ReaderExamples
+import CovenSequence.Retention
+import CovenSequence.Device
 import CovenSequence.Operation

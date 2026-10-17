@@ -15,16 +15,30 @@ import CovenSequence
 #print axioms CovenSequence.first_slot_wins
 #print axioms CovenSequence.owner_stays
 
-#print axioms CovenSequence.read_sound
+#print axioms CovenSequence.read_ok
+#print axioms CovenSequence.reads_ok
 #print axioms CovenSequence.read_progress
 #print axioms CovenSequence.reaches_head
 #print axioms CovenSequence.joiner_reaches_head
-#print axioms CovenSequence.retain_good
-#print axioms CovenSequence.claim_good
-#print axioms CovenSequence.deletion_keeps_reachable
 #print axioms CovenSequence.readers_agree
-#print axioms CovenSequence.ReaderExamples.c6_alone_strands_reader
+#print axioms CovenSequence.keyless_passes_only_others
+#print axioms CovenSequence.keyless_stops
+#print axioms CovenSequence.ReaderExamples.slot4_refused
+#print axioms CovenSequence.ReaderExamples.stale_floor_strands_joiner
 
+#print axioms CovenSequence.store_good
+#print axioms CovenSequence.store_reader
+#print axioms CovenSequence.stores_good
+#print axioms CovenSequence.claim_floor_check
+
+#print axioms CovenSequence.dev_ok
+#print axioms CovenSequence.device_reaches_head
+#print axioms CovenSequence.device_stops
+#print axioms CovenSequence.deletion_keeps_reachable
+
+#print axioms CovenSequence.Operation.step_req
 #print axioms CovenSequence.Operation.step_inv
+#print axioms CovenSequence.Operation.steps_inv
 #print axioms CovenSequence.Operation.operation_outcome
 #print axioms CovenSequence.Operation.forgetful_lands_twice
+#print axioms CovenSequence.Operation.eager_undo_leaks

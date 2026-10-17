@@ -22,8 +22,12 @@ Other devices claim slots at any time.
 
 The operation's bytes for slot `n` are `ours n`: they name the operation and
 the slot, so they are unique per attempt and a resend is the same attempt.
-Artifact creates are modelled as completed provider calls; a create request
-that could land after its undo is outside the model.
+
+An artifact create is a request that, once sent, can land at any time until it
+ends: it lands, fails, or is cancelled. The undo waits for, or cancels, every
+create it sent before deleting by recorded name, and confirms absence before
+deleting the journal. A request that cannot be cancelled (an S3 key mint) is
+covered outside this model, by the reclaim of keys tagged with their device.
 -/
 
 namespace CovenSequence.Operation
@@ -63,6 +67,9 @@ structure World (A : Type) where
   inflight : List Nat
   /-- The provider's storage of this operation's artifacts. -/
   artifacts : List A
+  /-- Artifact create requests sent and not yet ended: each may land at any
+  time until it ends (it lands, fails, or is cancelled). -/
+  artReq : List A
   journal : Option (Journal A)
   result : Option Result
 
@@ -72,55 +79,76 @@ variable {A : Type}
 def AtHead (s : Store Bytes) (n : Nat) : Prop :=
   (∀ i, 1 ≤ i → i < n → s i ≠ none) ∧ s n = none
 
+/-- Faulty variants checked as counterexamples. -/
+inductive Fault where
+  | none
+  /-- A restart that forgets its recorded claim. -/
+  | forget
+  /-- An undo that deletes an artifact while its create request may still land. -/
+  | eagerUndo
+  deriving DecidableEq
+
 /-- The operation's steps and the environment's. `allowed s n` is the
-operation's validation against slots `1..n-1`. `forgetful` enables a faulty
-restart that forgets its recorded claim. -/
-inductive Step [DecidableEq A] (allowed : Store Bytes → Nat → Bool) (forgetful : Bool) : World A → World A → Prop
+operation's validation against slots `1..n-1`. `fault` enables one faulty
+variant. -/
+inductive Step [DecidableEq A] (allowed : Store Bytes → Nat → Bool) (fault : Fault) : World A → World A → Prop
   | record (w : World A) (rec : List A) (a : A) (hj : w.journal = some ⟨rec, .prep⟩) :
-      Step allowed forgetful w { w with journal := some ⟨a :: rec, .prep⟩ }
-  | createArt (w : World A) (rec : List A) (a : A) (hj : w.journal = some ⟨rec, .prep⟩) (ha : a ∈ rec) :
-      Step allowed forgetful w { w with artifacts := a :: w.artifacts }
+      Step allowed fault w { w with journal := some ⟨a :: rec, .prep⟩ }
+  /-- Send the create of a recorded artifact. -/
+  | sendArt (w : World A) (rec : List A) (a : A) (hj : w.journal = some ⟨rec, .prep⟩) (ha : a ∈ rec) :
+      Step allowed fault w { w with artReq := a :: w.artReq }
+  /-- A sent create lands, at any time, even after a crash or the journal's end. -/
+  | landArt (w : World A) (a : A) (ha : a ∈ w.artReq) :
+      Step allowed fault w { w with artifacts := a :: w.artifacts, artReq := w.artReq.erase a }
+  /-- A sent create ends without landing: awaited to failure, or cancelled. -/
+  | endArt (w : World A) (a : A) (ha : a ∈ w.artReq) :
+      Step allowed fault w { w with artReq := w.artReq.erase a }
   | claim (w : World A) (rec : List A) (ph : Phase) (n : Nat) (hj : w.journal = some ⟨rec, ph⟩)
       (hph : ph = .prep ∨ ph = .retry) (hn : 1 ≤ n) (hhead : AtHead w.slots n)
       (hv : allowed w.slots n = true) :
-      Step allowed forgetful w { w with journal := some ⟨rec, .claiming n⟩, inflight := n :: w.inflight }
+      Step allowed fault w { w with journal := some ⟨rec, .claiming n⟩, inflight := n :: w.inflight }
   | resend (w : World A) (rec : List A) (n : Nat) (hj : w.journal = some ⟨rec, .claiming n⟩) :
-      Step allowed forgetful w { w with inflight := n :: w.inflight }
+      Step allowed fault w { w with inflight := n :: w.inflight }
   | land (w : World A) (n : Nat) (hn : n ∈ w.inflight) :
-      Step allowed forgetful w { w with slots := create w.slots n (.ours n), inflight := w.inflight.erase n }
+      Step allowed fault w { w with slots := create w.slots n (.ours n), inflight := w.inflight.erase n }
   | other (w : World A) (n x : Nat) :
-      Step allowed forgetful w { w with slots := create w.slots n (.other x) }
+      Step allowed fault w { w with slots := create w.slots n (.other x) }
   | won (w : World A) (rec : List A) (n : Nat) (hj : w.journal = some ⟨rec, .claiming n⟩)
       (hs : w.slots n = some (.ours n)) :
-      Step allowed forgetful w { w with journal := some ⟨rec, .landed n⟩ }
+      Step allowed fault w { w with journal := some ⟨rec, .landed n⟩ }
   | lost (w : World A) (rec : List A) (n x : Nat) (hj : w.journal = some ⟨rec, .claiming n⟩)
       (hs : w.slots n = some (.other x)) :
-      Step allowed forgetful w { w with journal := some ⟨rec, .retry⟩ }
+      Step allowed fault w { w with journal := some ⟨rec, .retry⟩ }
   | giveUp (w : World A) (rec : List A) (ph : Phase) (n : Nat) (hj : w.journal = some ⟨rec, ph⟩)
       (hph : ph = .prep ∨ ph = .retry) (hhead : AtHead w.slots n) (hv : allowed w.slots n = false) :
-      Step allowed forgetful w { w with journal := some ⟨rec, .undoing⟩ }
-  | undoOne (w : World A) (rec : List A) (a : A) (hj : w.journal = some ⟨rec, .undoing⟩) :
-      Step allowed forgetful w
+      Step allowed fault w { w with journal := some ⟨rec, .undoing⟩ }
+  /-- Delete an artifact by its recorded name, once no create of it can still
+  land. -/
+  | undoOne (w : World A) (rec : List A) (a : A) (hj : w.journal = some ⟨rec, .undoing⟩)
+      (hreq : a ∉ w.artReq ∨ fault = .eagerUndo) :
+      Step allowed fault w
         { w with artifacts := w.artifacts.filter (· ≠ a),
                  journal := some ⟨rec.filter (· ≠ a), .undoing⟩ }
-  | finishUndo (w : World A) (hj : w.journal = some ⟨[], .undoing⟩) :
-      Step allowed forgetful w { w with journal := none, result := some .undone }
+  /-- Confirm the artifacts are absent, then delete the journal. -/
+  | finishUndo (w : World A) (hj : w.journal = some ⟨[], .undoing⟩) (hgone : w.artifacts = []) :
+      Step allowed fault w { w with journal := none, result := some .undone }
   | complete (w : World A) (rec : List A) (n : Nat) (hj : w.journal = some ⟨rec, .landed n⟩) :
-      Step allowed forgetful w { w with journal := none, result := some (.landed n) }
+      Step allowed fault w { w with journal := none, result := some (.landed n) }
   /-- The faulty restart: the claim in flight is forgotten. -/
-  | forget (w : World A) (rec : List A) (n : Nat) (hf : forgetful = true)
+  | forget (w : World A) (rec : List A) (n : Nat) (hf : fault = .forget)
       (hj : w.journal = some ⟨rec, .claiming n⟩) :
-      Step allowed forgetful w { w with journal := some ⟨rec, .prep⟩ }
+      Step allowed fault w { w with journal := some ⟨rec, .prep⟩ }
 
-inductive Steps [DecidableEq A] (allowed : Store Bytes → Nat → Bool) (forgetful : Bool) : World A → World A → Prop
-  | refl (w : World A) : Steps allowed forgetful w w
-  | step {w w' w'' : World A} : Step allowed forgetful w w' → Steps allowed forgetful w' w'' →
-      Steps allowed forgetful w w''
+inductive Steps [DecidableEq A] (allowed : Store Bytes → Nat → Bool) (fault : Fault) : World A → World A → Prop
+  | refl (w : World A) : Steps allowed fault w w
+  | step {w w' w'' : World A} : Step allowed fault w w' → Steps allowed fault w' w'' →
+      Steps allowed fault w w''
 
 /-- An operation that has validated, with no artifacts and no requests, over
 any slots that hold none of its bytes. -/
 def start (s : Store Bytes) : World A :=
-  { slots := s, inflight := [], artifacts := [], journal := some ⟨[], .prep⟩, result := none }
+  { slots := s, inflight := [], artifacts := [], artReq := [], journal := some ⟨[], .prep⟩,
+    result := none }
 
 /-- The journal's phase, or none once it is deleted. -/
 def World.phase (w : World A) : Option Phase := w.journal.map (·.phase)
@@ -200,9 +228,74 @@ theorem result_none {allowed : Store Bytes → Nat → Bool} {w : World A} (hi :
   | none => rfl
   | some r => have := hi.result_done (by simp [hr]); simp [hj] at this
 
+/-- Every artifact create still in flight is recorded while the journal exists,
+and after it only for a landed operation. -/
+def ReqInv (w : World A) : Prop :=
+  ∀ a, a ∈ w.artReq → (∃ j, w.journal = some j ∧ a ∈ j.recorded) ∨ (∃ n, w.result = some (.landed n))
+
+theorem req_keep {w w' : World A} (hq : ReqInv w) (hreq : ∀ a, a ∈ w'.artReq → a ∈ w.artReq)
+    (hrec : ∀ j, w.journal = some j → ∃ j', w'.journal = some j' ∧ ∀ a, a ∈ j.recorded → a ∈ j'.recorded)
+    (hres : ∀ n, w.result = some (.landed n) → w'.result = some (.landed n)) : ReqInv w' := by
+  intro a ha
+  rcases hq a (hreq a ha) with ⟨j, hj, haj⟩ | ⟨n, hn⟩
+  · obtain ⟨j', hj', hsub⟩ := hrec j hj
+    exact Or.inl ⟨j', hj', hsub a haj⟩
+  · exact Or.inr ⟨n, hres n hn⟩
+
+/-- **Every step keeps the request invariant.** An undo deletes an artifact only
+once no create of it is in flight, so nothing can land after the journal ends
+unless the operation landed. -/
+theorem step_req [DecidableEq A] {allowed : Store Bytes → Nat → Bool} {w w' : World A}
+    (st : Step allowed .none w w') (hi : Inv allowed w) (hq : ReqInv w) : ReqInv w' := by
+  cases st with
+  | record rec a hj =>
+    refine req_keep hq (fun _ h => h) (fun j hj' => ?_) (fun _ h => h)
+    rw [hj] at hj'; cases hj'
+    exact ⟨_, rfl, fun b hb => List.mem_cons_of_mem _ hb⟩
+  | sendArt rec a hj ha =>
+    intro b hb
+    simp only [List.mem_cons] at hb
+    rcases hb with rfl | hb
+    · exact Or.inl ⟨_, hj, ha⟩
+    · exact hq b hb
+  | landArt a ha =>
+    exact req_keep hq (fun _ h => List.mem_of_mem_erase h) (fun j hj => ⟨j, hj, fun _ h => h⟩) (fun _ h => h)
+  | endArt a ha =>
+    exact req_keep hq (fun _ h => List.mem_of_mem_erase h) (fun j hj => ⟨j, hj, fun _ h => h⟩) (fun _ h => h)
+  | claim rec ph n hj =>
+    refine req_keep hq (fun _ h => h) (fun j hj' => ?_) (fun _ h => h)
+    rw [hj] at hj'; cases hj'; exact ⟨_, rfl, fun _ h => h⟩
+  | resend => exact req_keep hq (fun _ h => h) (fun j hj => ⟨j, hj, fun _ h => h⟩) (fun _ h => h)
+  | land => exact req_keep hq (fun _ h => h) (fun j hj => ⟨j, hj, fun _ h => h⟩) (fun _ h => h)
+  | other => exact req_keep hq (fun _ h => h) (fun j hj => ⟨j, hj, fun _ h => h⟩) (fun _ h => h)
+  | won rec n hj =>
+    refine req_keep hq (fun _ h => h) (fun j hj' => ?_) (fun _ h => h)
+    rw [hj] at hj'; cases hj'; exact ⟨_, rfl, fun _ h => h⟩
+  | lost rec n x hj =>
+    refine req_keep hq (fun _ h => h) (fun j hj' => ?_) (fun _ h => h)
+    rw [hj] at hj'; cases hj'; exact ⟨_, rfl, fun _ h => h⟩
+  | giveUp rec ph n hj =>
+    refine req_keep hq (fun _ h => h) (fun j hj' => ?_) (fun _ h => h)
+    rw [hj] at hj'; cases hj'; exact ⟨_, rfl, fun _ h => h⟩
+  | undoOne rec a hj hreq =>
+    have ha : a ∉ w.artReq := by rcases hreq with h | h; exact h; cases h
+    intro b hb
+    rcases hq b hb with ⟨j, hj', hbj⟩ | h
+    · rw [hj] at hj'; cases hj'
+      have hne : b ≠ a := by intro he; subst he; exact ha hb
+      exact Or.inl ⟨_, rfl, by simp [hbj, hne]⟩
+    · exact Or.inr h
+  | finishUndo hj hgone =>
+    intro b hb
+    rcases hq b hb with ⟨j, hj', hbj⟩ | ⟨n, hn⟩
+    · rw [hj] at hj'; cases hj'; simp at hbj
+    · simp [result_none hi hj] at hn
+  | complete rec n hj => intro b _; exact Or.inr ⟨n, rfl⟩
+  | forget rec n hf => cases hf
+
 /-- **Every step keeps the invariant.** -/
 theorem step_inv [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : PrefixOnly allowed) {w w' : World A}
-    (st : Step allowed false w w') (hi : Inv allowed w) : Inv allowed w' := by
+    (st : Step allowed .none w w') (hi : Inv allowed w) (hq : ReqInv w) : Inv allowed w' := by
   cases st with
   | record rec a hj =>
     have hno := no_own hi hj (fun n => by simp)
@@ -218,14 +311,18 @@ theorem step_inv [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : 
       · exact Or.inr h
     · simp [World.phase, hres] at hn
     · simp [World.phase, hres] at hn
-  | createArt rec a hj ha =>
-    have hno := no_own hi hj (fun n => by simp)
-    have hres := result_none hi hj
+  | sendArt rec a hj ha =>
+    exact ⟨hi.ours_here, hi.recorded, hi.inflight_ok, hi.own_phase, hi.landed_own, hi.validated,
+      hi.result_done⟩
+  | endArt a ha =>
+    exact ⟨hi.ours_here, hi.recorded, hi.inflight_ok, hi.own_phase, hi.landed_own, hi.validated,
+      hi.result_done⟩
+  | landArt a ha =>
     refine ⟨hi.ours_here, fun x hx => ?_, hi.inflight_ok, hi.own_phase, hi.landed_own, hi.validated,
       hi.result_done⟩
     simp only [List.mem_cons] at hx
     rcases hx with rfl | hx
-    · exact Or.inl ⟨_, hj, ha⟩
+    · exact hq x ha
     · exact hi.recorded x hx
   | claim rec ph n hj hph hn hhead hv =>
     have hno := no_own hi hj (fun k => by rcases hph with rfl | rfl <;> simp)
@@ -363,7 +460,7 @@ theorem step_inv [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : 
       · exact Or.inr h
     · simp [World.phase, hres] at hk
     · simp [World.phase, hres] at hk
-  | undoOne rec a hj =>
+  | undoOne rec a hj hreq =>
     have hno := no_own hi hj (fun k => by simp)
     have hres := result_none hi hj
     refine ⟨hi.ours_here, fun y hy => ?_, fun m hm => ?_, fun k hk => absurd hk (hno k),
@@ -378,7 +475,7 @@ theorem step_inv [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : 
       · exact Or.inr h
     · simp [World.phase, hres] at hk
     · simp [World.phase, hres] at hk
-  | finishUndo hj =>
+  | finishUndo hj hgone =>
     have hno := no_own hi hj (fun k => by simp)
     have hres := result_none hi hj
     refine ⟨hi.ours_here, fun y hy => ?_, fun m hm => ?_, fun k hk => absurd hk (hno k),
@@ -409,10 +506,10 @@ theorem step_inv [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : 
   | forget rec n hf => cases hf
 
 theorem steps_inv [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : PrefixOnly allowed) {w w' : World A}
-    (run : Steps allowed false w w') (hi : Inv allowed w) : Inv allowed w' := by
+    (run : Steps allowed .none w w') (hi : Inv allowed w) (hq : ReqInv w) : Inv allowed w' ∧ ReqInv w' := by
   induction run with
-  | refl => exact hi
-  | step s _ ih => exact ih (step_inv hp s hi)
+  | refl => exact ⟨hi, hq⟩
+  | step s _ ih => exact ih (step_inv hp s hi hq) (step_req s hi hq)
 
 /-- **The claim loop and journal.** From validation over any slots holding
 none of its bytes, through any interleaving of its own steps, crashes and
@@ -422,15 +519,16 @@ restarts, late-landing requests and other devices' claims:
 - a landed operation's bytes are at its slot, whose predecessors were all
   filled when it validated, and validation held against them;
 - an undone operation has no bytes in the sequence, now or later, and none of
-  its recorded artifacts remains in storage. -/
+  its recorded artifacts remains in storage, now or later: its undo ran only
+  after every create it sent had ended. -/
 theorem operation_outcome [DecidableEq A] {allowed : Store Bytes → Nat → Bool} (hp : PrefixOnly allowed)
     (s0 : Store Bytes) (h0 : ∀ n m, s0 n ≠ some (.ours m)) {w : World A}
-    (run : Steps allowed false (start s0) w) :
+    (run : Steps allowed .none (start s0) w) :
     (∀ n m, Own w.slots n → Own w.slots m → n = m) ∧
     (∀ n, w.result = some (.landed n) →
       Own w.slots n ∧ 1 ≤ n ∧ (∀ i, 1 ≤ i → i < n → w.slots i ≠ none) ∧ allowed w.slots n = true) ∧
     (w.result = some .undone → (∀ n, ¬ Own w.slots n) ∧ w.artifacts = []) := by
-  have hi := steps_inv hp run (inv_start allowed s0 h0)
+  have hi := (steps_inv hp run (inv_start allowed s0 h0) (fun a ha => by simp [start] at ha)).1
   refine ⟨fun n m hn hm => ?_, fun n hn => ?_, fun hu => ⟨fun n hn => ?_, ?_⟩⟩
   · rcases hi.own_phase n hn with h | h | h <;> rcases hi.own_phase m hm with h' | h' | h'
     all_goals first
@@ -455,7 +553,7 @@ theorem operation_outcome [DecidableEq A] {allowed : Store Bytes → Nat → Boo
 operation claims slot 1, the request lands, and a restart that does not
 resolve its recorded claim validates again, claims slot 2 and lands there too. -/
 theorem forgetful_lands_twice :
-    ∃ w : World Nat, Steps (fun _ _ => true) true (start (fun _ => none)) w ∧
+    ∃ w : World Nat, Steps (fun _ _ => true) .forget (start (fun _ => none)) w ∧
       Own w.slots 1 ∧ Own w.slots 2 := by
   refine ⟨_, Steps.step (Step.claim _ [] .prep 1 rfl (Or.inl rfl) (Nat.le_refl _)
       ⟨fun i h1 h2 => by omega, rfl⟩ rfl)
@@ -468,5 +566,22 @@ theorem forgetful_lands_twice :
   · simp [Claim.create, start]
   · simp [Own, Claim.create, start]
   · simp [Own, Claim.create, start]
+
+/-- **Counterexample: an undo that does not wait for its requests leaves an
+artifact.** The operation records and sends an artifact's create, finds it is no
+longer allowed, deletes the artifact while the create is in flight, confirms
+absence and ends. The create then lands: the operation is undone and its
+artifact is in storage. -/
+theorem eager_undo_leaks :
+    ∃ w : World Nat, Steps (fun _ _ => false) .eagerUndo (start (fun _ => none)) w ∧
+      w.result = some .undone ∧ w.artifacts = [7] := by
+  refine ⟨_, Steps.step (Step.record _ [] 7 rfl)
+    (Steps.step (Step.sendArt _ [7] 7 rfl (by simp))
+    (Steps.step (Step.giveUp _ [7] .prep 1 rfl (Or.inl rfl) ⟨fun i h1 h2 => by omega, rfl⟩ rfl)
+    (Steps.step (Step.undoOne _ [7] 7 rfl (Or.inr rfl))
+    (Steps.step (Step.finishUndo _ (by simp) rfl)
+    (Steps.step (Step.landArt _ 7 (by simp)) (Steps.refl _)))))), ?_, ?_⟩
+  · rfl
+  · simp [start]
 
 end CovenSequence.Operation

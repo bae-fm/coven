@@ -1,27 +1,29 @@
 import CovenSequence.Reader
 
 /-!
-# C6 alone does not remove the raise hold
+# Why a snapshot must cover the last raise
 
 C6 (a raise must cover every snapshot announced before it) is not enough to
 delete covered slots safely. A snapshot announced after a raise can cover a
-slot before the raise. Raising the floor to it and deleting the slots it
-covers removes slots the raise's replay needs, so a joiner that loads it is
-stuck at the raise forever, while every other device reached the head.
+slot before the raise. If the floor named it and the slots it covers were
+deleted, the raise's replay would need a deleted slot, so a joiner that loads
+it is stuck at the raise forever, while every other device reached the head.
 
-The rule that closes this is `versionRule`: a snapshot announced at slot `a`
-must cover the last raise before `a`, so it is at the store's version. With it
-the same announcement is refused, and `deletion_keeps_reachable` holds.
+The version rule refuses that announcement: a snapshot announced at slot `a`
+must cover the last raise of its audience before `a`. So the floor can never
+name it (`Good.floor_announced`), and `deletion_keeps_reachable` holds.
 
-Slots: 1 and 2 are batches; 3 raises to version 1 with a snapshot covering
-slot 1; 4 announces a snapshot covering slot 2, from before the raise.
+Slots, in one audience: 1 and 2 are batches; 3 raises to version 1 with a
+snapshot covering slot 1; 4 announces a snapshot covering slot 2, from before
+the raise. A device can produce slot 4: it captures at slot 2, its claim of
+slot 3 is refused by the raise, and it claims slot 4 with the same snapshot.
 -/
 
 namespace CovenSequence.ReaderExamples
 
 open CovenSequence
 
-/-- One device of one member; paths are numbers. -/
+/-- One device of one member, one audience; paths are numbers. -/
 def sig : Sig where
   Dev := Unit
   Mem := Unit
@@ -31,6 +33,7 @@ def sig : Sig where
   Rows := List Nat
   Op := Unit
   Aux := Unit
+  Aud := Unit
   decPath := inferInstanceAs (DecidableEq Nat)
 
 def ledger0 : Ledger sig where
@@ -39,118 +42,122 @@ def ledger0 : Ledger sig where
   removed := fun _ => false
   keyGen := fun _ => 0
   aux := ()
-  owner := fun _ => none
   copies := []
+  refused := fun _ => false
+
+def aud0 : AudLedger sig where
+  owner := fun _ => none
   snapshots := []
   maxCover := 0
   lastRaise := 0
   version := 0
   refused := fun _ => false
 
-/-- The rules with or without the version rule. -/
-def rules (versionRule : Bool) : Rules sig where
+def rules : Rules sig where
   authorized := fun _ _ _ => true
   applyOp := fun a _ => a
   copyOk := fun _ _ _ _ => true
+  mayWrite := fun _ _ _ => true
   merge := fun (r : List Nat) (b : Nat) => r ++ [b]
   convert := fun _ _ b => b
   migrate := fun v (r : List Nat) => r ++ [1000 + v]
   ledger0 := ledger0
-  rows0 := ([] : List Nat)
-  versionRule := versionRule
+  aud0 := fun _ => aud0
+  rows0 := fun _ => ([] : List Nat)
 
-/-- C6 only. -/
-abbrev R6 := rules false
+def part (b : Nat) : Unit → Option (WPart sig) := fun _ => some ⟨0, [], b⟩
 
 def seqEx : Nat → Slot sig
-  | 1 => .writes () 0 0 [] (10 : Nat)
-  | 2 => .writes () 0 0 [] (20 : Nat)
-  | 3 => .raise () 1 1 (1 : Nat)
-  | 4 => .snapshot () 2 (2 : Nat)
-  | _ => .writes () 0 9 [] (0 : Nat)
+  | 1 => .writes () 0 (part 10)
+  | 2 => .writes () 0 (part 20)
+  | 3 => .raise () () 1 1 (1 : Nat)
+  | 4 => .snapshot () () 2 (2 : Nat)
+  | _ => .writes () 0 (fun _ => none)
 
-/-- Every slot claimed, the floor at the start. Path 0 holds the empty state,
-path 1 the raise snapshot, path 2 the late snapshot. -/
-def st0 : Storage sig where
-  slot := fun i => if 1 ≤ i ∧ i ≤ 4 then some (seqEx i) else none
-  floorStart := 1
-  floorCovers := 0
-  floorPath := (0 : Nat)
+/-- The version rule refuses slot 4. Every other condition on it holds: its
+author is active and it covers less than its slot. The raise at 3 is valid
+and meets C6. -/
+theorem slot4_refused :
+    audValid rules (ledgerAt rules seqEx 3) (audAt rules seqEx () 3) 4 () (seqEx 4) = false ∧
+    active (ledgerAt rules seqEx 3) () = true ∧ 2 < 4 ∧
+    (audAt rules seqEx () 3).lastRaise = 3 ∧
+    audValid rules (ledgerAt rules seqEx 2) (audAt rules seqEx () 2) 3 () (seqEx 3) = true ∧
+    (audAt rules seqEx () 2).maxCover ≤ 1 := by
+  decide
+
+/-- Storage with the floor naming slot 4's snapshot, slots 1 and 2 deleted.
+Path 1 holds the raise snapshot, path 2 the late snapshot's true state. -/
+def st : Store sig where
+  slot := fun i => if 3 ≤ i ∧ i ≤ 4 then some (seqEx i) else none
+  first := fun i => if 1 ≤ i ∧ i ≤ 4 then some (seqEx i) else none
+  head := 4
+  floor := ⟨3, fun _ => 2, fun _ => (2 : Nat)⟩
   body := fun (p : Nat) =>
-    if p = 0 then some (stateAt R6 seqEx 0)
-    else if p = 1 then some (ledger0, R6.migrate 1 (rowsAt R6 seqEx 1))
-    else some (stateAt R6 seqEx 2)
+    if p = 1 then some (ledger0, aud0, rules.migrate 1 (rowsAt rules seqEx () 1))
+    else some (stateAt rules seqEx () 2)
 
-/-- The floor raised to the late snapshot: the log starts at slot 3. -/
-def st1 : Storage sig := { st0 with floorStart := 3, floorCovers := 2, floorPath := (2 : Nat) }
-/-- Slots 1 and 2 deleted. -/
-def st2 : Storage sig := { st1 with slot := fun j => if j = 1 then none else st1.slot j }
-def st3 : Storage sig := { st2 with slot := fun j => if j = 2 then none else st2.slot j }
+/-- The joiner after loading the floor's snapshot. -/
+def joiner : Reader sig :=
+  ⟨2, ledgerAt rules seqEx 2, audAt rules seqEx () 2, rowsAt rules seqEx () 2, fun _ => none⟩
 
-/-- A joiner after loading the floor's snapshot. -/
-def stuck : Reader sig := ⟨2, ledgerAt R6 seqEx 2, rowsAt R6 seqEx 2⟩
-
-theorem st0_good : Good R6 st0 seqEx 4 := by
-  refine ⟨fun i x h => ?_, fun i h1 h2 h3 => ?_, by decide, by decide, rfl, Or.inl rfl, ?_⟩
-  · simp only [st0] at h
-    split at h
-    · rename_i hi; simp at h; exact ⟨hi.1, hi.2, h.symm⟩
-    · cases h
-  · simp only [st0]; simp [h2, h3]
-  · intro r a v c p h1 h2 hs _
-    rcases (by omega : r = 1 ∨ r = 2 ∨ r = 3 ∨ r = 4) with rfl | rfl | rfl | rfl
-    · simp [seqEx] at hs
-    · simp [seqEx] at hs
-    · simp only [seqEx] at hs
-      obtain ⟨-, rfl, rfl, rfl⟩ := hs
-      refine ⟨fun _ => ⟨ledger0, by simp [st0]⟩, fun L' rows hb => ?_⟩
-      simp [st0] at hb
-      exact hb.2.symm
-    · simp [seqEx] at hs
-
-theorem slot4_applied : Applied R6 seqEx 4 := by
-  unfold Applied; rfl
-
-theorem retained_to_st3 : Retains R6 seqEx 4 st0 st3 :=
-  Retains.step (Retain.raiseFloor st0 3 4 () 2 (2 : Nat) (by decide) (by decide) (by decide) (by decide) (by decide)
-      rfl slot4_applied (by simp [st0]))
-    (Retains.step (Retain.delete st1 1 (by decide))
-      (Retains.step (Retain.delete st2 2 (by decide)) (Retains.refl st3)))
-
-/-- **Counterexample: C6 alone strands a reader.** Storage starts good, the
-floor is raised to the snapshot announced at slot 4 (valid under C6 alone),
-slots 1 and 2 are deleted as covered, and storage stays good. A joiner loads
-the floor's snapshot and is then stuck below the head: slot 3 is a valid raise
-whose replay needs the deleted slot 2. With the version rule, slot 4 is
-refused, so the floor could never name it. -/
-theorem c6_alone_strands_reader :
-    Good R6 st0 seqEx 4 ∧ Retains R6 seqEx 4 st0 st3 ∧ Good R6 st3 seqEx 4 ∧
-    ReadStep R6 st3 ⟨0, ledger0, []⟩ stuck ∧ stuck.pos < 4 ∧
-    (¬ ∃ d', ReadStep R6 st3 stuck d') ∧
-    valid (rules true) (ledgerAt (rules true) seqEx 3) 4 (seqEx 4) = false := by
-  have hgood3 : Good R6 st3 seqEx 4 :=
-    retain_good R6 (retain_good R6 (retain_good R6 st0_good
-      (Retain.raiseFloor st0 3 4 () 2 (2 : Nat) (by decide) (by decide) (by decide) (by decide) (by decide)
-        rfl slot4_applied (by simp [st0])))
-      (Retain.delete st1 1 (by decide))) (Retain.delete st2 2 (by decide))
-  refine ⟨st0_good, retained_to_st3, hgood3, ?_, by decide, ?_, rfl⟩
-  · exact ReadStep.reload _ _ _ (by decide) (by simp [st3, st2, st1, st0, stateAt])
-  · rintro ⟨d', step⟩
-    cases step with
-    | apply x hx hnr =>
-      have hx3 : x = seqEx 3 := by
-        simp [st3, st2, st1, st0, stuck] at hx; exact hx.symm
-      subst hx3
-      have := hnr () 1 1 (1 : Nat) rfl
-      revert this
-      simp only [stuck]
-      decide
-    | raise a v c p hx hv L' rows hb get hget =>
-      simp [st3, st2, st1, st0, stuck, seqEx] at hx
-      obtain ⟨-, rfl, rfl, rfl⟩ := hx
-      have := hget 2 (by decide) (by decide)
-      simp [st3] at this
-    | reload L rows hc hb =>
-      simp [st3, st2, st1, st0, stuck] at hc
+/-- **Counterexample: a floor naming a snapshot from before a raise strands a
+joiner.** The floor's body is the true state at its coverage and every slot at
+or above the first kept slot is genuine, but the joiner, holding the key, never
+moves past slot 2 while the head is 4: slot 3 is a valid raise whose replay
+needs the deleted slot 2. -/
+theorem stale_floor_strands_joiner :
+    st.body (st.floor.path ()) = some (stateAt rules seqEx () (st.floor.covers ())) ∧
+    (∀ i, st.floor.start ≤ i → st.slot i = st.first i) ∧
+    ∀ d', ReadSteps rules () true st joiner d' → d'.pos = 2 := by
+  refine ⟨rfl, fun i hi => ?_, fun d' run => ?_⟩
+  · simp only [st] at hi ⊢
+    by_cases h : i ≤ 4
+    · simp [show 3 ≤ i from hi, h, show 1 ≤ i by omega]
+    · simp [h]
+  · suffices h : ∀ a b, ReadSteps rules () true st a b → a.pos = 2 →
+        a.ledger = ledgerAt rules seqEx 2 → a.aud = audAt rules seqEx () 2 →
+        (∀ i x, a.buf i = some x → st.slot i = some x) →
+        b.pos = 2 ∧ b.ledger = ledgerAt rules seqEx 2 ∧ b.aud = audAt rules seqEx () 2 ∧
+          (∀ i x, b.buf i = some x → st.slot i = some x) from
+      (h joiner d' run rfl rfl rfl (fun _ _ h => by simp [joiner] at h)).1
+    intro a b run
+    induction run with
+    | refl => intro h1 h2 h3 h4; exact ⟨h1, h2, h3, h4⟩
+    | @step x y z s _ ih =>
+      intro hp hl ha hb
+      apply ih
+      all_goals cases s with
+      | fetch i =>
+        first
+          | exact hp
+          | exact hl
+          | exact ha
+          | (intro j y hy
+             simp only at hy
+             by_cases hj : j = i
+             · subst hj; simpa using hy
+             · simp only [hj, ite_false] at hy; exact hb j y hy)
+      | apply x' hb' hf hnr hk =>
+        exfalso
+        rw [hp] at hb'
+        have h3 := hb 3 x' hb'
+        simp [st, seqEx] at h3
+        subst h3
+        have := hnr () 1 1 (1 : Nat) rfl
+        rw [hl, ha, hp] at this
+        revert this
+        decide
+      | raise au v c p' hb' hf hv hk L' P' rows hbody get hget =>
+        exfalso
+        rw [hp] at hb'
+        have h3 := hb 3 _ hb'
+        simp [st, seqEx] at h3
+        obtain ⟨-, rfl, rfl, rfl⟩ := h3
+        have := (hget 2 (by decide) (by omega)).2
+        simp [st] at this
+      | reload L P rows hc =>
+        exfalso
+        rw [hp] at hc
+        simp [st] at hc
 
 end CovenSequence.ReaderExamples
