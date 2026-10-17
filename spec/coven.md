@@ -4059,7 +4059,10 @@ the device read, as one atomic step. A failed condition changes nothing; the
 caller rereads the floor and validates the new one. Without this, two devices
 moving the floor at once could each overwrite the other's floor. Setup tests both
 a matching replacement and a refusal with a stale revision. A provider without
-conditional replacement is refused.
+conditional replacement is refused. On OneDrive, racing replacements can all be
+refused while the floor keeps its bytes; the device rereads the floor and tries
+again on a later pass, as after any refusal (Appendix E.2). At most one
+replacement ever succeeds.
 
 **Complete reads, whole and by byte range.** A complete-object read streams
 through bounded buffers, so the reader checks each chunk as it arrives without a
@@ -5311,6 +5314,27 @@ folder, without a shared-namespace path-root header. Dropbox refuses sharing
 inside that folder, so `create_invite` returns a typed error before changing the
 provider. OneDrive, CloudKit and S3 have no such choice; their access rules are
 those of §20.
+
+**OneDrive floor replacement.** OneDrive's direct `PUT …/content` with
+`If-Match` let two writers holding one eTag both succeed, so the floor is
+replaced through an upload session instead.
+
+- The session is on the observed item id, created with the observed eTag in
+  `If-Match` and `item.@microsoft.graph.conflictBehavior: replace`.
+- Bounded fragments go in order; the old bytes stay visible until the last one
+  publishes. An empty body uses `deferCommit: true` and a zero-body `POST` to
+  the upload URL.
+- Another write changing the item before completion drops the session (404) or
+  refuses its request (409 `resourceModified`). Either is a refused replacement
+  (`Conflict`), never a reason to write the floor again.
+- Racing writers can all be refused, leaving the floor's bytes and eTag
+  unchanged. At most one writer succeeds, and the floor then holds its bytes.
+- A failed replacement cancels its session, whose own condition may refuse that
+  too with `resourceModified`, and is not retried.
+- Microsoft documents that `If-Match` is compared when the session is created,
+  not that it holds through completion. Two-account live races are the evidence
+  that it does (2026-10-17: one winner in every round, 200 two-writer and 50
+  eight-writer rounds).
 
 **OneDrive upload sessions.** OneDrive's sessions expose unfinished items, so
 coven uploads to `<store>/.coven-uploads/<session>` inside the configured folder.
