@@ -490,8 +490,8 @@ obligation and tries again.
 
 A device can be away so long that the slot it was claiming has been deleted. It
 then settles from the floor's snapshot, which records, for every device, the
-number of the last claim of that device's included in the snapshot, and a hash of
-that slot's bytes (§16.1). This works for every kind of slot, whether it applied
+number of the last claim of that device's included in the snapshot (its greatest
+claim number), and a hash of that slot's bytes (§16.1). This works for every kind of slot, whether it applied
 validly or was refused.
 
 Ana's phone was claiming its claim number 9 when it went offline. The floor's
@@ -2023,8 +2023,10 @@ of the entry.
 
 **Copies come first, then the introduction.** An operation claims every copy the
 key needs before it claims the introduction, so by the time a key is in use,
-everyone who should have it has a copy. The copies are encrypted outside the
-seal with a store key already accepted; the new key may encrypt its own
+everyone who should have it has a copy. Each copy's sealed box sits in the
+clear part of its slot, sealed to its recipient alone; no second layer of
+encryption wraps it. The rest of the copy's slot, only an acknowledgement, is
+encrypted with a store key already accepted. The new key may encrypt its own
 introduction. Store creation is the one exception: slot 1 sets up the first
 member and keys, and the creator's copy follows at slot 2 (§10.3).
 
@@ -5063,7 +5065,7 @@ collisions.
 | Object | In the clear | Encrypted |
 |---|---|---|
 | Key introduction (inside an admin entry) | nothing beyond the slot's kind | the key's random id and the SHA-256 of its 32 bytes |
-| Key copy (its own slot) | audience, key id, recipient member, the exact sealing key | the sealed key. Outside the seal, the copy is encrypted with an accepted store key; the member id and sealing key are authenticated in each copy |
+| Key copy (its own slot) | audience, key id, recipient member, the exact sealing key, and the sealed box itself | the key, inside a box sealed to the recipient alone; the box also authenticates the clear routing. No store key wraps the box. The slot's body, only an acknowledgement, is under an accepted store key |
 | Any slot | its kind | its device and claim number, under the store key |
 | Writes slot | the kind | a header naming which audiences its parts belong to, under the store key; each part under its audience's key |
 | S3 key delivery, `<store>/access-keys/<member>/<attempt>` | the path | the access key, sealed to the member |
