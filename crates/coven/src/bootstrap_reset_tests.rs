@@ -131,6 +131,61 @@ fn custody(f: &Fixture) -> coven_crypto::custody::StoreKeychain {
 }
 
 #[tokio::test]
+async fn reset_keeps_passphrase_sessions_until_the_replacement_handle_closes() {
+    use coven_crypto::custody::{KeyringCustody, PassphraseCustody};
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    uploaded(&f, "kept").await;
+    f.handle.close().await.unwrap();
+    let keychain = Arc::new(custody(&f));
+    let member = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone()))
+        .unwrap()
+        .unwrap();
+    let ring = StoreKeyCustody::unlock(&KeyringCustody::new(keychain))
+        .unwrap()
+        .unwrap();
+    let member_session = KeySession::member(Arc::new(PassphraseCustody::new(
+        Passphrase::new("member secret".into()),
+        f.directory.owned_file(StoreFile::MemberKeys),
+        f.directory.id(),
+    )))
+    .unwrap();
+    member_session.persist(&member).unwrap();
+    let key_session = KeySession::store(Arc::new(PassphraseCustody::new(
+        Passphrase::new("store secret".into()),
+        f.directory.owned_file(StoreFile::StoreKeys),
+        f.directory.id(),
+    )))
+    .unwrap();
+    key_session.persist(&ring).unwrap();
+    drop((member_session, key_session));
+    let configured = || {
+        reopen(&f)
+            .identity_custody(IdentityCustody::Passphrase(Passphrase::new(
+                "member secret".into(),
+            )))
+            .key_custody(KeyCustody::Passphrase(Passphrase::new(
+                "store secret".into(),
+            )))
+    };
+    let handle = configured()
+        .reset_device(f.directory.id(), "Replacement")
+        .await
+        .unwrap();
+    assert_eq!(notes(&handle).await, ["kept"]);
+    assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
+    handle.close().await.unwrap();
+    let reopened = configured().open(f.directory.id()).await.unwrap();
+    assert_eq!(notes(&reopened).await, ["kept"]);
+    assert_eq!(
+        reopened.store_key_state().unwrap(),
+        StoreKeyState::Available
+    );
+    reopened.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();

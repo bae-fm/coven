@@ -436,6 +436,13 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder.rs", "CovenBuilder", "connector"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "database"),
         ("crates/coven/src/builder.rs", "CovenBuilder", "keychain"),
+        // Builder setters replace a configured or already-unlocked custody choice.
+        ("crates/coven/src/builder.rs", "CovenBuilder", "key_custody"),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "identity_custody",
+        ),
         (
             "crates/coven/src/builder.rs",
             "CovenBuilder",

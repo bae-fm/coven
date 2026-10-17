@@ -44,24 +44,29 @@ pub(crate) async fn reset_device(
     };
     // One custody instance per key kind reads now and keeps them at publication.
     let identity = CovenBuilder::make_identity(
-        std::mem::replace(&mut builder.identity, IdentityCustody::InMemory),
+        std::mem::replace(
+            &mut builder.identity,
+            CustodyChoice::Configured(IdentityCustody::InMemory),
+        ),
         &directory,
         store,
         keychain.clone(),
-    );
-    builder.identity = IdentityCustody::Custom(identity.clone());
-    let member = KeySession::member(identity)?
+    )?;
+    builder.identity = CustodyChoice::Session(identity.clone());
+    let member = identity
         .read()?
         .ok_or(SyncError::from(StorageFailure::MemberKeysMissing))?;
     let keys = CovenBuilder::make_keys(
-        std::mem::replace(&mut builder.keys, KeyCustody::InMemory),
+        std::mem::replace(
+            &mut builder.keys,
+            CustodyChoice::Configured(KeyCustody::InMemory),
+        ),
         &directory,
         store,
         keychain,
-    );
-    builder.keys = KeyCustody::Custom(keys.clone());
+    )?;
     // Unlocking must succeed; loading acquires any store key it lacks.
-    KeySession::store(keys)?;
+    builder.keys = CustodyChoice::Session(keys);
     // The connection is reached before the damaged files move: one status
     // read of slot 1, which publishes nothing.
     builder
