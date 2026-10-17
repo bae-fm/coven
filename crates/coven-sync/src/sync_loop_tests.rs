@@ -1,6 +1,66 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 
+/// E5 and sync-pass's Object reads: an incomplete read is retryable input,
+/// never evidence that the slot's bytes cannot apply.
+#[tokio::test]
+async fn slot_read_failures_keep_their_pass_status_and_retry() {
+    use coven_storage::{
+        test_utils::{BodyFailure, Faults},
+        StorageFailure,
+    };
+    for body in [false, true] {
+        for failure in [StorageFailure::Network, StorageFailure::PermissionDenied] {
+            if body && failure != StorageFailure::Network {
+                continue;
+            }
+            let group = Group::new();
+            let ana = group.device(1).await;
+            let ben = group.device(2).await;
+            group.create(&ana).await;
+            group.admit(&ana, &ben).await;
+            ben.sync.pass().await.unwrap();
+            let before = ben.database().applied_slot().await.unwrap();
+            insert(ana.database(), "a", "read after retry").await;
+            ana.sync.pass().await.unwrap();
+            let path = ana.sync.path(before + 1).unwrap();
+            let mut faults = Faults::none();
+            if body {
+                faults
+                    .body_failures
+                    .insert(path, BodyFailure::Interrupted(1));
+            } else {
+                faults.read_failures.insert(path, failure);
+            }
+            ben.storage.set_faults(faults).await;
+            let error = ben.sync.pass().await.unwrap_err();
+            let shown = super::failed(&ben.sync, error);
+            match failure {
+                StorageFailure::Network => {
+                    assert!(matches!(shown, SyncStatus::Offline { .. }), "{shown:?}")
+                }
+                _ => assert!(matches!(shown, SyncStatus::Failed { .. }), "{shown:?}"),
+            }
+            assert_eq!(ben.database().applied_slot().await.unwrap(), before);
+            assert!(ben
+                .database()
+                .pending::<PendingRecord>()
+                .await
+                .unwrap()
+                .is_empty());
+            ben.storage.set_faults(Faults::none()).await;
+            ben.sync.pass().await.unwrap();
+            assert_eq!(
+                rows(ben.database()).await,
+                [("a".into(), "read after retry".into())]
+            );
+            for device in [&ana, &ben] {
+                device.database().close().await.unwrap();
+            }
+        }
+    }
+}
+
 async fn reached(device: &Device, slot: u64) {
     let mut status = device.sync.state.subscribe();
     tokio::time::timeout(

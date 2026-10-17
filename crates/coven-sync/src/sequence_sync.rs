@@ -550,6 +550,11 @@ impl SequenceSync {
     }
 
     async fn block(&self, session: &mut Session, slot: Slot, error: SyncError) -> SyncError {
+        // A failed provider request says nothing about whether the slot can
+        // apply. Preserve the read failure for the pass's retry and status (E5).
+        if matches!(error, SyncError::Storage(_)) {
+            return error;
+        }
         if let SyncError::DeviceIdInUse(evidence) = error {
             return self.state.stop_copy(evidence);
         }
@@ -566,10 +571,6 @@ impl SequenceSync {
             },
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
             SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
-            SyncError::Storage(error) => PendingReason::Storage {
-                provider: self.storage.config().provider(),
-                failure: error.failure(),
-            },
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
             }
