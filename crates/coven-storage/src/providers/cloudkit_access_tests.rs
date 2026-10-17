@@ -133,3 +133,29 @@ fn revoking_from_a_public_share_removes_the_participant_and_reports_public_acces
     let (removed, _) = revocation("share", true, &participants, None, "CY@example.test");
     assert_eq!(removed, [2]);
 }
+
+#[test]
+fn a_share_from_another_location_names_each_differing_part_and_both_values() {
+    let identity = |owner: &str, record: &str| ShareIdentity {
+        container: "iCloud.example".into(),
+        zone: "coven-zone".into(),
+        owner: owner.into(),
+        record: record.into(),
+    };
+    let expected = identity("_owner", "cloudkit.zoneshare");
+    assert_eq!(
+        identity("_owner", "cloudkit.zoneshare").mismatch(&expected),
+        None
+    );
+    assert_eq!(
+        identity("_other", "cloudkit.zoneshare").mismatch(&expected),
+        Some(r#"share metadata zone owner name "_other", invitation expects "_owner""#.into())
+    );
+    assert_eq!(
+        identity("_other", "share").mismatch(&expected),
+        Some(
+            r#"share metadata zone owner name "_other", invitation expects "_owner"; share metadata share record name "share", invitation expects "cloudkit.zoneshare""#
+                .into()
+        )
+    );
+}

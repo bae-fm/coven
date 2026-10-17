@@ -21,6 +21,35 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+/// Where a share lives, from its metadata or from the invitation's location.
+/// None of it is secret; the share URL never enters it.
+struct ShareIdentity {
+    container: String,
+    zone: String,
+    owner: String,
+    record: String,
+}
+
+impl ShareIdentity {
+    /// Every part of the share's metadata that differs from the invitation's
+    /// location, with both values, or None when the share is the expected one.
+    fn mismatch(&self, expected: &ShareIdentity) -> Option<String> {
+        let differences: Vec<_> = [
+            ("container", &self.container, &expected.container),
+            ("zone name", &self.zone, &expected.zone),
+            ("zone owner name", &self.owner, &expected.owner),
+            ("share record name", &self.record, &expected.record),
+        ]
+        .into_iter()
+        .filter(|(_, found, expected)| found != expected)
+        .map(|(part, found, expected)| {
+            format!("share metadata {part} {found:?}, invitation expects {expected:?}")
+        })
+        .collect();
+        (!differences.is_empty()).then(|| differences.join("; "))
+    }
+}
+
 struct Participant(Retained<CKShareParticipant>);
 // SAFETY: Each participant is copied from its callback and moved to one caller.
 // It is not Sync or Clone; all subsequent mutation is exclusive to that caller.
@@ -137,8 +166,9 @@ fn metadata(
     container: &CKContainer,
     url: &SecretText,
 ) -> Result<CloudKitRequest<Metadata>, StorageError> {
-    let url = NSURL::URLWithString(&NSString::from_str(url.as_str()))
-        .ok_or(StorageFailure::InvitationMismatch)?;
+    let url = NSURL::URLWithString(&NSString::from_str(url.as_str())).ok_or_else(|| {
+        StorageFailure::InvitationMismatch.with_source("NSURL cannot parse the share URL")
+    })?;
     let (complete, result) = completion();
     let value = Arc::new(Mutex::new(None));
     let fetched = value.clone();
@@ -380,19 +410,28 @@ impl CloudKitStorage {
     pub(super) async fn accept(&self, invitation: &StorageInvitation) -> Result<(), StorageError> {
         let crate::invitation::InvitationAcceptance::CloudKitShare { url } = &invitation.acceptance
         else {
-            return Err(StorageFailure::InvitationMismatch.into());
+            return Err(StorageFailure::InvitationMismatch
+                .with_source("the invitation carries no CloudKit share URL"));
         };
         let metadata = metadata(&self.container, url)?.wait().await?;
         let already_accepted = unsafe {
             let share = metadata.0.share();
             let id = share.recordID();
             let zone_id = id.zoneID();
-            if metadata.0.containerIdentifier().to_string() != self.container_id
-                || zone_id.zoneName().to_string() != self.zone
-                || zone_id.ownerName().to_string() != self.owner
-                || id.recordName().to_string() != self.share_name()
-            {
-                return Err(StorageFailure::InvitationMismatch.into());
+            let found = ShareIdentity {
+                container: metadata.0.containerIdentifier().to_string(),
+                zone: zone_id.zoneName().to_string(),
+                owner: zone_id.ownerName().to_string(),
+                record: id.recordName().to_string(),
+            };
+            let expected = ShareIdentity {
+                container: self.container_id.clone(),
+                zone: self.zone.clone(),
+                owner: self.owner.clone(),
+                record: self.share_name(),
+            };
+            if let Some(mismatch) = found.mismatch(&expected) {
+                return Err(StorageFailure::InvitationMismatch.with_source(mismatch));
             }
             if metadata.0.participantPermission() != CKShareParticipantPermission::ReadWrite {
                 return Err(StorageFailure::PermissionDenied.into());
