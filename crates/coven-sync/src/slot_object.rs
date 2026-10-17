@@ -17,7 +17,7 @@ use coven_format::{
     sealed_write::WriteObjectPrefix,
     sequence::{SlotFrame, SlotHeader},
 };
-use coven_foundation::id_source::MemberId;
+use coven_merge::Audience;
 use std::{
     io::{Read, Seek, SeekFrom},
     sync::Arc,
@@ -127,7 +127,7 @@ pub(crate) fn open(
     path: &ObjectPath,
     ring: &StoreKeyring,
     history: &History,
-    me: MemberId,
+    readable: impl Fn(&Audience) -> bool,
 ) -> Result<ReceivedSlot, SyncError> {
     let size = input.len();
     let mut head = read_exact(
@@ -194,7 +194,7 @@ pub(crate) fn open(
         if length == 0 || length > plain.len() - position {
             return Err(damaged(path, Refusal::Parse { cause: None }));
         }
-        let write = inner(&mut plain, path, length, ring, history, me)?;
+        let write = inner(&mut plain, path, length, ring, history, &readable)?;
         checked(
             path,
             coven_format::writes_slot::check_write(&header, previous, &write.header.header),
@@ -409,7 +409,7 @@ fn inner(
     length: u64,
     ring: &StoreKeyring,
     history: &History,
-    me: MemberId,
+    readable: impl Fn(&Audience) -> bool,
 ) -> Result<DownloadedWriteStream<PartPlaintext>, SyncError> {
     let start = input.stream_position().map_err(SyncError::disk)?;
     let mut bytes = read_exact(input, 23, path)?;
@@ -506,7 +506,7 @@ fn inner(
     while let Some(coordinate) = layout.next_chunk() {
         let part = &header.parts[coordinate.section as usize - 1];
         if coordinate.index == 0 {
-            let readable = crate::effects::belongs(&history.state, &part.audience, &me);
+            let readable = readable(&part.audience);
             let opens = readable && history.accepted(ring, &part.audience, coordinate.key);
             if readable && !opens {
                 return Err(SyncError::KeyUnavailable(coordinate.key));

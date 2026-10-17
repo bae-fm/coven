@@ -518,3 +518,376 @@ async fn a_raise_whose_version_is_already_established_is_satisfied() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+// §15 and E6: an explicit reload resumes its original selection and target.
+#[tokio::test]
+async fn a_reload_reopens_with_its_selected_snapshot_and_target() {
+    for background in [false, true] {
+        let group = Group::new();
+        let ana = group.device(1).await;
+        let ben = group.device(2).await;
+        group.create(&ana).await;
+        group.admit(&ana, &ben).await;
+        insert(&ana.sync.database, "a", "original snapshot").await;
+        ana.sync.pass().await.unwrap();
+        let first = ana.sync.snapshot(Audience::Store).await.unwrap();
+        ben.sync.pass().await.unwrap();
+        let target = ben.database().applied_slot().await.unwrap();
+        let original = ben.sync.session.lock().await.history.announcements[&first]
+            .snapshot
+            .clone();
+        let path = crate::snapshot_object::path(group.store, &original).unwrap();
+        ben.storage
+            .set_faults(Faults {
+                read_failures: [(path, StorageFailure::PermissionDenied)].into(),
+                ..Faults::none()
+            })
+            .await;
+        assert!(ben.sync.reload_from_snapshot().await.is_err());
+        let operation = ben
+            .database()
+            .operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kind == "sequence-reload")
+            .expect("a failed explicit reload retains its selection")
+            .id;
+        assert!(ben
+            .database()
+            .operation_pending::<PendingRecord>(operation)
+            .await
+            .unwrap()
+            .is_some());
+        insert(&ben.sync.database, "local", "waiting throughout reload").await;
+        ben.storage.set_faults(Faults::none()).await;
+        insert(&ana.sync.database, "later", "outside the fixed target").await;
+        ana.sync.pass().await.unwrap();
+        let newest = ana.sync.snapshot(Audience::Store).await.unwrap();
+        let newest = ana.sync.session.lock().await.history.announcements[&newest]
+            .snapshot
+            .clone();
+        let newest_path = crate::snapshot_object::path(group.store, &newest).unwrap();
+        let ben = group.reopen(ben).await;
+        let mut failures =
+            std::collections::BTreeMap::from([(newest_path, StorageFailure::PermissionDenied)]);
+        if background {
+            failures.insert(
+                ObjectPath::slot(group.store, (target + 1).try_into().unwrap()),
+                StorageFailure::Network,
+            );
+        }
+        ben.storage
+            .set_faults(Faults {
+                read_failures: failures,
+                ..Faults::none()
+            })
+            .await;
+        if background {
+            assert!(ben.sync.retry_pending_operation(operation).await.is_err());
+        } else {
+            ben.sync.reload_from_snapshot().await.unwrap();
+        }
+        assert_eq!(ben.database().applied_slot().await.unwrap(), target);
+        assert_eq!(
+            rows(ben.database()).await,
+            [
+                ("a".into(), "original snapshot".into()),
+                ("local".into(), "waiting throughout reload".into()),
+            ]
+        );
+        assert!(ben.database().operation(operation).await.unwrap().is_none());
+        ana.database().close().await.unwrap();
+        ben.database().close().await.unwrap();
+    }
+}
+
+// §15: retention can remove the selected snapshot or its required suffix.
+#[tokio::test]
+async fn a_retained_reload_uses_a_newer_floor_when_its_suffix_is_deleted() {
+    for (older_circle_coverage, departure) in [(false, false), (true, false), (true, true)] {
+        let group = Group::new();
+        let ana = group.device(1).await;
+        let ben = group.device(2).await;
+        group.create(&ana).await;
+        group.admit(&ana, &ben).await;
+        if departure {
+            let keeper = ana.sync.create_circle("Private".into()).await.unwrap();
+            ana.sync.snapshot(Audience::Circle(keeper)).await.unwrap();
+        }
+        let circle = if older_circle_coverage {
+            let circle = ana.sync.create_circle("Ana's".into()).await.unwrap();
+            if departure {
+                ana.sync
+                    .administer(StoreChange::AddCircleMember {
+                        circle,
+                        member: ben.identity.member(),
+                    })
+                    .await
+                    .unwrap();
+            }
+            let snapshot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+            Some((circle, snapshot))
+        } else {
+            None
+        };
+        insert(ana.database(), "a", "first").await;
+        ana.sync.pass().await.unwrap();
+        let first = ana.sync.snapshot(Audience::Store).await.unwrap();
+        ben.sync.pass().await.unwrap();
+        let selected = if departure { circle.unwrap().1 } else { first };
+        let old = ben.sync.session.lock().await.history.announcements[&selected].clone();
+        let path = crate::snapshot_object::path(group.store, &old.snapshot).unwrap();
+        ben.storage
+            .set_faults(Faults {
+                read_failures: [(path.clone(), StorageFailure::PermissionDenied)].into(),
+                ..Faults::none()
+            })
+            .await;
+        assert!(ben.sync.reload_from_snapshot().await.is_err());
+        assert!(ben
+            .database()
+            .operations()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.kind == "sequence-reload"));
+        ben.storage.set_faults(Faults::none()).await;
+        insert(ana.database(), "b", "covered by the newer floor").await;
+        ana.sync.pass().await.unwrap();
+        ana.sync.snapshot(Audience::Store).await.unwrap();
+        let departed_at = if departure {
+            ana.sync
+                .snapshot(Audience::Circle(circle.unwrap().0))
+                .await
+                .unwrap();
+            ana.sync
+                .administer(StoreChange::RemoveCircleMember {
+                    circle: circle.unwrap().0,
+                    member: ben.identity.member(),
+                })
+                .await
+                .unwrap();
+            Some(ana.database().applied_slot().await.unwrap())
+        } else {
+            None
+        };
+        group.clock.set(
+            std::time::UNIX_EPOCH
+                + crate::sequence_sync::sequence_retention::GRACE
+                + std::time::Duration::from_secs(1),
+        );
+        ana.sync.pass().await.unwrap();
+        ana.sync.pass().await.unwrap();
+        assert!(ana.storage.status(&path).await.unwrap().is_none());
+        let floor = stored_floor(&ana).await;
+        assert_eq!(
+            floor.header.first.0 > old.covers + 1,
+            !older_circle_coverage
+        );
+        let ben = group.reopen(ben).await;
+        ben.sync.reload_from_snapshot().await.unwrap();
+        assert!(ben.database().applied_slot().await.unwrap() >= floor.header.first.0 - 1);
+        if let Some(departed_at) = departed_at {
+            // §15: the chosen followed set and installed prefix agree.
+            assert!(ben.database().applied_slot().await.unwrap() >= departed_at);
+            assert!(!ben
+                .database()
+                .store_state()
+                .await
+                .unwrap()
+                .reads_circle(circle.unwrap().0, &ben.identity.member(),));
+        }
+        assert_eq!(rows(ben.database()).await, rows(ana.database()).await);
+        assert!(ben.database().operations().await.unwrap().is_empty());
+        ana.database().close().await.unwrap();
+        ben.database().close().await.unwrap();
+    }
+}
+
+// §15: authenticating a later floor must not apply its membership to the fixed target.
+#[tokio::test]
+async fn a_reload_keeps_its_selected_audiences_when_a_later_floor_records_departure() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember {
+            circle,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    pin(ana.database(), PIN_1, circle, "snapshot").await;
+    ana.sync.pass().await.unwrap();
+    let first = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+    pin(ana.database(), PIN_2, circle, "retained slot").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync.snapshot(Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let target = ben.database().applied_slot().await.unwrap();
+    let selected = ben.sync.session.lock().await.history.announcements[&first].clone();
+    let path = crate::snapshot_object::path(group.store, &selected.snapshot).unwrap();
+    ben.storage
+        .set_faults(Faults {
+            read_failures: [(path.clone(), StorageFailure::PermissionDenied)].into(),
+            ..Faults::none()
+        })
+        .await;
+    assert!(ben.sync.reload_from_snapshot().await.is_err());
+    ben.storage.set_faults(Faults::none()).await;
+    ana.sync
+        .administer(StoreChange::RemoveCircleMember {
+            circle,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    group.clock.set(
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(1),
+    );
+    ana.sync.pass().await.unwrap();
+    let floor = stored_floor(&ana).await;
+    assert!(floor.header.at > target);
+    assert!(floor.header.first.0 <= selected.covers + 1);
+    assert!(ana.storage.status(&path).await.unwrap().is_some());
+    let ben = group.reopen(ben).await;
+    ben.sync.reload_from_snapshot().await.unwrap();
+    assert_eq!(ben.database().applied_slot().await.unwrap(), target);
+    assert_eq!(
+        pins(ben.database()).await,
+        [
+            (PIN_1.into(), "snapshot".into()),
+            (PIN_2.into(), "retained slot".into()),
+        ]
+    );
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}
+
+// §18: dropping the caller while a body is loading leaves the operation resumable.
+#[tokio::test]
+async fn cancelling_a_reload_keeps_its_selected_target_and_waiting_writes() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    insert(ana.database(), "a", "in the snapshot").await;
+    ana.sync.pass().await.unwrap();
+    let first = ana.sync.snapshot(Audience::Store).await.unwrap();
+    ben.sync.pass().await.unwrap();
+    let target = ben.database().applied_slot().await.unwrap();
+    let snapshot = ben.sync.session.lock().await.history.announcements[&first]
+        .snapshot
+        .clone();
+    let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (release, held) = tokio::sync::oneshot::channel();
+    ben.storage.hold_next_read(path, started, held).await;
+    {
+        let reload = ben.sync.reload_from_snapshot();
+        tokio::pin!(reload);
+        tokio::select! {
+            result = &mut reload => panic!("held reload returned: {result:?}"),
+            result = observed => result.unwrap(),
+        }
+        insert(ben.database(), "local", "while loading").await;
+        assert_eq!(ben.database().applied_slot().await.unwrap(), target);
+        assert!(ben
+            .database()
+            .operations()
+            .await
+            .unwrap()
+            .iter()
+            .any(|r| r.kind == "sequence-reload"));
+    }
+    assert!(
+        release.send(()).is_err(),
+        "the cancelled read released its receiver"
+    );
+    let ben = group.reopen(ben).await;
+    ben.sync.reload_from_snapshot().await.unwrap();
+    assert_eq!(ben.database().applied_slot().await.unwrap(), target);
+    assert_eq!(rows(ben.database()).await.len(), 2);
+    assert!(ben.database().operations().await.unwrap().is_empty());
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}
+
+// §19.1 and E6: repeating a reload cannot recheck a refused body without an update.
+#[tokio::test]
+async fn a_reload_preserves_a_refused_body_until_an_applicable_update() {
+    for explicit in [false, true] {
+        let group = Group::new();
+        let ana = group.device(1).await;
+        let ben = group.device(2).await;
+        group.create(&ana).await;
+        group.admit(&ana, &ben).await;
+        let slot = ana.sync.snapshot(Audience::Store).await.unwrap();
+        ben.sync.pass().await.unwrap();
+        let snapshot = ben.sync.session.lock().await.history.announcements[&slot]
+            .snapshot
+            .clone();
+        let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+        let size = group.storage.status(&path).await.unwrap().unwrap().size;
+        group
+            .storage
+            .corrupt_byte(&path, size as usize - 1)
+            .await
+            .unwrap();
+        assert!(matches!(
+            ben.sync.reload_from_snapshot().await,
+            Err(SyncError::Damaged(_))
+        ));
+        let operation = ben
+            .database()
+            .operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kind == "sequence-reload")
+            .unwrap();
+        let pending = ben
+            .database()
+            .operation_pending::<PendingRecord>(operation.id)
+            .await
+            .unwrap()
+            .unwrap();
+        let result = if explicit {
+            ben.sync.reload_from_snapshot().await
+        } else {
+            ben.sync
+                .retry_pending_operation(operation.id)
+                .await
+                .map(drop)
+        };
+        assert!(
+            matches!(&result, Err(SyncError::Pending(record)) if **record == pending),
+            "{result:?}"
+        );
+        assert_eq!(
+            ben.database()
+                .operation_pending::<PendingRecord>(operation.id)
+                .await
+                .unwrap(),
+            Some(pending)
+        );
+        assert_eq!(
+            ben.database()
+                .operation(operation.id)
+                .await
+                .unwrap()
+                .unwrap()
+                .data,
+            operation.data
+        );
+        ana.database().close().await.unwrap();
+        ben.database().close().await.unwrap();
+    }
+}

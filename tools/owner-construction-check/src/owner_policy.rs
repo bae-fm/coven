@@ -746,6 +746,8 @@ pub(crate) const POLICY: Policy = Policy {
         "SnapshotObject",
         "SelectedSnapshot",
         "ReloadStart",
+        // One reload's selected streams and installation target.
+        "ReloadInputs",
         "ClaimSource",
         "SnapshotUploadSource",
         "FileTransfer",

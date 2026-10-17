@@ -759,6 +759,7 @@ async fn a_returning_device_loads_snapshots_covering_deleted_writes_and_keeps_it
     network.close().await;
 }
 
+/// §6 and E5: a complete reset slot waits for its required reload body.
 #[tokio::test]
 async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     let network = Network::new(2).await;
@@ -788,9 +789,16 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     .unwrap()
     .unwrap()
     .clone();
-    let SyncStatus::Blocked { slot, .. } = blocked else {
+    let SyncStatus::Blocked { slot, reason } = blocked else {
         unreachable!()
     };
+    assert!(matches!(
+        reason,
+        PendingReason::Storage {
+            failure: coven_storage::StorageFailure::NotFound,
+            ..
+        }
+    ));
     assert!(reader
         .pending()
         .await

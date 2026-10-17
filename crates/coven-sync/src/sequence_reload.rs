@@ -11,7 +11,7 @@ use crate::{
     PendingRecord, Refusal, SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::{IncomingSlot, SlotContent, SnapshotReload, SnapshotSource};
+use coven_database::{IncomingSlot, OperationUpdate, SlotContent, SnapshotReload, SnapshotSource};
 use coven_format::sequence::{Purpose, SlotFrame, SnapshotAnnouncement};
 use coven_merge::{Audience, Slot};
 use coven_storage::ObjectPath;
@@ -78,7 +78,24 @@ enum ReloadStart {
     Current(Audience),
 }
 
+struct ReloadInputs {
+    starts: Vec<ReloadStart>,
+    target: u64,
+    history: History,
+    operation: Option<OperationUpdate>,
+}
+
+#[path = "sequence_reload_operation.rs"]
+mod operation;
+
 impl ReloadStart {
+    fn audience(&self) -> &Audience {
+        match self {
+            ReloadStart::Stored(snapshot) => &snapshot.announcement().snapshot.audience,
+            ReloadStart::Empty(audience) | ReloadStart::Current(audience) => audience,
+        }
+    }
+
     fn covers(&self, through: u64) -> u64 {
         match self {
             ReloadStart::Stored(snapshot) => snapshot.announcement().covers,
@@ -244,7 +261,7 @@ impl SequenceSync {
                 &path,
                 ring,
                 history,
-                member.member(),
+                |audience| crate::effects::belongs(&history.state, audience, &member.member()),
             )?;
             history.consume(slot, member.member());
             history.acquire(ring, member)?;
@@ -293,9 +310,12 @@ impl SequenceSync {
             match self
                 .install_selected(
                     session,
-                    starts,
-                    target,
-                    history,
+                    ReloadInputs {
+                        starts,
+                        target,
+                        history,
+                        operation: None,
+                    },
                     &mut tentative_ring,
                     member,
                     Some(&floor),
@@ -311,73 +331,6 @@ impl SequenceSync {
                 }
             }
         }
-    }
-
-    /// Reload readable audiences from the floor's snapshots, or else from
-    /// their newest usable announced snapshots, and the following slots,
-    /// keeping this device's id and waiting writes (§19.2). It cannot bypass
-    /// a blocked slot.
-    pub async fn reload_from_snapshot(&self) -> Result<(), SyncError> {
-        let mut session = self.session.lock().await;
-        let member = self
-            .member
-            .read()?
-            .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let mut ring = self.ring(&mut session, &member).await?;
-        self.read_forward(&mut session, &mut ring, &member).await?;
-        self.settle_open(&mut session, &mut ring, &member).await?;
-        if let Some(floor) = session.floor.clone() {
-            return self
-                .reload_floor(&mut session, floor, &mut ring, &member)
-                .await;
-        }
-        let history = session.history.clone();
-        let readable: Vec<_> = std::iter::once(Audience::Store)
-            .chain(
-                history
-                    .state
-                    .readable_circles(&member.member())
-                    .into_iter()
-                    .map(Audience::Circle),
-            )
-            .collect();
-        let mut starts = Vec::new();
-        for audience in readable {
-            match history.announcements.values().rev().find(|announcement| {
-                announcement.snapshot.audience == audience && history.usable(announcement)
-            }) {
-                Some(announcement) => starts.push(ReloadStart::Stored(
-                    self.select(announcement.clone(), &ring).await?,
-                )),
-                None => starts.push(ReloadStart::Current(audience)),
-            }
-        }
-        if !starts
-            .iter()
-            .any(|start| matches!(start, ReloadStart::Stored(_)))
-        {
-            return Err(coven_storage::StorageFailure::NotFound
-                .with_source("no usable snapshot is announced for a readable audience")
-                .into());
-        }
-        let target = session.through;
-        if let Some(newer) = self
-            .install_selected(
-                &mut session,
-                starts,
-                target,
-                history,
-                &mut ring,
-                &member,
-                None,
-            )
-            .await?
-        {
-            return self
-                .reload_floor(&mut session, newer, &mut ring, &member)
-                .await;
-        }
-        Ok(())
     }
 
     /// Load the audiences an applied admin slot made `required`: a raise's or
@@ -497,9 +450,12 @@ impl SequenceSync {
         if let Some(newer) = self
             .install_selected(
                 session,
-                starts,
-                target,
-                history,
+                ReloadInputs {
+                    starts,
+                    target,
+                    history,
+                    operation: None,
+                },
                 &mut ring,
                 member,
                 floor.as_ref(),
@@ -523,13 +479,17 @@ impl SequenceSync {
     async fn install_selected(
         &self,
         session: &mut Session,
-        starts: Vec<ReloadStart>,
-        target: u64,
-        history: History,
+        inputs: ReloadInputs,
         ring: &mut StoreKeyring,
         member: &MemberIdentity,
         previous_floor: Option<&FloorObject>,
     ) -> Result<Option<FloorObject>, SyncError> {
+        let ReloadInputs {
+            starts,
+            target,
+            history,
+            operation,
+        } = inputs;
         let first = starts
             .iter()
             .map(|start| start.covers(session.through))
@@ -565,7 +525,7 @@ impl SequenceSync {
                 &path,
                 ring,
                 &history,
-                member.member(),
+                |audience| starts.iter().any(|start| start.audience() == audience),
             )?;
             if number > session.through && number > store_covers {
                 self.check_copy(&received, &path).await?;
@@ -631,7 +591,7 @@ impl SequenceSync {
                 boundaries: at_target.boundaries.clone(),
                 provider: at_target
                     .provider_changes(member.member(), &self.invited_accounts().await?)?,
-                operation: None,
+                operation,
                 authorship,
             })
             .await?;

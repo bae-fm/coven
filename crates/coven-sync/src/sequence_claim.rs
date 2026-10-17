@@ -97,7 +97,13 @@ impl SequenceSync {
                         path,
                         ring,
                         &session.history,
-                        member.member(),
+                        |audience| {
+                            crate::effects::belongs(
+                                &session.history.state,
+                                audience,
+                                &member.member(),
+                            )
+                        },
                     )?;
                     self.check_copy(&received, path).await?;
                     self.database
@@ -315,7 +321,9 @@ impl SequenceSync {
                 path,
                 ring,
                 &session.history,
-                member.member(),
+                |audience| {
+                    crate::effects::belongs(&session.history.state, audience, &member.member())
+                },
             )?;
             let mut history = session.history.clone();
             let incoming = history.consume(received, member.member());

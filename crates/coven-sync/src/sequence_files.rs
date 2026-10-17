@@ -230,7 +230,7 @@ impl SequenceSync {
             &input.object().path,
             ring,
             history,
-            member.member(),
+            |audience| crate::effects::belongs(&history.state, audience, &member.member()),
         )?;
         let mut files = BTreeSet::new();
         let mut unread = BTreeSet::new();

@@ -83,10 +83,11 @@ impl SequenceSync {
         // Without store keys in custody, history waits for this member's
         // copies in storage (§11).
         let (history, locked) = match keys.read()? {
-            Some(mut ring) => (
-                History::restore(&originals, directory.id(), &mut ring, &identity)?,
-                false,
-            ),
+            Some(mut ring) => {
+                let history = History::restore(&originals, directory.id(), &mut ring, &identity)?;
+                keys.persist(&ring)?;
+                (history, false)
+            }
             None => (History::default(), !originals.is_empty()),
         };
         let blocked = database
@@ -277,6 +278,7 @@ impl SequenceSync {
         if let SequenceStatus::Stopped(_) = &*self.state.subscribe().borrow() {
             return self.state.check();
         }
+        self.resume_reload(session, ring, member).await?;
         if let Some(record) = &session.blocked {
             if !self
                 .database
@@ -324,7 +326,13 @@ impl SequenceSync {
                         &path,
                         &tentative_ring,
                         &virtual_history,
-                        member.member(),
+                        |audience| {
+                            crate::effects::belongs(
+                                &virtual_history.state,
+                                audience,
+                                &member.member(),
+                            )
+                        },
                     ) {
                         Ok(slot) => slot,
                         Err(error) => {
@@ -408,6 +416,11 @@ impl SequenceSync {
             }
             *ring = tentative_ring;
             if let Some((slot, error)) = failure {
+                // A failed slot read supplies no bytes to apply. A failure
+                // during application, including its required reload, blocks.
+                if matches!(error, SyncError::Storage(_)) {
+                    return Err(error);
+                }
                 return Err(self.block(session, slot, error).await);
             }
             if next <= known_end {
@@ -555,11 +568,6 @@ impl SequenceSync {
     }
 
     async fn block(&self, session: &mut Session, slot: Slot, error: SyncError) -> SyncError {
-        // A failed provider request says nothing about whether the slot can
-        // apply. Preserve the read failure for the pass's retry and status (E5).
-        if matches!(error, SyncError::Storage(_)) {
-            return error;
-        }
         if let SyncError::DeviceIdInUse(evidence) = error {
             return self.state.stop_copy(evidence);
         }
@@ -576,6 +584,10 @@ impl SequenceSync {
             },
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
             SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
+            SyncError::Storage(error) => PendingReason::Storage {
+                provider: self.storage.config().provider(),
+                failure: error.failure(),
+            },
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
             }

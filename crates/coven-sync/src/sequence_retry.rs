@@ -15,11 +15,22 @@ impl SequenceSync {
         &self,
         id: OperationId,
     ) -> Result<SequenceStatus, SyncError> {
+        self.retry_operation(id).await?;
+        self.pass().await
+    }
+
+    pub(crate) async fn retry_operation(&self, id: OperationId) -> Result<(), SyncError> {
         if self.database.operation(id).await?.is_none() {
             return Err(SyncError::NotPending(id));
         }
         if let Some(pending) = self.database.operation_pending::<PendingRecord>(id).await? {
-            if pending.retry() == Retry::Never {
+            if pending.retry() == Retry::Never
+                || (pending.retry() == Retry::AfterUpdate
+                    && !self
+                        .database
+                        .pending_can_retry::<PendingRecord>(pending.subject.clone())
+                        .await?)
+            {
                 return Err(SyncError::Pending(Box::new(pending)));
             }
             self.database.clear_pending(pending.subject).await?;
@@ -35,7 +46,7 @@ impl SequenceSync {
                 .await?;
         }
         self.waits.forget(RetrySubject::Operation(id));
-        self.pass().await
+        Ok(())
     }
 
     pub(crate) async fn operation_ready(
