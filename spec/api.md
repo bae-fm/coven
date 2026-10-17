@@ -2836,7 +2836,7 @@ impl FileRangeStream<'_> {
 }
 
 pub enum FileReadError {
-    /// This file uses a newer coven format.
+    /// This file uses a newer coven format (§17.2).
     UpdateRequired(RequiredUpdate),
     /// Remote status or uncached bytes were requested with no storage connected.
     NoStorage,
