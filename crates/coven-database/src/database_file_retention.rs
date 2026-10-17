@@ -20,6 +20,33 @@ pub struct FileRetention {
 }
 
 impl Database {
+    /// A snapshot whose absence was confirmed by an exact read or deletion.
+    pub async fn snapshot_absent(
+        &self,
+        id: coven_format::admin::SnapshotId,
+    ) -> Result<bool, DbError> {
+        self.call(move |inner| {
+            let reader = inner.access.readers.acquire_reader();
+            reader.with_reader(|db| db.query_row(
+                "SELECT EXISTS(SELECT 1 FROM _coven_absent_snapshots WHERE audience=?1 AND device=?2 AND number=?3)",
+                params![crate::write_encoding::audience_text(&id.audience), id.device.0.to_be_bytes(), id.number.to_be_bytes()], |row| row.get(0)))
+        }).await
+    }
+
+    /// Confirm that a snapshot no longer protects its checked file references.
+    /// The references become candidates in the same transaction as that fact.
+    pub async fn record_absent_snapshot(
+        &self,
+        id: coven_format::admin::SnapshotId,
+        files: BTreeSet<(DeviceId, FileId)>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| inner.access.with_writer(|writer| writer.transaction(|db| {
+            for (device, file) in files { insert_candidate(db, device, file)?; }
+            db.internal_execute("INSERT INTO _coven_absent_snapshots(audience,device,number) VALUES(?1,?2,?3) ON CONFLICT DO NOTHING",
+                params![crate::write_encoding::audience_text(&id.audience), id.device.0.to_be_bytes(), id.number.to_be_bytes()])?;
+            Ok(())
+        }))).await
+    }
     /// Every fixed path local data protects, in one read transaction.
     pub async fn retained_files(&self) -> Result<FileRetention, DbError> {
         self.call(move |inner| {

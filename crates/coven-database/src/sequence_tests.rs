@@ -228,6 +228,7 @@ impl Database {
                         state,
                         boundary,
                         reload: vec![],
+                        provider: Default::default(),
                     }),
                 },
             },
@@ -336,7 +337,7 @@ pub(crate) fn reload<R, W>(
     )>,
     writes: Vec<DownloadedWriteStream<W>>,
     authorship: std::sync::Arc<dyn crate::Authorship>,
-) -> crate::SnapshotReload<R, W> {
+) -> crate::SnapshotReload<R, DownloadedWriteStream<W>> {
     let (applied, state, boundaries) = db.inspect_writer(|db| {
         (
             crate::sequence::applied(db).unwrap(),
@@ -412,6 +413,7 @@ pub(crate) fn reload<R, W>(
         target,
         state,
         cutoffs: vec![],
+        provider: Default::default(),
         boundaries,
         operation: None,
         authorship,

@@ -6,8 +6,23 @@ use coven_foundation::id_source::{DeviceId, FileId, KeyId};
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex, Weak};
 
+#[path = "input_bytes.rs"]
+mod bytes;
+pub use bytes::RetainedBytes;
+
+type InputConnection = Arc<Mutex<Option<DatabaseConnection>>>;
+
+fn read_local<R>(
+    reader: &InputConnection,
+    run: impl FnOnce(&DatabaseConnection) -> Result<R, DbError>,
+) -> Result<R, DbError> {
+    let guard = reader.lock().expect("input connection lock poisoned");
+    let reader = guard.as_ref().ok_or(DbError::StoreClosed)?;
+    reader.read_transaction(|| run(reader))
+}
+
 pub(crate) struct InputDatabase {
-    reader: Mutex<DatabaseConnection>,
+    reader: InputConnection,
     writer: Mutex<DatabaseConnection>,
     active: Arc<Mutex<BTreeMap<i64, Weak<InputRead>>>>,
 }
@@ -60,7 +75,54 @@ pub struct InputBudget {
     pub evicted: u64,
 }
 
+/// Copy the current claim attempt's exact bytes from the store connection into
+/// the input catalog, so applying a landed claim reads no provider bytes.
+fn copy_claim(inputs: &InputDatabase, source: &DatabaseConnection, id: i64) -> Result<(), DbError> {
+    inputs.write(|db| {
+        db.internal_execute("DELETE FROM _coven_input_ranges WHERE object=?1", [id])?;
+        crate::claim::read_attempt::<_, DbError>(source, |chunks| {
+            let mut offset = 0u64;
+            for chunk in chunks {
+                let bytes = chunk?;
+                let start = sql_offset(offset)?;
+                offset += bytes.len() as u64;
+                db.internal_execute(
+                    "INSERT INTO _coven_input_ranges(object,start,end,bytes) VALUES(?1,?2,?3,?4)",
+                    (id, start, sql_offset(offset)?, bytes),
+                )?;
+            }
+            Ok(())
+        })?;
+        db.internal_execute(
+            "UPDATE _coven_input_objects SET received=1 WHERE id=?1",
+            [id],
+        )?;
+        evict(db, &inputs.active)
+    })
+}
+
 impl InputDatabase {
+    pub(crate) fn prepare<T>(
+        &self,
+        consume: impl FnOnce(&crate::input_preparation::PreparedInputs<'_>) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        with_locked(&self.writer, |writer| {
+            writer.batch("PRAGMA temp_store=FILE")?;
+            writer.transaction(|db| crate::input_preparation::PreparedInputs::with(db, consume))
+        })
+    }
+    pub(crate) fn prepare_claim<T>(
+        &self,
+        attempt: crate::ClaimAttempt<impl std::io::Read>,
+        consume: impl FnOnce(
+            crate::claim_preparation::PreparedClaim<crate::claim_preparation::PreparedBytes<'_>>,
+        ) -> Result<T, DbError>,
+    ) -> Result<T, DbError> {
+        with_locked(&self.writer, |writer| {
+            writer.batch("PRAGMA temp_store=FILE")?;
+            writer.transaction(|db| crate::claim_preparation::prepare(db, attempt, consume))
+        })
+    }
     fn release(&self, ids: Vec<i64>) -> Result<(), DbError> {
         let pending = self.read(|db| {
             let mut pending = Vec::new();
@@ -90,17 +152,24 @@ impl InputDatabase {
     }
     #[cfg(any(test, feature = "test-utils"))]
     pub(super) fn test_track_work(&self, counter: &crate::test_utils::WorkCounter) {
-        for connection in [&self.reader, &self.writer] {
-            *connection
-                .lock()
-                .expect("input connection lock poisoned")
-                .work
-                .borrow_mut() = Some(counter.clone());
-        }
+        *self
+            .reader
+            .lock()
+            .expect("input connection lock poisoned")
+            .as_ref()
+            .expect("open input reader")
+            .work
+            .borrow_mut() = Some(counter.clone());
+        *self
+            .writer
+            .lock()
+            .expect("input connection lock poisoned")
+            .work
+            .borrow_mut() = Some(counter.clone());
     }
     pub(crate) fn new(reader: DatabaseConnection, writer: DatabaseConnection) -> Self {
         Self {
-            reader: Mutex::new(reader),
+            reader: Arc::new(Mutex::new(Some(reader))),
             writer: Mutex::new(writer),
             active: Arc::new(Mutex::new(BTreeMap::new())),
         }
@@ -121,15 +190,19 @@ impl InputDatabase {
     }
 
     pub(crate) fn close(self) -> Vec<DbError> {
-        [self.reader, self.writer]
+        let reader = self
+            .reader
+            .lock()
+            .expect("input connection lock poisoned")
+            .take()
+            .expect("open input reader");
+        let writer = self
+            .writer
+            .into_inner()
+            .expect("input connection lock poisoned");
+        [reader, writer]
             .into_iter()
-            .filter_map(|connection| {
-                connection
-                    .into_inner()
-                    .expect("input connection lock poisoned")
-                    .close()
-                    .err()
-            })
+            .filter_map(|connection| connection.close().err())
             .collect()
     }
 
@@ -137,9 +210,7 @@ impl InputDatabase {
         &self,
         run: impl FnOnce(&DatabaseConnection) -> Result<R, DbError>,
     ) -> Result<R, DbError> {
-        with_locked(&self.reader, |reader| {
-            reader.read_transaction(|| run(reader))
-        })
+        read_local(&self.reader, run)
     }
 
     fn write<R>(
@@ -240,6 +311,25 @@ fn evict(
 }
 
 impl Database {
+    /// A seekable local input for applying the current claim without a provider
+    /// reread after successful creation. One cache identity is reused across
+    /// claims; the journal remains the authoritative copy until settlement.
+    pub async fn claim_input(&self) -> Result<RetainedBytes, DbError> {
+        let (reader, reading, length) = self.call(|inner| {
+            inner.access.with_committed(|source| {
+                let upload = crate::claim::upload(source)?;
+                let id = inner.inputs.write(|db| {
+                    db.internal_execute("DELETE FROM _coven_input_objects WHERE path='local-claim'", [])?;
+                    db.query_row("INSERT INTO _coven_input_objects(path,identity,observation) VALUES('local-claim',x'',x'') RETURNING id", [], |row| row.get(0))
+                })?;
+                let reading = inner.inputs.reading(id);
+                copy_claim(&inner.inputs, source, id)?;
+                inner.inputs.release(vec![id])?;
+                Ok::<_, DbError>((inner.inputs.reader.clone(), reading, upload.size))
+            })
+        }).await?;
+        Ok(RetainedBytes::new(reader, reading, length))
+    }
     /// Release encrypted inputs after a snapshot reload commits, before retiring
     /// its journal record. A failed release leaves that step available to retry.
     pub async fn release_input_ranges(&self, paths: Vec<String>) -> Result<(), DbError> {
@@ -348,6 +438,32 @@ impl Database {
 }
 
 impl RetainedInput {
+    /// Retain the confirmed current claim under its provider observation without
+    /// downloading bytes already owned by the journal. The caller has settled
+    /// publication and checked the floor before associating these bytes.
+    pub async fn keep_claim_bytes(&self) -> Result<(), DbError> {
+        if self.received().await? {
+            return Ok(());
+        }
+        let id = self.id;
+        self.database
+            .call(move |inner| {
+                inner
+                    .access
+                    .with_committed(|source| copy_claim(&inner.inputs, source, id))
+            })
+            .await
+    }
+    /// A seekable reader over received bytes, pinned against eviction. It never
+    /// fetches missing bytes or acquires the application writer. Consumers may
+    /// use it inside a slot transaction after completing transport and floor checks.
+    pub async fn local_bytes(&self, length: u64) -> Result<RetainedBytes, DbError> {
+        let reader = self
+            .database
+            .call(|inner| Ok::<_, DbError>(inner.inputs.reader.clone()))
+            .await?;
+        Ok(RetainedBytes::new(reader, self.reading.clone(), length))
+    }
     /// The first completed provider observation for this identity, including
     /// native metadata whose representation can differ in later listings.
     pub async fn observation(&self) -> Result<Vec<u8>, DbError> {

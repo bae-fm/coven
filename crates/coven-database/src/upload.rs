@@ -209,7 +209,16 @@ pub(crate) fn read<R, E>(
     let Some(entry) = oldest(database)? else {
         return Ok(None);
     };
-    let (header, header_frame, bytes) = plaintext(database, &entry)?;
+    consume(read_entry(database, &entry)?)
+        .map(Some)
+        .map_err(UploadReadError::Consumer)
+}
+
+fn read_entry<'a>(
+    database: &'a DatabaseConnection,
+    entry: &Oldest,
+) -> Result<WaitingUpload<'a>, DbError> {
+    let (header, header_frame, bytes) = plaintext(database, entry)?;
     let keys = entry
         .keys
         .as_deref()
@@ -220,13 +229,63 @@ pub(crate) fn read<R, E>(
         bytes,
         headers: header.parts.clone().into_iter(),
     };
-    let upload = WaitingUpload {
+    Ok(WaitingUpload {
         header,
         header_frame,
         parts,
         keys,
-    };
-    consume(upload).map(Some).map_err(UploadReadError::Consumer)
+    })
+}
+
+fn batch(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    through: u64,
+) -> Result<Vec<Oldest>, DbError> {
+    database.query("SELECT rowid,device,number,sealing_keys FROM _coven_uploads WHERE device=?1 AND number<=?2 ORDER BY number",
+        params![device.0.to_be_bytes(), through.to_be_bytes()], |row| Ok(Oldest {rowid: row.get(0)?,
+            write: WriteId {device: DeviceId(counter(row.get(1)?)), number: counter(row.get(2)?)}, keys: row.get(3)?}))
+}
+
+pub(crate) fn prepare_batch<E: From<DbError> + From<coven_format::Error>>(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    through: u64,
+    mut select: impl FnMut(&WriteHeaderFrame) -> Result<WriteObjectPrefix, E>,
+) -> Result<Vec<WriteHeaderFrame>, E> {
+    let mut headers = Vec::new();
+    let mut selected = Vec::new();
+    for entry in batch(database, device, through)? {
+        let (header, _, _) = plaintext(database, &entry)?;
+        if entry.keys.is_none() {
+            selected.push((entry.rowid, select(&header)?.encode()?));
+        }
+        headers.push(header);
+    }
+    if !selected.is_empty() {
+        database.stream_transaction(|database| {
+            for (row, keys) in selected {
+                database.internal_execute(
+                    "UPDATE _coven_uploads SET sealing_keys=?1 WHERE rowid=?2",
+                    params![keys, row],
+                )?;
+            }
+            Ok(())
+        })?;
+    }
+    Ok(headers)
+}
+
+pub(crate) fn read_batch<E: From<DbError>>(
+    database: &DatabaseConnection,
+    device: DeviceId,
+    through: u64,
+    mut consume: impl FnMut(WaitingUpload<'_>) -> Result<(), E>,
+) -> Result<(), E> {
+    for entry in batch(database, device, through)? {
+        consume(read_entry(database, &entry)?)?;
+    }
+    Ok(())
 }
 
 /// Read every waiting plaintext, including attempted entries.

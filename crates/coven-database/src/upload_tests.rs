@@ -395,3 +395,73 @@ fn upload_completion_does_not_retain_the_object_in_sqlite_observation() {
     });
     std::process::exit(86);
 }
+
+#[tokio::test]
+async fn a_captured_batch_keeps_original_keys_and_excludes_later_commits() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    for id in ["a", "b", "later"] {
+        db.write(move |sql| {
+            sql.execute("INSERT INTO notes VALUES(?1,'title','body')", [id])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    }
+    let through = records(&db)[1].header.position.number;
+    let prefix = |header: &WriteHeaderFrame| {
+        let key = coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(29));
+        WriteObjectPrefix {
+            format: coven_format::FormatVersion::CURRENT,
+            store_key: key,
+            part_keys: vec![key; header.parts.len()],
+        }
+    };
+    assert!(db
+        .prepare_uploads::<DbError, _>(through, move |header| {
+            if header.header.position.number == through {
+                Err(DbError::TransactionEnded)
+            } else {
+                Ok(prefix(header))
+            }
+        })
+        .await
+        .is_err());
+    assert!(selected(&db).await.1.is_none());
+    let headers = db
+        .prepare_uploads::<DbError, _>(through, move |header| Ok(prefix(header)))
+        .await
+        .unwrap();
+    assert_eq!(headers.len(), 2);
+    db.prepare_uploads::<DbError, _>(through, |_| panic!("attempted originals retain their keys"))
+        .await
+        .unwrap();
+    let output = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let observed = output.clone();
+    db.read_uploads::<DbError, _>(through, move |upload| {
+        let mut bytes = upload.header_frame;
+        for (_, chunks) in upload.parts {
+            for chunk in chunks {
+                bytes.extend(chunk?);
+            }
+        }
+        observed.lock().unwrap().push((
+            coven_format::write_stream::decode_plaintext(&bytes)?,
+            upload.keys,
+        ));
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let selected = std::mem::take(&mut *output.lock().unwrap());
+    assert_eq!(selected.len(), 2);
+    for ((record, keys), original) in selected.iter().zip(records(&db)) {
+        assert_eq!(record, &original);
+        assert_eq!(
+            keys.as_ref().unwrap().store_key,
+            coven_foundation::id_source::KeyId(uuid::Uuid::from_u128(29))
+        );
+    }
+    assert_eq!(count(&db, "_coven_uploads"), 3);
+    db.close().await.unwrap();
+}

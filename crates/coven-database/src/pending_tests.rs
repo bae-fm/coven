@@ -62,7 +62,12 @@ impl PendingValue for Record {
             operation: Some(id),
         }
     }
-    fn writes_refused(slot: crate::Slot, _cutoff: crate::Slot, reported_by: DeviceId) -> Self {
+    fn writes_refused(
+        slot: crate::Slot,
+        _cutoff: crate::Slot,
+        _cause: crate::WriteCutoff,
+        reported_by: DeviceId,
+    ) -> Self {
         Self {
             subject: Subject::Slot(slot.0),
             reported_by,
@@ -344,7 +349,11 @@ async fn judgments_clear_only_with_a_committed_changed_reset() {
     .await
     .unwrap();
     let state = db.store_state().await.unwrap();
-    let reload = |snapshots| crate::SnapshotReload::<std::io::Empty, std::io::Empty> {
+    let reload = |snapshots| crate::SnapshotReload::<
+        std::io::Empty,
+        crate::DownloadedWriteStream<std::io::Empty>,
+    > {
+        provider: Default::default(),
         snapshots,
         slots: vec![crate::IncomingSlot {
             digest: [0x31; 32],

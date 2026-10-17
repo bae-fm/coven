@@ -400,3 +400,123 @@ async fn claim_streams_are_bounded_and_failed_reads_preserve_the_journal() {
     );
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn transfer_ranges_and_confirmed_session_survive_reopening() {
+    use std::io::{Read, Seek, SeekFrom};
+    let (_temp, directory, db) = open().await;
+    let id = operation(&db).await;
+    let content: Vec<u8> = (0..(3 * coven_format::chunks::CHUNK_SIZE + 19))
+        .map(|index| (index % 251) as u8)
+        .collect();
+    let object = attempt(directory.id(), 1, &content);
+    db.begin_claim(ClaimWork::Operation(id), move |_| Ok(object))
+        .await
+        .unwrap();
+    db.save_claim_upload(b"provider-confirmed-session".to_vec())
+        .await
+        .unwrap();
+    db.close().await.unwrap();
+    let db = builder(directory).open().await.unwrap();
+    let metadata = db.claim_upload().await.unwrap();
+    assert_eq!(metadata.size, content.len() as u64);
+    assert_eq!(
+        metadata.session.as_deref(),
+        Some(b"provider-confirmed-session".as_slice())
+    );
+    for (offset, length) in [
+        (0, 10),
+        (65530, 23),
+        (65537, 65537),
+        (content.len() - 19, 19),
+    ] {
+        assert_eq!(
+            db.claim_range(offset as u64, length).await.unwrap(),
+            content[offset..offset + length]
+        );
+    }
+    assert!(db.claim_range(content.len() as u64 - 1, 2).await.is_err());
+    let mut input = db.claim_input().await.unwrap();
+    db.settle_claim(ClaimRead::Created).await.unwrap();
+    db.finish_claim(None).await.unwrap();
+    input.seek(SeekFrom::Start(65530)).unwrap();
+    let mut bytes = vec![0; 23];
+    input.read_exact(&mut bytes).unwrap();
+    assert_eq!(bytes, content[65530..65553]);
+    assert!(db.current_claim().await.unwrap().is_none());
+    db.close().await.unwrap();
+    assert!(input.read(&mut [0; 1]).is_err());
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn claim_sealing_and_streaming_leave_the_app_writer_available() {
+    for during_seal in [true, false] {
+        let (_temporary, directory, db) = open().await;
+        let operation = operation(&db).await;
+        let (entered, started) = tokio::sync::oneshot::channel();
+        let (release, resume) = std::sync::mpsc::channel();
+        let claim_db = db.clone();
+        let claim = tokio::spawn(async move {
+            claim_db
+                .begin_claim(ClaimWork::Operation(operation), move |_| {
+                    let mut bytes = HeldBytes {
+                        entered: Some(entered),
+                        resume,
+                        sent: false,
+                    };
+                    if during_seal {
+                        bytes.wait();
+                    }
+                    Ok(ClaimAttempt {
+                        path: ObjectPath::slot(directory.id(), 1.try_into().unwrap()),
+                        bytes,
+                    })
+                })
+                .await
+        });
+        started.await.unwrap();
+        let written = tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            db.write(|sql| {
+                sql.execute("INSERT INTO items VALUES('while sealing')", [])?;
+                Ok(())
+            }),
+        )
+        .await;
+        release.send(()).unwrap();
+        claim.await.unwrap().unwrap();
+        db.close().await.unwrap();
+        assert!(
+            written.is_ok(),
+            "claim preparation held the application writer, during_seal={during_seal}"
+        );
+        written.unwrap().unwrap();
+    }
+}
+
+struct HeldBytes {
+    entered: Option<tokio::sync::oneshot::Sender<()>>,
+    resume: std::sync::mpsc::Receiver<()>,
+    sent: bool,
+}
+impl HeldBytes {
+    fn wait(&mut self) {
+        if let Some(entered) = self.entered.take() {
+            entered.send(()).unwrap();
+            self.resume
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+    }
+}
+impl std::io::Read for HeldBytes {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        self.wait();
+        if self.sent {
+            return Ok(0);
+        }
+        output[0] = 7;
+        self.sent = true;
+        Ok(1)
+    }
+}

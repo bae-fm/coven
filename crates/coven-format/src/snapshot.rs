@@ -374,6 +374,47 @@ impl SnapshotEncoder {
 /// merge's removal computation checks which removal rules actually hold.
 pub struct SnapshotDecoder(StreamState);
 impl SnapshotDecoder {
+    /// Extract original slots and claim settlement evidence before the store's
+    /// historical signing keys are known. Other sections are counted and skipped;
+    /// this is not row validation. A loader must subsequently decode the entire
+    /// authenticated snapshot with `frame` before installing its data.
+    pub fn history_frame(&mut self, bytes: &[u8]) -> Result<Option<SnapshotRecord>, Error> {
+        let (kind, mut input) = decode_frame(bytes)?;
+        if kind == 7 {
+            input.finish()?;
+            self.0.end()?;
+            return Ok(None);
+        }
+        require(kind == 6, "snapshot record kind", Rule::Kind)?;
+        let section = u8::get(&mut input)?;
+        if section < 8 {
+            require(
+                !self.0.ended
+                    && self.0.remaining.iter().position(|n| *n > 0) == Some(section as usize),
+                "snapshot section/count",
+                Rule::SnapshotSequence,
+            )?;
+            self.0.remaining[section as usize] -= 1;
+            return Ok(None);
+        }
+        let record = match section {
+            8 => SnapshotRecord::Admin(Wire::get(&mut input)?),
+            9 => SnapshotRecord::KeyCopy(Wire::get(&mut input)?),
+            10 => SnapshotRecord::Announcement(Wire::get(&mut input)?),
+            11 => SnapshotRecord::Claim(Wire::get(&mut input)?),
+            tag => {
+                return Err(Error::UnknownTag {
+                    field: "snapshot section",
+                    tag,
+                })
+            }
+        };
+        input.finish()?;
+        record.validate()?;
+        self.0.accept(&record)?;
+        Ok(Some(record))
+    }
+
     /// Read the initial header frame using coverage from the authenticated sealed prefix.
     pub fn start(
         frame: &[u8],

@@ -88,6 +88,7 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             tables,
             [
+                "_coven_absent_snapshots",
                 "_coven_access_keys",
                 "_coven_authored_changes",
                 "_coven_authored_parts",
@@ -313,9 +314,10 @@ mod fixture {
      INSERT INTO _coven_migration_prefix VALUES(1,counter(1),counter(4096),2);
      INSERT INTO _coven_migration_losses SELECT CAST(device || n AS BLOB),audience,key FROM fixture;
      INSERT INTO _coven_last_claims SELECT n,n,key,n FROM fixture;
+     INSERT INTO _coven_absent_snapshots SELECT audience,device,n FROM fixture;
      INSERT INTO _coven_claim_counters SELECT n,n FROM fixture;
      INSERT INTO _coven_claim_journal SELECT device,n,NULL,i,'landed',1 FROM fixture WHERE i=1;
-     INSERT INTO _coven_claim_attempts SELECT counter(1),counter(1),i,'store/seq/' || i,key FROM fixture;
+     INSERT INTO _coven_claim_attempts SELECT counter(1),counter(1),i,'store/seq/' || i,key,counter(32),NULL FROM fixture;
      INSERT INTO _coven_claim_chunks SELECT counter(1),counter(1),i,0,key FROM fixture;
      INSERT INTO _coven_slot_records SELECT n,CASE i%3 WHEN 0 THEN 'admin' WHEN 1 THEN 'key' ELSE 'announcement' END,key FROM fixture;
      INSERT INTO _coven_write_refusals SELECT n,n FROM fixture;

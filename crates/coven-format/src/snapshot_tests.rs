@@ -631,3 +631,57 @@ fn pinned_refused_and_reset_ignored_parts_preserve_claim_numbers() {
         );
     }
 }
+
+#[test]
+fn history_extraction_preserves_original_objects_and_claim_digests() {
+    let frames = test_utils::snapshot_frames();
+    let prefix = test_utils::snapshot_prefix(&test_utils::snapshot_header());
+    let mut reader = SnapshotDecoder::start(&frames[0], &prefix).unwrap();
+    let mut history = Vec::new();
+    for frame in &frames[1..] {
+        if let Some(record) = reader.history_frame(frame).unwrap() {
+            history.push(record);
+        }
+    }
+    reader.finish().unwrap();
+    assert_eq!(
+        history,
+        test_utils::snapshot_records()
+            .into_iter()
+            .filter(|record| matches!(
+                record,
+                SnapshotRecord::Admin(_)
+                    | SnapshotRecord::KeyCopy(_)
+                    | SnapshotRecord::Announcement(_)
+                    | SnapshotRecord::Claim(_)
+            ))
+            .collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn history_extraction_requires_counts_order_and_the_end_marker() {
+    let frames = test_utils::snapshot_frames();
+    let prefix = test_utils::snapshot_prefix(&test_utils::snapshot_header());
+    let open = || SnapshotDecoder::start(&frames[0], &prefix).unwrap();
+    let mut reader = open();
+    assert!(reader.history_frame(frames.last().unwrap()).is_err());
+    let mut reader = open();
+    assert!(reader.history_frame(&frames[2]).is_err());
+    for removed in 1..frames.len() {
+        let mut reader = open();
+        let result: Result<Vec<_>, _> = frames
+            .iter()
+            .enumerate()
+            .skip(1)
+            .filter(|(index, _)| *index != removed)
+            .map(|(_, frame)| reader.history_frame(frame))
+            .collect();
+        assert!(result.is_err() || reader.finish().is_err());
+    }
+    let mut reader = open();
+    for frame in &frames[1..] {
+        reader.history_frame(frame).unwrap();
+    }
+    assert!(reader.history_frame(frames.last().unwrap()).is_err());
+}

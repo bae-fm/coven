@@ -1,12 +1,9 @@
 //! Atomic application of the next shared slot and its provisional queue overlay.
 
-use crate::{
-    sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, DownloadedWriteStream,
-    StoreState,
-};
+use crate::download_stream::PreparedWrite;
+use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError, StoreState};
 use coven_format::{admin::StoreChange, floor::OriginalSlot, sequence::SlotHeader};
 use coven_merge::Slot;
-use std::io::Read;
 
 /// An authenticated slot whose floor check completed before installation.
 pub struct IncomingSlot<R> {
@@ -23,7 +20,7 @@ pub struct IncomingSlot<R> {
 /// One slot kind; readable write parts are applied together.
 pub enum SlotContent<R> {
     /// Original writes in increasing author write-number order.
-    Writes(Vec<DownloadedWriteStream<R>>),
+    Writes(Vec<R>),
     /// An original admin object and its checked effect, absent for a refusal.
     Admin {
         /// Exact signed evidence retained by store snapshots.
@@ -48,6 +45,8 @@ pub struct AdminEffect {
     /// Audiences requiring replacement data. `apply_slot` records their wait
     /// without consuming the slot; `load_snapshots` installs it with their data.
     pub reload: Vec<coven_merge::Audience>,
+    /// Provider work recorded atomically with this state.
+    pub provider: crate::ProviderChanges,
 }
 
 pub(crate) fn retain(
@@ -60,11 +59,11 @@ pub(crate) fn retain(
     Ok(())
 }
 
-pub(crate) fn apply<P: crate::PendingValue, R: Read>(
+pub(crate) fn apply<P: crate::PendingValue>(
     db: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
-    incoming: IncomingSlot<R>,
+    incoming: IncomingSlot<PreparedWrite<'_>>,
     files: &crate::file_write::FileWrite<'_>,
     authenticate: impl FnOnce() -> Result<(), DbError>,
     operation: Option<crate::OperationUpdate>,
@@ -90,7 +89,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
         let mut touched = crate::published::restore(db, schema)?;
         crate::pending::clear_slot(db, incoming.slot)?;
         match incoming.content {
-            SlotContent::Writes(writes) => stage_writes::<P, _>(
+            SlotContent::Writes(writes) => stage_writes::<P>(
                 db, schema, incoming.slot, &incoming.header, writes, None,
             )?,
             SlotContent::Admin { original, effect } => {
@@ -99,6 +98,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
                     let old = crate::store_state_tables::deleted_circles(db)?;
                     crate::sequence::cutoff(db, incoming.slot, &effect.change)?;
                     crate::store_state_tables::replace(db, &effect.state)?;
+                    effect.provider.record::<P>(db)?;
                     for circle in effect.state.circle_deletions.keys().filter(|circle| !old.contains_key(circle)) {
                         touched.extend(db.query(
                             "SELECT DISTINCT table_name,key,audience FROM _coven_rows WHERE audience=?1",
@@ -130,12 +130,12 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
 
 /// Ordinary application and reloads use the same ordering, cut-off and original
 /// validation. Reload coverage selects only parts newer than their snapshots.
-pub(crate) fn stage_writes<P: crate::PendingValue, R: Read>(
+pub(crate) fn stage_writes<P: crate::PendingValue>(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     slot: Slot,
     header: &SlotHeader,
-    writes: Vec<DownloadedWriteStream<R>>,
+    writes: Vec<PreparedWrite<'_>>,
     coverage: Option<&crate::snapshot_coverage::SnapshotCoverage>,
 ) -> Result<(), DbError> {
     let mut previous = None;
@@ -149,19 +149,17 @@ pub(crate) fn stage_writes<P: crate::PendingValue, R: Read>(
         previous = Some(write.header.header.position.number);
         let cutoff =
             crate::sequence::refusal(db, slot, header.device, header.author, &write.signer)?;
-        if let Some(cutoff) = cutoff {
+        if let Some((cutoff, cause)) = cutoff {
             db.internal_execute("INSERT INTO _coven_write_refusals(slot,cutoff) VALUES(?1,?2) ON CONFLICT(slot) DO NOTHING",
                 rusqlite::params![slot.0.to_be_bytes(), cutoff.0.to_be_bytes()])?;
             crate::pending::save(
                 db,
-                &P::writes_refused(slot, cutoff, crate::pending::own_device(db)?),
+                &P::writes_refused(slot, cutoff, cause, crate::pending::own_device(db)?),
             )?;
         }
         if let Some(coverage) = coverage {
-            for (part, stream) in write.header.parts.iter().zip(&write.parts) {
-                if coverage.needs(&part.audience, slot)
-                    && matches!(stream, crate::DownloadedPartStream::Skipped)
-                {
+            for audience in write.unopened_audiences() {
+                if coverage.needs(audience, slot) {
                     return Err(crate::snapshot_error::invalid(
                         "reload lacks a readable audience part",
                     ));
@@ -173,4 +171,29 @@ pub(crate) fn stage_writes<P: crate::PendingValue, R: Read>(
         })?;
     }
     Ok(())
+}
+
+impl<R: std::io::Read> IncomingSlot<crate::DownloadedWriteStream<R>> {
+    pub(crate) fn prepare<'a>(
+        self,
+        inputs: &crate::input_preparation::PreparedInputs<'a>,
+    ) -> Result<IncomingSlot<PreparedWrite<'a>>, DbError> {
+        let content = match self.content {
+            SlotContent::Writes(writes) => SlotContent::Writes(
+                writes
+                    .into_iter()
+                    .map(|write| write.prepare(inputs))
+                    .collect::<Result<_, _>>()?,
+            ),
+            SlotContent::Admin { original, effect } => SlotContent::Admin { original, effect },
+            SlotContent::KeyCopy(original) => SlotContent::KeyCopy(original),
+            SlotContent::Announcement(original) => SlotContent::Announcement(original),
+        };
+        Ok(IncomingSlot {
+            slot: self.slot,
+            header: self.header,
+            digest: self.digest,
+            content,
+        })
+    }
 }

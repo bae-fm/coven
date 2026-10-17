@@ -396,12 +396,17 @@ pub(crate) fn end_load(db: &DatabaseConnection) -> Result<(), DbError> {
 /// Authenticate one write's evidence in a loaded snapshot of `audience`: its
 /// header signature, then its opening against that part's signed root. Keep
 /// both for snapshots this device writes later.
-pub(crate) fn load(
-    db: &DatabaseConnection,
+pub(crate) struct AuthenticatedEvidence {
+    pub(crate) opened: WriteHeaderFrame,
+    pub(crate) leaves: Vec<Leaf>,
+    pub(crate) part: bool,
+}
+
+pub(crate) fn authenticate(
     authorship: &dyn Authorship,
     audience: &Audience,
     evidence: &WriteEvidence,
-) -> Result<(), DbError> {
+) -> Result<AuthenticatedEvidence, DbError> {
     let opened = authorship.header(evidence)?;
     if opened.header.position != evidence.write {
         return Err(crate::snapshot_error::invalid(
@@ -430,6 +435,25 @@ pub(crate) fn load(
             ))
         }
     };
+    Ok(AuthenticatedEvidence {
+        opened,
+        leaves,
+        part: part.is_some(),
+    })
+}
+
+/// Install already authenticated openings with their source evidence.
+pub(crate) fn load(
+    db: &DatabaseConnection,
+    audience: &Audience,
+    evidence: &WriteEvidence,
+    verified: AuthenticatedEvidence,
+) -> Result<(), DbError> {
+    let AuthenticatedEvidence {
+        opened,
+        leaves,
+        part,
+    } = verified;
     crate::write_headers::retain(db, &opened)?;
     let id = encoded(merge_fields::encode_write_id(&evidence.write))?;
     db.internal_execute(
@@ -456,7 +480,7 @@ pub(crate) fn load(
             signature: evidence.signature,
         },
     )?;
-    if part.is_some() {
+    if part {
         db.internal_execute(
             "INSERT INTO _coven_part_proofs(write_id,audience,proof) VALUES(?1,?2,?3) ON CONFLICT(write_id,audience) DO UPDATE SET proof=excluded.proof",
             params![
@@ -615,18 +639,13 @@ impl PartRoot {
     }
 
     /// Refuse a part whose leaves do not reproduce its signed root.
-    pub(crate) fn finish(
-        self,
-        db: &DatabaseConnection,
-        write: WriteId,
-        audience: &Audience,
-    ) -> Result<(), DbError> {
+    pub(crate) fn finish(self) -> Result<Vec<[u8; 32]>, DbError> {
         if coven_format::authorship::root_of_hashes(&self.hashes) != self.root {
             return Err(crate::snapshot_error::invalid(
                 "write part differs from its signed authorship root",
             ));
         }
-        retain_leaves(db, write, audience, &self.hashes)
+        Ok(self.hashes)
     }
 }
 

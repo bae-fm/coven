@@ -183,6 +183,7 @@ pub(crate) async fn load_one<R: std::io::Read + Send + 'static>(
             slots: vec![],
             state: database.store_state().await.unwrap(),
             cutoffs: vec![],
+            provider: Default::default(),
             boundaries: vec![],
             operation: None,
             authorship: std::sync::Arc::new(crate::test_utils::TestAuthorship),

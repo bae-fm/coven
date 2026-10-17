@@ -265,3 +265,53 @@ async fn eviction_removes_a_completed_inputs_whole_prefix() {
         .unwrap()
         .is_empty());
 }
+
+#[tokio::test]
+async fn local_cursor_reads_inside_the_writer_and_keeps_its_bytes_until_close() {
+    use std::io::{Read, Seek, SeekFrom};
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let saved = input(&db, "slot", 1, false).await;
+    saved.keep_range(0, vec![1, 2]).await.unwrap();
+    saved
+        .keep_received_range(2, vec![3, 4], true)
+        .await
+        .unwrap();
+    let mut bytes = saved.local_bytes(4).await.unwrap();
+    saved.release_ranges().await.unwrap();
+    assert!(matches!(
+        db.set_input_budget(0).await,
+        Err(DbError::InputBudgetExceeded { .. })
+    ));
+    let mut inside = bytes.clone();
+    db.write(move |_| {
+        inside.seek(SeekFrom::Start(1)).unwrap();
+        let mut received = Vec::new();
+        inside.read_to_end(&mut received).unwrap();
+        assert_eq!(received, [2, 3, 4]);
+        Ok(())
+    })
+    .await
+    .unwrap();
+    bytes.seek(SeekFrom::End(-1)).unwrap();
+    let mut last = [0];
+    bytes.read_exact(&mut last).unwrap();
+    assert_eq!(last, [4]);
+    db.close().await.unwrap();
+    bytes.seek(SeekFrom::Start(0)).unwrap();
+    assert!(bytes.read(&mut last).is_err());
+}
+
+#[tokio::test]
+async fn local_cursor_does_not_fill_a_missing_received_range() {
+    use std::io::Read;
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let saved = input(&db, "slot", 1, false).await;
+    saved.keep_range(2, vec![3, 4]).await.unwrap();
+    let mut bytes = saved.local_bytes(4).await.unwrap();
+    assert_eq!(
+        bytes.read(&mut [0; 4]).unwrap_err().kind(),
+        std::io::ErrorKind::UnexpectedEof
+    );
+}

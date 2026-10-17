@@ -23,6 +23,8 @@ pub enum SnapshotSource<R> {
     },
     /// History starts empty at slot zero.
     Empty(Audience),
+    /// Preserve this audience's committed prefix and apply only subsequent slots.
+    Current(Audience),
 }
 /// Files retained by a loaded snapshot.
 pub struct LoadedSnapshot {
@@ -43,6 +45,8 @@ pub struct SnapshotReload<R, W> {
     pub target: u64,
     /// Authenticated membership and keys at the target.
     pub state: StoreState,
+    /// Provider work required by the authenticated state at the fixed target.
+    pub provider: crate::ProviderChanges,
     /// Counted admin changes introducing cut-offs, including compacted history.
     pub cutoffs: Vec<(Slot, StoreChange)>,
     /// Activated schema and reset snapshot coverage at the target.

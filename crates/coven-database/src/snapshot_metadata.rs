@@ -25,9 +25,16 @@ impl<'a> SnapshotMetadata<'a> {
         }
     }
 
+    pub(crate) fn create_table(db: &DatabaseConnection) -> Result<(), DbError> {
+        db.batch("CREATE TEMP TABLE _coven_snapshot_writes(device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(device,number)) WITHOUT ROWID")
+    }
     pub(crate) fn put(&self, write: &AppliedWrite) -> Result<(), DbError> {
-        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5)", params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.0.to_be_bytes().as_slice()])?;
+        self.stage(write)?;
         crate::write_commit::retain_metadata(self.database, write)?;
+        Ok(())
+    }
+    pub(crate) fn stage(&self, write: &AppliedWrite) -> Result<(), DbError> {
+        self.database.internal_execute("INSERT INTO temp._coven_snapshot_writes(device,number,timestamp,read_through,slot) VALUES(?1,?2,?3,?4,?5)", params![write.id.device.0.to_be_bytes().as_slice(),write.id.number.to_be_bytes().as_slice(),encoded(merge_fields::encode_timestamp(&write.timestamp))?,write.read_through.to_be_bytes().as_slice(),write.slot.0.to_be_bytes().as_slice()])?;
         Ok(())
     }
 

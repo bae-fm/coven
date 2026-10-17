@@ -1,13 +1,13 @@
 //! Fold every retained slot needed by the selected audience prefixes.
+use crate::download_stream::PreparedWrite;
 use crate::{
     snapshot_coverage::SnapshotCoverage, snapshot_error::invalid, sqlite::DatabaseConnection,
     write_schema::WriteSchema, DbError, IncomingSlot, SlotContent,
 };
-use std::io::Read;
-pub(crate) fn apply<P: crate::PendingValue, R: Read>(
+pub(crate) fn apply<P: crate::PendingValue>(
     db: &DatabaseConnection,
     schema: &WriteSchema,
-    slots: Vec<IncomingSlot<R>>,
+    slots: Vec<IncomingSlot<PreparedWrite<'_>>>,
     coverage: &SnapshotCoverage,
 ) -> Result<(), DbError> {
     let mut applied = coverage.first()?;
@@ -23,7 +23,7 @@ pub(crate) fn apply<P: crate::PendingValue, R: Read>(
             });
         }
         match incoming.content {
-            SlotContent::Writes(writes) => crate::sequence_apply::stage_writes::<P, _>(
+            SlotContent::Writes(writes) => crate::sequence_apply::stage_writes::<P>(
                 db,
                 schema,
                 incoming.slot,

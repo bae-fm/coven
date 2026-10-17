@@ -7,6 +7,7 @@ edition.workspace = true
 coven-foundation.workspace = true
 argon2 = { workspace = true, features = ["zeroize"] }
 chacha20poly1305 = { workspace = true, features = ["alloc", "zeroize"] }
+chacha20 = { workspace = true, features = ["cipher", "xchacha", "zeroize"] }
 ed25519-dalek = { workspace = true, features = ["fast", "zeroize"] }
 x25519-dalek = { workspace = true, features = ["static_secrets", "zeroize"] }
 getrandom.workspace = true

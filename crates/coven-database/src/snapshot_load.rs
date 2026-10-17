@@ -1,33 +1,22 @@
-//! Install streamed plaintext with row replacement and local replay in one commit.
+//! Install prepared records with row replacement and local replay in one commit.
 
 use crate::merge_store::MergeStore;
 use crate::snapshot_error::{invalid, SnapshotError};
 use crate::snapshot_metadata::SnapshotMetadata;
+use crate::snapshot_preparation::PreparedSnapshot;
 use crate::sqlite::DatabaseConnection;
 use crate::write_schema::WriteSchema;
 use crate::DbError;
-use coven_format::admin::SnapshotId;
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
-use coven_format::snapshot_stream::SnapshotChunkDecoder;
 use coven_merge::RowId;
 use rusqlite::params;
 use std::collections::BTreeSet;
-use std::io::Read;
 
-/// Who signed a snapshot being loaded, and how to authenticate the other
-/// members' writes it carries (§8.8, §15).
-#[derive(Clone, Copy)]
-pub(crate) struct SnapshotSigner<'a> {
-    pub(crate) authorship: &'a dyn crate::Authorship,
-    /// The snapshot author's member, unknown only before this device's own.
-    pub(crate) author: Option<coven_foundation::id_source::MemberId>,
-}
-
-pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
+pub(crate) fn load<P: crate::PendingValue>(
     database: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
-    reload: crate::SnapshotReload<R, W>,
+    reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.stream_transaction(|database| {
@@ -36,15 +25,18 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
             slots,
             target,
             state,
+            provider,
             cutoffs,
             boundaries,
             operation,
-            authorship,
+            authorship: _,
         } = reload;
-        if target < crate::sequence::applied(database)? {
+        let current = crate::sequence::applied(database)?;
+        if target < current {
             return Err(invalid("reload target precedes committed applied slot"));
         }
         crate::store_state_tables::replace(database, &state)?;
+        provider.record::<P>(database)?;
         database.internal_execute("DELETE FROM _coven_cutoffs", [])?;
         for (slot, change) in cutoffs {
             if slot.0 > target {
@@ -64,30 +56,25 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
         let mut selected = BTreeSet::new();
         for source in snapshots {
             match source {
+                crate::SnapshotSource::Current(audience) => {
+                    coverage.loaded(audience, current)?;
+                }
                 crate::SnapshotSource::Stored {
                     id,
-                    prefix,
+                    prefix: _,
                     input,
                     author,
                 } => {
                     if !selected.insert(id.audience.clone()) {
                         return Err(invalid("reload repeats an audience"));
                     }
-                    let (header, rows) = read(
-                        database,
-                        schema,
-                        &id,
-                        prefix,
-                        input,
-                        &SnapshotSigner {
-                            authorship: authorship.as_ref(),
-                            author: Some(author),
-                        },
-                    )
-                    .map_err(|error| SnapshotError::Body {
-                        snapshot: id.clone(),
-                        error: Box::new(error),
-                    })?;
+                    let (header, rows) =
+                        read(database, schema, input, Some(author)).map_err(|error| {
+                            SnapshotError::Body {
+                                snapshot: id.clone(),
+                                error: Box::new(error),
+                            }
+                        })?;
                     let files = crate::database::file_retention::snapshot_references(
                         database,
                         &id.audience,
@@ -142,7 +129,7 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
             )?;
         }
         crate::snapshot_state::drop_tables(database)?;
-        crate::snapshot_writes::apply::<P, _>(database, schema, slots, &coverage)?;
+        crate::snapshot_writes::apply::<P>(database, schema, slots, &coverage)?;
         for audience in &selected {
             crate::reload_gate::clear_reload(database, audience)?;
         }
@@ -161,56 +148,28 @@ pub(crate) fn load<P: crate::PendingValue, R: Read, W: Read>(
 pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    expected: &SnapshotId,
-    prefix: coven_format::sealed_snapshot::SnapshotObjectPrefix,
-    mut input: impl Read,
-    signer: &SnapshotSigner<'_>,
+    prepared: PreparedSnapshot<'_>,
+    author: Option<coven_foundation::id_source::MemberId>,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
-    #[cfg(any(test, feature = "test-utils"))]
-    database.record_work(|work| work.snapshot_reads += 1);
-    let SnapshotSigner { authorship, author } = *signer;
+    let header = prepared.header.clone();
+    let expected = &header.id;
     let local_version = *schema.versions.end();
     let mut touched = crate::snapshot_state::begin(database, schema, &expected.audience)?;
     crate::ownership::clear_audience(database, &expected.audience)?;
     crate::authorship::begin_load(database)?;
     let metadata = SnapshotMetadata::new(database);
-    let mut decoder = SnapshotChunkDecoder::new(prefix);
-    let mut checked_header = false;
     let mut loss_state = None;
     let mut complete = BTreeSet::new();
     let mut carried = BTreeSet::new();
-    let mut chunk = [0; coven_format::chunks::CHUNK_SIZE];
-    loop {
-        let length = match input.read(&mut chunk) {
-            Ok(length) => length,
-            Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(error) => return Err(SnapshotError::Read(error).into()),
-        };
-        if length == 0 {
-            break;
-        }
-        let mut bytes = &chunk[..length];
-        loop {
-            let record = decoder.next_record(&mut bytes, &metadata);
-            metadata.check()?;
-            let record = record.map_err(SnapshotError::Format)?;
-            if !checked_header {
-                if let Some(header) = decoder.header() {
-                    check_header(schema, expected, header)?;
-                    checked_header = true;
-                }
-            }
-            let Some(record) = record else { break };
-            match record {
+    prepared.records().each(|bytes| {
+        let record = coven_format::merge_fields::decode_snapshot_record(&bytes, &metadata);
+        metadata.check()?;
+        match record? {
                 SnapshotRecord::Synced(row) => crate::snapshot_state::synced(
                     database,
                     schema,
                     row,
-                    decoder
-                        .header()
-                        .expect("record follows header")
-                        .schema_version
-                        < local_version,
+                    header.schema_version < local_version,
                 )?,
                 SnapshotRecord::Write(write) => metadata.put(&write)?,
                 SnapshotRecord::Column(column) => {
@@ -255,7 +214,7 @@ pub(crate) fn read(
                     )?;
                 }
                 SnapshotRecord::Evidence(evidence) => {
-                    crate::authorship::load(database, authorship, &expected.audience, &evidence)?
+                    crate::authorship::load(database, &expected.audience, &evidence, prepared.records().authorship(evidence.write)?)?
                 }
                 SnapshotRecord::Admin(original) => {
                     crate::sequence_apply::retain(database, "admin", &original)?
@@ -270,7 +229,7 @@ pub(crate) fn read(
                     crate::sequence::note_record(
                         database,
                         &claim,
-                        decoder.header().expect("record follows header").covers,
+                        header.covers,
                     )?;
                 }
                 SnapshotRecord::Authored(authored) => {
@@ -289,18 +248,12 @@ pub(crate) fn read(
                     }
                 }
             }
-        }
-    }
-    decoder.finish().map_err(SnapshotError::Format)?;
+        Ok(())
+    })?;
     for (header, audience) in complete {
         let header = coven_format::merge_fields::decode_write_header(&header)?;
         crate::write_sources::complete(database, &header, &audience)?;
     }
-    let header = decoder
-        .header()
-        .ok_or_else(|| invalid("snapshot has no header"))?;
-    check_header(schema, expected, header)?;
-    metadata.validate(header.covers)?;
     crate::write_sources::forget_own_migration(
         database,
         &expected.audience,
@@ -321,27 +274,7 @@ pub(crate) fn read(
     database.batch(
         "DELETE FROM temp._coven_snapshot_writes; DELETE FROM temp._coven_snapshot_columns",
     )?;
-    Ok((header.clone(), touched))
-}
-
-fn check_header(
-    schema: &WriteSchema,
-    expected: &SnapshotId,
-    header: &SnapshotHeader,
-) -> Result<(), DbError> {
-    if header.id != *expected {
-        return Err(invalid(
-            "snapshot identity differs from the requested object",
-        ));
-    }
-    if !schema.versions.contains(&header.schema_version) {
-        return Err(SnapshotError::Schema {
-            snapshot: header.schema_version,
-            database: *schema.versions.end(),
-        }
-        .into());
-    }
-    Ok(())
+    Ok((header, touched))
 }
 
 #[cfg(test)]

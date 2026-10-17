@@ -44,9 +44,10 @@ impl Boundary {
 
     /// The no-op rule for a raise; a lower version never replaces a higher one.
     pub fn schema_in_place(state: &StoreState, version: u32, snapshot: &SnapshotId) -> bool {
-        state.schema.get(&snapshot.audience).is_some_and(|current| {
-            version < current.number || (version == current.number && *snapshot == current.snapshot)
-        })
+        state
+            .schema
+            .get(&snapshot.audience)
+            .is_some_and(|current| version <= current.number)
     }
 
     /// Repeating the current reset does not introduce a new boundary.

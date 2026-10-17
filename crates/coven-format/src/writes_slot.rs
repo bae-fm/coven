@@ -209,7 +209,9 @@ impl WritesSlotDecoder {
         }
     }
 }
-fn check_write(
+/// Check one authenticated inner header's device, causal prefix and increasing
+/// number. Seekable consumers use the same rule as the incremental decoder.
+pub fn check_write(
     slot: &SlotHeader,
     previous: Option<u64>,
     header: &WriteHeader,

@@ -68,7 +68,64 @@ pub enum DownloadedPartStream<R> {
     Skipped,
 }
 
+pub(crate) struct PreparedWrite<'a> {
+    pub(crate) header: WriteHeaderFrame,
+    parts: Vec<Option<PreparedPart<'a>>>,
+    pub(crate) signer: coven_crypto::SigningKey,
+    evidence: crate::HeaderEvidence,
+}
+pub(crate) struct PreparedPart<'a> {
+    records: crate::input_preparation::PreparedRecords<'a>,
+    hashes: Vec<[u8; 32]>,
+}
 impl<R: Read> DownloadedWriteStream<R> {
+    pub(crate) fn prepare<'a>(
+        self,
+        inputs: &crate::input_preparation::PreparedInputs<'a>,
+    ) -> Result<PreparedWrite<'a>, crate::DbError> {
+        if self.header.parts.len() != self.parts.len()
+            || self.authorship.evidence.roots.len() != self.parts.len()
+        {
+            return Err(
+                SnapshotError::Inconsistent("write stream count differs from its header").into(),
+            );
+        }
+        let mut parts = Vec::new();
+        for (index, (header, stream)) in self.header.parts.iter().zip(self.parts).enumerate() {
+            match stream {
+                DownloadedPartStream::Skipped => parts.push(None),
+                DownloadedPartStream::Opened(input) => {
+                    let mut records = inputs.records();
+                    let mut root = self.authorship.root(index)?;
+                    read_part(input, header.clone(), |frame| {
+                        hash_frame(&mut root, &frame)?;
+                        records.push(coven_format::merge_fields::encode_write_frame(&frame)?)
+                    })?;
+                    parts.push(Some(PreparedPart {
+                        records,
+                        hashes: root.finish()?,
+                    }));
+                }
+            }
+        }
+        Ok(PreparedWrite {
+            header: self.header,
+            parts,
+            signer: self.signer,
+            evidence: self.authorship.evidence,
+        })
+    }
+}
+impl PreparedWrite<'_> {
+    /// The audiences of parts this installation could not open.
+    pub(crate) fn unopened_audiences(&self) -> impl Iterator<Item = &coven_merge::Audience> {
+        self.header
+            .parts
+            .iter()
+            .zip(&self.parts)
+            .filter(|(_, part)| part.is_none())
+            .map(|(header, _)| &header.audience)
+    }
     /// Stage one original inside its containing slot's transaction. The caller
     /// materializes the complete batch only after all parts authenticate.
     pub(crate) fn stage_selected(
@@ -84,9 +141,7 @@ impl<R: Read> DownloadedWriteStream<R> {
             .parts
             .iter()
             .zip(&self.parts)
-            .filter(|(part, stream)| {
-                selected(&part.audience) && matches!(stream, DownloadedPartStream::Opened(_))
-            })
+            .filter(|(part, stream)| selected(&part.audience) && stream.is_some())
             .map(|(part, _)| part.audience.clone())
             .collect();
         if !refused {
@@ -179,31 +234,23 @@ impl<R: Read> DownloadedWriteStream<R> {
             &coven_merge::Audience,
         ) -> Result<(), crate::DbError>,
     ) -> Result<(), crate::DbError> {
-        if self.header.parts.len() != self.parts.len()
-            || self.authorship.evidence.roots.len() != self.parts.len()
-        {
-            return Err(
-                SnapshotError::Inconsistent("write stream count differs from its header").into(),
-            );
-        }
-
-        let original_header = self.header.clone();
         let write = self.header.header.position;
-        for (index, (header, stream)) in self.header.parts.into_iter().zip(self.parts).enumerate() {
-            let DownloadedPartStream::Opened(input) = stream else {
+        for (header, part) in self.header.parts.iter().zip(self.parts) {
+            let Some(part) = part else {
                 continue;
             };
-            let audience = header.audience.clone();
-            let mut root = self.authorship.root(index)?;
-            read_part(input, header, |frame| {
-                hash_frame(&mut root, &frame)?;
-                consume(&self.header.header, &audience, frame)
+            part.records.each(|bytes| {
+                consume(
+                    &self.header.header,
+                    &header.audience,
+                    WriteFrame::decode(&bytes)?,
+                )
             })?;
-            root.finish(database, write, &audience)?;
-            complete(&self.header.header, &audience)?;
+            crate::authorship::retain_leaves(database, write, &header.audience, &part.hashes)?;
+            complete(&self.header.header, &header.audience)?;
         }
-        crate::write_headers::retain(database, &original_header)?;
-        crate::authorship::retain_header(database, write, &self.authorship.evidence)
+        crate::write_headers::retain(database, &self.header)?;
+        crate::authorship::retain_header(database, write, &self.evidence)
     }
 }
 

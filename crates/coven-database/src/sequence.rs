@@ -121,6 +121,17 @@ pub(crate) fn cutoff(
     Ok(())
 }
 
+/// Why a lower slot permanently excludes an original write.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum WriteCutoff {
+    /// The device was removed or replaced.
+    DeviceRemoved,
+    /// The member was removed.
+    MemberRemoved,
+    /// The member's signing and sealing keys were replaced.
+    MemberKeysReplaced,
+}
+
 /// The earliest prior removal or replacement that refuses this original.
 pub(crate) fn refusal(
     db: &DatabaseConnection,
@@ -128,10 +139,15 @@ pub(crate) fn refusal(
     device: DeviceId,
     member: MemberId,
     signer: &SigningKey,
-) -> Result<Option<Slot>, DbError> {
-    db.query_row("SELECT min(slot) FROM _coven_cutoffs WHERE slot<?1 AND (device=?2 OR (member=?3 AND (signing IS NULL OR signing=?4)))",
+) -> Result<Option<(Slot, WriteCutoff)>, DbError> {
+    Ok(db.query("SELECT slot,device,signing FROM _coven_cutoffs WHERE slot<?1 AND (device=?2 OR (member=?3 AND (signing IS NULL OR signing=?4))) ORDER BY slot LIMIT 1",
         params![slot.0.to_be_bytes().as_slice(),device.0.to_be_bytes().as_slice(),member.0.as_bytes().as_slice(),signer.as_bytes().as_slice()],
-        |r|Ok(r.get::<_,Option<Vec<u8>>>(0)?.map(|s|Slot(counter(s)))))
+        |r| {
+            let cause = if r.get::<_,Option<Vec<u8>>>(1)?.is_some() { WriteCutoff::DeviceRemoved }
+                else if r.get::<_,Option<Vec<u8>>>(2)?.is_some() { WriteCutoff::MemberKeysReplaced }
+                else { WriteCutoff::MemberRemoved };
+            Ok((Slot(counter(r.get(0)?)), cause))
+        })?.pop())
 }
 
 pub(crate) fn refused(db: &DatabaseConnection, write: WriteId) -> Result<bool, DbError> {

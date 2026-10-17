@@ -55,6 +55,9 @@ pub struct Claim {
 
 /// Authenticated observations supplied by the sync reader.
 pub enum ClaimRead {
+    /// The create succeeded and the subsequent authenticated floor still keeps
+    /// the attempted slot. No reread of our own ciphertext is required.
+    Created,
     /// A slot at or above the checked floor. Absence permits exact retry.
     Kept(Option<Box<dyn Read + Send>>),
     /// A snapshot whose coverage includes the attempted slot below the floor.
@@ -104,26 +107,29 @@ pub(crate) fn current(db: &DatabaseConnection) -> Result<Option<Claim>, DbError>
     }).transpose()
 }
 
-pub(crate) fn begin<E: From<DbError>, R: Read>(
-    db: &DatabaseConnection,
-    device: DeviceId,
-    work: ClaimWork,
-    seal: impl FnOnce(u64) -> Result<ClaimAttempt<R>, E>,
-) -> Result<Claim, E> {
-    if metadata(db)?.is_some() {
-        return Err(DbError::ClaimPending.into());
-    }
+pub(crate) fn reserved(db: &DatabaseConnection, device: DeviceId) -> Result<u64, DbError> {
     let previous: Option<Vec<u8>> = db.query_row(
         "SELECT (SELECT number FROM _coven_claim_counters WHERE device=?1)",
         [device.0.to_be_bytes().as_slice()],
         |r| r.get(0),
     )?;
-    let number = previous
-        .map(counter)
-        .unwrap_or(0)
-        .checked_add(1)
-        .ok_or(DbError::ClaimNumberExhausted)?;
-    let attempt = seal(number)?;
+    Ok(previous.map(counter).unwrap_or(0))
+}
+
+pub(crate) fn begin<R: Read>(
+    db: &DatabaseConnection,
+    device: DeviceId,
+    work: ClaimWork,
+    number: u64,
+    prepared: crate::claim_preparation::PreparedClaim<R>,
+) -> Result<Claim, DbError> {
+    if metadata(db)?.is_some() {
+        return Err(DbError::ClaimPending);
+    }
+    // Concurrent callers may have committed another claim while this one sealed.
+    if reserved(db, device)?.checked_add(1) != Some(number) {
+        return Err(DbError::ClaimPending);
+    }
     let (through, operation) = match work {
         ClaimWork::Writes(through) => (Some(through.to_be_bytes().to_vec()), None),
         ClaimWork::Operation(operation) => (None, Some(operation.0)),
@@ -132,8 +138,8 @@ pub(crate) fn begin<E: From<DbError>, R: Read>(
         params![device.0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice()])?;
     db.internal_execute("INSERT INTO _coven_claim_journal(device,number,through,operation,settlement,singleton) VALUES(?1,?2,?3,?4,'unknown',1)",
         params![device.0.to_be_bytes().as_slice(),number.to_be_bytes().as_slice(),through,operation])?;
-    let path = attempt.path.clone();
-    append(db, device, number, attempt)?;
+    let path = prepared.attempt.path.clone();
+    append(db, device, number, prepared)?;
     if let ClaimWork::Writes(through) = work {
         db.internal_execute(
             "UPDATE _coven_uploads SET claim=?1 WHERE device=?2 AND number<=?3",
@@ -157,8 +163,13 @@ fn append(
     db: &DatabaseConnection,
     device: DeviceId,
     number: u64,
-    mut attempt: ClaimAttempt<impl Read>,
+    prepared: crate::claim_preparation::PreparedClaim<impl Read>,
 ) -> Result<(), DbError> {
+    let crate::claim_preparation::PreparedClaim {
+        mut attempt,
+        digest,
+        size,
+    } = prepared;
     let ordinal: i64 = db.query_row("SELECT coalesce(max(attempt),0)+1 FROM _coven_claim_attempts WHERE device=?1 AND number=?2",
         params![device.0.to_be_bytes(),number.to_be_bytes()], |r|r.get(0))?;
     db.internal_execute(
@@ -170,23 +181,22 @@ fn append(
             attempt.path.as_str()
         ],
     )?;
-    let mut hash = coven_crypto::ObjectHasher::new();
     for chunk in 0i64.. {
         let bytes = read_chunk(&mut attempt.bytes)?;
         if bytes.is_empty() {
             break;
         }
-        hash.update(&bytes);
         db.internal_execute("INSERT INTO _coven_claim_chunks(device,number,attempt,chunk,bytes) VALUES(?1,?2,?3,?4,?5)",
             params![device.0.to_be_bytes(),number.to_be_bytes(),ordinal,chunk,bytes])?;
     }
     db.internal_execute(
-        "UPDATE _coven_claim_attempts SET digest=?4 WHERE device=?1 AND number=?2 AND attempt=?3",
+        "UPDATE _coven_claim_attempts SET digest=?4,size=?5 WHERE device=?1 AND number=?2 AND attempt=?3",
         params![
             device.0.to_be_bytes(),
             number.to_be_bytes(),
             ordinal,
-            hash.finish().as_bytes()
+            digest.as_bytes(),
+            size.to_be_bytes()
         ],
     )?;
     Ok(())
@@ -273,7 +283,7 @@ fn equal(db: &DatabaseConnection, mut received: Box<dyn Read + Send>) -> Result<
 
 pub(crate) fn retry(
     db: &DatabaseConnection,
-    attempt: ClaimAttempt<impl Read>,
+    attempt: crate::claim_preparation::PreparedClaim<impl Read>,
 ) -> Result<(), DbError> {
     let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
     if claim.settlement != ClaimSettlement::NotLanded {
@@ -300,6 +310,7 @@ pub(crate) fn settle(db: &DatabaseConnection, read: ClaimRead) -> Result<ClaimSe
         .last()
         .expect("a journal starts with its first attempt");
     let (result, name) = match read {
+        ClaimRead::Created => (ClaimSettlement::Landed, "landed"),
         ClaimRead::Kept(Some(bytes)) => {
             if equal(db, bytes)? {
                 (ClaimSettlement::Landed, "landed")
@@ -381,4 +392,63 @@ pub(crate) fn attempted(db: &DatabaseConnection, path: &ObjectPath) -> Result<bo
         [path.as_str()],
         |r| r.get(0),
     )
+}
+
+pub(crate) fn attempted_digest(
+    db: &DatabaseConnection,
+    number: u64,
+    path: &ObjectPath,
+    digest: &[u8; 32],
+) -> Result<bool, DbError> {
+    db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_claim_attempts WHERE number=?1 AND path=?2 AND digest=?3)",
+        params![number.to_be_bytes(), path.as_str(), digest], |r| r.get(0))
+}
+
+/// Durable transfer state for the current attempt's exact sealed bytes.
+pub struct ClaimUpload {
+    /// The complete ciphertext length.
+    pub size: u64,
+    /// Opaque provider session retained after each confirmed part.
+    pub session: Option<Vec<u8>>,
+}
+
+pub(crate) fn upload(db: &DatabaseConnection) -> Result<ClaimUpload, DbError> {
+    let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
+    db.query_row("SELECT size,session FROM _coven_claim_attempts WHERE device=?1 AND number=?2 ORDER BY attempt DESC LIMIT 1",
+        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes()], |row| Ok(ClaimUpload {size: counter(row.get(0)?), session: row.get(1)?}))
+}
+
+pub(crate) fn save_upload(db: &DatabaseConnection, session: Vec<u8>) -> Result<(), DbError> {
+    let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
+    db.internal_execute("UPDATE _coven_claim_attempts SET session=?3 WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2)",
+        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes(), session])?;
+    Ok(())
+}
+
+pub(crate) fn range(
+    db: &DatabaseConnection,
+    offset: u64,
+    length: usize,
+) -> Result<Vec<u8>, DbError> {
+    if length == 0 {
+        return Ok(Vec::new());
+    }
+    let claim = metadata(db)?.ok_or(DbError::NoClaim)?;
+    let chunk_size = coven_format::chunks::CHUNK_SIZE as u64;
+    let end = offset
+        .checked_add(length as u64)
+        .ok_or(DbError::DamagedDatabase)?;
+    let pieces = db.query("SELECT chunk,bytes FROM _coven_claim_chunks WHERE device=?1 AND number=?2 AND attempt=(SELECT max(attempt) FROM _coven_claim_attempts WHERE device=?1 AND number=?2) AND chunk>=?3 AND chunk<=?4 ORDER BY chunk",
+        params![claim.device.0.to_be_bytes(), claim.number.to_be_bytes(), (offset / chunk_size) as i64, ((end-1) / chunk_size) as i64],
+        |row| Ok((row.get::<_,i64>(0)? as u64, row.get::<_,Vec<u8>>(1)?)))?;
+    let mut bytes = Vec::with_capacity(length);
+    for (index, piece) in pieces {
+        let start = offset.saturating_sub(index * chunk_size) as usize;
+        let last = (end - index * chunk_size).min(piece.len() as u64) as usize;
+        bytes.extend_from_slice(piece.get(start..last).ok_or(DbError::DamagedDatabase)?);
+    }
+    if bytes.len() != length {
+        return Err(DbError::DamagedDatabase);
+    }
+    Ok(bytes)
 }

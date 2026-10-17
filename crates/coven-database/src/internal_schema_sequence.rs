@@ -77,6 +77,14 @@ macro_rules! coven_sequence_tables {
             ) STRICT;
             INSERT INTO _coven_sequence VALUES(1,x'0000000000000000');
         ");
+        $visit!(_coven_absent_snapshots, "
+            CREATE TABLE _coven_absent_snapshots (
+                audience TEXT NOT NULL,
+                device BLOB NOT NULL CHECK(length(device)=8),
+                number BLOB NOT NULL CHECK(length(number)=8),
+                PRIMARY KEY(audience,device,number)
+            ) STRICT, WITHOUT ROWID;
+        ");
         $visit!(_coven_last_claims, "
             CREATE TABLE _coven_last_claims (
                 device BLOB PRIMARY KEY NOT NULL CHECK(length(device)=8),
@@ -111,6 +119,8 @@ macro_rules! coven_sequence_tables {
                 attempt INTEGER NOT NULL,
                 path TEXT NOT NULL,
                 digest BLOB CHECK(digest IS NULL OR length(digest)=32),
+                size BLOB CHECK(size IS NULL OR length(size)=8),
+                session BLOB,
                 PRIMARY KEY(device,number,attempt),
                 FOREIGN KEY(device,number) REFERENCES _coven_claim_journal(device,number) ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;

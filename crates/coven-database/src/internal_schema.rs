@@ -610,7 +610,7 @@ macro_rules! coven_tables {
         $visit!(_coven_retries, "
             CREATE TABLE _coven_retries (
                 id INTEGER PRIMARY KEY,
-                scope TEXT UNIQUE CHECK(scope IN ('join','provider')),
+                scope TEXT UNIQUE CHECK(scope IN ('join','sync','provider')),
                 operation INTEGER UNIQUE REFERENCES _coven_operations(id) ON DELETE CASCADE,
                 upload INTEGER UNIQUE REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
                 download BLOB UNIQUE CHECK(download IS NULL OR length(download)=24),

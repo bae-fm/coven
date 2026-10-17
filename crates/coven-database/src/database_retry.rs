@@ -7,6 +7,34 @@ use crate::{
 };
 
 impl Database {
+    /// Persist an operation's failure and its automatic retry deadline together.
+    pub async fn record_operation_retry<P: crate::PendingValue>(
+        &self,
+        record: P,
+        wait: Option<RetryWait>,
+    ) -> Result<(), DbError> {
+        self.call(move |inner| {
+            let id = record.operation().ok_or(DbError::Invariant {
+                what: "an operation retry names its journal row",
+            })?;
+            if record.reported_by() != inner.access.device {
+                return Err(DbError::Invariant {
+                    what: "an operation retry is this device's own",
+                });
+            }
+            inner.access.with_writer(|writer| {
+                writer.pending_transaction(|db| {
+                    crate::pending::save(db, &record)?;
+                    match wait {
+                        Some(wait) => retry::save(db, RetrySubject::Operation(id), &wait),
+                        None => retry::clear(db, RetrySubject::Operation(id)),
+                    }
+                })
+            })
+        })
+        .await
+    }
+
     /// Every persisted wait, for arming on reopen (§16.5).
     pub async fn retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
         self.call(move |inner| {

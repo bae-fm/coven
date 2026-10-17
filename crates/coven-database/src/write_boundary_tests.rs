@@ -5,6 +5,29 @@ use coven_format::admin::{SnapshotId, StoreChange};
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Slot};
 
+#[test]
+fn an_established_version_does_not_select_a_later_preparation() {
+    let first = SnapshotId {
+        audience: Audience::Store,
+        device: DeviceId(1),
+        number: 1,
+    };
+    let mut state = crate::StoreState::default();
+    Boundary::SchemaChange(StoreVersion {
+        number: 2,
+        snapshot: first,
+        entry: Slot(4),
+    })
+    .apply(&mut state);
+    let later = SnapshotId {
+        audience: Audience::Store,
+        device: DeviceId(2),
+        number: 1,
+    };
+    assert!(Boundary::schema_in_place(&state, 2, &later));
+    assert!(!Boundary::schema_in_place(&state, 3, &later));
+}
+
 pub(crate) fn notes_v2() -> Vec<crate::Migration> {
     vec![
         crate::Migration::sql(1, "notes", NOTES),

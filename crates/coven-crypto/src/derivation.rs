@@ -163,6 +163,45 @@ impl DerivedKeys {
             .open_object_chunk(path, prefix, section, index, sealed)
     }
 
+    /// Open a header whose authentication identity is inside its plaintext.
+    /// `identity` receives only the fixed routing prefix as an untrusted hint;
+    /// it must only construct the identity, never install or report that hint.
+    /// No plaintext is returned until the ordinary AEAD check succeeds with
+    /// the selected identity, exact prefix, and header coordinates (0, 0).
+    ///
+    /// D9 inner writes use this because their stable write number is sealed.
+    /// ChaCha's keystream does not depend on associated data (RFC 8439 §2.8).
+    /// The tentative bytes and cipher state are erased after routing.
+    pub fn open_identified_header<const N: usize>(
+        &self,
+        prefix: &[u8],
+        sealed: &[u8],
+        identity: impl FnOnce(&[u8; N]) -> Result<String, CryptoError>,
+    ) -> Result<Vec<u8>, CryptoError> {
+        use chacha20::{
+            cipher::{StreamCipher, StreamCipherSeek},
+            KeyIvInit, XChaCha20,
+        };
+        let (nonce, ciphertext) = sealed.split_at_checked(24).ok_or(CryptoError::Malformed)?;
+        if ciphertext
+            .len()
+            .checked_sub(cipher::FILE_CHUNK_TAG_LEN)
+            .is_none_or(|length| length < N)
+        {
+            return Err(CryptoError::Malformed);
+        }
+        let mut tentative = Zeroizing::new([0; N]);
+        tentative.copy_from_slice(&ciphertext[..N]);
+        let key: &[u8; 32] = &self.encryption.0;
+        let nonce: &[u8; 24] = nonce.try_into().expect("24-byte split");
+        let mut stream = XChaCha20::new(key.into(), nonce.into());
+        // Block zero supplies Poly1305's key; payload encryption starts at one.
+        stream.seek(64u64);
+        stream.apply_keystream(tentative.as_mut());
+        let path = identity(&tentative)?;
+        self.open_object_chunk(&path, prefix, 0, 0, sealed)
+    }
+
     /// Start an incremental hash of the audience's agreed data (§19.1).
     pub fn fingerprint_hasher(&self) -> FingerprintHasher {
         FingerprintHasher::new(&self.fingerprints)

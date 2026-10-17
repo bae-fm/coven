@@ -57,9 +57,8 @@ pub(crate) fn begin(
 
 pub(crate) fn create_tables(database: &DatabaseConnection) -> Result<(), DbError> {
     database.batch("CREATE TEMP TABLE _coven_snapshot_values(audience TEXT NOT NULL,table_name TEXT NOT NULL,key BLOB NOT NULL,columns BLOB NOT NULL,matched INTEGER NOT NULL DEFAULT 0,PRIMARY KEY(audience,table_name,key)) WITHOUT ROWID;
-        CREATE TEMP TABLE _coven_snapshot_writes(device BLOB NOT NULL,number BLOB NOT NULL,timestamp BLOB NOT NULL,read_through BLOB NOT NULL,slot BLOB NOT NULL,PRIMARY KEY(device,number)) WITHOUT ROWID;
         CREATE TEMP TABLE _coven_snapshot_columns(table_name TEXT NOT NULL,column_name TEXT NOT NULL,PRIMARY KEY(table_name,column_name)) WITHOUT ROWID;")?;
-    Ok(())
+    crate::snapshot_metadata::SnapshotMetadata::create_table(database)
 }
 
 /// A generated cell keeps the value its write computed, which can differ from

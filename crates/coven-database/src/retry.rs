@@ -30,6 +30,8 @@ pub enum RetrySubject {
     },
     /// The joining device's polling for its request's outcome (§12.2).
     Join,
+    /// A failed sequence pass.
+    Sync,
     /// The provider/account cooldown a `Retry-After` requested; every
     /// consumer of the store's connection waits for it.
     Provider,
@@ -65,6 +67,7 @@ fn key(subject: RetrySubject) -> Key {
             Key::Download(bytes)
         }
         RetrySubject::Join => Key::Scope("join"),
+        RetrySubject::Sync => Key::Scope("sync"),
         RetrySubject::Provider => Key::Scope("provider"),
     }
 }
@@ -158,6 +161,7 @@ impl RawRow {
                 }
             }
             (Some("join"), None, None, None) => RetrySubject::Join,
+            (Some("sync"), None, None, None) => RetrySubject::Sync,
             (Some("provider"), None, None, None) => RetrySubject::Provider,
             _ => return Err(DbError::DamagedDatabase),
         };

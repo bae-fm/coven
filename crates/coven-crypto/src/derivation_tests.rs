@@ -230,3 +230,43 @@ fn authorship_leaves_are_keyed_and_branches_are_pinned() {
         hasher.leaf(b"leaf")
     );
 }
+
+#[test]
+fn identified_headers_authenticate_the_selected_identity_before_returning_plaintext() {
+    let key = DerivedKeys::new(&[17; 32]);
+    let plain = b"000007 body";
+    let path = "coven/write/store/1/000007";
+    let sealed = key.reseal_object_chunk(path, b"prefix", 0, 0, plain);
+    let route = |hint: &[u8; 6]| {
+        Ok(format!(
+            "coven/write/store/1/{}",
+            std::str::from_utf8(hint).map_err(|_| CryptoError::Authentication)?
+        ))
+    };
+    assert_eq!(
+        key.open_identified_header(b"prefix", &sealed, route)
+            .unwrap(),
+        plain
+    );
+    assert!(key
+        .open_identified_header::<6>(b"prefix", &sealed, |_| Ok("another identity".into()))
+        .is_err());
+    for position in [0, 24, sealed.len() - 1] {
+        let mut changed = sealed.clone();
+        changed[position] ^= 1;
+        assert!(key
+            .open_identified_header(b"prefix", &changed, route)
+            .is_err());
+    }
+    assert!(key
+        .open_identified_header(b"other prefix", &sealed, route)
+        .is_err());
+    assert!(DerivedKeys::new(&[18; 32])
+        .open_identified_header(b"prefix", &sealed, route)
+        .is_err());
+    assert!(key
+        .open_identified_header::<32>(b"prefix", &sealed, |_| panic!(
+            "truncated hint reached routing"
+        ))
+        .is_err());
+}

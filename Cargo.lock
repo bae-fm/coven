@@ -970,6 +970,7 @@ dependencies = [
  "android-native-keyring-store",
  "apple-native-keyring-store",
  "argon2",
+ "chacha20",
  "chacha20poly1305",
  "coven-foundation",
  "ed25519-dalek",

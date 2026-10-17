@@ -72,6 +72,7 @@ mod snapshot_coverage;
 mod snapshot_error;
 mod snapshot_load;
 mod snapshot_metadata;
+mod snapshot_preparation;
 mod snapshot_reload;
 mod snapshot_state;
 mod snapshot_write;
@@ -105,7 +106,7 @@ pub use coven_merge::WriteId;
 pub use database::file_database::{CacheReservation, FileDatabase};
 pub use database::file_retention::{FileCandidate, FileRetention};
 pub use database::input_database::{
-    FileEvidence, InputBudget, RetainedInput, RetainedRange, UnprovenFiles,
+    FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, UnprovenFiles,
 };
 pub use database::{discarded_operations, Database, DatabaseBuilder, DatabaseReadHandle};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
@@ -173,8 +174,17 @@ mod snapshot_view;
 mod store_state;
 mod store_state_tables;
 mod write_metadata;
-pub use claim::{Claim, ClaimAttempt, ClaimBytes, ClaimRead, ClaimSettlement, ClaimWork};
+pub use claim::{
+    Claim, ClaimAttempt, ClaimBytes, ClaimRead, ClaimSettlement, ClaimUpload, ClaimWork,
+};
+pub use sequence::WriteCutoff;
 pub use sequence_apply::{AdminEffect, IncomingSlot, SlotContent};
 pub use store_state::{
     DeviceState, StoreCircle, StoreDevice, StoreIdentity, StoreMember, StoreState, StoreVersion,
 };
+
+mod provider_changes;
+pub use provider_changes::ProviderChanges;
+
+mod claim_preparation;
+mod input_preparation;

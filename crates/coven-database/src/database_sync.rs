@@ -4,6 +4,69 @@ use super::Database;
 use crate::{CovenResult, DbError};
 
 impl Database {
+    /// Transfer metadata of the current durable claim attempt.
+    pub async fn claim_upload(&self) -> Result<crate::ClaimUpload, DbError> {
+        self.call(|inner| inner.access.with_committed(crate::claim::upload))
+            .await
+    }
+    /// A bounded range of the current attempt, used by a recorded upload.
+    pub async fn claim_range(&self, offset: u64, length: usize) -> Result<Vec<u8>, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_committed(|db| crate::claim::range(db, offset, length))
+        })
+        .await
+    }
+    /// Save provider-confirmed progress before the next part is sent.
+    pub async fn save_claim_upload(&self, session: Vec<u8>) -> Result<(), DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.stream_transaction(|db| crate::claim::save_upload(db, session))
+            })
+        })
+        .await
+    }
+    /// Fix first-attempt keys for this captured queue prefix. Previously
+    /// attempted originals retain their exact format and keys.
+    pub async fn prepare_uploads<E, F>(
+        &self,
+        through: u64,
+        select: F,
+    ) -> Result<Vec<coven_format::write_stream::WriteHeaderFrame>, E>
+    where
+        E: From<DbError> + From<coven_format::Error> + Send + 'static,
+        F: FnMut(
+                &coven_format::write_stream::WriteHeaderFrame,
+            ) -> Result<coven_format::sealed_write::WriteObjectPrefix, E>
+            + Send
+            + 'static,
+    {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                crate::upload::prepare_batch(writer, inner.access.device, through, select)
+            })
+        })
+        .await
+    }
+
+    /// Stream the captured originals through one committed reader. Concurrent
+    /// app commits append after this fixed number and remain for the next pass.
+    pub async fn read_uploads<E, F>(&self, through: u64, consume: F) -> Result<(), E>
+    where
+        E: From<DbError> + Send + 'static,
+        F: FnMut(crate::WaitingUpload<'_>) -> Result<(), E> + Send + 'static,
+    {
+        self.call(move |inner| {
+            inner.access.readers.acquire_reader().with_reader(|reader| {
+                reader.read_transaction(|| {
+                    crate::upload::read_batch(reader, inner.access.device, through, consume)
+                })
+            })
+        })
+        .await
+    }
+
     /// Authenticate and retain original source records covered by an applied slot
     /// or snapshot, without applying their data again or changing source verdicts.
     pub async fn retain_write_sources<R, F>(
@@ -16,11 +79,12 @@ impl Database {
         F: FnOnce() -> Result<(), DbError> + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.stream_transaction(|db| {
-                    write.retain_sources(db)?;
-                    authenticate()
-                })
+            inner.inputs.prepare(|inputs| {
+                let write = write.prepare(inputs)?;
+                authenticate()?;
+                inner
+                    .access
+                    .with_writer(|writer| writer.stream_transaction(|db| write.retain_sources(db)))
             })
         })
         .await
@@ -30,7 +94,7 @@ impl Database {
     /// Authentication failure rolls back the slot and leaves its predecessor applied.
     pub async fn apply_slot<P, R, F>(
         &self,
-        incoming: crate::IncomingSlot<R>,
+        incoming: crate::IncomingSlot<crate::DownloadedWriteStream<R>>,
         authenticate: F,
         operation: Option<crate::OperationUpdate>,
     ) -> Result<crate::ApplyOutcome, DbError>
@@ -54,21 +118,24 @@ impl Database {
                     )?;
                 }
             }
-            let reader = inner.access.readers.acquire_reader();
-            inner.with_files(Vec::new(), |writer, files| {
-                reader.with_reader(|reader| {
-                    reader.read_transaction(|| {
-                        inner.access.write_schema.prepare(reader)?;
-                        reader.schema_version()?;
-                        crate::sequence_apply::apply::<P, R>(
-                            writer,
-                            reader,
-                            &inner.access.write_schema,
-                            incoming,
-                            files,
-                            authenticate,
-                            operation,
-                        )
+            inner.inputs.prepare(|inputs| {
+                let incoming = incoming.prepare(inputs)?;
+                let reader = inner.access.readers.acquire_reader();
+                inner.with_files(Vec::new(), |writer, files| {
+                    reader.with_reader(|reader| {
+                        reader.read_transaction(|| {
+                            inner.access.write_schema.prepare(reader)?;
+                            reader.schema_version()?;
+                            crate::sequence_apply::apply::<P>(
+                                writer,
+                                reader,
+                                &inner.access.write_schema,
+                                incoming,
+                                files,
+                                authenticate,
+                                operation,
+                            )
+                        })
                     })
                 })
             })
@@ -343,6 +410,50 @@ impl Database {
             .await
     }
 
+    /// Original administrative, copy and announcement evidence retained by snapshots.
+    pub async fn original_slots(&self) -> Result<Vec<coven_format::floor::OriginalSlot>, DbError> {
+        self.call(|inner| {
+            inner.access.with_committed(|db| {
+                db.query(
+                    "SELECT slot,record FROM _coven_slot_records ORDER BY slot",
+                    [],
+                    |row| {
+                        Ok(coven_format::floor::OriginalSlot {
+                            slot: coven_merge::Slot(crate::write_encoding::counter(row.get(0)?)),
+                            object: row.get(1)?,
+                        })
+                    },
+                )
+            })
+        })
+        .await
+    }
+
+    /// Greatest locally reserved claim number, including finished journals.
+    pub async fn claim_counter(&self) -> Result<u64, DbError> {
+        self.call(|inner| {
+            inner
+                .access
+                .with_committed(|db| crate::claim::reserved(db, inner.access.device))
+        })
+        .await
+    }
+
+    /// Whether this copy journaled these complete bytes at this exact slot.
+    pub async fn attempted_slot(
+        &self,
+        number: u64,
+        path: coven_format::path::ObjectPath,
+        digest: [u8; 32],
+    ) -> Result<bool, DbError> {
+        self.call(move |inner| {
+            inner
+                .access
+                .with_committed(|db| crate::claim::attempted_digest(db, number, &path, &digest))
+        })
+        .await
+    }
+
     /// The active claim and every durable attempted path. `read_current_attempt`
     /// streams the current attempt's exact bytes.
     pub async fn current_claim(&self) -> Result<Option<crate::Claim>, DbError> {
@@ -350,7 +461,8 @@ impl Database {
             .await
     }
 
-    /// Reserve a claim and seal its first attempt under the writer lock.
+    /// Seal and stage outside the application writer, then atomically reserve
+    /// the claim number and retain its complete attempted bytes.
     /// Returning the attempt proves the journal transaction has committed.
     pub async fn begin_claim<F, R>(
         &self,
@@ -362,9 +474,17 @@ impl Database {
         R: std::io::Read + Send + 'static,
     {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.stream_transaction(|db| {
-                    crate::claim::begin(db, inner.access.device, work, seal)
+            let number = inner
+                .access
+                .with_committed(|db| crate::claim::reserved(db, inner.access.device))?
+                .checked_add(1)
+                .ok_or(DbError::ClaimNumberExhausted)?;
+            let attempt = seal(number)?;
+            inner.inputs.prepare_claim(attempt, |prepared| {
+                inner.access.with_writer(|writer| {
+                    writer.stream_transaction(|db| {
+                        crate::claim::begin(db, inner.access.device, work, number, prepared)
+                    })
                 })
             })
         })
@@ -394,8 +514,10 @@ impl Database {
         attempt: crate::ClaimAttempt<R>,
     ) -> Result<(), DbError> {
         self.call(move |inner| {
-            inner.access.with_writer(|writer| {
-                writer.stream_transaction(|db| crate::claim::retry(db, attempt))
+            inner.inputs.prepare_claim(attempt, |prepared| {
+                inner.access.with_writer(|writer| {
+                    writer.stream_transaction(|db| crate::claim::retry(db, prepared))
+                })
             })
         })
         .await

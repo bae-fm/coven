@@ -11,6 +11,7 @@ pub trait PendingValue: Serialize + DeserializeOwned + Send + 'static {
     fn writes_refused(
         slot: coven_merge::Slot,
         cutoff: coven_merge::Slot,
+        cause: crate::WriteCutoff,
         reporter: DeviceId,
     ) -> Self;
     /// Report an audience whose selected boundary has no committed data input.

@@ -17,6 +17,7 @@ use std::{collections::BTreeMap, io::Cursor};
 struct Pending {
     subject: u64,
     by: DeviceId,
+    cutoff: Option<(u64, String)>,
 }
 impl PendingValue for Pending {
     type Subject = u64;
@@ -39,24 +40,31 @@ impl PendingValue for Pending {
         false
     }
     fn reload(_: Audience, by: DeviceId) -> Self {
-        Self { subject: 0, by }
+        Self {
+            subject: 0,
+            by,
+            cutoff: None,
+        }
     }
     fn access_key(id: OperationId, by: DeviceId, _: AccessKeyToDelete) -> Self {
         Self {
             subject: id.0 as u64,
             by,
+            cutoff: None,
         }
     }
     fn provider_access(id: OperationId, by: DeviceId, _: String, _: bool, _: bool) -> Self {
         Self {
             subject: id.0 as u64,
             by,
+            cutoff: None,
         }
     }
-    fn writes_refused(slot: Slot, _: Slot, by: DeviceId) -> Self {
+    fn writes_refused(slot: Slot, cutoff: Slot, cause: WriteCutoff, by: DeviceId) -> Self {
         Self {
             subject: slot.0,
             by,
+            cutoff: Some((cutoff.0, format!("{cause:?}"))),
         }
     }
 }
@@ -385,6 +393,7 @@ async fn admin(
                     state,
                     boundary: None,
                     reload: vec![],
+                    provider: Default::default(),
                 }),
             },
         },
@@ -413,6 +422,12 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
         apply(&db, 1, vec![insert(10, 1, 1, "a", "first")])
             .await
             .unwrap();
+        let cause = match &change {
+            StoreChange::RemoveDevice { .. } => "DeviceRemoved",
+            StoreChange::RemoveMember { .. } => "MemberRemoved",
+            StoreChange::ReplaceMemberKeys { .. } => "MemberKeysReplaced",
+            _ => unreachable!(),
+        };
         let replaced_key = matches!(change, StoreChange::ReplaceMemberKeys { .. });
         admin(&db, 2, change, db.store_state().await.unwrap()).await;
         // Cutoff: an old authored view cannot move the cut-off past the containing slot.
@@ -439,6 +454,10 @@ async fn cutoff_consumes_every_kind_of_removed_author_without_effects() {
                 .map(|p| p.subject)
                 .collect::<Vec<_>>(),
             [3]
+        );
+        assert_eq!(
+            db.pending::<Pending>().await.unwrap()[0].cutoff,
+            Some((2, cause.into()))
         );
         assert!(db.lost_values().await.unwrap().is_empty());
         apply(&db, 4, vec![insert(20, 1, 3, "b", "available")])
@@ -641,6 +660,7 @@ async fn snapshot_claim_digests_survive_loading_and_writing() {
             target: 2,
             state: StoreState::default(),
             cutoffs: vec![],
+            provider: Default::default(),
             boundaries: vec![],
             operation: None,
             authorship: std::sync::Arc::new(NoSnapshotEvidence),
@@ -695,6 +715,7 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
         target,
         state: StoreState::default(),
         cutoffs: vec![],
+        provider: Default::default(),
         boundaries: vec![],
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
@@ -731,7 +752,7 @@ async fn reload_commits_the_fixed_prefix_and_preserves_queued_originals() {
 #[tokio::test]
 async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
     let (_temp, db) = open(false).await;
-    let incoming = || IncomingSlot::<std::io::Empty> {
+    let incoming = || IncomingSlot::<DownloadedWriteStream<std::io::Empty>> {
         digest: [0x31; 32],
         slot: Slot(1),
         header: SlotHeader {
@@ -753,6 +774,7 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
                 state: StoreState::default(),
                 boundary: None,
                 reload: vec![Audience::Store],
+                provider: Default::default(),
             }),
         },
     };
@@ -770,6 +792,7 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
         target,
         state: StoreState::default(),
         cutoffs: vec![],
+        provider: Default::default(),
         boundaries: vec![],
         operation: None,
         authorship: std::sync::Arc::new(NoSnapshotEvidence),
@@ -781,4 +804,77 @@ async fn an_admin_slot_waits_until_its_required_reload_can_commit() {
     assert!(db.reloading_audiences().await.unwrap().is_empty());
     assert_eq!(db.last_claims().await.unwrap()[0].number, 1);
     db.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn preparing_an_incoming_part_leaves_the_application_writer_available() {
+    let (_temp, db) = open(false).await;
+    let write = stream(insert(10, 1, 1, "received", "received"));
+    let (entered, started) = tokio::sync::oneshot::channel();
+    let (release, resume) = std::sync::mpsc::channel();
+    let DownloadedPartStream::Opened(bytes) = write.parts.into_iter().next().unwrap() else {
+        panic!("opened fixture")
+    };
+    let write = DownloadedWriteStream {
+        header: write.header,
+        signer: write.signer,
+        authorship: write.authorship,
+        parts: vec![DownloadedPartStream::Opened(HeldPart {
+            bytes,
+            entered: Some(entered),
+            resume,
+        })],
+    };
+    let receiving = db.clone();
+    let incoming = tokio::spawn(async move {
+        receiving
+            .apply_slot::<Pending, _, _>(
+                IncomingSlot {
+                    slot: Slot(1),
+                    digest: [0x31; 32],
+                    header: SlotHeader {
+                        device: DeviceId(10),
+                        claim: 1,
+                        author: member(10),
+                        after: 0,
+                    },
+                    content: SlotContent::Writes(vec![write]),
+                },
+                || Ok(()),
+                None,
+            )
+            .await
+    });
+    started.await.unwrap();
+    let written = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        db.write(|sql| {
+            sql.execute("INSERT INTO items VALUES('local','while decoding')", [])?;
+            Ok(())
+        }),
+    )
+    .await;
+    release.send(()).unwrap();
+    incoming.await.unwrap().unwrap();
+    db.close().await.unwrap();
+    written
+        .expect("incoming part decoding held the application writer")
+        .unwrap();
+}
+
+struct HeldPart {
+    bytes: Cursor<Vec<u8>>,
+    entered: Option<tokio::sync::oneshot::Sender<()>>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+impl std::io::Read for HeldPart {
+    fn read(&mut self, output: &mut [u8]) -> std::io::Result<usize> {
+        if let Some(entered) = self.entered.take() {
+            entered.send(()).unwrap();
+            self.resume
+                .recv_timeout(std::time::Duration::from_secs(10))
+                .unwrap();
+        }
+        self.bytes.read(output)
+    }
 }

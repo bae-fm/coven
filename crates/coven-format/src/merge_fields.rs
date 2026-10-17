@@ -310,6 +310,23 @@ pub fn encode_write_frame(value: &crate::dismissal::WriteFrame) -> Result<Vec<u8
     }
 }
 
+/// Retain one prepared snapshot record in SQLite, without stream framing.
+pub fn encode_snapshot_record(value: &crate::snapshot::SnapshotRecord) -> Result<Vec<u8>, Error> {
+    let mut out = Encoder::new();
+    value.put(&mut out)?;
+    Ok(out.bytes)
+}
+
+/// Read one prepared SQLite record against its retained write metadata.
+pub fn decode_snapshot_record(
+    bytes: &[u8],
+    oracle: &impl coven_merge::WriteOracle,
+) -> Result<crate::snapshot::SnapshotRecord, Error> {
+    decode_with(bytes, |input| {
+        crate::snapshot::SnapshotRecord::get(input, oracle)
+    })
+}
+
 /// Encode a loss identity without its values or changing replacement details.
 pub fn encode_loss_identity(value: &crate::loss::Loss) -> Result<Vec<u8>, Error> {
     use crate::loss::LossValues;

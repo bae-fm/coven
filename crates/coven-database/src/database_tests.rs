@@ -778,6 +778,15 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
         let store = TestStore::new();
         let open = || store.builder(notes_tables(), notes_migrations()).open();
         let db = open().await.unwrap();
+        db.write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('00000000-0000-4000-8000-000000000001','kept','')",
+                [],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
         let snapshot =
             crate::snapshot_write::tests::frames(&db, coven_merge::Audience::Store).await;
         let (id, prefix, input, author) = snapshot.input();
@@ -794,7 +803,25 @@ async fn a_failed_rollback_after_snapshot_checks_fails_the_handle() {
         let input = if valid {
             input
         } else {
-            std::io::Cursor::new(Vec::new())
+            // Framing is checked before acquiring the writer. This failure
+            // belongs to installation: synced values disagree with merge state.
+            let (header, mut records) = crate::snapshot_write::tests::decode(&snapshot);
+            let row = records
+                .iter_mut()
+                .find_map(|record| match record {
+                    coven_format::snapshot::SnapshotRecord::Synced(row) => Some(row),
+                    _ => None,
+                })
+                .expect("snapshot carries the inserted row");
+            row.columns.get_mut("title").unwrap().value =
+                coven_format::value::Value::Text("changed".into());
+            let (mut encoder, mut bytes) =
+                coven_format::snapshot::SnapshotEncoder::start(header).unwrap();
+            for record in records {
+                bytes.extend(encoder.record(record).unwrap());
+            }
+            bytes.extend(encoder.finish().unwrap());
+            std::io::Cursor::new(bytes)
         };
         db.inspect_writer(|writer| writer.refuse_transaction_end(true));
         let error = db

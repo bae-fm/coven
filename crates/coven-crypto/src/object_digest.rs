@@ -14,6 +14,7 @@ impl ObjectDigest {
 }
 
 /// Incremental SHA-256 state for an object's bytes in storage order.
+#[derive(Clone)]
 pub struct ObjectHasher(Sha256);
 
 impl ObjectHasher {
