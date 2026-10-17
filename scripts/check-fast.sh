@@ -29,8 +29,8 @@ if [ -n "${COVEN_CHECK_PACKAGES:-}" ]; then
         checker_args+=("$package")
     done
 fi
-step "cargo clippy ${packages[*]} --all-targets --all-features"
-cargo clippy "${packages[@]}" --all-targets --all-features -- -D warnings
-
 step "owner-construction-check: §20.1 dependencies, §20.2 capabilities and owners, §20.3 conventions"
 cargo run --quiet -p owner-construction-check -- "${checker_args[@]}"
+
+step "cargo clippy ${packages[*]} --all-targets --all-features"
+cargo clippy "${packages[@]}" --all-targets --all-features -- -D warnings
