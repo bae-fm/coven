@@ -462,10 +462,12 @@ pub fn snapshot_records() -> Vec<SnapshotRecord> {
     records.push(SnapshotRecord::Claim(crate::snapshot::LastClaim {
         device: DeviceId(1),
         number: 8,
+        digest: Some([0x81; 32]),
     }));
     records.push(SnapshotRecord::Claim(crate::snapshot::LastClaim {
         device: DeviceId(2),
         number: 1,
+        digest: Some([0x21; 32]),
     }));
     records
 }

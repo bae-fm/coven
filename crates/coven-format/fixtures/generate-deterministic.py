@@ -95,6 +95,12 @@ def snapshot_id(audience, device, number):
     return audience + u64(device) + u64(number)
 
 
+def last_claim(device, number, digest):
+    assert (number == 0) == (digest is None)
+    return frame(6, b"\x0b" + u64(device) + u64(number)
+                 + (b"\x00" if digest is None else b"\x01" + digest))
+
+
 def frame(kind, payload):
     return u8(kind) + u16(1) + u32(len(payload)) + payload
 
@@ -549,7 +555,7 @@ def main():
     path = STORE_TEXT + b"snapshots/02020202-0202-0202-0202-020202020202/1/1"
     prefix = bytes([34, 0, 1]) + circle_audience(CIRCLE) + bytes([3]) * 16 + u64(8) + b"\x00"
     plaintext = frame(5, snapshot_id(circle_audience(CIRCLE), 1, 1) + u32(2) + u64(0) * 11 + u64(2))
-    plaintext += frame(6, b"\x0b" + u64(1) + u64(7)) + frame(6, b"\x0b" + u64(2) + u64(1)) + frame(7, b"")
+    plaintext += last_claim(1, 7, bytes([0x71]) * 32) + last_claim(2, 1, bytes([0x21]) * 32) + frame(7, b"")
     body = prefix + signature(sodium, context(b"coven/prefix-signature/v1", path, prefix), 0x33)
     body += sealed_chunk(sodium, encryption_key(18), path, prefix, 0, 0, plaintext, bytes([0x69]) * 24)
     circle_snapshot = signed(sodium, path, body)
@@ -584,7 +590,7 @@ def main():
         counts[5], counts[11] = 1, 2
         body = frame(5, snapshot_id(store_audience(), 1, number) + u32(2) + b"".join(u64(n) for n in counts))
         body += frame(6, authored[7:-1] + verdict)
-        body += frame(6, b"\x0b" + u64(1) + u64(number)) + frame(6, b"\x0b" + u64(2) + u64(1)) + frame(7, b"")
+        body += last_claim(1, number, bytes([0x81]) * 32) + last_claim(2, 1, bytes([0x21]) * 32) + frame(7, b"")
         claim_snapshots.append(body)
     (out / "snapshot-claims.hex").write_text("".join(body.hex() + "\n" for body in claim_snapshots))
     for name, data in [

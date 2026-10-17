@@ -77,15 +77,17 @@ pub enum SnapshotRecord {
     Claim(LastClaim),
 }
 
-/// A device's last included claim number; zero means none through coverage.
+/// A device's last included claim and its complete-slot digest.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct LastClaim {
     /// The known device.
     pub device: coven_foundation::id_source::DeviceId,
     /// Last included claim across all slot kinds.
     pub number: u64,
+    /// SHA-256 of that slot's complete bytes; absent exactly when number is zero.
+    pub digest: Option<[u8; 32]>,
 }
-crate::wire::wire_struct!(LastClaim, device, number);
+crate::wire::wire_struct!(LastClaim, device, number, digest);
 
 /// Published-write locations from the snapshot's staged metadata and history.
 pub trait WriteSlots {
@@ -144,7 +146,11 @@ impl SnapshotRecord {
             Self::Admin(v) => v.validate_kind(0),
             Self::KeyCopy(v) => v.validate_kind(2),
             Self::Announcement(v) => v.validate_kind(3),
-            Self::Claim(_) => Ok(()),
+            Self::Claim(v) => require(
+                (v.number == 0) == v.digest.is_none(),
+                "last claim digest",
+                Rule::Required,
+            ),
         }
     }
     fn section(&self) -> u8 {

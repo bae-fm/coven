@@ -391,7 +391,7 @@
   | 8 | Original admin slot: `slot:Slot \| object:bytes` | slot |
   | 9 | Original key-copy slot: `slot:Slot \| object:bytes` | slot |
   | 10 | Original announcement slot: `slot:Slot \| object:bytes` | slot |
-  | 11 | Last included claim: `device:DeviceId \| number:u64` | device |
+  | 11 | Last included claim: `device:DeviceId \| number:u64 \| digest:Option<32 bytes>` | device |
 
   Empty sections emit nothing. `Cell` is `write:WriteId | value:ColumnValue`.
   Synced-row columns are nonempty. Applied-write timestamps name their

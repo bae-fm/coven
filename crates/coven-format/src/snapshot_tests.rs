@@ -476,12 +476,58 @@ fn write_evidence_has_one_root_per_part_key_and_decodable_openings() {
 }
 
 #[test]
+fn claim_record_round_trips_the_complete_slot_digest() {
+    for (number, digest) in [
+        (0u64, None),
+        (1, Some([0x31; 32])),
+        (u64::MAX, Some([0x42; 32])),
+    ] {
+        let (_, first) = SnapshotEncoder::start(single_header(11, Audience::Store, 1)).unwrap();
+        let mut reader = SnapshotDecoder::start(
+            &first,
+            &test_utils::snapshot_prefix(&single_header(11, Audience::Store, 1)),
+        )
+        .unwrap();
+        let frame = encode_frame_with(6, |out| {
+            11u8.put(out)?;
+            DeviceId(1).put(out)?;
+            number.put(out)?;
+            digest.put(out)
+        })
+        .unwrap();
+        let record = reader
+            .frame(&frame, &test_utils::oracle())
+            .unwrap()
+            .unwrap();
+        assert_eq!(raw(&record), frame);
+    }
+}
+
+#[test]
+fn last_claim_requires_a_digest_exactly_when_its_number_is_positive() {
+    for (number, digest) in [(0, Some([0x31; 32])), (1, None)] {
+        let record = SnapshotRecord::Claim(LastClaim {
+            device: DeviceId(1),
+            number,
+            digest,
+        });
+        let (mut writer, first) =
+            SnapshotEncoder::start(single_header(11, Audience::Store, 1)).unwrap();
+        let mut reader =
+            SnapshotDecoder::start(&first, &test_utils::snapshot_prefix(writer.header())).unwrap();
+        assert!(writer.record(record.clone()).is_err());
+        assert!(reader.frame(&raw(&record), &test_utils::oracle()).is_err());
+    }
+}
+
+#[test]
 fn last_claims_preserve_zero_and_exhausted_counters_and_refuse_duplicate_devices() {
     for number in [0, 1, u64::MAX] {
         round_trip(
             SnapshotRecord::Claim(LastClaim {
                 device: DeviceId(1),
                 number,
+                digest: (number > 0).then_some([0x31; 32]),
             }),
             Audience::Store,
         );
@@ -493,6 +539,7 @@ fn last_claims_preserve_zero_and_exhausted_counters_and_refuse_duplicate_devices
     let record = SnapshotRecord::Claim(LastClaim {
         device: DeviceId(2),
         number: 8,
+        digest: Some([0x81; 32]),
     });
     let frame = writer.record(record.clone()).unwrap();
     reader.frame(&frame, &test_utils::oracle()).unwrap();
@@ -500,6 +547,7 @@ fn last_claims_preserve_zero_and_exhausted_counters_and_refuse_duplicate_devices
         let invalid = SnapshotRecord::Claim(LastClaim {
             device: DeviceId(device),
             number: 9,
+            digest: Some([0x91; 32]),
         });
         assert!(writer.record(invalid.clone()).is_err());
         assert!(reader.frame(&raw(&invalid), &test_utils::oracle()).is_err());
@@ -562,7 +610,9 @@ fn pinned_refused_and_reset_ignored_parts_preserve_claim_numbers() {
                         assert_eq!(change.verdict, verdict);
                         authored += 1;
                     }
-                    SnapshotRecord::Claim(claim) => claims.push((claim.device, claim.number)),
+                    SnapshotRecord::Claim(claim) => {
+                        claims.push((claim.device, claim.number, claim.digest))
+                    }
                     _ => panic!("unexpected fixture section"),
                 }
                 encoded.extend(writer.record(record).unwrap());
@@ -572,6 +622,12 @@ fn pinned_refused_and_reset_ignored_parts_preserve_claim_numbers() {
         encoded.extend(writer.finish().unwrap());
         assert_eq!(encoded, bytes);
         assert_eq!(authored, 1);
-        assert_eq!(claims, [(DeviceId(1), last_claim), (DeviceId(2), 1)]);
+        assert_eq!(
+            claims,
+            [
+                (DeviceId(1), last_claim, Some([0x81; 32])),
+                (DeviceId(2), 1, Some([0x21; 32]))
+            ]
+        );
     }
 }
