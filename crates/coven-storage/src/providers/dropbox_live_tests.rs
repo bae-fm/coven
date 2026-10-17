@@ -1,6 +1,50 @@
 use super::*;
 
 #[test]
+#[ignore = "COVEN_LIVE_DROPBOX_ENV and COVEN_LIVE_DROPBOX_B_ENV; races in this run's shared folder"]
+fn dropbox_live_sequence() {
+    run(async |live, storage| {
+        let recipient_tokens = tokens("COVEN_LIVE_DROPBOX_B_ENV", live.clock.clone()).await;
+        let mut writers: Vec<Arc<dyn Storage>> = Vec::new();
+        for _ in 0..4 {
+            for tokens in [&live.tokens, &recipient_tokens] {
+                let session = OAuthSession::new(
+                    PROVIDER,
+                    tokens.clone(),
+                    Arc::new(crate::test_utils::RefusedRefresh),
+                    live.clock.clone(),
+                )
+                .unwrap();
+                writers.push(Arc::new(StorageConnection::from_provider(Arc::new(
+                    DropboxStorage::new(storage.config(), session).unwrap(),
+                ))));
+            }
+        }
+        let account = writers[1].account().await.unwrap();
+        assert!(
+            account != storage.account().await.unwrap(),
+            "race requires two accounts"
+        );
+        live.members.push((storage.clone(), account.clone()));
+        let AccessGrant::Granted { invitation } = storage.grant_access(&account).await.unwrap()
+        else {
+            panic!("Dropbox did not grant race access");
+        };
+        writers[1].join(live.store, &invitation).await.unwrap();
+        use crate::providers::tests::sequence_live as suite;
+        suite::lost_replies(writers[0].as_ref(), writers[1].as_ref(), live.store)
+            .await
+            .unwrap();
+        suite::slots(live.clock.as_ref(), &writers, live.store)
+            .await
+            .unwrap();
+        suite::floor(live.clock.as_ref(), &writers, live.store)
+            .await
+            .unwrap();
+    });
+}
+
+#[test]
 #[ignore = "requires COVEN_LIVE_DROPBOX_ENV and writes to Dropbox"]
 fn dropbox_live_conformance() {
     run(async |live, storage| {

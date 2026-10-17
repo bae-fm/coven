@@ -13,7 +13,8 @@ The container is the bae app's own, and real stores use the same
 marker record named `coven-live-test-zone` into each zone it creates before
 anything else, naming the test in its `test` field. No store writes that record
 type or name, and a test zone can only be deleted after its marker is read
-back. A failed assertion leaves the zone available for inspection. After
+back. A failed assertion in the conformance or two-account tests leaves the
+zone available for inspection. After
 investigating, run the ignored
 `providers::cloudkit::tests::live_zone::tests::cloudkit_live_remove_leftover_test_zones`
 test from the same host. It deletes only `coven-<store>` zones holding the
@@ -157,7 +158,7 @@ requires `InviteeIsStoreOwner`, and deletes the zone.
 
 The ignored `providers::cloudkit::tests::race::tests::cloudkit_live_create_once_race`
 test measures whether a CloudKit save of a new record gives exactly one winner
-when several writers create the same path at once. It runs 200 rounds of 2
+when several writers create the same `seq/<n>` path at once. It runs 200 rounds of 2
 writers, then 50 rounds of 8. Every writer is its own `CloudKitStorage`
 instance and connection, but `CKContainer.containerWithIdentifier` hands every
 instance in one process the same `CKContainer` and `CKDatabase` objects, so a
@@ -167,15 +168,24 @@ uses a fresh path.
 Every writer is released at one instant of this Mac's clock, and each round
 requires exactly one success, every other writer refused as
 `AlreadyExists`, and the winner's bytes when the path is read back. A rate
-limit or network failure says nothing about the race: that attempt is retried
-on a fresh path after the requested wait, and five such attempts in a row fail
-the test. The test prints, per race size, the winners, each refusal's cause
-with its native error code, retried attempts and what their path held, how
-many rounds had every writer start before any finished, and every anomaly. It
-deletes its marked zone only when no round had an anomaly.
+limit or network failure permits another attempt only when no definite
+violation was observed and read-back succeeded. Two successes, changed or
+missing winner bytes, and unexpected errors still fail immediately. An
+inconclusive attempt uses a fresh path after the requested wait; five such
+attempts in a row fail the test. The test prints, per race size, the winners,
+each refusal's cause with its native error code, inconclusive attempts and
+what their path held, how many rounds had every writer start before any
+finished, and every anomaly. It
+stops on the first anomaly or non-overlapping round.
 
 `COVEN_CLOUDKIT_TEST_ROLE` selects the mode. `single` runs every writer on the
-signed-in account, in one process:
+signed-in account, in one process. This mode also checks lost slot and floor
+replies by withholding a completed request's success and settling by an exact
+read. Equal and different slot retries preserve the occupant; stale floor
+retries preserve its bytes and revision. It then runs 200 two-writer and 50
+eight-writer conditional floor replacement races, requiring one winner from
+the same observed revision and the winner's bytes on read-back. It deletes
+only its own marked zone after success or an assertion failure:
 
 ```sh
 COVEN_CLOUDKIT_TEST_ROLE=single \

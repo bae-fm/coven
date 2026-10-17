@@ -12,6 +12,9 @@ use coven_crypto::SecretText;
 use coven_foundation::clock::FixedClock;
 use std::{sync::Arc, time::SystemTime};
 
+#[path = "sequence_live.rs"]
+pub(crate) mod sequence_live;
+
 pub(crate) struct TestServer {
     pub(crate) url: String,
     task: tokio::task::JoinHandle<()>,

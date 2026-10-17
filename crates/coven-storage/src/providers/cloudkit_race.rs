@@ -35,7 +35,7 @@ pub(super) const STAGES: [Stage; 2] = [
     },
 ];
 
-/// A stage gives up after this many retried attempts in a row.
+/// A stage gives up after this many inconclusive attempts in a row.
 pub(super) const RETRIES: usize = 5;
 
 /// The wait before retrying when no retryable refusal named one.
@@ -197,7 +197,7 @@ pub(super) struct Tally {
     winners: BTreeMap<String, usize>,
     refusals: BTreeMap<String, usize>,
     retryable: BTreeMap<String, usize>,
-    retried: Vec<String>,
+    inconclusive_attempts: Vec<String>,
     streak: usize,
     longest_streak: usize,
     /// Rounds in which every writer started before any finished.
@@ -229,6 +229,16 @@ impl Tally {
         attempt: u64,
         outcomes: Vec<Outcome>,
     ) -> Settled {
+        let held = read_back(clock, reader, path).await;
+        self.record(attempt, outcomes, held)
+    }
+
+    fn record(
+        &mut self,
+        attempt: u64,
+        outcomes: Vec<Outcome>,
+        read: Result<Option<Vec<u8>>, StorageError>,
+    ) -> Settled {
         self.attempts += 1;
         for outcome in &outcomes {
             self.max_late_us = self.max_late_us.max(outcome.late_us);
@@ -245,42 +255,61 @@ impl Tally {
                 retry = Some(retry.map_or(wait, |longest| longest.max(wait)));
             }
         }
-        let held = holder(clock, reader, path, attempt, &outcomes).await;
-        if let Some(wait) = retry {
+        let winners: Vec<_> = outcomes
+            .iter()
+            .filter(|outcome| matches!(outcome.verdict, Verdict::Won))
+            .collect();
+        let mut anomalous = winners.len() > 1
+            || (retry.is_none() && winners.len() != 1)
+            || outcomes
+                .iter()
+                .any(|outcome| matches!(outcome.verdict, Verdict::Other(_)));
+        let held = match &read {
+            Ok(Some(bytes)) => {
+                if let [winner] = winners.as_slice() {
+                    anomalous |= bytes != &claim(&winner.writer, attempt);
+                }
+                match outcomes
+                    .iter()
+                    .find(|outcome| claim(&outcome.writer, attempt) == *bytes)
+                {
+                    Some(outcome) => outcome.writer.clone(),
+                    None => {
+                        anomalous = true;
+                        format!("unrecognized bytes {:?}", String::from_utf8_lossy(bytes))
+                    }
+                }
+            }
+            Ok(None) => {
+                anomalous |= !winners.is_empty();
+                "absent".to_owned()
+            }
+            Err(error) => {
+                anomalous = true;
+                format!("unread: {error}")
+            }
+        };
+        if anomalous {
+            self.anomalies.push(format!(
+                "attempt {attempt}: {outcomes:?}; path holds {held}"
+            ));
+        } else if let Some(wait) = retry {
             self.streak += 1;
             self.longest_streak = self.longest_streak.max(self.streak);
-            self.retried.push(format!(
+            self.inconclusive_attempts.push(format!(
                 "attempt {attempt}: {outcomes:?}; path holds {held}"
             ));
             return Settled::Retry(wait);
         }
         self.streak = 0;
         self.rounds += 1;
-        let winners: Vec<_> = outcomes
-            .iter()
-            .filter(|outcome| matches!(outcome.verdict, Verdict::Won))
-            .collect();
-        let mut anomalous = false;
         for outcome in &outcomes {
-            match &outcome.verdict {
-                Verdict::Won | Verdict::Retryable { .. } => {}
-                Verdict::Occupied(cause) => *self.refusals.entry(cause.clone()).or_default() += 1,
-                Verdict::Other(_) => anomalous = true,
+            if let Verdict::Occupied(cause) = &outcome.verdict {
+                *self.refusals.entry(cause.clone()).or_default() += 1;
             }
         }
-        match winners.as_slice() {
-            [winner] => {
-                *self.winners.entry(winner.writer.clone()).or_default() += 1;
-                if held != winner.writer {
-                    anomalous = true;
-                }
-            }
-            _ => anomalous = true,
-        }
-        if anomalous {
-            self.anomalies.push(format!(
-                "attempt {attempt}: {outcomes:?}; path holds {held}"
-            ));
+        if let [winner] = winners.as_slice() {
+            *self.winners.entry(winner.writer.clone()).or_default() += 1;
         }
         let latest_start = outcomes.iter().map(|o| o.started_us).max().unwrap();
         let earliest_start = outcomes.iter().map(|o| o.started_us).min().unwrap();
@@ -294,10 +323,10 @@ impl Tally {
 
     pub(super) fn print(&self, label: &str) {
         println!(
-            "race {label}: rounds={} attempts={} retried={} longest retry streak={}",
+            "race {label}: rounds={} attempts={} inconclusive={} longest inconclusive streak={}",
             self.rounds,
             self.attempts,
-            self.retried.len(),
+            self.inconclusive_attempts.len(),
             self.longest_streak
         );
         for (writer, count) in &self.winners {
@@ -309,8 +338,8 @@ impl Tally {
         for (cause, count) in &self.retryable {
             println!("race {label}: retryable {cause}: {count}");
         }
-        for retried in &self.retried {
-            println!("race {label}: retried {retried}");
+        for attempt in &self.inconclusive_attempts {
+            println!("race {label}: inconclusive {attempt}");
         }
         println!(
             "race {label}: rounds where every writer started before any finished={}/{}; widest start spread={} us; latest release seen={} us late",
@@ -323,39 +352,36 @@ impl Tally {
     }
 }
 
-/// Which writer's bytes `path` holds, "absent", or the read's failure.
-async fn holder(
+/// Read the exact bytes, preserving absence and errors as separate results.
+async fn read_back(
     clock: &dyn Clock,
     reader: &StorageConnection<CloudKitStorage>,
     path: &ObjectPath,
-    attempt: u64,
-    outcomes: &[Outcome],
-) -> String {
+) -> Result<Option<Vec<u8>>, StorageError> {
     let mut tries = 0;
     loop {
         match reader.read(path).await {
-            Ok(bytes) => {
-                return outcomes
-                    .iter()
-                    .find(|outcome| claim(&outcome.writer, attempt) == bytes)
-                    .map_or_else(
-                        || format!("unrecognized bytes {:?}", String::from_utf8_lossy(&bytes)),
-                        |outcome| outcome.writer.clone(),
-                    )
-            }
-            Err(error) if error.failure() == StorageFailure::NotFound => return "absent".into(),
+            Ok(bytes) => return Ok(Some(bytes)),
             Err(error)
-                if matches!(
-                    error.failure(),
-                    StorageFailure::RateLimited | StorageFailure::Network
-                ) && tries < RETRIES =>
+                if !matches!(error, StorageError::Cleanup { .. })
+                    && error.failure() == StorageFailure::NotFound =>
+            {
+                return Ok(None)
+            }
+            Err(error)
+                if !matches!(error, StorageError::Cleanup { .. })
+                    && matches!(
+                        error.failure(),
+                        StorageFailure::RateLimited | StorageFailure::Network
+                    )
+                    && tries < RETRIES =>
             {
                 tries += 1;
                 clock
                     .sleep(error.retry_after().map_or(RETRY_WAIT, RetryAfter::wait))
                     .await;
             }
-            Err(error) => return format!("unread: {error}"),
+            Err(error) => return Err(error),
         }
     }
 }

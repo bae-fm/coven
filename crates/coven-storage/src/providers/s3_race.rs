@@ -26,12 +26,7 @@ pub(super) enum Write {
     },
 }
 
-pub(super) struct Reply {
-    pub(super) writer: usize,
-    pub(super) start: Duration,
-    pub(super) end: Duration,
-    pub(super) result: Result<(), StorageError>,
-}
+pub(super) use crate::providers::tests::sequence_live::{judge, Reply};
 
 fn multipart_request(
     s: &S3Storage,
@@ -171,28 +166,6 @@ pub(super) async fn fire(
         }
     }
     Ok(())
-}
-
-/// All intervals must share an instant; a barrier alone does not establish it.
-pub(super) fn judge(replies: &[Reply], payloads: &[Vec<u8>], stored: &[u8]) -> bool {
-    let latest_start = replies.iter().map(|reply| reply.start).max();
-    let earliest_end = replies.iter().map(|reply| reply.end).min();
-    let winners: Vec<_> = replies
-        .iter()
-        .filter(|reply| reply.result.is_ok())
-        .collect();
-    latest_start
-        .zip(earliest_end)
-        .is_some_and(|(start, end)| start < end)
-        && winners.len() == 1
-        && stored == payloads[winners[0].writer]
-        && replies.iter().all(|reply| match &reply.result {
-            Ok(()) => true,
-            Err(error) => matches!(
-                error.failure(),
-                StorageFailure::AlreadyExists | StorageFailure::Conflict
-            ),
-        })
 }
 
 #[cfg(test)]

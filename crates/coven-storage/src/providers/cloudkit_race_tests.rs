@@ -2,7 +2,7 @@ use super::*;
 use crate::providers::cloudkit::tests::live_zone;
 use coven_foundation::{
     clock::{ClockRef, SystemClock},
-    id_source::{DeviceId, FileId, StoreId, UuidIds},
+    id_source::{StoreId, UuidIds},
 };
 use serde::de::DeserializeOwned;
 use std::path::{Path, PathBuf};
@@ -18,6 +18,64 @@ const STEP_TIMEOUT: Duration = Duration::from_secs(600);
 /// process takes to notice it.
 const RELEASE_MARGIN: Duration = Duration::from_millis(250);
 const POLL: Duration = Duration::from_millis(2);
+
+#[test]
+fn retryable_reply_cannot_hide_multiple_winners_or_unexpected_errors() {
+    let outcomes = |second| {
+        [
+            Verdict::Won,
+            second,
+            Verdict::Retryable {
+                cause: "interrupted".into(),
+                retry_after_ms: None,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(writer, verdict)| Outcome {
+            writer: format!("owner-{writer}"),
+            verdict,
+            late_us: 0,
+            started_us: writer as u64,
+            finished_us: 10,
+        })
+        .collect()
+    };
+    for (second, read) in [
+        (Verdict::Won, Ok(Some(claim("owner-0", 1)))),
+        (
+            Verdict::Other("permission denied".into()),
+            Ok(Some(claim("owner-0", 1))),
+        ),
+        (
+            Verdict::Occupied("already exists".into()),
+            Ok(Some(claim("owner-2", 1))),
+        ),
+        (Verdict::Occupied("already exists".into()), Ok(None)),
+        (
+            Verdict::Occupied("already exists".into()),
+            Err(StorageFailure::PermissionDenied.into()),
+        ),
+    ] {
+        let mut tally = Tally::default();
+        assert!(matches!(
+            tally.record(1, outcomes(second), read),
+            Settled::Round
+        ));
+        assert_eq!(tally.anomalies().len(), 1);
+    }
+    let mut tally = Tally::default();
+    assert!(matches!(
+        tally.record(
+            1,
+            outcomes(Verdict::Occupied("already exists".into())),
+            Ok(Some(claim("owner-0", 1)))
+        ),
+        Settled::Retry(_)
+    ));
+    assert!(tally.anomalies().is_empty());
+    assert_eq!(tally.rounds(), 0);
+}
 
 /// Read by the recipient from the private invitation file.
 #[derive(Serialize, Deserialize)]
@@ -186,13 +244,12 @@ async fn run_stage(
     peer: Option<&Peer>,
     reader: &StorageConnection<CloudKitStorage>,
     store: StoreId,
-    ids: &IdSourceRef,
     attempt: &mut u64,
 ) -> Tally {
     let mut tally = Tally::default();
     while tally.rounds() < stage.rounds {
         *attempt += 1;
-        let path = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
+        let path = ObjectPath::slot(store, (*attempt).try_into().unwrap());
         let release = match peer {
             Some(peer) => {
                 let go = Go {
@@ -207,13 +264,17 @@ async fn run_stage(
         if let Some(peer) = peer {
             outcomes.extend(peer.outcomes(*attempt).await);
         }
-        if let Settled::Retry(wait) = tally
+        let settled = tally
             .settle(&**clock, reader, &path, *attempt, outcomes)
-            .await
-        {
+            .await;
+        if !tally.anomalies().is_empty() || tally.overlapping != tally.rounds() {
+            tally.print(&format!("{} writers (failed)", stage.writers));
+            panic!("CloudKit slot race failed");
+        }
+        if let Settled::Retry(wait) = settled {
             if tally.streak() >= RETRIES {
                 tally.print(&format!("{} writers (gave up)", stage.writers));
-                panic!("{RETRIES} attempts in a row were retried");
+                panic!("{RETRIES} attempts in a row were inconclusive");
             }
             tokio::time::sleep(wait).await;
         }
@@ -250,33 +311,50 @@ async fn cloudkit_live_create_once_race() {
     match role.as_str() {
         "single" => {
             let store = StoreId(ids.new_id());
-            // A failed run keeps its marked zone for inspection and later cleanup.
+            use crate::providers::tests::sequence_live;
+            use futures_util::FutureExt;
             let native = Arc::new(live_zone::prepare(store, TEST, ids.clone()).await.unwrap());
             let reader = StorageConnection::from_provider(native.clone());
-            let most = STAGES.iter().map(|stage| stage.writers).max().unwrap();
-            let writers = Writer::connect("owner", &native.config(), &ids, most).await;
-            let mut attempt = 0;
-            let mut tallies = Vec::new();
-            for stage in STAGES {
-                let tally = run_stage(
-                    &clock,
-                    stage,
-                    stage.writers,
-                    &writers,
-                    None,
-                    &reader,
-                    store,
-                    &ids,
-                    &mut attempt,
-                )
-                .await;
-                tallies.push((stage, tally));
-            }
-            check(&tallies);
+            let result = std::panic::AssertUnwindSafe(async {
+                let most = STAGES.iter().map(|stage| stage.writers).max().unwrap();
+                let writers = Writer::connect("owner", &native.config(), &ids, most).await;
+                sequence_live::lost_replies(&reader, writers[0].storage.as_ref(), store)
+                    .await
+                    .unwrap();
+                let mut attempt = 1;
+                let mut tallies = Vec::new();
+                for stage in STAGES {
+                    let tally = run_stage(
+                        &clock,
+                        stage,
+                        stage.writers,
+                        &writers,
+                        None,
+                        &reader,
+                        store,
+                        &mut attempt,
+                    )
+                    .await;
+                    tallies.push((stage, tally));
+                }
+                check(&tallies);
+                let writers: Vec<Arc<dyn Storage>> = writers
+                    .into_iter()
+                    .map(|writer| writer.storage as Arc<dyn Storage>)
+                    .collect();
+                sequence_live::floor(clock.as_ref(), &writers, store)
+                    .await
+                    .unwrap();
+            })
+            .catch_unwind()
+            .await;
             println!(
                 "race deleted zone marked by {}",
                 live_zone::delete(&native).await.unwrap()
             );
+            if let Err(panic) = result {
+                std::panic::resume_unwind(panic);
+            }
         }
         "owner" => {
             use std::io::Write;
@@ -329,7 +407,6 @@ async fn cloudkit_live_create_once_race() {
                     Some(&peer),
                     &reader,
                     store,
-                    &ids,
                     &mut attempt,
                 )
                 .await;

@@ -22,9 +22,9 @@ use tokio::time::Instant as Monotonic;
 // Serialize ownership of the shared coven-live parent, including its deletion.
 static LIVE_LOCK: Mutex<()> = Mutex::new(());
 
-async fn tokens(clock: ClockRef) -> OAuthTokens {
+async fn tokens(variable: &str, clock: ClockRef) -> OAuthTokens {
     let (client_id, refresh_token) =
-        crate::providers::tests::read_live_settings("COVEN_LIVE_ONEDRIVE_ENV", |settings| {
+        crate::providers::tests::read_live_settings(variable, |settings| {
             (
                 settings.take("ONEDRIVE_CLIENT_ID"),
                 settings.take("ONEDRIVE_REFRESH_TOKEN"),
@@ -47,7 +47,7 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
         .build()
         .unwrap();
     let clock: ClockRef = Arc::new(SystemClock);
-    let tokens = runtime.block_on(tokens(clock.clone()));
+    let tokens = runtime.block_on(tokens("COVEN_LIVE_ONEDRIVE_ENV", clock.clone()));
     let session = OAuthSession::new(
         PROVIDER,
         tokens.clone(),
@@ -156,6 +156,60 @@ fn onedrive_live_conformance() {
             .await
             .unwrap();
         println!("onedrive_live conformance: passed");
+    });
+}
+
+#[test]
+#[ignore = "COVEN_LIVE_ONEDRIVE_ENV and COVEN_LIVE_ONEDRIVE_B_ENV; races in this run's shared folder"]
+fn onedrive_live_sequence() {
+    run(async |live| {
+        let owner = tokens("COVEN_LIVE_ONEDRIVE_ENV", live.clock.clone()).await;
+        let recipient = tokens("COVEN_LIVE_ONEDRIVE_B_ENV", live.clock.clone()).await;
+        let mut writers: Vec<Arc<dyn Storage>> = Vec::new();
+        for _ in 0..4 {
+            for tokens in [&owner, &recipient] {
+                let session = OAuthSession::new(
+                    PROVIDER,
+                    tokens.clone(),
+                    Arc::new(crate::test_utils::RefusedRefresh),
+                    live.clock.clone(),
+                )
+                .unwrap();
+                writers.push(Arc::new(StorageConnection::from_provider(Arc::new(
+                    OneDriveStorage::new(live.storage.config(), session, Arc::new(UuidIds))
+                        .unwrap(),
+                ))));
+            }
+        }
+        let account = writers[1].account().await.unwrap();
+        assert!(
+            account != writers[0].account().await.unwrap(),
+            "race requires two accounts"
+        );
+        let AccessGrant::Granted { invitation } =
+            live.storage.grant_access(&account).await.unwrap()
+        else {
+            panic!("OneDrive did not grant race access");
+        };
+        writers[1].join(live.store, &invitation).await.unwrap();
+        use crate::providers::tests::sequence_live as suite;
+        suite::lost_replies(writers[0].as_ref(), writers[1].as_ref(), live.store)
+            .await
+            .unwrap();
+        suite::slots(live.clock.as_ref(), &writers, live.store)
+            .await
+            .unwrap();
+        suite::floor(live.clock.as_ref(), &writers, live.store)
+            .await
+            .unwrap();
+        assert!(live
+            .storage
+            .revoke_access(&account)
+            .await
+            .unwrap()
+            .is_empty());
+        // The enclosing run deletes only its own folder, including its grants,
+        // even if setup, a race or the explicit revocation failed.
     });
 }
 

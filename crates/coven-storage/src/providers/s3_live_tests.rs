@@ -18,6 +18,80 @@ pub(super) const SUITE_VERSION: u32 = 5;
 #[path = "s3_race.rs"]
 mod races;
 
+#[tokio::test]
+#[ignore = "COVEN_LIVE_S3_ENV and a certified profile; creates and deletes only this run's store objects"]
+async fn s3_live_sequence() {
+    use crate::providers::tests::sequence_live;
+    let clock = coven_foundation::clock::SystemClock;
+    let settings = live::LiveS3::load();
+    let StorageConfig::S3 {
+        endpoint, profile, ..
+    } = &settings.config
+    else {
+        unreachable!()
+    };
+    let Selected::Catalogued(selected) =
+        profile::select(endpoint.as_ref(), profile.as_ref()).unwrap()
+    else {
+        panic!("sequence evidence requires a catalogued profile");
+    };
+    assert!(
+        matches!(selected.certification, Certification::Passed { .. }),
+        "profile must be certified"
+    );
+    let connected = settings.connect(Some(selected.settings));
+    let before = connected
+        .provider
+        .bucket_versioning()
+        .await
+        .expect("read bucket versioning before sequence writes");
+    versioning::check(endpoint.as_ref(), profile.as_ref(), &Ok(before)).unwrap();
+    println!("sequence profile={:?} versioning={before:?}", selected.name);
+    // Native replies establish exclusivity without adapter recovery hiding an
+    // extra accepted publication. Every case owns a fresh store for cleanup.
+    for (race, width) in [
+        (races::Race::Put, 2),
+        (races::Race::Put, 8),
+        (races::Race::Multipart, 2),
+        (races::Race::Multipart, 8),
+        (races::Race::Mixed, 2),
+        (races::Race::Replace, 2),
+    ] {
+        assert!(
+            case(
+                &settings,
+                &["sequence_native_race"],
+                selected.settings,
+                move |s, store| run_race(s, store, race, width)
+            )
+            .await
+            .is_some(),
+            "sequence native race failed: {race:?} width={width}"
+        );
+    }
+    let writers: Vec<Arc<dyn Storage>> = (0..8)
+        .map(|_| Arc::new(settings.connect(Some(selected.settings))) as Arc<dyn Storage>)
+        .collect();
+    assert!(
+        case(
+            &settings,
+            &["sequence_floor_and_lost_replies"],
+            selected.settings,
+            move |_, store| async move {
+                sequence_live::lost_replies(writers[0].as_ref(), writers[1].as_ref(), store)
+                    .await?;
+                sequence_live::floor(&clock, &writers, store).await
+            }
+        )
+        .await
+        .is_some(),
+        "sequence floor or reply settlement failed"
+    );
+    let after = connected.provider.bucket_versioning().await.unwrap();
+    assert_eq!(before, after, "bucket versioning changed during the run");
+    println!("sequence S3 PASS cleanup=PASS");
+}
+
 fn path(store: StoreId, number: u64) -> ObjectPath {
     ObjectPath::slot(store, number.try_into().unwrap())
 }
@@ -426,11 +500,15 @@ async fn run_race(
                 reply.writer, reply.start.as_micros(), reply.end.as_micros(), detect::outcome(&reply.result));
         }
         println!("race {race:?} writers={width} trial={trial} overlap={overlap} successes={accepted} pass={passed}");
+        require(
+            passed,
+            "conditional publication failed reply, byte or overlap checks",
+        )?;
     }
     println!("race SUMMARY {race:?} writers={width} trials={trials} overlapping={overlapping} successes={successes} violations={violations}");
     require(
         violations == 0,
-        "concurrent conditional publication violated exclusivity, bytes or overlap",
+        "conditional publication failed reply, byte or overlap checks",
     )
 }
 
