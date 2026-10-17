@@ -24,6 +24,7 @@ struct Remote {
     next: u32,
     lose_create_reply: bool,
     bearer_seen: bool,
+    listing: Option<serde_json::Value>,
 }
 
 fn result(value: serde_json::Value) -> Response<Body> {
@@ -45,6 +46,11 @@ async fn serve(
     let Some(path) = uri.path().strip_prefix("/client/v4/accounts/acct/tokens") else {
         return response(404, "{}");
     };
+    if method == HttpMethod::GET && path.is_empty() {
+        if let Some(listing) = &state.listing {
+            return result(listing.clone());
+        }
+    }
     match (method, path) {
         (HttpMethod::GET, "") => result(
             state
@@ -333,4 +339,32 @@ async fn a_store_listing_returns_its_tokens_with_their_minting_device() {
             device: coven_foundation::id_source::DeviceId(0x0abc),
         }]
     );
+}
+
+#[tokio::test]
+async fn malformed_key_listings_are_errors() {
+    let (state, _server, admin) = fake().await;
+    for listing in [
+        serde_json::json!(null),
+        serde_json::json!({}),
+        serde_json::json!([{}]),
+        serde_json::json!([{"id": "token", "name": 7}]),
+    ] {
+        state.lock().unwrap().listing = Some(listing.clone());
+        assert_eq!(
+            admin
+                .list_keys(StoreId(uuid::Uuid::from_u128(3)))
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol,
+            "{listing}"
+        );
+    }
+    state.lock().unwrap().listing = Some(serde_json::json!([]));
+    assert!(admin
+        .list_keys(StoreId(uuid::Uuid::from_u128(3)))
+        .await
+        .unwrap()
+        .is_empty());
 }

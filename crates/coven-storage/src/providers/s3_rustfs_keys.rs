@@ -205,7 +205,7 @@ impl<'a> Admin<'a> {
 
     /// The parent's service accounts, every one.
     async fn accounts(&self) -> Result<Vec<Value>, StorageError> {
-        let listed = self
+        let Some(listed) = self
             .call(
                 Method::GET,
                 "list-service-accounts",
@@ -214,8 +214,16 @@ impl<'a> Admin<'a> {
                 &[404],
             )
             .await?
-            .unwrap_or_default();
-        Ok(listed["accounts"].as_array().cloned().unwrap_or_default())
+        else {
+            return Ok(Vec::new());
+        };
+        let accounts = crate::providers::http::array(&listed, "accounts")?;
+        for account in accounts {
+            crate::providers::http::string(account, "accessKey")?;
+            crate::providers::http::optional_string(account, "name")?;
+            crate::providers::http::optional_string(account, "description")?;
+        }
+        Ok(accounts.clone())
     }
 
     /// The parent's service accounts made with this scope's name.

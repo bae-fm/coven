@@ -282,6 +282,7 @@ impl<'a> Gcs<'a> {
     async fn hmac_keys(&self, project: &str, email: &str) -> Result<Vec<String>, StorageError> {
         let mut keys = Vec::new();
         let mut token: Option<String> = None;
+        let mut pages = crate::providers::pagination::Pagination::new();
         loop {
             let mut url = self.hmac_url(project, None);
             url.query_pairs_mut()
@@ -294,20 +295,19 @@ impl<'a> Gcs<'a> {
                 .call(Method::GET, url, None, &[])
                 .await?
                 .unwrap_or_default();
-            for item in page["items"].as_array().cloned().unwrap_or_default() {
-                if item["state"] != "DELETED" {
-                    keys.push(crate::providers::http::string(&item, "accessId")?.to_owned());
+            for item in crate::providers::http::array(&page, "items")? {
+                let id = crate::providers::http::string(item, "accessId")?;
+                match crate::providers::http::string(item, "state")? {
+                    "ACTIVE" | "INACTIVE" => keys.push(id.to_owned()),
+                    "DELETED" => (),
+                    _ => return Err(StorageFailure::Protocol.with_source("unknown HMAC key state")),
                 }
             }
-            match page["nextPageToken"].as_str() {
-                Some(next) if Some(next) != token.as_deref() => token = Some(next.to_owned()),
-                Some(_) => {
-                    return Err(
-                        StorageFailure::Protocol.with_source("HMAC listing repeated its token")
-                    )
-                }
-                None => return Ok(keys),
-            }
+            let Some(next) = next_page(&page)? else {
+                return Ok(keys);
+            };
+            pages.check(next)?;
+            token = Some(next.to_owned());
         }
     }
 
@@ -490,6 +490,7 @@ async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, 
     let project = gcs.project().await?;
     let mut listed = Vec::new();
     let mut token: Option<String> = None;
+    let mut pages = crate::providers::pagination::Pagination::new();
     loop {
         let mut url = gcs.iam(&format!("projects/{project}/serviceAccounts"));
         url.query_pairs_mut().append_pair("pageSize", "100");
@@ -500,14 +501,13 @@ async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, 
             .call(Method::GET, url, None, &[])
             .await?
             .unwrap_or_default();
-        for account in page["accounts"].as_array().cloned().unwrap_or_default() {
-            let Some(device) = account["description"]
-                .as_str()
+        for account in crate::providers::http::array(&page, "accounts")? {
+            let email = crate::providers::http::string(account, "email")?.to_owned();
+            let Some(device) = crate::providers::http::optional_string(account, "description")?
                 .and_then(|description| named_device(description, store))
             else {
                 continue;
             };
-            let email = crate::providers::http::string(&account, "email")?.to_owned();
             for access_key_id in gcs.hmac_keys(&project, &email).await? {
                 listed.push(ListedKey {
                     access_key_id,
@@ -520,14 +520,20 @@ async fn list(context: &AdminRequest, store: StoreId) -> Result<Vec<ListedKey>, 
                 });
             }
         }
-        match page["nextPageToken"].as_str() {
-            Some("") | None => return Ok(listed),
-            Some(next) if Some(next) != token.as_deref() => token = Some(next.to_owned()),
-            Some(_) => {
-                return Err(StorageFailure::Protocol
-                    .with_source("service account listing repeated its token"))
-            }
-        }
+        let Some(next) = next_page(&page)? else {
+            return Ok(listed);
+        };
+        pages.check(next)?;
+        token = Some(next.to_owned());
+    }
+}
+
+fn next_page(page: &Value) -> Result<Option<&str>, StorageError> {
+    match page.get("nextPageToken") {
+        None => Ok(None),
+        Some(Value::String(token)) if token.is_empty() => Ok(None),
+        Some(Value::String(token)) => Ok(Some(token)),
+        Some(_) => Err(StorageFailure::Protocol.with_source("non-string GCS page token")),
     }
 }
 

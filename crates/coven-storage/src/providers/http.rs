@@ -512,6 +512,17 @@ pub(crate) fn string<'a>(value: &'a Value, field: &str) -> Result<&'a str, Stora
         .filter(|s| !s.is_empty())
         .ok_or(StorageFailure::Protocol.with_source("missing string field"))
 }
+/// An optional nullable provider field must still be text when present.
+pub(crate) fn optional_string<'a>(
+    value: &'a Value,
+    field: &str,
+) -> Result<Option<&'a str>, StorageError> {
+    match value.get(field) {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::String(value)) => Ok(Some(value)),
+        Some(_) => Err(StorageFailure::Protocol.with_source("non-string optional field")),
+    }
+}
 pub(crate) fn timestamp(
     value: &Value,
     field: &str,

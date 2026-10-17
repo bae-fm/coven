@@ -138,8 +138,10 @@ impl Cloudflare<'_> {
                 .call(Method::GET, url, None, &[])
                 .await?
                 .unwrap_or_default();
-            let tokens = tokens.as_array().cloned().unwrap_or_default();
-            for token in &tokens {
+            let tokens = tokens.as_array().ok_or_else(|| {
+                StorageFailure::Protocol.with_source("Cloudflare token listing is not an array")
+            })?;
+            for token in tokens {
                 found.push((
                     crate::providers::http::string(token, "id")?.to_owned(),
                     crate::providers::http::string(token, "name")?.to_owned(),

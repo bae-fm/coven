@@ -34,6 +34,7 @@ struct Remote {
     bad_signatures: u32,
     failed_policy_requests: u32,
     mint_requests: u32,
+    listing: Option<serde_json::Value>,
 }
 
 fn admin_api(
@@ -93,6 +94,9 @@ fn admin_api(
             response(200, "")
         }
         "list-service-accounts" => {
+            if let Some(listing) = &state.listing {
+                return response(200, listing.to_string());
+            }
             let accounts: Vec<_> = state
                 .accounts
                 .iter()
@@ -389,4 +393,33 @@ async fn a_store_listing_returns_its_service_accounts_with_their_minting_device(
             device: coven_foundation::id_source::DeviceId(3),
         }]
     );
+}
+
+#[tokio::test]
+async fn malformed_key_listings_are_errors() {
+    let (state, _server, admin) = fake().await;
+    for listing in [
+        serde_json::json!({}),
+        serde_json::json!({"accounts": null}),
+        serde_json::json!({"accounts": {}}),
+        serde_json::json!({"accounts": [{}]}),
+        serde_json::json!({"accounts": [{"accessKey": "key", "description": 7}]}),
+    ] {
+        state.lock().unwrap().listing = Some(listing.clone());
+        assert_eq!(
+            admin
+                .list_keys(StoreId(uuid::Uuid::from_u128(3)))
+                .await
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Protocol,
+            "{listing}"
+        );
+    }
+    state.lock().unwrap().listing = Some(serde_json::json!({"accounts": []}));
+    assert!(admin
+        .list_keys(StoreId(uuid::Uuid::from_u128(3)))
+        .await
+        .unwrap()
+        .is_empty());
 }

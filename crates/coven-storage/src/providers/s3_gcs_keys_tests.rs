@@ -41,6 +41,7 @@ struct Remote {
     /// The pauses the minter's clock took; none of them waits.
     pauses: Vec<Duration>,
     bearer_seen: bool,
+    listings: BTreeMap<String, serde_json::Value>,
 }
 
 /// A clock whose pauses return at once, recorded in the remote's state.
@@ -121,6 +122,11 @@ fn api(
     }
     let path = uri.path();
     let q = query(uri);
+    if method == HttpMethod::GET {
+        if let Some(listing) = state.listings.get(path) {
+            return json(listing.clone());
+        }
+    }
     let body: serde_json::Value = serde_json::from_slice(body).unwrap_or_default();
     if path == "/storage/v1/b/bucket" {
         return json(serde_json::json!({
@@ -559,4 +565,41 @@ async fn minting_waits_for_google_to_see_a_new_account() {
         StorageFailure::NotFound
     );
     assert_eq!(state.lock().unwrap().pauses.len(), 60);
+}
+
+#[tokio::test]
+async fn malformed_key_listings_are_errors() {
+    let (state, _server, admin) = fake(true).await;
+    let scope = scope();
+    admin.mint(&scope).await.unwrap();
+    for (path, field) in [
+        ("/iam/v1/projects/household/serviceAccounts", "accounts"),
+        ("/storage/v1/projects/household/hmacKeys", "items"),
+    ] {
+        for listing in [
+            serde_json::json!({}),
+            serde_json::json!({field: null}),
+            serde_json::json!({field: {}}),
+            serde_json::json!({field: [{}]}),
+            serde_json::json!({field: [], "nextPageToken": 7}),
+        ] {
+            state
+                .lock()
+                .unwrap()
+                .listings
+                .insert(path.into(), listing.clone());
+            assert_eq!(
+                admin.list_keys(scope.store).await.unwrap_err().failure(),
+                StorageFailure::Protocol,
+                "{path}: {listing}"
+            );
+        }
+        state
+            .lock()
+            .unwrap()
+            .listings
+            .insert(path.into(), serde_json::json!({field: []}));
+        assert!(admin.list_keys(scope.store).await.unwrap().is_empty());
+        state.lock().unwrap().listings.remove(path);
+    }
 }

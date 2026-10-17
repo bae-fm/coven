@@ -13,6 +13,9 @@ use coven_foundation::id_source::StoreId;
 use std::{collections::BTreeMap, time::Duration};
 use url::Url;
 
+#[path = "s3_iam_listing.rs"]
+mod listing;
+
 const VERSION: &str = "2010-05-08";
 /// The inline policy's name on each user coven makes.
 const INLINE_POLICY: &str = "coven-member";
@@ -207,65 +210,50 @@ impl<'a> Iam<'a> {
         }
     }
 
-    /// Every page of a listing; None when its first page answers `absent`.
-    async fn pages(
+    /// Every checked record; an explicitly tolerated missing principal holds no keys.
+    async fn pages<T>(
         &self,
-        action: &str,
+        listing: &listing::Listing<T>,
         parameters: &[(&str, &str)],
         absent: Option<StorageFailure>,
-    ) -> Result<Option<Vec<String>>, StorageError> {
-        let mut pages = Vec::new();
+    ) -> Result<Vec<T>, StorageError> {
+        let mut records = Vec::new();
         let mut marker: Option<String> = None;
+        let mut pages = crate::providers::pagination::Pagination::new();
         loop {
             let mut sent = parameters.to_vec();
             if let Some(marker) = &marker {
                 sent.push(("Marker", marker));
             }
-            let body = match self.call(action, &sent).await {
+            let body = match self.call(listing.action, &sent).await {
                 Ok(body) => body,
-                Err(error) if pages.is_empty() && absent == Some(error.failure()) => {
-                    return Ok(None)
+                Err(error) if marker.is_none() && absent == Some(error.failure()) => {
+                    return Ok(Vec::new())
                 }
                 Err(error) => return Err(error),
             };
-            let truncated =
-                elements(&body, "IsTruncated")?.first().map(String::as_str) == Some("true");
-            let next = elements(&body, "Marker")?.into_iter().next();
-            pages.push(body);
-            if !truncated {
-                return Ok(Some(pages));
-            }
-            let next = next.ok_or_else(|| {
-                StorageFailure::Protocol.with_source("truncated IAM listing without a marker")
-            })?;
-            if marker.as_ref() == Some(&next) {
-                return Err(StorageFailure::Protocol.with_source("IAM listing repeated its marker"));
-            }
+            let page = listing.page(&body)?;
+            records.extend(page.records);
+            let Some(next) = page.next else {
+                return Ok(records);
+            };
+            pages.check(&next)?;
             marker = Some(next);
         }
     }
 
-    /// The user's key ids, every page; None when the user is absent.
-    async fn keys(&self, user: &str) -> Result<Option<Vec<String>>, StorageError> {
-        let Some(pages) = self
-            .pages(
-                "ListAccessKeys",
-                &[("UserName", user)],
-                Some(StorageFailure::NotFound),
-            )
-            .await?
-        else {
-            return Ok(None);
-        };
-        let mut keys = Vec::new();
-        for page in pages {
-            keys.extend(elements(&page, "AccessKeyId")?);
-        }
-        Ok(Some(keys))
+    /// Every key id, or none if the user is absent.
+    async fn keys(&self, user: &str) -> Result<Vec<String>, StorageError> {
+        self.pages(
+            &listing::KEYS,
+            &[("UserName", user)],
+            Some(StorageFailure::NotFound),
+        )
+        .await
     }
 
     async fn delete_keys(&self, user: &str) -> Result<(), StorageError> {
-        for key in self.keys(user).await?.unwrap_or_default() {
+        for key in self.keys(user).await? {
             self.tolerating(
                 StorageFailure::NotFound,
                 "DeleteAccessKey",
@@ -279,17 +267,15 @@ impl<'a> Iam<'a> {
     /// Every local managed policy's ARN by name.
     async fn policies(&self) -> Result<BTreeMap<String, String>, StorageError> {
         let mut policies = BTreeMap::new();
-        for page in self
-            .pages("ListPolicies", &[("Scope", "Local")], None)
+        for (name, arn) in self
+            .pages(&listing::POLICIES, &[("Scope", "Local")], None)
             .await?
-            .unwrap_or_default()
         {
-            let names = elements(&page, "PolicyName")?;
-            let arns = elements(&page, "Arn")?;
-            if names.len() != arns.len() {
-                return Err(StorageFailure::Protocol.with_source("IAM policy listing is malformed"));
+            if policies.insert(name, arn).is_some() {
+                return Err(
+                    StorageFailure::Protocol.with_source("IAM policy listing repeats a name")
+                );
             }
-            policies.extend(names.into_iter().zip(arns));
         }
         Ok(policies)
     }
@@ -306,15 +292,7 @@ impl<'a> Iam<'a> {
             true => &[("PathPrefix", "/coven/")],
             false => &[],
         };
-        let mut users = Vec::new();
-        for page in self
-            .pages("ListUsers", parameters, None)
-            .await?
-            .unwrap_or_default()
-        {
-            users.extend(elements(&page, "UserName")?);
-        }
-        Ok(users)
+        self.pages(&listing::USERS, parameters, None).await
     }
 
     /// Remove the user's keys, its policy and the user, each already absent or not.
@@ -485,10 +463,7 @@ async fn key_exists(
 ) -> Result<bool, StorageError> {
     let (name, _) = user(principal)?;
     let iam = Iam::new(context, flavor)?;
-    Ok(iam
-        .keys(name)
-        .await?
-        .is_some_and(|keys| keys.iter().any(|key| key == access_key_id)))
+    Ok(iam.keys(name).await?.iter().any(|key| key == access_key_id))
 }
 
 /// Every key held by a user whose name coven made for this store, with the
@@ -506,7 +481,7 @@ async fn list(
             continue;
         };
         // A user removed since the listing holds no key.
-        let keys = iam.keys(&user).await?.unwrap_or_default();
+        let keys = iam.keys(&user).await?;
         if keys.is_empty() {
             continue;
         }

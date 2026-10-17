@@ -138,10 +138,13 @@ pub(crate) async fn send(
         .await
         .map_err(|error| super::http::transport(CloudProvider::S3, error))?;
     let status = response.status().as_u16();
-    let text = response
-        .text()
+    let bytes = response
+        .bytes()
         .await
         .map_err(|error| super::http::transport(CloudProvider::S3, error))?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|error| StorageFailure::Protocol.with_source(error))?
+        .to_owned();
     if (200..300).contains(&status) {
         return Ok(text);
     }
@@ -255,35 +258,14 @@ pub(crate) fn authorization(
     )
 }
 
+#[path = "s3_admin_xml.rs"]
+pub(crate) mod xml;
+
 /// The text of every element with this local name, in document order.
-pub(crate) fn elements(xml: &str, name: &str) -> Result<Vec<String>, StorageError> {
+pub(crate) fn elements(bytes: &str, name: &str) -> Result<Vec<String>, StorageError> {
     let mut found = Vec::new();
-    let mut open: Option<String> = None;
-    for token in xmlparser::Tokenizer::from(xml) {
-        let token = token.map_err(|error| StorageFailure::Protocol.with_source(error))?;
-        match token {
-            xmlparser::Token::ElementStart { local, .. } if local.as_str() == name => {
-                open = Some(String::new());
-            }
-            xmlparser::Token::Text { text } | xmlparser::Token::Cdata { text, .. } => {
-                if let Some(value) = open.as_mut() {
-                    value.push_str(&unescape(text.as_str())?);
-                }
-            }
-            xmlparser::Token::ElementEnd {
-                end: xmlparser::ElementEnd::Close(_, local),
-                ..
-            } if local.as_str() == name => {
-                found.extend(open.take());
-            }
-            xmlparser::Token::ElementEnd {
-                end: xmlparser::ElementEnd::Empty,
-                ..
-            } => {
-                found.extend(open.take());
-            }
-            _ => {}
-        }
+    if let Some(root) = xml::parse(bytes)? {
+        root.elements(name, &mut found);
     }
     Ok(found)
 }

@@ -79,6 +79,7 @@ struct Remote {
     broad: bool,
     /// Signed admin requests whose recomputed signature differed.
     bad_signatures: u32,
+    listings: BTreeMap<String, Vec<u8>>,
 }
 
 fn iam_error(status: u16, code: &str) -> Response<Body> {
@@ -152,6 +153,9 @@ fn admin(state: &mut Remote, uri: &Uri, headers: &HeaderMap, body: &Bytes) -> Re
     assert_eq!(form["Version"], "2010-05-08");
     if state.fail_action == Some(action.as_str()) {
         return iam_error(403, "AccessDenied");
+    }
+    if let Some(listing) = state.listings.get(&action) {
+        return response(200, listing.clone());
     }
     let user_name = form.get("UserName").cloned().unwrap_or_default();
     match action.as_str() {
@@ -930,3 +934,6 @@ async fn a_store_listing_returns_its_users_keys_with_their_minting_device() {
         );
     }
 }
+
+#[path = "s3_iam_listing_tests.rs"]
+mod listing;
