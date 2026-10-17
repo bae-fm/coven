@@ -2,24 +2,6 @@
 
 use coven_storage::StorageError;
 
-/// Whether a provider read found a key.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum KeyPresence {
-    /// The provider still lists the key.
-    Present,
-    /// The provider's read no longer lists the key.
-    Absent,
-}
-
-/// A provider read made after deleting a key, naming the key it read.
-#[derive(Debug)]
-pub(crate) struct KeyObservation {
-    /// The key id the read concerned.
-    pub(crate) access_key_id: String,
-    /// What the read found, or why it failed.
-    pub(crate) reply: Result<KeyPresence, StorageError>,
-}
-
 /// Why a deletion with admin access did not clear its notice (§13).
 #[derive(Debug, thiserror::Error)]
 pub enum DeleteAccessKeyError {
@@ -38,25 +20,6 @@ pub enum DeleteAccessKeyError {
     /// The read failed.
     #[error("reading the S3 key's state failed")]
     ObservationFailed(#[source] StorageError),
-}
-
-/// Accept a deletion only when it succeeded and a later read of this exact key
-/// found it absent. Admin access is required by the deleting call itself.
-pub(crate) fn verify_deletion(
-    access_key_id: &str,
-    deleted: Result<(), StorageError>,
-    observation: Option<KeyObservation>,
-) -> Result<(), DeleteAccessKeyError> {
-    deleted.map_err(DeleteAccessKeyError::DeleteFailed)?;
-    let read = observation.ok_or(DeleteAccessKeyError::ObservationMissing)?;
-    if read.access_key_id != access_key_id {
-        return Err(DeleteAccessKeyError::WrongKey);
-    }
-    match read.reply {
-        Err(error) => Err(DeleteAccessKeyError::ObservationFailed(error)),
-        Ok(KeyPresence::Present) => Err(DeleteAccessKeyError::StillPresent),
-        Ok(KeyPresence::Absent) => Ok(()),
-    }
 }
 
 #[cfg(test)]
@@ -85,24 +48,17 @@ impl crate::SequenceSync {
             return Err(crate::SyncError::NotPending(id));
         }
         let Deletion { key } = serde_json::from_slice(&record.data)?;
-        let deleted = admin.revoke(&key.access_key_id, &key.principal).await;
-        let observation = match &deleted {
-            Ok(()) => Some(KeyObservation {
-                access_key_id: key.access_key_id.clone(),
-                reply: admin
-                    .key_exists(&key.access_key_id, &key.principal)
-                    .await
-                    .map(|present| {
-                        if present {
-                            KeyPresence::Present
-                        } else {
-                            KeyPresence::Absent
-                        }
-                    }),
-            }),
-            Err(_) => None,
-        };
-        verify_deletion(&key.access_key_id, deleted, observation)?;
+        admin
+            .revoke(&key.access_key_id, &key.principal)
+            .await
+            .map_err(DeleteAccessKeyError::DeleteFailed)?;
+        if admin
+            .key_exists(&key.access_key_id, &key.principal)
+            .await
+            .map_err(DeleteAccessKeyError::ObservationFailed)?
+        {
+            return Err(DeleteAccessKeyError::StillPresent.into());
+        }
         self.database.clear_access_key(key.access_key_id).await?;
         Ok(())
     }
