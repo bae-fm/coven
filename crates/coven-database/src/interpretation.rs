@@ -85,8 +85,8 @@ impl Interpreter {
                 _ if header.disposition == WriteDisposition::Migration => {
                     PartAdmission::Judged(Interpretation::Native)
                 }
-                // A late old-schema part the winning raise's converters reach is a
-                // candidate for admission at that version; without them it is excluded.
+                // Crossed breaking steps need converters; with no breaking steps
+                // in range, judge the older-schema part with unchanged values.
                 Some(ChangeVerdict::Excluded(version)) => {
                     if crate::migration_receive::available(
                         &schema.conversions,

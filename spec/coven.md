@@ -3728,6 +3728,11 @@ floor is not modeled.
   - Those are the converters of the breaking migrations after the write's
     version through the raise's, in version order
     ([`one_step_is_conversion`](proofs/queue/CovenQueue/ConversionChain.lean)).
+    If that range has no breaking migration, no converter is needed: eligible
+    changes apply unchanged. Thus a write at the newest breaking version at
+    or below the raise still applies when later versions only add tables or
+    columns; older writes still need the conversions they cross
+    ([`newest_breaking_write_admitted`, `retained_step_required`](proofs/queue/CovenQueue/ConversionChain.lean)).
   - Member-key slot cut-offs supply base verdicts to the same §8 data
     rule (§10); conversion cannot rescue them.
   - First determine candidate schema admission without changing values,
@@ -3739,7 +3744,8 @@ floor is not modeled.
     its original shape with its failed sources as the cause; unrelated
     changes in the same write, even the same part, can convert and apply
     ([`dependent_change_not_converted`, `independent_change_converted`, `converted_change_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Without a converter, exclude the old-version interpretation: retain
+  - If any breaking migration in that range lacks a converter, exclude
+    the old-version interpretation: retain
     each original change as a frozen loss naming the breaking version,
     including a delete with no scalar values, and consume the write.
     Already frozen changes keep their original values and cause through

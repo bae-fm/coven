@@ -1,6 +1,7 @@
 use super::*;
 use crate::tests::{database_error, TestStore};
 use crate::write::tests::{count, notes, records, sql, NOTES};
+use crate::write_boundary::tests::version_two;
 use crate::{Database, Migration, RowIdentity, SyncedTable};
 use coven_format::write::WriteDisposition;
 use coven_format::write::{WriteHeader, WriteRecord};
@@ -214,29 +215,24 @@ async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table
     let source_store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store).await;
-    let receiver = receiver_store
-        .builder(vec![], vec![Migration::sql(1, "empty", "SELECT 1")])
-        .open()
-        .await
-        .unwrap();
+    let receiver = version_two(&receiver_store, false).await;
+    receiver.exclude_later_writes(2).await;
     sql(&source, "INSERT INTO notes VALUES('n','lost','body')")
         .await
         .unwrap();
-    let mut record = records(&source).remove(0);
-    record.header.schema_version = 0;
-    receiver.exclude_version_zero().await;
+    let record = records(&source).remove(0);
     assert_eq!(
         receiver.receive(record.clone().into()).await.unwrap(),
         ApplyOutcome::Applied
     );
     assert_eq!(count(&receiver, "_coven_rows"), 0);
     assert_eq!(count(&receiver, "_coven_cells"), 0);
-    assert_eq!(count(&receiver, "_coven_writes"), 1);
+    assert_eq!(count(&receiver, "_coven_writes"), 2);
     let losses = receiver.lost_values().await.unwrap();
     assert_eq!(losses.len(), 1);
     assert_eq!(
         losses[0].replaced_by,
-        crate::Replacement::SchemaChange { version: 1 }
+        crate::Replacement::SchemaChange { version: 2 }
     );
     assert!(
         matches!(&losses[0].lost,crate::Lost::Row(cells) if cells.len()==3 && cells.iter().all(|c| c.set_by==record.header.position))
@@ -536,7 +532,11 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
         (1, vec![], false),
     ] {
         let store = TestStore::with_ids(&ids);
-        let db = open(&store).await;
+        let db = if version == 2 {
+            version_two(&store, true).await
+        } else {
+            open(&store).await
+        };
         let included = included.len() as u64;
         if included > 0 {
             db.receive(initial.clone().into()).await.unwrap();
@@ -546,7 +546,11 @@ async fn applied_schema_boundaries_exclude_only_uncovered_older_writes() {
             .await
             .unwrap());
         db.close().await.unwrap();
-        let db = open(&store).await;
+        let db = if version == 2 {
+            version_two(&store, true).await
+        } else {
+            open(&store).await
+        };
         assert!(!db
             .install_schema_fixture(coven_merge::Audience::Store, version, included)
             .await
@@ -701,7 +705,13 @@ async fn excluded_values_do_not_replace_a_removed_rows_merge_values() {
         .await
         .unwrap();
     let receiver = receiver_store
-        .builder(notes(), vec![Migration::sql(1, "unique", schema)])
+        .builder(
+            notes(),
+            vec![
+                Migration::sql(1, "unique", schema),
+                Migration::sql(2, "index", "CREATE INDEX notes_body ON notes(body)"),
+            ],
+        )
         .clock(clock)
         .open()
         .await

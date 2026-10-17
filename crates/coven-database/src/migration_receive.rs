@@ -84,14 +84,16 @@ pub(crate) fn authored(steps: &BTreeMap<u32, ReceivedMigration>, version: u32) -
         .map(|(_, step)| &step.before)
 }
 
+/// Every crossed breaking step needs a converter. Only breaking steps are
+/// retained; an empty range passes values unchanged, as proved by the queue
+/// model's `Chain.additions_pass_unchanged` and `Chain.chain_available_iff`.
 pub(crate) fn available(steps: &BTreeMap<u32, ReceivedMigration>, from: u32, to: u32) -> bool {
-    let mut steps = steps
+    steps
         .range((
             std::ops::Bound::Excluded(from),
             std::ops::Bound::Included(to),
         ))
-        .peekable();
-    steps.peek().is_some() && steps.all(|(_, step)| step.conversion.is_some())
+        .all(|(_, step)| step.conversion.is_some())
 }
 
 pub(crate) fn convert(
@@ -117,3 +119,7 @@ pub(crate) fn convert(
     part.rows.sort_by(|a, b| a.row.cmp(&b.row));
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "migration_receive_tests.rs"]
+mod tests;

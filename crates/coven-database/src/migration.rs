@@ -73,8 +73,9 @@ impl Migration {
     }
 
     /// Interpret received late old-schema row changes in this version (§17.1).
-    /// Upload records never change; without a converter, the received
-    /// interpretation retains each original change as a schema loss.
+    /// Upload records never change; without a converter for a crossed breaking
+    /// step, the received interpretation retains each original change as a
+    /// schema loss. Additions alone need no converter.
     pub fn writes<F>(mut self, f: F) -> Self
     where
         F: Fn(&mut crate::RowChange) -> Result<(), DbError> + Send + Sync + 'static,

@@ -327,6 +327,10 @@ proofs() {
         step "Rust / Lean authored source evidence and data validity"
         COVEN_AUTHORED_LEAN="$runner" exact_ignored coven-database --all-features -- \
             write_sources::tests::authored_sources_differential
+        runner=$(runner queue conversionRunner)
+        step "Rust / Lean conversion across breaking changes and additions"
+        COVEN_CONVERSION_LEAN="$runner" exact_ignored coven-database --all-features -- \
+            migration_receive::tests::conversion_chain_matches_lean
     fi
 
     if proof_selected io || crate_selected coven-sync; then

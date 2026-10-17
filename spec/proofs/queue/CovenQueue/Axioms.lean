@@ -97,3 +97,11 @@ import CovenQueue
 #print axioms CovenQueue.Chain.one_step_is_conversion
 #print axioms CovenQueue.Chain.row_classification_diverges
 #print axioms CovenQueue.Chain.statement_classification_converts
+#print axioms CovenQueue.Chain.additions_pass_unchanged
+#print axioms CovenQueue.Chain.newest_breaking_range_empty
+#print axioms CovenQueue.Chain.identity_record
+#print axioms CovenQueue.Chain.newest_breaking_write_admitted
+#print axioms CovenQueue.Chain.chain_available_iff
+#print axioms CovenQueue.Chain.retained_step_required
+#print axioms CovenQueue.Chain.addition_raise_cases
+#print axioms CovenQueue.Chain.below_breaking_needs_converter

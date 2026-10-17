@@ -55,6 +55,14 @@ from migration statements. `statement_plans_agree` proves that devices select
 the same chain. `row_classification_diverges` shows why classifying a migration
 from the rows it happens to affect can give different answers.
 `one_step_is_conversion` connects a one-step chain to the conversion above.
+`additions_pass_unchanged` composes a range with no breaking steps by the
+identity; `newest_breaking_write_admitted` proves admission with unchanged
+values at the newest breaking version under a later additions-only raise.
+`chain_available_iff` requires a converter for every crossed breaking step,
+and `retained_step_required` proves that an older write uses that converter.
+`below_breaking_needs_converter` proves exclusion whenever a crossed breaking
+step lacks one. `addition_raise_cases` checks both
+schema versions below an additions-only raise to 3.
 
 ## Merge and migration
 
@@ -95,6 +103,11 @@ the root and [Axioms.lean](queue/CovenQueue/Axioms.lean) audits the results.
 `authoredRunner` calls [Checked.lean](queue/CovenQueue/Checked.lean) and the
 merge package's authored-source validation.
 `write_sources::tests::authored_sources_differential` compares Rust's actual
-source checks using `COVEN_AUTHORED_LEAN`. Conversion, row-merge and migration
-examples are checked in Lean; this runner is not a differential test of those
-entire subsystems. The sequence runner covers the shared-slot rules separately.
+source checks using `COVEN_AUTHORED_LEAN`.
+`migration_receive::tests::conversion_chain_matches_lean` uses
+`COVEN_CONVERSION_LEAN` to compare `conversionRunner` with actual database
+receipt: additions after a breaking raise, missing converters, unchanged
+values, and ordered conversion across additions, through buffered and streamed
+receipt and reopening. Row-merge and migration examples are checked in Lean;
+these runners do not compare those entire subsystems. The sequence runner
+covers the shared-slot rules separately.

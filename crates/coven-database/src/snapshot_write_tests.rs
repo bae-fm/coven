@@ -1,6 +1,7 @@
 use super::*;
 use crate::tests::TestStore;
 use crate::write::tests::{count, notes, records, sql, NOTES};
+use crate::write_boundary::tests::version_two;
 use crate::{Database, RowIdentity, SyncedTable};
 use coven_format::snapshot::SnapshotDecoder;
 use coven_format::value::Value;
@@ -205,11 +206,7 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     let source_store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
     let source = source_store.schema(notes(), NOTES).await.unwrap();
-    let receiver = receiver_store
-        .builder(notes(), crate::write_boundary::tests::notes_v2())
-        .open()
-        .await
-        .unwrap();
+    let receiver = version_two(&receiver_store, true).await;
     sql(
         &source,
         "INSERT INTO notes VALUES('n','first','body'); INSERT INTO local_rows VALUES('private')",
@@ -235,9 +232,9 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     receiver.receive(excluded.clone().into()).await.unwrap();
     let (header, snapshot) = decode(&frames(&receiver, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
-    assert_eq!(header.covers, 6);
-    // Five original changes travel as source evidence with their verdicts.
-    assert_eq!(&header.counts[..6], &[1, 5, 3, 1, 1, 5]);
+    assert_eq!(header.covers, 7);
+    // The migration marker has no changes; five original changes retain verdicts.
+    assert_eq!(&header.counts[..6], &[1, 6, 3, 1, 1, 5]);
     let verdicts: Vec<_> = snapshot
         .iter()
         .filter_map(|record| match record {
@@ -291,15 +288,11 @@ async fn a_snapshot_round_trips_rows_history_and_excluded_changes() {
     assert_eq!(cells["title"].write, excluded.header.position);
     assert_eq!(cells["title"].value.value, Value::Text("excluded".into()));
     assert_eq!(count(&source, "_coven_uploads"), 5);
-    assert_eq!(count(&receiver, "_coven_uploads"), 0);
-    // The source holds the excluded write's original header, which this test
-    // altered for the receiver; a loader of the receiver's evidence must not.
+    // The receiver queues only its own migration marker.
+    assert_eq!(count(&receiver, "_coven_uploads"), 1);
     let target_store = TestStore::with_ids(&ids);
-    let target = target_store
-        .builder(notes(), crate::write_boundary::tests::notes_v2())
-        .open()
-        .await
-        .unwrap();
+    let target = version_two(&target_store, true).await;
+    consume_marker(&receiver, &target).await;
     assert_loaded_losses(&receiver, &target).await;
     target.close().await.unwrap();
     source.close().await.unwrap();
@@ -677,25 +670,11 @@ async fn snapshots_keep_the_written_reference_when_the_app_reads_null() {
     }
 }
 
-/// A database whose app went through an addition-only version 2, so a raise
-/// to 2 can exclude version-1 writes (§17.1).
-async fn version_two(store: &TestStore, notes_table: bool) -> Database {
-    let (tables, schema) = if notes_table {
-        (notes(), NOTES)
-    } else {
-        (Vec::new(), "SELECT 1")
-    };
-    store
-        .builder(
-            tables,
-            vec![
-                crate::Migration::sql(1, "initial", schema),
-                crate::Migration::sql(2, "local", "CREATE TABLE local_extra(id TEXT PRIMARY KEY)"),
-            ],
-        )
-        .open()
-        .await
-        .unwrap()
+/// Compare snapshots after both devices have consumed the target's marker.
+async fn consume_marker(source: &Database, target: &Database) {
+    for write in records(target) {
+        source.receive(write.into()).await.unwrap();
+    }
 }
 
 #[tokio::test]
@@ -777,6 +756,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         assert_eq!(rows[1].row, excluded.parts[0].rows[1].row);
         let target_store = TestStore::with_ids(&ids);
         let target = version_two(&target_store, operation != "insert").await;
+        consume_marker(&receiver, &target).await;
         assert_loaded_losses(&receiver, &target).await;
         receiver
             .dismiss_lost_values(&receiver.lost_values().await.unwrap())
@@ -863,6 +843,7 @@ async fn excluded_deletions_without_old_values_keep_distinct_write_identities() 
         })
         .collect();
     assert_eq!(writes, [first, deletion.header.position]);
+    consume_marker(&receiver, &target).await;
     assert_loaded_losses(&receiver, &target).await;
     for database in [source, receiver, target] {
         database.close().await.unwrap();

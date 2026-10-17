@@ -178,25 +178,23 @@ async fn excluded_cells_can_be_dismissed_without_their_app_table() {
     let source_store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
     let source = open(&source_store, NOTES).await;
-    let receiver = receiver_store
-        .builder(vec![], vec![Migration::sql(1, "empty", "SELECT 1")])
-        .open()
-        .await
-        .unwrap();
+    let receiver = crate::write_boundary::tests::version_two(&receiver_store, false).await;
+    receiver.exclude_later_writes(2).await;
     let empty = data(&receiver).await;
     sql(&source, "INSERT INTO notes VALUES('n','excluded','body')")
         .await
         .unwrap();
-    let mut record = records(&source).remove(0);
-    record.header.schema_version = 0;
-    receiver.exclude_version_zero().await;
+    let record = records(&source).remove(0);
     receiver.receive(record.into()).await.unwrap();
     let losses = receiver.lost_values().await.unwrap();
     assert_eq!(losses.len(), 1);
     receiver.dismiss_lost_values(&losses).await.unwrap();
     assert!(receiver.lost_values().await.unwrap().is_empty());
     assert_eq!(data(&receiver).await, empty);
-    assert_eq!(records(&receiver)[0].parts[0].dismissals.len(), 3);
+    assert_eq!(
+        records(&receiver).last().unwrap().parts[0].dismissals.len(),
+        3
+    );
     receiver.close().await.unwrap();
     source.close().await.unwrap();
 }

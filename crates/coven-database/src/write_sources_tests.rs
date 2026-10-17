@@ -399,16 +399,25 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
     };
     let schema = "CREATE TABLE p(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE c(id TEXT NOT NULL PRIMARY KEY,p TEXT REFERENCES p(id))";
     let source = source_store.schema(tables(), schema).await.unwrap();
-    let target = target_store.schema(tables(), schema).await.unwrap();
+    let target = target_store
+        .builder(
+            tables(),
+            vec![
+                crate::Migration::sql(1, "references", schema),
+                crate::Migration::sql(2, "index", "CREATE INDEX c_p ON c(p)"),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    target.exclude_later_writes(2).await;
     sql(
         &source,
         "INSERT INTO p VALUES('p'); INSERT INTO c VALUES('c','p')",
     )
     .await
     .unwrap();
-    let mut write = records(&source).remove(0);
-    write.header.schema_version = 0;
-    target.exclude_version_zero().await;
+    let write = records(&source).remove(0);
     target.receive(write.clone().into()).await.unwrap();
     let original = write.parts[0]
         .rows
@@ -467,7 +476,7 @@ async fn frozen_display_and_dismissal_preserve_original_parents_sources_and_admi
         for (_, admission) in before {
             assert_eq!(
                 merge_fields::decode_change_verdict(&admission).unwrap(),
-                coven_format::snapshot_rows::ChangeVerdict::Excluded(1)
+                coven_format::snapshot_rows::ChangeVerdict::Excluded(2)
             );
         }
     });

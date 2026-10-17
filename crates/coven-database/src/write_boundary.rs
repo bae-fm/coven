@@ -215,7 +215,8 @@ fn retained(database: &DatabaseConnection) -> Result<Vec<RetainedBoundary>, DbEr
 /// What a realized boundary decides about an uncovered part of its audience.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) enum BoundaryRule {
-    /// A raise excludes a part authored at an older schema version (§17.1).
+    /// An older-schema part needs admission through the raise's retained
+    /// breaking steps (§17.1).
     Raise(u32),
     /// A reset ignores a part whose write had not read this entry (§19.3).
     Reset(Slot),
@@ -276,7 +277,8 @@ impl WriteBoundary {
 
     /// This boundary's verdict on an uncovered part of its audience: a kept
     /// reset ignores a part whose write had not read the reset entry (§19.3);
-    /// a raise excludes a part authored at an older schema version (§17.1).
+    /// a raise returns a candidate schema exclusion, resolved by the interpreter
+    /// using the retained breaking steps (§17.1).
     pub(crate) fn excludes(
         &self,
         header: &WriteHeader,

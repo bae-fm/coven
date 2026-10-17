@@ -4,21 +4,7 @@ use crate::{tests::TestStore, CacheFill, FileDecl, Provenance, RowIdentity, Sync
 #[tokio::test]
 async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
     let store = TestStore::new();
-    let db = store
-        .schema(
-            vec![SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-                FileDecl::new(
-                    "files",
-                    1 << 30,
-                    Provenance::AppProvided,
-                    CacheFill::CacheLazy,
-                )
-                .with_location_column("x"),
-            )],
-            "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
-        )
-        .await
-        .unwrap();
+    let db = store.schema(vec![files_table()], FILES).await.unwrap();
     let file = FileId(uuid::Uuid::from_u128(7));
     for operation in [
         Operation::Update(BTreeMap::from([(
@@ -118,6 +104,45 @@ async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
     );
 }
 
+const FILES: &str = "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)";
+
+fn files_table() -> SyncedTable {
+    SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
+        FileDecl::new(
+            "files",
+            1 << 30,
+            Provenance::AppProvided,
+            CacheFill::CacheLazy,
+        )
+        .with_location_column("x"),
+    )
+}
+
+/// Reopen after the app runs breaking version 2, `change`, without a
+/// converter, under a kept raise to 2 covering what was consumed: a later
+/// version-1 write is excluded (§17.1).
+async fn migrate(
+    store: &TestStore,
+    db: Database,
+    tables: Vec<SyncedTable>,
+    change: &'static str,
+) -> Database {
+    db.close().await.unwrap();
+    let db = store
+        .builder(
+            tables,
+            vec![
+                crate::Migration::sql(1, "schema", FILES),
+                crate::Migration::sql(2, "change", change),
+            ],
+        )
+        .open()
+        .await
+        .unwrap();
+    db.exclude_later_writes(2).await;
+    db
+}
+
 async fn file_loss_fixture() -> (
     TestStore,
     Database,
@@ -127,21 +152,7 @@ async fn file_loss_fixture() -> (
     use coven_format::write::{WriteDisposition, WriteHeader, WritePart, WriteRecord};
     use coven_merge::{Audience, Change, RowId, Timestamp, WriteId};
     let store = TestStore::new();
-    let db = store
-        .schema(
-            vec![SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-                FileDecl::new(
-                    "files",
-                    1 << 30,
-                    Provenance::AppProvided,
-                    CacheFill::CacheLazy,
-                )
-                .with_location_column("x"),
-            )],
-            "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,x TEXT)",
-        )
-        .await
-        .unwrap();
+    let db = store.schema(vec![files_table()], FILES).await.unwrap();
     let file = FileId(uuid::Uuid::from_u128(7));
     let id = WriteId {
         device: DeviceId(2),
@@ -240,13 +251,12 @@ async fn local_losses_protect_files_after_the_downloaded_write_leaves_storage() 
 
 #[tokio::test]
 async fn a_schema_loss_protects_its_file_without_a_displayed_row_change() {
-    let (_store, db, mut record, _) = file_loss_fixture().await;
+    let (store, db, mut record, _) = file_loss_fixture().await;
+    let db = migrate(&store, db, vec![files_table()], "CREATE INDEX t_x ON t(x)").await;
     let device = DeviceId(4);
     let file = FileId(uuid::Uuid::from_u128(9));
     record.header.position = coven_merge::WriteId { device, number: 1 };
     record.header.timestamp = coven_merge::Timestamp::new(3, 0, device).unwrap();
-    record.header.schema_version = 0;
-    db.exclude_version_zero().await;
     let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
         panic!()
     };
@@ -308,15 +318,13 @@ async fn checked_snapshots_protect_files_named_only_by_losses() {
 
 #[tokio::test]
 async fn frozen_losses_keep_file_paths_after_their_declaration_is_removed() {
-    let (_store, db, mut record, file) = file_loss_fixture().await;
+    let (store, db, mut record, file) = file_loss_fixture().await;
+    let db = migrate(&store, db, Vec::new(), "DROP TABLE t").await;
     record.header.position = coven_merge::WriteId {
         device: DeviceId(4),
         number: 1,
     };
     record.header.timestamp = coven_merge::Timestamp::new(3, 0, DeviceId(4)).unwrap();
-    record.header.schema_version = 0;
-    db.exclude_version_zero().await;
-    record.parts[0].rows[0].row.table = "removed_files".into();
     let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
         panic!()
     };
@@ -415,13 +423,11 @@ fn candidates_of(device: DeviceId) -> BTreeSet<DeviceId> {
 /// transaction, without any listing of storage.
 #[tokio::test]
 async fn a_frozen_loss_protects_its_file_until_its_last_local_reference_goes() {
-    let (_store, db, mut record, file) = file_loss_fixture().await;
+    let (store, db, mut record, file) = file_loss_fixture().await;
+    let db = migrate(&store, db, vec![files_table()], "CREATE INDEX t_x ON t(x)").await;
     let device = DeviceId(4);
     record.header.position = coven_merge::WriteId { device, number: 1 };
     record.header.timestamp = coven_merge::Timestamp::new(3, 0, device).unwrap();
-    record.header.schema_version = 0;
-    db.exclude_version_zero().await;
-    record.parts[0].rows[0].row.table = "removed_files".into();
     let Operation::Insert(columns) = &mut record.parts[0].rows[0].change.operation else {
         panic!()
     };

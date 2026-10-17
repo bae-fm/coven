@@ -172,16 +172,15 @@ async fn streamed_excluded_rows_use_the_common_snapshot_loss_section() {
     let sa = TestStore::with_ids(&ids);
     let sb = TestStore::with_ids(&ids);
     let a = open(&sa).await;
-    let b = open(&sb).await;
+    let b = crate::write_boundary::tests::version_two(&sb, true).await;
+    b.exclude_later_writes(2).await;
     sql(
         &a,
         "INSERT INTO notes VALUES('one','first',''),('two','second','')",
     )
     .await
     .unwrap();
-    let mut record = records(&a).remove(0);
-    record.header.schema_version = 0;
-    b.exclude_version_zero().await;
+    let record = records(&a).remove(0);
     b.receive_stream(stream(&record), || Ok(())).await.unwrap();
     assert_eq!(count(&b, "notes"), 0);
     assert_eq!(count(&b, "_coven_lost"), 2);
