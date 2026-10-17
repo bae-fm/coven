@@ -1,10 +1,11 @@
 use crate::sequence_sync::sequence_reload::tests::stored_floor;
 use crate::sequence_sync::tests::*;
-use crate::SyncError;
+use crate::{SequenceSync, SyncError};
+use coven_database::DbError;
 use coven_format::admin::StoreChange;
 use coven_merge::Audience;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage, StorageFailure};
-use serde_json::json;
+use serde_json::{json, Value};
 
 // §15: retention can remove the selected snapshot or its required suffix.
 #[tokio::test]
@@ -272,5 +273,113 @@ async fn sequence_reload_reselection_matches_lean() {
         actual,
         crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
         "{input}"
+    );
+}
+
+async fn read(device: &Device) {
+    let mut session = device.sync.session.lock().await;
+    let mut ring = device.sync.keys.read().unwrap().unwrap();
+    SequenceSync::read_forward(&device.sync, &mut session, &mut ring, &device.identity)
+        .await
+        .unwrap();
+}
+
+async fn during_load(
+    device: &Device,
+    path: ObjectPath,
+    write: impl std::future::Future<Output = ()>,
+) {
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (release, held) = tokio::sync::oneshot::channel();
+    device.storage.hold_next_read(path, started, held).await;
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let loading = read(device);
+        tokio::pin!(loading);
+        tokio::select! {
+            () = &mut loading => panic!("reload finished before its held snapshot read"),
+            result = observed => result.unwrap(),
+        }
+        write.await;
+        release.send(()).unwrap();
+        loading.await;
+    })
+    .await
+    .unwrap();
+}
+
+// An original authored without the reset has the same past whether queued
+// before the reload gate or admitted through a hypothetical gate-free commit.
+async fn reset() -> Value {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ana.sync.reset(Audience::Store).await.unwrap();
+    insert(ben.database(), "queued", "value").await;
+    let originals = ben.database().waiting_snapshot_headers().await.unwrap();
+    let snapshot = ana
+        .sync
+        .session
+        .lock()
+        .await
+        .history
+        .boundaries
+        .last()
+        .unwrap()
+        .boundary
+        .snapshot()
+        .clone();
+    let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+    during_load(&ben, path, async {
+        assert!(matches!(
+            ben.database()
+                .write(|sql| {
+                    sql.execute("INSERT INTO notes VALUES('during','value')", [])?;
+                    Ok(())
+                })
+                .await,
+            Err(DbError::AudienceReloading(Audience::Store))
+        ));
+    })
+    .await;
+    assert_eq!(
+        ben.database().waiting_snapshot_headers().await.unwrap(),
+        originals
+    );
+    let replayed = rows(ben.database()).await.len();
+    assert_eq!(replayed, 0);
+    assert!(ben.database().lost_values().await.unwrap().is_empty());
+    insert(ben.database(), "queued", "value").await;
+    let after = rows(ben.database()).await;
+    assert_eq!(after, [("queued".into(), "value".into())]);
+    let waiting = ben.database().waiting_snapshot_headers().await.unwrap();
+    assert_eq!(waiting.len(), 2);
+    ben.sync.reload_from_snapshot().await.unwrap();
+    assert_eq!(rows(ben.database()).await, after);
+    assert_eq!(
+        ben.database().waiting_snapshot_headers().await.unwrap(),
+        waiting
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+    json!({"retained": originals.len(), "replayed": replayed, "after_replayed": after.len()})
+}
+
+#[tokio::test]
+async fn reset_queue_preservation_does_not_make_an_unread_reset_writable() {
+    reset().await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_queue_reset_matches_lean() {
+    assert_eq!(
+        reset().await,
+        crate::tests::run_lean(
+            "COVEN_SEQUENCE_LEAN",
+            &json!({"kind":"queueReload", "scenario":"reset"})
+        )
     );
 }
