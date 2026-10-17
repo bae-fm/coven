@@ -54,3 +54,14 @@ import CovenSequence
 #print axioms CovenSequence.Settle.admin_state_cannot_settle
 #print axioms CovenSequence.Settle.cstep_signed
 #print axioms CovenSequence.Settle.foreign_slot_means_copy
+
+#print axioms CovenSequence.Deadline.bounded_retention
+#print axioms CovenSequence.Deadline.uncovered_has_no_deadline
+#print axioms CovenSequence.Deadline.cut_delete_allowed
+#print axioms CovenSequence.Causality.authored_readThrough
+#print axioms CovenSequence.Causality.catchup_preserves_originals
+#print axioms CovenSequence.Causality.ordered_application_causal
+#print axioms CovenSequence.Causality.past_transitive
+#print axioms CovenSequence.Causality.receivers_agree
+#print axioms CovenSequence.Causality.own_predecessor_is_read
+#print axioms CovenSequence.Causality.intervening_write_not_read

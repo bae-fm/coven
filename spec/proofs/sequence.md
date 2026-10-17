@@ -130,6 +130,17 @@ storage model:
 
 ## The removal cut-off
 
+[`Causality`](sequence/CovenSequence/Causality.lean) records each write's
+original device, number, timestamp, schema, bytes and `readThrough`.
+
+- `authored_readThrough`, `catchup_preserves_originals`: commit records the
+  applied slot; subsequent catch-up preserves every queued original.
+- `ordered_application_causal`, `past_transitive`, `receivers_agree`: under
+  number-ordered publication and monotone authored reads, strict slot and
+  within-slot write order consumes every cause first. Receivers agree on
+  exactly the authored prefix plus own predecessors, including predecessors
+  outside that prefix. A later claim does not add intervening remote writes.
+
 [`Cutoff`](sequence/CovenSequence/Cutoff.lean):
 
 - `cutoff`: a batch at slot `k+1` is refused in every audience it has a part
@@ -201,6 +212,16 @@ what make one conditional floor write safe.
   state it covers;
 - a valid raise's body, when present, is the raiser's migrated rows, and it
   stays present while the floor has not covered the raise.
+
+[`Deadline`](sequence/CovenSequence/Deadline.lean):
+
+- `bounded_retention`: successful snapshot service U, grace G, maintenance
+  spacing P (including a successful conditional floor write), and deletion
+  service D delete a ready prefix within U+G+P+D. Coverage witnesses must stay
+  usable through the floor update; no device acknowledgements occur in the model.
+- `uncovered_has_no_deadline`: missing coverage in any relevant audience
+  prevents the retention gate at every time. `cut_delete_allowed` connects
+  the service's floor bound to the concrete storage deletion step.
 
 - `read_ok`, `reads_ok`: every reader step from a sound reader gives a sound
   reader, whatever was deleted or recreated below the floor. Retained slots are
@@ -373,7 +394,6 @@ sending it and creates only what it recorded, signed with its id.
   derived from a device's counter.
 - Not modelled:
   - Drive's head file and its compare-and-swap;
-  - the grace period, which is a cost setting and not a correctness rule;
   - unannounced snapshot bodies and orphaned batch objects;
   - releasing a unique value;
   - joiners reading slots before they hold the store key;

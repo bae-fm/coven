@@ -9,3 +9,5 @@ import CovenSequence.Retention
 import CovenSequence.Device
 import CovenSequence.Operation
 import CovenSequence.Settle
+import CovenSequence.Deadline
+import CovenSequence.Causality
