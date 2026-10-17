@@ -58,20 +58,20 @@ A key in a later slot cannot bypass 41.
 
 - Settle any unsettled claim first, using [§6](coven.md#settling-a-claim).
   On reopening or retrying, read its recorded path and compare its exact bytes.
-- If the floor has passed that slot, use the floor's snapshots: last-write
-  numbers settle writes; the resulting state settles admin changes (§6).
+- If the floor has passed that slot, its snapshots' per-device last-claim
+  numbers settle every slot kind, valid or refused (§6).
 - A new claim at n+1 requires the device to have applied 1 through n.
   No clock deadline expires that progress.
 - For an admin operation, validate, journal its prerequisites, then do the work
   needed before its entry. [§18](coven.md#18-operations) governs completion and undo.
-- Before each create, journal the slot path and exact bytes.
+- Before each create, journal the device's claim number, slot path and exact bytes.
   A large writes slot uploads in parts; it becomes visible only when complete.
 - On `AlreadyExists`, compare the occupied slot with the attempted bytes.
   Equal bytes can be a lost success reply; different bytes mean contention.
 - After contention, read forward and validate again. Claim the next slot if
   still allowed; otherwise undo the journaled work and fail with the validation reason.
 - After a create lands, read the floor before confirmation.
-  A create below the floor is void and settles under §6's deleted-slot rules.
+  Recreated bytes below the floor cannot confirm it; settle from the snapshot under §6.
 - Apply a confirmed claim as any received slot.
   Different bytes at an attempted slot do not prove a copied device id (§10).
 - Claim at most one writes slot for this pass's queued, sendable writes.

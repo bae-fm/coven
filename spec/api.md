@@ -45,6 +45,7 @@ pub struct SealingKey(/* private */);
 pub use coven_format::MemberKeys as MemberPublicKeys;
 
 /// One write: its device and local write number, independent of its slot (§6).
+/// Claim numbers separately count every slot kind and remain internal to sync.
 pub struct WriteId {
     pub device: DeviceId,
     pub number: u64,
@@ -2519,7 +2520,11 @@ loop {
 - Every administrative call follows [§18](coven.md#18-operations): validate,
   journal, do prerequisite work, then claim. Contention reads forward and validates again.
 - On reopening or retrying, settle the recorded path and bytes before another
-  attempt ([§6](coven.md#settling-a-claim)). The floor's snapshots settle deleted slots.
+  attempt ([§6](coven.md#settling-a-claim)). Each device has one claim counter
+  across writes, admin entries, key copies and announcements, and settles its
+  current claim before starting another. If the floor has passed the slot,
+  its snapshot's last included claim number settles it, valid or refused;
+  the resulting app or admin state is not evidence that a claim landed.
 - If validation fails, undo the operation's artifacts and return `Rejected`.
   Failed undo reports both causes and keeps the journal for retry.
 - A claimed entry is final. An already-satisfied request needs no extra entry.

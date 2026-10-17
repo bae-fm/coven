@@ -1261,9 +1261,15 @@ The store log means the admin entries in this sequence.
 ### Settling a claim
 
 A *journal* is the device's durable record of unfinished work.
-Before each create, it records the slot path and exact bytes.
+Each device uses one increasing claim counter for every kind of slot: writes,
+admin entries, key copies and announcements. The claim number starts at one
+and is sealed in the slot under the store key, separately from write numbers.
+Before each create, the journal records the claim number, slot path and exact bytes.
 An operation keeps this record in its journal; a writes queue keeps it with its batch.
 
+- A device settles its current claim before starting another, across all its
+  queues and operations. Contention retries keep that claim number; a new
+  claim takes the next number. Never reuse a settled number for different work.
 - On reopening or retrying, settle this claim before validating again, undoing,
   or trying another slot. Read its recorded slot and compare all bytes.
 - Equal bytes mean the claim landed, even if the provider replied `AlreadyExists`.
@@ -1271,15 +1277,16 @@ An operation keeps this record in its journal; a writes queue keeps it with its 
 - If the slot is absent and the floor has not passed it, retry the same
   path with the same bytes. Absence does not cancel a request still in flight.
 - After a create lands, read the floor before confirming the claim.
-  If the floor has passed its slot, that create is void.
-- The floor's snapshots settle an earlier attempt whose slot was deleted:
-  a writes claim landed if the snapshot's last-write number includes all its writes ([§15](#15-snapshots)).
-- For an admin claim below the floor, inspect the loaded state for its change.
-  For example, a rotation is satisfied when its new key is current.
-- If the writes are absent or the admin change is not present, read forward
-  and validate again before claiming at the current end.
-- Copies and announcements below the floor are settled from their signed
-  records in the store snapshot. They need no separate claim identity.
+  If the floor has passed its slot, recreated bytes cannot confirm it.
+- When the floor has passed the recorded slot, use an authenticated floor
+  snapshot's last included claim number for this device ([§15](#15-snapshots)).
+  The claim landed exactly when that number reaches its recorded number,
+  whether the slot was valid or refused. This settles every slot kind
+  ([`settle_from_floor`](proofs/sequence/CovenSequence/Settle.lean)).
+- Settling from the state fails: later writes or admin entries can erase a
+  landed claim's effects ([`admin_state_cannot_settle`, `state_alone_cannot_settle`](proofs/sequence/CovenSequence/Settle.lean)).
+- If the number has not reached the claim, read forward and validate again
+  before claiming at the current end with that claim number.
 - Any bytes recreated below the floor are deleted as recorded cleanup.
   Failure retains that obligation; those bytes never change the sequence's meaning.
 - When another claim won, apply the new slots and validate the waiting work again.
@@ -2957,10 +2964,12 @@ It holds rows, merge records, losses and the evidence needed for old writes.
 
 - Store snapshots also hold signed admin entries, key copies and announcements.
   They preserve the history needed for membership, keys, schema changes and resets (D7).
-- Each snapshot records, for every device, the number of its last included write.
-  This counts consumed writes, including refused writes and reset-ignored parts, not only surviving row changes.
-- The numbers cover all writes slots through its coverage, including opaque parts.
-  A device with no included write has number zero. Claim recovery uses these numbers (§6).
+- Each snapshot records, for every device, its last included claim number.
+  Count every slot through coverage: writes, admin entries, key copies and
+  announcements, valid or refused, including writes with opaque or reset-ignored parts.
+- A device with no included claim has number zero. These numbers settle every
+  kind of claim after slot deletion (§6); they do not describe surviving effects
+  ([`claims_ge`](proofs/sequence/CovenSequence/Settle.lean)).
 - A snapshot excludes local uploads, journals, pending records, file sources and caches.
   Reloading preserves them; a reset clears pending records only as §19.3 specifies.
 - A device snapshots only audiences it can read.

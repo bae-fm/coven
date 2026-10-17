@@ -391,7 +391,7 @@
   | 8 | Original admin slot: `slot:Slot \| object:bytes` | slot |
   | 9 | Original key-copy slot: `slot:Slot \| object:bytes` | slot |
   | 10 | Original announcement slot: `slot:Slot \| object:bytes` | slot |
-  | 11 | Last included write: `device:DeviceId \| number:u64` | device |
+  | 11 | Last included claim: `device:DeviceId \| number:u64` | device |
 
   Empty sections emit nothing. `Cell` is `write:WriteId | value:ColumnValue`.
   Synced-row columns are nonempty. Applied-write timestamps name their
@@ -478,11 +478,12 @@
 - These records preserve historical bindings, key introductions, exposure and announcements.
   Derive admin state from them in order; retained later slots supply newer bindings.
 - Section 11 occurs in every snapshot, once per device known through its coverage.
-  It records that device's last write number in the covered slots, or zero without one.
-- Include consumed writes even when their parts were unreadable, refused or reset-ignored.
-  This number settles writes claims after slot deletion ([§6](coven.md#settling-a-claim)).
-- Authenticate the snapshot before using these numbers. They establish that writes
-  were included, not that their row changes survived.
+  It records that device's last claim number in the covered slots, or zero without one.
+- Include every slot kind, valid or refused, including writes whose parts were
+  unreadable or reset-ignored. This number settles every claim after slot deletion
+  ([§6](coven.md#settling-a-claim)).
+- Authenticate the snapshot before using these numbers. They establish that claims
+  were included, not that their effects survived.
 - The decoder refuses incorrect order, duplicate identities, mismatched counts,
   audiences or coverage. EOF without the end frame is truncation; nothing may follow it.
 - No local row ids, upload queues, operation journals or local paths occur
@@ -609,7 +610,9 @@
   `copy` is present exactly for kind 2. The key id opens the slot's encrypted
   body; a prerequisite copy uses an accepted store key (§11).
 - Every slot starts its encrypted body with a kind-14 header:
-  `device:DeviceId | author:MemberId | after:u64`.
+  `device:DeviceId | claim:u64 | author:MemberId | after:u64`.
+  `claim` is positive, from the device's one counter for all slot kinds (§6).
+  Retries of that claim retain its number; it is independent of inner write numbers.
   `after` is exactly its slot minus one.
   Admin, copy and announcement slots use the device owner's preceding current key;
   creation supplies it in D6. Registration uses the new device's existing member key.
@@ -886,7 +889,7 @@
     replacement member keys, access principals and key introductions;
   - key copies for old and current credentials, with signed clear routing;
   - snapshot announcements and snapshots with every evidence section,
-    active/frozen losses, first-slot creations and per-device last-write numbers;
+    active/frozen losses, first-slot creations and per-device last-claim numbers;
   - a floor with original boxes, announcements and the first kept slot;
   - restore and invite codes, signed join requests and delivered S3 keys.
 
@@ -899,8 +902,9 @@
   routing credentials, slot order, authored views, roots and signatures.
   A retry at the same slot repeats every byte; a different slot changes its
   outer authentication while retaining each inner write exactly.
-- Fixtures cover an advanced floor with deletion unfinished, and last-write
-  numbers for lost-reply claims. Refused and reset-ignored writes count too.
+- Fixtures cover an advanced floor with deletion unfinished, and last-claim
+  numbers settling lost-reply claims of every slot kind. Refused slots and
+  writes with reset-ignored parts count too.
 - Fixtures cover snapshots for audiences at different slots and the schema
   rule in §15. Regenerate format-1 ciphertext and signatures for these layouts.
 
