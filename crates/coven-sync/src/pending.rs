@@ -60,7 +60,7 @@ pub enum PendingSubject {
         key: KeyId,
         /// The recipient.
         member: MemberId,
-        /// The recipient's exact sealing credential (D8).
+        /// The recipient's exact sealing credential (D9, Key copies).
         #[serde(with = "encoding::sealing")]
         sealing: coven_crypto::SealingKey,
     },
