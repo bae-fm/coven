@@ -3,7 +3,7 @@
 //! nothing (SP, Waiting without repeated work). File uploads run beside passes, sharing
 //! their connection's lifetime and cooldown.
 
-use crate::tests::Network;
+use crate::tests::{wait_for_sent, Network};
 use crate::*;
 use coven_storage::{
     test_utils::{Faults, MemoryRequest},
@@ -37,17 +37,6 @@ async fn insert(handle: &CovenHandle, id: &str) {
         .unwrap();
 }
 
-/// Wait until every queued write has a landed slot.
-async fn wait_for_sent(device: &crate::tests::Device) {
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while !device.handle.test_queued_writes().await.unwrap().is_empty() {
-            tokio::time::sleep(Duration::from_millis(5)).await;
-        }
-    })
-    .await
-    .unwrap();
-}
-
 #[tokio::test]
 async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     let network = Network::new(1).await;
@@ -65,7 +54,7 @@ async fn a_write_racing_a_pass_retains_one_pass_and_own_commits_retain_none() {
     insert(&device.handle, "second").await;
     insert(&device.handle, "third").await;
     resume.send(()).unwrap();
-    wait_for_sent(device).await;
+    wait_for_sent(&device.handle).await;
     // The racing writes retain one more pass, which claims their slot.
     let counted = || passes(device).saturating_sub(before);
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -109,7 +98,7 @@ async fn a_stopped_loop_runs_no_pass_until_started_and_close_ends_it() {
     tokio::time::sleep(Duration::from_millis(100)).await;
     assert_eq!(passes(device), before);
     device.handle.start_sync().await.unwrap();
-    wait_for_sent(device).await;
+    wait_for_sent(&device.handle).await;
     assert_eq!(passes(device) - before, 1);
     // Closing ends the loop: a write committed after stopping is not sent.
     status.borrow_and_update();
@@ -267,7 +256,7 @@ async fn a_held_file_upload_delays_no_pass_and_its_completion_schedules_none() {
     // A later write claims its slot while the file's create waits.
     insert(&device.handle, "later").await;
     network.sync(0).await;
-    wait_for_sent(device).await;
+    wait_for_sent(&device.handle).await;
     assert_eq!(file_creates(device), creates + 1, "a pass sent file bytes");
     assert!(!stored(device, "photo").await);
     resume.send(()).unwrap();
@@ -410,7 +399,7 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
         "{:?}",
         &*status.borrow()
     );
-    wait_for_sent(device).await;
+    wait_for_sent(&device.handle).await;
     assert!(refused(&device.handle.pending().await.unwrap()));
     device.storage.set_faults(Faults::none()).await;
     wait_for_empty_queue(&device.handle).await;

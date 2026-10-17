@@ -5,6 +5,23 @@ use std::{
     time::{Duration, UNIX_EPOCH},
 };
 
+/// Wait for committed writes to land. A pass that captured its queue before
+/// the write can finish afterward, so its finish time cannot confirm upload.
+pub(crate) async fn wait_for_sent(handle: &CovenHandle) {
+    let mut status = handle.subscribe_sync_status();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            status.borrow_and_update();
+            if handle.test_queued_writes().await.unwrap().is_empty() {
+                return;
+            }
+            status.changed().await.expect("open loop status");
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("uploads did not finish: {:?}", &*status.borrow()));
+}
+
 #[test]
 fn file_name_error_fields_are_available_through_the_facade() {
     let name: FileName = FileName::new("attachment.data").unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::wait_for_sent;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
     Storage, StorageConnection, StorageSettings,
@@ -365,8 +366,6 @@ async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
     let connected = f.setup().await.unwrap();
     assert_eq!(connected.connection.key_state, StoreKeyState::Available);
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
-    f.advance(Duration::from_secs(1));
-    let written = f.clock.now();
     f.handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('one','written')", [])?;
@@ -374,11 +373,7 @@ async fn setup_starts_sync_and_committed_writes_wake_it_without_a_tick() {
         })
         .await
         .unwrap();
-    status(
-        &f.handle,
-        |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= written),
-    )
-    .await;
+    wait_for_sent(&f.handle).await;
     assert!(f.handle.test_queued_writes().await.unwrap().is_empty());
     f.handle.close().await.unwrap();
 }
@@ -646,14 +641,8 @@ async fn two_stores_share_one_location_without_reading_each_others_history() {
             .await
             .unwrap();
     }
-    f.advance(Duration::from_secs(1));
     for handle in [&f.handle, &other] {
-        handle.sync_now();
-        status(
-            handle,
-            |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= f.clock.now()),
-        )
-        .await;
+        wait_for_sent(handle).await;
     }
     for (handle, expected) in [(&f.handle, "Household"), (&other, "Garden")] {
         let body = handle

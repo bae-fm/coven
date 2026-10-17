@@ -1,4 +1,5 @@
 use super::*;
+use crate::tests::wait_for_sent;
 use coven_storage::{
     test_utils::{MemoryRequest, MemoryStorage},
     Storage,
@@ -59,10 +60,6 @@ impl Fixture {
             )
             .await
     }
-
-    fn advance(&self, duration: Duration) {
-        self.clock.set(self.clock.now() + duration);
-    }
 }
 
 fn builder(
@@ -97,8 +94,6 @@ async fn status(handle: &CovenHandle, expected: impl Fn(&SyncStatus) -> bool) {
 }
 
 async fn uploaded(f: &Fixture, id: &'static str) {
-    f.advance(Duration::from_secs(1));
-    let written = f.clock.now();
     f.handle
         .write(move |sql| {
             sql.execute("INSERT INTO notes VALUES(?1,'uploaded')", [id])?;
@@ -106,11 +101,7 @@ async fn uploaded(f: &Fixture, id: &'static str) {
         })
         .await
         .unwrap();
-    status(
-        &f.handle,
-        |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= written),
-    )
-    .await;
+    wait_for_sent(&f.handle).await;
 }
 
 async fn notes(handle: &CovenHandle) -> Vec<String> {
@@ -235,9 +226,15 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     let backup = tempfile::tempdir().unwrap();
     copy_tree(&store, backup.path());
     let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    // The first pass captures an empty queue before this write commits. Its
+    // later completion must not let closing discard the write's upload.
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage
+        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
+        .await;
     handle.start_sync().await.unwrap();
-    f.advance(Duration::from_secs(1));
-    let written = f.clock.now();
+    entering.await.unwrap();
     handle
         .write(|sql| {
             sql.execute("INSERT INTO notes VALUES('newer','uploaded')", [])?;
@@ -245,11 +242,9 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
         })
         .await
         .unwrap();
-    status(
-        &handle,
-        |s| matches!(s, SyncStatus::Synced { finished_at } if *finished_at >= written),
-    )
-    .await;
+    resume.send(()).unwrap();
+    wait_for_sent(&handle).await;
+    assert!(handle.test_queued_writes().await.unwrap().is_empty());
     handle.close().await.unwrap();
     std::fs::remove_dir_all(&store).unwrap();
     copy_tree(backup.path(), &store);
