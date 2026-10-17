@@ -19,8 +19,8 @@ mod clock;
 mod error;
 #[path = "s3_publication.rs"]
 mod publication;
-pub(crate) use error::response_status;
 use error::s3_error;
+pub(crate) use error::{response_retry_after, response_status};
 #[path = "s3_profile.rs"]
 mod profile;
 #[path = "s3_versioning.rs"]

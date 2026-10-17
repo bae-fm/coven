@@ -48,9 +48,10 @@ pub(crate) fn retry_after(
     if let Some(native) = source.downcast_ref::<cloudkit::NativeError>() {
         return native.retry_after();
     }
-    source
-        .downcast_ref::<ProviderResponse>()?
-        .retry_after(provider)
+    if let Some(response) = source.downcast_ref::<ProviderResponse>() {
+        return response.retry_after(provider);
+    }
+    s3::response_retry_after(source)
 }
 pub(crate) use s3::{
     check_new_store as check_new_s3_store, check_s3_versioning, detect as detect_s3, s3_key_scope,

@@ -16,6 +16,17 @@ S3 retains the native multipart and mixed-publication races so adapter reply
 recovery cannot conceal two accepted publications. Its selected profile and
 bucket versioning are checked before any race.
 
+A throttled writer makes the whole round uncounted. The harness awaits every
+writer, then waits at least the longest provider retry delay before further
+requests, including cleanup (using the response's Date for HTTP-date delays).
+Known violations still fail; observed winner bytes and revisions must pass
+before a round can retry with a fresh slot or the floor's newly read revision.
+Summaries include discarded throttled rounds. Rounds are spaced by one second;
+repeated throttling uses coven's ordinary exponential delay when longer than
+the provider's request. A stage stops after 100 throttled rounds. Auxiliary
+reads and lost-reply checks retry throttling up to 20 attempts; other errors
+and any known atomicity violation fail the run.
+
 Floor races use 200 two-writer and 50 eight-writer rounds against one observed
 revision. Lost-reply checks await a real write, withhold its successful reply,
 then settle by reading; they also test occupied slot retries and stale floor

@@ -6,6 +6,7 @@ use super::pagination::Pagination;
 use crate::session::{OneDriveUpload, SessionState};
 use crate::*;
 use async_trait::async_trait;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
 use coven_crypto::SecretText;
 use coven_foundation::id_source::IdSourceRef;
 use reqwest::Method;
@@ -217,19 +218,30 @@ impl OneDriveStorage {
                 && writable(permission)
                 && permission["link"]["scope"].as_str() != Some("existingAccess")
             {
-                let acceptance = match permission.get("shareId") {
-                    Some(_) => crate::invitation::InvitationAcceptance::OneDriveShare {
+                // A permission's shareId can name the permission rather than a
+                // usable shares key. Its sharing URL has Graph's defined u!
+                // encoding; use that representation whenever it is supplied.
+                let acceptance = match (permission["link"].get("webUrl"), permission.get("shareId"))
+                {
+                    (Some(_), _) => crate::invitation::InvitationAcceptance::OneDriveShare {
+                        token: SecretText::new(format!(
+                            "u!{}",
+                            URL_SAFE_NO_PAD.encode(http::string(&permission["link"], "webUrl")?)
+                        )),
+                    },
+                    (None, Some(_)) => crate::invitation::InvitationAcceptance::OneDriveShare {
                         token: SecretText::new(http::string(permission, "shareId")?.into()),
                     },
-                    None if permission
-                        .get("invitation")
-                        .is_some_and(|value| !value.is_null())
-                        || permission.get("link").is_some_and(|value| !value.is_null()) =>
+                    (None, None)
+                        if permission
+                            .get("invitation")
+                            .is_some_and(|value| !value.is_null())
+                            || permission.get("link").is_some_and(|value| !value.is_null()) =>
                     {
                         return Err(StorageFailure::Protocol
                             .with_source("OneDrive omitted acceptance token"))
                     }
-                    None => crate::invitation::InvitationAcceptance::Granted,
+                    (None, None) => crate::invitation::InvitationAcceptance::Granted,
                 };
                 return Ok(Some(StorageInvitation::new(self.config(), acceptance)?));
             }

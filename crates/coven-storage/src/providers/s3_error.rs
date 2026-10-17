@@ -36,6 +36,14 @@ where
         failure,
         source: Box::new(S3ResponseError {
             status,
+            retry_after: error.raw_response().and_then(|response| {
+                response.headers().get("retry-after").map(|value| {
+                    crate::providers::http::retry_after_header(
+                        value,
+                        response.headers().get("date"),
+                    )
+                })
+            }),
             error: Box::new(error),
         }),
     }
@@ -54,6 +62,13 @@ pub(crate) fn response_status(source: &(dyn std::error::Error + 'static)) -> Opt
     source
         .downcast_ref::<S3ResponseError>()
         .and_then(|response| response.status)
+}
+
+/// The retry delay retained from the SDK's original response.
+pub(crate) fn response_retry_after(
+    source: &(dyn std::error::Error + 'static),
+) -> Option<crate::RetryAfter> {
+    source.downcast_ref::<S3ResponseError>()?.retry_after
 }
 
 fn s3_service_failure(
@@ -119,6 +134,7 @@ fn s3_service_failure(
 // include it in ordinary storage error formatting.
 struct S3ResponseError {
     status: Option<u16>,
+    retry_after: Option<crate::RetryAfter>,
     error: Box<dyn std::error::Error + Send + Sync>,
 }
 impl fmt::Debug for S3ResponseError {

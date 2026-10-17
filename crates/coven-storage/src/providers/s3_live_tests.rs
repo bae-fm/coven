@@ -78,8 +78,13 @@ async fn s3_live_sequence() {
             &["sequence_floor_and_lost_replies"],
             selected.settings,
             move |_, store| async move {
-                sequence_live::lost_replies(writers[0].as_ref(), writers[1].as_ref(), store)
-                    .await?;
+                sequence_live::lost_replies(
+                    &clock,
+                    writers[0].as_ref(),
+                    writers[1].as_ref(),
+                    store,
+                )
+                .await?;
                 sequence_live::floor(&clock, &writers, store).await
             }
         )
@@ -251,7 +256,7 @@ async fn s3_bucket_versioning() {
 }
 
 /// Each independent case gets its own namespace. Unwinding still reaches cleanup.
-async fn case<T: Send + 'static, F, Fut>(
+async fn case<T, F, Fut>(
     settings: &live::LiveS3,
     requirements: &[&str],
     profile: S3Settings,
@@ -259,12 +264,15 @@ async fn case<T: Send + 'static, F, Fut>(
 ) -> Option<T>
 where
     F: FnOnce(Arc<StorageConnection<S3Storage>>, StoreId) -> Fut,
-    Fut: Future<Output = Result<T, StorageError>> + Send + 'static,
+    Fut: Future<Output = Result<T, StorageError>>,
 {
     let label = requirements.join(", ");
     let store = StoreId(uuid::Uuid::new_v4());
     let storage = Arc::new(settings.connect(Some(profile)));
-    let result = tokio::spawn(work(storage.clone(), store)).await;
+    use futures_util::FutureExt;
+    let result = std::panic::AssertUnwindSafe(work(storage.clone(), store))
+        .catch_unwind()
+        .await;
     let cleanup = live_cleanup::cleanup(&storage.provider, store).await;
     let value = match result {
         Ok(Ok(value)) => Some(value),
@@ -395,121 +403,139 @@ async fn run_race(
     race: races::Race,
     width: usize,
 ) -> Result<(), StorageError> {
-    use races::{fire, judge, prepare, single, Race, Reply, Write};
+    use crate::providers::tests::sequence_live;
+    let clock = coven_foundation::clock::SystemClock;
     let trials = if width == 8 { 50 } else { 200 };
-    let mut overlapping = 0;
-    let mut violations = 0;
-    let mut successes = 0;
-    for trial in 1..=trials {
-        let target = if matches!(race, Race::Replace) {
-            ObjectPath::floor(store)
-        } else {
-            path(store, trial)
-        };
-        let replacement = if matches!(race, Race::Replace) {
-            if trial == 1 {
-                s.create(&target, b"initial revision").await?;
-            } else {
-                s.replace(
-                    &s.status(&target).await?.ok_or(StorageFailure::NotFound)?,
-                    b"initial revision",
-                )
-                .await?;
-            }
-            let head = head(&s.provider, &target.under(&s.provider.prefix)).await?;
-            Some(match s.provider.settings.revision {
-                S3Revision::ETag => (
-                    "if-match",
-                    metadata::required(head.e_tag(), "missing current ETag")?.to_owned(),
-                ),
-                S3Revision::Generation => (
-                    "x-goog-if-generation-match",
-                    metadata::required(head.version_id(), "missing current generation")?.to_owned(),
-                ),
-            })
-        } else {
-            None
-        };
-        let payloads: Vec<_> = (0..width)
-            .map(|writer| {
-                let mut bytes = format!("trial={trial} writer={writer} ")
-                    .repeat(4096)
-                    .into_bytes();
-                bytes.truncate(64 * 1024);
-                bytes
-            })
-            .collect();
-        let mut prepared = Vec::new();
-        // Each writer publishes as the profile does: a single-request create
-        // is a copy too where the profile publishes every object by copy.
-        for (writer, bytes) in payloads.iter().enumerate() {
-            prepared.push(match &replacement {
-                Some((header, value)) => Write::Put {
-                    header,
-                    value: value.clone(),
-                },
-                None if matches!(race, Race::Multipart)
-                    || matches!(race, Race::Mixed) && writer == 1 =>
-                {
-                    prepare(&s, &target, bytes).await?
-                }
-                None => single(&s.provider, &target, bytes).await?,
-            });
-        }
-        let barrier = Arc::new(Barrier::new(width + 1));
-        let origin = Instant::now();
-        let mut tasks = JoinSet::new();
-        for (writer, write) in prepared.into_iter().enumerate() {
-            let s = s.clone();
-            let target = target.clone();
-            let bytes = payloads[writer].clone();
-            let barrier = barrier.clone();
-            tasks.spawn(async move {
-                barrier.wait().await;
-                let start = origin.elapsed();
-                let result = fire(&s.provider, &target, bytes, write).await;
-                Reply {
-                    writer,
-                    start,
-                    end: origin.elapsed(),
-                    result,
-                }
-            });
-        }
-        barrier.wait().await;
-        let mut joined = Vec::new();
-        while let Some(reply) = tasks.join_next().await {
-            joined.push(reply);
-        }
-        // Even a failed worker must not let cleanup race the other requests.
-        let mut replies = joined
-            .into_iter()
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-        replies.sort_by_key(|reply| reply.writer);
-        let overlap = replies.iter().map(|reply| reply.start).max().unwrap()
-            < replies.iter().map(|reply| reply.end).min().unwrap();
-        overlapping += usize::from(overlap);
-        let accepted = replies.iter().filter(|reply| reply.result.is_ok()).count();
-        successes += accepted;
-        let stored = s.read(&target).await?;
-        let passed = judge(&replies, &payloads, &stored);
-        violations += usize::from(!passed);
-        for reply in &replies {
-            println!("race {race:?} writers={width} trial={trial} writer={} start_us={} end_us={} outcome={}",
-                reply.writer, reply.start.as_micros(), reply.end.as_micros(), detect::outcome(&reply.result));
-        }
-        println!("race {race:?} writers={width} trial={trial} overlap={overlap} successes={accepted} pass={passed}");
-        require(
-            passed,
-            "conditional publication failed reply, byte or overlap checks",
-        )?;
+    if matches!(race, races::Race::Replace) {
+        sequence_live::retry(&clock, async || {
+            s.create(&ObjectPath::floor(store), b"initial revision")
+                .await
+        })
+        .await?;
     }
-    println!("race SUMMARY {race:?} writers={width} trials={trials} overlapping={overlapping} successes={successes} violations={violations}");
-    require(
-        violations == 0,
-        "conditional publication failed reply, byte or overlap checks",
+    let throttled = sequence_live::rounds(
+        &clock,
+        &format!("{race:?} writers={width}"),
+        trials,
+        async |trial, attempt| {
+            run_race_round(&clock, s.clone(), store, race, width, trial, attempt).await
+        },
     )
+    .await?;
+    println!("race SUMMARY {race:?} writers={width} trials={trials} overlapping={trials} successes={trials} throttled={throttled} violations=0");
+    Ok(())
+}
+
+async fn run_race_round(
+    clock: &dyn coven_foundation::clock::Clock,
+    s: Arc<StorageConnection<S3Storage>>,
+    store: StoreId,
+    race: races::Race,
+    width: usize,
+    trial: u64,
+    attempt: u64,
+) -> Result<(), StorageError> {
+    use crate::providers::tests::sequence_live;
+    use races::{fire, judge, prepare, single, Race, Reply, Write};
+    let target = if matches!(race, Race::Replace) {
+        ObjectPath::floor(store)
+    } else {
+        path(store, attempt)
+    };
+    let previous = if matches!(race, Race::Replace) {
+        Some(s.read_object(&target, None).await?)
+    } else {
+        None
+    };
+    let payloads: Vec<_> = (0..width)
+        .map(|writer| {
+            let mut bytes = format!("trial={trial} attempt={attempt} writer={writer} ")
+                .repeat(4096)
+                .into_bytes();
+            bytes.truncate(64 * 1024);
+            bytes
+        })
+        .collect();
+    let mut prepared = Vec::new();
+    // Preparation failures retry the whole round with a fresh destination;
+    // this case's namespace records every temporary and upload for cleanup.
+    for (writer, bytes) in payloads.iter().enumerate() {
+        prepared.push(match &previous {
+            Some(previous) => Write::Put {
+                header: match s.provider.settings.revision {
+                    S3Revision::ETag => "if-match",
+                    S3Revision::Generation => "x-goog-if-generation-match",
+                },
+                value: previous.metadata.replace_token.clone(),
+            },
+            None if matches!(race, Race::Multipart)
+                || matches!(race, Race::Mixed) && writer == 1 =>
+            {
+                prepare(&s, &target, bytes).await?
+            }
+            None => single(&s.provider, &target, bytes).await?,
+        });
+    }
+    let barrier = Arc::new(Barrier::new(width + 1));
+    let origin = Instant::now();
+    let mut tasks = JoinSet::new();
+    for (writer, write) in prepared.into_iter().enumerate() {
+        let s = s.clone();
+        let target = target.clone();
+        let bytes = payloads[writer].clone();
+        let barrier = barrier.clone();
+        tasks.spawn(async move {
+            barrier.wait().await;
+            let start = origin.elapsed();
+            let result = fire(&s.provider, &target, bytes, write).await;
+            Reply {
+                writer,
+                start,
+                end: origin.elapsed(),
+                result,
+            }
+        });
+    }
+    barrier.wait().await;
+    let mut joined = Vec::new();
+    while let Some(reply) = tasks.join_next().await {
+        joined.push(reply);
+    }
+    // Await every worker before a failed request can reach cleanup.
+    let mut replies = joined
+        .into_iter()
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| StorageFailure::Protocol.with_source(error))?;
+    replies.sort_by_key(|reply| reply.writer);
+    for reply in &replies {
+        println!("race {race:?} writers={width} trial={trial} attempt={attempt} writer={} start_us={} end_us={} outcome={}",
+            reply.writer, reply.start.as_micros(), reply.end.as_micros(), detect::outcome(&reply.result));
+    }
+    sequence_live::wait_for_writers(clock, &replies).await?;
+    let stored = sequence_live::observed(clock, s.as_ref(), &target).await?;
+    if let Some(previous) = &previous {
+        if replies.iter().any(|reply| reply.result.is_ok()) {
+            require(
+                stored
+                    .as_ref()
+                    .is_some_and(|s| s.metadata.revision != previous.metadata.revision),
+                "floor winner retained the previous revision",
+            )?;
+        } else {
+            require(
+                stored.as_ref() == Some(previous),
+                "refused floor writers changed its revision or bytes",
+            )?;
+        }
+    }
+    judge(
+        replies,
+        &payloads,
+        stored.as_ref().map(|s| s.bytes.as_slice()),
+        previous.as_ref().map(|p| p.bytes.as_slice()),
+    )?;
+    println!("race {race:?} writers={width} trial={trial} attempt={attempt} overlap=true successes=1 pass=true");
+    Ok(())
 }
 
 #[tokio::test]

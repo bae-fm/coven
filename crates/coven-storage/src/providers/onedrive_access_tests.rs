@@ -234,3 +234,62 @@ async fn native_identity_fields_identify_the_account_without_an_invitation() {
         .is_empty());
     assert!(state.lock().unwrap().permissions.is_empty());
 }
+
+#[tokio::test]
+async fn invitation_uses_encoded_sharing_url_when_permission_id_is_not_a_shares_key() {
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let captured = requests.clone();
+    let server = TestServer::new(Router::new().fallback(
+        move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+            captured.lock().unwrap().push((
+                method.clone(),
+                uri.path().to_owned(),
+                headers.get("prefer").cloned(),
+            ));
+            async move {
+                assert_eq!(method, Method::GET);
+                assert!(body.is_empty());
+                match uri.path() {
+                    "/graph/me/drive" => reply(json!({"id":"drive"})),
+                    "/graph/me" => reply(json!({"mail":"owner@example.test"})),
+                    "/graph/drives/drive/items/root/permissions" => reply(json!({"value":[{
+                        "id":"permission-id", "shareId":"permission-id", "roles":["write"],
+                        "grantedToV2":{"siteUser":{"email":"member@example.test"}},
+                        "link":{"webUrl":"https://1drv.ms/f/example?e=abc"}
+                    }]})),
+                    "/graph/shares/u!aHR0cHM6Ly8xZHJ2Lm1zL2YvZXhhbXBsZT9lPWFiYw/driveItem" => {
+                        reply(
+                            json!({"id":"root","folder":{},"parentReference":{"driveId":"drive"}}),
+                        )
+                    }
+                    _ => response(
+                        400,
+                        json!({"error":{"code":"invalidRequest","message":"Invalid shares key."}})
+                            .to_string(),
+                    ),
+                }
+            }
+        },
+    ))
+    .await;
+    let storage = provider(&server.url);
+    let AccessGrant::Granted { invitation } =
+        storage.grant_access("member@example.test").await.unwrap()
+    else {
+        panic!()
+    };
+    let invitation = StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
+    storage.provider.join(&invitation).await.unwrap();
+    let requests = requests.lock().unwrap();
+    let redemption: Vec<_> = requests
+        .iter()
+        .filter_map(|(_, _, prefer)| prefer.as_ref().map(|p| p.to_str().unwrap()))
+        .collect();
+    assert_eq!(
+        redemption,
+        ["redeemSharingLinkIfNecessary", "redeemSharingLink"]
+    );
+    assert!(requests
+        .iter()
+        .all(|(_, path, _)| !path.contains("/shares/permission-id/")));
+}

@@ -193,9 +193,14 @@ fn onedrive_live_sequence() {
         };
         writers[1].join(live.store, &invitation).await.unwrap();
         use crate::providers::tests::sequence_live as suite;
-        suite::lost_replies(writers[0].as_ref(), writers[1].as_ref(), live.store)
-            .await
-            .unwrap();
+        suite::lost_replies(
+            live.clock.as_ref(),
+            writers[0].as_ref(),
+            writers[1].as_ref(),
+            live.store,
+        )
+        .await
+        .unwrap();
         suite::slots(live.clock.as_ref(), &writers, live.store)
             .await
             .unwrap();

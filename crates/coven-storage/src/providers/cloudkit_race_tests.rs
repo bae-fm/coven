@@ -318,9 +318,14 @@ async fn cloudkit_live_create_once_race() {
             let result = std::panic::AssertUnwindSafe(async {
                 let most = STAGES.iter().map(|stage| stage.writers).max().unwrap();
                 let writers = Writer::connect("owner", &native.config(), &ids, most).await;
-                sequence_live::lost_replies(&reader, writers[0].storage.as_ref(), store)
-                    .await
-                    .unwrap();
+                sequence_live::lost_replies(
+                    clock.as_ref(),
+                    &reader,
+                    writers[0].storage.as_ref(),
+                    store,
+                )
+                .await
+                .unwrap();
                 let mut attempt = 1;
                 let mut tallies = Vec::new();
                 for stage in STAGES {

@@ -25,6 +25,7 @@ aws-credential-types.workspace = true
 aws-smithy-async.workspace = true
 aws-smithy-runtime-api.workspace = true
 hex.workspace = true
+base64.workspace = true
 xmlparser.workspace = true
 
 [target.'cfg(target_vendor = "apple")'.dependencies]

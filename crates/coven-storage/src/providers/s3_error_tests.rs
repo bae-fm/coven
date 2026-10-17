@@ -227,3 +227,36 @@ fn sdk_transport_failures_remain_retryable_and_retain_native_causes() {
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
     }
 }
+
+#[tokio::test]
+async fn throttled_responses_retain_retry_after_seconds_dates_and_missing_basis() {
+    use crate::RetryAfter;
+    use std::time::Duration;
+    for (retry, date, expected) in [
+        ("37", None, RetryAfter::Wait(Duration::from_secs(37))),
+        (
+            "Wed, 21 Oct 2026 07:38:00 GMT",
+            Some("Wed, 21 Oct 2026 07:28:00 GMT"),
+            RetryAfter::Wait(Duration::from_secs(600)),
+        ),
+        ("not-a-date", None, RetryAfter::NoTimeBasis),
+    ] {
+        let server = TestServer::new(Router::new().fallback(move || async move {
+            let mut reply = response(429, "<Error><Code>SlowDown</Code></Error>");
+            reply
+                .headers_mut()
+                .insert("retry-after", retry.parse().unwrap());
+            if let Some(date) = date {
+                reply.headers_mut().insert("date", date.parse().unwrap());
+            }
+            reply
+        }))
+        .await;
+        let error = provider(&server.url)
+            .list(&ObjectPrefix::all(STORE_ID))
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::RateLimited);
+        assert_eq!(error.retry_after(), Some(expected));
+    }
+}

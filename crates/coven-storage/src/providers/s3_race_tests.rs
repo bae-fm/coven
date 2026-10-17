@@ -76,3 +76,116 @@ async fn every_object_race_stages_single_requests_and_races_only_copies() {
         }
     ));
 }
+
+struct RecordingWaits {
+    clock: coven_foundation::clock::SystemClock,
+    waits: Mutex<Vec<std::time::Duration>>,
+}
+
+impl coven_foundation::clock::Clock for RecordingWaits {
+    fn now(&self) -> SystemTime {
+        self.clock.now()
+    }
+    fn elapsed(&self) -> std::time::Duration {
+        self.clock.elapsed()
+    }
+    fn sleep(
+        &self,
+        duration: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
+        self.waits.lock().unwrap().push(duration);
+        Box::pin(std::future::ready(()))
+    }
+}
+
+#[tokio::test]
+async fn native_throttling_restarts_with_fresh_slots_and_current_floor_revisions() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    for (race, preparation) in [
+        (Race::Multipart, true),
+        (Race::Multipart, false),
+        (Race::Replace, false),
+    ] {
+        let state = Arc::new(Mutex::new(Remote {
+            gcs: true,
+            ..Remote::default()
+        }));
+        let remote = state.clone();
+        let refused = Arc::new(AtomicBool::new(false));
+        let first = refused.clone();
+        let server = TestServer::new(Router::new().fallback(
+            move |method: Method, uri: Uri, headers: HeaderMap, body: Bytes| {
+                let remote = remote.clone();
+                let first = first.clone();
+                async move {
+                    let selected = if preparation {
+                        method == Method::POST && query(&uri).contains_key("uploads")
+                    } else if matches!(race, Race::Replace) {
+                        method == Method::PUT
+                            && headers
+                                .get("x-goog-if-generation-match")
+                                .is_some_and(|value| value != "0")
+                    } else {
+                        headers.contains_key("x-goog-copy-source")
+                    };
+                    if selected && !first.swap(true, Ordering::SeqCst) {
+                        let mut reply = response(429, "<Error><Code>SlowDown</Code></Error>");
+                        reply
+                            .headers_mut()
+                            .insert("retry-after", "7".parse().unwrap());
+                        reply
+                    } else {
+                        endpoint(State(remote), method, uri, headers, body).await
+                    }
+                }
+            },
+        ))
+        .await;
+        let storage = Arc::new(profile_provider(
+            &server.url,
+            CataloguedProfile::named(S3ProfileName::Gcs).settings,
+        ));
+        if matches!(race, Race::Replace) {
+            storage
+                .create(&ObjectPath::floor(STORE_ID), b"initial revision")
+                .await
+                .unwrap();
+        }
+        let clock = RecordingWaits {
+            clock: coven_foundation::clock::SystemClock,
+            waits: Mutex::new(Vec::new()),
+        };
+        let discarded = crate::providers::tests::sequence_live::rounds(
+            &clock,
+            "native fixture",
+            2,
+            async |trial, attempt| {
+                run_race_round(&clock, storage.clone(), STORE_ID, race, 2, trial, attempt).await
+            },
+        )
+        .await
+        .unwrap();
+        assert!(refused.load(Ordering::SeqCst));
+        assert_eq!(discarded, 1);
+        assert!(clock
+            .waits
+            .lock()
+            .unwrap()
+            .contains(&std::time::Duration::from_secs(7)));
+        let state = state.lock().unwrap();
+        if matches!(race, Race::Replace) {
+            assert_eq!(state.objects.len(), 1);
+            assert!(state.objects[ObjectPath::floor(STORE_ID).as_str()]
+                .starts_with(b"trial=2 attempt=3 writer="));
+            assert_eq!(state.generation, 4);
+        } else {
+            let slots: Vec<_> = state
+                .objects
+                .keys()
+                .filter(|key| key.contains("/seq/"))
+                .collect();
+            assert_eq!(slots.len(), if preparation { 2 } else { 3 });
+            assert!(state.objects.contains_key(path(STORE_ID, 3).as_str()));
+        }
+    }
+}

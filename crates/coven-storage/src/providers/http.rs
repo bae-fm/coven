@@ -258,29 +258,10 @@ impl ProviderResponse {
     pub(crate) fn retry_after(&self, provider: CloudProvider) -> Option<crate::RetryAfter> {
         use reqwest::header::{DATE, RETRY_AFTER};
         if let Some(value) = self.headers.get(RETRY_AFTER) {
-            let value = value.to_str().unwrap_or_default().trim();
-            if let Ok(seconds) = value.parse::<u64>() {
-                return Some(crate::RetryAfter::Wait(std::time::Duration::from_secs(
-                    seconds,
-                )));
-            }
-            let date = |value: &str| {
-                use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
-                DateTime::from_str(value.trim(), DateTimeFormat::HttpDate)
-                    .ok()
-                    .map(|time| time.secs())
-            };
-            let basis = self
-                .headers
-                .get(DATE)
-                .and_then(|value| value.to_str().ok())
-                .and_then(date);
-            return Some(match (date(value), basis) {
-                (Some(retry), Some(basis)) => crate::RetryAfter::Wait(
-                    std::time::Duration::from_secs(retry.saturating_sub(basis).max(0) as u64),
-                ),
-                _ => crate::RetryAfter::NoTimeBasis,
-            });
+            return Some(retry_after_header(
+                value.to_str().unwrap_or_default(),
+                self.headers.get(DATE).and_then(|date| date.to_str().ok()),
+            ));
         }
         if provider == CloudProvider::Dropbox {
             let value: Value = serde_json::from_slice(self.body()).ok()?;
@@ -302,6 +283,27 @@ impl ProviderResponse {
         self.body.as_bytes()
     }
 }
+/// Interpret HTTP retry timing using the response's clock, for both HTTP clients.
+pub(crate) fn retry_after_header(value: &str, date: Option<&str>) -> crate::RetryAfter {
+    use crate::RetryAfter;
+    use std::time::Duration;
+    if let Ok(seconds) = value.trim().parse::<u64>() {
+        return RetryAfter::Wait(Duration::from_secs(seconds));
+    }
+    let parse = |value: &str| {
+        use aws_sdk_s3::primitives::{DateTime, DateTimeFormat};
+        DateTime::from_str(value.trim(), DateTimeFormat::HttpDate)
+            .ok()
+            .map(|time| time.secs())
+    };
+    match (parse(value), date.and_then(parse)) {
+        (Some(retry), Some(basis)) => RetryAfter::Wait(Duration::from_secs(
+            retry.saturating_sub(basis).max(0) as u64,
+        )),
+        _ => RetryAfter::NoTimeBasis,
+    }
+}
+
 impl fmt::Debug for ProviderResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderResponse")
