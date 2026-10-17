@@ -258,6 +258,7 @@ pub(crate) fn read(
         database,
         &expected.audience,
         header.covers,
+        header.schema_version,
         &carried,
     )?;
     crate::snapshot_state::finish(database)?;

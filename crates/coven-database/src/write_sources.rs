@@ -649,11 +649,15 @@ pub(crate) fn load_evidence(
 /// This device's migration write changes rows only through its own raise's
 /// snapshot (§17.1). A loaded snapshot that covers it without carrying those
 /// changes was made from another raise's data, in which they never counted:
-/// their evidence goes with the data they described.
+/// their evidence goes with the data they described. A loaded snapshot at
+/// the marker's version or later, covering it or not, comes from the raise
+/// that established that version: the marker's own results are replaced and
+/// it changes nothing anywhere.
 pub(crate) fn forget_own_migration(
     db: &DatabaseConnection,
     audience: &coven_merge::Audience,
     covered: u64,
+    version: u32,
     carried: &std::collections::BTreeSet<(WriteId, String, Vec<u8>)>,
 ) -> Result<(), DbError> {
     let own = crate::pending::own_device(db)?;
@@ -673,7 +677,9 @@ pub(crate) fn forget_own_migration(
     )? {
         let header = merge_fields::decode_write_header(&header)?;
         if header.disposition != coven_format::write::WriteDisposition::Migration
-            || crate::sequence::write_slot(db,header.position)?.is_none_or(|slot|slot.0>covered)
+            || (header.schema_version > version
+                && crate::sequence::write_slot(db, header.position)?
+                    .is_none_or(|slot| slot.0 > covered))
         {
             continue;
         }

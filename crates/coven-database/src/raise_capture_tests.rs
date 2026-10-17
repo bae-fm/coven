@@ -455,3 +455,61 @@ async fn an_addition_moves_a_waiting_raise_to_its_version() {
     );
     db.close().await.unwrap();
 }
+
+/// Another device's established raise replaces what this device's own
+/// unpublished migration computed: its marker sets nothing here, so a later
+/// write names the raise's migration write as the setter, a source every
+/// receiver holds (§17.1).
+#[tokio::test]
+async fn an_adopted_raise_replaces_an_unpublished_migrations_setters() {
+    let ids = coven_foundation::id_source::SequentialIds::new();
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let a = a_store.schema(notes(), NOTES).await.unwrap();
+    let b = b_store.schema(notes(), NOTES).await.unwrap();
+    connect(&a).await;
+    connect(&b).await;
+    for db in [&a, &b] {
+        TestStore::register(db, a_store.device(), 1);
+        TestStore::register(db, b_store.device(), 1);
+    }
+    sql(&a, "INSERT INTO notes VALUES('n','title','body')")
+        .await
+        .unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
+    let fill = || Migration::sql(2, "fill", "UPDATE notes SET body='migrated'");
+    let mut migrated = Vec::new();
+    for (store, db) in [(&a_store, a), (&b_store, b)] {
+        db.close().await.unwrap();
+        migrated.push(
+            store
+                .builder(notes(), vec![initial(), fill()])
+                .open()
+                .await
+                .unwrap(),
+        );
+    }
+    let (a, b) = (&migrated[0], &migrated[1]);
+    let marker = records(a).pop().unwrap().header.position;
+    let raise = raise_frames(a, 1, 2).await;
+    let own = records(b).pop().unwrap().header;
+    assert_eq!(own.disposition, WriteDisposition::Migration);
+    assert_ne!(own.position, marker);
+    crate::snapshot_write::tests::load_one(
+        b,
+        decode(&raise).0.id,
+        raise.prefix.clone(),
+        std::io::Cursor::new(raise.concat()),
+    )
+    .await
+    .unwrap();
+    sql(b, "UPDATE notes SET body='later'").await.unwrap();
+    let later = records(b).pop().unwrap();
+    assert_eq!(
+        later.parts[0].rows[0].sources.setters["body"].change.write,
+        marker
+    );
+    for db in migrated {
+        db.close().await.unwrap();
+    }
+}
