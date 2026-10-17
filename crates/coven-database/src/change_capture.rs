@@ -1,4 +1,4 @@
-//! Convert a transaction's session changes into read dependencies before commit.
+//! Convert transaction changes into read dependencies before commit.
 
 use crate::{observation::RowChange, sql_value::SqlValue, sqlite::DatabaseConnection, DbError};
 use rusqlite::{
@@ -7,9 +7,48 @@ use rusqlite::{
 use std::collections::BTreeMap;
 
 struct TableColumns {
-    names: Vec<String>,
-    generated: Vec<String>,
+    names: Vec<(String, bool, bool)>,
+    has_primary_key: bool,
     virtual_parent: Option<String>,
+}
+
+fn observe_table<'a>(
+    database: &DatabaseConnection,
+    table: &str,
+    tables: &'a mut BTreeMap<String, TableColumns>,
+    changes: &mut Vec<RowChange>,
+) -> Result<&'a TableColumns, DbError> {
+    if !tables.contains_key(table) {
+        let names = database.query(
+            "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
+            [table],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?.to_ascii_lowercase(),
+                    r.get::<_, bool>(1)?,
+                    r.get::<_, u32>(2)? != 0,
+                ))
+            },
+        )?;
+        let has_primary_key = names.iter().any(|(_, pk, _)| *pk);
+        tables.insert(
+            table.to_owned(),
+            TableColumns {
+                names,
+                has_primary_key,
+                virtual_parent: shadow_parent(database, table)?,
+            },
+        );
+    }
+    let columns = &tables[table];
+    if let Some(parent) = &columns.virtual_parent {
+        changes.push(RowChange {
+            table: parent.clone(),
+            column: String::new(),
+            keys: None,
+        });
+    }
+    Ok(columns)
 }
 
 /// Tables whose changes need an update hook in addition to the session. An
@@ -72,59 +111,32 @@ pub(crate) fn changes(
     while let Some(item) = items.next()? {
         let operation = item.op()?;
         let table = operation.table_name().to_ascii_lowercase();
-        if !tables.contains_key(&table) {
-            let fields = database.query(
-                "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
-                [&table],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?.to_ascii_lowercase(),
-                        r.get::<_, bool>(1)?,
-                        r.get::<_, u32>(2)?,
-                    ))
-                },
-            )?;
-            let mut names: Vec<_> = fields
-                .iter()
-                .filter(|(_, _, hidden)| *hidden == 0)
-                .map(|(name, _, _)| name.clone())
-                .collect();
-            if !fields.iter().any(|(_, pk, _)| *pk) {
-                // SQLITE_SESSION_OBJCONFIG_ROWID adds the implicit key first.
-                names.insert(0, "rowid".into());
-            }
+        let first = !tables.contains_key(&table);
+        let columns = observe_table(database, &table, &mut tables, &mut changes)?;
+        // SQLITE_SESSION_OBJCONFIG_ROWID adds the implicit key first. Session
+        // positions otherwise omit generated columns; event positions don't.
+        let names = (!columns.has_primary_key)
+            .then_some("rowid")
+            .into_iter()
+            .chain(
+                columns
+                    .names
+                    .iter()
+                    .filter(|(_, _, hidden)| !hidden)
+                    .map(|(name, _, _)| name.as_str()),
+            );
+        if first {
             assert_eq!(
-                names.len(),
+                names.clone().count(),
                 operation.number_of_columns() as usize,
                 "session columns match table metadata"
             );
-            let virtual_parent = shadow_parent(database, &table)?;
-            tables.insert(
-                table.clone(),
-                TableColumns {
-                    names,
-                    generated: fields
-                        .into_iter()
-                        .filter(|(_, _, hidden)| *hidden != 0)
-                        .map(|(name, _, _)| name)
-                        .collect(),
-                    virtual_parent,
-                },
-            );
-        }
-        let columns = &tables[&table];
-        if let Some(parent) = &columns.virtual_parent {
-            changes.push(RowChange {
-                table: parent.clone(),
-                column: String::new(),
-                keys: None,
-            });
         }
         let mut old = BTreeMap::new();
         let mut new = BTreeMap::new();
         let pk = item.pk()?;
         let mut changed = Vec::new();
-        for (index, name) in columns.names.iter().enumerate() {
+        for (index, name) in names.enumerate() {
             let before = if operation.code() == Action::SQLITE_INSERT {
                 None
             } else {
@@ -141,15 +153,21 @@ pub(crate) fn changes(
                     (Action::SQLITE_UPDATE, None) => before.clone(),
                     (_, after) => after,
                 };
-                old.insert(name.clone(), before.unwrap_or(SqlValue::Null));
-                new.insert(name.clone(), after.unwrap_or(SqlValue::Null));
+                old.insert(name.to_owned(), before.unwrap_or(SqlValue::Null));
+                new.insert(name.to_owned(), after.unwrap_or(SqlValue::Null));
             } else if before.is_some() || after.is_some() {
-                changed.push(name.clone());
+                changed.push(name.to_owned());
             }
         }
         if operation.code() == Action::SQLITE_UPDATE {
             // Sessions omit generated columns; they can change with their inputs.
-            changed.extend(columns.generated.iter().cloned());
+            changed.extend(
+                columns
+                    .names
+                    .iter()
+                    .filter(|(_, _, hidden)| *hidden)
+                    .map(|(name, _, _)| name.clone()),
+            );
         } else {
             changed = vec![String::new()];
         }
@@ -185,46 +203,12 @@ pub(crate) fn event_changes(
     events: &[crate::sqlite::Event],
     supplemental: &BTreeMap<String, Option<String>>,
 ) -> Result<Vec<RowChange>, DbError> {
-    struct Fields {
-        names: Vec<(String, bool, bool)>,
-        keyed: bool,
-        virtual_parent: Option<String>,
-    }
-    let mut tables = BTreeMap::<String, Fields>::new();
+    let mut tables = BTreeMap::new();
     let mut changes = Vec::new();
     for event in events {
         let table = event.table.to_ascii_lowercase();
-        if !tables.contains_key(&table) {
-            let names = database.query(
-                "SELECT name,pk,hidden FROM pragma_table_xinfo(?1,'main') ORDER BY cid",
-                [&table],
-                |r| {
-                    Ok((
-                        r.get::<_, String>(0)?.to_ascii_lowercase(),
-                        r.get::<_, bool>(1)?,
-                        r.get::<_, u32>(2)? != 0,
-                    ))
-                },
-            )?;
-            let keyed = names.iter().any(|(_, pk, _)| *pk) && !supplemental.contains_key(&table);
-            tables.insert(
-                table.clone(),
-                Fields {
-                    names,
-                    keyed,
-                    virtual_parent: shadow_parent(database, &table)?,
-                },
-            );
-        }
-        let fields = &tables[&table];
-        if let Some(parent) = &fields.virtual_parent {
-            changes.push(RowChange {
-                table: parent.clone(),
-                column: String::new(),
-                keys: None,
-            });
-        }
-        if !fields.keyed {
+        let fields = observe_table(database, &table, &mut tables, &mut changes)?;
+        if !fields.has_primary_key || supplemental.contains_key(&table) {
             changes.push(RowChange {
                 table,
                 column: String::new(),
