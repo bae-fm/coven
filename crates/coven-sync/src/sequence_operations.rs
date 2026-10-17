@@ -317,7 +317,10 @@ impl SequenceSync {
         self.waits
             .retain_operations(&records.iter().map(|r| r.id).collect());
         for record in records {
-            if record.kind == "sequence" && self.operation_ready(&record, ring).await? {
+            if record.kind == "sequence"
+                && record.started_by != super::sequence_invites::INVITE
+                && self.operation_ready(&record, ring).await?
+            {
                 self.run_administration(session, ring, member, record.id)
                     .await?;
             }
@@ -338,9 +341,11 @@ impl SequenceSync {
             .await;
         if let Err(error) = &result {
             if let Some(record) = self.database.operation(id).await? {
-                let work: SequenceOperation = serde_json::from_slice(&record.data)?;
-                self.record_operation_error(id, work.kind(), error, ring)
-                    .await?;
+                if record.started_by != super::sequence_invites::INVITE {
+                    let work: SequenceOperation = serde_json::from_slice(&record.data)?;
+                    self.record_operation_error(id, work.kind(), error, ring)
+                        .await?;
+                }
             }
         } else {
             self.waits.clear_evidence(id);

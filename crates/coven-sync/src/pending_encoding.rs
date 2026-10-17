@@ -125,3 +125,24 @@ pub(crate) mod snapshot_id {
         })
     }
 }
+
+/// Public pairs kept as operation preconditions, independent of wire frames.
+pub(crate) mod public_keys {
+    use super::*;
+    pub(crate) fn serialize<S: serde::Serializer>(
+        value: &coven_crypto::MemberPublicKeys,
+        serializer: S,
+    ) -> Result<S::Ok, S::Error> {
+        (value.signing.as_bytes(), value.sealing.as_bytes()).serialize(serializer)
+    }
+    pub(crate) fn deserialize<'de, D: serde::Deserializer<'de>>(
+        deserializer: D,
+    ) -> Result<coven_crypto::MemberPublicKeys, D::Error> {
+        let (signing, sealing) = <([u8; 32], [u8; 32])>::deserialize(deserializer)?;
+        Ok(coven_crypto::MemberPublicKeys {
+            signing: coven_crypto::SigningKey::from_bytes(signing)
+                .map_err(serde::de::Error::custom)?,
+            sealing: coven_crypto::SealingKey::from_bytes(sealing),
+        })
+    }
+}

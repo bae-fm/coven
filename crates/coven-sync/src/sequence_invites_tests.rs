@@ -476,3 +476,115 @@ async fn an_invite_waiting_for_a_decision_still_expires() {
         device.sync.database.close().await.unwrap();
     }
 }
+
+// §12.2, §18 and E9: an invite cannot replace a competing binding on retry.
+#[tokio::test]
+async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry() {
+    for interrupted in [true, false] {
+        let group = Group::shared();
+        let ana = group.device(1).await;
+        let ben = group.device(2).await;
+        group
+            .create_with_access(
+                &ana,
+                MemberAccess::ProviderAccount("ana@example.org".into()),
+            )
+            .await;
+        group.admit(&ana, &ben).await;
+        let target = coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(91));
+        ana.sync
+            .administer(coven_format::admin::StoreChange::AddMember {
+                member: target,
+                keys: coven_format::test_utils::keys_from_seed(3).public_keys(),
+                role: MemberRole::Member,
+                access: MemberAccess::ProviderAccount("carol@example.org".into()),
+            })
+            .await
+            .unwrap();
+        let invite = ana
+            .sync
+            .create_invite(
+                InviteTarget::ReplaceMemberKeys { member: target },
+                InviteAccess::ProviderAccount {
+                    email: "carol@example.org".into(),
+                },
+            )
+            .await
+            .unwrap();
+        let carol = join(&group, &invite.code, "Carol's replacement").await;
+        ana.sync.pass().await.unwrap();
+        let request = ana.sync.join_requests().await.unwrap().remove(0);
+        let operation = ana
+            .sync
+            .database
+            .operations()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|record| record.kind == "invite")
+            .unwrap()
+            .id;
+        if interrupted {
+            let next = ana.sync.database.applied_slot().await.unwrap() + 1;
+            ana.storage
+                .set_faults(coven_storage::test_utils::Faults {
+                    create_failures: [(
+                        ObjectPath::slot(group.store, next.try_into().unwrap()),
+                        (coven_storage::StorageFailure::Network, 500),
+                    )]
+                    .into(),
+                    ..coven_storage::test_utils::Faults::none()
+                })
+                .await;
+            assert!(matches!(
+                ana.sync.approve_join_request(&request).await,
+                Err(SyncError::Storage(_))
+            ));
+            ana.storage
+                .set_faults(coven_storage::test_utils::Faults::none())
+                .await;
+        }
+        let competing = coven_format::test_utils::keys_from_seed(4).public_keys();
+        ben.sync
+            .replace_member_keys_for(target, competing)
+            .await
+            .unwrap();
+        let result = if interrupted {
+            ana.sync.retry_pending_operation(operation).await.map(drop)
+        } else {
+            ana.sync.approve_join_request(&request).await
+        };
+        assert!(matches!(result, Err(SyncError::Rejected(_))), "{result:?}");
+        assert!(
+            ana.sync
+                .database
+                .operation(operation)
+                .await
+                .unwrap()
+                .is_none(),
+            "rejection must finish the parent undo"
+        );
+        assert!(ana
+            .sync
+            .database
+            .operations()
+            .await
+            .unwrap()
+            .iter()
+            .all(|record| record.started_by != "invite"));
+        assert!(group
+            .storage
+            .status(&ObjectPath::join_request(group.store, invite.id))
+            .await
+            .unwrap()
+            .is_none());
+        ana.sync.pass().await.unwrap();
+        assert_eq!(
+            ana.sync.database.store_state().await.unwrap().members[&target].keys,
+            competing
+        );
+        for device in [&ana, &ben, &carol.device] {
+            device.sync.database.close().await.unwrap();
+        }
+    }
+}

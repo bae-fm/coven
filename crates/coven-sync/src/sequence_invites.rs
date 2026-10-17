@@ -1,7 +1,7 @@
 //! The inviting device's one-time invitation, its join request and the
 //! approval that binds the request's exact pair (§12.2, §12.3).
 
-use super::{sequence_operations::Request, SequenceSync, Session};
+use super::{SequenceSync, Session};
 use crate::{
     Invite, InviteAccess, InviteTarget, JoinRequest, OperationKind, OperationRejection,
     PendingReason, PendingRecord, PendingSubject, ProviderAccessAction, SyncError,
@@ -59,7 +59,10 @@ pub(crate) enum InviteBinding {
     Add { role: MemberRole },
     /// An existing active id keeps its role, circles, devices and recorded
     /// access; only its pair changes.
-    Replace,
+    Replace {
+        #[serde(with = "crate::pending_encoding::public_keys")]
+        expected: coven_crypto::MemberPublicKeys,
+    },
 }
 
 #[derive(Serialize, Deserialize)]
@@ -199,7 +202,12 @@ impl SequenceSync {
                             .into());
                     }
                 }
-                (target, InviteBinding::Replace)
+                (
+                    target,
+                    InviteBinding::Replace {
+                        expected: existing.keys,
+                    },
+                )
             }
         };
         let id = InviteId(self.ids.new_id());
@@ -321,13 +329,13 @@ impl SequenceSync {
                 self.database
                     .advance_operation(work.update(&record)?)
                     .await?;
-                self.advance_invite(&mut session, &mut ring, &member, operation)
+                self.run_invite(&mut session, &mut ring, &member, operation)
                     .await?;
                 return Err(error);
             }
         }
         match self
-            .advance_invite(&mut session, &mut ring, &member, operation)
+            .run_invite(&mut session, &mut ring, &member, operation)
             .await?
         {
             InviteProgress::Shown(invite) => {
@@ -448,7 +456,7 @@ impl SequenceSync {
             .await?;
         loop {
             match self
-                .advance_invite(&mut session, &mut ring, &member, record.id)
+                .run_invite(&mut session, &mut ring, &member, record.id)
                 .await?
             {
                 InviteProgress::Finished => return Ok(()),
@@ -475,7 +483,7 @@ impl SequenceSync {
         member: &MemberIdentity,
         id: OperationId,
     ) -> Result<(), SyncError> {
-        match self.advance_invite(session, ring, member, id).await? {
+        match self.run_invite(session, ring, member, id).await? {
             InviteProgress::Waiting(reason) if reason != PendingReason::Paused => {
                 Err(SyncError::Pending(Box::new(PendingRecord {
                     subject: PendingSubject::Operation {
@@ -507,30 +515,11 @@ impl SequenceSync {
             if !expired && !self.operation_ready(&record, ring).await? {
                 continue;
             }
-            let scope = self.waits.begin_attempt(record.id);
-            let result = scope
-                .run(self.advance_invite(session, ring, member, record.id))
-                .await;
-            let reason = match result {
-                Ok(InviteProgress::Waiting(reason)) => reason,
-                Ok(_) => {
-                    self.waits.clear_evidence(record.id);
-                    self.waits
-                        .forget(coven_database::RetrySubject::Operation(record.id));
-                    continue;
+            if let Err(error) = self.run_invite(session, ring, member, record.id).await {
+                if self.database.operation(record.id).await?.is_none() {
+                    return Err(error);
                 }
-                Err(error) => self.error_reason(&error),
-            };
-            let pending = SyncError::Pending(Box::new(PendingRecord {
-                subject: PendingSubject::Operation {
-                    id: record.id,
-                    kind: OperationKind::Invite,
-                },
-                reason,
-                reported_by: self.device,
-            }));
-            self.record_operation_error(record.id, OperationKind::Invite, &pending, ring)
-                .await?;
+            }
             self.state.check()?;
         }
         self.publish_join_requests().await
@@ -661,46 +650,31 @@ impl SequenceSync {
                             role,
                             access: work.access.member_access()?,
                         },
-                        InviteBinding::Replace => {
-                            let current = session
-                                .history
-                                .state
-                                .members
-                                .get(&work.member)
-                                .filter(|value| !value.removed)
-                                .ok_or(SyncError::Rejected(OperationRejection::TargetGone(
-                                    crate::EntryTarget::Member(work.member),
-                                )))?;
-                            StoreChange::ReplaceMemberKeys {
-                                member: work.member,
-                                expected: current.keys,
-                                keys: decoded.keys,
-                            }
-                        }
+                        InviteBinding::Replace { expected } => StoreChange::ReplaceMemberKeys {
+                            member: work.member,
+                            expected,
+                            keys: decoded.keys,
+                        },
                     };
-                    // A replacement already binding this pair is satisfied.
-                    let bound = matches!(&change, StoreChange::ReplaceMemberKeys { expected, keys, .. } if expected == keys);
-                    if !bound {
-                        match self
-                            .start_request(session, ring, member, Request::Change(change), INVITE)
-                            .await
-                        {
-                            Ok(_) => (),
-                            Err(SyncError::Rejected(reason)) => {
-                                // A rejected approval is reported, not retried
-                                // with a new entry; its grants are taken back.
-                                work.state = InviteState::Revoking;
-                                self.database
-                                    .advance_operation(work.update(&record)?)
-                                    .await?;
-                                Box::pin(self.advance_invite(session, ring, member, id)).await?;
-                                return Err(SyncError::Rejected(reason));
-                            }
-                            Err(error) => return Err(error),
+                    match self
+                        .approve_invite_change(session, ring, member, change)
+                        .await
+                    {
+                        Ok(()) => (),
+                        Err(SyncError::Rejected(reason)) => {
+                            work.state = InviteState::Revoking;
+                            self.database
+                                .advance_operation(work.update(&record)?)
+                                .await?;
+                            Box::pin(self.advance_invite(session, ring, member, id)).await?;
+                            return Err(SyncError::Rejected(reason));
                         }
+                        Err(error) => return Err(error),
                     }
                     work.state = match (&work.binding, &work.access) {
-                        (InviteBinding::Replace, InviteGrant::S3Key(_)) => InviteState::Recording,
+                        (InviteBinding::Replace { .. }, InviteGrant::S3Key(_)) => {
+                            InviteState::Recording
+                        }
                         _ => InviteState::Settled,
                     };
                     self.database
@@ -712,7 +686,7 @@ impl SequenceSync {
                         member: work.member,
                         access: work.access.member_access()?,
                     };
-                    self.start_request(session, ring, member, Request::Change(change), INVITE)
+                    self.approve_invite_change(session, ring, member, change)
                         .await?;
                     work.state = InviteState::Settled;
                     self.database
@@ -736,7 +710,7 @@ impl SequenceSync {
                     // never access its active member already holds (§12.2).
                     let deletions = match work.access.member_access() {
                         Ok(access @ MemberAccess::S3AccessKey { .. }) => {
-                            let retained = matches!(work.binding, InviteBinding::Replace)
+                            let retained = matches!(work.binding, InviteBinding::Replace { .. })
                                 && session.history.state.members.get(&work.member).is_some_and(
                                     |value| !value.removed && value.access.same_credential(&access),
                                 );
@@ -961,3 +935,6 @@ fn decode_request(bytes: &[u8]) -> Result<coven_format::objects::JoinRequest, Sy
 #[cfg(test)]
 #[path = "sequence_invites_tests.rs"]
 mod tests;
+
+#[path = "sequence_invite_approval.rs"]
+mod approval;
