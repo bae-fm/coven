@@ -607,12 +607,13 @@
   reset. A raise's version is positive and equals its snapshot schema.
   The admin entry names the exact announcement activating its prepared state.
 - Slot kinds are 0 admin, 1 writes, 2 key copy, 3 snapshot announcement.
-  `copy` is present exactly for kind 2. The key id opens the slot's encrypted
-  body; a prerequisite copy uses an accepted store key (§11).
+  `copy` is present exactly for kind 2. `key` names the store key that seals
+  the slot's body; a prerequisite copy uses an accepted store key (§11).
 - Every slot starts its encrypted body with a kind-14 header:
   `device:DeviceId | claim:u64 | author:MemberId | after:u64`.
   `claim` is positive, from the device's one counter for all slot kinds (§6).
   Retries of that claim retain its number; it is independent of inner write numbers.
+  The device and claim number are readable by every member, not by the provider.
   `after` is exactly its slot minus one.
   Admin, copy and announcement slots use the device owner's preceding current key;
   creation supplies it in D6. Registration uses the new device's existing member key.
@@ -684,6 +685,10 @@
   floors and writes slots stream; admin/copy/announcement slots and
   join requests use one chunk. Inner part counts and lengths come from D5.
   Unreadable parts are hashed and passed over without opening them.
+- `header_key` names a store key, so every member can read D5's part audiences
+  before opening parts with their audience keys. The provider sees neither
+  these audiences nor the slot's device or claim number; the slot's kind,
+  key-copy routing and object framing remain clear.
 - Chunk associated data is D11's context of `coven/object-chunk/v1`, path or
   inner identity, complete clear prefix, section and chunk index. Snapshot
   prefix signatures are outside this context. Derive deterministic nonces

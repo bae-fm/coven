@@ -1618,7 +1618,8 @@ while let Ok(values) = lost.next().await {
   - A missing slot below the floor reloads its snapshots.
     Returning devices retain eligible queued writes ([§15](coven.md#15-snapshots)).
   - `Blocked` names a slot that cannot apply and its cause.
-    Later slots and all sends wait; local reads and eligible app writes continue.
+    [§6's stuck-device rule](coven.md#stuck-devices) applies;
+    local reads and eligible app writes continue.
   - File transfers run outside the pass. Their failures appear in `pending()`
     without blocking sequence application.
   - `Synced` means the pass reached its read end. Files, provider effects or
@@ -2462,7 +2463,7 @@ pub enum SyncStatus {
     Syncing,
     /// The pass reached its observed end; other subjects may still be pending.
     Synced { finished_at: SystemTime },
-    /// This slot prevents later application and every send (§6).
+    /// This slot invokes §6's stuck-device rule.
     Blocked { slot: Slot, reason: PendingReason },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed { error: SyncFailure },
@@ -2588,7 +2589,7 @@ impl CovenHandle {
     pub async fn retry_pending_operation(&self, operation: OperationId) -> Result<(), OperationError>;
 
     /// Reloads this device from the latest snapshot, keeping its waiting
-    /// writes, as an operation (§19.2).
+    /// writes, as an operation (§19.2). It cannot bypass §6's stuck-device rule.
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError>;
 
     /// Resets the store from this device's copy, as an admin (§19.3): writes

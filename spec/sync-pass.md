@@ -45,14 +45,12 @@ A pass reads slots, applies them, claims waiting work, then performs effects.
   coverage (§15). Applying the announcement does not load its rows.
 - An unavailable required key reports `KeyUnavailable`; a newer schema or format
   reports `UpdateRequired`. A damaged complete object reports its `Refused` cause.
-- Any slot that cannot apply stops the device there. It sends nothing,
-  including file parts, operation retries and provider changes.
+- Any slot that cannot apply follows [§6's stuck-device rule](coven.md#stuck-devices).
 - The local app still reads its data and commits eligible writes.
   Pending records name the cause; [§19.1](coven.md#191-noticing) specifies retries.
 
 Ben's laptop reads slot 41, a copy of a key it cannot open.
-It applies nothing after 41 and sends nothing until it can open that copy.
-A key in a later slot cannot bypass 41.
+A key in a later slot cannot bypass [the block at 41](coven.md#stuck-devices).
 
 ## 3. Claim
 
@@ -145,7 +143,7 @@ Ben's idle pass makes two reads. If Ana added one note, its slot adds one read.
   and does not delay the write that attached them (§16.5).
 - Files use their fixed keys and references. Source checks in §16.5 prevent
   a retry from encrypting changed bytes under the same file key and nonce.
-- A blocked sequence or removed identity stops file sends too.
+- File sends follow [§6's stuck-device rule](coven.md#stuck-devices) and §10's removal cut-off.
   Confirmed parts remain recorded for resumption; no elapsed-time send permission is needed.
 - Up to the provider's single-request limit or 32 MiB, whichever is less,
   use one create. Larger files use a resumable upload.

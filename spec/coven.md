@@ -87,6 +87,8 @@
 - No server. It syncs through storage the members already have.
 - Contents are encrypted ([§11](#11-keys)); slot kinds, key-copy routing,
   object framing and S3 detection's probes are visible (D9).
+- A slot's device, claim number and each part's audience are sealed under the
+  store key: every member can read them, but the provider cannot.
 - Only members' devices hold the store key.
 
 ## 2. Threat model
@@ -147,7 +149,9 @@ cryptographic and environmental assumptions.
 - **Confidentiality:** the provider and outsiders cannot read encrypted contents.
   Circle data is readable only by its members (§11).
 - Slot kinds and key-copy routing are clear. Names, values, key commitments
-  and operation contents stay encrypted. Keyed authorship roots prevent guessing values without the secret (D11).
+  and operation contents stay encrypted. The store key also seals each slot's
+  device, claim number and part audiences; circle keys seal circle-part contents.
+  Keyed authorship roots prevent guessing values without the secret (D11).
 - **Authorization:** signatures identify authors. Admin actions use the preceding
   slot's state; writes use their authored view and the removal cut-off (§9, §10).
 - Only authorized members change membership, and at least one admin remains.
@@ -165,7 +169,7 @@ cryptographic and environmental assumptions.
 - Admin work either claims or undoes its recorded artifacts.
   Failed undo remains journaled and reported (§18).
 - **Revocation:** catch up before sending. First attempts use the newest usable key (§10, §11).
-  A blocked slot stops sends and prevents reading later removals.
+  A blocked slot follows [§6](#stuck-devices), so a later removal cannot be read past it.
 - Writes after device or member removal, or credential replacement, have no effects.
   Record their refusal; there is no grace period for late claims (§10).
 - Prior attempts retain their inner bytes and keys. Provider cut-off remains separate;
@@ -1235,10 +1239,6 @@ The store log means the admin entries in this sequence.
 - Applying a slot commits its changes and applied slot number in one transaction.
   Failure leaves both at the preceding slot.
   [proof pending: applying slots in order preserves causality and commits progress atomically]
-- A slot that cannot apply stops the device there. It reports `UpdateRequired`,
-  `KeyUnavailable`, the read failure, or a `Refused` reason, and sends nothing.
-- Ben's laptop cannot open its key copy at slot 41. It applies nothing after
-  41 and sends nothing until it can open that copy.
 - Parts outside this member's audiences need not be opened ([§14.4](#144-writes)).
   A readable part missing its key stops the whole slot.
 - Writes cut off by removal or key replacement are consumed without effects
@@ -1257,6 +1257,17 @@ The store log means the admin entries in this sequence.
   [§11](#11-keys) chooses the keys; [D9](format.md#d9-sealed-objects) fixes its signed inner bytes across retries.
 - Remove queued writes only when their claim is settled and their consumed
   state commits. Apply the remaining local queue over that state without applying any write twice.
+
+### Stuck devices
+
+A slot that cannot apply stops the device entirely until it can apply that slot:
+it applies nothing after it, reloads no audience from the floor, and sends nothing,
+including file parts, operation retries and provider changes. It reports
+`UpdateRequired`, `KeyUnavailable`, the read failure, or a `Refused` reason.
+The local app can still read its data and commit eligible writes.
+The model proves that an already-stopped device takes no apply or reload step
+([`stopped_stays`](proofs/sequence/CovenSequence/Device.lean)); sends and recovery
+from the blocking cause are outside that model.
 
 ### Settling a claim
 
@@ -2423,6 +2434,9 @@ No removal of Ana enters the sequence.
 
 - Store keys encrypt store data and metadata; circle keys encrypt circle data.
   Member signing/sealing pairs and provider credentials have separate purposes.
+- Every slot's device and claim number, and every inner write's part audiences,
+  are sealed under the store key. All members can read those headers before
+  deciding which audience-encrypted parts to open; the provider cannot.
 - Each file has its own key inside its encrypted row ([§16](#16-files)).
 - Creation and rotation introduce an audience key by random id and SHA-256
   of its exact 32 bytes. These fields stay encrypted; removals carry no keys.
@@ -2875,7 +2889,9 @@ No removal of Ana enters the sequence.
   part stops the slot. Not being a recipient is not a missing-key error.
 - The applied admin state determines which parts this device may read;
   the write's authored view determines the author's permission. Every device
-  reads the header and checks the full signature, including opaque parts.
+  opens the header with the store key and checks the full signature, including
+  opaque parts. Its part audiences are hidden from the provider; among slot
+  fields, only the kind and key-copy routing are clear, besides D9's framing.
 - Adding a member to an existing circle requires its historical keys and
   a reload of parts missed while outside it. The overall applied slot is
   not evidence those parts were read. Load its announced snapshot and suffix
@@ -3457,7 +3473,7 @@ His unsent edits keep their original reads and timestamps; age alone does not re
     in the store log ([§9](#9-members-and-roles)).
   - An older app cannot apply that audience's newer schema. It records
     `UpdateRequired` and reloads from the snapshot after updating.
-    This slot stops the whole sequence and every send until then (§19.1).
+    Until updating, it follows [§6's stuck-device rule](#stuck-devices).
   - It snapshots every audience it can read, with one entry raising each
     to the new version; the store's own entry raises the store.
   - For a circle it can't read, the first device of one of that circle's
@@ -3765,8 +3781,8 @@ Role changes and renames use the same path as key rotation, invitations and rese
   Calls retain native errors; durable records retain the category.
 - An applicable coven update permits one recheck of a refused object.
   Reopening the same version does not repeat that work.
-- A floor may replace deleted history. Otherwise a device cannot skip a
-  refused slot to reach a later reset or admin entry.
+- A refused slot follows [§6's stuck-device rule](#stuck-devices); a later
+  floor, reset or admin entry cannot bypass the refusal.
 - Missing keys, required updates, failed reloads, unavailable files and failed
   cleanup stay visible. A failed snapshot read cannot justify loading an older state (§15).
 - Applying a changed reset clears pending records with its reload.
@@ -3782,7 +3798,8 @@ It cannot read Ben's removal at 81 or send queued writes until 80 applies.
 ### 19.2 Recovering one device
 
 - At the app's request, a usable database reloads from snapshots and the
-  sequence (§15). It keeps its device id and waiting writes.
+  sequence (§15), subject to [§6's stuck-device rule](#stuck-devices).
+  It keeps its device id and waiting writes.
   - Settle attempted writes under [§6](#settling-a-claim). Convert
     eligible received old-schema records or record their original-value
     losses under §17.1, leaving upload records unchanged

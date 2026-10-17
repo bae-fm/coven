@@ -228,7 +228,8 @@ bytes, its genuine content. A reader steps in four ways:
 2. **Apply:** it applies its next slot from the buffer once a floor read after
    the fetch shows the slot at or above the first kept slot. A slot with a part
    or announcement for `A` needs `A`'s key. Other audiences' parts are not
-   read; the slot's clear metadata says they are not `A`'s.
+   read; the slot's metadata, sealed under the store key and readable by every
+   member, says they are not `A`'s. The provider cannot read that metadata.
 3. **Raise or reset:** it loads the matching prepared body. A raise replays
    buffered slots after coverage, checked against the floor; a reset replaces
    rows without replaying that suffix.
