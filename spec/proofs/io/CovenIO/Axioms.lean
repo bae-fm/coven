@@ -23,6 +23,8 @@ import CovenIO
 #print axioms CovenIO.Downloads.permanent_never_retries
 #print axioms CovenIO.Downloads.temporary_uses_shared_delay
 #print axioms CovenIO.Downloads.permanent_storage_never_retries
+#print axioms CovenIO.Downloads.person_waits_for_connection
+#print axioms CovenIO.Downloads.connection_retry_keeps_cooldown
 #print axioms CovenIO.Downloads.removed_not_waiting
 #print axioms CovenIO.Downloads.replaced_not_waiting
 #print axioms CovenIO.Downloads.active_absence_retries

@@ -2,6 +2,8 @@
 
 #[path = "file_cache.rs"]
 mod file_cache;
+#[path = "file_cache_retry.rs"]
+mod file_cache_retry;
 #[path = "file_error.rs"]
 mod file_error;
 #[path = "file_read.rs"]
@@ -10,6 +12,8 @@ mod file_read;
 mod file_status;
 #[path = "file_upload.rs"]
 pub(crate) mod file_upload;
+#[path = "file_upload_failure.rs"]
+mod file_upload_failure;
 #[path = "file_upload_retry.rs"]
 mod file_upload_retry;
 use crate::SyncError;
@@ -22,7 +26,7 @@ pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
 pub use file_upload::{DrainOutcome, QueuedUpload, UploadPhase, UploadQueue};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     sync::{
         atomic::{AtomicBool, Ordering},
         Arc, Mutex,
@@ -65,6 +69,9 @@ struct FilesInner {
     storage: std::sync::RwLock<Option<Arc<dyn Storage>>>,
     send: Arc<crate::SendGate>,
     waits: Arc<crate::RetryWaits>,
+    /// Failures observed on this connection that require a new connection.
+    /// Reopening creates a new connection and permits one attempt again.
+    connection_waits: Mutex<BTreeSet<coven_database::RetrySubject>>,
     ids: IdSourceRef,
     /// The persisted pause setting as of the last drain or app change; parts
     /// check it between sends.
@@ -110,6 +117,7 @@ impl Files {
             storage: std::sync::RwLock::new(storage),
             send,
             waits,
+            connection_waits: Mutex::new(BTreeSet::new()),
             ids,
             paused: AtomicBool::new(false),
             wake: Arc::new(Notify::new()),
@@ -203,8 +211,8 @@ impl Files {
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
     }
-    /// Retry all waiting files now, overriding their ordinary backoff and
-    /// app-action waits. A live provider cooldown still holds (§16.5).
+    /// Optionally retry recoverable uploads early. Provider cooldowns and
+    /// failures that never clear still hold (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.inner.drain_uploads(true).await
     }
@@ -241,11 +249,38 @@ impl Files {
         self.inner.check_open()?;
         ready.await?;
         *self.inner.storage.write().expect("storage lock poisoned") = storage;
+        self.inner
+            .connection_waits
+            .lock()
+            .expect("file connection waits poisoned")
+            .clear();
         self.inner.wake.notify_one();
         Ok(())
     }
 }
 impl FilesInner {
+    fn connection_due(&self, subject: coven_database::RetrySubject) -> bool {
+        !self
+            .connection_waits
+            .lock()
+            .expect("file connection waits poisoned")
+            .contains(&subject)
+    }
+
+    fn wait_for_connection(&self, subject: coven_database::RetrySubject) {
+        self.connection_waits
+            .lock()
+            .expect("file connection waits poisoned")
+            .insert(subject);
+    }
+
+    fn forget_connection_wait(&self, subject: coven_database::RetrySubject) {
+        self.connection_waits
+            .lock()
+            .expect("file connection waits poisoned")
+            .remove(&subject);
+    }
+
     pub(crate) async fn lock_file(
         &self,
         file: &coven_database::FileRef,

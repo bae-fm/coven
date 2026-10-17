@@ -252,7 +252,8 @@ impl PendingRecord {
     /// own under backoff, the app's on an explicit retry (§18). Coven's own
     /// operation retries as its failure clears: by itself under backoff,
     /// after a person acts once that is resolved, or never (storelog-data
-    /// `operationRetry`).
+    /// `operationRetry`). Files use the same failure classes; an uploader's
+    /// unavailable source retries under backoff (§16.5).
     pub fn retry(&self) -> Retry {
         match (&self.subject, &self.reason) {
             (PendingSubject::Operation { kind, .. }, PendingReason::Dropped(_))
@@ -261,7 +262,14 @@ impl PendingRecord {
                 Retry::Automatic
             }
             (PendingSubject::Operation { .. }, PendingReason::Dropped(_)) => Retry::AppAction,
-            (PendingSubject::Operation { kind, .. }, reason) if kind.coven_owned() => {
+            (
+                PendingSubject::File { device, .. },
+                PendingReason::FileUnavailable(FileMissingReason::Source(_)),
+            ) if *device == self.reported_by => Retry::Automatic,
+            (subject, reason)
+                if matches!(subject, PendingSubject::File { .. })
+                    || matches!(subject, PendingSubject::Operation { kind, .. } if kind.coven_owned()) =>
+            {
                 match reason.clears() {
                     Some(Clears::ByItself) => Retry::Automatic,
                     Some(Clears::ByPerson) => Retry::AppAction,
@@ -285,8 +293,8 @@ pub(crate) enum Clears {
     Never,
 }
 
-/// Storage failures that work other than coven's own operations, such as
-/// file uploads, retries automatically (E5).
+/// Storage failures that subjects other than files and coven's own
+/// operations retry automatically (E5).
 pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
     matches!(
         failure,

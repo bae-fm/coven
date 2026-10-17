@@ -359,44 +359,8 @@ async fn a_fill_that_cannot_read_its_work_fails_its_step() {
     a.close().await;
 }
 
-/// A provider refusing the download is no temporary failure: its record
-/// waits for the app and no wait retries it on a timer (§16.3; io
-/// `Downloads.permanent_storage_never_retries`).
-#[tokio::test]
-async fn a_permanent_provider_failure_is_not_retried_automatically() {
-    let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let b = eager_reader(&a, &clock).await;
-    apply_all(&a, &b).await;
-    a.storage
-        .set_faults(Faults {
-            fail_next: 1,
-            failure: StorageFailure::PermissionDenied,
-            ..Faults::none()
-        })
-        .await;
-    b.files.sync_files().await.unwrap();
-    let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
-    assert!(
-        matches!(records.as_slice(), [record] if record.retry() == crate::Retry::AppAction),
-        "{records:?}"
-    );
-    assert!(b
-        .files
-        .inner
-        .database
-        .download_waits()
-        .await
-        .unwrap()
-        .is_empty());
-    let reads = reads_of(&a, &file).await;
-    advance(&b, &clock, 600);
-    b.files.sync_files().await.unwrap();
-    assert_eq!(reads_of(&a, &file).await, reads);
-    b.close().await;
-    a.close().await;
-}
+#[path = "file_cache_retry_tests.rs"]
+mod retries;
 
 /// A failed eager download persists `T` and `W` with its record before it
 /// waits: no fill requests it again before its deadline, reopening included,
@@ -414,7 +378,10 @@ async fn a_failed_download_is_not_requested_before_its_deadline() {
     let [(subject, wait)] = waits.as_slice() else {
         panic!("one persisted wait: {waits:?}");
     };
-    assert_eq!(*subject, crate::files::file_cache::download_subject(&file));
+    assert_eq!(
+        *subject,
+        crate::files::file_cache_retry::download_subject(&file)
+    );
     assert_eq!(wait.failures, 1);
     assert_eq!(wait.wait, Duration::from_secs(1));
     assert_eq!(wait.not_before, clock.now() + Duration::from_secs(1));

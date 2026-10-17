@@ -19,9 +19,8 @@ impl CovenHandle {
             .subscribe_upload_queue()
             .process(UploadQueue::from_state)
     }
-    /// Attempt waiting uploads now, overriding their ordinary backoff and
-    /// app-action waits; a provider cooldown still holds them (§16.5).
-    /// Individual failures stay in pending().
+    /// Optionally retry recoverable uploads early; provider cooldowns still
+    /// hold them and individual failures stay in pending() (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
         self.files.retry_uploads_now().await
     }

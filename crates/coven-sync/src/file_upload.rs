@@ -138,7 +138,12 @@ impl FilesInner {
         }
         let eligible: Vec<_> = waiting
             .into_iter()
-            .filter(|(item, record)| force || self.retry_due(item, record.as_ref()))
+            .filter(|(item, record)| {
+                record
+                    .as_ref()
+                    .is_none_or(|record| record.retry() != crate::Retry::Never)
+                    && (force || self.retry_due(item, record.as_ref()))
+            })
             .map(|(item, _)| item)
             .collect();
         let limit = self
@@ -165,6 +170,7 @@ impl FilesInner {
         if self.paused() {
             return Ok(false);
         }
+        self.forget_connection_wait(RetrySubject::Upload(item.id));
         match self.upload(&item).await {
             Ok(stored) => {
                 if stored {

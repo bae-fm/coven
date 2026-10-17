@@ -150,41 +150,6 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
 }
 
 #[tokio::test]
-async fn failures_needing_the_app_wait_for_retry_uploads_now() {
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
-    let f = fixture(&clock).await;
-    let file = f.attach("files", "photo", b"photo".to_vec()).await;
-    for failure in [
-        StorageFailure::QuotaExceeded,
-        StorageFailure::PermissionDenied,
-        StorageFailure::Authentication,
-    ] {
-        f.storage.set_faults(fail_next(failure, None)).await;
-        assert_eq!(drained(f.files.inner.drain_uploads(true).await.unwrap()), 0);
-        // A whole-store condition is not retried on a timer.
-        assert_eq!(
-            f.upload_reason(&file).await,
-            Some(PendingReason::Storage {
-                provider: coven_storage::CloudProvider::Dropbox,
-                failure,
-            })
-        );
-        assert_eq!(retry(&f).await, None);
-        assert_eq!(retry_in(&f), None);
-        advance(&f, &clock, 3600);
-        assert_eq!(
-            f.files.inner.drain_uploads(false).await.unwrap(),
-            DrainOutcome::Drained { uploaded: 0 }
-        );
-    }
-    f.files.retry_uploads_now().await.unwrap();
-    assert!(!f.queued(&file).await);
-    f.close().await;
-}
-
-#[tokio::test]
 async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
     let clock = Arc::new(FixedClock::new(
         SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
@@ -827,45 +792,5 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
     f.close().await;
 }
 
-/// A changed original fails the upload as the uploader's own
-/// `FileUnavailable` record, which waits for the app rather than a timer.
-#[tokio::test]
-async fn a_changed_source_is_the_uploaders_unavailable_record() {
-    use coven_format::pending::FileSourceFailure;
-    let clock = Arc::new(FixedClock::new(
-        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
-    ));
-    let f = Fixture::with_clock(
-        Provenance::UserProvided,
-        CacheFill::CacheLazy,
-        clock.clone(),
-    )
-    .await;
-    f.files.stop_background_for_counts().await;
-    f.files.set_uploads_paused(false).await.unwrap();
-    let file = f.original("photo", b"photo").await;
-    std::fs::write(f.root.path().join("photo"), b"other").unwrap();
-    assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
-    );
-    assert_eq!(
-        f.upload_reason(&file).await,
-        Some(PendingReason::FileUnavailable(
-            crate::FileMissingReason::Source(FileSourceFailure::Changed)
-        ))
-    );
-    assert_eq!(retry(&f).await, None);
-    assert_eq!(retry_in(&f), None);
-    advance(&f, &clock, 3600);
-    let item = f.files.inner.database.uploads().await.unwrap().remove(0);
-    let record = f
-        .database
-        .pending::<crate::PendingRecord>()
-        .await
-        .unwrap()
-        .pop();
-    assert!(!f.files.inner.retry_due(&item, record.as_ref()));
-    assert!(f.queued(&file).await);
-    f.close().await;
-}
+#[path = "file_upload_failure_tests.rs"]
+mod failures;

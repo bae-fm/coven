@@ -5335,8 +5335,7 @@ Carol's tablet:
   pending record per fixed file subject. An immediate call retains its typed
   cause; the list records the first unmet condition:
   - no connection is `NoStorage`; network and provider failures retain the
-    provider's `Storage` category and retry temporary failures with §16.5's
-    persisted delay;
+    provider's `Storage` category and use §16.5's failure classes and retries;
   - confirmed absence with an active, capable uploader is
     `Waits(Object(path))`; removal, replacement or a reported source failure
     is `FileUnavailable(FileMissingReason)`, requiring app action;
@@ -5448,23 +5447,25 @@ Carol's tablet:
   - A provider part may begin or end inside an encrypted chunk. Coven
     reads and verifies the whole plaintext chunk before encrypting it
     and selecting the requested bytes.
-- Automatic retry delays start at 1 second and double to at most 5 minutes.
-  Before waiting, persist the not-before wall-clock deadline T and the full
-  wait W with the work. During a running session a monotonic timer enforces
-  the delay; wall-clock changes do not move that timer.
-  - On reopen arm `max(0, min(T - now, W))` on the monotonic timer. Keep the
-    original T and W until an attempt supplies a new delay; reopening does
-    not reset the backoff exponent or replace the persisted deadline.
-  - Operations, invites, joining, missing keys and file retries share this
-    rule. Persist provider/account cooldowns separately at their actual
-    scope before any affected worker can retry. `Retry-After` may make W
-    exceed five minutes; neither restart, sync_now nor app retry discards it.
-  - Ana restarts with four seconds left in an eight-second delay. She waits
-    four seconds. If her clock moved backward, the restart waits at most
-    eight; moving it forward can shorten the wait to zero. This rule bounds
-    restart delays, not real-time cooldown duration under arbitrary clock jumps.
-  - Failure to persist a delay fails the initiating work and prevents automatic
-    retry; it is never converted into permission to retry immediately.
+- Uploads retry missing, changed or mismatching sources and disk failures under
+  backoff, checking the source before any provider request. Uploads and eager
+  downloads retry storage failures by E5's classes: (a) under backoff, (b) on a
+  credential or connection change without a timer, (c) never, retaining the
+  pending reason. `retry_uploads_now` optionally tries recoverable uploads early;
+  progress never depends on it.
+- Operations, invites, joining, missing keys and files share automatic delays
+  of 1, 2, 4 … 256, then 300 seconds. Before waiting, persist wall-clock deadline T
+  and full wait W with the work. Enforce the delay monotonically, unaffected by
+  wall-clock changes.
+  - Reopen arms `max(0, min(T - now, W))` monotonically, preserving T, W and the
+    backoff exponent until another attempt.
+  - Persist provider/account cooldowns separately at their actual scope before
+    any affected worker retries. `Retry-After` can exceed five minutes; restart,
+    sync_now and app retry never discard it.
+  - Ana restarts with four seconds left of eight and waits four. A backward
+    clock jump permits at most eight; a forward jump can reduce it to zero.
+    This bounds restart waits, not real-time cooldowns under arbitrary jumps.
+  - A failed delay commit fails its initiating work and prevents automatic retry.
 - A large file goes up through the provider's resumable or multipart
   upload, in parts.
   - Providers require it above a size, such as Dropbox above 150 MiB per

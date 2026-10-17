@@ -617,11 +617,33 @@ impl FileDatabase {
         })
         .await
     }
-    /// Commit cancellation of the requested eager set before reporting it.
-    pub async fn cancel_eager(&self) -> Result<(), DbError> {
+    /// Cancel and retire the requested eager work in one transaction. Return
+    /// the retry subjects retired with it; a carried pin keeps its own wait.
+    pub async fn cancel_eager(&self) -> Result<Vec<crate::RetrySubject>, DbError> {
         self.require_writer()?;
-        self.run(|db, _, _, _| db.transaction(crate::cache_progress::cancel_eager))
-            .await
+        self.run(|db, _, _, _| {
+            db.transaction(|db| {
+                let cancelled = crate::cache_progress::cancel_eager(db)?;
+                let pins = cache::pin_requests(db)?;
+                let mut retired = Vec::new();
+                for file in cancelled {
+                    crate::eager_work::settle(db, &file)?;
+                    if !pins
+                        .iter()
+                        .any(|pin| pin.uploader() == file.uploader() && pin.id() == file.id())
+                    {
+                        let subject = crate::RetrySubject::Download {
+                            uploader: file.uploader(),
+                            file: file.id(),
+                        };
+                        crate::retry::clear(db, subject)?;
+                        retired.push(subject);
+                    }
+                }
+                Ok(retired)
+            })
+        })
+        .await
     }
     /// The namespace's budget, declared or since set.
     pub async fn budget(&self, namespace: &str) -> Result<u64, DbError> {

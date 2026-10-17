@@ -2381,11 +2381,13 @@ impl PendingRecord {
     /// Network/Conflict/RateLimited/NotFound/SessionExpired.
     /// AfterUpdate: Refused and UpdateRequired.
     /// Never: a dropped entry or write, or this device's removal.
-    /// AppAction: every other reason, including source files, disagreements
+    /// AppAction: every other reason, including disagreements
     /// and an app operation replay dropped.
     /// Coven's own operation: Automatic on a drop, a database, disk or custody
     /// failure, or storage QuotaExceeded/File; AppAction, retried on new
     /// credentials or connection, if a person clears it; else Never.
+    /// Files use those same failure classes. An uploader's missing, changed
+    /// or mismatching source retries automatically; peer reports stay visible.
     /// A replay change can clear a replay-dependent reason without retrying
     /// its subject. It cannot undo an entry's LandedTooLate, but can undo a
     /// write's retirement-dependent LandedTooLate (§10).
@@ -2714,12 +2716,8 @@ impl CovenHandle {
     /// The same pre-built query, through the app's live-query mechanism.
     pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue>;
 
-    /// Retries waiting uploads now; individual failures stay in pending().
-    /// Overrides ordinary backoff or retries a repaired source, but never
-    /// bypasses a provider Retry-After cooldown.
-    /// Automatic delays start at 1 second and double to at most 5 minutes
-    /// with persisted deadline T and wait W. Restart waits max(0, min(T-now, W));
-    /// a live provider cooldown is never discarded (§16.5).
+    /// Optional early retry of recoverable uploads; coven retries on its own.
+    /// Provider cooldowns still hold; failures stay in pending() (§16.5).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
     /// Pauses uploads, or resumes them. A paused upload keeps its place,

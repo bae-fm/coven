@@ -1,13 +1,13 @@
 import CovenIO.Waiting
 import CovenStorage.Files
+import CovenStorelogData.Pending
 
 namespace CovenIO.Downloads
 
-/-- `storage temporary`: a provider failure, retried only when temporary
-(§16.3; Rust `automatic_storage`). -/
+/-- Provider failures use the shared three classes (§16.5; Rust `storage_clears`). -/
 inductive Reason where
   | noStorage | network | disk | database
-  | storage (temporary : Bool)
+  | storage (clears : CovenStorelogData.Pending.Clears)
   | object (path : Path)
   | range (path : Path) (index : Nat)
   | unavailable (reason : CovenStorage.Files.MissingReason)
@@ -16,9 +16,12 @@ inductive Reason where
   deriving DecidableEq, Repr
 
 def automatic : Reason → Bool
-  | .storage temporary => temporary
-  | .noStorage | .network | .object _ | .range _ _ | .key _ | .disk | .database => true
-  | .unavailable _ | .authentication | .contentHash => false
+  | .storage .byItself | .network | .object _ | .range _ _ | .key _ | .disk | .database => true
+  | .storage _ | .noStorage | .unavailable _ | .authentication | .contentHash => false
+
+def connectionRetry : Reason → Bool
+  | .storage .byPerson | .noStorage => true
+  | _ => false
 
 /-- Before decrypting the row there is a pending write/snapshot subject, no
 fabricated file reference. Acquiring its key opens the retained row bytes. -/
@@ -173,20 +176,36 @@ def evict (s : State) (index : Nat) : State :=
   | .complete _ true => s
   | .complete _ false | .evicted _ => .evicted retained
 
-def canRetry (s : State) (timer : Waiting.Timer) (now : Nat) : Bool :=
-  match pending s with | none => false | some reason => automatic reason && Waiting.due timer now
+def canRetry (s : State) (timer : Waiting.Timer) (now : Nat) (connectionChanged : Bool) : Bool :=
+  match pending s with
+  | none => false
+  | some reason => if automatic reason then Waiting.due timer now
+    else connectionRetry reason && connectionChanged && decide (timer.provider ≤ now)
 
 theorem permanent_never_retries (s : State) (timer : Waiting.Timer) (now : Nat) (reason : Reason)
-    (has_pending : pending s = some reason) (permanent : automatic reason = false) :
-    canRetry s timer now = false := by simp [canRetry, has_pending, permanent]
+    (has_pending : pending s = some reason) (permanent : automatic reason = false)
+    (no_connection : connectionRetry reason = false) (changed : Bool) :
+    canRetry s timer now changed = false := by simp [canRetry, has_pending, permanent, no_connection]
 
 theorem temporary_uses_shared_delay (s : State) (timer : Waiting.Timer) (now : Nat)
-    (reason : Reason) (has_pending : pending s = some reason) (temporary : automatic reason = true) :
-    canRetry s timer now = Waiting.due timer now := by simp [canRetry, has_pending, temporary]
+    (reason : Reason) (has_pending : pending s = some reason) (temporary : automatic reason = true)
+    (changed : Bool) :
+    canRetry s timer now changed = Waiting.due timer now := by simp [canRetry, has_pending, temporary]
 
 theorem permanent_storage_never_retries (s : State) (timer : Waiting.Timer) (now : Nat)
-    (has_pending : pending s = some (.storage false)) : canRetry s timer now = false :=
-  permanent_never_retries s timer now _ has_pending rfl
+    (has_pending : pending s = some (.storage .never)) (changed : Bool) :
+    canRetry s timer now changed = false :=
+  permanent_never_retries s timer now _ has_pending rfl rfl changed
+
+theorem person_waits_for_connection (s : State) (timer : Waiting.Timer) (now : Nat)
+    (has_pending : pending s = some (.storage .byPerson)) (changed : Bool) :
+    canRetry s timer now changed = (changed && decide (timer.provider ≤ now)) := by
+  simp [canRetry, has_pending, automatic, connectionRetry]
+
+theorem connection_retry_keeps_cooldown (s : State) (timer : Waiting.Timer) (now : Nat)
+    (has_pending : pending s = some (.storage .byPerson))
+    (ready : canRetry s timer now true = true) : timer.provider ≤ now := by
+  simpa [person_waits_for_connection s timer now has_pending] using ready
 
 def absence (path : Path) (uploader : CovenStorage.Files.DeviceState)
     (source : Option CovenStorage.Files.SourceFailure) : Reason :=
@@ -204,14 +223,15 @@ theorem replaced_not_waiting (p : Path) (source : Option CovenStorage.Files.Sour
 theorem active_absence_retries (p : Path) : automatic (absence p .active none) = true := rfl
 
 theorem eviction_preserves_refusal (rs : List Range) (reason : Reason) (index : Nat)
-    (permanent : automatic reason = false) (timer : Waiting.Timer) (now : Nat) :
+    (permanent : automatic reason = false) (no_connection : connectionRetry reason = false)
+    (timer : Waiting.Timer) (now : Nat) (changed : Bool) :
     pending (evict (.unfinished rs reason) index) = some reason ∧
-    canRetry (evict (.unfinished rs reason) index) timer now = false := by
-  simp [evict, pending, canRetry, permanent]
+    canRetry (evict (.unfinished rs reason) index) timer now changed = false := by
+  simp [evict, pending, canRetry, permanent, no_connection]
 
 theorem completed_eviction_does_not_refill (rs : List Range) (index : Nat)
-    (timer : Waiting.Timer) (now : Nat) :
-    canRetry (evict (.complete rs false) index) timer now = false := rfl
+    (timer : Waiting.Timer) (now : Nat) (changed : Bool) :
+    canRetry (evict (.complete rs false) index) timer now changed = false := rfl
 
 def rowWait (parent : Path) : Subject × State :=
   (.encryptedRow parent, .unfinished [] (.key parent))

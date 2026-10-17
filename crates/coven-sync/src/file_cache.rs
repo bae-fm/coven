@@ -1,22 +1,17 @@
 //! Pins, budgets and downloads driven by committed file rows.
 
+use super::file_cache_retry::{download_clears, download_subject};
+use crate::pending::Clears;
 use crate::{
     files::file_read::UploadedFile,
     files::{Files, FilesInner},
     FileReadError,
 };
-use crate::{LocalFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite};
-use coven_database::{DbError, FileRef, RetrySubject, RetryWait};
+use crate::{PendingReason, PendingSubject};
+use coven_database::{DbError, FileRef};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
 
-/// The persisted wait of an eager download of `file`.
-pub(crate) fn download_subject(file: &FileRef) -> RetrySubject {
-    RetrySubject::Download {
-        uploader: file.uploader(),
-        file: file.id(),
-    }
-}
 impl Files {
     /// Download missing chunks and retain complete files regardless of
     /// budgets. Progress is the committed coverage `pin_progress` reads. A
@@ -75,7 +70,11 @@ impl Files {
     /// active fill; later changed references remain eligible.
     pub async fn cancel_eager_cache_fill(&self) -> Result<(), DbError> {
         self.inner.check_open()?;
-        self.inner.database.cancel_eager().await?;
+        let retired = self.inner.database.cancel_eager().await?;
+        for subject in retired {
+            self.inner.waits.forget(subject);
+            self.inner.forget_connection_wait(subject);
+        }
         self.inner
             .cancel_eager
             .send_modify(|version| *version = version.wrapping_add(1));
@@ -108,7 +107,7 @@ impl FilesInner {
             .into_iter()
             .filter(|file| {
                 let subject = download_subject(file);
-                self.waits.due(subject, waits.get(&subject))
+                self.connection_due(subject) && self.waits.due(subject, waits.get(&subject))
             })
             .collect::<Vec<_>>();
         if pending.is_empty() {
@@ -118,6 +117,7 @@ impl FilesInner {
         self.database.request_eager(pending.clone()).await?;
         let mut cancel = self.cancel_eager.subscribe();
         for file in &pending {
+            self.forget_connection_wait(download_subject(file));
             let work = async {
                 self.database.validate(file).await?;
                 UploadedFile::open(self.clone(), file.clone())
@@ -130,6 +130,7 @@ impl FilesInner {
                     // Cancelled downloads are not retried; new references remain eligible.
                     for file in &pending {
                         self.waits.clear(download_subject(file)).await?;
+                        self.forget_connection_wait(download_subject(file));
                     }
                     self.database.settle_eager_work(pending.clone()).await?;
                     return Ok(());
@@ -153,9 +154,12 @@ impl FilesInner {
                 file: file.id(),
             };
             let retry = download_subject(file);
-            // Done or permanently refused, the work is settled; a temporary
-            // failure keeps it for its retry wait.
-            if reason.as_ref().is_none_or(|reason| !retries(reason)) {
+            // Recoverable failures keep their work, whether waiting for a
+            // timer or a new connection. Only terminal outcomes settle it.
+            if reason
+                .as_ref()
+                .is_none_or(|reason| download_clears(reason) == Clears::Never)
+            {
                 self.database.settle_eager_work(vec![file.clone()]).await?;
             }
             match reason {
@@ -187,9 +191,10 @@ impl FilesInner {
         let _pins = self.pins.lock().await;
         for file in files {
             let retry = download_subject(&file);
-            if !self.waits.due(retry, waits.get(&retry)) {
+            if !self.connection_due(retry) || !self.waits.due(retry, waits.get(&retry)) {
                 continue;
             }
+            self.forget_connection_wait(retry);
             let kept = async {
                 UploadedFile::open(self.clone(), file.clone())
                     .await?
@@ -211,7 +216,7 @@ impl FilesInner {
                 )) => self.database.settle_pin_request(file).await?,
                 Err(error) => {
                     let reason = self.read_pending(&file, &error);
-                    if !retries(&reason) {
+                    if download_clears(&reason) == Clears::Never {
                         self.database.settle_pin_request(file).await?;
                     }
                     self.record_download_failure(subject, retry, reason, waits.get(&retry))
@@ -220,98 +225,5 @@ impl FilesInner {
             }
         }
         Ok(())
-    }
-
-    /// Persist the failed download's record with its next wait before it
-    /// waits (§16.5): temporary conditions retry once the wait is due,
-    /// others wait for the app or an update and keep no wait. A wait that
-    /// cannot be chosen or persisted holds the download until the app acts,
-    /// and fails the fill.
-    async fn record_download_failure(
-        &self,
-        subject: PendingSubject,
-        retry: RetrySubject,
-        reason: PendingReason,
-        previous: Option<&RetryWait>,
-    ) -> Result<(), crate::SyncError> {
-        let timed = retries(&reason);
-        let wait = if timed {
-            match self.waits.next(previous) {
-                Ok(wait) => Some(wait),
-                Err(error) => {
-                    self.waits.hold(retry);
-                    return Err(error);
-                }
-            }
-        } else {
-            None
-        };
-        let recorded = self
-            .database
-            .fail_download(
-                move |reported_by| PendingRecord {
-                    subject,
-                    reason,
-                    reported_by,
-                },
-                retry,
-                wait,
-            )
-            .await;
-        if let Err(error) = recorded {
-            self.waits.hold(retry);
-            return Err(error.into());
-        }
-        match wait {
-            Some(wait) => self.waits.arm(retry, &wait),
-            None => self.waits.forget(retry),
-        }
-        Ok(())
-    }
-
-    /// The first unmet condition a failed read of `file` leaves (§16.3).
-    fn read_pending(&self, file: &FileRef, error: &FileReadError) -> PendingReason {
-        match error {
-            FileReadError::NoStorage => PendingReason::NoStorage,
-            FileReadError::Storage(error) => {
-                match self.storage.read().expect("storage lock poisoned").as_ref() {
-                    Some(storage) => PendingReason::Storage {
-                        provider: storage.config().provider(),
-                        failure: error.failure(),
-                    },
-                    None => PendingReason::NoStorage,
-                }
-            }
-            FileReadError::Uploading { .. } => PendingReason::Waits(Prerequisite::Object(
-                coven_storage::ObjectPath::file(self.directory.id(), file.uploader(), file.id()),
-            )),
-            FileReadError::Missing { reason, .. } => PendingReason::FileUnavailable(reason.clone()),
-            FileReadError::Integrity { .. } => {
-                PendingReason::Refused(crate::Refusal::Decryption { cause: None })
-            }
-            FileReadError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
-            FileReadError::Disk(_) | FileReadError::Lock(_) => {
-                PendingReason::Failed(LocalFailure::Disk)
-            }
-            FileReadError::Database(_)
-            | FileReadError::UserFileMissing { .. }
-            | FileReadError::UserFileChanged { .. }
-            | FileReadError::RangeOutOfBounds { .. } => {
-                PendingReason::Failed(LocalFailure::Database)
-            }
-        }
-    }
-}
-
-/// Temporary conditions retry on a later pass; a permanent provider
-/// failure, refusals of immutable bytes, a missing file and a required
-/// update wait for app action or an update (§16.3; io `Downloads.automatic`).
-fn retries(reason: &PendingReason) -> bool {
-    match reason {
-        PendingReason::Storage { failure, .. } => crate::pending::automatic_storage(*failure),
-        PendingReason::Refused(_)
-        | PendingReason::FileUnavailable(_)
-        | PendingReason::UpdateRequired(_) => false,
-        _ => true,
     }
 }

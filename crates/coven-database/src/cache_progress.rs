@@ -184,14 +184,14 @@ pub(crate) fn request_eager(db: &DatabaseConnection, files: &[FileRef]) -> Resul
 }
 
 /// Record cancellation of the current set before it is reported.
-pub(crate) fn cancel_eager(db: &DatabaseConnection) -> Result<(), DbError> {
+pub(crate) fn cancel_eager(db: &DatabaseConnection) -> Result<Vec<FileRef>, DbError> {
     db.internal_execute(
         "INSERT INTO _coven_eager_cancel(cancelled)
          SELECT 1 WHERE EXISTS(SELECT 1 FROM _coven_eager_requests)
          ON CONFLICT DO NOTHING",
         [],
     )?;
-    Ok(())
+    requests(db)
 }
 
 /// Retire the requested set together once every file in it has settled:

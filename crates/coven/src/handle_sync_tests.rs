@@ -418,15 +418,13 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     device.handle.set_uploads_paused(true).await.unwrap();
     attach(&device.handle, "photo", vec![3; 2048]).await;
     network.sync(0).await;
-    device
-        .storage
-        .set_faults(Faults {
-            fail_next: 1,
-            failure: StorageFailure::QuotaExceeded,
-            response: Some(507),
-            ..Faults::none()
-        })
-        .await;
+    let file = device.handle.file_ref("files", "photo").await.unwrap();
+    let path = coven_storage::ObjectPath::file(device.store, file.uploader(), file.id());
+    let mut faults = Faults::none();
+    faults
+        .create_failures
+        .insert(path, (StorageFailure::QuotaExceeded, 507));
+    device.storage.set_faults(faults).await;
     let refused = |records: &[PendingRecord]| {
         records.iter().any(|record| {
             matches!(record.subject, PendingSubject::File { .. })
@@ -461,6 +459,9 @@ async fn a_refused_file_upload_leaves_the_pass_synced_with_its_pending_record() 
     );
     assert_eq!(stored_writes(device).await, writes + 1);
     assert!(refused(&device.handle.pending().await.unwrap()));
+    device.storage.set_faults(Faults::none()).await;
+    wait_for_empty_queue(&device.handle).await;
+    assert!(!refused(&device.handle.pending().await.unwrap()));
     network.close().await;
 }
 

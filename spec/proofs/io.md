@@ -1393,11 +1393,20 @@ missing row key, authentication/hash failure, disk failure and database failure.
 `key_wait_names_parent` records the encrypted write/snapshot subject before
 a file reference exists.
 
-`temporary_uses_shared_delay` and `permanent_never_retries` separate temporary
-retry from app/update work; `permanent_storage_never_retries` keeps a
-permanent provider failure for the app. `eviction_preserves_refusal` preserves permanent
-reasons when bytes are evicted. `completed_eviction_does_not_refill` does not
-requeue completed eager work after budget eviction.
+Provider failures use the data model's three `Clears` classes.
+`temporary_uses_shared_delay` gives failures that clear themselves the shared
+backoff. `person_waits_for_connection` retries sign-in and permission failures
+only after a connection change; `connection_retry_keeps_cooldown` retains the
+provider's cooldown. `permanent_storage_never_retries` excludes failures that
+never clear. `eviction_preserves_refusal` preserves permanent reasons when
+bytes are evicted. `completed_eviction_does_not_refill` does not requeue
+completed eager work after budget eviction.
+
+[`DownloadRetryRunner.lean`](io/DownloadRetryRunner.lean) and
+[`io_differential_download_retries`](../../crates/coven-sync/src/file_cache_retry_tests.rs)
+compare timed waits and actual eager download requests across failure classes,
+elapsed time, connection changes and provider cooldowns. Upload retry decisions
+and source restoration have no Lean model; Rust tests exercise those paths.
 
 `committed_range_checked` requires authentication, the final whole-file hash
 when completing, and disk/database success before committing a range.
