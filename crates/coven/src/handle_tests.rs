@@ -582,7 +582,7 @@ async fn migration_failure_precedes_custody_unlock() {
 }
 
 #[tokio::test]
-async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
+async fn stop_and_close_preserve_release_failures_and_erase_custody() {
     use std::{
         future::Future,
         pin::Pin,
@@ -602,60 +602,97 @@ async fn closing_erases_custody_even_when_releasing_a_worker_fails() {
         }
     }
 
-    let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().into());
-    let app = TestCoven::new();
-    let ids = Arc::new(UuidIds);
-    let keys = Arc::new(Keys {
-        keys: Mutex::new(Some(StoreKeyring::new(
-            StoreKey::generate(KeyId(ids.new_id())).unwrap(),
-        ))),
-        ..Keys::default()
-    });
-    let identity = Arc::new(Identity::default());
-    let handle = builder(&app, layout.clone())
-        .clock(Arc::new(HeldClock))
-        .key_custody(KeyCustody::Custom(keys.clone()))
-        .identity_custody(IdentityCustody::Custom(identity.clone()))
-        .create_store("session")
-        .await
-        .unwrap();
+    for stop_first in [false, true] {
+        let root = tempfile::tempdir().unwrap();
+        let layout = StoreLayout::new(root.path().into());
+        let app = TestCoven::new();
+        let ids = Arc::new(UuidIds);
+        let keys = Arc::new(Keys {
+            keys: Mutex::new(Some(StoreKeyring::new(
+                StoreKey::generate(KeyId(ids.new_id())).unwrap(),
+            ))),
+            ..Keys::default()
+        });
+        let identity = Arc::new(Identity::default());
+        let handle = builder(&app, layout.clone())
+            .clock(Arc::new(HeldClock))
+            .key_custody(KeyCustody::Custom(keys.clone()))
+            .identity_custody(IdentityCustody::Custom(identity.clone()))
+            .create_store("session")
+            .await
+            .unwrap();
 
-    handle.pending().await.unwrap();
-    // Hold timer-driven work so closing encounters the damaged journal row.
-    handle
-        .database
-        .start_operation(coven_database::NewOperation {
-            kind: "create-circle".into(),
-            data: b"malformed operation".to_vec(),
-            started_by: "create_circle".into(),
-            pauses_writes: false,
-        })
-        .await
-        .unwrap();
-    let clone = handle.clone();
-    // The operation worker stops on its journal and every waiter, here the
-    // sync loop releasing its provider, shares that one undecodable row.
-    let error = handle.close().await.unwrap_err();
-    let SyncError::Failed {
-        failure: LocalFailure::Operation,
-        source,
-    } = &error
-    else {
-        panic!("{error:?}")
-    };
-    assert!(
-        matches!(source.downcast_ref(), Some(SyncError::OperationData(_))),
-        "{source:?}"
-    );
-    assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
-    assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
-    assert!(keys.keys.lock().unwrap().is_none());
-    assert!(identity.keys.lock().unwrap().is_none());
-    assert!(matches!(
-        clone.read(|_| Ok(())).await,
-        Err(CovenError::Database(DbError::StoreClosed))
-    ));
+        handle.pending().await.unwrap();
+        // Hold timer-driven work so stopping or closing encounters the damaged row.
+        handle
+            .database
+            .start_operation(coven_database::NewOperation {
+                kind: "create-circle".into(),
+                data: b"malformed operation".to_vec(),
+                started_by: "create_circle".into(),
+                pauses_writes: false,
+            })
+            .await
+            .unwrap();
+        let clone = handle.clone();
+        // The operation worker stops on its journal and every waiter, here the
+        // sync loop releasing its provider, shares that one undecodable row.
+        let stopped = if stop_first {
+            let mut status = handle.subscribe_sync_status();
+            handle.stop_sync();
+            tokio::time::timeout(
+                Duration::from_secs(10),
+                status.wait_for(|s| matches!(s, SyncStatus::Failed { .. })),
+            )
+            .await
+            .unwrap()
+            .unwrap();
+            let latest = handle.subscribe_sync_status();
+            let source = match &*latest.borrow() {
+                SyncStatus::Failed {
+                    error: SyncFailure::Other(source),
+                } => source.clone(),
+                _ => panic!("release failure stays visible to new subscribers"),
+            };
+            assert!(matches!(
+                source.downcast_ref(),
+                Some(SyncError::OperationData(_))
+            ));
+            assert!(handle
+                .database
+                .pending::<PendingRecord>()
+                .await
+                .unwrap()
+                .iter()
+                .all(|record| !matches!(record.subject, PendingSubject::Connection)));
+            Some(source)
+        } else {
+            None
+        };
+        let error = handle.close().await.unwrap_err();
+        let SyncError::Failed {
+            failure: LocalFailure::Operation,
+            source,
+        } = &error
+        else {
+            panic!("{error:?}")
+        };
+        assert!(
+            matches!(source.downcast_ref(), Some(SyncError::OperationData(_))),
+            "{source:?}"
+        );
+        if let Some(stopped) = stopped {
+            assert!(Arc::ptr_eq(&stopped, source));
+        }
+        assert_eq!(keys.closes.load(Ordering::SeqCst), 1);
+        assert_eq!(identity.closes.load(Ordering::SeqCst), 1);
+        assert!(keys.keys.lock().unwrap().is_none());
+        assert!(identity.keys.lock().unwrap().is_none());
+        assert!(matches!(
+            clone.read(|_| Ok(())).await,
+            Err(CovenError::Database(DbError::StoreClosed))
+        ));
+    }
 }
 
 #[test]

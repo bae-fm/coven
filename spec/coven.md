@@ -6615,11 +6615,10 @@ holds failures and rejected entries, without making either wait look completed.
 - Opening leaves configured storage `Stopped`, or `Disconnected` when none is
   set up. `start_sync` starts the loop, whose first pass builds the client
   from custody credentials (E5). Repeated starts keep the running loop.
-- `stop_sync` finishes the active pass and file transfers before releasing
-  every worker's provider reference. Session keys stay with the open handle;
-  closing or explicit key forgetting erases them. It retains the location
-  and custody credentials for the next start. `disconnect_storage` also forgets
-  this device's storage credentials, leaving remote contents untouched (E5).
+- `stop_sync` returns immediately; release follows the active pass and transfers.
+  It retains session keys, location and credentials. Status reports completion
+  or `Failed` with its cause, without a pending connection record.
+  `disconnect_storage` also removes credentials; remote contents stay untouched (E5).
 - An owner never hands out what it holds, by returning it or by a public
   field; callers ask it to do the work.
 - E.g. nothing outside coven-database gets the SQLite connection; it asks

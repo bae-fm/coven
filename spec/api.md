@@ -1697,10 +1697,9 @@ while let Ok(values) = lost.next().await {
 - `start_sync` starts the loop; its first pass builds the provider client from
   custody credentials, failing and backing off like any pass. Tokens refresh
   on provider rejection (§4).
-- `stop_sync` finishes the active pass and file transfers, then drops all
-  workers' references to the provider client. The open handle keeps its session
-  keys until close or explicit forgetting. Credentials
-  and the storage location remain available for the next `start_sync`.
+- `stop_sync` returns immediately, releasing providers after the active pass
+  and transfers. Keys, credentials and location remain. Status reports completion
+  or `Failed` with its cause; no pending connection record is written.
 - `disconnect_storage` also removes this device's storage credentials. It leaves
   storage's contents untouched; syncing requires storage setup again.
 
@@ -2479,11 +2478,10 @@ impl CovenHandle {
     /// connects. Does nothing if already running or no storage is set up.
     pub async fn start_sync(&self) -> Result<(), SyncError>;
 
-    /// Finishes the active pass and file transfers, then drops the provider
-    /// client. Keeps session keys, credentials and location for the next start.
-    /// Completion publishes `Stopped`, or `Disconnected` if no storage is set up.
-    /// A release failure is returned and recorded as a pending connection record.
-    pub async fn stop_sync(&self) -> Result<(), SyncError>;
+    /// Queues stopping after the active pass and transfers, retaining keys,
+    /// credentials and location. Completion publishes Stopped or Disconnected;
+    /// release failures publish Failed with their cause, without a pending record.
+    pub fn stop_sync(&self);
 
     /// Syncs now instead of at the next idle tick. While idle, coven syncs
     /// every 30 seconds, and at once after a local write. Requests coalesce
