@@ -2610,9 +2610,8 @@ Carol's tablet:
   - E.g. `note_tags(note_id, tag_id)` is a shared key.
   - Ana and Ben, both offline, each tag note 42 "urgent", and make one row.
   - An independent key over several columns needs a UUID in one of them.
-  - A write that inserts a row whose independent key holds no UUID,
-    version 4 or 7 in canonical lowercase form, is refused; opening never
-    reads the rows to check.
+  - Bind independent UUID keys with `UuidText` (E3). Inserts still refuse
+    text outside canonical lowercase UUIDv4/v7; opening never scans rows.
 - E.g. notes have independent keys, and tags have shared keys derived from
   the tag's name.
   - Ana and Ben, both offline, each add the tag "urgent".
@@ -4324,10 +4323,9 @@ Carol's tablet:
   - E.g. a household's notes are the store's, and each person pins notes
     in a circle of their own.
 - The app declares, for each synced table, how its rows get their audience:
-  - a *root* table names a column holding each row's audience: `store` or
-    a circle's id in canonical lowercase hyphenated form, and never NULL.
-    Receivers compare the cell with that text, so a write spelling the id
-    any other way, such as uppercase, is refused with `InvalidAudience`;
+  - a *root* names a non-NULL audience column. Binding `Audience` or `CircleId`
+    writes canonical text: `store` or a lowercase hyphenated circle UUID.
+    Other text spellings, including uppercase, fail with `InvalidAudience`;
   - a *descendant* table names one foreign key, and each row takes the
     audience of the row it points at;
   - a table that declares neither is in the store, every row of it.

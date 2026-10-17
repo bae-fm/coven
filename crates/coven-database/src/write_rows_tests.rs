@@ -291,3 +291,103 @@ fn row_id_order_keeps_table_key_and_audience_precedence() {
         assert!(pair[0] < pair[1], "{pair:?}");
     }
 }
+
+mod typed_bindings {
+    use crate::tests::TestStore;
+    use crate::{DbError, RowIdentity, SyncedTable};
+    use coven_foundation::id_source::CircleId;
+    use coven_foundation::uuid_text::UuidText;
+    use coven_merge::Audience;
+
+    const KEY: &str = "f47ac10b-58cc-4372-a567-0e02b2c3d479";
+    const CIRCLE: &str = "018f22bb-aaaa-7777-8ccc-000000000001";
+
+    #[tokio::test]
+    async fn typed_audiences_round_trip_and_uppercase_text_is_refused() {
+        let store = TestStore::new();
+        let db = store
+            .schema(
+                vec![SyncedTable::new("notes", RowIdentity::IndependentUuid)
+                    .audience_column("audience")],
+                "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,audience TEXT NOT NULL)",
+            )
+            .await
+            .unwrap();
+        let circle = CircleId(uuid::Uuid::parse_str(CIRCLE).unwrap());
+        store.join_circle(&db, circle);
+        db.write(|sql| {
+            let key = UuidText(uuid::Uuid::parse_str(KEY).unwrap());
+            sql.execute("INSERT INTO notes VALUES(?1,?2)", (key, Audience::Store))?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let audience = db
+            .read(|sql| {
+                Ok(sql.query_row("SELECT audience FROM notes", [], |r| {
+                    r.get::<_, Audience>(0)
+                })?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(audience, Audience::Store);
+        db.write(move |sql| {
+            sql.execute("UPDATE notes SET audience=?1", [circle])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let (audience, read_circle, text) = db
+            .read(|sql| {
+                Ok(sql.query_row("SELECT audience FROM notes", [], |r| {
+                    Ok((
+                        r.get::<_, Audience>(0)?,
+                        r.get::<_, CircleId>(0)?,
+                        r.get::<_, String>(0)?,
+                    ))
+                })?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(audience, Audience::Circle(circle));
+        assert_eq!(read_circle, circle);
+        assert_eq!(text, CIRCLE);
+        db.write(move |sql| {
+            sql.execute("UPDATE notes SET audience=?1", [Audience::Circle(circle)])?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+        let error = db
+            .write(|sql| {
+                sql.execute("UPDATE notes SET audience=?1", [CIRCLE.to_uppercase()])?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::InvalidAudience { .. }));
+        let (key, text) = db
+            .read(|sql| {
+                Ok(sql.query_row("SELECT id FROM notes", [], |r| {
+                    Ok((r.get::<_, UuidText>(0)?, r.get::<_, String>(0)?))
+                })?)
+            })
+            .await
+            .unwrap();
+        assert_eq!(key.0, uuid::Uuid::parse_str(KEY).unwrap());
+        assert_eq!(text, KEY);
+        assert_eq!(
+            crate::RowKey::from(key).values(),
+            [rusqlite::types::Value::Text(KEY.into())]
+        );
+        let error = db
+            .write(|sql| {
+                sql.execute("UPDATE notes SET id=?1", [KEY.to_uppercase()])?;
+                Ok(())
+            })
+            .await
+            .unwrap_err();
+        assert!(matches!(error, DbError::KeyNotUuid { .. }));
+        db.close().await.unwrap();
+    }
+}

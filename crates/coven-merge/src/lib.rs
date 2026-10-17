@@ -8,6 +8,7 @@
 //! [`classify`] is the shared data rule deciding which received row changes
 //! enter the merge at all.
 
+mod audience_sql;
 mod dependency;
 mod error;
 #[cfg(any(test, feature = "test-utils"))]

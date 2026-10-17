@@ -444,6 +444,28 @@ fn rusqlite_is_used_only_by_the_database_crate() {
 }
 
 #[test]
+fn sql_value_conversions_are_allowed_without_allowing_database_access() {
+    let path = "crates/coven-foundation/src/uuid_text.rs";
+    assert!(kinds(
+        path,
+        r#"
+        use rusqlite::ToSql;
+        use rusqlite::types::{FromSql, FromSqlResult, FromSqlError, ToSqlOutput, Value, ValueRef};
+        fn bind() -> rusqlite::Result<ToSqlOutput<'static>> { todo!() }
+    "#
+    )
+    .is_empty());
+    for source in [
+        "use rusqlite::Connection;",
+        "use rusqlite::ffi;",
+        "use rusqlite::types::*;",
+        "fn open() { rusqlite::Connection::open_in_memory(); }",
+    ] {
+        assert!(!kinds(path, source).is_empty(), "{source}");
+    }
+}
+
+#[test]
 fn an_unlisted_function_in_an_authoritys_file_cannot_spawn() {
     assert!(!violations(
         "crates/coven-sync/src/sync_loop.rs",

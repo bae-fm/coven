@@ -7,6 +7,7 @@ edition.workspace = true
 test-utils = []
 
 [dependencies]
+rusqlite.workspace = true
 coven-foundation.workspace = true
 thiserror.workspace = true
 

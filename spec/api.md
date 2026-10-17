@@ -20,11 +20,11 @@ use tokio::{io::AsyncRead, sync::watch};
 use url::Url;
 use uuid::Uuid;
 
-/// A row's primary key: one value per key column, in the order the table
-/// declares them (§8.5).
+/// Primary-key values in declaration order (§8.5).
 pub struct RowKey(/* private */);
 
-impl From<&str> for RowKey { /* a one-column text key */ }
+impl From<&str> for RowKey { /* one text key */ }
+impl From<UuidText> for RowKey { /* one UUID text key */ }
 impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, B)> for RowKey { /* a two-column key */ }
 impl From<Vec<rusqlite::types::Value>> for RowKey { /* any key width */ }
 
@@ -58,7 +58,7 @@ pub struct EntryId {
     pub number: u64,
 }
 
-/// Where a row goes: the store, or one circle (§14).
+/// Row audience; ToSql/FromSql bind/read canonical text (§14).
 pub enum Audience {
     Store,
     Circle(CircleId),
@@ -106,8 +106,11 @@ pub enum Audience {
 /// A store's UUID, independent of its name and location (E1).
 pub struct StoreId(pub Uuid);
 
-/// A circle's UUID, independent of its name and key (§14.3).
+/// Circle UUID; ToSql/FromSql bind/read canonical text (§14.3).
 pub struct CircleId(pub Uuid);
+
+/// ToSql/FromSql for canonical UUID text; bare rusqlite UUIDs bind as BLOBs.
+pub struct UuidText(pub Uuid);
 
 /// The wall clock used for timestamps (§7.2).
 pub trait Clock: Send + Sync {
@@ -992,8 +995,7 @@ handle.setup_oauth_storage(
 pub enum RowIdentity {
     /// Each new row gets a UUID, version 4 or 7, in canonical lowercase form.
     IndependentUuid,
-    /// The app derives the key from what makes the row unique, so equal keys
-    /// are one row on every device.
+    /// App-derived keys: equal keys are one row everywhere.
     SharedKey,
 }
 
@@ -1013,9 +1015,8 @@ impl SyncedTable {
     /// consequences are verified separately (§8.8). No app owner column is needed.
     pub fn owner_only(self) -> Self;
 
-    /// Makes the table a root: its text `column` holds each row's audience,
-    /// `store` or a circle's id in canonical lowercase form, and is never
-    /// NULL (§14).
+    /// Root audience column: bind Audience or CircleId; NULL and
+    /// noncanonical text are refused (§14).
     pub fn audience_column(self, column: impl Into<String>) -> Self;
 
     /// A descendant: each row takes the audience of the row its
@@ -1110,9 +1111,8 @@ fn tables() -> Vec<SyncedTable> {
 
 ### E3 Writing
 
-- A write runs the app's SQL in one transaction ([§5](coven.md#5-local-database)).
-- The closure returns the write's result; an error rolls the whole write
-  back, files included.
+- App SQL runs in one transaction; errors roll back rows and files
+  ([§5](coven.md#5-local-database)).
 
 ```rust
 /// App-provided files staged for one write; a failure discards them (E3).
@@ -1227,22 +1227,22 @@ pub async fn prepare_user_file(
 Example:
 
 ```rust
-let note_id = Uuid::now_v7().to_string();
-let attachment_id = Uuid::now_v7().to_string();
+let note_id = UuidText(Uuid::now_v7());
+let attachment_id = UuidText(Uuid::now_v7());
 let size = std::fs::metadata(&path)?.len() as i64;
 let prepared = prepare_user_file(&path, |read| show_progress(read)).await?;
 
 handle
     .write(move |sql| {
         sql.execute(
-            "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, 'store')",
-            (&note_id, "Paint colors"),
+            "INSERT INTO notes (id, title, audience) VALUES (?1, ?2, ?3)",
+            (note_id, "Paint colors", Audience::Store),
         )?;
         sql.execute(
             "INSERT INTO attachments (id, note_id, title, size) VALUES (?1, ?2, ?3, ?4)",
             (&attachment_id, &note_id, "Swatches", size),
         )?;
-        sql.register_user_file("attachments", attachment_id.as_str(), prepared)?;
+        sql.register_user_file("attachments", attachment_id, prepared)?;
         Ok(())
     })
     .await?;

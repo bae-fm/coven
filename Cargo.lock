@@ -1031,6 +1031,7 @@ dependencies = [
 name = "coven-foundation"
 version = "0.1.0"
 dependencies = [
+ "rusqlite",
  "rustix",
  "serde",
  "serde_json",
@@ -1047,6 +1048,7 @@ name = "coven-merge"
 version = "0.1.0"
 dependencies = [
  "coven-foundation",
+ "rusqlite",
  "serde_json",
  "thiserror 2.0.21",
  "uuid",

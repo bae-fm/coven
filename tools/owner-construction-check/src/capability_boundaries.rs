@@ -126,6 +126,27 @@ impl<'p> CapabilityBoundaryVisitor<'_, 'p> {
 }
 
 fn gate_matches(gate: &Gate, segments: &[String], is_import: bool) -> bool {
+    // SQL value conversions acquire no connection or other capability.
+    if segments.first().is_some_and(|name| name == "rusqlite") {
+        let path: Vec<_> = segments.iter().map(String::as_str).collect();
+        if matches!(
+            path.as_slice(),
+            ["rusqlite", "ToSql" | "Result", ..]
+                | [
+                    "rusqlite",
+                    "types",
+                    "FromSql"
+                        | "FromSqlError"
+                        | "FromSqlResult"
+                        | "ToSqlOutput"
+                        | "Value"
+                        | "ValueRef",
+                    ..
+                ]
+        ) {
+            return false;
+        }
+    }
     let first_is_gated_crate = (is_import || segments.len() >= 2)
         && segments
             .first()

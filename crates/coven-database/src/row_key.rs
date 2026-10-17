@@ -28,6 +28,12 @@ impl From<&str> for RowKey {
     }
 }
 
+impl From<coven_foundation::uuid_text::UuidText> for RowKey {
+    fn from(value: coven_foundation::uuid_text::UuidText) -> Self {
+        Self(vec![value.into()])
+    }
+}
+
 impl<A: Into<rusqlite::types::Value>, B: Into<rusqlite::types::Value>> From<(A, B)> for RowKey {
     fn from((first, second): (A, B)) -> Self {
         Self(vec![first.into(), second.into()])

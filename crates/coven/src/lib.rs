@@ -60,6 +60,7 @@ pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{
     CircleId, DeviceId, FileId, IdSource, IdSourceRef, InviteId, KeyId, StoreId, UuidIds,
 };
+pub use coven_foundation::uuid_text::UuidText;
 pub use coven_merge::{Audience, MergeError};
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub use coven_storage::providers::DesktopDeviceSignIn;

@@ -5,7 +5,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use coven_format::value::Value;
 use coven_foundation::id_source::DeviceId;
 use coven_merge::{Audience, Timestamp};
-use rusqlite::types::{Type, ValueRef};
+use rusqlite::types::{FromSql, Type, ValueRef};
 
 use crate::DbError;
 
@@ -95,30 +95,19 @@ pub(crate) fn sql_value(value: &Value) -> rusqlite::types::Value {
 }
 
 pub(crate) fn audience_text(audience: &Audience) -> String {
-    match audience {
-        Audience::Store => "store".into(),
-        Audience::Circle(circle) => circle.to_string(),
-    }
+    audience.to_string()
 }
-
-/// Audience text that is neither `store` nor a circle id's canonical form.
-#[derive(Debug, thiserror::Error)]
-#[error("audience text is neither `store` nor a canonical lowercase circle id")]
-pub(crate) struct AudienceText;
 
 /// The audience `text` names, spelled exactly as [`audience_text`] writes
 /// it: receivers compare a root's audience cell with that text, so any other
 /// spelling of the same circle id names no audience (§14).
 pub(crate) fn canonical_audience(text: &str) -> Option<Audience> {
-    if text == "store" {
-        return Some(Audience::Store);
-    }
-    let id = uuid::Uuid::parse_str(text).ok()?;
-    (id.to_string() == text).then_some(Audience::Circle(coven_foundation::id_source::CircleId(id)))
+    Audience::column_result(ValueRef::Text(text.as_bytes())).ok()
 }
 
 pub(crate) fn audience(text: &str) -> rusqlite::Result<Audience> {
-    canonical_audience(text).ok_or_else(|| decode_failure(0, Type::Text, AudienceText))
+    Audience::column_result(ValueRef::Text(text.as_bytes()))
+        .map_err(|error| decode_failure(0, Type::Text, error))
 }
 
 pub(crate) fn counter(bytes: Vec<u8>) -> u64 {

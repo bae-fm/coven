@@ -3,3 +3,4 @@
 pub mod clock;
 pub mod files;
 pub mod id_source;
+pub mod uuid_text;
