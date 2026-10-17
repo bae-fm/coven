@@ -1997,7 +1997,7 @@ can't.
 
 | Who can read it | What |
 |---|---|
-| The provider (in the clear) | each slot's kind (writes, admin entry, key copy, announcement); a key copy's routing (which member and key it's for, §12.1); object framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
+| The provider (in the clear) | each slot's kind (writes, admin entry, key copy, announcement); a key copy's routing (its audience, key id and recipient member, §12.1), so circle ids are already visible; object framing and sizes ([format.md D9](format.md#d9-sealed-objects)); the probes S3 detection writes (§20.7); the device and audience that file and snapshot paths name (§3) |
 | Every member (sealed under the store key) | a slot's device, its claim number (§5.1), and which audience each part belongs to |
 | A circle's members (sealed under its key) | the contents of that circle's parts |
 | Members of the audience only | names, values, key commitments, operation contents |
