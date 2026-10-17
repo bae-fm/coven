@@ -1,6 +1,7 @@
 #!/bin/bash
 # The fast checks of Appendix F.6, which the pre-commit hook runs: formatting,
-# clippy, and the checker's rules of Appendix F.1 to F.5.
+# clippy, the checker's rules of Appendix F.1 to F.5, and the spec's readability
+# checks (scripts/check-spec.py).
 #
 #   scripts/check-fast.sh
 # COVEN_CHECK_PACKAGES may select Cargo packages for clippy and checker
@@ -15,6 +16,9 @@ fi
 cd "$(dirname "$0")/.."
 
 step() { echo ""; echo "── $1"; }
+
+step "spec/coven.md and spec/format.md against spec/WRITING.md"
+"$(command -v python3 || command -v python)" scripts/check-spec.py
 
 step "cargo fmt --check"
 cargo fmt --all --check

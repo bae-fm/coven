@@ -4,7 +4,9 @@ This is the spec's writing standard. Every edit to `spec/` follows it: [coven.md
 [format.md](format.md), [api.md](api.md) and the proof write-ups under [proofs/](proofs/).
 
 The spec is read by people deciding whether coven is right, and by people changing it. It has to
-explain, not just list rules. Read this before you change a sentence.
+explain, not just list rules. Read this before you change a sentence. `scripts/check-spec.py` checks
+the mechanical parts on every commit: references and links resolve, body proof citations are listed
+in Appendix G, lines stay short, and no paragraph is split by stray blank lines.
 
 ## Each change
 - **Put the rule where the story needs it.** Find the section where a reader meets the situation, and add the

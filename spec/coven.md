@@ -6127,6 +6127,11 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
      use fixed inputs, an injected clock and explicit barriers.
 9. The Lean proofs, built from scratch, with no `sorry` and no axiom beyond
    Lean's own, and their differential tests against the Rust.
+10. The spec's own checks (`scripts/check-spec.py`): in coven.md and format.md,
+    every section reference and link resolves, every proof link in the body is a
+    *Body.* row of Appendix G, prose lines stay within 100 characters, and no
+    paragraph is split by two blank lines. spec/WRITING.md is the standard they
+    help keep.
 
 The checker is the first thing built, before any crate, so every rule holds from
 the first line of code.
@@ -6135,8 +6140,8 @@ Tests control clocks, transfer limits and request completion. Upload boundary
 tests use byte-sized payloads; races wait for observed events; interrupted
 operations are reopened until they report completion.
 
-The pre-commit hook runs the fast checks: formatting, clippy, and the rules of
-F.1 to F.5.
+The pre-commit hook runs the fast checks: formatting, clippy, the rules of F.1 to
+F.5, and the spec's own checks.
 
 ---
 
@@ -6278,7 +6283,7 @@ Write-ups explain each model and state its assumptions:
 | The converters used are those after the write's version, up to the raise's | `one_step_is_conversion` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
 | Dependent changes stay frozen; independent ones convert and match receivers | `dependent_change_not_converted`, `independent_change_converted`, `converted_change_matches_receiver` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
 | With `Drop`, values are kept; frozen stays frozen; a lost value is never converted again | `explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted` | `proofs/queue/CovenQueue/Conversion.lean` | §18.6 |
-| With no breaking migration in a write's range, no converter is needed; older writes still need the conversions they cross | `newest_breaking_write_admitted`, `retained_step_required` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
+| *Body.* With no breaking migration in a write's range, no converter is needed; older writes still need the conversions they cross | `newest_breaking_write_admitted`, `retained_step_required` | `proofs/queue/CovenQueue/ConversionChain.lean` | §18.6 |
 | Recorded reads don't exclude a write | `recorded_reads_do_not_exclude` | `proofs/queue/CovenQueue/Model.lean` | §18.6 |
 | A later snapshot doesn't revive dropped data; a snapshot's lost values keep their cause | `snapshot_drop_stays_dropped`, `snapshot_loss_preserves_cause` | `proofs/queue/CovenQueue/Verdicts.lean` | §18.6 |
 | Ben's mixed write 10: its note edit stays frozen and its playlist rename converts; a device's own reads don't exclude | `mixed_write`, `own_reads_do_not_exclude` | `proofs/queue/CovenQueue/DataExamples.lean` | §18.6 |
