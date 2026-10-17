@@ -10,7 +10,8 @@ inductive Action where
   | cascade | setNull | restrict | noAction
   deriving DecidableEq, Repr
 
-/-- SQL NULL is distinct from an absent column in a patch. -/
+/-- SQL NULL is distinct from an absent column. Insert/update cells are new
+values; delete cells are D5.6's `old` map, as the replaced setters wrote them. -/
 structure Effect (Row Col Value : Type) where
   row : Row
   generation : Nat
@@ -28,6 +29,9 @@ structure Reference (Row Col Value : Type) where
   onDelete : Action
   onUpdate : Action
   parentColumns : List Col
+  /-- Authenticated values of the child's replaced setters, before the write.
+  Step-only classification supplies no net delete map; receipt supplies all cells. -/
+  childValues : List (Col × Option Value)
   deriving DecidableEq
 
 variable {Row Col Value : Type} [DecidableEq Row] [DecidableEq Col] [DecidableEq Value]
@@ -36,7 +40,7 @@ variable {Row Col Value : Type} [DecidableEq Row] [DecidableEq Col] [DecidableEq
 def actionEffect (f : Reference Row Col Value) (action : Action)
     (replacement : Option (List (Option Value))) : Option (Effect Row Col Value) :=
   match action, replacement with
-  | .cascade, none => some ⟨f.child, f.childGeneration, .del, []⟩
+  | .cascade, none => some ⟨f.child, f.childGeneration, .del, f.childValues⟩
   | .cascade, some values =>
     if values.length = f.columns.length then
       some ⟨f.child, f.childGeneration, .upd, f.columns.zip values⟩
@@ -66,11 +70,11 @@ def consequence (f : Reference Row Col Value) (parent : Effect Row Col Value) :
   else none
 
 /-- Coalesce successive actions on one row. Later setters replace earlier
-setters of the same column; other columns remain. A delete records no cells. -/
+setters of the same column; other columns remain. A delete retains its old map. -/
 def combineEffects (a b : Effect Row Col Value) : Option (Effect Row Col Value) :=
   if a.row = b.row ∧ a.generation = b.generation then
-    if a.kind = .del ∨ b.kind = .del then
-      some ⟨a.row, a.generation, .del, []⟩
+    if b.kind = .del then some b
+    else if a.kind = .del then some a
     else if a.kind = .upd ∧ b.kind = .upd then
       some ⟨a.row, a.generation, .upd,
         (a.cells.filter fun cell => !(b.cells.map Prod.fst).contains cell.1) ++ b.cells⟩
@@ -235,6 +239,16 @@ theorem dropped_root (schema : Schema Row Payload) (direct : Row → Option Payl
 def verifies [DecidableEq Payload] (schema : Schema Row Payload)
     (direct : Row → Option Payload) (d : Derivation Row) (row : Row) (value : Payload) : Bool :=
   decide (evaluate schema direct d = some (row, value))
+
+/-- D5.6: changing, omitting or adding any deleted cell refuses the action.
+The recomputed payload comes from authenticated setter values, not displayed rows. -/
+theorem delete_old_mismatch_refused (schema : Schema Row (Effect Row Col Value))
+    (direct : Row → Option (Effect Row Col Value)) (d : Derivation Row)
+    (row : Row) (generation : Nat) (written proposed : List (Col × Option Value))
+    (expected : evaluate schema direct d = some (row, ⟨row, generation, .del, written⟩))
+    (different : proposed ≠ written) :
+    verifies schema direct d row ⟨row, generation, .del, proposed⟩ = false := by
+  simp [verifies, expected, different.symm]
 
 theorem no_forged_effect [DecidableEq Payload] (schema : Schema Row Payload)
     (direct : Row → Option Payload) (d : Derivation Row) (row : Row) (value : Payload)

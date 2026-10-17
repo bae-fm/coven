@@ -315,3 +315,7 @@ open CovenMerge
 #print axioms LocalUpdate.Stuck.accepted_apply
 #print axioms Receive.unadmitted_no_effects
 #print axioms Receive.unadmitted_not_applied
+
+#print axioms CovenMerge.Ownership.ForeignKey.delete_old_mismatch_refused
+#print axioms CovenMerge.Ownership.ForeignKeyExamples.cascade_delete_keeps_written_values
+#print axioms CovenMerge.Ownership.ForeignKeyExamples.changed_delete_old_refused

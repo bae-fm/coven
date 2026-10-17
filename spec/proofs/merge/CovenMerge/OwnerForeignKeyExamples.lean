@@ -6,7 +6,7 @@ open ForeignKey
 
 /-- An owned child with a two-column reference and a third, unrelated cell. -/
 def compound (action : Action) : Reference Nat Nat Nat :=
-  ⟨0, 1, 1, 3, [10, 11], [some 7, some 8], action, action, [20, 21]⟩
+  ⟨0, 1, 1, 3, [10, 11], [some 7, some 8], action, action, [20, 21], []⟩
 
 def parentDelete : Effect Nat Nat Nat := ⟨0, 1, .del, []⟩
 
@@ -36,6 +36,22 @@ theorem compound_update_exact :
 
 theorem wrong_incarnation_refused :
     consequence (compound .cascade) ⟨0, 3, .del, []⟩ = none := by decide
+
+/-- A displayed NULL cannot replace a reference's original written value. -/
+def deletedValues : List (Nat × Option Nat) := [(10, some 7), (11, some 8), (12, some 9)]
+
+def deleteSchema := resolvedSchema [{ compound .cascade with childValues := deletedValues }]
+
+theorem cascade_delete_keeps_written_values :
+    evaluate deleteSchema rootChange certificate = some (1, ⟨1, 3, .del, deletedValues⟩) := by decide
+
+theorem changed_delete_old_refused :
+    verifies deleteSchema rootChange certificate 1 ⟨1, 3, .del, deletedValues⟩ = true ∧
+    verifies deleteSchema rootChange certificate 1 ⟨1, 3, .del, []⟩ = false ∧
+    verifies deleteSchema rootChange certificate 1
+      ⟨1, 3, .del, [(10, none), (11, some 8), (12, some 9)]⟩ = false ∧
+    verifies deleteSchema rootChange certificate 1
+      ⟨1, 3, .del, deletedValues ++ [(13, some 10)]⟩ = false := by decide
 
 def chain := resolvedSchema [compound .cascade,
   { compound .cascade with parent := 1, parentGeneration := 3, child := 2, childGeneration := 5 }]

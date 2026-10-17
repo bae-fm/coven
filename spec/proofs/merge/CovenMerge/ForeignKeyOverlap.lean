@@ -38,7 +38,7 @@ abbrev Step := Recorded Nat Nat Nat Nat
 
 /-- The track's reference to its album, cascading on update. -/
 def albumRef : Reference Nat Nat Nat :=
-  ⟨1, 1, 3, 1, [10, 11], [some 1, some 2], .cascade, .cascade, [20, 21]⟩
+  ⟨1, 1, 3, 1, [10, 11], [some 1, some 2], .cascade, .cascade, [20, 21], []⟩
 
 def held (others : Option (List (Nat × Nat × Nat × Nat))) : Held Nat Nat Nat Nat :=
   ⟨albumRef, 1, [], [], others⟩

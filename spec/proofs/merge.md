@@ -969,6 +969,15 @@ differs from its steps but causes nothing,
 and requires each recorded verdict to be the model's cause, with the roots of
 each derived change (`applied_derived_recorded`) and the failed sources of each
 dependent one (`dependencies`, `dropped_contributing_root_no_effect`).
+For a delete, `Effect.cells` carries D5.6's `old` map. The resolved reference
+supplies the replaced setters' authenticated written values, independently
+of that proposed map and of the displayed row. `delete_old_mismatch_refused`
+refuses any different map; `cascade_delete_keeps_written_values` and
+`changed_delete_old_refused` check unchanged values, omissions, additions
+and a displayed NULL substituted for a written reference.
+`judge_view::tests::cascade_delete_old_matches_the_model` compares the real
+receiver's acceptance and refusal after a concurrent parent deletion has
+made that reference display NULL.
 The `classify` mode compares the receiver's classification itself, which
 supplies those references. It takes every step of a received write as D5
 records it, with the references the receiver replays for each step's row,
@@ -998,7 +1007,8 @@ COVEN_MERGE_LEAN="$PWD/spec/proofs/merge/.lake/build/bin/mergeRunner" \
   execution_capture::tests::lean::captured_actions_are_the_models_consequences \
   author_judgement::tests::local_admission_matches_the_model \
   judge_view::tests::receipt_matches_the_model \
-  judge_view::tests::classification_matches_the_model
+  judge_view::tests::classification_matches_the_model \
+  judge_view::tests::cascade_delete_old_matches_the_model
 ```
 
 ### B19 Foreign keys on generated columns

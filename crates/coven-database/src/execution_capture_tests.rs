@@ -371,6 +371,7 @@ pub(crate) mod lean {
                 "columns": columns.iter().map(|c| ids.column(&row.table, c)).collect::<Vec<_>>(),
                 "oldKey": targets.iter().map(|t| ids.value(&old[t])).collect::<Vec<_>>(),
                 "onDelete": action(&key.on_delete), "onUpdate": action(&key.on_update),
+                "childValues": [],
                 "parentColumns": targets.iter().map(|t| ids.column(&parent.table, t)).collect::<Vec<_>>(),
             }));
             // The chain of causes back to the direct root.

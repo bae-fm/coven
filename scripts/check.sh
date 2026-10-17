@@ -316,6 +316,7 @@ proofs() {
             execution_capture::tests::lean::captured_actions_are_the_models_consequences \
             author_judgement::tests::local_admission_matches_the_model \
             judge_view::tests::receipt_matches_the_model \
+            judge_view::tests::cascade_delete_old_matches_the_model \
             judge_view::tests::classification_matches_the_model
     fi
 

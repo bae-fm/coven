@@ -216,11 +216,16 @@ private def readAction (j : Json) (name : String) : Except String Action := do
   | _ => throw "unknown foreign-key action"
 
 open Ownership.ForeignKey in
+private def readCells (j : Json) (name : String) : Except String (List (Nat × Option Nat)) := do
+  (← j.getObjValAs? (List Json) name).mapM fun cell => do
+    pure (← natField cell "column", ← cell.getObjValAs? (Option Nat) "value")
+
+open Ownership.ForeignKey in
 private def readReference (j : Json) : Except String (Reference Nat Nat Nat) := do
   pure ⟨← natField j "parent", ← natField j "parentGeneration", ← natField j "child",
     ← natField j "childGeneration", (← j.getObjValAs? (Array Nat) "columns").toList,
     (← j.getObjValAs? (Array (Option Nat)) "oldKey").toList, ← readAction j "onDelete",
-    ← readAction j "onUpdate", (← j.getObjValAs? (Array Nat) "parentColumns").toList⟩
+    ← readAction j "onUpdate", (← j.getObjValAs? (Array Nat) "parentColumns").toList, ← readCells j "childValues"⟩
 
 open Ownership.ForeignKey in
 private def readEffect (j : Json) : Except String (Effect Nat Nat Nat) := do
@@ -351,7 +356,8 @@ private def runReceive (j : Json) : Except String Json := do
     ((store.find? fun e => e.1 == c && e.2.1 == v).map (·.2.2)).getD v
   let schema : Schema Nat (Effect Nat Nat Nat) := { resolvedSchema references with
     consequences := fun r p => ((resolvedSchema references).consequences r p).map fun (row, e) =>
-      (row, { e with cells := e.cells.map fun cell => (cell.1, stored cell.1 cell.2) }) }
+      (row, if e.kind = .upd then
+        { e with cells := e.cells.map fun cell => (cell.1, stored cell.1 cell.2) } else e) }
   let plain : Nat → Option (Effect Nat Nat Nat) := fun r => directs.find? (·.row == r)
   let path := fun (path : Array Nat) =>
     (path.toList.drop 1).foldl (fun (acc : Option (Derivation Nat)) child =>

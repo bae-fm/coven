@@ -99,7 +99,7 @@ def payload (w : Write) (r : Row) : Option (Effect Row Unit Nat) :=
     ⟨r, change.gen, change.kind, if change.kind = .del then [] else [((), some 1)]⟩
 
 def reference (action : Action) : Reference Row Unit Nat :=
-  ⟨.track, 1, .review, 1, [()], [some 1], action, .cascade, [()]⟩
+  ⟨.track, 1, .review, 1, [()], [some 1], action, .cascade, [()], []⟩
 
 /-- This history's direct actions have no source roles beyond the net
 changes' authenticated generation/setter provenance. -/

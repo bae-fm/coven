@@ -140,6 +140,34 @@ fn effect(
     json!({"row": id, "generation": step.change.generation, "kind": kind, "cells": cells})
 }
 
+/// The old map is compared in original column order, independently of the
+/// receiver's displayed substitutions and the proposed delete's values.
+fn old_cells(ids: &mut Ids, row: &RowId, values: &BTreeMap<String, Value>) -> Vec<Json> {
+    values.iter().map(|(column, value)| {
+        json!({"column": ids.column(&row.table, column), "value": ids.value(value)})
+    }).collect()
+}
+
+fn setter_values(
+    db: &DatabaseConnection,
+    change: &coven_format::write::RowChange,
+) -> BTreeMap<String, Value> {
+    change
+        .sources
+        .setters
+        .iter()
+        .map(|(column, setter)| {
+            let source = crate::write_sources::evidence(db, &setter.change).unwrap();
+            let columns = match &source.original.change.operation {
+                coven_merge::Operation::Insert(columns)
+                | coven_merge::Operation::Update(columns) => columns,
+                coven_merge::Operation::Delete => panic!("a delete cannot supply a setter"),
+            };
+            (column.clone(), columns[&setter.column].value.clone())
+        })
+        .collect()
+}
+
 /// The runner input for one received write, and the ids it used.
 fn input(
     db: &DatabaseConnection,
@@ -163,6 +191,18 @@ fn input(
     let mut derived = Vec::new();
     let mut store = Vec::new();
     for (row, checked) in &judgement.rows {
+        let net = record
+            .parts
+            .iter()
+            .flat_map(|part| &part.rows)
+            .find(|change| change.row == *row);
+        let written = match net {
+            Some(change) if matches!(change.change.operation, coven_merge::Operation::Delete) => {
+                setter_values(db, change)
+            }
+            _ => BTreeMap::new(),
+        };
+        let child_values = old_cells(&mut ids, row, &written);
         let mut order: Vec<String> = Vec::new();
         let mut paths = Vec::new();
         for (sequence, chain) in &checked.actions {
@@ -222,6 +262,7 @@ fn input(
                     "columns": columns.iter().map(|c| ids.column(&row.table, c)).collect::<Vec<_>>(),
                     "oldKey": targets.iter().map(|t| ids.value(&old[t])).collect::<Vec<_>>(),
                     "onDelete": action(&fk.on_delete), "onUpdate": action(&fk.on_update),
+                    "childValues": child_values,
                     "parentColumns": targets.iter().map(|t| ids.column(&parent.table, t)).collect::<Vec<_>>(),
                 }));
             }
@@ -250,7 +291,7 @@ fn input(
             continue;
         };
         let (kind, cells) = match &net.change.operation {
-            coven_merge::Operation::Delete => (2, Vec::new()),
+            coven_merge::Operation::Delete => (2, old_cells(&mut ids, row, &net.old)),
             coven_merge::Operation::Insert(columns) | coven_merge::Operation::Update(columns) => {
                 for name in columns.keys() {
                     if !order.contains(name) {
@@ -325,15 +366,19 @@ fn input(
                 }
             }
             external.push(json!({"row": ids.row(row), "sources": numbered}));
-            let owner = crate::ownership::creation(db, row)
-                .unwrap()
-                .map(|creation| {
-                    let member = crate::ownership::member(db, creation.creator.write.device)
-                        .unwrap()
-                        .unwrap();
-                    owners[&member]
-                })
-                .unwrap_or(BEN);
+            let owner = if crate::ownership::owner_table(schema, &row.table) {
+                crate::ownership::creation(db, row)
+                    .unwrap()
+                    .map(|creation| {
+                        let member = crate::ownership::member(db, creation.creator.write.device)
+                            .unwrap()
+                            .unwrap();
+                        owners[&member]
+                    })
+                    .unwrap_or(BEN)
+            } else {
+                BEN
+            };
             rows.push(json!({"row": ids.row(row), "owner": owner,
                 "table": TABLES.iter().position(|t| *t == row.table).unwrap_or(100)}));
         }
@@ -572,6 +617,7 @@ fn classify(runner: &std::ffi::OsStr, db: &Database, record: &WriteRecord) -> (u
                         "columns": columns.iter().map(|c| ids.column(&row.table, c)).collect::<Vec<_>>(),
                         "oldKey": old.iter().map(|v| ids.value(v)).collect::<Vec<_>>(),
                         "onDelete": action(&key.on_delete), "onUpdate": action(&key.on_update),
+                        "childValues": [],
                         "parentColumns": targets.iter().map(|t| ids.column(&parent_table.name, t)).collect::<Vec<_>>(),
                     },
                     "name": name(&schema.foreign_key(table, key)),
@@ -635,6 +681,20 @@ async fn classification_matches_the_model() {
 /// what Ana wrote, and so do the delete's old values.
 #[tokio::test]
 async fn a_cascade_delete_shows_what_its_setters_wrote() {
+    cascade_delete(|_, _| {}).await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_MERGE_LEAN; scripts/check.sh supplies the merge runner"]
+async fn cascade_delete_old_matches_the_model() {
+    let runner = std::env::var_os("COVEN_MERGE_LEAN").expect("built mergeRunner");
+    cascade_delete(|db, record| {
+        assert!(compare(&runner, db, record) >= 2);
+    })
+    .await;
+}
+
+async fn cascade_delete(mut observed: impl FnMut(&Database, &WriteRecord)) {
     use crate::author_judgement::tests::deliver;
     use crate::tests::TestStore;
     use crate::write::tests::{records, sql};
@@ -716,10 +776,12 @@ CREATE TABLE reviews(id TEXT NOT NULL PRIMARY KEY, track TEXT REFERENCES tracks(
         crate::judge::tests::verdict(dan, &forged, &review),
         ChangeVerdict::NotAuthorized(AuthorizationFailure::InvalidForeignKeyEffect)
     );
+    observed(dan, &forged);
     deliver(ana, carol).await;
     crate::judge::tests::receive(carol, &genuine).await;
     let verdict = crate::judge::tests::verdict(carol, &genuine, &review);
     assert!(matches!(verdict, ChangeVerdict::Derived(_)), "{verdict:?}");
+    observed(carol, &genuine);
     for db in dbs {
         db.close().await.unwrap();
     }

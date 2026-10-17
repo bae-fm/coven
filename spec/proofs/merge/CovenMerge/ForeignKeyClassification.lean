@@ -321,7 +321,7 @@ Rows and columns are numbers. Every reference below is CASCADE on delete and
 on update, from column 1 of the child to column 0 of the parent. -/
 
 def ref (parent child : Nat) (key : Nat) : Reference Nat Nat Nat :=
-  ⟨parent, 1, child, 1, [1], [some key], .cascade, .cascade, [0]⟩
+  ⟨parent, 1, child, 1, [1], [some key], .cascade, .cascade, [0], []⟩
 
 namespace TriggerFirst
 

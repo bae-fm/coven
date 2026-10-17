@@ -193,7 +193,7 @@ column 10. Ben may change only his track. -/
 
 open ForeignKey Admission
 
-def setNull : Reference Nat Nat Nat := ⟨0, 1, 1, 3, [10], [some 7], .setNull, .setNull, [20]⟩
+def setNull : Reference Nat Nat Nat := ⟨0, 1, 1, 3, [10], [some 7], .setNull, .setNull, [20], []⟩
 
 def stepsEnd (r : Nat) : Option (Effect Nat Nat Nat) :=
   if r = 0 then some ⟨0, 1, .del, []⟩ else none

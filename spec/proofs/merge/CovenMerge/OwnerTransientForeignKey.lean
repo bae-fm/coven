@@ -60,7 +60,7 @@ def parent : Recorded :=
 def child := record ⟨.review, 1, .upd, [((), none)]⟩
 
 def reference : Reference Row Unit Nat :=
-  ⟨.track, 1, .review, 1, [()], [some 7], .cascade, .setNull, [()]⟩
+  ⟨.track, 1, .review, 1, [()], [some 7], .cascade, .setNull, [()], []⟩
 
 /-- The resolved authoring execution has one child action. Once it is NULL,
 the restored parent key has no reference through which to act on that child. -/
