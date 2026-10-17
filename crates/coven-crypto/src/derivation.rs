@@ -110,7 +110,8 @@ impl DerivedKeys {
             .seal_object_chunk(path, prefix, section, index, plaintext)
     }
 
-    /// Re-seal a write or store-log chunk identically on every attempt (D9/D11).
+    /// Re-seal an inner-write or sequence-slot chunk identically on every
+    /// attempt (D9/D11).
     /// The nonce binds the path, complete cleartext prefix, section, index and
     /// SHA-256 of the complete chunk plaintext, including any frame bytes.
     /// Different content at a reused path has different nonce inputs. Retries

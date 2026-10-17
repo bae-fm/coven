@@ -979,7 +979,7 @@ Receiving Ben's note adds its slot read.
   - Sharing is per account, not per invite: taking access back takes the
     account's access, whatever shared it.
   - So the owner's device leaves an account shared while a member in its
-    store log reaches storage through it, or another of its own open
+    applied membership reaches storage through it, or another of its own open
     invites names it.
   - An invite made at the same time on another of the owner's devices can
     still lose its access this way: the invited device's join fails with
@@ -1018,7 +1018,7 @@ Receiving Ben's note adds its slot read.
 - Access-key creation and deletion are specific to each S3 service.
   Coven may make and delete member keys using the storage account's admin
   access, held in memory for one operation and never stored. Admin credentials
-  never enter the store log, invites, logs or device key custody; member
+  never enter admin entries, invites, logs or device key custody; member
   credentials remain separate and follow their ordinary custody rules.
   - The person chooses a signed-in CLI and its profile/account, browser
     sign-in, a pasted admin key, or guided console steps. Coven reads no CLI
@@ -1239,7 +1239,6 @@ A *slot* is one create-once object in the store's sequence:
 `<store>/seq/1`, `seq/2`, `seq/3`, and so on.
 A *claim* is an attempt to create the next slot.
 The slot holds an admin entry, writes, a key copy, or a snapshot announcement.
-The store log means the admin entries in this sequence.
 
 - A device applies slots in order. It claims n+1 only after applying 1 through n.
   [One sync pass](sync-pass.md) gives the read, apply, claim and effects order.
@@ -1446,7 +1445,7 @@ Two mechanisms order writes:
   - The *merged state* comes from the writes themselves: each row's
     generation ([§8.3](#83-deletes)), and each cell's winning value.
   - The *removal rules* then decide which rows the app sees, from the
-    merged state and the store log ([§9](#9-members-and-roles)).
+    merged state and applied admin entries ([§9](#9-members-and-roles)).
 - The merged state follows two rules:
   - cells: of two values for one cell, the one with the larger timestamp
     stays;
@@ -1506,7 +1505,7 @@ Two mechanisms order writes:
     ([§8.4](#84-foreign-keys));
   - CHECK constraints: a row whose merged values fail is taken out
     ([§8.6](#86-check-constraints));
-  - deleted circles: a row in a circle the store log has deleted is taken
+  - deleted circles: a row in a circle whose deletion has been applied is taken
     out ([§14.7](#147-deleting-a-circle));
   - unique values: of two rows claiming one value, the later slot claim
     is taken out, since the first claim keeps it
@@ -2678,9 +2677,9 @@ No removal of Ana enters the sequence.
      new public keys and her device's name.
   3. Ana's phone shows the request, and Ana approves it.
   4. Ana's phone seals every store key it holds to Carol's new sealing key
-     ([§11](#11-keys)), then writes "add member Carol" to the store log.
+     ([§11](#11-keys)), then publishes an "add member Carol" admin entry.
      - Every key, so Carol reads a late write made under an older one.
-  5. Carol's phone opens the store key, adds itself to the store log, and
+  5. Carol's phone opens the store key, publishes its "add device" entry, and
      Carol writes down her own restore code.
 - The join request is stored at `<store>/join-requests/<invite id>`.
   - It is encrypted with a key derived from the invite secret, and signed
@@ -2923,8 +2922,8 @@ No removal of Ana enters the sequence.
 
 ### 14.3 Circles
 
-- Circles are made, and members added to and removed from them, by entries
-  in the store log, under its rules ([§9](#9-members-and-roles)).
+- Circles are made, and members added to and removed from them, by admin entries
+  under their authorization rules ([§9](#9-members-and-roles)).
 - Any member of the store can make a circle, and is its first member.
 - A circle's own members rename it, add and remove its members, and delete
   it ([§14.7](#147-deleting-a-circle)); an admin outside the circle can't.
@@ -2978,7 +2977,8 @@ No removal of Ana enters the sequence.
     still points at it is refused with `DbError::ReferenceAudience`, since
     link 5 would point at a row Ben can't read.
 - Coven also refuses, with `DbError::NotInCircle`, a write that puts a row
-  in a circle this member isn't in, or in no circle the store log has.
+  in a circle this member isn't in, or a circle absent from this device's
+  applied membership.
 
   ```
   store          notes  row 42   "Groceries"
@@ -3592,7 +3592,7 @@ floor is not modeled.
   - Whichever device's app updates first makes it, whoever's device it is.
   - That device runs the migration's first part on its database, writes a
     snapshot in the new version ([§15](#15-snapshots)), and records the store's new version
-    in the store log ([§9](#9-members-and-roles)).
+    in an admin entry ([§9](#9-members-and-roles)).
   - An older app cannot apply that audience's newer schema. It records
     `UpdateRequired` and reloads from the snapshot after updating.
     Until updating, it follows [§6's stuck-device rule](#stuck-devices).

@@ -15,7 +15,7 @@ impl Coven {
     /// Deletes a closed store from this device without opening it: every
     /// keychain entry coven holds for it, including every saved host secret,
     /// then its directory. Unsent writes and files are lost, and this device
-    /// stays in the store log for peers to read until it is removed; prefer
+    /// stays registered with the store until it is removed; prefer
     /// `CovenHandle::delete_store`. Use this for a store that cannot open, or
     /// to finish a handle's deletion that failed after closing.
     /// Refused while a writer, read-only handle or file stream remains open;

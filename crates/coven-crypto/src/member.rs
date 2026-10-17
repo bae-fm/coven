@@ -9,7 +9,7 @@ use x25519_dalek::{PublicKey, StaticSecret};
 use zeroize::Zeroizing;
 
 /// A member's validated Ed25519 public signing key (§11.1). It is bound to a
-/// stable [`MemberId`] by the store log and is never that identity.
+/// stable [`MemberId`] by admin entries and is never that identity.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct SigningKey([u8; 32]);
 
@@ -139,7 +139,7 @@ impl MemberKeys {
         })
     }
 
-    /// The public pair a store log binds to a stable member id (§9).
+    /// The public pair admin entries bind to a stable member id (§9).
     pub fn public_keys(&self) -> MemberPublicKeys {
         MemberPublicKeys {
             signing: SigningKey(self.signing.verifying_key().to_bytes()),
@@ -308,7 +308,7 @@ pub struct MemberIdentity {
 }
 
 impl MemberIdentity {
-    /// Bind a private pair to the stable id the store log names for it.
+    /// Bind a private pair to the stable id its admin entry names.
     pub fn new(member: MemberId, keys: MemberKeys) -> Self {
         Self {
             member,

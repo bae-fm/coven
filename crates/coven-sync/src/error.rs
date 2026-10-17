@@ -1,4 +1,4 @@
-//! Failures of store-log publication, file uploads and sync steps (E5, E7).
+//! Failures of sequence publication, file uploads and sync steps (E5, E7).
 
 use crate::OperationRejection;
 use coven_crypto::{custody::KeyError, CryptoError, MaterialError};

@@ -2404,12 +2404,12 @@ The Dropbox and OneDrive refresh tokens were still valid.
 ### CloudKit
 
 The first `cloudkit_live` run failed after 1,003 s in its own fixture: it
-began a multipart upload of a store-log entry, which the connection has
-refused with `InvalidPath` since store-log entries became single-request
-publications (`fc480c31f`). The fixture's unfinished upload now targets a
-device log, and the test prints its zone names so a failed run's zones can be
-removed. The rerun passed in 4,057 s, including the one-hour listing margin
-wait, and deleted both test zones. The failed run's zone in
+began a multipart upload of an admin entry, which required single-request
+publication (`fc480c31f`) and was refused with `InvalidPath`. The fixture's
+unfinished upload was changed to an object supporting multipart uploads,
+and the test printed its zone names so a failed run's zones could be removed.
+The rerun passed in 4,057 s, including the one-hour listing margin wait, and
+deleted both test zones. The failed run's zone in
 `iCloud.fm.bae.desktop` (Development) was left behind unnamed and still needs
 removal through CloudKit Console. Live tests now mark their zones, and
 the marker-only cleanup then found `_defaultZone` and two unmarked zones,

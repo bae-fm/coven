@@ -374,8 +374,8 @@ pub enum DbError {
     ReferenceAudience { table: String, key: RowKey, column: String },
     /// A write targets a circle whose deletion has been applied (§14.7).
     DeletedCircle(CircleId),
-    /// A write puts a row in a circle this member isn't in, or in no circle
-    /// the store log has (§14.5, §14.6).
+    /// A write puts a row in a circle this member isn't in, or a circle
+    /// absent from this device's applied membership (§14.5, §14.6).
     NotInCircle(CircleId),
     /// A required reset, schema or skipped-history reload has not committed.
     AudienceReloading(Audience),
@@ -2942,7 +2942,7 @@ match stream.read_at(resume_at, 256 * 1024).await {
 
 ```rust
 impl CovenHandle {
-    /// The members and their devices, as this device's store log has them.
+    /// The members and their devices at this device's applied slot.
     pub async fn members(&self) -> CovenResult<Vec<MemberInfo>>;
 
     /// The same internal query, live (E4).
@@ -2973,7 +2973,7 @@ impl CovenHandle {
     ) -> Result<(), SyncError>;
 
     /// On S3: switches this member to a key supplied through §4's admin-access
-    /// or console path and records the new key's id in the store log (§9).
+    /// or console path and records the new key's id in an admin entry (§9).
     /// The restore code does not change. They keep the key separately,
     /// update their other devices with update_credentials, and the old key
     /// becomes pending deletion under §13. Requires connected storage.
@@ -3009,7 +3009,7 @@ impl CovenHandle {
 
     /// Obtains the storage account's admin access from the source the person
     /// chose, held in memory by the operations it is passed to and never
-    /// stored, logged or put in the store log or invites (§4). S3 only.
+    /// stored, logged or put in admin entries or invites (§4). S3 only.
     pub async fn admin_access(&self, source: AdminAccessSource) -> Result<Arc<dyn AccessKeyAdmin>, SyncError>;
 
     /// The bucket, the store's prefix and the filled member policy for making
@@ -3716,7 +3716,7 @@ pub enum IdentityError {
 }
 
 impl MemberKeys {
-    /// The public pair bound to a stable member id by the store log.
+    /// The public pair bound to a stable member id by admin entries.
     pub fn public_keys(&self) -> MemberPublicKeys;
     /// Encodes both private seeds for custody or a restore code (§12.1).
     pub fn to_secret_bytes(&self) -> SecretBytes;

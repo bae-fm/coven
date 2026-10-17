@@ -48,7 +48,7 @@ impl std::fmt::Display for KeyId {
 }
 
 /// A member's random stable identity, independent of their keys (§9).
-/// Device ownership, circle membership and store-log authors name it; a key
+/// Device ownership, circle membership and slot authors name it; a key
 /// replacement keeps it.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash, Serialize, Deserialize)]
 #[serde(transparent)]

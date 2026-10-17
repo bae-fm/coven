@@ -317,8 +317,6 @@
 - A part's record count and byte length must match its header. A frame
   announced beyond the part's end is refused before allocation.
 
-<a id="d6-store-log-entries"></a>
-
 ### D6 Admin entries
 
 - An admin frame (kind 4) is `change:u8 | fields`. Its containing slot gives
@@ -353,7 +351,7 @@
   signing key. Check that signature and the path's store id.
 - Other entries use the signing binding immediately before their slot.
   Add-device registers the slot's writing device. A replacement retires a
-  distinct older device of the same member; it has no log ends.
+  distinct older device of the same member.
 - Replace-member-keys requires the target's current binding to equal
   `expected`; both new public keys must be unused. Only this change alters
   an existing member's binding. A competing completed replacement requires
@@ -735,7 +733,7 @@
 
 - Device ids and numbers are decimal without leading zeros; n starts at 1.
   The sequence has no gaps before retention. Snapshot numbers identify
-  objects, never discovery cursors. No per-device log or key-copy path exists.
+  objects, never discovery cursors.
 - Audience is `store` or a circle UUID. Store, member, circle, invite,
   attempt and file ids are canonical lowercase hyphenated UUIDs.
 - Every immutable path is created once and retries compare exact bytes.

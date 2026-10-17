@@ -95,7 +95,7 @@ pub enum StoreKeyUnlockError {
     /// Custody refused to read or persist keys.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),
-    /// Store-log validation or local work failed, preserving its cause.
+    /// Sequence validation or local work failed, preserving its cause.
     #[error("opening store keys: {0}")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
