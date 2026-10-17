@@ -2979,13 +2979,24 @@ to the target. With the store's snapshot at 560 and Gifts' at 520, Ben's laptop
 reads slots 521 to 560 for Gifts. It commits all the audiences together, only
 after every one has reached the target, and then reads on from 561.
 
+Before a floor exists, Ben selects store coverage 100 and Gifts coverage 40,
+with target 102. A floor at 104 then names store coverage 80 and Gifts coverage
+60, with `first` at 61. Ben's Gifts suffix is gone. He can load those floor
+snapshots and replay both audiences to 104, even though the store starts earlier.
+
 The target is fixed when loading begins. New writes or announcements don't
-restart it. If deletion removes slots or a snapshot the reload still needs, the
-device uses the newer floor's snapshots instead, but only a snapshot that
-replaces the one it selected, never an older one. The floor's rules alone don't
-guarantee that. Storage can delete the snapshot a reload selected once a later one
-is announced, while the floor still names an older snapshot; switching to the
-floor's snapshot would then move the reload's coverage backward
+restart it. If deletion removes slots the reload still needs, the device uses
+the newer floor's snapshots as its starts. An audience's new start may have
+lower coverage than the one selected before. The common target never decreases:
+it includes the old target, the floor's `at`, and every selected start's coverage.
+Replaying each audience to that target keeps their installed states together.
+
+A missing selected snapshot body needs an additional check. Storage can delete
+it once a later one is announced, while the floor still names an older snapshot.
+That older body cannot replace the missing selection. The floor must name a
+later announcement for the same audience with at least the selected coverage;
+otherwise the reload waits. Without this check, a missing body would let a reload
+bypass its selection by loading an older snapshot
 ([`unchecked_reselection_goes_backwards`](proofs/sequence/CovenSequence/ReloadExamples.lean)).
 
 **A reload commits all at once:** rows, merge records, lost values, source
@@ -6339,6 +6350,8 @@ Write-ups explain each model and state its assumptions:
 | The queue model refuses commits during reset, breaking-raise and newly-readable-circle reloads; ordinary reloads accept them | `reloading_blocks_commit`, `ordinary_reload_accepts` | `proofs/queue/CovenQueue/Verdicts.lean` | §16.5 |
 | *Body.* Keeping queued writes and applying the eligible ones once doesn't make their outcome equal to writes made after the reload installs: an unread reset ignores them, a breaking migration can bring a conflicting key, a newly readable circle changes authorization and key checks | `reset_counterexample`, `breaking_raise_counterexample`, `newly_readable_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §2.1, §16.5 |
 | *Body.* Without checking that a snapshot replaces the reload's selection, switching to the floor's snapshot after deletion can move coverage backward | `unchecked_reselection_goes_backwards` | `proofs/sequence/CovenSequence/ReloadExamples.lean` | §16.5 |
+| Reselection keeps the old common target and includes the floor's `at` and every selected start; a missing body requires a later announcement for the same audience with no lower coverage | `reselect_monotone`, `reselect_replacement` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
+| On good storage, loading the selected ordinary floor body and replaying to the reselected target gives the full-history state at that target | `reselect_preserves_prefix` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | A floor needs coverage for every introduced audience, even an idle circle; complete coverage places the floor past the covered cut | `floor_requires_every_audience`, `complete_coverage_advances`, `floor_covered`, `idle_audience_blocks_floor` | `proofs/sequence/CovenSequence/Retention.lean` | §16.4, §16.6 |
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
