@@ -418,6 +418,17 @@ pub(crate) fn verify_complete(
     SignedDigest::read(input, path)?.verify(path, signer, expected)
 }
 
+fn read_inner(
+    input: &mut std::io::Take<&mut SlotPlaintext>,
+    length: usize,
+    path: &ObjectPath,
+) -> Result<Vec<u8>, SyncError> {
+    if length as u64 > input.limit() {
+        return Err(damaged(path, Refusal::from(coven_format::Error::Truncated)));
+    }
+    read_exact(input, length, path)
+}
+
 fn inner(
     input: &mut SlotPlaintext,
     path: &ObjectPath,
@@ -426,17 +437,17 @@ fn inner(
     history: &History,
     readable: impl Fn(&Audience) -> bool,
 ) -> Result<DownloadedWriteStream<PartPlaintext>, SyncError> {
-    let start = input.stream_position().map_err(SyncError::disk)?;
-    let mut bytes = read_exact(input, 23, path)?;
+    let mut input = input.take(length);
+    let mut bytes = read_inner(&mut input, 23, path)?;
     let prefix_length = checked(path, WriteObjectPrefix::length(&bytes))?;
-    bytes.extend(read_exact(input, prefix_length - bytes.len(), path)?);
+    bytes.extend(read_inner(&mut input, prefix_length - bytes.len(), path)?);
     let prefix = checked(path, WriteObjectPrefix::decode(&bytes))?;
     let aad: Arc<[u8]> = Arc::from(bytes.clone());
     let mut hash = ObjectHasher::new();
     hash.update(&bytes);
-    let mut piece = read_exact(input, 4, path)?;
+    let mut piece = read_inner(&mut input, 4, path)?;
     let header_length = checked(path, WriteObjectPrefix::header_chunk_length(&piece))?;
-    piece.extend(read_exact(input, header_length - 4, path)?);
+    piece.extend(read_inner(&mut input, header_length - 4, path)?);
     hash.update(&piece);
     let sealed = checked(path, WriteObjectPrefix::header_chunk(&piece))?;
     let key = crate::write_seal::derive(ring, &coven_merge::Audience::Store, prefix.store_key)?;
@@ -482,8 +493,8 @@ fn inner(
     if expected != length {
         return Err(damaged(path, Refusal::Parse { cause: None }));
     }
-    let tail_bytes = read_exact(
-        input,
+    let tail_bytes = read_inner(
+        &mut input,
         WriteObjectPrefix::tail_length(prefix.part_keys.len()),
         path,
     )?;
@@ -533,9 +544,9 @@ fn inner(
                     coordinate.key,
                 )?);
                 hashers.push(Some(key.authorship_hasher()));
-                let position = input.stream_position().map_err(SyncError::disk)?;
+                let position = input.get_mut().stream_position().map_err(SyncError::disk)?;
                 parts.push(DownloadedPartStream::Opened(ChunkReader::new(
-                    input.clone(),
+                    input.get_mut().clone(),
                     position,
                     part.plaintext_length,
                     identity.clone(),
@@ -548,13 +559,16 @@ fn inner(
                 parts.push(DownloadedPartStream::Skipped);
             }
         }
-        let mut bytes = read_exact(input, 4, path)?;
+        let mut bytes = read_inner(&mut input, 4, path)?;
         let chunk_length = checked(path, layout.chunk_length(&bytes))?;
-        bytes.extend(read_exact(input, chunk_length - 4, path)?);
+        bytes.extend(read_inner(&mut input, chunk_length - 4, path)?);
         checked(path, layout.decode_chunk(&bytes))?;
         hash.update(&bytes);
     }
-    let signature = checked(path, layout.read_signature(&read_exact(input, 64, path)?))?;
+    let signature = checked(
+        path,
+        layout.read_signature(&read_inner(&mut input, 64, path)?),
+    )?;
     checked(path, layout.finish(&[]))?;
     signer
         .verify_object(&identity, &hash.finish(), &signature)
@@ -566,7 +580,7 @@ fn inner(
                 },
             )
         })?;
-    if input.stream_position().map_err(SyncError::disk)? - start != length {
+    if input.limit() != 0 {
         return Err(damaged(path, Refusal::Parse { cause: None }));
     }
     Ok(DownloadedWriteStream {
@@ -600,3 +614,7 @@ pub(crate) fn seal_bounded(
     );
     Ok(bytes)
 }
+
+#[cfg(test)]
+#[path = "slot_object_tests.rs"]
+mod tests;
