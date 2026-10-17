@@ -107,25 +107,29 @@ impl Record {
             self.set_text(field, directory);
         }
     }
-    pub(super) fn metadata(&self) -> Result<StoredObject, StorageError> {
+    fn metadata_fields(&self) -> Result<NativeMetadata, StorageError> {
         objc2::rc::autoreleasepool(|_| unsafe {
             if self.0.recordType().to_string() != "CovenObject" {
                 return Err(StorageFailure::Protocol.into());
             }
-            publication_metadata(
-                &self.name(),
-                &self.text("path")?,
-                &self.text("size")?,
-                self.0.creationDate().map(|v| v.timeIntervalSince1970()),
-                self.0.modificationDate().map(|v| v.timeIntervalSince1970()),
-                self.0.recordChangeTag().map(|v| v.to_string()).as_deref(),
-            )
+            Ok(NativeMetadata {
+                name: self.name(),
+                path: self.text("path")?,
+                size: self.text("size")?,
+                created: self.0.creationDate().map(|v| v.timeIntervalSince1970()),
+                modified: self.0.modificationDate().map(|v| v.timeIntervalSince1970()),
+                revision: self.0.recordChangeTag().map(|v| v.to_string()),
+            })
         })
     }
-    pub(super) fn listed(&self, prefix: &ObjectPrefix) -> Result<StoredObject, StorageError> {
-        let object = self.metadata()?;
-        check_prefix(prefix, &object.path)?;
-        Ok(object)
+    pub(super) fn metadata(&self) -> Result<StoredObject, StorageError> {
+        self.metadata_fields()?.object()
+    }
+    pub(super) fn listed(
+        &self,
+        prefix: &ObjectPrefix,
+    ) -> Result<Option<StoredObject>, StorageError> {
+        self.metadata_fields()?.listed(prefix)
     }
     pub(super) fn set_asset(
         &mut self,
@@ -168,6 +172,54 @@ impl Record {
     }
 }
 
+/// The native fields before interpreting the object path.
+struct NativeMetadata {
+    name: String,
+    path: String,
+    size: String,
+    created: Option<f64>,
+    modified: Option<f64>,
+    revision: Option<String>,
+}
+impl NativeMetadata {
+    fn object(&self) -> Result<StoredObject, StorageError> {
+        publication_metadata(
+            &self.name,
+            &self.path,
+            &self.size,
+            self.created,
+            self.modified,
+            self.revision.as_deref(),
+        )
+    }
+    fn listed(&self, prefix: &ObjectPrefix) -> Result<Option<StoredObject>, StorageError> {
+        check_prefix(prefix, &self.path)?;
+        match ObjectPath::parse(&self.path) {
+            Ok(path) => metadata_for_path(
+                &self.name,
+                path,
+                &self.size,
+                self.created,
+                self.modified,
+                self.revision.as_deref(),
+            )
+            .map(Some),
+            Err(_) => {
+                metadata_values(
+                    &self.name,
+                    &self.path,
+                    &self.size,
+                    self.created,
+                    self.modified,
+                    self.revision.as_deref(),
+                    false,
+                )?;
+                Ok(None)
+            }
+        }
+    }
+}
+
 pub(super) fn record_name(path: &ObjectPath) -> &str {
     path.as_str()
 }
@@ -178,8 +230,8 @@ pub(super) fn upload_name(path: &ObjectPath, token: &str) -> Result<String, Stor
 pub(super) fn part_name(root: &str, offset: u64) -> String {
     format!("{root}/{offset}")
 }
-pub(super) fn check_prefix(prefix: &ObjectPrefix, path: &ObjectPath) -> Result<(), StorageError> {
-    if !prefix.contains(path) {
+pub(super) fn check_prefix(prefix: &ObjectPrefix, path: &str) -> Result<(), StorageError> {
+    if !path.starts_with(prefix.as_str()) || path.split('/').any(|part| part == "..") {
         return Err(StorageFailure::Protocol
             .with_source("CloudKit query returned a record outside its prefix"));
     }
@@ -212,22 +264,50 @@ pub(super) fn publication_metadata(
 ) -> Result<StoredObject, StorageError> {
     let path =
         ObjectPath::parse(path).map_err(|error| StorageFailure::Protocol.with_source(error))?;
+    metadata_for_path(name, path, size, created, modified, revision)
+}
+
+fn metadata_values<'a>(
+    name: &str,
+    path: &str,
+    size: &str,
+    created: Option<f64>,
+    modified: Option<f64>,
+    revision: Option<&'a str>,
+    replaceable: bool,
+) -> Result<(u64, StorageTime, &'a str), StorageError> {
     let revision = revision
         .filter(|value| !value.is_empty())
         .ok_or(StorageFailure::Protocol)?;
-    if name != record_name(&path) {
+    if name != path {
         return Err(StorageFailure::Protocol.into());
     }
     let size = size
         .parse()
         .map_err(|error| StorageFailure::Protocol.with_source(error))?;
-    let seconds = if path.is_replaceable() {
-        modified
-    } else {
-        created
-    }
-    .ok_or(StorageFailure::Protocol)?;
-    let stored_at = whole_milliseconds(seconds)?;
+    let created = created.map(whole_milliseconds).transpose()?;
+    let modified = modified.map(whole_milliseconds).transpose()?;
+    let stored_at = if replaceable { modified } else { created }.ok_or(StorageFailure::Protocol)?;
+    Ok((size, stored_at, revision))
+}
+
+fn metadata_for_path(
+    name: &str,
+    path: ObjectPath,
+    size: &str,
+    created: Option<f64>,
+    modified: Option<f64>,
+    revision: Option<&str>,
+) -> Result<StoredObject, StorageError> {
+    let (size, stored_at, revision) = metadata_values(
+        name,
+        path.as_str(),
+        size,
+        created,
+        modified,
+        revision,
+        path.is_replaceable(),
+    )?;
     Ok(StoredObject {
         path,
         size,

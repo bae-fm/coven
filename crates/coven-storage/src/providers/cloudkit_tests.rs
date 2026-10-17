@@ -61,14 +61,14 @@ fn prefix_conversion_rejects_another_writer_or_store() {
         FileId(uuid::Uuid::from_u128(1)),
     );
     let prefix = ObjectPrefix::device_files(path.store(), DeviceId(7));
-    check_prefix(&prefix, &path).unwrap();
+    check_prefix(&prefix, path.as_str()).unwrap();
     for other in [
         ObjectPath::slot(path.store(), NonZeroU64::MIN),
         ObjectPath::slot(StoreId(uuid::Uuid::from_u128(2)), NonZeroU64::MIN),
         ObjectPath::floor(path.store()),
     ] {
         assert_eq!(
-            check_prefix(&prefix, &other).unwrap_err().failure(),
+            check_prefix(&prefix, other.as_str()).unwrap_err().failure(),
             StorageFailure::Protocol
         );
     }

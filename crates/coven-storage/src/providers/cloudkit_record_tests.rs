@@ -158,3 +158,82 @@ fn an_empty_or_missing_account_is_authentication() {
     }
     assert_eq!(account_name(Some("_owner".into())).unwrap(), "_owner");
 }
+
+#[test]
+fn listing_skips_non_d10_paths_after_checking_native_metadata() {
+    let store = coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(1));
+    let prefix = ObjectPrefix::all(store);
+    let path = format!("{store}/unrelated");
+    let fields = NativeMetadata {
+        name: path.clone(),
+        path,
+        size: "64".into(),
+        created: Some(20.0),
+        modified: Some(30.0),
+        revision: Some("tag".into()),
+    };
+    for suffix in ["unrelated", "/unrelated", "./unrelated", "unrelated/"] {
+        let path = format!("{store}/{suffix}");
+        let unrelated = NativeMetadata {
+            name: path.clone(),
+            path,
+            size: fields.size.clone(),
+            created: fields.created,
+            modified: fields.modified,
+            revision: fields.revision.clone(),
+        };
+        assert!(unrelated.listed(&prefix).unwrap().is_none());
+    }
+    for index in 0..10 {
+        let mut bad = NativeMetadata {
+            name: fields.name.clone(),
+            path: fields.path.clone(),
+            size: fields.size.clone(),
+            created: fields.created,
+            modified: fields.modified,
+            revision: fields.revision.clone(),
+        };
+        match index {
+            0 => bad.name.push('x'),
+            1 => bad.size = "-1".into(),
+            2 => bad.created = None,
+            3 => bad.created = Some(f64::NAN),
+            4 => bad.modified = Some(-1.0),
+            5 => bad.revision = None,
+            6 => bad.revision = Some(String::new()),
+            7 => {
+                bad.path = format!("{}/unrelated", uuid::Uuid::from_u128(2));
+                bad.name = bad.path.clone();
+            }
+            8 => {
+                bad.path = format!("{store}/../unrelated");
+                bad.name = bad.path.clone();
+            }
+            9 => {
+                bad.path = format!("{store}/files/other");
+                bad.name = bad.path.clone();
+            }
+            _ => unreachable!(),
+        }
+        let requested = if index == 9 {
+            ObjectPrefix::device_files(store, coven_foundation::id_source::DeviceId(1))
+        } else {
+            prefix.clone()
+        };
+        assert_eq!(
+            bad.listed(&requested).unwrap_err().failure(),
+            StorageFailure::Protocol,
+            "case {index}"
+        );
+    }
+    let path = ObjectPath::floor(store);
+    let valid = NativeMetadata {
+        name: path.as_str().into(),
+        path: path.as_str().into(),
+        size: "64".into(),
+        created: None,
+        modified: Some(30.0),
+        revision: Some("tag".into()),
+    };
+    assert_eq!(valid.listed(&prefix).unwrap().unwrap().path, path);
+}

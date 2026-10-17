@@ -223,7 +223,7 @@ impl ProviderOps for CloudKitStorage {
                 self.query_pages.clone(),
             );
             let (records, next) = request.wait().await?;
-            for object in records {
+            for object in records.into_iter().flatten() {
                 listing.insert(object)?;
             }
             match next {
