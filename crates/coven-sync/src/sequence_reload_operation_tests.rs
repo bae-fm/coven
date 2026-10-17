@@ -493,3 +493,165 @@ async fn sequence_queue_breaking_raise_matches_lean() {
         )
     );
 }
+
+async fn circle_device(group: &Group, seed: u8) -> Device {
+    use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
+    use coven_foundation::id_source::{IdSource, MemberId};
+    let (temp, directory) = group.directory();
+    let identity = coven_crypto::MemberIdentity::new(
+        MemberId(group.ids.new_id()),
+        coven_format::test_utils::keys_from_seed(seed),
+    );
+    let database = DatabaseBuilder::new(directory)
+        .synced_tables(vec![
+            SyncedTable::new("notes", RowIdentity::SharedKey),
+            SyncedTable::new("pins", RowIdentity::SharedKey)
+                .key_columns(["audience", "id"])
+                .audience_column("audience"),
+        ])
+        .migrations(vec![Migration::sql(
+            1,
+            "shared circle keys",
+            "CREATE TABLE notes(id TEXT PRIMARY KEY NOT NULL,title TEXT NOT NULL);
+             CREATE TABLE pins(id TEXT NOT NULL,audience TEXT NOT NULL,title TEXT NOT NULL,
+                PRIMARY KEY(audience,id))",
+        )])
+        .open()
+        .await
+        .unwrap();
+    group
+        .attach(
+            temp,
+            identity,
+            Some(group.ring.clone()),
+            group.storage.for_device(),
+            database,
+        )
+        .await
+}
+
+async fn newly_readable() -> Value {
+    use coven_format::admin::StoreChange;
+    let group = Group::new();
+    let ana = circle_device(&group, 1).await;
+    let ben = circle_device(&group, 2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Shared keys".into()).await.unwrap();
+    pin(ana.database(), "7", circle, "loaded").await;
+    ana.sync.pass().await.unwrap();
+    let snapshot = ana.sync.snapshot(Audience::Circle(circle)).await.unwrap();
+    read(&ben).await;
+    let before = ben
+        .database()
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO pins VALUES('8',?1,'fresh')",
+                [circle.to_string()],
+            )?;
+            Ok(())
+        })
+        .await;
+    assert!(
+        matches!(&before, Err(DbError::NotInCircle(_))),
+        "{before:?}"
+    );
+    // Observe the actual SQL key check before history is loaded. Membership
+    // still refuses the transaction; projecting future membership cannot
+    // change this key check into the check against the loaded rows.
+    let (send, empty_key) = tokio::sync::oneshot::channel();
+    let empty = ben
+        .database()
+        .write(move |sql| {
+            let result = sql.execute(
+                "INSERT INTO pins VALUES('7',?1,'candidate')",
+                [circle.to_string()],
+            );
+            send.send(result.is_ok()).unwrap();
+            result?;
+            Ok(())
+        })
+        .await;
+    assert!(matches!(empty, Err(DbError::NotInCircle(_))), "{empty:?}");
+    let empty_key_allowed = empty_key.await.unwrap();
+    assert!(empty_key_allowed);
+    ana.sync
+        .administer(StoreChange::AddCircleMember {
+            circle,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    let snapshot = ana.sync.session.lock().await.history.announcements[&snapshot]
+        .snapshot
+        .clone();
+    let path = crate::snapshot_object::path(group.store, &snapshot).unwrap();
+    during_load(&ben, path, async {
+        let during = ben
+            .database()
+            .write(move |sql| {
+                sql.execute(
+                    "INSERT INTO pins VALUES('8',?1,'fresh')",
+                    [circle.to_string()],
+                )?;
+                Ok(())
+            })
+            .await;
+        assert!(
+            matches!(during, Err(DbError::AudienceReloading(Audience::Circle(c))) if c == circle)
+        );
+    })
+    .await;
+    let loaded = ben
+        .database()
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO pins VALUES('7',?1,'candidate')",
+                [circle.to_string()],
+            )?;
+            Ok(())
+        })
+        .await;
+    assert!(
+        matches!(&loaded, Err(DbError::Sqlite(error))
+        if error.to_string() == "UNIQUE constraint failed: pins.audience, pins.id"),
+        "{loaded:?}"
+    );
+    let after = ben
+        .database()
+        .write(move |sql| {
+            sql.execute(
+                "INSERT INTO pins VALUES('8',?1,'fresh')",
+                [circle.to_string()],
+            )?;
+            Ok(())
+        })
+        .await;
+    assert!(after.is_ok(), "{after:?}");
+    assert_eq!(
+        pins(ben.database()).await,
+        [("7".into(), "loaded".into()), ("8".into(), "fresh".into())]
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+    json!({"before_allowed":before.is_ok(),"after_allowed":after.is_ok(),
+        "empty_key_allowed":empty_key_allowed,"loaded_key_allowed":loaded.is_ok()})
+}
+
+#[tokio::test]
+async fn a_new_circle_changes_membership_and_key_checks_when_history_installs() {
+    newly_readable().await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_queue_newly_readable_matches_lean() {
+    assert_eq!(
+        newly_readable().await,
+        crate::tests::run_lean(
+            "COVEN_SEQUENCE_LEAN",
+            &json!({"kind":"queueReload", "scenario":"newlyReadable"})
+        )
+    );
+}
