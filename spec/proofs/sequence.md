@@ -267,6 +267,14 @@ secret: excluding a stolen device's retained member credential requires
 replacement (or removing that member). Rotation cannot erase previously
 downloaded ciphertext or secrets.
 
+[`KeyCustody`](sequence/CovenSequence/KeyCustody.lean) separates the journal's
+key identity and public commitment from secret material in custody.
+`saved_before_prepared` requires saved material before recording its commitment;
+`restart_reuses_saved` keeps that material on restart, and `save_keeps_other`
+preserves other keys. `journal_depends_only_on_commitment` makes the journal's
+observation independent of secrets with the same commitment. Rust tests also
+scan the physical SQLite files, whose encoding is outside the model.
+
 ## Unique values and owner rows
 
 [`Unique`](sequence/CovenSequence/Unique.lean), per audience:
@@ -816,6 +824,13 @@ each audience with `first` (key or null) and `sending` (key, unavailable key,
 or `removed`/`notAllowed` error), and `metadata` (key or null). `first` is
 restricted to current members. `sending` also permits the old-circle-original
 case; eligibility of those originals is checked outside this projection.
+
+**`keyCustody`** calls `KeyCustody.save` and `ready` with `audience`, `key`,
+nullable `held`, and `fresh`. The material tokens also stand for their public
+commitments in this case. The answer is `{audience,key,hash}`, reusing `held`
+when present. `key_custody_preparation_matches_lean` compares real reopened
+preparations before and after the custody commit; cryptographic hashing itself
+is outside this projection.
 
 **`rotation`** takes the same fields and `rotation:{audience,key,hash,members}`.
 The fresh generated key must already be in custody. The runner requires a

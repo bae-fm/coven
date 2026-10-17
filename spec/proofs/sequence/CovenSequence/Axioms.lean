@@ -226,3 +226,8 @@ import SequenceApply
 #print axioms CovenSequence.KeysExamples.unbound_recipient_exposes_key
 #print axioms CovenSequence.KeysExamples.departed_circle_original_can_use_exposed_key
 #print axioms CovenSequence.KeysExamples.device_removal_keeps_credentials
+
+#print axioms CovenSequence.KeyCustody.saved_before_prepared
+#print axioms CovenSequence.KeyCustody.restart_reuses_saved
+#print axioms CovenSequence.KeyCustody.save_keeps_other
+#print axioms CovenSequence.KeyCustody.journal_depends_only_on_commitment

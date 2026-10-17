@@ -275,6 +275,7 @@ def run (j : Json) : Except String Json := do
   | "apply" => readApply j
   | "past" => readPast j
   | "keys" => SequenceKeys.readKeys j
+  | "keyCustody" => SequenceKeys.readCustody j
   | "rotation" => SequenceKeys.readRotation j
   | "queueReload" => readQueueReload j
   | _ => throw "unknown case kind"

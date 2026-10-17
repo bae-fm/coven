@@ -1,5 +1,6 @@
 import SequenceInput
 import CovenSequence.Keys
+import CovenSequence.KeyCustody
 
 /-! Authenticated key-slot projections and the current membership/custody at
 one applied prefix. Hash and exact credential numbers are equality tokens;
@@ -74,6 +75,17 @@ def result (input : Input) (h : History Nat Nat) : Json := Json.mkObj [
 def readKeys (j : Json) : Except String Json := do
   let input ← readInput j
   return result input (publish ⟨[], []⟩ 0 input.slots)
+
+def readCustody (j : Json) : Except String Json := do
+  let held ← j.getObjValAs? (Option Nat) "held"
+  let fresh ← nat j "fresh"
+  let k ← key j
+  let saved := CovenSequence.KeyCustody.save (fun _ => held) k fresh
+  match CovenSequence.KeyCustody.ready id saved k with
+  | .generating _ => throw "saving must precede a prepared commitment"
+  | .prepared key hash =>
+    return Json.mkObj [("audience", toJson key.audience), ("key", toJson key.id),
+      ("hash", toJson hash)]
 
 def readRotation (j : Json) : Except String Json := do
   let input ← readInput j

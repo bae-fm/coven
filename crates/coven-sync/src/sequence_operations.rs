@@ -25,11 +25,11 @@ use std::io::Cursor;
 pub(crate) enum Request {
     Change(#[serde(with = "change")] StoreChange),
     Snapshot(SnapshotRequest),
+    Key(super::sequence_keys::KeyPreparation),
 }
 #[derive(Serialize, Deserialize)]
 pub(crate) enum Step {
     Preparing,
-    InstallingKey(Vec<u8>),
     Copy(#[serde(with = "route")] KeyCopyPrefix),
     Claiming,
     CreatorCopy(u64),
@@ -74,6 +74,7 @@ impl SequenceOperation {
     }
     fn kind(&self) -> crate::OperationKind {
         match &self.request {
+            Request::Key(target) => target.kind(),
             Request::Change(change) => operation_kind(change),
             Request::Snapshot(request) => match request.purpose {
                 Purpose::Ordinary => crate::OperationKind::WriteSnapshot,
@@ -229,6 +230,7 @@ impl SequenceSync {
         request: &Request,
     ) -> Result<bool, OperationRejection> {
         match request {
+            Request::Key(_) => unreachable!("key preparation supplies its public commitment first"),
             Request::Change(change) => session
                 .history
                 .validate(
@@ -400,6 +402,11 @@ impl SequenceSync {
                 }
                 _ => (),
             }
+            if let Request::Key(target) = request {
+                self.prepare_audience_key(session, ring, member, &record, target)
+                    .await?;
+                continue;
+            }
             if let Some(claim) = self.database.current_claim().await? {
                 if claim.work != ClaimWork::Operation(id) {
                     return Err(coven_database::DbError::ClaimPending.into());
@@ -533,37 +540,9 @@ impl SequenceSync {
                 }
                 Ok(true) => (),
             }
-            if let Step::InstallingKey(bytes) = &step {
-                let prepared = StoreKeyring::from_secret_bytes(bytes)?;
-                for id in prepared.store_key_ids() {
-                    ring.insert_store_key(prepared.store_key(id)?.clone())?;
-                }
-                if let Request::Change(
-                    StoreChange::CreateCircle { circle, .. }
-                    | StoreChange::RotateKey {
-                        audience: Audience::Circle(circle),
-                        ..
-                    },
-                ) = &request
-                {
-                    for id in prepared.circle_key_ids(*circle) {
-                        ring.insert_circle_key(prepared.circle_key(*circle, id)?.clone())?;
-                    }
-                }
-                self.keys.persist(ring)?;
-                self.database
-                    .advance_operation(
-                        SequenceOperation {
-                            request,
-                            progress: Progress::Running(Step::Preparing),
-                        }
-                        .update(&record)?,
-                    )
-                    .await?;
-                continue;
-            }
             if matches!(step, Step::Preparing) {
                 step = match &request {
+                    Request::Key(_) => unreachable!("key preparation has advanced"),
                     Request::Change(change) => match required_copies(&session.history, ring, change, member.member()).into_iter().find(|route|
                         !session.history.copies.iter().any(|copy| matches!(&copy.prefix.kind, SlotKind::KeyCopy(copy) if &copy.routing == route))) {
                         Some(route) => Step::Copy(route), None => Step::Claiming,

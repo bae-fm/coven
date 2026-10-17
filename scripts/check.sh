@@ -290,6 +290,7 @@ proofs() {
             sequence_sync::sequence_claim::tests::differential::sequence_kept_settlement_matches_lean \
             effects::tests::sequence_differential::sequence_admin_matches_lean \
             history::tests::sequence_key_selection_matches_lean \
+            sequence_sync::sequence_keys::tests::key_custody_preparation_matches_lean \
             sequence_sync::sequence_keys::tests::sequence_rotation_matches_lean
     fi
 

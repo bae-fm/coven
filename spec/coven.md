@@ -1882,11 +1882,12 @@ to get it right. That path is an *operation*.
 5. **Finish.** Once the claim settles, apply the entry and do the local work it
    needs, such as installing a new key in custody, before reporting success.
 
-Ben rotates the Gifts key. His journal holds the new key, K2, and the copies he
-claimed at slots 41 and 42. He sends his entry for slot 43 and crashes before the
-reply. On restart he settles 43 first. If his rotation landed, he finishes it. If
-another entry took 43, he applies it and checks again. If 43 removed him from
-Gifts, his call undoes what's left and fails. Copies 41 and 42 stay in history.
+Ben rotates the Gifts key. His journal holds K2's id and the copies he claimed
+at slots 41 and 42; the key itself stays in custody (§12.4). He sends his entry
+for slot 43 and crashes before the reply. On restart he settles 43 first. If his
+rotation landed, he finishes it. If another entry took 43, he applies it and
+checks again. If 43 removed him from Gifts, his call undoes what's left and
+fails. Copies 41 and 42 stay in history.
 
 Without settling first, a restarted operation would check again, claim 44, and
 land twice
@@ -2165,6 +2166,13 @@ holds still match Ana's current keys.
 *Custody* is where secret keys live: the OS keychain by default, or another
 store the app supplies. Members' private keys and audience keys stay in custody,
 never in the database.
+
+Preparation follows that boundary too. The journal records the audience and
+new key's id before saving its material in custody. Once saved, its public hash
+joins the journal, and copies can be claimed. A restart reuses the saved key;
+if custody had not saved it yet, no copy could have been sent. This keeps secret
+material out of both the operation journal and SQLite's database, WAL and rollback
+journal files.
 
 - Store creation sets up the member in custody before publishing the store.
 - A device keeps every earlier private sealing key it still needs to open old
@@ -6262,6 +6270,7 @@ Write-ups explain each model and state its assumptions:
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | An operation occupies at most one slot; a landed one passed validation against the slots before it; a confirmed undo leaves neither slot bytes nor anything it made | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | *Body.* An undo that doesn't wait for in-flight creates leaves something behind | `eager_undo_leaks` | `proofs/sequence/CovenSequence/Operation.lean` | §11.3 |
+| Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 

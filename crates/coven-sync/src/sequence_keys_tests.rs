@@ -199,3 +199,144 @@ async fn rotation_does_not_need_preceding_circle_material() {
     drop(session);
     ana.sync.database.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn audience_keys_never_enter_database_files() {
+    let mut group = Group::new();
+    group.passphrase_custody = true;
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    for audience in [Audience::Circle(circle), Audience::Store] {
+        ana.sync.rotate_key(audience).await.unwrap();
+    }
+    let held = ana.sync.keys.read().unwrap().unwrap();
+    assert_database_has_no_keys(&ana, &held, circle);
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        ana.sync
+            .keys
+            .read()
+            .unwrap()
+            .unwrap()
+            .to_secret_bytes()
+            .as_bytes(),
+        held.to_secret_bytes().as_bytes()
+    );
+    assert_database_has_no_keys(&ana, &held, circle);
+    ana.database().close().await.unwrap();
+    assert_database_has_no_keys(&ana, &held, circle);
+}
+
+fn assert_database_has_no_keys(ana: &Device, ring: &StoreKeyring, circle: CircleId) {
+    let encoded = ring.to_secret_bytes();
+    let secrets: Vec<_> = ring
+        .store_key_ids()
+        .chain(ring.circle_key_ids(circle))
+        .map(|id| {
+            let offset = encoded
+                .as_bytes()
+                .windows(16)
+                .position(|bytes| bytes == id.0.as_bytes())
+                .unwrap()
+                + 16;
+            encoded.as_bytes()[offset..offset + 32].to_vec()
+        })
+        .collect();
+    let path = ana.sync.directory.database_path();
+    let mut scanned = Vec::new();
+    for entry in std::fs::read_dir(path.parent().unwrap()).unwrap() {
+        let entry = entry.unwrap();
+        if !entry.file_name().to_str().unwrap().starts_with("store.db") {
+            continue;
+        }
+        let bytes = std::fs::read(entry.path()).unwrap();
+        for secret in &secrets {
+            let json = serde_json::to_vec(secret).unwrap();
+            for needle in [secret.as_slice(), &json[1..json.len() - 1]] {
+                assert!(
+                    !bytes.windows(needle.len()).any(|bytes| bytes == needle),
+                    "audience key reached {:?}",
+                    entry.file_name()
+                );
+            }
+        }
+        scanned.push(entry.file_name());
+    }
+    assert!(scanned.iter().any(|name| name == "store.db"));
+}
+
+async fn resume_key_generation(saved: bool) -> serde_json::Value {
+    use coven_foundation::id_source::IdSource;
+    let mut group = Group::new();
+    group.passphrase_custody = true;
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let circle = CircleId(group.ids.new_id());
+    let key = KeyId(group.ids.new_id());
+    let record = ana
+        .database()
+        .start_operation(NewOperation {
+            kind: "sequence".into(),
+            data: serde_json::to_vec(&SequenceOperation {
+                request: Request::Key(KeyPreparation::Circle {
+                    circle,
+                    key,
+                    name: "Gifts".into(),
+                }),
+                progress: Progress::Running(Step::Preparing),
+            })
+            .unwrap(),
+            started_by: "key".into(),
+            pauses_writes: false,
+        })
+        .await
+        .unwrap();
+    let kept = coven_crypto::CircleKey::from_bytes(circle, key, [29; 32]);
+    if saved {
+        let mut ring = ana.sync.keys.read().unwrap().unwrap();
+        ring.insert_circle_key(kept.clone()).unwrap();
+        ana.sync.keys.persist(&ring).unwrap();
+    }
+    let ana = group.reopen(ana).await;
+    ana.sync.pass().await.unwrap();
+    assert!(ana.database().operation(record).await.unwrap().is_none());
+    let ring = ana.sync.keys.read().unwrap().unwrap();
+    let hash = ring.circle_key(circle, key).unwrap().hash();
+    assert_eq!(
+        hash == kept.hash(),
+        saved,
+        "a restart must reuse saved material"
+    );
+    let session = ana.sync.session.lock().await;
+    let introduction = session.history.introductions.last().unwrap();
+    assert_eq!(introduction.key, key);
+    assert_eq!(introduction.audience, Audience::Circle(circle));
+    assert_eq!(introduction.hash, hash);
+    assert_database_has_no_keys(&ana, &ring, circle);
+    let output = json!({"audience":1,"key":1,"hash":if hash == kept.hash() {2} else {1}});
+    drop(session);
+    ana.database().close().await.unwrap();
+    output
+}
+
+#[tokio::test]
+async fn key_generation_resumes_on_either_side_of_the_custody_commit() {
+    for saved in [false, true] {
+        resume_key_generation(saved).await;
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN"]
+async fn key_custody_preparation_matches_lean() {
+    for saved in [false, true] {
+        let input = json!({"kind":"keyCustody","audience":1,"key":1,
+            "held":saved.then_some(2),"fresh":1});
+        assert_eq!(
+            resume_key_generation(saved).await,
+            crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input)
+        );
+    }
+}

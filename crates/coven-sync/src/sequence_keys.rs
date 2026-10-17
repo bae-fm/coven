@@ -5,11 +5,36 @@ use crate::{
     SyncError,
 };
 use coven_crypto::{MemberIdentity, StoreKeyring};
-use coven_database::NewOperation;
+use coven_database::{NewOperation, OperationRecord};
 use coven_format::admin::StoreChange;
 use coven_foundation::id_source::{CircleId, KeyId};
 use coven_merge::Audience;
+use serde::{Deserialize, Serialize};
 use std::sync::Arc;
+
+/// The journal names material in custody; it never carries the material (§12.4).
+#[derive(Clone, Serialize, Deserialize)]
+pub(crate) enum KeyPreparation {
+    Circle {
+        circle: CircleId,
+        name: String,
+        key: KeyId,
+    },
+    Rotation {
+        #[serde(with = "crate::pending_encoding::audience")]
+        audience: Audience,
+        key: KeyId,
+    },
+}
+
+impl KeyPreparation {
+    pub(crate) fn kind(&self) -> crate::OperationKind {
+        match self {
+            Self::Circle { .. } => crate::OperationKind::CreateCircle,
+            Self::Rotation { .. } => crate::OperationKind::RotateKey,
+        }
+    }
+}
 
 impl SequenceSync {
     /// Create a new circle and the copies that introduce its first key.
@@ -57,50 +82,18 @@ impl SequenceSync {
         name: Option<String>,
     ) -> Result<(), SyncError> {
         let id = KeyId(self.ids.new_id());
-        let mut prepared = ring.clone();
-        let hash = match audience {
-            Audience::Store => {
-                let key = coven_crypto::StoreKey::generate(id)?;
-                let hash = key.hash();
-                prepared.insert_store_key(key)?;
-                hash
-            }
-            Audience::Circle(circle) => {
-                let key = coven_crypto::CircleKey::generate(circle, id)?;
-                let hash = key.hash();
-                prepared.insert_circle_key(key)?;
-                hash
-            }
-        };
-        let change = match (audience, name) {
-            (Audience::Circle(circle), Some(name)) => StoreChange::CreateCircle {
+        let target = match (audience, name) {
+            (Audience::Circle(circle), Some(name)) => KeyPreparation::Circle {
                 circle,
                 name,
                 key: id,
-                key_hash: hash,
             },
-            (audience, None) => StoreChange::RotateKey {
-                audience,
-                key: id,
-                key_hash: hash,
-            },
+            (audience, None) => KeyPreparation::Rotation { audience, key: id },
             (Audience::Store, Some(_)) => unreachable!("only circle creation names its audience"),
         };
-        session.history.validate(
-            &coven_format::sequence::SlotHeader {
-                device: self.device,
-                claim: 1,
-                author: member.member(),
-                after: session.through,
-            },
-            coven_merge::Slot(session.through + 1),
-            &change,
-        )?;
         let work = SequenceOperation {
-            request: Request::Change(change),
-            progress: Progress::Running(Step::InstallingKey(
-                prepared.to_secret_bytes().as_bytes().to_vec(),
-            )),
+            request: Request::Key(target),
+            progress: Progress::Running(Step::Preparing),
         };
         let id = self
             .database
@@ -114,6 +107,80 @@ impl SequenceSync {
         self.run_administration(session, ring, member, id)
             .await
             .map(drop)
+    }
+
+    pub(crate) async fn prepare_audience_key(
+        &self,
+        session: &Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+        record: &OperationRecord,
+        target: KeyPreparation,
+    ) -> Result<(), SyncError> {
+        let (audience, key) = match &target {
+            KeyPreparation::Circle { circle, key, .. } => (Audience::Circle(*circle), *key),
+            KeyPreparation::Rotation { audience, key } => (audience.clone(), *key),
+        };
+        let mut prepared = ring.clone();
+        // A crash after custody committed but before the journal advanced
+        // reuses that exact key. Before custody committed, nothing used it (§12.4).
+        let hash = match audience {
+            Audience::Store => {
+                if !prepared.store_key_ids().any(|id| id == key) {
+                    prepared.insert_store_key(coven_crypto::StoreKey::generate(key)?)?;
+                }
+                prepared.store_key(key)?.hash()
+            }
+            Audience::Circle(circle) => {
+                if !prepared.circle_key_ids(circle).any(|id| id == key) {
+                    prepared.insert_circle_key(coven_crypto::CircleKey::generate(circle, key)?)?;
+                }
+                prepared.circle_key(circle, key)?.hash()
+            }
+        };
+        let change = match target {
+            KeyPreparation::Circle { circle, name, key } => StoreChange::CreateCircle {
+                circle,
+                name,
+                key,
+                key_hash: hash,
+            },
+            KeyPreparation::Rotation { audience, key } => StoreChange::RotateKey {
+                audience,
+                key,
+                key_hash: hash,
+            },
+        };
+        let progress = match session.history.validate(
+            &coven_format::sequence::SlotHeader {
+                device: self.device,
+                claim: 1,
+                author: member.member(),
+                after: session.through,
+            },
+            coven_merge::Slot(session.through + 1),
+            &change,
+        ) {
+            Ok(_) => {
+                self.keys.persist(&prepared)?;
+                *ring = prepared;
+                Progress::Running(Step::Preparing)
+            }
+            Err(reason) => Progress::Undo {
+                step: Step::Preparing,
+                reason,
+            },
+        };
+        self.database
+            .advance_operation(
+                SequenceOperation {
+                    request: Request::Change(change),
+                    progress,
+                }
+                .update(record)?,
+            )
+            .await?;
+        Ok(())
     }
     pub(crate) async fn rotate_exposed(
         &self,
@@ -137,7 +204,12 @@ impl SequenceSync {
                     .find(|intro| intro.audience == audience)
                     .is_some_and(|intro| session.history.exposed(&audience, intro.key))
             {
-                let rotates = |request: &Request| matches!(request, Request::Change(StoreChange::RotateKey { audience: rotated, .. }) if *rotated == audience);
+                let rotates = |request: &Request| {
+                    matches!(request,
+                    Request::Change(StoreChange::RotateKey { audience: rotated, .. })
+                    | Request::Key(KeyPreparation::Rotation { audience: rotated, .. })
+                    if *rotated == audience)
+                };
                 // A journaled rotation resumes under its own backoff.
                 if self.journaled(rotates).await? {
                     continue;
