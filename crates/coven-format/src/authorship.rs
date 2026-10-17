@@ -9,7 +9,9 @@
 use crate::error::{bound, require, Error, Rule};
 use crate::value::{name, row, Value};
 use crate::wire::{get_blob, put_blob, wire_struct, Decoder, Encoder, Wire, MAX_ITEMS};
-use crate::write::{PartRecord, RowChange, RowExecution, Step, WritePart};
+#[cfg(any(test, feature = "test-utils"))]
+use crate::write::WritePart;
+use crate::write::{PartRecord, RowChange, RowExecution, Step};
 use crate::write_sources::ChangeId;
 use coven_merge::{ColumnValue, Operation, RowId};
 
@@ -256,6 +258,7 @@ pub fn record_leaves(record: PartRecord<'_>) -> Vec<Leaf> {
 }
 
 /// Every leaf of a part, in its stream's record order. Dismissals have none.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn part_leaves(part: &WritePart) -> Vec<Leaf> {
     part.records().flat_map(record_leaves).collect()
 }
@@ -327,6 +330,7 @@ pub fn root_of_hashes(hashes: &[[u8; 32]]) -> [u8; 32] {
 }
 
 /// The root of a part over its leaves.
+#[cfg(any(test, feature = "test-utils"))]
 pub fn root(hasher: &impl PartHasher, leaves: &[Leaf]) -> Result<[u8; 32], Error> {
     let mut builder = RootBuilder::new(hasher);
     for leaf in leaves {
@@ -370,6 +374,7 @@ impl Wire for Multiproof {
 }
 impl Multiproof {
     /// Open the leaves `keep` selects, hiding each subtree that has none.
+    #[cfg(any(test, feature = "test-utils"))]
     pub fn prove(
         hasher: &impl PartHasher,
         leaves: &[Leaf],
