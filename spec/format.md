@@ -738,9 +738,9 @@ steps, through the references as replayed up to each step.
 are the sources the steps used beyond those the net change already names, in the
 same role order (D5.6).
 
-**Changes without SQL.** A change coven made without SQL has no steps: an
-audience move, a dismissal's delete of a removed row, or a migration's
-difference.
+**Changes without SQL.** Audience moves and migration differences have no steps.
+A dismissal records its deletes as steps, a parent before the children whose
+deletes it causes, so receivers can verify the children's permission (§9.6).
 
 ### D5.9 Execution records (kind 13)
 

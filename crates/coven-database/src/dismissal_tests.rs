@@ -229,3 +229,156 @@ async fn a_failed_dismissal_rolls_back_its_delete_losses_position_and_queue() {
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn dismissing_a_parent_records_its_owned_cascade_chain_in_one_write() {
+    cascade_deletions(|_, _| {}).await;
+}
+
+pub(crate) async fn cascade_deletions(
+    mut compare: impl FnMut(&crate::Database, &coven_format::write::WriteRecord),
+) {
+    use crate::author_judgement::tests::deliver;
+    use crate::judge::tests::{causes, key, verdict};
+    use coven_format::snapshot_rows::ChangeVerdict;
+    use coven_merge::Operation;
+
+    for select_all in [false, true] {
+        let ids = SequentialIds::new();
+        let sa = TestStore::with_ids(&ids);
+        let sb = TestStore::with_ids(&ids);
+        let tables = || {
+            vec![
+                crate::SyncedTable::new("parents", crate::RowIdentity::SharedKey),
+                crate::SyncedTable::new("children", crate::RowIdentity::SharedKey).owner_only(),
+                crate::SyncedTable::new("grandchildren", crate::RowIdentity::SharedKey)
+                    .owner_only(),
+            ]
+        };
+        let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT UNIQUE);
+        CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE CASCADE);
+        CREATE TABLE grandchildren(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES children(id) ON DELETE CASCADE)";
+        let a = sa.schema(tables(), schema).await.unwrap();
+        let b = sb.schema(tables(), schema).await.unwrap();
+        for db in [&a, &b] {
+            TestStore::register(db, sa.device(), 1);
+            TestStore::register(db, sb.device(), 2);
+        }
+        sql(&a, "INSERT INTO parents VALUES('a','same')")
+            .await
+            .unwrap();
+        sql(
+            &b,
+            "INSERT INTO parents VALUES('b','same'),('other','other');
+        INSERT INTO children VALUES('c','b'),('other','other');
+        INSERT INTO grandchildren VALUES('g','c')",
+        )
+        .await
+        .unwrap();
+        deliver(&a, &b).await;
+        deliver(&b, &a).await;
+        let losses: Vec<_> = a
+            .lost_values()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|loss| select_all || loss.table == "parents")
+            .collect();
+        assert_eq!(losses.len(), if select_all { 3 } else { 1 });
+        let before = data(&a).await;
+        a.inspect_writer(|sql| sql.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse"));
+        assert!(a.dismiss_lost_values(&losses).await.is_err());
+        assert_eq!(data(&a).await, before);
+        a.inspect_writer(|sql| sql.batch("DROP TRIGGER refuse").unwrap());
+        a.dismiss_lost_values(&losses).await.unwrap();
+        let record = records(&a).pop().unwrap();
+        assert_eq!(record.parts[0].rows.len(), 3);
+        for change in &record.parts[0].rows {
+            assert_eq!(change.change.operation, Operation::Delete);
+            assert_eq!(change.change.generation, 1);
+            assert_eq!(change.execution.steps.len(), 1);
+        }
+        b.receive(record.clone().into()).await.unwrap();
+        compare(&b, &record);
+        for db in [&a, &b] {
+            assert_eq!(
+                verdict(db, &record, &key("children", "c")),
+                ChangeVerdict::Derived(causes(&record, &[("parents", "b")]))
+            );
+            assert_eq!(
+                verdict(db, &record, &key("grandchildren", "g")),
+                ChangeVerdict::Derived(causes(&record, &[("parents", "b"), ("children", "c")]))
+            );
+            assert!(db.lost_values().await.unwrap().is_empty());
+            assert_eq!(count(db, "children"), 1);
+            db.inspect_writer_schema(|writer, schema| {
+                let app = crate::write_rows::AppView::after(writer, schema);
+                let store = crate::merge_store::MergeStore::new(writer, &app);
+                for change in &record.parts[0].rows {
+                    assert_eq!(store.row(&change.row).unwrap().state.generation(), 2);
+                }
+            });
+        }
+        assert_eq!(data(&a).await, data(&b).await);
+        let queued = records(&a).len();
+        a.dismiss_lost_values(&losses).await.unwrap();
+        assert_eq!(records(&a).len(), queued);
+        sql(
+            &b,
+            "INSERT INTO children VALUES('c','other'); INSERT INTO grandchildren VALUES('g','c')",
+        )
+        .await
+        .unwrap();
+        let restored = records(&b).pop().unwrap();
+        assert!(restored.parts[0].rows.iter().all(
+            |r| r.change.generation == 2 && matches!(r.change.operation, Operation::Insert(_))
+        ));
+        a.close().await.unwrap();
+        let a = sa.schema(tables(), schema).await.unwrap();
+        assert!(a.lost_values().await.unwrap().is_empty());
+        assert_eq!(count(&a, "children"), 1);
+        a.close().await.unwrap();
+        b.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn a_dismissal_records_each_row_of_a_cascade_cycle_once() {
+    let ids = SequentialIds::new();
+    let sa = TestStore::with_ids(&ids);
+    let sb = TestStore::with_ids(&ids);
+    let tables = || {
+        vec![crate::SyncedTable::new(
+            "nodes",
+            crate::RowIdentity::SharedKey,
+        )]
+    };
+    let schema = "CREATE TABLE nodes(id TEXT NOT NULL PRIMARY KEY,label TEXT UNIQUE,parent TEXT REFERENCES nodes(id) ON DELETE CASCADE)";
+    let a = sa.schema(tables(), schema).await.unwrap();
+    let b = sb.schema(tables(), schema).await.unwrap();
+    sql(&a, "INSERT INTO nodes VALUES('a','same',NULL)")
+        .await
+        .unwrap();
+    sql(&b, "INSERT INTO nodes VALUES('b','same',NULL),('c','other','b'); UPDATE nodes SET parent='c' WHERE id='b'").await.unwrap();
+    crate::author_judgement::tests::deliver(&a, &b).await;
+    crate::author_judgement::tests::deliver(&b, &a).await;
+    let losses: Vec<_> = a
+        .lost_values()
+        .await
+        .unwrap()
+        .into_iter()
+        .filter(|loss| loss.key.0 == [rusqlite::types::Value::Text("b".into())])
+        .collect();
+    a.dismiss_lost_values(&losses).await.unwrap();
+    let record = records(&a).pop().unwrap();
+    assert_eq!(record.parts[0].rows.len(), 2);
+    assert!(record.parts[0]
+        .rows
+        .iter()
+        .all(|r| r.change.operation == coven_merge::Operation::Delete));
+    b.receive(record.into()).await.unwrap();
+    assert!(a.lost_values().await.unwrap().is_empty());
+    assert_eq!(data(&a).await, data(&b).await);
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}

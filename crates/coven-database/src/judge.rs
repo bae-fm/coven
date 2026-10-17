@@ -264,7 +264,7 @@ pub(crate) fn judge(
         .flat_map(|(row, sequence)| chain(row, *sequence))
         .map(|(row, _)| row)
         .collect();
-    let mut owners = Owners::new(db, schema, header)?;
+    let mut owners = Owners::new(db, schema, header.position.device, header.schema_version)?;
     let mut rows = BTreeMap::new();
     for (row, shape) in &shapes {
         let derived: Vec<u32> = shape
@@ -396,7 +396,7 @@ fn combined(steps: &[Step]) -> Option<Change<Value>> {
 }
 
 /// Each row's owner, as the selected creations and the counted membership name them.
-struct Owners<'a> {
+pub(crate) struct Owners<'a> {
     schema: &'a WriteSchema,
     version: u32,
     current: u32,
@@ -406,17 +406,18 @@ struct Owners<'a> {
 }
 
 impl<'a> Owners<'a> {
-    fn new(
+    pub(crate) fn new(
         db: &DatabaseConnection,
         schema: &'a WriteSchema,
-        header: &WriteHeader,
+        device: DeviceId,
+        version: u32,
     ) -> Result<Self, DbError> {
         Ok(Self {
             schema,
-            version: header.schema_version,
+            version,
             current: db.schema_version()?,
-            device: header.position.device,
-            member: crate::ownership::member(db, header.position.device)?,
+            device,
+            member: crate::ownership::member(db, device)?,
             known: BTreeMap::new(),
         })
     }
@@ -424,7 +425,7 @@ impl<'a> Owners<'a> {
     /// The member who owns this row when it is not the author (Lean
     /// `!allowed`): an owner table's row another member created. A row no
     /// write has created yet is new, and its creation is the author's.
-    fn foreign_owner(
+    pub(crate) fn foreign_owner(
         &mut self,
         db: &DatabaseConnection,
         row: &RowId,

@@ -126,8 +126,8 @@ pub struct RowChange {
     /// row's original creation, whose author keeps owning it (§9.6).
     pub creator: Option<ChangeId>,
     /// The statement, shared-trigger and foreign-key operations on this row,
-    /// in the write's execution order. Empty for a change coven made without
-    /// SQL, such as an audience move, a dismissal or a migration's difference.
+    /// in execution order, including a dismissal's deletes. Audience moves
+    /// and migration differences have no steps.
     pub execution: Execution,
 }
 impl Wire for RowChange {
@@ -233,9 +233,9 @@ impl RowChange {
     }
 }
 
-/// One SQLite row operation of a write, at its place in the whole write's
-/// execution (§9.6, D5). Statements, shared triggers and foreign-key actions
-/// all record steps; no step says which of them produced it.
+/// One row operation at its place in the write's execution (§9.6, D5).
+/// Statements, shared triggers, foreign-key actions and dismissal deletes
+/// record steps; no step says which of them produced it.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Step {
     /// The operation's position in the write. Only the two halves of one

@@ -1102,7 +1102,8 @@ whichever rule a device ran first.
 **Dismissing.** The app can dismiss a taken-out row for good
 ([api.md E4](api.md#e4-reading)). The dismissal is a write that records a real
 delete of the row, so it never comes back, and its children follow their foreign
-keys' delete actions (§9.1). The dismissed lost value is dropped.
+keys' delete actions (§9.1). The same write records deletes for its cascade
+children, including their cascade children. The dismissed lost value is dropped.
 
 **Inserting the same key again.** The app can't see a row that is out, so it can
 insert the same shared key again (§9.2). The write records that insert as an

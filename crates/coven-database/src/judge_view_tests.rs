@@ -668,6 +668,13 @@ async fn classification_matches_the_model() {
         actions += found;
     })
     .await;
+    crate::dismissal::tests::cascade_deletions(|db, record| {
+        let (steps, found) = classify(&runner, db, record);
+        assert_eq!((steps, found), (3, 2));
+        compared += steps;
+        actions += found;
+    })
+    .await;
     assert!(
         compared >= 30 && actions >= 10,
         "{compared} steps, {actions} actions"
