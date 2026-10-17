@@ -398,6 +398,8 @@ pub enum DbError {
     /// Snapshots or their gap writes could not be checked or loaded; the
     /// database is unchanged (§15, §19.2).
     Snapshot(SnapshotError),
+    /// The declared migration kind disagrees with its runtime classification (E13).
+    MigrationKindMismatch { version: u32 },
     /// A conversion changed or introduced a reference whose generation it cannot know (E13).
     MigrationReference { table: String, column: String },
     /// A converted row names the same column twice.
@@ -3883,10 +3885,12 @@ pub struct CircleMemberInfo {
 - The app's schema is a list of migrations numbered from 1 with no gaps.
 - Opening runs every migration above the database's version in one
   transaction, so a failure leaves the schema as it was.
-- A migration has two parts (§17.1): the first changes the database; the
-  optional second converts eligible row changes of received late ordinary
-  writes using the applied raise's conversion, in version and causal order
-  ([`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
+- Constructors declare the kind: `addition` or `breaking` for SQL,
+  `addition_with` or `breaking_with` for code. Breaking constructors require
+  `OldWrites::Convert(f)` or `OldWrites::Drop`; there is no implicit choice.
+  `Convert` handles eligible received late ordinary changes in version and
+  causal order (§17.1;
+  [`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
   - Local migration preserves every queued original record, including
     untried writes; tried uploads also retain their format and sealing keys
     ([`conversions_preserve_uploads`, `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
@@ -3906,25 +3910,21 @@ pub struct CircleMemberInfo {
     frozen changes keep their old names and original cause
     ([`conversion_preserves_identity`, `convertChange_metadata`](proofs/queue/CovenQueue/Conversion.lean);
     reference and rename validation remain implementation obligations).
-  - With no converter, keep each original change as a schema loss naming
+  - With `Drop`, keep each original change as a schema loss naming
     the breaking version and consume the write. No callback changes any
     upload record. Already frozen values and causes survive later raises
-    ([`missing_converter_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
+    ([`explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
   - The author reloading after a competing raise uses the same per-change
     rule as peers. New writes use the atomically reloaded state; an implicit
     own read of an excluded position creates no data dependence. Source
     evidence and verdicts survive snapshots and loss dismissal (§8).
-  - E.g. Ben's attempted 9 arrives after Ana's raise: its eligible changes
-    convert on receipt. If 9's note change was already excluded, 10's edit
-    of it stays frozen while its unrelated playlist rename can convert;
-    later changes keep that same distinction (§17.1;
-    [`mixed_write`, `partial_write_chain`](proofs/queue/CovenQueue/DataExamples.lean)).
   - A failed callback aborts the receive or reload transaction, preserving
     the preceding committed values, losses, source verdicts and applied slot.
     The upload queue remains unchanged on success and failure alike.
-- Coven decides whether a migration is an addition or a breaking change by
-  comparing the schema before and after it. Statements that change rows of
-  synced tables also make it breaking (§17.1).
+- Coven still classifies every migration (§17.1). Either kind mismatch returns
+  `DbError::MigrationKindMismatch { version }` and rolls back the whole batch;
+  local-only changes accept `addition`. Reopening checks historical declarations
+  against committed classifications before running new migrations.
 - A converted change keeps the references its columns carried, renamed
   with them. Changing a reference's value, or adding a column that is a
   reference, fails conversion and leaves application pending without a
@@ -3932,25 +3932,23 @@ pub struct CircleMemberInfo {
   old write meant.
 
 ```rust
-impl Migration {
-    /// A migration whose first part is SQL.
-    pub fn sql(version: u32, name: &'static str, sql: &'static str) -> Self;
+pub enum OldWrites {
+    /// Convert eligible changes; never rewrite their original upload records.
+    Convert(std::sync::Arc<dyn Fn(&mut RowChange) -> Result<(), DbError> + Send + Sync>),
+    /// Retain original changes as frozen schema losses, including their values.
+    Drop,
+}
 
-    /// A migration whose first part is code, for rebuilds and backfills SQL
-    /// alone can't express.
-    pub fn run<F>(version: u32, name: &'static str, f: F) -> Self
+impl Migration {
+    pub fn addition(version: u32, name: &'static str, sql: &'static str) -> Self;
+    pub fn addition_with<F>(version: u32, name: &'static str, f: F) -> Self
     where
         F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static;
 
-    /// Its second part: interprets eligible received old-schema row changes
-    /// in the new schema, independently of upload attempt status (§17.1).
-    /// Dependent changes never reach this callback; they remain frozen
-    /// originals alongside the write's converted changes. Without a converter,
-    /// retain each original change as a schema loss. It never rewrites the
-    /// original upload record. An error aborts the receive or reload transaction.
-    pub fn writes<F>(self, f: F) -> Self
+    pub fn breaking(version: u32, name: &'static str, sql: &'static str, old_writes: OldWrites) -> Self;
+    pub fn breaking_with<F>(version: u32, name: &'static str, f: F, old_writes: OldWrites) -> Self
     where
-        F: Fn(&mut RowChange) -> Result<(), DbError> + Send + Sync + 'static;
+        F: Fn(&MigrationContext<'_>) -> Result<(), DbError> + Send + Sync + 'static;
 }
 
 /// SQL access inside the transaction applying a migration (§17.1, E13).
@@ -4016,14 +4014,14 @@ Example:
 ```rust
 fn migrations() -> Vec<Migration> {
     vec![
-        Migration::sql(1, "initial", include_str!("migrations/001_initial.sql")),
-        Migration::sql(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name")
-            .writes(|change| {
+        Migration::addition(1, "initial", include_str!("migrations/001_initial.sql")),
+        Migration::breaking(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name",
+            OldWrites::Convert(std::sync::Arc::new(|change| {
                 if change.table == "attachments" {
                     change.rename_column("title", "name");
                 }
                 Ok(())
-            }),
+            }))),
     ]
 }
 ```

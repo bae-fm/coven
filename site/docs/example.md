@@ -60,7 +60,7 @@ fn tables() -> Vec<SyncedTable> {
 }
 
 fn migrations() -> Vec<Migration> {
-    vec![Migration::sql(1, "initial", SCHEMA)]
+    vec![Migration::addition(1, "initial", SCHEMA)]
 }
 ```
 

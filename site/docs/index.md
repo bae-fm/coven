@@ -105,7 +105,7 @@ let handle = Coven::builder(layout.clone())
         SyncedTable::new("notes", RowIdentity::IndependentUuid),
         SyncedTable::new("tags", RowIdentity::SharedKey),
     ])
-    .migrations(vec![Migration::sql(1, "initial", SCHEMA)])
+    .migrations(vec![Migration::addition(1, "initial", SCHEMA)])
     .create_store("Household")
     .await?;
 ```

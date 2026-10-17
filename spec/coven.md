@@ -3614,21 +3614,20 @@ floor is not modeled.
     device: a migration's class, and the conversions kept for it, never
     depend on a device's data
     ([`statement_plans_agree`, `row_classification_diverges`](proofs/queue/CovenQueue/ConversionChain.lean)).
-- For each breaking change, the app supplies a *migration* in two parts:
-  - one changes the database, e.g. `ALTER TABLE notes RENAME COLUMN title
-    TO name`;
-  - optionally, one converts an eligible row change of a received late
-    old-version write, e.g. turns "note 43, title: X" into
-    "note 43, name: X". It never changes an upload record.
-- An update runs every pending migration in one transaction, then checks
-  the schema rules against the tables the app declares, which describe
-  only the newest version; if a rule fails, nothing changes.
-  - E.g. migration 1 makes `notes(id)` and migration 2 renames `id` to
-    `note_id`: only the final schema has to match `key_columns(["note_id"])`.
+- The app declares `addition` or `breaking` (E13). Breaking requires
+  `OldWrites::Convert(f)` for eligible late changes or `OldWrites::Drop`
+  to keep them as frozen schema losses; neither rewrites upload records.
+- All pending migrations run in one transaction. Coven validates the final
+  schema against the newest table declarations and checks each declared kind.
+  Local-only changes accept `addition`; either mismatch returns
+  `DbError::MigrationKindMismatch { version }` before anything commits
+  ([`undeclared_breaking_refused`, `declared_breaking_addition_refused`,
+  `accepted_prefix_does_not_commit_on_mismatch`](proofs/queue/CovenQueue/ConversionChain.lean)).
+  Reopening also checks historical declarations against their committed kinds.
 - A breaking change raises the store's schema version, which every device
   shares.
   - Whichever device's app updates first makes it, whoever's device it is.
-  - That device runs the migration's first part on its database, writes a
+  - That device runs the migration on its database, writes a
     snapshot in the new version ([§15](#15-snapshots)), and records the store's new version
     in an admin entry ([§9](#9-members-and-roles)).
   - An older app cannot apply that audience's newer schema. It records
@@ -3782,13 +3781,13 @@ floor is not modeled.
     its original shape with its failed sources as the cause; unrelated
     changes in the same write, even the same part, can convert and apply
     ([`dependent_change_not_converted`, `independent_change_converted`, `converted_change_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
-  - If any breaking migration in that range lacks a converter, exclude
+  - If any breaking migration in that range declares `Drop`, exclude
     the old-version interpretation: retain
     each original change as a frozen loss naming the breaking version,
     including a delete with no scalar values, and consume the write.
     Already frozen changes keep their original values and cause through
     later raises; no callback rewrites any tried or untried upload
-    ([`missing_converter_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
+    ([`explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
   - Recorded reads, including implicit own predecessors, govern receive
     order, not exclusion. No adoption-exclusion list is needed. Keep the
     selected raise/reset, snapshot coverage and `read_through` for their
@@ -3807,7 +3806,7 @@ floor is not modeled.
   old-schema write 9 arrives after the raise and creates a note. With the
   supplied converter, every device converts it on receipt, including Ben
   after adopting that raise; the upload's original bytes stay unchanged.
-  - If 9 has already been excluded without a converter, a later callback
+  - If `Drop` has already excluded 9, a later callback
     cannot revive it. Ben's old-schema 10 edits that note and renames an
     unrelated playlist whose generation and replaced setter survive.
     With a converter for 10, its note edit is a frozen dependency loss and
@@ -3817,7 +3816,7 @@ floor is not modeled.
     that 10 replaced came from excluded 9. Later changes built on 10's
     playlist rename can apply; changes built on its frozen note edit lose
     ([`actual_setter_decides`, `partial_write_chain`](proofs/queue/CovenQueue/DataExamples.lean)).
-  - Without a converter for either write, both keep their original changes
+  - With `Drop` for both writes, both keep their original changes
     as schema losses. Ben's write 11 after the atomic reload uses the
     announced state; reading the consumed identities of 9 and 10 alone does not
     exclude it.

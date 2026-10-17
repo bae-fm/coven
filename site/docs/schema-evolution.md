@@ -12,22 +12,23 @@ The app's schema is a list of migrations numbered from 1 with no gaps:
 ```rust
 fn migrations() -> Vec<Migration> {
     vec![
-        Migration::sql(1, "initial", include_str!("migrations/001_initial.sql")),
-        Migration::sql(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name")
-            .writes(|change| {
+        Migration::addition(1, "initial", include_str!("migrations/001_initial.sql")),
+        Migration::breaking(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name",
+            OldWrites::Convert(std::sync::Arc::new(|change| {
                 if change.table == "attachments" {
                     change.rename_column("title", "name");
                 }
                 Ok(())
-            }),
+            }))),
     ]
 }
 ```
 
-`Migration::sql` runs SQL; `Migration::run` runs code with a
-[`MigrationContext`](rustdoc:struct:coven::MigrationContext), for rebuilds and
-backfills SQL alone can't express. Opening runs every migration above the
-database's version in one transaction, then checks the schema rules against the
+`Migration::addition` and `Migration::breaking` run SQL; their `addition_with`
+and `breaking_with` forms run code with a
+[`MigrationContext`](rustdoc:struct:coven::MigrationContext). Breaking migrations
+require an [`OldWrites`](rustdoc:enum:coven::OldWrites) choice. Opening runs every
+migration above the database's version in one transaction, then checks the schema rules against the
 declared tables, which describe only the newest version. If anything fails,
 nothing changes. A database newer than the app's migrations fails with
 `MigrationError::SchemaTooNew`; numbering that isn't 1 to N fails with
@@ -54,6 +55,9 @@ together with the app's table declarations:
 A migration that changes rows is breaking because each device would otherwise
 compute those changes from its own rows, and the devices would disagree. Its
 statements decide its kind, never the rows a device happens to hold.
+Coven checks the constructor's declaration against this classification. Either
+mismatch returns `DbError::MigrationKindMismatch { version }` and rolls back
+all pending migrations. Use `addition` for local-only changes too.
 
 ## Additions
 
@@ -104,17 +108,17 @@ inside the raise's snapshot.
 ## Late writes in the old shape
 
 Writes made on the old version still arrive afterwards: Ben edited offline
-before updating. A migration's optional second part, its *converter*, turns an
-old-shape row change received from another device into the new shape:
+before updating. A breaking migration must choose what happens to those writes.
+`OldWrites::Convert` turns an eligible old-shape row change into the new shape:
 
 ```rust
-Migration::sql(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name")
-    .writes(|change| {
+Migration::breaking(2, "rename_attachment_title", "ALTER TABLE attachments RENAME COLUMN title TO name",
+    OldWrites::Convert(std::sync::Arc::new(|change| {
         if change.table == "attachments" {
             change.rename_column("title", "name");
         }
         Ok(())
-    })
+    })))
 ```
 
 The callback gets a [`RowChange`](rustdoc:struct:coven::RowChange): its table,
@@ -123,9 +127,9 @@ version 1 arriving at a version-3 device goes through the converters of
 migrations 2 and 3, in order.
 
 With a converter, Ben's late edit converts and applies on every device,
-including his own once he adopts the raise. Without one, it is kept as a lost
-value in its old shape, naming the breaking version as its cause
-(`Replacement::SchemaChange`), so nothing disappears silently. Such a lost value
+including his own once he adopts the raise. With an explicit `OldWrites::Drop`,
+it is kept as a lost value in its old shape, naming the breaking version as its
+cause (`Replacement::SchemaChange`), so nothing disappears silently. Such a lost value
 is *frozen*: it keeps its old column names and values, takes no part in later
 merges, and survives later raises. A converter added later can't revive it.
 

@@ -45,7 +45,7 @@ Conversion first determines admission and data dependence. A dependent change
 keeps its original values as a frozen loss; an independent change can be
 converted. `dependent_change_not_converted`, `independent_change_converted`
 and `converted_change_matches_receiver` prove these cases and their agreement
-with receipt. `missing_converter_preserves_values`, `lost_never_reconverted`
+with receipt. `explicit_drop_preserves_values`, `lost_never_reconverted`
 and `conversions_preserve_frozen` preserve losses through later schema changes.
 Callbacks here are successful validated functions; executing application SQL
 and handling a failed transaction are outside this conversion model.
@@ -60,9 +60,16 @@ identity; `newest_breaking_write_admitted` proves admission with unchanged
 values at the newest breaking version under a later additions-only raise.
 `chain_available_iff` requires a converter for every crossed breaking step,
 and `retained_step_required` proves that an older write uses that converter.
-`below_breaking_needs_converter` proves exclusion whenever a crossed breaking
-step lacks one. `addition_raise_cases` checks both
+`explicit_drop_excludes_older` proves exclusion whenever a crossed breaking
+step chooses `Drop`. `addition_raise_cases` checks both
 schema versions below an additions-only raise to 3.
+
+Declarations distinguish additions from breaking migrations with an explicit
+`OldWrites` choice. `undeclared_breaking_refused` and
+`declared_breaking_addition_refused` prove refusal in both directions.
+`mismatch_preserves_state` and `accepted_prefix_does_not_commit_on_mismatch`
+preserve the entire prior state, including accepted steps before a mismatch.
+These proofs assume transactional staging, rather than proving SQLite.
 
 ## Merge and migration
 
@@ -106,8 +113,9 @@ merge package's authored-source validation.
 source checks using `COVEN_AUTHORED_LEAN`.
 `migration_receive::tests::conversion_chain_matches_lean` uses
 `COVEN_CONVERSION_LEAN` to compare `conversionRunner` with actual database
-receipt: additions after a breaking raise, missing converters, unchanged
-values, and ordered conversion across additions, through buffered and streamed
+receipt and migration refusal: additions after a breaking raise, explicit
+drop choices, unchanged values, mismatched declarations with complete rollback,
+and ordered conversion across additions, through buffered and streamed
 receipt and reopening. Row-merge and migration examples are checked in Lean;
 these runners do not compare those entire subsystems. The sequence runner
 covers the shared-slot rules separately.
