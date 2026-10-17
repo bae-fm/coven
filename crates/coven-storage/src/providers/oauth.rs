@@ -98,6 +98,45 @@ struct AuthorizeRequest {
     redirect: String,
 }
 
+impl AuthorizeRequest {
+    fn new(
+        client_id: &str,
+        endpoint: &str,
+        scope: &str,
+        redirect_uri: &str,
+        extra: &[(&str, &str)],
+    ) -> Result<Self, OAuthError> {
+        let redirect = url::Url::parse(redirect_uri).map_err(|_| OAuthError::InvalidRedirect)?;
+        if redirect.fragment().is_some()
+            || redirect.query().is_some()
+            || !redirect.username().is_empty()
+            || redirect.password().is_some()
+        {
+            return Err(OAuthError::InvalidRedirect);
+        }
+        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
+        let state = CsrfToken::new_random();
+        let mut url = url::Url::parse(endpoint).map_err(|_| OAuthError::InvalidRedirect)?;
+        url.query_pairs_mut()
+            .extend_pairs([
+                ("response_type", "code"),
+                ("client_id", client_id),
+                ("redirect_uri", redirect_uri),
+                ("code_challenge", challenge.as_str()),
+                ("code_challenge_method", "S256"),
+                ("state", state.secret()),
+                ("scope", scope),
+            ])
+            .extend_pairs(extra.iter().copied());
+        Ok(Self {
+            auth_url: url.into(),
+            verifier: SecretText::new(verifier.secret().clone()),
+            state: SecretText::new(state.secret().clone()),
+            redirect: redirect_uri.to_owned(),
+        })
+    }
+}
+
 /// The sign-in and refresh service used by coven's composition roots. Apps
 /// configure `OAuthClients` and `OAuthPresenter`; only coven receives tokens.
 #[derive(Clone)]
@@ -261,36 +300,16 @@ impl OAuthClients {
         redirect_uri: &str,
     ) -> Result<AuthorizeRequest, OAuthError> {
         let (client_id, auth, _, scope) = self.config(access)?;
-        let redirect = url::Url::parse(redirect_uri).map_err(|_| OAuthError::InvalidRedirect)?;
-        if redirect.fragment().is_some()
-            || redirect.query().is_some()
-            || !redirect.username().is_empty()
-            || redirect.password().is_some()
-        {
-            return Err(OAuthError::InvalidRedirect);
-        }
-        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-        let state = CsrfToken::new_random();
-        let mut url = url::Url::parse(auth).map_err(|_| OAuthError::InvalidRedirect)?;
-        url.query_pairs_mut().extend_pairs([
-            ("response_type", "code"),
-            ("client_id", client_id),
-            ("redirect_uri", redirect_uri),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-            ("state", state.secret()),
-            ("scope", scope),
-        ]);
-        if access.provider() == CloudProvider::Dropbox {
-            url.query_pairs_mut()
-                .append_pair("token_access_type", "offline");
-        }
-        Ok(AuthorizeRequest {
-            auth_url: url.into(),
-            verifier: SecretText::new(verifier.secret().clone()),
-            state: SecretText::new(state.secret().clone()),
-            redirect: redirect_uri.to_owned(),
-        })
+        AuthorizeRequest::new(
+            client_id,
+            auth,
+            scope,
+            redirect_uri,
+            match access.provider() {
+                CloudProvider::Dropbox => &[("token_access_type", "offline")],
+                _ => &[],
+            },
+        )
     }
     async fn exchange_redirect(
         &self,
@@ -425,6 +444,32 @@ impl OAuthClients {
     ) -> Result<OAuthTokens, OAuthError> {
         let provider = access.provider();
         let (client_id, _, token, _) = self.config(access)?;
+        #[derive(serde::Deserialize)]
+        struct Tokens {
+            access_token: SecretText,
+            refresh_token: Option<SecretText>,
+            token_type: String,
+            scope: Option<String>,
+        }
+        let tokens = self
+            .token_response(provider, token, params, |tokens: &Tokens| {
+                (&tokens.access_token, tokens.token_type.as_str())
+            })
+            .await?;
+        Ok(OAuthTokens {
+            client_id: client_id.to_owned(),
+            access: access.granted(tokens.scope.as_deref())?,
+            access_token: tokens.access_token,
+            refresh_token: tokens.refresh_token,
+        })
+    }
+    async fn token_response<T: serde::de::DeserializeOwned>(
+        &self,
+        provider: CloudProvider,
+        token: &str,
+        params: &[(&str, &str)],
+        bearer: impl FnOnce(&T) -> (&SecretText, &str),
+    ) -> Result<T, OAuthError> {
         #[cfg(any(test, feature = "test-utils"))]
         let token = match &self.token_override {
             Some(url) => url.as_str(),
@@ -455,28 +500,15 @@ impl OAuthClients {
                 .map_err(|e| http::transport(provider, e))?
                 .to_vec(),
         );
-        #[derive(serde::Deserialize)]
-        struct Tokens {
-            access_token: SecretText,
-            refresh_token: Option<SecretText>,
-            token_type: String,
-            scope: Option<String>,
-        }
-        let tokens: Tokens = serde_json::from_slice(bytes.as_bytes())
+        let tokens: T = serde_json::from_slice(bytes.as_bytes())
             .map_err(|error| StorageFailure::Encoding.with_source(error))?;
-        if tokens.access_token.as_str().is_empty()
-            || !tokens.token_type.eq_ignore_ascii_case("bearer")
-        {
+        let (access_token, token_type) = bearer(&tokens);
+        if access_token.as_str().is_empty() || !token_type.eq_ignore_ascii_case("bearer") {
             return Err(StorageFailure::Protocol
                 .with_source("invalid OAuth token response")
                 .into());
         }
-        Ok(OAuthTokens {
-            client_id: client_id.to_owned(),
-            access: access.granted(tokens.scope.as_deref())?,
-            access_token: tokens.access_token,
-            refresh_token: tokens.refresh_token,
-        })
+        Ok(tokens)
     }
     /// Redirect token requests to an HTTP fake while retaining the real protocol.
     #[cfg(any(test, feature = "test-utils"))]

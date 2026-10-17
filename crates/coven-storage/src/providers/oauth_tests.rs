@@ -172,6 +172,10 @@ async fn presenter_flow_binds_state_redirect_and_pkce_for_each_provider() {
             &oauth2::PkceCodeVerifier::new(exchange["code_verifier"].clone()),
         );
         assert_eq!(challenge.as_str(), params["code_challenge"]);
+        assert_eq!(
+            params.get("token_access_type").map(String::as_str),
+            (provider == CloudProvider::Dropbox).then_some("offline")
+        );
         if provider == CloudProvider::OneDrive {
             assert_eq!(url.path(), "/common/oauth2/v2.0/authorize");
             assert_eq!(
@@ -593,4 +597,106 @@ async fn refresh_without_a_refresh_token_or_client_names_the_needed_action() {
         unconfigured.refresh(&held).await.err().unwrap().failure(),
         StorageFailure::InvalidConfiguration
     );
+}
+
+#[tokio::test]
+async fn token_parsing_preserves_provider_and_admin_refresh_policies() {
+    let state = Arc::new(Mutex::new(Provider::default()));
+    let server = TestServer::new(Router::new().fallback(token).with_state(state.clone())).await;
+    let flow = OAuthFlow::new(
+        clients(Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)))
+            .with_token_endpoint(server.url.clone()),
+        presenter("https://callback.example?code=code&state=STATE"),
+    );
+    for (body, failure, invalid_refresh) in [
+        (
+            r#"{"access_token":"new-token","token_type":"bEaReR"}"#,
+            None,
+            false,
+        ),
+        (
+            r#"{"access_token":"new-token","token_type":"Bearer","refresh_token":"refresh"}"#,
+            None,
+            false,
+        ),
+        (
+            r#"{"access_token":"new-token","token_type":"Bearer","refresh_token":{"unexpected":"shape"}}"#,
+            None,
+            true,
+        ),
+        (
+            r#"{"access_token":"new-token","token_type":"Bearer","refresh_token":"one","refresh_token":"two"}"#,
+            None,
+            true,
+        ),
+        (
+            r#"{"access_token":"","token_type":"Bearer"}"#,
+            Some(StorageFailure::Protocol),
+            false,
+        ),
+        (
+            r#"{"access_token":"new-token","token_type":"Basic"}"#,
+            Some(StorageFailure::Protocol),
+            false,
+        ),
+        (
+            r#"{"token_type":"Bearer"}"#,
+            Some(StorageFailure::Encoding),
+            false,
+        ),
+    ] {
+        state.lock().unwrap().error_response = Some((200, body.into()));
+        let admin = flow.google_cloud_admin().await;
+        match failure {
+            Some(expected) => assert!(
+                matches!(admin, Err(OAuthError::Storage(error)) if error.failure() == expected)
+            ),
+            None => assert_eq!(admin.unwrap().as_str(), "new-token"),
+        }
+        for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
+            let result = flow.authenticate(full_access(provider)).await;
+            match if invalid_refresh {
+                Some(StorageFailure::Encoding)
+            } else {
+                failure
+            } {
+                Some(expected) => assert!(
+                    matches!(result, Err(OAuthError::Storage(error)) if error.failure() == expected)
+                ),
+                None => {
+                    let tokens = result.unwrap();
+                    assert_eq!(tokens.access_token.as_str(), "new-token");
+                    assert_eq!(
+                        tokens.refresh_token.as_ref().map(SecretText::as_str),
+                        body.contains("refresh_token").then_some("refresh")
+                    );
+                }
+            }
+        }
+    }
+    let body = r#"{"error":"invalid_grant","error_description":"secret-description"}"#;
+    state.lock().unwrap().error_response = Some((400, body.into()));
+    let Err(OAuthError::Storage(StorageError::Provider {
+        provider,
+        failure,
+        source,
+    })) = flow.google_cloud_admin().await
+    else {
+        panic!("admin token response lost its provider cause");
+    };
+    assert_eq!(provider, CloudProvider::S3);
+    assert_eq!(failure, StorageFailure::Authentication);
+    assert_eq!(
+        source
+            .downcast_ref::<http::ProviderResponse>()
+            .unwrap()
+            .body(),
+        body.as_bytes()
+    );
+    assert!(state
+        .lock()
+        .unwrap()
+        .requests
+        .iter()
+        .all(|request| !request.contains_key("client_secret")));
 }

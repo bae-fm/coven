@@ -21,36 +21,13 @@ impl OAuthFlow {
             .google
             .as_ref()
             .ok_or(OAuthError::Unavailable(GOOGLE_ADMIN))?;
-        let redirect_uri = self.presenter.redirect_uri(GOOGLE_ADMIN);
-        let redirect = url::Url::parse(redirect_uri).map_err(|_| OAuthError::InvalidRedirect)?;
-        if redirect.fragment().is_some()
-            || redirect.query().is_some()
-            || !redirect.username().is_empty()
-            || redirect.password().is_some()
-        {
-            return Err(OAuthError::InvalidRedirect);
-        }
-        let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-        let state = CsrfToken::new_random();
-        let mut url =
-            url::Url::parse("https://accounts.google.com/o/oauth2/v2/auth").expect("static URL");
-        url.query_pairs_mut().extend_pairs([
-            ("response_type", "code"),
-            ("client_id", google.id.as_str()),
-            ("redirect_uri", redirect_uri),
-            ("code_challenge", challenge.as_str()),
-            ("code_challenge_method", "S256"),
-            ("state", state.secret()),
-            ("scope", CLOUD_PLATFORM),
-            ("access_type", "online"),
-            ("prompt", "consent"),
-        ]);
-        let request = AuthorizeRequest {
-            auth_url: url.into(),
-            verifier: SecretText::new(verifier.secret().clone()),
-            state: SecretText::new(state.secret().clone()),
-            redirect: redirect_uri.to_owned(),
-        };
+        let request = AuthorizeRequest::new(
+            &google.id,
+            "https://accounts.google.com/o/oauth2/v2/auth",
+            CLOUD_PLATFORM,
+            self.presenter.redirect_uri(GOOGLE_ADMIN),
+            &[("access_type", "online"), ("prompt", "consent")],
+        )?;
         let flow = async {
             let callback = self.presenter.present(&request.auth_url).await?;
             let code = OAuthClients::redirect_code(GOOGLE_ADMIN, &request, callback)?;
@@ -84,51 +61,20 @@ impl OAuthClients {
         if let Some(secret) = &google.secret {
             params.push(("client_secret", secret.as_str()));
         }
-        #[allow(unused_mut)]
-        let mut token = "https://oauth2.googleapis.com/token";
-        #[cfg(any(test, feature = "test-utils"))]
-        if let Some(url) = &self.token_override {
-            token = url.as_str();
-        }
-        let client = self
-            .client
-            .as_ref()
-            .map_err(|source| StorageError::Provider {
-                provider,
-                failure: StorageFailure::Network,
-                source: Box::new(source.clone()),
-            })?;
-        let response = client
-            .post(token)
-            .form(&params)
-            .send()
-            .await
-            .map_err(|e| http::transport(provider, e))?;
-        if !response.status().is_success() {
-            return Err(http::response_error(provider, response).await.into());
-        }
-        let bytes = SecretBytes::new(
-            response
-                .bytes()
-                .await
-                .map_err(|e| http::transport(provider, e))?
-                .to_vec(),
-        );
         #[derive(serde::Deserialize)]
         struct Token {
             access_token: SecretText,
             token_type: String,
             scope: Option<String>,
         }
-        let token: Token = serde_json::from_slice(bytes.as_bytes())
-            .map_err(|error| StorageFailure::Encoding.with_source(error))?;
-        if token.access_token.as_str().is_empty()
-            || !token.token_type.eq_ignore_ascii_case("bearer")
-        {
-            return Err(StorageFailure::Protocol
-                .with_source("invalid OAuth token response")
-                .into());
-        }
+        let token = self
+            .token_response(
+                provider,
+                "https://oauth2.googleapis.com/token",
+                &params,
+                |token: &Token| (&token.access_token, token.token_type.as_str()),
+            )
+            .await?;
         // An omitted scope means the requested one (OAuth 2.0); a narrower
         // grant cannot manage keys.
         if token

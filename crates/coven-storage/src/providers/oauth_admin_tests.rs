@@ -77,10 +77,15 @@ async fn admin_sign_in_requests_cloud_platform_with_pkce_and_keeps_no_refresh_to
         let shown: BTreeMap<_, _> = shown.query_pairs().into_owned().collect();
         assert_eq!(shown["scope"], CLOUD_PLATFORM);
         assert_eq!(shown["access_type"], "online");
+        assert_eq!(shown["prompt"], "consent");
+        assert!(!shown.contains_key("token_access_type"));
         assert_eq!(shown["code_challenge_method"], "S256");
         let sent = &state.lock().unwrap().0[0];
         assert_eq!(sent["code"], "admin-code");
         assert_eq!(sent["client_secret"], "client-secret");
-        assert!(!sent["code_verifier"].is_empty());
+        let challenge = PkceCodeChallenge::from_code_verifier_sha256(
+            &oauth2::PkceCodeVerifier::new(sent["code_verifier"].clone()),
+        );
+        assert_eq!(challenge.as_str(), shown["code_challenge"]);
     }
 }
