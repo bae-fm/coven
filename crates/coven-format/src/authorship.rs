@@ -419,6 +419,25 @@ impl Multiproof {
     /// The root these openings and hashes reconstruct. Positions must be in
     /// range and increasing, and every hash must be used exactly once.
     pub fn root(&self, hasher: &impl PartHasher) -> Result<[u8; 32], Error> {
+        self.rebuild(|leaf| hasher.leaf(leaf))
+    }
+
+    /// Reconstruct the root and retain the hash of each revealed leaf, in
+    /// revealed order, so later proofs can hide it without the audience key.
+    pub fn root_with_leaf_hashes(
+        &self,
+        hasher: &impl PartHasher,
+    ) -> Result<([u8; 32], Vec<[u8; 32]>), Error> {
+        let mut hashes = Vec::with_capacity(self.revealed.len());
+        let root = self.rebuild(|leaf| {
+            let hash = hasher.leaf(leaf);
+            hashes.push(hash);
+            hash
+        })?;
+        Ok((root, hashes))
+    }
+
+    fn rebuild(&self, mut hash_leaf: impl FnMut(&[u8]) -> [u8; 32]) -> Result<[u8; 32], Error> {
         require(
             self.revealed.windows(2).all(|pair| pair[0].0 < pair[1].0)
                 && self.revealed.last().is_none_or(|(i, _)| *i < self.leaves),
@@ -438,7 +457,7 @@ impl Multiproof {
         }
         let mut revealed = self.revealed.iter().peekable();
         let mut hidden = self.hidden.iter();
-        let root = rebuild(hasher, 0, self.leaves, &mut revealed, &mut hidden)?;
+        let root = rebuild(&mut hash_leaf, 0, self.leaves, &mut revealed, &mut hidden)?;
         require(
             revealed.next().is_none() && hidden.next().is_none(),
             "multiproof hashes",
@@ -446,6 +465,81 @@ impl Multiproof {
         )?;
         Ok(root)
     }
+
+    /// Retain a subset of an authenticated proof's openings, merging hidden
+    /// siblings into maximal subtrees. `hashes` and `keep` correspond exactly
+    /// to `revealed`; hashes come from `root_with_leaf_hashes` at authentication.
+    pub fn retain_opened(&self, hashes: &[[u8; 32]], keep: &[bool]) -> Self {
+        let mut proof = Self {
+            leaves: self.leaves,
+            revealed: Vec::new(),
+            hidden: Vec::new(),
+        };
+        if self.leaves > 0 {
+            retain_opened(
+                0,
+                self.leaves,
+                &self.revealed,
+                hashes,
+                keep,
+                &mut self.hidden.iter(),
+                &mut proof,
+            );
+        }
+        proof
+    }
+}
+
+fn retain_opened(
+    start: u64,
+    count: u64,
+    revealed: &[(u64, Vec<u8>)],
+    hashes: &[[u8; 32]],
+    keep: &[bool],
+    hidden: &mut std::slice::Iter<'_, [u8; 32]>,
+    proof: &mut Multiproof,
+) -> [u8; 32] {
+    if revealed.is_empty() {
+        let hash = *hidden.next().expect("authenticated subtree");
+        proof.hidden.push(hash);
+        return hash;
+    }
+    if count == 1 {
+        if keep[0] {
+            proof.revealed.push(revealed[0].clone());
+        } else {
+            proof.hidden.push(hashes[0]);
+        }
+        return hashes[0];
+    }
+    let left = split(count);
+    let middle = revealed.partition_point(|(index, _)| *index < start + left);
+    let opened = proof.revealed.len();
+    let hidden_start = proof.hidden.len();
+    let left_hash = retain_opened(
+        start,
+        left,
+        &revealed[..middle],
+        &hashes[..middle],
+        &keep[..middle],
+        hidden,
+        proof,
+    );
+    let right_hash = retain_opened(
+        start + left,
+        count - left,
+        &revealed[middle..],
+        &hashes[middle..],
+        &keep[middle..],
+        hidden,
+        proof,
+    );
+    let hash = authorship_node(&left_hash, &right_hash);
+    if proof.revealed.len() == opened {
+        proof.hidden.truncate(hidden_start);
+        proof.hidden.push(hash);
+    }
+    hash
 }
 
 fn subtree(hashes: &[[u8; 32]]) -> [u8; 32] {
@@ -471,7 +565,7 @@ fn prune(hashes: &[[u8; 32]], opened: &[Option<Vec<u8>>], start: u64, proof: &mu
 }
 
 fn rebuild<'a>(
-    hasher: &impl PartHasher,
+    hash_leaf: &mut impl FnMut(&[u8]) -> [u8; 32],
     start: u64,
     count: u64,
     revealed: &mut std::iter::Peekable<impl Iterator<Item = &'a (u64, Vec<u8>)>>,
@@ -488,11 +582,11 @@ fn rebuild<'a>(
     }
     if count == 1 {
         let (_, leaf) = revealed.next().expect("checked");
-        return Ok(hasher.leaf(leaf));
+        return Ok(hash_leaf(leaf));
     }
     let left = split(count);
-    let left_hash = rebuild(hasher, start, left, revealed, hidden)?;
-    let right_hash = rebuild(hasher, start + left, count - left, revealed, hidden)?;
+    let left_hash = rebuild(hash_leaf, start, left, revealed, hidden)?;
+    let right_hash = rebuild(hash_leaf, start + left, count - left, revealed, hidden)?;
     Ok(authorship_node(&left_hash, &right_hash))
 }
 

@@ -239,6 +239,69 @@ async fn a_reloaded_device_carries_the_same_evidence_on() {
     }
 }
 
+#[tokio::test]
+async fn a_reloaded_snapshot_hides_cells_overwritten_after_loading() {
+    let mut created = insert(0, 0);
+    let Operation::Insert(columns) = &mut created.parts[0].rows[0].change.operation else {
+        unreachable!()
+    };
+    columns.get_mut("a").unwrap().value = Value::Text("7".into());
+    columns.get_mut("b").unwrap().value = Value::Text("8".into());
+    let mut replaced = overwrite();
+    let change = &mut replaced.parts[0].rows[0];
+    let Operation::Update(columns) = &mut change.change.operation else {
+        unreachable!()
+    };
+    let mut cell = columns.remove("a").unwrap();
+    cell.value = Value::Text("9".into());
+    columns.insert("b".into(), cell);
+    change.old = BTreeMap::from([("b".into(), Value::Text("8".into()))]);
+    let mut setter = change.sources.setters.remove("a").unwrap();
+    setter.column = "b".into();
+    change.sources.setters.insert("b".into(), setter);
+
+    let store = TestStore::new();
+    let db = source(&store, &[created.clone()]).await;
+    let snapshot = frames(&db, Audience::Store).await;
+    let middle_store = TestStore::new();
+    let middle = middle_store.schema(owned(), SCHEMA).await.unwrap();
+    let (expected, prefix, input, _) = snapshot.input();
+    load_one(&middle, expected, prefix, input).await.unwrap();
+    TestStore::register(&middle, created.header.position.device, 1);
+    TestStore::register(&middle, replaced.header.position.device, 1);
+    middle
+        .receive_stream(stream(&replaced), || Ok(()))
+        .await
+        .unwrap();
+    let again = frames(&middle, Audience::Store).await;
+    let carried = evidence(&again);
+    let proof = &carried
+        .iter()
+        .find(|e| e.write == created.header.position)
+        .unwrap()
+        .proof;
+    let expected = Multiproof::prove(
+        &TestAuthorship::key().derive().authorship_hasher(),
+        &coven_format::authorship::part_leaves(&created.parts[0]),
+        |leaf| {
+            matches!(leaf, Leaf::Creation { .. })
+                || matches!(leaf, Leaf::Cell { column, .. } if column != "b")
+        },
+    )
+    .unwrap();
+    assert_eq!(proof, &expected);
+    assert_eq!(
+        proof
+            .root(&TestAuthorship::key().derive().authorship_hasher())
+            .unwrap(),
+        carried[0].roots[0]
+    );
+    load(&again, again.concat()).await.unwrap();
+    for db in [db, middle] {
+        db.close().await.unwrap();
+    }
+}
+
 /// The storage model's `prune` over `neededLeaves`, as `authorshipRunner` computes it.
 fn lean_proof(runner: &std::ffi::OsStr, input: serde_json::Value) -> serde_json::Value {
     use std::io::Write as _;
@@ -288,9 +351,12 @@ fn multiproofs_match_the_storage_model() {
             let proof = Multiproof::prove(
                 &hasher,
                 &leaves,
-                |leaf| matches!(leaf, Leaf::Deletion { generation, .. } if keep(*generation)),
+                |leaf| matches!(leaf, Leaf::Deletion { generation, .. } if keep(*generation) || generation % 2 == 0),
             )
             .unwrap();
+            let (_, hashes) = proof.root_with_leaf_hashes(&hasher).unwrap();
+            let retained: Vec<_> = proof.revealed.iter().map(|(i, _)| keep(*i)).collect();
+            let proof = proof.retain_opened(&hashes, &retained);
             let input = serde_json::json!({
                 "leaves": (0..count).map(|g| serde_json::json!({"kind": "deletion", "key": 0, "generation": g})).collect::<Vec<_>>(),
                 "creations": [], "cells": [],

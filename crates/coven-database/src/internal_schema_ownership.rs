@@ -48,6 +48,7 @@ macro_rules! coven_ownership_tables {
                 write_id BLOB NOT NULL CHECK(length(write_id)=16),
                 audience TEXT NOT NULL,
                 proof BLOB NOT NULL,
+                hashes BLOB NOT NULL CHECK(length(hashes)%32=0),
                 PRIMARY KEY(write_id,audience)
             ) STRICT, WITHOUT ROWID;
         "

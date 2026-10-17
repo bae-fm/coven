@@ -380,3 +380,33 @@ fn retained_leaf_hashes_reopen_a_part_without_its_key() {
         Multiproof::prove(&hasher, &leaves, keep).unwrap()
     );
 }
+
+#[test]
+fn retained_openings_match_fresh_proofs_for_every_subtree_shape() {
+    let hasher = hasher();
+    for count in 0..40 {
+        let leaves = numbered(count);
+        for opened in [0u64, 1, 0b101, 0b1001_0110, u64::MAX] {
+            let proof = Multiproof::prove(&hasher, &leaves, |leaf| {
+                matches!(leaf, Leaf::Deletion { generation, .. } if opened >> generation & 1 == 1)
+            }).unwrap();
+            let (root, hashes) = proof.root_with_leaf_hashes(&hasher).unwrap();
+            for kept in [0u64, 1, 0b10, 0b101, 0b1001_0110, u64::MAX] {
+                let keep: Vec<_> = proof
+                    .revealed
+                    .iter()
+                    .map(|(i, _)| kept >> i & 1 == 1)
+                    .collect();
+                let retained = proof.retain_opened(&hashes, &keep);
+                let expected = Multiproof::prove(&hasher, &leaves, |leaf| {
+                    matches!(leaf, Leaf::Deletion { generation, .. } if (opened & kept) >> generation & 1 == 1)
+                }).unwrap();
+                assert_eq!(
+                    retained, expected,
+                    "{count} leaves, {opened:b} opened, {kept:b} retained"
+                );
+                assert_eq!(retained.root(&hasher).unwrap(), root);
+            }
+        }
+    }
+}

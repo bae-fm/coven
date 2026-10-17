@@ -326,7 +326,7 @@ pub(crate) fn evidence(
 }
 
 /// Open the needed leaves of one part: from its records and retained leaf
-/// hashes when held whole, or reusing a loaded snapshot's opening of them.
+/// hashes when held whole, or pruning a loaded snapshot's authenticated openings.
 fn open(
     db: &DatabaseConnection,
     write: WriteId,
@@ -370,15 +370,25 @@ fn open(
         }
         return Ok(Multiproof::from_hashes(&hashes, opened));
     }
-    let proof: Option<Vec<u8>> = db.query_row(
-        "SELECT (SELECT proof FROM _coven_part_proofs WHERE write_id=?1 AND audience=?2)",
-        params![id, audience_text(audience)],
-        |r| r.get(0),
-    )?;
-    let proof = decoded(merge_fields::decode_multiproof(
-        &proof.ok_or(missing(write))?,
-    ))?;
-    Ok(proof)
+    let (proof, hashes) = db
+        .query(
+            "SELECT proof,hashes FROM _coven_part_proofs WHERE write_id=?1 AND audience=?2",
+            params![id, audience_text(audience)],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, Vec<u8>>(1)?)),
+        )?
+        .pop()
+        .ok_or_else(|| missing(write))?;
+    let proof = decoded(merge_fields::decode_multiproof(&proof))?;
+    let hashes: Vec<[u8; 32]> = hashes
+        .chunks_exact(32)
+        .map(|hash| hash.try_into().expect("32 bytes"))
+        .collect();
+    let keep = proof
+        .opened()?
+        .iter()
+        .map(|leaf| proves(db, version, current, leaf, needs, creators))
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(proof.retain_opened(&hashes, &keep))
 }
 
 /// Temporary openings of the snapshot being loaded, by write and row.
@@ -399,6 +409,7 @@ pub(crate) fn end_load(db: &DatabaseConnection) -> Result<(), DbError> {
 pub(crate) struct AuthenticatedEvidence {
     pub(crate) opened: WriteHeaderFrame,
     pub(crate) leaves: Vec<Leaf>,
+    pub(crate) hashes: Vec<[u8; 32]>,
     pub(crate) part: bool,
 }
 
@@ -418,17 +429,18 @@ pub(crate) fn authenticate(
         .parts
         .iter()
         .position(|part| part.audience == *audience);
-    let leaves = match part {
+    let (leaves, hashes) = match part {
         Some(index) => {
             let hasher = authorship.hasher(audience, prefix.part_keys[index])?;
-            if evidence.proof.root(&hasher)? != evidence.roots[index] {
+            let (root, hashes) = evidence.proof.root_with_leaf_hashes(&hasher)?;
+            if root != evidence.roots[index] {
                 return Err(crate::snapshot_error::invalid(
                     "write evidence opening differs from its signed root",
                 ));
             }
-            evidence.proof.opened()?
+            (evidence.proof.opened()?, hashes)
         }
-        None if evidence.proof.leaves == 0 => Vec::new(),
+        None if evidence.proof.leaves == 0 => (Vec::new(), Vec::new()),
         None => {
             return Err(crate::snapshot_error::invalid(
                 "write evidence opens a part the write does not have",
@@ -438,6 +450,7 @@ pub(crate) fn authenticate(
     Ok(AuthenticatedEvidence {
         opened,
         leaves,
+        hashes,
         part: part.is_some(),
     })
 }
@@ -452,6 +465,7 @@ pub(crate) fn load(
     let AuthenticatedEvidence {
         opened,
         leaves,
+        hashes,
         part,
     } = verified;
     crate::write_headers::retain(db, &opened)?;
@@ -481,12 +495,14 @@ pub(crate) fn load(
         },
     )?;
     if part {
+        let hashes: Vec<u8> = hashes.into_iter().flatten().collect();
         db.internal_execute(
-            "INSERT INTO _coven_part_proofs(write_id,audience,proof) VALUES(?1,?2,?3) ON CONFLICT(write_id,audience) DO UPDATE SET proof=excluded.proof",
+            "INSERT INTO _coven_part_proofs(write_id,audience,proof,hashes) VALUES(?1,?2,?3,?4) ON CONFLICT(write_id,audience) DO UPDATE SET proof=excluded.proof,hashes=excluded.hashes",
             params![
                 id,
                 audience_text(audience),
-                encoded(merge_fields::encode_multiproof(&evidence.proof))?
+                encoded(merge_fields::encode_multiproof(&evidence.proof))?,
+                hashes
             ],
         )?;
     }

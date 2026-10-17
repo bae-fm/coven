@@ -255,7 +255,7 @@ mod fixture {
      INSERT INTO _coven_creations SELECT tab,key,audience,CAST(device || n AS BLOB),x'00' FROM fixture;
      INSERT INTO _coven_write_evidence SELECT CAST(device || n AS BLOB),x'00',x'00',x'',zeroblob(64) FROM fixture;
      INSERT INTO _coven_part_leaves SELECT CAST(device || n AS BLOB),audience,zeroblob(32) FROM fixture;
-     INSERT INTO _coven_part_proofs SELECT CAST(device || n AS BLOB),audience,x'00' FROM fixture;
+     INSERT INTO _coven_part_proofs SELECT CAST(device || n AS BLOB),audience,x'00',zeroblob(32) FROM fixture;
      INSERT INTO _coven_owner_tables SELECT DISTINCT 'table_' || i FROM fixture;
      INSERT INTO _coven_table_origins SELECT i,tab,1,tab FROM fixture;
      INSERT INTO _coven_column_origins SELECT i,tab,'column_' || i,1,tab,'column_' || i FROM fixture;
