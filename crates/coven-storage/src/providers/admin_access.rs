@@ -122,7 +122,14 @@ pub async fn obtain_admin_access(
             flow.google_cloud_admin()
                 .await
                 .map(AdminCredential::BearerToken)
-                .map_err(|error| StorageFailure::Authentication.with_source(error))
+                .map_err(|error| match error {
+                    super::OAuthError::Storage(error) => error,
+                    error @ (super::OAuthError::Unavailable(_)
+                    | super::OAuthError::InvalidRedirect) => {
+                        StorageFailure::InvalidConfiguration.with_source(error)
+                    }
+                    error => StorageFailure::Authentication.with_source(error),
+                })
         }
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         AdminAccessSource::AwsIdentityCenter {

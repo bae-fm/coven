@@ -39,10 +39,6 @@ impl OAuthAccess {
     }
 
     pub(crate) fn granted(self, scope: Option<&str>) -> Result<Self, StorageError> {
-        // Only Dropbox's grant is checked against its registration's scopes.
-        if self == Self::OneDrive {
-            return Ok(self);
-        }
         // OAuth 2.0 defines omission as the requested scope, not an empty grant.
         let Some(scope) = scope else { return Ok(self) };
         let scopes: Vec<_> = scope.split_ascii_whitespace().collect();
@@ -80,3 +76,7 @@ impl DropboxLocation {
         }
     }
 }
+
+#[cfg(test)]
+#[path = "provider_access_tests.rs"]
+mod tests;

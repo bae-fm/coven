@@ -4,6 +4,57 @@ use axum::{body::Bytes, extract::State, http::Uri, Router};
 use coven_foundation::clock::SystemClock;
 use std::sync::Mutex;
 
+struct AdminCallback;
+
+#[async_trait::async_trait]
+impl crate::providers::OAuthPresenter for AdminCallback {
+    fn redirect_uri(&self, _: crate::CloudProvider) -> &str {
+        "http://localhost:19284/callback"
+    }
+
+    async fn present(
+        &self,
+        authorization_url: &str,
+    ) -> Result<SecretText, crate::providers::OAuthError> {
+        let url = Url::parse(authorization_url).unwrap();
+        let state = url.query_pairs().find(|(key, _)| key == "state").unwrap().1;
+        Ok(SecretText::new(format!(
+            "http://localhost:19284/callback?code=admin-code&state={state}"
+        )))
+    }
+}
+
+#[tokio::test]
+async fn google_admin_access_preserves_token_failure_classes() {
+    for (code, expected) in [
+        ("server_error", StorageFailure::Network),
+        ("temporarily_unavailable", StorageFailure::Network),
+        ("invalid_client", StorageFailure::InvalidConfiguration),
+        ("invalid_scope", StorageFailure::InvalidConfiguration),
+        ("invalid_grant", StorageFailure::Authentication),
+    ] {
+        let server = TestServer::new(Router::new().fallback(move || async move {
+            response(400, serde_json::json!({"error": code}).to_string())
+        }))
+        .await;
+        let clock: ClockRef = Arc::new(coven_foundation::clock::FixedClock::new(
+            std::time::UNIX_EPOCH,
+        ));
+        let clients = crate::providers::OAuthClients::new(
+            Some("google-client".into()),
+            None,
+            None,
+            clock.clone(),
+        )
+        .with_token_endpoint(server.url.clone());
+        let flow = crate::providers::OAuthFlow::new(clients, Arc::new(AdminCallback));
+        let error = obtain_admin_access(AdminAccessSource::GoogleSignIn, Some(&flow), clock)
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure(), expected, "{code}");
+    }
+}
+
 #[test]
 fn cli_commands_name_only_the_chosen_profile_or_account() {
     let args = |command: &tokio::process::Command| {
