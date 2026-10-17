@@ -1,5 +1,8 @@
 use crate::sequence_sync::tests::*;
-use coven_storage::{test_utils::Faults, ObjectPath, Storage};
+use coven_storage::{
+    test_utils::{Faults, MemoryRequest},
+    ObjectPath, Storage,
+};
 
 #[tokio::test]
 async fn independent_sealings_of_the_same_floor_differ_and_both_authenticate() {
@@ -262,4 +265,92 @@ async fn a_failed_snapshot_deletion_resumes_its_recorded_body_after_reopening() 
         .unwrap()
         .is_none());
     ana.database().close().await.unwrap();
+}
+
+/// OneDrive can refuse every writer of one floor race while the floor stays
+/// unchanged. The refusal is the pass's ordinary conflict outcome: it rereads
+/// the floor, deletes nothing, and a later pass publishes the floor again.
+#[tokio::test]
+async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_later_pass() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let floor_path = ObjectPath::floor(group.store);
+    let grace = |extra| {
+        std::time::UNIX_EPOCH
+            + crate::sequence_sync::sequence_retention::GRACE
+            + std::time::Duration::from_secs(extra)
+    };
+    insert(&ana.sync.database, "first", "under the first floor").await;
+    ana.sync.pass().await.unwrap();
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group.clock.set(grace(1));
+    ana.sync.pass().await.unwrap();
+    let first_floor = group.storage.status(&floor_path).await.unwrap().unwrap();
+
+    insert(&ana.sync.database, "second", "under the second floor").await;
+    ana.sync.pass().await.unwrap();
+    let covered = ana.sync.database.applied_slot().await.unwrap();
+    let covered = ObjectPath::slot(group.store, covered.try_into().unwrap());
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group
+        .clock
+        .set(grace(2) + crate::sequence_sync::sequence_retention::GRACE);
+    ana.storage
+        .set_faults(Faults {
+            refuse_replacements: 1,
+            ..Faults::none()
+        })
+        .await;
+    let traced = ana.storage.request_trace().len();
+    let status = ana.sync.pass().await.unwrap();
+    assert!(matches!(status, crate::SequenceStatus::Synced { .. }));
+    let trace = ana.storage.request_trace().split_off(traced);
+    let refused = trace
+        .iter()
+        .position(|request| *request == MemoryRequest::Replace(floor_path.clone()))
+        .expect("the pass attempts the floor replacement");
+    assert!(
+        trace[refused..]
+            .iter()
+            .any(|request| *request == MemoryRequest::Read(floor_path.clone(), None)),
+        "the refusal rereads the floor"
+    );
+    assert_eq!(
+        group.storage.status(&floor_path).await.unwrap().unwrap(),
+        first_floor
+    );
+    assert_eq!(
+        ana.sync
+            .session
+            .lock()
+            .await
+            .floor
+            .as_ref()
+            .map(|floor| floor.object().clone()),
+        Some(first_floor.clone())
+    );
+    assert!(group.storage.status(&covered).await.unwrap().is_some());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+
+    // The refused pass also published a growth snapshot; the next floor
+    // names it once it passes grace.
+    group.clock.set(
+        grace(3)
+            + crate::sequence_sync::sequence_retention::GRACE
+            + crate::sequence_sync::sequence_retention::GRACE,
+    );
+    ana.sync.pass().await.unwrap();
+    let second_floor = group.storage.status(&floor_path).await.unwrap().unwrap();
+    assert_ne!(second_floor, first_floor);
+    assert!(group.storage.status(&covered).await.unwrap().is_none());
+    assert!(ana.sync.database.operations().await.unwrap().is_empty());
+    assert_eq!(rows(&ana.sync.database).await.len(), 2);
+    ana.sync.database.close().await.unwrap();
 }

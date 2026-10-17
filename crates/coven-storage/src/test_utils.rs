@@ -649,6 +649,10 @@ impl ProviderOps for MemoryProvider {
         {
             return Err(StorageFailure::Conflict.into());
         }
+        if state.faults.refuse_replacements > 0 {
+            state.faults.refuse_replacements -= 1;
+            return Err(StorageFailure::Conflict.into());
+        }
         let revision = state.next_id()?;
         state.objects.insert(
             path.clone(),
