@@ -10,13 +10,13 @@ use crate::DbError;
 use coven_format::snapshot::{SnapshotHeader, SnapshotRecord};
 use coven_merge::RowId;
 use rusqlite::params;
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 pub(crate) fn load<P: crate::PendingValue>(
     database: &DatabaseConnection,
     before: &DatabaseConnection,
     schema: &WriteSchema,
-    reload: crate::SnapshotReload<PreparedSnapshot<'_>, crate::download_stream::PreparedWrite<'_>>,
+    reload: crate::SnapshotReload<PreparedSnapshot, crate::download_stream::PreparedWrite<'_>>,
     files: &crate::file_write::FileWrite<'_>,
 ) -> Result<Vec<crate::LoadedSnapshot>, DbError> {
     database.stream_transaction(|database| {
@@ -148,7 +148,7 @@ pub(crate) fn load<P: crate::PendingValue>(
 pub(crate) fn read(
     database: &DatabaseConnection,
     schema: &WriteSchema,
-    prepared: PreparedSnapshot<'_>,
+    prepared: PreparedSnapshot,
     author: Option<coven_foundation::id_source::MemberId>,
 ) -> Result<(SnapshotHeader, BTreeSet<RowId>), DbError> {
     let header = prepared.header.clone();
@@ -156,102 +156,98 @@ pub(crate) fn read(
     let local_version = *schema.versions.end();
     let mut touched = crate::snapshot_state::begin(database, schema, &expected.audience)?;
     crate::ownership::clear_audience(database, &expected.audience)?;
-    crate::authorship::begin_load(database)?;
+    let mut authenticated = BTreeMap::new();
     let metadata = SnapshotMetadata::new(database);
     let mut loss_state = None;
-    let mut complete = BTreeSet::new();
+    let mut complete = BTreeMap::new();
     let mut carried = BTreeSet::new();
-    prepared.records().each(|bytes| {
-        let record = coven_format::merge_fields::decode_snapshot_record(&bytes, &metadata);
-        metadata.check()?;
-        match record? {
-                SnapshotRecord::Synced(row) => crate::snapshot_state::synced(
-                    database,
-                    schema,
-                    row,
-                    header.schema_version < local_version,
-                )?,
-                SnapshotRecord::Write(write) => metadata.put(&write)?,
-                SnapshotRecord::Column(column) => {
-                    // A synced column is registered; any other column can be
-                    // named only by frozen losses, which keep dropped columns.
-                    let synced = schema
-                        .declarations
+    for record in prepared.records() {
+        match record {
+            SnapshotRecord::Synced(row) => crate::snapshot_state::synced(
+                database,
+                schema,
+                row,
+                header.schema_version < local_version,
+            )?,
+            SnapshotRecord::Write(write) => metadata.put(&write)?,
+            SnapshotRecord::Column(column) => {
+                // A synced column is registered; any other column can be
+                // named only by frozen losses, which keep dropped columns.
+                let synced = schema
+                    .declarations
+                    .iter()
+                    .any(|declaration| declaration.name == column.table)
+                    && schema
+                        .table(&column.table)
+                        .columns
                         .iter()
-                        .any(|declaration| declaration.name == column.table)
-                        && schema
-                            .table(&column.table)
-                            .columns
-                            .iter()
-                            .any(|c| c.name == column.column);
-                    if !synced {
-                        crate::write_commit::frozen_column(
-                            database,
-                            &column.table,
-                            &column.column,
-                        )?;
-                    }
-                    database.internal_execute(
+                        .any(|c| c.name == column.column);
+                if !synced {
+                    crate::write_commit::frozen_column(database, &column.table, &column.column)?;
+                }
+                database.internal_execute(
                             "INSERT INTO temp._coven_snapshot_columns(table_name,column_name) VALUES(?1,?2)",
                             params![column.table, column.column],
                         )?;
-                }
-                SnapshotRecord::Merge(row) => {
-                    touched.insert(crate::snapshot_state::merged(database, schema, row)?);
-                }
-                SnapshotRecord::Loss(loss) => {
-                    crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)?
-                }
-                SnapshotRecord::Creation(creation) => {
-                    schema.row_table(&creation.row)?;
-                    crate::ownership::put(
-                        database,
-                        &creation.row,
-                        &crate::ownership::Creation {
-                            write: creation.write,
-                            creator: creation.creator,
-                        },
-                    )?;
-                }
-                SnapshotRecord::Evidence(evidence) => {
-                    crate::authorship::load(database, &expected.audience, &evidence, prepared.records().authorship(evidence.write)?)?
-                }
-                SnapshotRecord::Admin(original) => {
-                    crate::sequence_apply::retain(database, "admin", &original)?
-                }
-                SnapshotRecord::KeyCopy(original) => {
-                    crate::sequence_apply::retain(database, "key", &original)?
-                }
-                SnapshotRecord::Announcement(original) => {
-                    crate::sequence_apply::retain(database, "announcement", &original)?
-                }
-                SnapshotRecord::Claim(claim) => {
-                    crate::sequence::note_record(
-                        database,
-                        &claim,
-                        header.covers,
-                    )?;
-                }
-                SnapshotRecord::Authored(authored) => {
-                    crate::write_sources::load_evidence(database, &authored)?;
-                    carried.insert((
-                        authored.header.position,
-                        authored.change.row().table.clone(),
-                        authored.change.row().key.clone(),
-                    ));
-                    if authored.complete {
-                        complete.insert((
-                            coven_format::merge_fields::encode_write_header(&authored.header)
-                                .map_err(DbError::from)?,
+            }
+            SnapshotRecord::Merge(row) => {
+                touched.insert(crate::snapshot_state::merged(database, schema, row)?);
+            }
+            SnapshotRecord::Loss(loss) => {
+                crate::snapshot_state::loss(database, schema, loss, &metadata, &mut loss_state)?
+            }
+            SnapshotRecord::Creation(creation) => {
+                schema.row_table(&creation.row)?;
+                crate::ownership::put(
+                    database,
+                    &creation.row,
+                    &crate::ownership::Creation {
+                        write: creation.write,
+                        creator: creation.creator,
+                    },
+                )?;
+            }
+            SnapshotRecord::Evidence(evidence) => {
+                crate::authorship::load(
+                    database,
+                    &expected.audience,
+                    &evidence.original,
+                    &evidence.verified,
+                )?;
+                authenticated.insert(evidence.original.write, evidence.verified);
+            }
+            SnapshotRecord::Admin(original) => {
+                crate::sequence_apply::retain(database, "admin", &original)?
+            }
+            SnapshotRecord::KeyCopy(original) => {
+                crate::sequence_apply::retain(database, "key", &original)?
+            }
+            SnapshotRecord::Announcement(original) => {
+                crate::sequence_apply::retain(database, "announcement", &original)?
+            }
+            SnapshotRecord::Claim(claim) => {
+                crate::sequence::note_record(database, &claim, header.covers)?;
+            }
+            SnapshotRecord::Authored(authored) => {
+                crate::write_sources::load_evidence(database, &authored)?;
+                carried.insert((
+                    authored.header.position,
+                    authored.change.row().table.clone(),
+                    authored.change.row().key.clone(),
+                ));
+                if authored.complete {
+                    complete.insert(
+                        (
+                            authored.header.position,
                             authored.change.row().audience.clone(),
-                        ));
-                    }
+                        ),
+                        authored.header,
+                    );
                 }
             }
-        Ok(())
-    })?;
-    for (header, audience) in complete {
-        let header = coven_format::merge_fields::decode_write_header(&header)?;
+        }
+    }
+    for ((_, audience), header) in complete {
         crate::write_sources::complete(database, &header, &audience)?;
     }
     crate::write_sources::forget_own_migration(
@@ -270,8 +266,8 @@ pub(crate) fn read(
             device: expected.device,
             member: author,
         },
+        &authenticated,
     )?;
-    crate::authorship::end_load(database)?;
     database.batch(
         "DELETE FROM temp._coven_snapshot_writes; DELETE FROM temp._coven_snapshot_columns",
     )?;

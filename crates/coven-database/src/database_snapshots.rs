@@ -236,9 +236,9 @@ impl Database {
 
     /// Load authenticated snapshots and gap writes supplied by sync. Each stored
     /// snapshot supplies its identity, authenticated prefix and plaintext. Snapshot
-    /// frames and write parts are prepared in bounded records on the input
-    /// connection before taking the application writer. Inputs name a fixed
-    /// target and consecutive retained slots.
+    /// records and their authenticated evidence stay decoded for installation;
+    /// write parts are staged on the input connection before taking the application
+    /// writer. Inputs name a fixed target and consecutive retained slots.
     ///
     /// Replaces the selected audiences and replays uncovered parts and waiting
     /// uploads in one transaction, after parsing each snapshot body once. Every

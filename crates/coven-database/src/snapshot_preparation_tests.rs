@@ -4,6 +4,32 @@ use crate::write::tests::{notes, sql, NOTES};
 use coven_merge::Audience;
 use std::io::{Cursor, Read};
 
+#[tokio::test]
+async fn snapshot_installation_does_not_decode_prepared_records_under_the_writer() {
+    let store = TestStore::new();
+    let db = store.schema(notes(), NOTES).await.unwrap();
+    sql(&db, "INSERT INTO notes VALUES('n','before','')")
+        .await
+        .unwrap();
+    let snapshot = frames(&db, Audience::Store).await;
+    let counter = coven_foundation::test_work::Counter::default();
+    let bytes = snapshot.concat();
+    counter
+        .run(load_one(
+            &db,
+            id(Audience::Store),
+            snapshot.prefix,
+            Cursor::new(bytes),
+        ))
+        .await
+        .unwrap();
+    let counts = counter.take();
+    assert!(counts.snapshot_decodes > 0);
+    assert!(counts.decodes > 0, "the real snapshot decoder was measured");
+    assert_eq!(counts.snapshot_decodes_with_writer, 0);
+    db.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn snapshot_loading_and_validation_leave_the_application_writer_available() {
     for validating in [false, true] {

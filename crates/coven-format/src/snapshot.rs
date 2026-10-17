@@ -50,7 +50,7 @@ impl SnapshotHeader {
 
 /// One bounded record in a snapshot, using the owners' logical identities.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub enum SnapshotRecord {
+pub enum SnapshotRecord<E = crate::authorship::WriteEvidence> {
     /// An app-visible synced row.
     Synced(SyncedRow),
     /// Applied write metadata, before any row needing it is decoded.
@@ -66,7 +66,7 @@ pub enum SnapshotRecord {
     /// A row's selected original creation (§8.8).
     Creation(crate::authorship::Creation),
     /// Another member's write header, roots and openings in this audience.
-    Evidence(crate::authorship::WriteEvidence),
+    Evidence(E),
     /// Original signed admin slots, including creation; store snapshots only.
     Admin(crate::floor::OriginalSlot),
     /// Original signed key-copy slots; store snapshots only.
@@ -95,6 +95,27 @@ pub trait WriteSlots {
     fn slot(&self, write: WriteId) -> Option<Slot>;
 }
 impl SnapshotRecord {
+    /// Retain decoded records while replacing wire evidence with its checked form.
+    pub fn try_map_evidence<E, X>(
+        self,
+        prepare: impl FnOnce(crate::authorship::WriteEvidence) -> Result<E, X>,
+    ) -> Result<SnapshotRecord<E>, X> {
+        Ok(match self {
+            Self::Synced(value) => SnapshotRecord::Synced(value),
+            Self::Write(value) => SnapshotRecord::Write(value),
+            Self::Column(value) => SnapshotRecord::Column(value),
+            Self::Merge(value) => SnapshotRecord::Merge(value),
+            Self::Loss(value) => SnapshotRecord::Loss(value),
+            Self::Authored(value) => SnapshotRecord::Authored(value),
+            Self::Creation(value) => SnapshotRecord::Creation(value),
+            Self::Admin(value) => SnapshotRecord::Admin(value),
+            Self::KeyCopy(value) => SnapshotRecord::KeyCopy(value),
+            Self::Announcement(value) => SnapshotRecord::Announcement(value),
+            Self::Claim(value) => SnapshotRecord::Claim(value),
+            Self::Evidence(value) => SnapshotRecord::Evidence(prepare(value)?),
+        })
+    }
+
     pub(crate) fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.section().put(out)?;
         match self {
@@ -111,6 +132,8 @@ impl SnapshotRecord {
         }
     }
     pub(crate) fn get(input: &mut Decoder<'_>, oracle: &impl WriteOracle) -> Result<Self, Error> {
+        #[cfg(any(test, feature = "test-utils"))]
+        coven_foundation::test_work::snapshot_record_decode();
         match u8::get(input)? {
             0 => Ok(Self::Synced(Wire::get(input)?)),
             1 => Ok(Self::Write(Wire::get(input)?)),

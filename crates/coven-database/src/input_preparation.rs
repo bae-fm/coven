@@ -13,14 +13,12 @@ impl<'a> PreparedInputs<'a> {
         db: &'a DatabaseConnection,
         consume: impl FnOnce(&Self) -> Result<T, DbError>,
     ) -> Result<T, DbError> {
-        db.batch("CREATE TEMP TABLE _coven_prepared_records(source INTEGER NOT NULL,ordinal INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(source,ordinal)) WITHOUT ROWID;
-            CREATE TEMP TABLE _coven_prepared_evidence(source INTEGER NOT NULL,write_id BLOB NOT NULL,header BLOB NOT NULL,has_part INTEGER NOT NULL,hashes BLOB NOT NULL,PRIMARY KEY(source,write_id)) WITHOUT ROWID;
-            CREATE TEMP TABLE _coven_prepared_openings(source INTEGER NOT NULL,write_id BLOB NOT NULL,ordinal INTEGER NOT NULL,leaf BLOB NOT NULL,PRIMARY KEY(source,write_id,ordinal)) WITHOUT ROWID")?;
+        db.batch("CREATE TEMP TABLE _coven_prepared_records(source INTEGER NOT NULL,ordinal INTEGER NOT NULL,record BLOB NOT NULL,PRIMARY KEY(source,ordinal)) WITHOUT ROWID")?;
         let result = consume(&Self {
             db,
             next: Cell::new(0),
         })?;
-        db.batch("DROP TABLE temp._coven_prepared_records; DROP TABLE temp._coven_prepared_evidence; DROP TABLE temp._coven_prepared_openings")?;
+        db.batch("DROP TABLE temp._coven_prepared_records")?;
         Ok(result)
     }
     /// Run transaction-local work on the catalog's connection.
@@ -61,53 +59,5 @@ impl PreparedRecords<'_> {
             [self.id],
             |row| consume(row.get(0)?),
         )
-    }
-}
-
-impl PreparedRecords<'_> {
-    pub(crate) fn keep_authorship(
-        &self,
-        write: coven_merge::WriteId,
-        verified: crate::authorship::AuthenticatedEvidence,
-    ) -> Result<(), DbError> {
-        let id = coven_format::merge_fields::encode_write_id(&write)?;
-        let hashes: Vec<u8> = verified.hashes.into_iter().flatten().collect();
-        self.db.internal_execute(
-            "INSERT INTO temp._coven_prepared_evidence VALUES(?1,?2,?3,?4,?5)",
-            rusqlite::params![
-                self.id,
-                id,
-                verified.opened.encode()?,
-                verified.part,
-                hashes
-            ],
-        )?;
-        for (ordinal, leaf) in verified.leaves.into_iter().enumerate() {
-            self.db.internal_execute(
-                "INSERT INTO temp._coven_prepared_openings VALUES(?1,?2,?3,?4)",
-                rusqlite::params![self.id, id, ordinal as i64, leaf.encode()?],
-            )?;
-        }
-        Ok(())
-    }
-    pub(crate) fn authorship(
-        &self,
-        write: coven_merge::WriteId,
-    ) -> Result<crate::authorship::AuthenticatedEvidence, DbError> {
-        let id = coven_format::merge_fields::encode_write_id(&write)?;
-        let (header, part, hashes): (Vec<u8>, bool, Vec<u8>) = self.db.query_row(
-            "SELECT header,has_part,hashes FROM temp._coven_prepared_evidence WHERE source=?1 AND write_id=?2",
-            rusqlite::params![self.id, id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?;
-        let leaves = self.db.query("SELECT leaf FROM temp._coven_prepared_openings WHERE source=?1 AND write_id=?2 ORDER BY ordinal",
-            rusqlite::params![self.id, id], |row| crate::write_encoding::decoded(coven_format::authorship::Leaf::decode(&row.get::<_,Vec<u8>>(0)?)))?;
-        Ok(crate::authorship::AuthenticatedEvidence {
-            opened: coven_format::write_stream::WriteHeaderFrame::decode(&header)?,
-            leaves,
-            hashes: hashes
-                .chunks_exact(32)
-                .map(|hash| hash.try_into().expect("32 bytes"))
-                .collect(),
-            part,
-        })
     }
 }

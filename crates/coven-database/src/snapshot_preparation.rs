@@ -1,7 +1,7 @@
 //! Snapshot framing and cryptographic evidence prepared before installation.
 use crate::{
     authorship::Authorship,
-    input_preparation::{PreparedInputs, PreparedRecords},
+    input_preparation::PreparedInputs,
     snapshot_error::{invalid, SnapshotError},
     snapshot_metadata::SnapshotMetadata,
     write_schema::WriteSchema,
@@ -15,43 +15,47 @@ use coven_format::{
 };
 use std::io::Read;
 
-pub(crate) struct PreparedSnapshot<'a> {
-    pub(crate) header: SnapshotHeader,
-    records: PreparedRecords<'a>,
+pub(crate) struct PreparedEvidence {
+    pub(crate) original: coven_format::authorship::WriteEvidence,
+    pub(crate) verified: crate::authorship::AuthenticatedEvidence,
 }
-impl<'a> PreparedSnapshot<'a> {
-    /// The decoded records, in their original order, and their authorship.
-    pub(crate) fn records(&self) -> &PreparedRecords<'a> {
-        &self.records
+
+pub(crate) struct PreparedSnapshot {
+    pub(crate) header: SnapshotHeader,
+    records: Vec<SnapshotRecord<PreparedEvidence>>,
+}
+impl PreparedSnapshot {
+    /// Decoded records and authenticated evidence, consumed without reparsing.
+    pub(crate) fn records(self) -> Vec<SnapshotRecord<PreparedEvidence>> {
+        self.records
     }
 }
 
-pub(crate) fn prepare<'a>(
-    inputs: &PreparedInputs<'a>,
+pub(crate) fn prepare(
+    inputs: &PreparedInputs<'_>,
     schema: &WriteSchema,
     expected: &SnapshotId,
     prefix: SnapshotObjectPrefix,
     input: impl Read,
     authorship: &dyn Authorship,
-) -> Result<PreparedSnapshot<'a>, DbError> {
-    inputs.run(|db| prepare_with(db, inputs, schema, expected, prefix, input, authorship))
+) -> Result<PreparedSnapshot, DbError> {
+    inputs.run(|db| prepare_with(db, schema, expected, prefix, input, authorship))
 }
 
-fn prepare_with<'a>(
+fn prepare_with(
     db: &crate::sqlite::DatabaseConnection,
-    inputs: &PreparedInputs<'a>,
     schema: &WriteSchema,
     expected: &SnapshotId,
     prefix: SnapshotObjectPrefix,
     mut input: impl Read,
     authorship: &dyn Authorship,
-) -> Result<PreparedSnapshot<'a>, DbError> {
+) -> Result<PreparedSnapshot, DbError> {
     #[cfg(any(test, feature = "test-utils"))]
     db.record_work(|work| work.snapshot_reads += 1);
     SnapshotMetadata::create_table(db)?;
     let metadata = SnapshotMetadata::new(db);
     let mut decoder = SnapshotChunkDecoder::new(prefix);
-    let mut records = inputs.records();
+    let mut records = Vec::new();
     let mut checked_header = false;
     let mut chunk = [0; coven_format::chunks::CHUNK_SIZE];
     loop {
@@ -75,16 +79,14 @@ fn prepare_with<'a>(
             let Some(record) = record else {
                 break;
             };
-            match &record {
-                SnapshotRecord::Write(write) => metadata.stage(write)?,
-                SnapshotRecord::Evidence(evidence) => {
-                    let verified =
-                        crate::authorship::authenticate(authorship, &expected.audience, evidence)?;
-                    records.keep_authorship(evidence.write, verified)?;
-                }
-                _ => (),
+            if let SnapshotRecord::Write(write) = &record {
+                metadata.stage(write)?;
             }
-            records.push(coven_format::merge_fields::encode_snapshot_record(&record)?)?;
+            records.push(record.try_map_evidence(|original| {
+                let verified =
+                    crate::authorship::authenticate(authorship, &expected.audience, &original)?;
+                Ok::<_, DbError>(PreparedEvidence { original, verified })
+            })?);
         }
     }
     decoder.finish().map_err(SnapshotError::Format)?;

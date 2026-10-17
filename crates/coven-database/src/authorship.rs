@@ -391,18 +391,6 @@ fn open(
     Ok(proof.retain_opened(&hashes, &keep))
 }
 
-/// Temporary openings of the snapshot being loaded, by write and row.
-pub(crate) fn begin_load(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.batch(
-        "CREATE TEMP TABLE _coven_snapshot_openings(write_id BLOB NOT NULL,ordinal INTEGER NOT NULL,leaf BLOB NOT NULL,PRIMARY KEY(write_id,ordinal)) WITHOUT ROWID;
-         CREATE TEMP TABLE _coven_snapshot_authored(write_id BLOB PRIMARY KEY NOT NULL,version INTEGER NOT NULL,migration INTEGER NOT NULL) WITHOUT ROWID;",
-    )
-}
-
-pub(crate) fn end_load(db: &DatabaseConnection) -> Result<(), DbError> {
-    db.batch("DROP TABLE temp._coven_snapshot_openings; DROP TABLE temp._coven_snapshot_authored")
-}
-
 /// Authenticate one write's evidence in a loaded snapshot of `audience`: its
 /// header signature, then its opening against that part's signed root. Keep
 /// both for snapshots this device writes later.
@@ -455,35 +443,14 @@ pub(crate) fn authenticate(
     })
 }
 
-/// Install already authenticated openings with their source evidence.
+/// Retain already authenticated evidence for snapshots this device writes later.
 pub(crate) fn load(
     db: &DatabaseConnection,
     audience: &Audience,
     evidence: &WriteEvidence,
-    verified: AuthenticatedEvidence,
+    verified: &AuthenticatedEvidence,
 ) -> Result<(), DbError> {
-    let AuthenticatedEvidence {
-        opened,
-        leaves,
-        hashes,
-        part,
-    } = verified;
-    crate::write_headers::retain(db, &opened)?;
-    let id = encoded(merge_fields::encode_write_id(&evidence.write))?;
-    db.internal_execute(
-        "INSERT INTO temp._coven_snapshot_authored(write_id,version,migration) VALUES(?1,?2,?3)",
-        params![
-            id,
-            opened.header.schema_version,
-            opened.header.disposition == WriteDisposition::Migration
-        ],
-    )?;
-    for (ordinal, leaf) in leaves.iter().enumerate() {
-        db.internal_execute(
-            "INSERT INTO temp._coven_snapshot_openings(write_id,ordinal,leaf) VALUES(?1,?2,?3)",
-            params![id, ordinal as i64, leaf.encode()?],
-        )?;
-    }
+    crate::write_headers::retain(db, &verified.opened)?;
     retain_header(
         db,
         evidence.write,
@@ -494,12 +461,12 @@ pub(crate) fn load(
             signature: evidence.signature,
         },
     )?;
-    if part {
-        let hashes: Vec<u8> = hashes.into_iter().flatten().collect();
+    if verified.part {
+        let hashes: Vec<u8> = verified.hashes.iter().flatten().copied().collect();
         db.internal_execute(
             "INSERT INTO _coven_part_proofs(write_id,audience,proof,hashes) VALUES(?1,?2,?3,?4) ON CONFLICT(write_id,audience) DO UPDATE SET proof=excluded.proof,hashes=excluded.hashes",
             params![
-                id,
+                encoded(merge_fields::encode_write_id(&evidence.write))?,
                 audience_text(audience),
                 encoded(merge_fields::encode_multiproof(&evidence.proof))?,
                 hashes
@@ -517,31 +484,9 @@ pub(crate) fn check(
     schema: &WriteSchema,
     audience: &Audience,
     author: Author,
+    authenticated: &BTreeMap<WriteId, AuthenticatedEvidence>,
 ) -> Result<(), DbError> {
     let current = db.schema_version()?;
-    let authenticated = |write: WriteId| -> Result<Option<(u32, bool, Vec<Leaf>)>, DbError> {
-        let id = encoded(merge_fields::encode_write_id(&write))?;
-        let Some((version, migration)) = db
-            .query(
-                "SELECT version,migration FROM temp._coven_snapshot_authored WHERE write_id=?1",
-                [&id],
-                |r| Ok((r.get::<_, u32>(0)?, r.get::<_, bool>(1)?)),
-            )?
-            .pop()
-        else {
-            return Ok(None);
-        };
-        let leaves = db.query(
-            "SELECT leaf FROM temp._coven_snapshot_openings WHERE write_id=?1 ORDER BY ordinal",
-            [&id],
-            |r| r.get::<_, Vec<u8>>(0),
-        )?;
-        let leaves = leaves
-            .iter()
-            .map(|leaf| Leaf::decode(leaf))
-            .collect::<Result<Vec<_>, _>>()?;
-        Ok(Some((version, migration, leaves)))
-    };
     let refused = || {
         crate::snapshot_error::invalid(
             "snapshot names another member's authorship without its write's evidence",
@@ -590,19 +535,21 @@ pub(crate) fn check(
         }
     }
     for (write, needs) in needs {
-        let Some((version, migration, leaves)) = authenticated(write)? else {
+        let Some(verified) = authenticated.get(&write) else {
             return Err(refused());
         };
-        if migration {
+        if verified.opened.header.disposition == WriteDisposition::Migration {
             continue;
         }
+        let version = verified.opened.header.schema_version;
+        let leaves = &verified.leaves;
         for row in &needs.creations {
             let single = Needs {
                 creations: BTreeSet::from([row.clone()]),
                 cells: Vec::new(),
             };
             let mut found = false;
-            for leaf in &leaves {
+            for leaf in leaves {
                 found |= proves(db, version, current, leaf, &single, &creators)?;
             }
             if !found {
@@ -615,7 +562,7 @@ pub(crate) fn check(
                 cells: vec![cell.clone()],
             };
             let mut found = false;
-            for leaf in &leaves {
+            for leaf in leaves {
                 found |= proves(db, version, current, leaf, &single, &creators)?;
             }
             if !found {

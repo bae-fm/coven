@@ -51,6 +51,8 @@ pub(crate) struct Decoder<'a> {
 
 impl<'a> Decoder<'a> {
     pub(crate) fn new(bytes: &'a [u8]) -> Result<Self, Error> {
+        #[cfg(any(test, feature = "test-utils"))]
+        coven_foundation::test_work::decode();
         bound(bytes.len(), MAX_OBJECT, "object")?;
         Ok(Self { bytes, items: 0 })
     }

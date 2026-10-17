@@ -46,6 +46,8 @@ pub(crate) fn bind<R>(
     run: impl FnOnce() -> R + Send + 'static,
 ) -> impl FnOnce() -> R + Send + 'static {
     let scope = TASK.try_with(|scope| *scope).ok();
+    #[cfg(any(test, feature = "test-utils"))]
+    let run = coven_foundation::test_work::bind(run);
     move || enter(scope, run)
 }
 

@@ -51,9 +51,7 @@ async fn encoded_part_growth_requests_a_snapshot_and_an_idle_pass_reuses_its_siz
         .expect("growth requests a snapshot");
     assert_eq!(announcement.covers, 3);
     drop(session);
-    let count = ana.storage.request_count();
-    ana.sync.pass().await.unwrap();
-    assert_eq!(ana.storage.request_count() - count, 2);
+    assert_idle_work(&ana).await;
     ana.sync.database.close().await.unwrap();
 }
 

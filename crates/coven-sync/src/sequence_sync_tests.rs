@@ -1,12 +1,14 @@
 use crate::*;
 use coven_crypto::{
-    custody::{InMemoryCustody, KeySession, Keychain, StoreKeychain},
+    custody::{
+        InMemoryCustody, KeySession, Keychain, Passphrase, PassphraseCustody, StoreKeychain,
+    },
     MemberIdentity, StoreKey, StoreKeyring,
 };
 use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
 use coven_format::admin::{MemberRole, StoreChange};
 use coven_foundation::{
-    files::StoreLayout,
+    files::{StoreFile, StoreLayout},
     id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId},
 };
 use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage, StorageSettings};
@@ -18,6 +20,7 @@ pub(crate) struct Device {
     pub(crate) sync: Arc<SequenceSync>,
     pub(crate) storage: MemoryStorage,
     pub(crate) identity: MemberIdentity,
+    pub(crate) work: coven_database::test_utils::WorkCounter,
 }
 impl Device {
     pub(crate) fn database(&self) -> &Database {
@@ -35,6 +38,7 @@ pub(crate) struct Group {
     pub(crate) version: std::sync::atomic::AtomicU32,
     /// Whether a breaking migration journals the raises passes publish.
     pub(crate) raises: std::sync::atomic::AtomicBool,
+    pub(crate) passphrase_custody: bool,
 }
 impl Group {
     pub(crate) fn new() -> Self {
@@ -55,6 +59,7 @@ impl Group {
             clock,
             version: 1.into(),
             raises: false.into(),
+            passphrase_custody: false,
         }
     }
     pub(crate) async fn device(&self, seed: u8) -> Device {
@@ -156,6 +161,40 @@ impl Group {
             .open()
             .await
             .unwrap();
+        let work = coven_database::test_utils::WorkCounter::default();
+        database.test_track_work(work.clone()).await.unwrap();
+        let (store_keys, member_keys) = if self.passphrase_custody {
+            let store_keys = KeySession::store(Arc::new(PassphraseCustody::new(
+                Passphrase::new("store test phrase".into()),
+                directory.owned_file(StoreFile::StoreKeys),
+                self.store,
+            )))
+            .unwrap();
+            let member_keys = KeySession::member(Arc::new(PassphraseCustody::new(
+                Passphrase::new("member test phrase".into()),
+                directory.owned_file(StoreFile::MemberKeys),
+                self.store,
+            )))
+            .unwrap();
+            if store_keys.read().unwrap().is_none() {
+                if let Some(ring) = &ring {
+                    store_keys.persist(ring).unwrap();
+                }
+            }
+            if member_keys.read().unwrap().is_none() {
+                member_keys.persist(&identity).unwrap();
+            }
+            (store_keys, member_keys)
+        } else {
+            (
+                KeySession::store(Arc::new(match ring {
+                    Some(ring) => InMemoryCustody::new(ring),
+                    None => InMemoryCustody::empty(),
+                }))
+                .unwrap(),
+                KeySession::member(Arc::new(InMemoryCustody::new(identity.clone()))).unwrap(),
+            )
+        };
         let device = directory.settings().unwrap().device_id;
         let state = Arc::new(SyncState::new());
         let clock: coven_foundation::clock::ClockRef = self.clock.clone();
@@ -185,16 +224,8 @@ impl Group {
                 Arc::new(storage.clone()),
                 directory,
                 device,
-                Arc::new(
-                    KeySession::store(Arc::new(match ring {
-                        Some(ring) => InMemoryCustody::new(ring),
-                        None => InMemoryCustody::empty(),
-                    }))
-                    .unwrap(),
-                ),
-                Arc::new(
-                    KeySession::member(Arc::new(InMemoryCustody::new(identity.clone()))).unwrap(),
-                ),
+                Arc::new(store_keys),
+                Arc::new(member_keys),
                 state,
                 clock,
                 self.ids.clone(),
@@ -209,6 +240,7 @@ impl Group {
             sync,
             storage,
             identity,
+            work,
         }
     }
     pub(crate) async fn create(&self, ana: &Device) {
@@ -431,17 +463,51 @@ async fn a_departed_reader_consumes_old_key_parts_unopened_until_rejoining() {
     }
 }
 
+pub(crate) async fn assert_idle_work(device: &Device) {
+    let requests = device.storage.request_count();
+    let received: usize = device.storage.received_buffers().await.iter().sum();
+    let transferred = device.storage.transferred().await;
+    device.work.take();
+    let counter = coven_foundation::test_work::Counter::default();
+    assert!(matches!(
+        counter.run(device.sync.pass()).await.unwrap(),
+        SequenceStatus::Synced { .. }
+    ));
+    assert_eq!(device.storage.request_count() - requests, 2);
+    assert_eq!(
+        device
+            .storage
+            .received_buffers()
+            .await
+            .iter()
+            .sum::<usize>(),
+        received
+    );
+    assert_eq!(device.storage.transferred().await, transferred);
+    assert_eq!(
+        counter.take(),
+        coven_foundation::test_work::Counts::default()
+    );
+    assert_eq!(device.work.take().commits, 0);
+}
+
 #[tokio::test]
 async fn idle_pass_reads_only_the_next_slot_and_floor() {
-    let group = Group::new();
-    let ana = group.device(1).await;
+    let mut group = Group::new();
+    group.passphrase_custody = true;
+    let counter = coven_foundation::test_work::Counter::default();
+    let ana = counter.run(group.device(1)).await;
+    assert_eq!(counter.take().custody_derivations, 2);
     group.create(&ana).await;
-    let count = ana.storage.request_count();
-    assert!(matches!(
-        ana.sync.pass().await.unwrap(),
-        SequenceStatus::Synced { through: 2 }
-    ));
-    assert_eq!(ana.storage.request_count() - count, 2);
+    assert!(ana.work.take().commits > 0);
+    assert_idle_work(&ana).await;
+    let ana = counter.run(group.reopen(ana)).await;
+    let reopened = counter.take();
+    assert_eq!(reopened.custody_derivations, 2);
+    assert!(reopened.decodes > 0);
+    // Reopening reconstructs history once; unchanged passes reuse it.
+    ana.sync.pass().await.unwrap();
+    assert_idle_work(&ana).await;
     assert!(ana.sync.database.current_claim().await.unwrap().is_none());
     assert!(ana.sync.database.operations().await.unwrap().is_empty());
     ana.sync.database.close().await.unwrap();

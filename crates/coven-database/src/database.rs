@@ -122,6 +122,8 @@ impl<L> DatabaseAccess<L> {
             if let Some(error) = self.observer.error() {
                 return Err(error.into());
             }
+            #[cfg(any(test, feature = "test-utils"))]
+            let run = |writer| coven_foundation::test_work::writing(|| run(writer));
             run(writer)
         })
     }

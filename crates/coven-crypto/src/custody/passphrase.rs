@@ -199,8 +199,8 @@ fn derive(
     salt: &[u8; SALT_LEN],
     params: argon2::Params,
 ) -> Result<Zeroizing<[u8; 32]>, KeyError> {
-    #[cfg(test)]
-    tests::DERIVATIONS.with(|count| count.set(count.get() + 1));
+    #[cfg(any(test, feature = "test-utils"))]
+    coven_foundation::test_work::custody_derivation();
     let mut blocks = allocate_blocks(params.block_count())?;
     let argon = argon2::Argon2::new(argon2::Algorithm::Argon2id, argon2::Version::V0x13, params);
     let mut key = Zeroizing::new([0; 32]);

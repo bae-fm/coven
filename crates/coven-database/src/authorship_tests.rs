@@ -121,6 +121,26 @@ fn refused(result: Result<(), DbError>) -> &'static str {
     }
 }
 
+#[tokio::test]
+async fn prepared_authorship_is_not_decoded_during_installation() {
+    let store = TestStore::new();
+    let db = source(&store, &[insert(0, 0), overwrite()]).await;
+    let snapshot = frames(&db, Audience::Store).await;
+    assert!(!evidence(&snapshot).is_empty());
+    let counter = coven_foundation::test_work::Counter::default();
+    counter
+        .run(load(&snapshot, snapshot.concat()))
+        .await
+        .unwrap();
+    let counts = counter.take();
+    assert!(counts.snapshot_decodes > 0);
+    assert_eq!(
+        counts.snapshot_decodes_with_writer, 0,
+        "snapshot evidence decoded while the application writer was held"
+    );
+    db.close().await.unwrap();
+}
+
 /// The snapshot opens the creation marker and each surviving cell of
 /// another member's row, and hides the replaced value behind a hash (§8.8).
 #[tokio::test]

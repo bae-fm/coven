@@ -2,9 +2,6 @@ use super::*;
 use crate::custody::{KeySession, MemberKeyCustody, StoreKeyCustody};
 use std::sync::Arc;
 
-thread_local! {
-    pub(super) static DERIVATIONS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
-}
 use crate::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_foundation::id_source::{IdSource, KeyId};
 use coven_foundation::{
@@ -79,53 +76,56 @@ fn wrong_passphrase_and_wrong_store_or_material_kind_fail_authentication() {
 
 #[test]
 fn a_session_holds_its_material_and_saves_without_rereading_the_file() {
-    let (_temp, file, id) = file();
-    let custody = Arc::new(PassphraseCustody::<StoreKeyring>::new(
-        Passphrase::new("phrase".into()),
-        file.clone(),
-        id,
-    ));
-    let session = KeySession::store(custody.clone()).unwrap();
-    let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
-    session.persist(&first).unwrap();
-    let header = file.read_optional().unwrap().unwrap()[..37].to_vec();
-    // External changes cannot replace held keys. Saving uses the held sealing
-    // capability, even when rereading the prior file would fail authentication.
-    file.replace(b"damaged external replacement").unwrap();
-    assert_eq!(
-        session
-            .read()
-            .unwrap()
-            .unwrap()
-            .to_secret_bytes()
-            .as_bytes(),
-        first.to_secret_bytes().as_bytes()
-    );
-    let mut replacement = first;
-    replacement
-        .insert_store_key(StoreKey::generate(KeyId(Uuid::from_u128(2))).unwrap())
+    let counter = coven_foundation::test_work::Counter::default();
+    counter.scope(|| {
+        let (_temp, file, id) = file();
+        let custody = Arc::new(PassphraseCustody::<StoreKeyring>::new(
+            Passphrase::new("phrase".into()),
+            file.clone(),
+            id,
+        ));
+        let session = KeySession::store(custody.clone()).unwrap();
+        let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
+        session.persist(&first).unwrap();
+        let header = file.read_optional().unwrap().unwrap()[..37].to_vec();
+        // External changes cannot replace held keys. Saving uses the held sealing
+        // capability, even when rereading the prior file would fail authentication.
+        file.replace(b"damaged external replacement").unwrap();
+        assert_eq!(
+            session
+                .read()
+                .unwrap()
+                .unwrap()
+                .to_secret_bytes()
+                .as_bytes(),
+            first.to_secret_bytes().as_bytes()
+        );
+        let mut replacement = first;
+        replacement
+            .insert_store_key(StoreKey::generate(KeyId(Uuid::from_u128(2))).unwrap())
+            .unwrap();
+        session.persist(&replacement).unwrap();
+        assert_eq!(&file.read_optional().unwrap().unwrap()[..37], header);
+        assert_eq!(counter.take().custody_derivations, 1);
+        session.close();
+        assert!(custody.protection.lock().unwrap().is_none());
+        let reopened = KeySession::store(Arc::new(PassphraseCustody::new(
+            Passphrase::new("phrase".into()),
+            file,
+            id,
+        )))
         .unwrap();
-    session.persist(&replacement).unwrap();
-    assert_eq!(&file.read_optional().unwrap().unwrap()[..37], header);
-    assert_eq!(DERIVATIONS.get(), 1);
-    session.close();
-    assert!(custody.protection.lock().unwrap().is_none());
-    let reopened = KeySession::store(Arc::new(PassphraseCustody::new(
-        Passphrase::new("phrase".into()),
-        file,
-        id,
-    )))
-    .unwrap();
-    assert_eq!(
-        reopened
-            .read()
-            .unwrap()
-            .unwrap()
-            .to_secret_bytes()
-            .as_bytes(),
-        replacement.to_secret_bytes().as_bytes()
-    );
-    assert_eq!(DERIVATIONS.get(), 2);
+        assert_eq!(
+            reopened
+                .read()
+                .unwrap()
+                .unwrap()
+                .to_secret_bytes()
+                .as_bytes(),
+            replacement.to_secret_bytes().as_bytes()
+        );
+        assert_eq!(counter.take().custody_derivations, 1);
+    });
 }
 
 #[test]
@@ -207,75 +207,84 @@ fn file_failures_are_not_absence_or_success() {
 
 #[test]
 fn saving_additions_reuses_the_unlocked_passphrase_key() {
-    let ids = SequentialIds::new();
-    let (_temp, file, id) = file();
-    let custody =
-        PassphraseCustody::<StoreKeyring>::new(Passphrase::new("phrase".into()), file.clone(), id);
-    assert!(custody.unlock().unwrap().is_none());
-    let mut keys = StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap());
-    custody.persist(&keys).unwrap();
-    let first = file.read_optional().unwrap().unwrap();
-    keys.insert_store_key(StoreKey::generate(KeyId(ids.new_id())).unwrap())
-        .unwrap();
-    custody.persist(&keys).unwrap();
-    let second = file.read_optional().unwrap().unwrap();
-    assert_eq!(DERIVATIONS.get(), 1);
-    assert_eq!(
-        &first[..37],
-        &second[..37],
-        "saving must retain the unlocked salt and parameters"
-    );
-    assert_ne!(
-        &first[37..61],
-        &second[37..61],
-        "each save needs a fresh nonce"
-    );
+    let counter = coven_foundation::test_work::Counter::default();
+    counter.scope(|| {
+        let ids = SequentialIds::new();
+        let (_temp, file, id) = file();
+        let custody = PassphraseCustody::<StoreKeyring>::new(
+            Passphrase::new("phrase".into()),
+            file.clone(),
+            id,
+        );
+        assert!(custody.unlock().unwrap().is_none());
+        let mut keys = StoreKeyring::new(StoreKey::generate(KeyId(ids.new_id())).unwrap());
+        custody.persist(&keys).unwrap();
+        let first = file.read_optional().unwrap().unwrap();
+        keys.insert_store_key(StoreKey::generate(KeyId(ids.new_id())).unwrap())
+            .unwrap();
+        custody.persist(&keys).unwrap();
+        let second = file.read_optional().unwrap().unwrap();
+        assert_eq!(counter.take().custody_derivations, 1);
+        assert_eq!(
+            &first[..37],
+            &second[..37],
+            "saving must retain the unlocked salt and parameters"
+        );
+        assert_ne!(
+            &first[37..61],
+            &second[37..61],
+            "each save needs a fresh nonce"
+        );
+    });
 }
 
 #[test]
 fn failed_save_and_forget_preserve_held_keys_and_reuse_the_sealing_capability() {
-    let (temp, file, id) = file();
-    let custody = Arc::new(PassphraseCustody::<StoreKeyring>::new(
-        Passphrase::new("phrase".into()),
-        file.clone(),
-        id,
-    ));
-    let session = KeySession::store(custody.clone()).unwrap();
-    let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
-    session.persist(&first).unwrap();
-    file.remove().unwrap();
-    let target = temp
-        .path()
-        .join("stores")
-        .join(id.to_string())
-        .join("store-keys.sealed");
-    // A directory at the file itself rejects both replacement and removal on
-    // Unix and Windows. A file in a parent component instead reports NotFound
-    // on Windows, where forgetting an absent file correctly succeeds.
-    std::fs::create_dir(&target).unwrap();
-    let second = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(2))).unwrap());
-    assert!(matches!(session.persist(&second), Err(KeyError::File(_))));
-    assert!(matches!(session.forget(), Err(KeyError::File(_))));
-    assert_eq!(
-        session
-            .read()
-            .unwrap()
-            .unwrap()
-            .to_secret_bytes()
-            .as_bytes(),
-        first.to_secret_bytes().as_bytes()
-    );
-    std::fs::remove_dir(&target).unwrap();
-    session.persist(&second).unwrap();
-    session.forget().unwrap();
-    assert!(session.read().unwrap().is_none());
-    assert!(file.read_optional().unwrap().is_none());
-    session.persist(&first).unwrap();
-    assert_eq!(DERIVATIONS.get(), 1);
-    session.close();
-    assert!(custody.protection.lock().unwrap().is_none());
-    assert!(matches!(
-        custody.persist(&first),
-        Err(KeyError::StoreClosed)
-    ));
+    let counter = coven_foundation::test_work::Counter::default();
+    counter.scope(|| {
+        let (temp, file, id) = file();
+        let custody = Arc::new(PassphraseCustody::<StoreKeyring>::new(
+            Passphrase::new("phrase".into()),
+            file.clone(),
+            id,
+        ));
+        let session = KeySession::store(custody.clone()).unwrap();
+        let first = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(1))).unwrap());
+        session.persist(&first).unwrap();
+        file.remove().unwrap();
+        let target = temp
+            .path()
+            .join("stores")
+            .join(id.to_string())
+            .join("store-keys.sealed");
+        // A directory at the file itself rejects both replacement and removal on
+        // Unix and Windows. A file in a parent component instead reports NotFound
+        // on Windows, where forgetting an absent file correctly succeeds.
+        std::fs::create_dir(&target).unwrap();
+        let second = StoreKeyring::new(StoreKey::generate(KeyId(Uuid::from_u128(2))).unwrap());
+        assert!(matches!(session.persist(&second), Err(KeyError::File(_))));
+        assert!(matches!(session.forget(), Err(KeyError::File(_))));
+        assert_eq!(
+            session
+                .read()
+                .unwrap()
+                .unwrap()
+                .to_secret_bytes()
+                .as_bytes(),
+            first.to_secret_bytes().as_bytes()
+        );
+        std::fs::remove_dir(&target).unwrap();
+        session.persist(&second).unwrap();
+        session.forget().unwrap();
+        assert!(session.read().unwrap().is_none());
+        assert!(file.read_optional().unwrap().is_none());
+        session.persist(&first).unwrap();
+        assert_eq!(counter.take().custody_derivations, 1);
+        session.close();
+        assert!(custody.protection.lock().unwrap().is_none());
+        assert!(matches!(
+            custody.persist(&first),
+            Err(KeyError::StoreClosed)
+        ));
+    });
 }

@@ -167,6 +167,8 @@ impl Leaf {
 
     /// Decode exactly one leaf.
     pub fn decode(bytes: &[u8]) -> Result<Self, Error> {
+        #[cfg(any(test, feature = "test-utils"))]
+        coven_foundation::test_work::snapshot_record_decode();
         let mut input = Decoder::new(bytes)?;
         let leaf = Self::get(&mut input)?;
         input.finish()?;

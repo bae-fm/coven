@@ -41,7 +41,7 @@ tempfile.workspace = true
 coven-foundation = { workspace = true, features = ["test-utils"] }
 
 [features]
-test-utils = []
+test-utils = ["coven-foundation/test-utils"]
 
 [lints]
 workspace = true
