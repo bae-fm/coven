@@ -27,9 +27,8 @@ fn set_upload(session: &mut UploadSession, next: OneDriveUpload) -> Result<(), S
     }
 }
 
-/// Graph refuses a fragment overlapping bytes its session already received
-/// with 416 and `fragmentOverlap`, as its own or an inner error's code.
-fn fragment_overlap(error: &StorageError) -> bool {
+/// Whether Graph named `code` as the error's own or an inner error's code.
+pub(super) fn native_code(error: &StorageError, code: &str) -> bool {
     let StorageError::Provider { source, .. } = error else {
         return false;
     };
@@ -42,7 +41,39 @@ fn fragment_overlap(error: &StorageError) -> bool {
     std::iter::successors(Some(&value["error"]), |error| {
         Some(&error["innererror"]).filter(|inner| inner.is_object())
     })
-    .any(|error| error["code"].as_str() == Some("fragmentOverlap"))
+    .any(|error| error["code"].as_str() == Some(code))
+}
+
+/// Earliest byte the provider still needs after accepting a sequential fragment.
+pub(super) fn next_offset(
+    ranges: &Value,
+    confirmed: u64,
+    total: u64,
+    invalid: impl Fn() -> StorageError,
+) -> Result<u64, StorageError> {
+    let ranges = ranges.as_array().ok_or_else(&invalid)?;
+    let mut first: Option<u64> = None;
+    for range in ranges {
+        let (start, end) = range
+            .as_str()
+            .and_then(|s| s.split_once('-'))
+            .ok_or_else(&invalid)?;
+        let start = start.parse::<u64>().map_err(|_| invalid())?;
+        if start < confirmed || start >= total {
+            return Err(invalid());
+        }
+        if !end.is_empty() {
+            let end = end.parse::<u64>().map_err(|_| invalid())?;
+            if end < start || end >= total {
+                return Err(invalid());
+            }
+        }
+        first = Some(match first {
+            Some(previous) => previous.min(start),
+            None => start,
+        });
+    }
+    first.ok_or_else(invalid)
 }
 
 impl OneDriveStorage {
@@ -294,7 +325,9 @@ impl OneDriveStorage {
                     .await?;
                 if response.status().as_u16() == 416 {
                     let error = http::response_error(PROVIDER, response).await;
-                    if !fragment_overlap(&error) {
+                    // Graph refuses a fragment overlapping bytes its session
+                    // already received with 416 and `fragmentOverlap`.
+                    if !native_code(&error, "fragmentOverlap") {
                         // An invalid range coven sent stays its error.
                         return Err(error);
                     }
@@ -561,29 +594,7 @@ impl OneDriveStorage {
         let invalid = || http::invalid_response(PROVIDER, status, headers.clone(), body.to_vec());
         let value: Value = serde_json::from_slice(&body).map_err(|_| invalid())?;
         if let Some(ranges) = value.get("nextExpectedRanges") {
-            let ranges = ranges.as_array().ok_or_else(invalid)?;
-            let mut first: Option<u64> = None;
-            for range in ranges {
-                let (start, end) = range
-                    .as_str()
-                    .and_then(|s| s.split_once('-'))
-                    .ok_or_else(invalid)?;
-                let start = start.parse::<u64>().map_err(|_| invalid())?;
-                if start < session.confirmed || start >= session.total {
-                    return Err(invalid());
-                }
-                if !end.is_empty() {
-                    let end = end.parse::<u64>().map_err(|_| invalid())?;
-                    if end < start || end >= session.total {
-                        return Err(invalid());
-                    }
-                }
-                first = Some(match first {
-                    Some(previous) => previous.min(start),
-                    None => start,
-                });
-            }
-            session.confirmed = first.ok_or_else(invalid)?;
+            session.confirmed = next_offset(ranges, session.confirmed, session.total, invalid)?;
         } else {
             if value["size"].as_u64() != Some(session.total)
                 || http::string(&value, "name")? != temporary(session)?.to_string()

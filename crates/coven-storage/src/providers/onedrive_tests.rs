@@ -15,6 +15,9 @@ use std::{
 #[path = "onedrive_live.rs"]
 mod live;
 
+#[path = "onedrive_replace_tests.rs"]
+mod replace_tests;
+
 #[tokio::test]
 async fn completed_parts_wait_for_publication_and_temporaries_are_not_listed() {
     let state = remote();
@@ -49,6 +52,7 @@ pub(super) struct Remote {
     pub(super) revisions: BTreeMap<String, u64>,
     replace_during_read: bool,
     uploads: BTreeMap<String, (String, Vec<u8>)>,
+    replacements: BTreeMap<String, replace_tests::Upload>,
     next: u64,
     non_owner: bool,
     redeemed: BTreeSet<String>,
@@ -95,6 +99,9 @@ pub(super) async fn endpoint(
     state.requests.push((method.clone(), uri.to_string()));
     let q = query(&uri);
     let host = headers["host"].to_str().unwrap();
+    if let Some(id) = uri.path().strip_prefix("/replace-session/") {
+        return replace_tests::transfer(&mut state, id, &method, &headers, &body, host);
+    }
     if uri.path().starts_with("/copy-monitor/") {
         assert!(headers.get("authorization").is_none());
         if let Some((status, body)) = state.monitor_replies.pop_front() {
@@ -234,6 +241,11 @@ pub(super) async fn endpoint(
     } else {
         serde_json::from_slice(&body).unwrap()
     };
+    if let Some(id) = tail.strip_suffix("/createUploadSession") {
+        if !id.contains(":/") {
+            return replace_tests::begin(&mut state, id, &value, &headers, host);
+        }
+    }
     if let Some(source) = tail.strip_suffix("/copy") {
         assert_eq!(method, Method::POST);
         assert_eq!(q["@microsoft.graph.conflictBehavior"], "fail");
@@ -479,7 +491,9 @@ async fn content_uploads_declare_their_length_including_empty_objects() {
             let state = state.clone();
             let received = received.clone();
             async move {
-                if method == Method::PUT {
+                if method == Method::PUT
+                    || uri.path().starts_with("/replace-session/") && method == Method::POST
+                {
                     received
                         .lock()
                         .unwrap()

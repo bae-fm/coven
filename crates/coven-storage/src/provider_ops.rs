@@ -44,7 +44,7 @@ pub trait ProviderOps: Send + Sync {
         path: &ObjectPath,
         bytes: &[u8],
     ) -> Result<Option<StoredObject>, StorageError>;
-    /// Replace the observed object conditionally in one request.
+    /// Replace the observed object in one atomic conditional publication.
     async fn replace(
         &self,
         publication: &PublicationRequest,

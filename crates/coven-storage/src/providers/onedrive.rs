@@ -16,6 +16,8 @@ const PROVIDER: CloudProvider = CloudProvider::OneDrive;
 
 #[path = "onedrive_folder.rs"]
 mod folder;
+#[path = "onedrive_replace.rs"]
+mod replace;
 #[path = "onedrive_upload.rs"]
 mod upload;
 
@@ -314,27 +316,7 @@ impl ProviderOps for OneDriveStorage {
         previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        let path = &previous.path;
-        let body = Body::Bytes(bytes.to_vec());
-        let mut headers = body_headers(&body);
-        headers.push(("If-Match", previous.replace_token.clone()));
-        let result = http::checked(
-            PROVIDER,
-            self.session
-                .publish(
-                    publication,
-                    Method::PUT,
-                    &self.by_path(path, "/content")?,
-                    &headers,
-                    body,
-                    true,
-                )
-                .await?,
-        )
-        .await
-        .map_err(StorageError::replacement);
-        self.checked_folder_operation(result).await?;
-        Ok(())
+        self.replace_content(publication, previous, bytes).await
     }
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self.metadata(path).await {

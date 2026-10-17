@@ -130,8 +130,9 @@ pub trait Storage: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
     /// Largest complete encrypted body sent in one request, in bytes. Larger
-    /// create-once objects use resumable or multipart uploads. Floor replacements
-    /// use one request and reject an oversized body.
+    /// create-once objects use recorded resumable or multipart uploads. Floor
+    /// replacements accept complete bodies up to this limit; OneDrive stages
+    /// the body in a revision-bound session before conditional publication.
     /// Callers retaining sessions across crashes use `begin_upload` and record them.
     /// S3 uses 5 GiB, Dropbox 150 MiB and OneDrive 250,000,000 bytes.
     /// CloudKit uses bounded 8 MiB assets.
@@ -157,7 +158,8 @@ pub trait Storage: Send + Sync {
     ) -> Result<Option<StoredObject>, StorageError>;
     /// Replace the floor only if its observed native revision still matches.
     /// A stale observation returns `Conflict` without changing the object.
-    /// Always one request; an oversized body returns [`StorageFailure::SingleRequestTooLarge`].
+    /// The new bytes become visible together, or not at all. A body above
+    /// [`Self::single_request_limit`] returns [`StorageFailure::SingleRequestTooLarge`].
     async fn replace(&self, previous: &StoredObject, bytes: &[u8]) -> Result<(), StorageError>;
     /// Exact lookup. None means confirmed absence; failed lookups remain errors.
     /// Pending multipart assets must not be reported as complete objects.
@@ -251,7 +253,7 @@ pub trait Storage: Send + Sync {
     /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
-    /// The replaceable floor is refused; its conditional write uses one request.
+    /// The replaceable floor is refused; `replace` owns its conditional write.
     async fn begin_upload(
         &self,
         path: &ObjectPath,

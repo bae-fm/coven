@@ -78,13 +78,17 @@ async fn warm_create_and_read_do_not_resolve_parents_again() {
     let previous = storage.status(&floor).await.unwrap().unwrap();
     take_requests(&state);
     storage.replace(&previous, b"second").await.unwrap();
+    let requests = take_requests(&state);
+    assert_eq!(requests.len(), 2);
     assert_eq!(
-        take_requests(&state),
-        [(
-            Method::PUT,
-            format!("/graph/drives/drive/items/root:/{STORE_ID}/floor:/content")
-        )]
+        requests[0],
+        (
+            Method::POST,
+            format!("/graph/drives/drive/items/file:{STORE_ID}%2Ffloor/createUploadSession")
+        )
     );
+    assert_eq!(requests[1].0, Method::PUT);
+    assert!(requests[1].1.starts_with("/replace-session/"));
 }
 
 #[tokio::test]
