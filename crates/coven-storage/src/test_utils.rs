@@ -86,6 +86,9 @@ fn confirm_published(
     Ok(())
 }
 
+/// The account holding a fake store, as `account()` reports it to its owner.
+const OWNER_ACCOUNT: &str = "owner@example.test";
+
 #[derive(Clone)]
 enum Account {
     Owner,
@@ -512,7 +515,7 @@ impl ProviderOps for MemoryProvider {
     async fn account(&self) -> Result<String, StorageError> {
         self.before(MemoryRequest::Other("account")).await?;
         Ok(match &self.account {
-            Account::Owner => "owner@example.test".into(),
+            Account::Owner => OWNER_ACCOUNT.into(),
             Account::Recipient(account) => account.clone(),
         })
     }
@@ -728,6 +731,9 @@ impl ProviderOps for MemoryProvider {
         }
         if account.is_empty() {
             return Err(StorageFailure::InvalidConfiguration.with_source("empty sharing account"));
+        }
+        if account.eq_ignore_ascii_case(OWNER_ACCOUNT) {
+            return Err(StorageFailure::InviteeIsStoreOwner.into());
         }
         let invitation = match self.config.provider() {
             CloudProvider::CloudKit => StorageInvitation::new(

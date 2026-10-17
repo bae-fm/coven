@@ -2002,6 +2002,8 @@ pub enum StorageFailure {
     InvalidRange,
     /// Only the account holding the store may change its sharing.
     NotStoreOwner,
+    /// The invited account is the one holding the store (§12.2).
+    InviteeIsStoreOwner,
     /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     AccountIdUnavailable,
     /// The invite belongs to another provider location.
@@ -3349,6 +3351,8 @@ pub enum ProviderSignOut {
 - Before `create_invite` makes any provider change, an App-folder Dropbox
   store fails with `DropboxAppFolderNotShareable`: sharing it requires store
   relocation, outside this operation.
+- Inviting the account that holds the store fails with `InviteeIsStoreOwner`,
+  before any provider change.
 - A replacement invite fixes an existing active id before the requester
   generates keys. Approval binds the exact signed request's new pair after
   publishing copies of every store key and the held circle keys. The

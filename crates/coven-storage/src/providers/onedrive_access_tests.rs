@@ -179,17 +179,27 @@ async fn revocation_validates_every_page_before_mutating_permissions() {
 }
 
 #[tokio::test]
-async fn sharing_an_owner_does_not_replace_their_permission() {
+async fn sharing_with_the_store_owners_account_is_refused_before_any_change() {
     let state = remote();
     state.lock().unwrap().permissions.insert("owner".into(), json!({"id":"owner", "roles":["owner"], "grantedToV2":{"siteUser":{"email":"owner@example.test"}}}));
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    storage.grant_access("OWNER@example.test").await.unwrap();
-    assert!(state.lock().unwrap().members.is_empty());
     assert_eq!(
-        state.lock().unwrap().permissions["owner"]["roles"],
-        json!(["owner"])
+        storage
+            .grant_access("OWNER@example.test")
+            .await
+            .err()
+            .unwrap()
+            .failure(),
+        StorageFailure::InviteeIsStoreOwner
     );
+    let state = state.lock().unwrap();
+    assert!(state.members.is_empty());
+    assert_eq!(state.permissions["owner"]["roles"], json!(["owner"]));
+    assert!(state
+        .requests
+        .iter()
+        .all(|(method, uri)| *method == Method::GET && !uri.contains("/invite")));
 }
 
 #[tokio::test]

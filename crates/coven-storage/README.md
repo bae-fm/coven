@@ -138,7 +138,12 @@ per-invite grant identity; ordinary formatting redacts its secrets.
 Before changing sharing, adapters check Dropbox's folder `access_type`,
 OneDrive's current-account drive id, or CloudKit's current user record id
 compared with the recorded zone owner. A non-owner gets `NotStoreOwner` (`PermissionDenied`) before any
-mutation. S3's console-key instructions need no account-ownership check.
+mutation. Inviting the owner's own account gets `InviteeIsStoreOwner`. Dropbox
+(the folder member with `owner` access) and OneDrive (the signed-in `mail` or
+`userPrincipalName`) refuse before any mutation. CloudKit's participant lookup
+gives the owner's own address no user record, so the adapter learns it from
+the saved share: CloudKit drops the added participant and only the owner
+remains. S3's console-key instructions need no account-ownership check.
 Dropbox pages
 direct and inherited memberships separately, removes only direct account
 membership, waits for its native removal job and reports group/parent access.

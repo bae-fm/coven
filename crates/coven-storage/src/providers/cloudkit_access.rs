@@ -59,7 +59,7 @@ struct Metadata(Retained<CKShareMetadata>);
 // one acceptance operation. No alias can mutate it during that transfer.
 unsafe impl Send for Metadata {}
 
-/// One share participant as revocation sees it.
+/// One share participant as granting and revocation see it.
 struct Seen {
     /// The participant's user record name, once CloudKit knows it.
     id: Option<String>,
@@ -67,6 +67,42 @@ struct Seen {
     email: Option<String>,
     owner: bool,
     participant_id: String,
+}
+
+/// One participant of a share as CloudKit returned it.
+///
+/// # Safety
+/// `person` comes from a share record this caller holds, as every share
+/// accessor here requires.
+unsafe fn seen(person: &CKShareParticipant) -> Seen {
+    let identity = person.userIdentity();
+    Seen {
+        id: identity
+            .userRecordID()
+            .map(|id| id.recordName().to_string()),
+        email: identity
+            .lookupInfo()
+            .and_then(|lookup| lookup.emailAddress())
+            .map(|email| email.to_string()),
+        owner: person.role() == CKShareParticipantRole::Owner,
+        participant_id: person.participantID().to_string(),
+    }
+}
+
+/// Whether the saved share holds the participant just added for `account`:
+/// `added` itself, or the participant added earlier for that account, which
+/// CloudKit updates in its place. When the address belongs to the zone
+/// owner's own iCloud account, CloudKit saves the share without it: only the
+/// owner remains, and the owner cannot accept its own zone's share.
+fn holds_invitee(participants: &[Seen], added: &str, account: &str) -> bool {
+    participants.iter().any(|person| {
+        !person.owner
+            && (person.participant_id == added
+                || person
+                    .email
+                    .as_deref()
+                    .is_some_and(|email| email.eq_ignore_ascii_case(account)))
+    })
 }
 
 /// What removing `account`, whose user record name is `target` when known,
@@ -288,24 +324,18 @@ impl CloudKitStorage {
             Err(error) => return Err(error),
         };
         let person = participant(&self.container, account).wait().await?;
-        unsafe {
+        let added = unsafe {
             let share = share.share()?;
             if share.publicPermission() != CKShareParticipantPermission::None {
                 return Err(StorageFailure::PermissionDenied
                     .with_source("CloudKit public sharing must be managed by its owner"));
             }
-            let is_owner = person
+            person
                 .0
-                .userIdentity()
-                .userRecordID()
-                .is_some_and(|id| id.recordName().to_string() == self.owner);
-            if !is_owner {
-                person
-                    .0
-                    .setPermission(CKShareParticipantPermission::ReadWrite);
-                share.addParticipant(&person.0);
-            }
-        }
+                .setPermission(CKShareParticipantPermission::ReadWrite);
+            share.addParticipant(&person.0);
+            person.0.participantID().to_string()
+        };
         let mut saved = native::modify(
             &self.database,
             vec![share],
@@ -318,6 +348,17 @@ impl CloudKitStorage {
         .await?;
         if saved.len() != 1 {
             return Err(StorageFailure::Protocol.into());
+        }
+        let participants: Vec<Seen> = unsafe {
+            saved[0]
+                .share()?
+                .participants()
+                .iter()
+                .map(|person| seen(&person))
+                .collect()
+        };
+        if !holds_invitee(&participants, &added, account) {
+            return Err(StorageFailure::InviteeIsStoreOwner.into());
         }
         let url = unsafe { saved[0].share()?.URL() }.ok_or(StorageFailure::Protocol)?;
         let url = url
@@ -363,23 +404,7 @@ impl CloudKitStorage {
         let (removed, retained) = unsafe {
             let native_share = share.share()?;
             let people: Vec<_> = native_share.participants().into_iter().collect();
-            let seen: Vec<Seen> = people
-                .iter()
-                .map(|person| {
-                    let identity = person.userIdentity();
-                    Seen {
-                        id: identity
-                            .userRecordID()
-                            .map(|id| id.recordName().to_string()),
-                        email: identity
-                            .lookupInfo()
-                            .and_then(|lookup| lookup.emailAddress())
-                            .map(|email| email.to_string()),
-                        owner: person.role() == CKShareParticipantRole::Owner,
-                        participant_id: person.participantID().to_string(),
-                    }
-                })
-                .collect();
+            let seen: Vec<Seen> = people.iter().map(|person| seen(person)).collect();
             let public = native_share.publicPermission() != CKShareParticipantPermission::None;
             let (removed, retained) = revocation(
                 &self.share_name(),

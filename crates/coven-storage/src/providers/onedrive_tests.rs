@@ -217,6 +217,9 @@ pub(super) async fn endpoint(
             return response(403, json!({"error":{"code":"accessDenied"}}).to_string());
         }
     }
+    if uri.path() == "/graph/me" {
+        return reply(json!({"mail": null, "userPrincipalName": "Owner@example.test"}));
+    }
     if uri.path() == "/graph/me/drive" {
         return reply(
             json!({"id": if state.non_owner || recipient.is_some() { "other" } else { "drive" }}),

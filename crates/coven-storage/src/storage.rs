@@ -212,6 +212,10 @@ pub trait Storage: Send + Sync {
     /// Ownership comes from Dropbox's folder `access_type`,
     /// OneDrive's current-account drive id, or CloudKit's current user record id compared with the zone owner.
     /// S3's console-key instructions need no sharing-account check.
+    /// Inviting the account that holds the store gets
+    /// [`StorageFailure::InviteeIsStoreOwner`]. Dropbox and OneDrive refuse
+    /// before any sharing change; CloudKit learns it from the saved share,
+    /// which then lists only the owner.
     ///
     /// Dropbox upgrades viewers in place with `update_folder_member`; a pending
     /// viewer without a native account id gets [`StorageFailure::AccountIdUnavailable`]

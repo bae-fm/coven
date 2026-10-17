@@ -67,6 +67,8 @@ pub enum StorageFailure {
     InvalidRange,
     /// Only the account holding the store may change its sharing.
     NotStoreOwner,
+    /// The invited account is the one holding the store (§12.2).
+    InviteeIsStoreOwner,
     /// Dropbox cannot upgrade a pending viewer without the recipient's account id.
     AccountIdUnavailable,
     /// The invite belongs to another provider location.

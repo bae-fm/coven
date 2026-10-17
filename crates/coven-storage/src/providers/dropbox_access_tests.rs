@@ -349,7 +349,7 @@ async fn viewer_upgrade_retries_a_lost_reply_without_removing_access() {
 }
 
 #[tokio::test]
-async fn granting_an_owner_does_not_downgrade_their_access() {
+async fn sharing_with_the_store_owners_account_is_refused_before_any_change() {
     let state = Arc::new(Mutex::new(Remote::default()));
     state
         .lock()
@@ -358,7 +358,15 @@ async fn granting_an_owner_does_not_downgrade_their_access() {
         .insert("owner@example.test".into(), "owner".into());
     let server = TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
     let storage = provider(&server.url);
-    storage.grant_access("owner@example.test").await.unwrap();
+    assert_eq!(
+        storage
+            .grant_access("Owner@example.test")
+            .await
+            .err()
+            .unwrap()
+            .failure(),
+        StorageFailure::InviteeIsStoreOwner
+    );
     assert_eq!(state.lock().unwrap().members["owner@example.test"], "owner");
     assert!(state.lock().unwrap().sharing_mutations.is_empty());
 }

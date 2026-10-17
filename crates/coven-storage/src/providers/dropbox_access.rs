@@ -29,6 +29,18 @@ pub(super) struct FolderMembers {
     pub(super) retained: Vec<RetainedAccess>,
 }
 impl FolderMembers {
+    /// The folder's owner is the account holding the store; inviting it is
+    /// refused (§12.2).
+    pub(super) fn refuse_owner(&self) -> Result<(), StorageError> {
+        if self
+            .retained
+            .iter()
+            .any(|share| share.reason == RetainedAccessReason::StoreOwner)
+        {
+            return Err(StorageFailure::InviteeIsStoreOwner.into());
+        }
+        Ok(())
+    }
     pub(super) fn append(
         &mut self,
         value: &Value,

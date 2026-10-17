@@ -150,6 +150,13 @@ its next read to fail. After that test succeeds, enter `verified` on the owner's
 stdin. The owner deletes the test zone. Both tests remove their invitation files
 after success. These files contain a secret share URL; do not commit or publish them.
 
+## Inviting the owner's own account
+
+The ignored `providers::cloudkit::access::tests::cloudkit_live_inviting_the_owner_is_refused`
+test runs on one host. Set `COVEN_CLOUDKIT_TEST_OWNER_EMAIL` to an address of
+the signed-in iCloud account. It creates a marked zone, grants that address,
+requires `InviteeIsStoreOwner`, and deletes the zone.
+
 ## Create-once race
 
 The ignored `providers::cloudkit::tests::race::tests::cloudkit_live_create_once_race`

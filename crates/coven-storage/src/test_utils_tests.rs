@@ -705,7 +705,16 @@ async fn recipients_keep_their_own_tokens_while_clones_share_the_same_sign_in() 
 async fn invalid_account_grants_leave_the_fake_unchanged() {
     let invalid = sharing_configs()
         .into_iter()
-        .map(|config| (config, "", StorageFailure::InvalidConfiguration))
+        .flat_map(|config| {
+            [
+                (config.clone(), "", StorageFailure::InvalidConfiguration),
+                (
+                    config,
+                    "Owner@example.test",
+                    StorageFailure::InviteeIsStoreOwner,
+                ),
+            ]
+        })
         .chain([(
             StorageConfig::Dropbox {
                 location: crate::DropboxLocation::AppFolder,

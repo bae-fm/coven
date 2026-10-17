@@ -86,6 +86,32 @@ async fn cloudkit_live_sharing() {
     }
 }
 
+/// One account: the zone owner invites its own iCloud email and is refused.
+/// The zone is deleted only after the refusal.
+#[tokio::test]
+#[ignore = "requires a signed host and the signed-in account's iCloud email"]
+async fn cloudkit_live_inviting_the_owner_is_refused() {
+    let email = std::env::var("COVEN_CLOUDKIT_TEST_OWNER_EMAIL")
+        .expect("the signed-in account's iCloud email");
+    let ids: IdSourceRef = Arc::new(UuidIds);
+    let native = Arc::new(
+        live_zone::prepare(
+            StoreId(ids.new_id()),
+            "cloudkit_live_inviting_the_owner_is_refused",
+            ids,
+        )
+        .await
+        .unwrap(),
+    );
+    let storage = StorageConnection::from_provider(native.clone());
+    let Err(refused) = storage.grant_access(&email).await else {
+        panic!("CloudKit granted the owner's own account");
+    };
+    println!("grant to the owner's own email: {refused}");
+    assert_eq!(refused.failure(), StorageFailure::InviteeIsStoreOwner);
+    live_zone::delete(&native).await.unwrap();
+}
+
 fn seen(id: Option<&str>, email: Option<&str>, owner: bool, participant_id: &str) -> Seen {
     Seen {
         id: id.map(str::to_owned),
@@ -93,6 +119,34 @@ fn seen(id: Option<&str>, email: Option<&str>, owner: bool, participant_id: &str
         owner,
         participant_id: participant_id.to_owned(),
     }
+}
+
+/// Participants as two live grants saved them: one to another account, and
+/// one to the owner's own address, which CloudKit dropped.
+#[test]
+fn a_saved_share_without_the_added_participant_names_the_owner() {
+    let owner = || seen(Some("__defaultOwner__"), None, true, "p-owner");
+    let invited = seen(None, Some("ben@example.test"), false, "p-added");
+    assert!(holds_invitee(
+        &[owner(), invited],
+        "p-added",
+        "ben@example.test"
+    ));
+    assert!(!holds_invitee(&[owner()], "p-added", "owner@example.test"));
+    // Granting again updates the participant added before in place.
+    let earlier = seen(Some("_ben"), Some("ben@example.test"), false, "p-earlier");
+    assert!(holds_invitee(
+        &[owner(), earlier],
+        "p-added",
+        "BEN@example.test"
+    ));
+    // The owner's own row never stands for the invitee.
+    let owner_by_email = seen(Some("_owner"), Some("owner@example.test"), true, "p-added");
+    assert!(!holds_invitee(
+        &[owner_by_email],
+        "p-added",
+        "owner@example.test"
+    ));
 }
 
 /// A public share keeps reaching everyone while it stays public; the member

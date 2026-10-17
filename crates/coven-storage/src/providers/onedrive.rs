@@ -173,6 +173,20 @@ impl OneDriveStorage {
         }
         Ok(())
     }
+    /// Once [`Self::require_owner`] passed, the signed-in account holds the
+    /// store; inviting either of its addresses is refused (§12.2).
+    async fn refuse_owner(&self, account: &str) -> Result<(), StorageError> {
+        let url = http::endpoint(&self.api, &["me"], &[("$select", "mail,userPrincipalName")])?;
+        let value = http::json(PROVIDER, self.send(Method::GET, &url, Body::Empty).await?).await?;
+        if ["mail", "userPrincipalName"].into_iter().any(|field| {
+            value[field]
+                .as_str()
+                .is_some_and(|address| address.eq_ignore_ascii_case(account))
+        }) {
+            return Err(StorageFailure::InviteeIsStoreOwner.into());
+        }
+        Ok(())
+    }
     async fn permissions(&self) -> Result<Vec<Value>, StorageError> {
         let mut url = self.item(&self.folder, &["permissions"])?;
         let mut seen = Pagination::new();
@@ -339,6 +353,7 @@ impl ProviderOps for OneDriveStorage {
     }
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
+        self.refuse_owner(account).await?;
         if let Some(invitation) = self.invitation(account).await? {
             return Ok(AccessGrant::Granted { invitation });
         }

@@ -404,12 +404,8 @@ impl ProviderOps for DropboxStorage {
     async fn grant_access(&self, account: &str) -> Result<AccessGrant, StorageError> {
         self.require_owner().await?;
         let members = self.members(account, false).await?;
-        if members.direct.iter().any(|member| member.role == "editor")
-            || members
-                .retained
-                .iter()
-                .any(|share| share.reason == RetainedAccessReason::StoreOwner)
-        {
+        members.refuse_owner()?;
+        if members.direct.iter().any(|member| member.role == "editor") {
             return Ok(AccessGrant::Granted {
                 invitation: StorageInvitation::for_account(self.config())?,
             });
@@ -426,12 +422,8 @@ impl ProviderOps for DropboxStorage {
             self.rpc("sharing/add_folder_member", json!({"shared_folder_id":self.namespace()?,"members":[{"member":{".tag":"email","email":account},"access_level":{".tag":"editor"}}],"quiet":false})).await?;
         }
         let members = self.members(account, false).await?;
-        if !members.direct.iter().any(|member| member.role == "editor")
-            && !members
-                .retained
-                .iter()
-                .any(|share| share.reason == RetainedAccessReason::StoreOwner)
-        {
+        members.refuse_owner()?;
+        if !members.direct.iter().any(|member| member.role == "editor") {
             return Err(StorageFailure::Protocol.with_source("Dropbox did not grant editor access"));
         }
         Ok(AccessGrant::Granted {

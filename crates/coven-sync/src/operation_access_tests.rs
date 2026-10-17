@@ -547,6 +547,44 @@ async fn discarding_an_invalid_s3_account_invite_leaves_no_provider_request() {
     operations.close().await.unwrap();
 }
 
+/// The refused grant fails its provider request; the invite reports that
+/// refusal when its own wait for the request next comes due.
+#[tokio::test]
+async fn inviting_the_store_owners_account_fails_the_invite_with_that_refusal() {
+    let [a, _, _] = accounts(dropbox()).await;
+    let files = file_owner(&a);
+    let operations = operation_owner(a.sync, files);
+    let invite = operations.create_invite(
+        InviteTarget::NewMember {
+            role: MemberRole::Member,
+        },
+        InviteAccess::ProviderAccount {
+            email: "Owner@example.test".into(),
+        },
+    );
+    tokio::pin!(invite);
+    let mut minutes = 0;
+    let refused = loop {
+        tokio::select! {
+            result = &mut invite => break result,
+            () = tokio::time::sleep(Duration::from_millis(20)) => {
+                minutes += 1;
+                assert!(minutes < 60, "the invite never answered");
+                a.clock.set(a.clock.now() + Duration::from_secs(60));
+            }
+        }
+    };
+    let Err(refused) = refused else {
+        panic!("the store owner's account was invited");
+    };
+    assert!(
+        matches!(&refused, SyncError::Pending(pending) if matches!(pending.reason,
+        PendingReason::Storage { failure: StorageFailure::InviteeIsStoreOwner, .. })),
+        "{refused:?}"
+    );
+    operations.close().await.unwrap();
+}
+
 #[tokio::test]
 async fn an_obsolete_held_revoke_is_followed_by_a_grant_before_completion() {
     let storage = dropbox();

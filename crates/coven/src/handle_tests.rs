@@ -778,6 +778,7 @@ fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
                 StorageFailure::InvalidPath,
                 StorageFailure::InvalidRange,
                 StorageFailure::NotStoreOwner,
+                StorageFailure::InviteeIsStoreOwner,
                 StorageFailure::AccountIdUnavailable,
                 StorageFailure::InvitationMismatch,
                 StorageFailure::SessionMismatch,
