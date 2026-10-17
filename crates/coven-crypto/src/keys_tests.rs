@@ -282,7 +282,6 @@ fn every_secret_value_redacts_debug_output() {
         format!("{invite:?}"),
         format!("{derived:?}"),
         format!("{:?}", invite.join_request_key()),
-        format!("{:?}", derived.fingerprint_hasher()),
         format!("{:?}", StoreKeyring::new(key)),
         format!("{member:?}"),
         format!("{:?}", member.to_secret_bytes()),

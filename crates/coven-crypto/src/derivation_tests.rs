@@ -12,11 +12,6 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
             "5c09ce5876164485843f2637bb370094c8dfd799637cda80fbc4c88c5b63229f",
         ),
         (
-            FINGERPRINTS,
-            b"coven/fingerprints/v1",
-            "795d9756ca6212a6f38d5cd68fccbd5952ec59e52d8f5aa4bdd76e8bb95ceff6",
-        ),
-        (
             JOIN_REQUEST,
             b"coven/join-request/v1",
             "80dc795abb07ec2ebea022802dcd893f27e018e45157d78fa7ac42bf691440f5",
@@ -39,17 +34,6 @@ fn purpose_labels_and_hkdf_answers_are_pinned() {
             *answer
         );
     }
-}
-
-#[test]
-fn fingerprint_key_answer_is_pinned() {
-    let keys = StoreKey::from_bytes(KeyId(uuid::Uuid::from_bytes([1; 16])), [17; 32]).derive();
-    let mut fingerprint = keys.fingerprint_hasher();
-    fingerprint.update(b"agreed state");
-    assert_eq!(
-        hex::encode(fingerprint.finish().as_bytes()),
-        "e03357024e1ed6e2bb91ce154bb87a62e77f452a810274561035e99551516440"
-    );
 }
 
 #[test]

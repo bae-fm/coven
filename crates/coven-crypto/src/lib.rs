@@ -26,8 +26,7 @@ pub use derivation::{DerivedKeys, EncryptionKey};
 pub use error::{CryptoError, MaterialError};
 pub use file_key::FileKey;
 pub use hashing::{
-    authorship_empty, authorship_node, AuthorshipHasher, ContentHash, ContentHasher, Fingerprint,
-    FingerprintHasher,
+    authorship_empty, authorship_node, AuthorshipHasher, ContentHash, ContentHasher,
 };
 pub use keys::{CircleKey, InviteSecret, StoreKey, StoreKeyring};
 pub use member::{

@@ -52,7 +52,7 @@ impl StoreKey {
         Ok(())
     }
 
-    /// Derive separate encryption and fingerprint keys.
+    /// Derive separate encryption and authorship keys.
     pub fn derive(&self) -> DerivedKeys {
         DerivedKeys::new(&self.bytes)
     }
@@ -126,7 +126,7 @@ impl CircleKey {
             })
     }
 
-    /// Derive separate encryption and fingerprint keys.
+    /// Derive separate encryption and authorship keys.
     pub fn derive(&self) -> DerivedKeys {
         self.key.derive()
     }

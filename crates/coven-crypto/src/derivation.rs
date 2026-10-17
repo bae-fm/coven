@@ -5,10 +5,9 @@ use hmac::{Hmac, KeyInit, Mac};
 use sha2::{Digest, Sha256};
 use zeroize::{Zeroize, Zeroizing};
 
-use crate::{cipher, AuthorshipHasher, CryptoError, FingerprintHasher};
+use crate::{cipher, AuthorshipHasher, CryptoError};
 
 pub(crate) const ENCRYPTION: &[u8] = b"coven/encryption/v1";
-pub(crate) const FINGERPRINTS: &[u8] = b"coven/fingerprints/v1";
 pub(crate) const JOIN_REQUEST: &[u8] = b"coven/join-request/v1";
 pub(crate) const SEALED_BOX: &[u8] = b"coven/sealed-box/v1";
 pub(crate) const AUTHORSHIP: &[u8] = b"coven/row-authorship/v1";
@@ -77,10 +76,9 @@ impl std::fmt::Debug for EncryptionKey {
     }
 }
 
-/// Separate encryption and fingerprint keys for one audience.
+/// Separate encryption and authorship keys for one audience.
 pub struct DerivedKeys {
     encryption: EncryptionKey,
-    fingerprints: Zeroizing<[u8; 32]>,
     authorship: Zeroizing<[u8; 32]>,
 }
 
@@ -88,7 +86,6 @@ impl DerivedKeys {
     pub(crate) fn new(key: &[u8; 32]) -> Self {
         Self {
             encryption: EncryptionKey(derive_label(key, ENCRYPTION)),
-            fingerprints: derive_label(key, FINGERPRINTS),
             authorship: derive_label(key, AUTHORSHIP),
         }
     }
@@ -118,7 +115,7 @@ impl DerivedKeys {
     /// SHA-256 of the complete chunk plaintext, including any frame bytes.
     /// Different content at a reused path has different nonce inputs. Retries
     /// fix plaintext, prefix and key choices to reproduce the same bytes.
-    /// Snapshots, positions, clocks and join requests use `seal_object_chunk` instead.
+    /// Snapshots, floors and join requests use `seal_object_chunk` instead.
     pub fn reseal_object_chunk(
         &self,
         path: &str,
@@ -200,11 +197,6 @@ impl DerivedKeys {
         stream.apply_keystream(tentative.as_mut());
         let path = identity(&tentative)?;
         self.open_object_chunk(&path, prefix, 0, 0, sealed)
-    }
-
-    /// Start an incremental hash of the audience's agreed data (§19.1).
-    pub fn fingerprint_hasher(&self) -> FingerprintHasher {
-        FingerprintHasher::new(&self.fingerprints)
     }
 }
 

@@ -1,6 +1,4 @@
 use super::*;
-use crate::StoreKey;
-use coven_foundation::id_source::{IdSource, KeyId};
 
 #[test]
 fn incremental_content_hash_matches_sha256_known_answers() {
@@ -24,31 +22,5 @@ fn incremental_content_hash_matches_sha256_known_answers() {
     assert_eq!(
         hex::encode(million.finish().as_bytes()),
         "cdc76e5c9914fb9281a1c7e284d73e67f1809a48a497200e046d39ccc7112cd0"
-    );
-}
-
-#[test]
-fn fingerprints_are_incremental_and_depend_on_the_audience_key() {
-    let key_ids = coven_foundation::id_source::SequentialIds::new();
-    let key = StoreKey::generate(KeyId(key_ids.new_id()))
-        .unwrap()
-        .derive();
-    let mut whole = key.fingerprint_hasher();
-    whole.update(b"agreed state");
-    let mut stream = key.fingerprint_hasher();
-    for byte in b"agreed state" {
-        stream.update(&[*byte]);
-    }
-    let fingerprint = whole.finish();
-    assert_eq!(fingerprint, stream.finish());
-    let other = StoreKey::generate(KeyId(key_ids.new_id()))
-        .unwrap()
-        .derive();
-    let mut foreign = other.fingerprint_hasher();
-    foreign.update(b"agreed state");
-    assert_ne!(fingerprint, foreign.finish());
-    assert_eq!(
-        fingerprint,
-        Fingerprint::from_bytes(*fingerprint.as_bytes())
     );
 }
