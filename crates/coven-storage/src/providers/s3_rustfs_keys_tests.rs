@@ -32,6 +32,8 @@ struct Remote {
     /// Answer every delete as RustFS answers one of an absent account.
     refuse_delete: bool,
     bad_signatures: u32,
+    failed_policy_requests: u32,
+    mint_requests: u32,
 }
 
 fn admin_api(
@@ -83,6 +85,10 @@ fn admin_api(
             response(200, "")
         }
         "set-user-or-group-policy" => {
+            if state.failed_policy_requests > 0 {
+                state.failed_policy_requests -= 1;
+                return response(500, "{}");
+            }
             state.users.get_mut(&q["userOrGroup"]).unwrap().1 = Some(q["policyName"].clone());
             response(200, "")
         }
@@ -102,6 +108,7 @@ fn admin_api(
             response(200, serde_json::json!({"accounts": accounts}).to_string())
         }
         "add-service-account" => {
+            state.mint_requests += 1;
             let parent = body["targetUser"].as_str().unwrap().to_owned();
             assert!(state.users.contains_key(&parent));
             state.next += 1;
@@ -258,6 +265,32 @@ async fn fake() -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessKeyAdmin>) {
     )
     .unwrap();
     (state, server, admin)
+}
+
+#[tokio::test]
+async fn minting_retries_the_parent_grant_before_creating_a_service_account() {
+    let (state, _server, admin) = fake().await;
+    let scope = MintScope::new(
+        StoreId(uuid::Uuid::from_u128(4)),
+        "member-id",
+        coven_foundation::id_source::DeviceId(3),
+        uuid::Uuid::from_u128(0x55),
+    );
+    state.lock().unwrap().failed_policy_requests = 2;
+    assert!(admin.mint(&scope).await.is_err());
+    let secret = state.lock().unwrap().users["coven"].0.clone();
+    assert!(admin.mint(&scope).await.is_err());
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(state.mint_requests, 0);
+        assert!(state.accounts.is_empty());
+        assert!(state.users["coven"].1.is_none());
+    }
+    admin.mint(&scope).await.unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.mint_requests, 1);
+    assert_eq!(state.users["coven"].0, secret);
+    assert_eq!(state.users["coven"].1.as_deref(), Some("readwrite"));
 }
 
 #[tokio::test]

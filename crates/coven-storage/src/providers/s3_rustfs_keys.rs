@@ -163,7 +163,7 @@ impl<'a> Admin<'a> {
             .map_err(|error| StorageFailure::Protocol.with_source(error))
     }
 
-    /// The dedicated parent, made once with a secret nobody keeps.
+    /// The shared parent survives failed mints; each retry establishes its grant.
     async fn parent(&self) -> Result<(), StorageError> {
         if self
             .call(
@@ -174,21 +174,20 @@ impl<'a> Admin<'a> {
                 &[404],
             )
             .await?
-            .is_some()
+            .is_none()
         {
-            return Ok(());
+            // Nobody signs in as the parent; its secret only has to be unguessable.
+            let secret = coven_crypto::random_secret()
+                .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
+            self.call(
+                Method::PUT,
+                "add-user",
+                &[("accessKey", PARENT)],
+                Some(json!({"secretKey": secret.as_str(), "status": "enabled"})),
+                &[],
+            )
+            .await?;
         }
-        // Nobody signs in as the parent; its secret only has to be unguessable.
-        let secret = coven_crypto::random_secret()
-            .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
-        self.call(
-            Method::PUT,
-            "add-user",
-            &[("accessKey", PARENT)],
-            Some(json!({"secretKey": secret.as_str(), "status": "enabled"})),
-            &[],
-        )
-        .await?;
         self.call(
             Method::PUT,
             "set-user-or-group-policy",
