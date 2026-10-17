@@ -67,7 +67,7 @@ def settleFloor (covered : Option (ClaimRecord H)) (n : Nat) (digest : H) : Verd
     else if r.number = n then (if r.digest = digest then .landed else .copy)
     else .notLanded
 
-/-- `another` checks authenticated device id and claim number in the kept slot.
+/-- `another` checks the authenticated device id in the kept slot.
 The complete-byte comparison always comes first. -/
 def settle {Bytes : Type} [DecidableEq Bytes] (start : Nat) (covered : Option (ClaimRecord H))
     (i : Nat) (own : Bytes) (n : Nat) (digest : H) (another : Bytes → Bool)
@@ -78,11 +78,32 @@ def settle {Bytes : Type} [DecidableEq Bytes] (start : Nat) (covered : Option (C
     | none => .retry
   else settleFloor covered n digest
 
-/-- A different slot at or above the current claim number cannot come from
-this copy, which has settled its earlier claims and has only this one in flight. -/
-def anotherClaim (d : Dev) (n : Nat) : Rec Dev → Bool
-  | .claim a m _ _ => decide (a = d ∧ n ≤ m)
+/-- Different bytes at the attempted slot cannot come from this copy, whose
+earlier claims preceded this slot and which has only this attempt in flight. -/
+def anotherClaim (d : Dev) : Rec Dev → Bool
+  | .claim a _ _ _ => decide (a = d)
   | .other => false
+
+/-- Every different same-id claim at the recorded kept slot detects a copy,
+including one whose claim number precedes the recorded attempt's number. -/
+theorem kept_same_id_copy (d : Dev) (n m i t v t' v' start : Nat)
+    (covered : Option (ClaimRecord H)) (digest : H) (hk : start ≤ i)
+    (hne : Rec.claim d m t' v' ≠ .claim d n t v) :
+    settle start covered i (.claim d n t v) n digest (anotherClaim d)
+      (some (.claim d m t' v')) = .copy := by
+  simp [settle, hk, hne, anotherClaim]
+
+/-- A number gate misses a copy reusing an earlier claim number. -/
+theorem earlier_claim_counterexample :
+    let own : Rec Bool := .claim true 2 0 5
+    let rival : Rec Bool := .claim true 1 0 7
+    settle 1 (none : Option (ClaimRecord Nat)) 3 own 2 5
+      (fun x => match x with
+        | .claim d n _ _ => decide (d = true ∧ 2 ≤ n)
+        | .other => false) (some rival) = .notLanded ∧
+    settle 1 (none : Option (ClaimRecord Nat)) 3 own 2 5
+      (anotherClaim true) (some rival) = .copy := by
+  decide
 
 @[simp] theorem floor_landed (covered : Option (ClaimRecord H)) (n : Nat) (h : H) :
     settleFloor covered n h = .landed ↔ covered = some ⟨n, h⟩ := by
@@ -122,7 +143,7 @@ deleted slots use only the authenticated floor record. -/
 def CopyEvidence (seq : Nat → Rec Dev) (hash : Nat → Rec Dev → H)
     (head start c : Nat) (d : Dev) (n i t v : Nat) : Prop :=
   if start ≤ i then
-    i ≤ head ∧ seq i ≠ .claim d n t v ∧ anotherClaim d n (seq i) = true
+    i ≤ head ∧ seq i ≠ .claim d n t v ∧ anotherClaim d (seq i) = true
   else ∃ r, lastClaim seq hash d c = some r ∧
     (n < r.number ∨ (r.number = n ∧ r.digest ≠ hash i (.claim d n t v)))
 
@@ -130,7 +151,7 @@ def CopyEvidence (seq : Nat → Rec Dev) (hash : Nat → Rec Dev → H)
 assumed. Digest equality identifies the recorded complete bytes and their path
 (the cryptographic and encoding boundary). `landed` never confirms other bytes;
 `notLanded` excludes this attempt; `retry` is exactly an empty slot; `copy` is
-exactly the evidence of another claim at or above n visible in the chosen source. -/
+exactly the copy evidence visible in the chosen source. -/
 theorem settle_correct' {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n i t v : Nat}
     (hash : Nat → Rec Dev → H) (hn : 1 ≤ n) (hi : 1 ≤ i)
     (hsc : start ≤ c + 1) (hch : c ≤ head)
@@ -138,7 +159,7 @@ theorem settle_correct' {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {
       hash j (seq j) = hash i (.claim d n t v) → j = i ∧ seq j = .claim d n t v)
     {read : Option (Rec Dev)} (hread : start ≤ i → read = if i ≤ head then some (seq i) else none) :
     let verdict := settle start (lastClaim seq hash d c) i (.claim d n t v) n
-      (hash i (.claim d n t v)) (anotherClaim d n) read
+      (hash i (.claim d n t v)) (anotherClaim d) read
     (verdict = .landed → i ≤ head ∧ seq i = .claim d n t v) ∧
     (verdict = .notLanded → ¬ (i ≤ head ∧ seq i = .claim d n t v)) ∧
     (verdict = .retry ↔ head < i) ∧
@@ -150,7 +171,7 @@ theorem settle_correct' {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {
     · simp only [hih, ite_true]
       by_cases he : seq i = .claim d n t v
       · simp [he, hih, CopyEvidence, hk]
-      · by_cases ha : anotherClaim d n (seq i) = true <;>
+      · by_cases ha : anotherClaim d (seq i) = true <;>
           simp [he, ha, hih, CopyEvidence, hk] <;> omega
     · simp [hih, CopyEvidence, hk]
       omega
@@ -176,6 +197,7 @@ structure Own (seq : Nat → Rec Dev) (head : Nat) (d : Dev) (n i t v : Nat) : P
   pos : 1 ≤ n
   slot_pos : 1 ≤ i
   numbers_le : ∀ j m t' v', 1 ≤ j → j ≤ head → seq j = .claim d m t' v' → m ≤ n
+  earlier_before : ∀ j m t' v', 1 ≤ j → j ≤ head → seq j = .claim d m t' v' → m < n → j < i
   only_here : ∀ j t' v', 1 ≤ j → j ≤ head → seq j = .claim d n t' v' → j = i ∧ t' = t ∧ v' = v
 
 /-- With one copy, settlement identifies a landed, absent or pending claim; copy is impossible. -/
@@ -184,7 +206,7 @@ theorem settle_correct {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n
     (hsc : start ≤ c + 1) (hch : c ≤ head)
     {read : Option (Rec Dev)} (hread : start ≤ i → read = if i ≤ head then some (seq i) else none) :
     let verdict := settle start (lastClaim seq hash d c) i (.claim d n t v) n
-      (hash i (.claim d n t v)) (anotherClaim d n) read
+      (hash i (.claim d n t v)) (anotherClaim d) read
     (verdict = .landed ↔ i ≤ head ∧ seq i = .claim d n t v) ∧
     (verdict = .notLanded → ∀ j t' v', 1 ≤ j → j ≤ head → seq j ≠ .claim d n t' v') ∧
     (verdict = .retry → head < i) ∧ verdict ≠ .copy := by
@@ -200,14 +222,19 @@ theorem settle_correct {seq : Nat → Rec Dev} {head start c : Nat} {d : Dev} {n
     · simp only [hih, ite_true]
       by_cases he : seq i = .claim d n t v
       · simp [he]
-      · have ha : anotherClaim d n (seq i) = false := by
+      · have ha : anotherClaim d (seq i) = false := by
           cases hs : seq i with
           | other => rfl
           | claim a m t' v' =>
             simp only [anotherClaim, decide_eq_false_iff_not]
-            rintro ⟨rfl, hm⟩
+            intro ha
+            subst a
             have hle := own.numbers_le i m t' v' own.slot_pos hih hs
-            have hmn : m = n := by omega
+            have hmn : m = n := by
+              by_cases heq : m = n
+              · exact heq
+              · have := own.earlier_before i m t' v' own.slot_pos hih hs (by omega)
+                omega
             subst m
             obtain ⟨_, rfl, rfl⟩ := own.only_here i t' v' own.slot_pos hih hs
             exact he hs
@@ -248,7 +275,7 @@ theorem lands_once_never_lost {seq : Nat → Rec Dev} {head start c : Nat} {d : 
     (hsc : start ≤ c + 1) (hch : c ≤ head) (hih : i ≤ head)
     {read : Option (Rec Dev)} (hread : start ≤ i → read = some (seq i)) (t₂ : Nat) :
     let verdict := settle start (lastClaim seq hash d c) i (Rec.claim d n t v) n
-      (hash i (.claim d n t v)) (anotherClaim d n) read
+      (hash i (.claim d n t v)) (anotherClaim d) read
     let seq' : Nat → Rec Dev := fun j =>
       if j = head + 1 ∧ verdict = .notLanded then .claim d n t₂ v else seq j
     let head' := if verdict = .notLanded then head + 1 else head
@@ -413,8 +440,8 @@ theorem copies_fool_number_only :
     Claim.create (Claim.create (fun _ => none) 41 b) 41 a 41 = some b ∧
     copiesSequence 41 ≠ a ∧ ClaimRecord.numberOf covered = 1 ∧
     (if 1 ≤ ClaimRecord.numberOf covered then Verdict.landed else .notLanded) = .landed ∧
-    settle 42 covered 41 a 1 (hash 41 a) (anotherClaim true 1) none = .copy ∧
-    settle 42 covered 41 a 1 (hash 41 a) (anotherClaim true 1) (some a) = .copy := by
+    settle 42 covered 41 a 1 (hash 41 a) (anotherClaim true) none = .copy ∧
+    settle 42 covered 41 a 1 (hash 41 a) (anotherClaim true) (some a) = .copy := by
   decide
 
 /-! ## The per-device record in every audience's snapshot ledger -/

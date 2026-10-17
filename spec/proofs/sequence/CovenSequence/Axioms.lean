@@ -67,6 +67,8 @@ import SequenceApply
 #print axioms CovenSequence.ClaimRecord.remember_number
 #print axioms CovenSequence.Claims.witness
 #print axioms CovenSequence.Claims.ge
+#print axioms CovenSequence.Settle.kept_same_id_copy
+#print axioms CovenSequence.Settle.earlier_claim_counterexample
 #print axioms CovenSequence.Settle.lastClaim_witness
 #print axioms CovenSequence.Settle.claims_eq
 #print axioms CovenSequence.Settle.claims_witness

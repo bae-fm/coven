@@ -621,10 +621,10 @@ For an in-flight claim numbered `n`, below the floor:
 - `L = n`: `landed` only when the digest matches, otherwise `copy`.
 
 For a kept slot, equal complete bytes mean `landed` and absence means `retry`.
-Different bytes signed by the same id with a number at or above `n` mean `copy`;
-a different device means `notLanded`. Lower-number mismatches remain
-`notLanded`, as in the single-copy model. Bytes recreated below the floor
-never override its record. A read error supplies no settlement input.
+Different bytes signed by the same id mean `copy`, whatever their claim number;
+a different device means `notLanded`. This copy settled its earlier claims
+before attempting this slot. Bytes recreated below the floor never override
+its record. A read error supplies no settlement input.
 
 - `Claims.witness`, `lastClaim_witness`, `claims_witness`: the number and
   digest in a record came together from an included slot of that device.
@@ -634,7 +634,7 @@ never override its record. A read error supplies no settlement input.
 - `settle_correct'`: for any number of copies, `landed` implies the recorded
   slot holds this copy's bytes; `notLanded` excludes that attempt; `retry`
   is equivalent to a slot above the head; and `copy` is equivalent to evidence
-  of another claim at or above `n` in the source settlement reads.
+  of another copy in the source settlement reads.
   The digest premise says that matching complete-byte hashes identify the
   recorded bytes and slot path, including [D9's `after` header](../format.md#d9-sealed-objects).
   It is a cryptographic/encoding assumption,
@@ -643,7 +643,10 @@ never override its record. A read error supplies no settlement input.
   equivalent to the recorded claim being in the sequence, `notLanded` means
   its claim number is nowhere in the sequence, `retry` means the slot is still
   empty, and `copy` is impossible. These journal facts are not premises of
-  `settle_correct'`.
+  `settle_correct'`. Earlier claims must precede the attempted slot.
+- `kept_same_id_copy`: every different same-id kept claim detects a copy,
+  including lower claim numbers. `earlier_claim_counterexample` shows why a
+  number threshold misses this evidence.
 - `lands_once_never_lost`: for one copy, once its attempted slot is occupied,
   retaining a landed claim or successfully claiming again after `notLanded`
   leaves the claim at exactly one slot. The successful new create is a premise;
@@ -897,7 +900,7 @@ and settlement comparisons also include deterministic seeded cases.
   verdict. Complete-byte digests are computed in Rust; the kept-slot inputs have
   passed the separate sync authentication boundary. `coven-sync` also exercises
   kept-slot settlement with signed equal bytes, missing slots and different
-  same-id bytes at equal or higher claim numbers.
+  same-id bytes at lower, equal or higher claim numbers.
 - `coven-sync` reads real stored slots while retention publishes a floor, with
   every fetched slot still present. An unavailable required snapshot body exposes
   the reload decision before installation: the applied slot must remain unchanged.

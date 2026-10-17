@@ -48,7 +48,7 @@ def settlement (slot start : Nat) (covered : Option (Nat × String)) (read : Opt
     "recorded":{"device":0,"number":2,"slot":$(slot),"bytes":"ours","digest":"ours-hash"},
     "current":$(read),"floor":{"first_kept":$(start),"last_claims":$(claims ++ [json% [1,99,"remote-hash"]])}}
 
--- Exact bytes at the floor; authenticated same-id claims at or above n detect
+-- Exact bytes at the floor; authenticated different same-id claims detect
 -- copies. Below the floor only the snapshot record may settle the claim.
 #eval do
   let ours := some (current 0 2 "ours")
@@ -58,7 +58,7 @@ def settlement (slot start : Nat) (covered : Option (Nat × String)) (read : Opt
   check (settlement 2 2 (some (9,"remote")) (some (current 1 2 "other"))) (toJson "notLanded")
   check (settlement 2 2 none (some (current 0 2 "other"))) (toJson "copy")
   check (settlement 2 2 none (some (current 0 3 "other"))) (toJson "copy")
-  check (settlement 2 2 none (some (current 0 1 "earlier"))) (toJson "notLanded")
+  check (settlement 2 2 none (some (current 0 1 "earlier"))) (toJson "copy")
   check (settlement 2 2 (some (9,"remote")) none) (toJson "retry")
   check (settlement 2 3 (some (2,"ours-hash")) none) (toJson "landed")
   check (settlement 2 3 (some (2,"other-hash")) none) (toJson "copy")

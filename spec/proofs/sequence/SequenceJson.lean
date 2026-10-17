@@ -138,7 +138,7 @@ def readSettle (j : Json) : Except String Json := do
   let claims ← (← floor.getObjValAs? (List Json) "last_claims").mapM readClaimRecord
   distinct (claims.map (·.1)) "snapshot device"
   let covered := (claims.find? (fun c => c.1 == own.1)).map (·.2)
-  let another := fun (x : Nat × Nat × String) => decide (x.1 = own.1 ∧ own.2.1 ≤ x.2.1)
+  let another := fun (x : Nat × Nat × String) => decide (x.1 = own.1)
   return toJson (match Settle.settle start covered slot own own.2.1 digest another current with
     | .landed => "landed" | .notLanded => "notLanded" | .retry => "retry" | .copy => "copy")
 

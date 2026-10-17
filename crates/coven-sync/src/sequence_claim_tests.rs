@@ -314,10 +314,10 @@ mod differential {
             })
             .await
             .unwrap();
-        let incoming_number = if current == 3 {
-            number + offset
-        } else {
-            number
+        let incoming_number = match current {
+            3 => number + offset,
+            4 => number - 1,
+            _ => number,
         };
         let current_json = match current {
             0 => serde_json::Value::Null,
@@ -325,7 +325,7 @@ mod differential {
                 group.storage.create(&path, &own).await.unwrap();
                 json!({"device":ana.sync.device.0,"number":number,"bytes":"own"})
             }
-            2 | 3 => {
+            2..=4 => {
                 group
                     .storage
                     .create(&path, &seal(incoming_number, "copy"))
@@ -361,7 +361,7 @@ mod differential {
     #[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
     async fn sequence_kept_settlement_matches_lean() {
         for prior in 0..3 {
-            for current in 0..4 {
+            for current in 0..5 {
                 compare(prior, current, 1).await;
             }
         }
@@ -372,11 +372,11 @@ mod differential {
             rng ^= rng << 17;
             compare(
                 (rng % 6) as usize,
-                ((rng >> 8) % 4) as usize,
+                ((rng >> 8) % 5) as usize,
                 1 + ((rng >> 16) % 100),
             )
             .await;
         }
-        eprintln!("sequence settle: 12 exhaustive + 16 seeded authenticated kept-slot cases");
+        eprintln!("sequence settle: 15 exhaustive + 16 seeded authenticated kept-slot cases");
     }
 }
