@@ -47,7 +47,7 @@ pub struct PendingRecord {
 }
 
 /// Stable identities of work, independent of attempts and wall-clock time.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PendingSubject {
     /// A numbered write.
     Write(#[serde(with = "encoding::write")] WriteId),
@@ -444,70 +444,6 @@ impl PendingValue for PendingRecord {
             }
             _ => self.retry() == Retry::Automatic,
         }
-    }
-}
-
-impl PendingSubject {
-    fn tag(&self) -> u8 {
-        match self {
-            Self::Write(_) => 0,
-            Self::Slot(_) => 1,
-            Self::KeyCopy { .. } => 2,
-            Self::Snapshot(_) => 4,
-            Self::File { .. } => 6,
-            Self::Operation { .. } => 7,
-            Self::Retention { .. } => 8,
-            Self::Audience(_) => 9,
-            Self::JoinRequest(_) => 11,
-            Self::Connection => 12,
-        }
-    }
-}
-impl Ord for PendingSubject {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        match (self, other) {
-            (Self::Write(a), Self::Write(b)) => a.cmp(b),
-            (Self::Slot(a), Self::Slot(b)) => a.cmp(b),
-            (
-                Self::KeyCopy {
-                    audience: a,
-                    key: ak,
-                    member: am,
-                    sealing: asl,
-                },
-                Self::KeyCopy {
-                    audience: b,
-                    key: bk,
-                    member: bm,
-                    sealing: bsl,
-                },
-            ) => (a, ak, am, asl).cmp(&(b, bk, bm, bsl)),
-            (Self::Snapshot(a), Self::Snapshot(b)) => {
-                (&a.audience, a.device, a.number).cmp(&(&b.audience, b.device, b.number))
-            }
-            (
-                Self::File {
-                    device: a,
-                    file: af,
-                },
-                Self::File {
-                    device: b,
-                    file: bf,
-                },
-            ) => (a, af).cmp(&(b, bf)),
-            (Self::Operation { id: a, kind: ak }, Self::Operation { id: b, kind: bk }) => {
-                (a, ak).cmp(&(b, bk))
-            }
-            (Self::Retention { path: a }, Self::Retention { path: b }) => a.cmp(b),
-            (Self::Audience(a), Self::Audience(b)) => a.cmp(b),
-            (Self::JoinRequest(a), Self::JoinRequest(b)) => a.cmp(b),
-            _ => self.tag().cmp(&other.tag()),
-        }
-    }
-}
-impl PartialOrd for PendingSubject {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
-        Some(self.cmp(other))
     }
 }
 

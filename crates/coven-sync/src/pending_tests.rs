@@ -85,3 +85,58 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
         Retry::Never
     );
 }
+
+#[test]
+fn pending_subjects_keep_their_variant_and_snapshot_order() {
+    use coven_foundation::id_source::{CircleId, StoreId};
+    use uuid::Uuid;
+
+    let snapshot = |audience, device, number| {
+        PendingSubject::Snapshot(SnapshotId {
+            audience,
+            device: DeviceId(device),
+            number,
+        })
+    };
+    let expected = vec![
+        PendingSubject::Write(WriteId {
+            device: DeviceId(9),
+            number: 9,
+        }),
+        PendingSubject::Slot(Slot(1)),
+        PendingSubject::KeyCopy {
+            audience: Audience::Store,
+            key: KeyId(Uuid::from_u128(1)),
+            member: MemberId(Uuid::from_u128(1)),
+            sealing: coven_crypto::SealingKey::from_bytes([1; 32]),
+        },
+        snapshot(Audience::Store, 1, 1),
+        snapshot(Audience::Store, 1, 2),
+        snapshot(Audience::Store, 2, 1),
+        snapshot(Audience::Circle(CircleId(Uuid::from_u128(1))), 1, 9),
+        snapshot(Audience::Circle(CircleId(Uuid::from_u128(2))), 1, 1),
+        PendingSubject::File {
+            device: DeviceId(1),
+            file: FileId(Uuid::from_u128(1)),
+        },
+        PendingSubject::Operation {
+            id: OperationId(1),
+            kind: OperationKind::CreateStore,
+        },
+        PendingSubject::Retention {
+            path: ObjectPath::floor(StoreId(Uuid::from_u128(1))),
+        },
+        PendingSubject::Audience(Audience::Store),
+        PendingSubject::JoinRequest(InviteId(Uuid::from_u128(1))),
+        PendingSubject::Connection,
+    ];
+    let mut subjects: Vec<_> = expected.iter().rev().cloned().collect();
+    subjects.sort();
+    assert_eq!(subjects, expected);
+    let encoded = r#"{"Snapshot":["store",2,1]}"#;
+    assert_eq!(serde_json::to_string(&subjects[5]).unwrap(), encoded);
+    assert_eq!(
+        serde_json::from_str::<PendingSubject>(encoded).unwrap(),
+        subjects[5]
+    );
+}

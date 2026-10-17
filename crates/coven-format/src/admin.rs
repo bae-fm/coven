@@ -33,14 +33,14 @@ impl Wire for MemberRole {
 }
 
 /// A snapshot's identity without a storage path (§15).
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SnapshotId {
+    /// The rows the snapshot covers.
+    pub audience: Audience,
     /// The device that wrote the snapshot.
     pub device: DeviceId,
     /// The positive number in this device's snapshot sequence.
     pub number: u64,
-    /// The rows the snapshot covers.
-    pub audience: Audience,
 }
 wire_struct!(SnapshotId, audience, device, number);
 
