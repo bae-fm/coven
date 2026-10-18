@@ -4060,8 +4060,10 @@ occupied path without replacing its bytes. Ana and Ben both try to create slot
 devices would each believe they hold slot 41 and history would split.
 
 - It must hold under simultaneous claims as well as retries.
-- At most one distinct byte string may ever occupy a slot, including a slot
-  published in parts.
+- While a slot path remains occupied, its bytes cannot change, including when
+  published in parts. Deletion below the floor frees the path: a stale create
+  can occupy it again, but the subsequent floor check makes those bytes void
+  (§5.2). Physical reuse cannot replace the slot's valid historical content.
 - It covers objects created in one request and, past the provider's
   single-request limit, objects sent through its resumable upload (§20.6).
 - A slot path has competing writers. Each claim attempt fixes its bytes, and
@@ -6248,8 +6250,8 @@ Write-ups explain each model and state its assumptions:
 | For one slot, in storage that only grows (no slot deleted), with every attempt's bytes unique to it: the claimant whose bytes fill the slot concludes it won, every other claimant that concludes anything concludes it lost, and both conclusions stay true | `conclude_correct`, `exactly_one_claimant` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* Without the byte comparison, a batch lands twice | `no_compare_lands_twice` | `proofs/sequence/CovenSequence/Claim.lean` | §5.1 |
 | *Body.* An operation that forgets its claim on restart lands twice | `forgetful_lands_twice` | `proofs/sequence/CovenSequence/Operation.lean` | §5.1, §11.1 |
-| A read followed by a floor check admits only genuine first bytes | `floor_check_sound` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2 |
-| *Body.* Without the floor check, a stale create can win a deleted slot and be taken as genuine, so recreated bytes can't confirm a claim | `stale_create_wins_deleted_slot` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2 |
+| A read followed by a floor check admits only genuine first bytes | `floor_check_sound` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
+| *Body.* Without the floor check, a stale create can win a deleted slot and be taken as genuine, so recreated bytes can't confirm a claim | `stale_create_wins_deleted_slot` | `proofs/sequence/CovenSequence/Claim.lean` | §5.2, §6.2, §20.1 |
 | A slot at or above the floor read after the create holds the genuine bytes | `claim_floor_check` | `proofs/sequence/CovenSequence/Retention.lean` | §5.2 |
 | Settling from the floor snapshot's last claim number and hash is correct | `settle_correct'`, `settle_from_floor` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
 | *Body.* Two copies of one device id fool a check of the claim number alone | `copies_fool_number_only` | `proofs/sequence/CovenSequence/Settle.lean` | §5.3 |
