@@ -2,6 +2,102 @@ use super::*;
 use crate::tests::{database_error, TestStore};
 use crate::{DbError, Migration, SchemaError};
 
+#[test]
+fn declaration_getters_expose_defaults_without_opening_a_database() {
+    let table = SyncedTable::new("Notes", RowIdentity::IndependentUuid);
+    assert_eq!(table.name(), "Notes");
+    assert_eq!(table.identity(), &RowIdentity::IndependentUuid);
+    assert_eq!(table.get_key_columns(), ["id"]);
+    assert!(!table.is_owner_only());
+    assert_eq!(table.get_audience_column(), None);
+    assert_eq!(table.get_audience_from(), None);
+    assert_eq!(table.files(), None);
+    assert!(table.shared_triggers().is_empty());
+
+    let file = declaration();
+    assert_eq!(file.namespace(), "attachments");
+    assert_eq!(file.cache_budget(), 1 << 30);
+    assert_eq!(file.provenance(), &Provenance::AppProvided);
+    assert_eq!(file.fill(), &CacheFill::CacheEager);
+    assert_eq!(file.id_column(), "id");
+    assert_eq!(file.size_column(), "size");
+    assert_eq!(file.hash_column(), "hash");
+    assert_eq!(file.location_column(), "location");
+    assert!(!file.is_write_once());
+}
+
+#[test]
+fn declaration_getters_preserve_the_builders_choices_and_spelling() {
+    let table = SyncedTable::new("Attachments", RowIdentity::SharedKey)
+        .key_columns(["Note", "Attachment"])
+        .audience_from("Note")
+        .owner_only()
+        .shared_trigger("RecordInsert")
+        .shared_trigger("RecordUpdate")
+        .shared_trigger("RecordInsert")
+        .carries_files(
+            FileDecl::new(
+                "Originals",
+                12345,
+                Provenance::UserProvided,
+                CacheFill::CacheLazy,
+            )
+            .with_id_column("File")
+            .with_size_column("Bytes")
+            .with_hash_column("Digest")
+            .with_location_column("WhereAt")
+            .write_once(),
+        );
+    assert_eq!(table.name(), "Attachments");
+    assert_eq!(table.identity(), &RowIdentity::SharedKey);
+    assert_eq!(table.get_key_columns(), ["Note", "Attachment"]);
+    assert!(table.is_owner_only());
+    assert_eq!(table.get_audience_column(), None);
+    assert_eq!(table.get_audience_from(), Some("Note"));
+    assert_eq!(
+        table.shared_triggers(),
+        ["RecordInsert", "RecordUpdate", "RecordInsert"]
+    );
+    let file = table.files().unwrap();
+    assert_eq!(file.namespace(), "Originals");
+    assert_eq!(file.cache_budget(), 12345);
+    assert_eq!(file.provenance(), &Provenance::UserProvided);
+    assert_eq!(file.fill(), &CacheFill::CacheLazy);
+    assert_eq!(file.id_column(), "File");
+    assert_eq!(file.size_column(), "Bytes");
+    assert_eq!(file.hash_column(), "Digest");
+    assert_eq!(file.location_column(), "WhereAt");
+    assert!(file.is_write_once());
+
+    let table = table
+        .key_columns(["ReplacementKey"])
+        .carries_files(declaration());
+    assert_eq!(table.get_key_columns(), ["ReplacementKey"]);
+    assert_eq!(table.files(), Some(&declaration()));
+}
+
+#[test]
+fn audience_getters_preserve_conflicting_declarations_in_either_order() {
+    let root = SyncedTable::new("Notes", RowIdentity::IndependentUuid)
+        .audience_column("OldAudience")
+        .audience_column("Audience");
+    assert_eq!(root.get_audience_column(), Some("Audience"));
+    assert_eq!(root.get_audience_from(), None);
+
+    for table in [
+        root.audience_from("Note"),
+        SyncedTable::new("Notes", RowIdentity::IndependentUuid)
+            .audience_from("Note")
+            .audience_column("Audience"),
+    ] {
+        assert_eq!(table.get_audience_column(), Some("Audience"));
+        assert_eq!(table.get_audience_from(), Some("Note"));
+        let table = table.audience_from("Parent").audience_column("Readers");
+        assert_eq!(table.get_audience_column(), Some("Readers"));
+        assert_eq!(table.get_audience_from(), Some("Parent"));
+    }
+}
+
 const SCHEMA: &str =
     "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location BLOB)";
 

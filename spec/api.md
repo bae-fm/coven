@@ -1520,6 +1520,10 @@ handle.setup_oauth_storage(
 - Table names in declarations match SQLite identifiers without regard to ASCII
   case. Opening records SQLite's spelling, which identifies the table in writes,
   snapshots and file retention.
+- Declaration getters let app tests inspect builder choices without opening a store.
+  They borrow the declarations as supplied, preserving spelling and order; they do
+  not report the opened schema or current cache budgets. Getters whose names would
+  collide with a builder method use `get_`; boolean getters use `is_`.
 - Each synced table declares its kind of key ([§9.2](coven.md#92-keys-and-unique-values)),
   how its rows get their audience ([§15](coven.md#15-circles)), and whether its rows
   carry a file ([§17](coven.md#17-files)). It may restrict direct writes to
@@ -1542,6 +1546,32 @@ pub enum RowIdentity {
 }
 
 impl SyncedTable {
+    /// The table name exactly as supplied to the declaration.
+    pub fn name(&self) -> &str;
+
+    /// The declared kind of row identity.
+    pub fn identity(&self) -> &RowIdentity;
+
+    /// The declared primary-key columns, in order; defaults to `id`.
+    pub fn get_key_columns(&self) -> &[String];
+
+    /// Whether direct writes are restricted to each row's original creator.
+    pub fn is_owner_only(&self) -> bool;
+
+    /// The root audience column, including when inheritance was also declared.
+    /// Opening refuses a declaration with both audience sources.
+    pub fn get_audience_column(&self) -> Option<&str>;
+
+    /// The audience foreign key, including when a root column was also declared.
+    /// Opening refuses a declaration with both audience sources.
+    pub fn get_audience_from(&self) -> Option<&str>;
+
+    /// The file declaration supplied to `carries_files`, if any.
+    pub fn files(&self) -> Option<&FileDecl>;
+
+    /// The shared trigger names, in declaration order, including repetitions.
+    pub fn shared_triggers(&self) -> &[String];
+
     /// Declares a synced table and its kind of key.
     pub fn new(name: impl Into<String>, identity: RowIdentity) -> Self;
 
@@ -1593,6 +1623,33 @@ pub enum CacheFill {
 pub struct FileDecl { /* private fields */ }
 
 impl FileDecl {
+    /// The cache namespace exactly as declared.
+    pub fn namespace(&self) -> &str;
+
+    /// The initial cache budget in bytes, as declared, not its current setting.
+    pub fn cache_budget(&self) -> u64;
+
+    /// Whether the declared file belongs to the user or is supplied by the app.
+    pub fn provenance(&self) -> &Provenance;
+
+    /// The declared cache-fill policy.
+    pub fn fill(&self) -> &CacheFill;
+
+    /// The declared file identity column; defaults to `id`.
+    pub fn id_column(&self) -> &str;
+
+    /// The declared byte-count column; defaults to `size`.
+    pub fn size_column(&self) -> &str;
+
+    /// The declared content-hash column; defaults to `hash`.
+    pub fn hash_column(&self) -> &str;
+
+    /// The declared location column; defaults to `location`.
+    pub fn location_column(&self) -> &str;
+
+    /// Whether the declaration forbids replacing an existing file.
+    pub fn is_write_once(&self) -> bool;
+
     /// Declares the file a table's rows carry: its namespace, which groups
     /// files in the cache, its cache budget in bytes from first declaration
     /// (E8), its kind, and when devices download it. Every attached file is

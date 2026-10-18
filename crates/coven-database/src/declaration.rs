@@ -31,6 +31,56 @@ pub struct SyncedTable {
 }
 
 impl SyncedTable {
+    /// The table name exactly as supplied to the declaration.
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    /// The declared kind of row identity.
+    pub fn identity(&self) -> &RowIdentity {
+        &self.identity
+    }
+
+    /// The declared primary-key columns, in order; defaults to `id`.
+    pub fn get_key_columns(&self) -> &[String] {
+        &self.key
+    }
+
+    /// Whether direct writes are restricted to each row's original creator.
+    pub fn is_owner_only(&self) -> bool {
+        self.owner_only
+    }
+
+    /// The root audience column, including when inheritance was also declared.
+    /// Opening refuses a declaration with both audience sources.
+    pub fn get_audience_column(&self) -> Option<&str> {
+        match &self.audience {
+            AudienceSource::Column(column) | AudienceSource::Both { column, .. } => Some(column),
+            AudienceSource::Store | AudienceSource::ForeignKey(_) => None,
+        }
+    }
+
+    /// The audience foreign key, including when a root column was also declared.
+    /// Opening refuses a declaration with both audience sources.
+    pub fn get_audience_from(&self) -> Option<&str> {
+        match &self.audience {
+            AudienceSource::ForeignKey(foreign_key) | AudienceSource::Both { foreign_key, .. } => {
+                Some(foreign_key)
+            }
+            AudienceSource::Store | AudienceSource::Column(_) => None,
+        }
+    }
+
+    /// The file declaration supplied to `carries_files`, if any.
+    pub fn files(&self) -> Option<&FileDecl> {
+        self.files.as_ref()
+    }
+
+    /// The shared trigger names, in declaration order, including repetitions.
+    pub fn shared_triggers(&self) -> &[String] {
+        &self.shared_triggers
+    }
+
     /// Declare a synced table with the one-column primary key `id`.
     pub fn new(name: impl Into<String>, identity: RowIdentity) -> Self {
         Self {
@@ -143,6 +193,51 @@ pub struct FileDecl {
 }
 
 impl FileDecl {
+    /// The cache namespace exactly as declared.
+    pub fn namespace(&self) -> &str {
+        &self.namespace
+    }
+
+    /// The initial cache budget in bytes, as declared, not its current setting.
+    pub fn cache_budget(&self) -> u64 {
+        self.cache_budget
+    }
+
+    /// Whether the declared file belongs to the user or is supplied by the app.
+    pub fn provenance(&self) -> &Provenance {
+        &self.provenance
+    }
+
+    /// The declared cache-fill policy.
+    pub fn fill(&self) -> &CacheFill {
+        &self.fill
+    }
+
+    /// The declared file identity column; defaults to `id`.
+    pub fn id_column(&self) -> &str {
+        &self.id
+    }
+
+    /// The declared byte-count column; defaults to `size`.
+    pub fn size_column(&self) -> &str {
+        &self.size
+    }
+
+    /// The declared content-hash column; defaults to `hash`.
+    pub fn hash_column(&self) -> &str {
+        &self.hash
+    }
+
+    /// The declared location column; defaults to `location`.
+    pub fn location_column(&self) -> &str {
+        &self.location
+    }
+
+    /// Whether the declaration forbids replacing an existing file.
+    pub fn is_write_once(&self) -> bool {
+        self.write_once
+    }
+
     /// Declare a file namespace, its cache budget in bytes, origin and cache
     /// policy. The budget applies when the namespace is first declared;
     /// `set_cache_budget` changes it after. Every attached file is queued for
