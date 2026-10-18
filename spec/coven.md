@@ -604,9 +604,12 @@ until one is missing.
   discards what it read and reloads (§16.5) instead: bytes recreated at a deleted
   path can't become new history (§5.2).
 - **Signature before use.** The device checks each slot's framing and complete
-  signature before applying it. It finds the slot's author in the state just
-  before the slot. The writes inside are judged against the history their author
-  had seen when making them (§7.1).
+  signature before applying it. Each original write uses its device owner's
+  signing key at `read_through`; its writes slot uses the credential those writes
+  share. Other slots use the state just before the slot, except the initial store
+  creation (§10.2). A delayed write signed before a key replacement can therefore
+  authenticate and then be consumed as refused (§14.1). Writes are judged against
+  their authored history (§7.1); format.md D9 defines each kind's credential.
 - **One transaction per slot,** together with "applied through this slot". A
   failed transaction changes neither the data nor the progress.
 
