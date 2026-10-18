@@ -60,7 +60,8 @@ impl StorageInvitation {
         if matches!(
             location,
             StorageConfig::Dropbox {
-                location: crate::DropboxLocation::AppFolder
+                location: crate::DropboxLocation::AppFolder,
+                ..
             }
         ) {
             return Err(StorageFailure::DropboxAppFolderNotShareable.into());
@@ -101,7 +102,7 @@ impl StorageInvitation {
         serde_json::from_slice(bytes).map_err(|error| StorageFailure::Encoding.with_source(error))
     }
     pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
-        if &self.location != location {
+        if !self.location.same_location(location) {
             return Err(StorageFailure::InvitationMismatch.into());
         }
         Ok(())

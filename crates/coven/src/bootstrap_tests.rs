@@ -44,7 +44,7 @@ async fn restore_code_api_never_discloses_storage_credentials() {
         assert_eq!(code.member, owner.member.member());
         assert_eq!(
             RestoreCode::from_bytes(&bytes).unwrap().storage.as_bytes(),
-            serde_json::to_vec(&owner.storage.config()).unwrap()
+            serde_json::to_vec(&owner.handle.storage_config().await.unwrap().unwrap()).unwrap()
         );
         owner.close().await;
     }
@@ -164,6 +164,22 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         }
         let restored =
             coven_sync::read_restore_code(&handle.restore_code().await.unwrap()).unwrap();
+        let location = StorageConfig::decode(restored.storage.as_bytes()).unwrap();
+        match &location {
+            StorageConfig::Dropbox { account_label, .. }
+            | StorageConfig::OneDrive { account_label, .. } => {
+                assert_eq!(account_label.as_deref(), Some("join@example.com"));
+            }
+            _ => assert_eq!(location, owner.storage.config()),
+        }
+        assert_eq!(
+            handle.storage_config().await.unwrap(),
+            Some(location.clone())
+        );
+        assert_eq!(
+            crate::saved_restore::list(install.keychain.clone()).unwrap()[0].location,
+            location
+        );
         assert_eq!(restored.member, member);
         assert_ne!(member, owner.member.member());
         assert_eq!(

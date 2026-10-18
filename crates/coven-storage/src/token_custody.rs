@@ -17,6 +17,7 @@ pub trait TokenCustody: Send + Sync {
 }
 
 /// What a connection authenticates with (§20.2).
+#[derive(Clone)]
 pub enum ProviderAuth {
     /// This member's S3 key.
     S3(S3Credentials),

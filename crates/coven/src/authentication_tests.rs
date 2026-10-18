@@ -397,6 +397,7 @@ mod provider_access_tests {
     #[tokio::test]
     async fn app_folder_invites_fail_before_provider_requests() {
         let fixture = Fixture::new(StorageConfig::Dropbox {
+            account_label: None,
             location: DropboxLocation::AppFolder,
         })
         .await;

@@ -265,6 +265,7 @@ impl StorageConnections {
             location,
             StorageConfig::Dropbox {
                 location: DropboxLocation::AppFolder,
+                ..
             }
         ) {
             return Err(StorageFailure::DropboxAppFolderNotShareable.into());
@@ -479,6 +480,13 @@ impl StorageConnections {
                     (owner.codes.provider_auth(data.credentials), None)
                 }
             };
+            let storage = crate::authentication::label_location(
+                owner.connector.as_ref(),
+                storage,
+                auth.clone(),
+                owner.waits.clone(),
+            )
+            .await?;
             let result = owner
                 .setup_connection(storage, &device_name, auth, sign_in)
                 .await?;
@@ -515,7 +523,7 @@ impl StorageConnections {
             .location()
             .await
             .map_err(setup_error)?
-            .is_some_and(|recorded| &recorded != config)
+            .is_some_and(|recorded| !recorded.same_location(config))
         {
             return Err(StorageSetupError::LocationChangeUnsupported);
         }

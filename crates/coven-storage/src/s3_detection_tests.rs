@@ -204,6 +204,7 @@ fn resolution_records_detected_settings_only_where_the_location_needs_them() {
     ));
     assert!(detection
         .resolve(StorageConfig::OneDrive {
+            account_label: None,
             drive_id: "drive".into(),
             folder_id: "folder".into()
         })

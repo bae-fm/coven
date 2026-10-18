@@ -111,12 +111,14 @@ fn locations_select_the_required_initial_access() {
     for (config, expected) in [
         (
             StorageConfig::Dropbox {
+                account_label: None,
                 location: DropboxLocation::AppFolder,
             },
             Some(OAuthAccess::Dropbox(DropboxAccess::AppFolder)),
         ),
         (
             StorageConfig::Dropbox {
+                account_label: None,
                 location: DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
                 },
@@ -125,6 +127,7 @@ fn locations_select_the_required_initial_access() {
         ),
         (
             StorageConfig::OneDrive {
+                account_label: None,
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
             },
@@ -210,6 +213,7 @@ fn every_native_location_identifier_is_required() {
     }
     for invalid in ["", "  ", "namespace\n"] {
         let config = StorageConfig::Dropbox {
+            account_label: None,
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: invalid.into(),
             },

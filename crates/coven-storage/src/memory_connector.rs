@@ -52,6 +52,23 @@ impl MemoryStorage {
 
 #[async_trait]
 impl crate::providers::StorageConnector for MemoryStorage {
+    async fn account_label(
+        &self,
+        auth: crate::ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<String, StorageError> {
+        self.connect(
+            self.config(),
+            auth,
+            self.publications.clone(),
+            cooldown,
+            self.transfers.clone(),
+        )
+        .await?
+        .account()
+        .await
+    }
+
     async fn prepare_cloudkit(
         &self,
         container: &str,

@@ -51,6 +51,7 @@ fn with_state(session: &UploadSession, state: serde_json::Value, confirmed: u64)
 impl Storage for PlannedStorage {
     fn config(&self) -> StorageConfig {
         StorageConfig::OneDrive {
+            account_label: None,
             drive_id: "drive".into(),
             folder_id: "folder".into(),
         }

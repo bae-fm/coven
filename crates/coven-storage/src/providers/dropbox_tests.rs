@@ -471,6 +471,7 @@ async fn lost_completion_requires_byte_verification() {
 pub(super) fn provider(url: &str) -> StorageConnection<DropboxStorage> {
     let mut storage = DropboxStorage::new(
         StorageConfig::Dropbox {
+            account_label: None,
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "namespace".into(),
             },
@@ -658,6 +659,7 @@ async fn recipient_join_mounts_the_invited_namespace_and_retries_a_lost_reply() 
         StorageFailure::PermissionDenied
     );
     let elsewhere = StorageInvitation::for_account(StorageConfig::Dropbox {
+        account_label: None,
         location: crate::DropboxLocation::SharedFolder {
             namespace_id: "elsewhere".into(),
         },

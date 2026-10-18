@@ -85,6 +85,7 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
             let folder_id = folders.prepare(store).await;
             let provider = OneDriveStorage::new(
                 StorageConfig::OneDrive {
+                    account_label: None,
                     drive_id: folders.drive.clone(),
                     folder_id,
                 },

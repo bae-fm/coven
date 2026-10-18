@@ -330,7 +330,7 @@ async fn prepare_and_load(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<Loaded>, BootstrapError> {
     let directory = pending.directory();
-    let (member, data, sign_in, device_name, mut admission) = match request {
+    let (member, mut data, sign_in, device_name, mut admission) = match request {
         BootstrapRequest::Restore {
             code,
             data,
@@ -375,6 +375,14 @@ async fn prepare_and_load(
                 .await
                 .map_err(CovenError::from)?,
         );
+        data.location = crate::authentication::label_location(
+            builder.connector().as_ref(),
+            data.location.clone(),
+            provider_auth(&data, sign_in.as_ref())?,
+            waits.clone(),
+        )
+        .await
+        .map_err(SyncError::from)?;
         let storage = builder
             .connector()
             .connect(

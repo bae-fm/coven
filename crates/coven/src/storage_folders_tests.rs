@@ -119,6 +119,13 @@ struct Connector {
 }
 #[async_trait::async_trait]
 impl StorageConnector for Connector {
+    async fn account_label(
+        &self,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+    ) -> Result<String, StorageError> {
+        self.native.account_label(auth, cooldown).await
+    }
     /// Read the signed-in OneDrive root.
     async fn onedrive_root(
         &self,
@@ -222,6 +229,7 @@ impl Fixture {
 }
 fn drive(folder: &str) -> StorageConfig {
     StorageConfig::OneDrive {
+        account_label: None,
         drive_id: "drive".into(),
         folder_id: folder.into(),
     }
@@ -231,6 +239,7 @@ fn folder(id: &str, name: &str) -> Value {
 }
 fn dropbox(namespace: &str) -> StorageConfig {
     StorageConfig::Dropbox {
+        account_label: None,
         location: DropboxLocation::SharedFolder {
             namespace_id: namespace.into(),
         },
@@ -313,12 +322,17 @@ async fn onedrive_root_pages_and_creation_return_setup_locations_without_publish
     assert_eq!(created.name, "Household");
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
+    f.fake
+        .expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
     let setup = f
         .handle
         .setup_oauth_storage(created.storage.clone(), "Ana's laptop")
         .await
         .unwrap();
-    assert_eq!(setup.connection.storage, created.storage);
+    assert_eq!(
+        setup.connection.storage,
+        labelled(created.storage, "ana@example.com")
+    );
     f.fake.consumed();
     f.handle.close().await.unwrap();
     assert!(matches!(
@@ -382,12 +396,17 @@ async fn dropbox_namespaces_follow_cursors_and_refresh_in_the_same_sign_in_used_
     assert_eq!(f.sign_in.request_count(), 2);
     f.no_credentials();
     assert_eq!(f.handle.storage_config().await.unwrap(), None);
+    f.fake
+        .expect(account_reply(CloudProvider::Dropbox, "ana@example.com", 1));
     let setup = f
         .handle
         .setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop")
         .await
         .unwrap();
-    assert_eq!(setup.connection.storage, dropbox("123"));
+    assert_eq!(
+        setup.connection.storage,
+        labelled(dropbox("123"), "ana@example.com")
+    );
     let bytes = f
         .app
         .store_keychain(f.handle.store_id())
@@ -554,6 +573,7 @@ async fn incomplete_or_cyclic_listings_fail_without_returning_a_partial_choice()
 #[tokio::test]
 async fn remote_onedrive_folders_use_the_target_drive_and_item_ids() {
     let f = Fixture::new(StorageConfig::OneDrive {
+        account_label: None,
         drive_id: "shared-drive".into(),
         folder_id: "shared-item".into(),
     })
@@ -575,11 +595,14 @@ async fn remote_onedrive_folders_use_the_target_drive_and_item_ids() {
         vec![StorageFolder {
             name: "Household".into(),
             storage: StorageConfig::OneDrive {
+                account_label: None,
                 drive_id: "shared-drive".into(),
                 folder_id: "shared-item".into()
             }
         }]
     );
+    f.fake
+        .expect(account_reply(CloudProvider::OneDrive, "ana@example.com", 0));
     f.handle
         .setup_oauth_storage(folders[0].storage.clone(), "Ana's laptop")
         .await
@@ -639,4 +662,264 @@ async fn provider_cooldown_applies_to_folder_selection_before_another_request() 
         .is::<coven_storage::CoolingDown>());
     f.fake.consumed();
     f.handle.close().await.unwrap();
+}
+
+fn labelled(mut location: StorageConfig, label: &str) -> StorageConfig {
+    match &mut location {
+        StorageConfig::Dropbox { account_label, .. }
+        | StorageConfig::OneDrive { account_label, .. } => *account_label = Some(label.into()),
+        _ => panic!("OAuth location"),
+    }
+    location
+}
+
+fn account_reply(provider: CloudProvider, label: &str, token: usize) -> Reply {
+    match provider {
+        CloudProvider::Dropbox => Reply::new(
+            "POST",
+            "/users/get_current_account",
+            Some(Value::Null),
+            json!({"email":label}),
+        ),
+        CloudProvider::OneDrive => Reply::new(
+            "GET",
+            "/me?%24select=mail%2CuserPrincipalName",
+            None,
+            json!({"mail":label,"userPrincipalName":"principal@example.com"}),
+        ),
+        _ => panic!("OAuth provider"),
+    }
+    .token(token)
+}
+
+#[tokio::test]
+async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label() {
+    for location in [
+        dropbox("123"),
+        StorageConfig::Dropbox {
+            location: DropboxLocation::AppFolder,
+            account_label: None,
+        },
+        drive("household"),
+    ] {
+        let f = Fixture::new(location.clone()).await;
+        let access = location.oauth_access().unwrap();
+        let mut previous_code = None;
+        for (token, label) in ["ana@example.com", "ana@work.example"]
+            .into_iter()
+            .enumerate()
+        {
+            f.handle.authenticate(access).await.unwrap();
+            f.fake
+                .expect(account_reply(location.provider(), label, token));
+            let setup = f
+                .handle
+                .setup_oauth_storage(
+                    labelled(location.clone(), "untrusted@example.com"),
+                    "Ana's laptop",
+                )
+                .await
+                .unwrap();
+            let expected = labelled(location.clone(), label);
+            assert_eq!(setup.connection.storage, expected);
+            assert_eq!(
+                f.handle.storage_config().await.unwrap(),
+                Some(expected.clone())
+            );
+            let code = f.handle.restore_code().await.unwrap();
+            let decoded = coven_sync::read_restore_code(&code).unwrap();
+            assert_eq!(
+                StorageConfig::decode(decoded.storage.as_bytes()).unwrap(),
+                expected
+            );
+            assert_eq!(
+                f.app.saved_restore_codes().await.unwrap()[0].location,
+                expected
+            );
+            // Display metadata cannot replace the account used for membership.
+            let state = f.handle.store_state().await;
+            assert_eq!(
+                state.members[&decoded.member].access,
+                coven_format::MemberAccess::ProviderAccount("owner@example.test".into())
+            );
+            if let Some(previous) = previous_code {
+                assert_ne!(code, previous);
+            }
+            previous_code = Some(code);
+        }
+        // A different folder remains a location change, regardless of its label.
+        let elsewhere = match &location {
+            StorageConfig::Dropbox { .. } => dropbox("other"),
+            StorageConfig::OneDrive { .. } => drive("other"),
+            _ => unreachable!(),
+        };
+        assert!(matches!(
+            f.handle.setup_oauth_storage(elsewhere, "Laptop").await,
+            Err(StorageSetupError::LocationChangeUnsupported)
+        ));
+        f.fake.consumed();
+        f.handle.close().await.unwrap();
+        let directory = StoreLayout::new(f._root.path().into()).store_dir(&f.handle.store_id());
+        assert_eq!(
+            Coven::storage_config(&directory).await.unwrap(),
+            Some(labelled(location, "ana@work.example"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn account_lookup_failure_retains_committed_location_credentials_and_code() {
+    for location in [dropbox("123"), drive("household")] {
+        let f = Fixture::new(location.clone()).await;
+        let access = location.oauth_access().unwrap();
+        f.handle.authenticate(access).await.unwrap();
+        f.fake
+            .expect(account_reply(location.provider(), "ana@example.com", 0));
+        f.handle
+            .setup_oauth_storage(location.clone(), "Laptop")
+            .await
+            .unwrap();
+        let code = f.handle.restore_code().await.unwrap();
+        let keychain = f.app.store_keychain(f.handle.store_id());
+        let credentials = keychain.storage_credentials().unwrap().unwrap();
+        let saved = f.app.saved_restore_codes().await.unwrap();
+        f.handle.authenticate(access).await.unwrap();
+        f.fake
+            .expect(account_reply(location.provider(), "ignored", 1).status(503));
+        assert_eq!(
+            failure(
+                f.handle
+                    .setup_oauth_storage(location.clone(), "Laptop")
+                    .await
+                    .unwrap_err()
+            )
+            .failure(),
+            StorageFailure::Network
+        );
+        assert_eq!(f.handle.restore_code().await.unwrap(), code);
+        assert_eq!(f.app.saved_restore_codes().await.unwrap(), saved);
+        assert_eq!(
+            keychain.storage_credentials().unwrap().unwrap().as_bytes(),
+            credentials.as_bytes()
+        );
+        f.fake
+            .expect(account_reply(location.provider(), "ana@work.example", 1));
+        f.handle
+            .setup_oauth_storage(location, "Laptop")
+            .await
+            .unwrap();
+        f.fake.consumed();
+        f.handle.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn onedrive_uses_the_principal_name_when_mail_is_absent() {
+    for value in [
+        json!({"mail":null,"userPrincipalName":"ANA@example.com"}),
+        json!({"userPrincipalName":"ANA@example.com"}),
+    ] {
+        let f = Fixture::new(drive("household")).await;
+        f.handle.authenticate(OAuthAccess::OneDrive).await.unwrap();
+        let mut reply = account_reply(CloudProvider::OneDrive, "ignored", 0);
+        reply.value = value;
+        f.fake.expect(reply);
+        let setup = f
+            .handle
+            .setup_oauth_storage(drive("household"), "Laptop")
+            .await
+            .unwrap();
+        assert_eq!(
+            setup.connection.storage,
+            labelled(drive("household"), "ana@example.com")
+        );
+        f.fake.consumed();
+        f.handle.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn malformed_accounts_fail_before_setup_publishes_anything() {
+    for (location, value) in [
+        (dropbox("123"), json!({})),
+        (dropbox("123"), json!({"email":""})),
+        (
+            drive("household"),
+            json!({"mail":42,"userPrincipalName":"ana@example.com"}),
+        ),
+        (drive("household"), json!({"mail":null})),
+    ] {
+        let f = Fixture::new(location.clone()).await;
+        f.handle
+            .authenticate(location.oauth_access().unwrap())
+            .await
+            .unwrap();
+        let mut reply = account_reply(location.provider(), "ignored", 0);
+        reply.value = value;
+        f.fake.expect(reply);
+        assert_eq!(
+            failure(
+                f.handle
+                    .setup_oauth_storage(location, "Laptop")
+                    .await
+                    .unwrap_err()
+            )
+            .failure(),
+            StorageFailure::Protocol
+        );
+        assert_eq!(f.handle.storage_config().await.unwrap(), None);
+        assert!(f.app.saved_restore_codes().await.unwrap().is_empty());
+        f.no_credentials();
+        f.fake.consumed();
+        f.handle.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn refreshing_during_account_lookup_commits_the_replacement_tokens() {
+    for location in [dropbox("123"), drive("household")] {
+        for reconnect in [false, true] {
+            let f = Fixture::new(location.clone()).await;
+            f.handle
+                .authenticate(location.oauth_access().unwrap())
+                .await
+                .unwrap();
+            if reconnect {
+                f.fake
+                    .expect(account_reply(location.provider(), "ana@example.com", 0));
+                f.handle
+                    .setup_oauth_storage(location.clone(), "Laptop")
+                    .await
+                    .unwrap();
+            }
+            f.fake
+                .expect(account_reply(location.provider(), "ignored", 0).status(401));
+            f.fake
+                .expect(account_reply(location.provider(), "ana@work.example", 1));
+            let setup = f
+                .handle
+                .setup_oauth_storage(location.clone(), "Laptop")
+                .await
+                .unwrap();
+            assert_eq!(
+                setup.connection.storage,
+                labelled(location.clone(), "ana@work.example")
+            );
+            let bytes = f
+                .app
+                .store_keychain(f.handle.store_id())
+                .storage_credentials()
+                .unwrap()
+                .unwrap();
+            let coven_storage::StorageCredentials::OAuth(tokens) =
+                coven_storage::StorageCredentials::decode(bytes.as_bytes()).unwrap()
+            else {
+                panic!("OAuth credentials")
+            };
+            assert_eq!(tokens.access_token.as_str(), "access-1");
+            assert_eq!(f.sign_in.request_count(), 2);
+            f.fake.consumed();
+            f.handle.close().await.unwrap();
+        }
+    }
 }

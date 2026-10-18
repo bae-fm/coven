@@ -173,6 +173,7 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
 fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() {
     let (keychain, store, mut code) = fixture(true);
     code.storage = StorageConfig::Dropbox {
+        account_label: None,
         location: coven_storage::DropboxLocation::SharedFolder {
             namespace_id: "folder".into(),
         },

@@ -12,7 +12,10 @@ async fn replacement_tokens_cannot_change_dropbox_access_or_provider() {
     ] {
         let required = OAuthAccess::Dropbox(location.access());
         let storage = MemoryStorage::builder()
-            .location(StorageConfig::Dropbox { location })
+            .location(StorageConfig::Dropbox {
+                account_label: None,
+                location,
+            })
             .build()
             .unwrap();
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
@@ -105,6 +108,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         ),
         (
             StorageConfig::Dropbox {
+                account_label: None,
                 location: crate::DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
                 },
@@ -113,6 +117,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         ),
         (
             StorageConfig::OneDrive {
+                account_label: None,
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
             },
@@ -123,6 +128,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
         let path = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
         let mut session = storage.begin_upload(&path, 4).await.unwrap();
         session.location = StorageConfig::Dropbox {
+            account_label: None,
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "another".into(),
             },
@@ -185,6 +191,7 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
     }
     let mut foreign = session.clone();
     foreign.location = StorageConfig::Dropbox {
+        account_label: None,
         location: crate::DropboxLocation::SharedFolder {
             namespace_id: "another".into(),
         },

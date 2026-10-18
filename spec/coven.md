@@ -2260,7 +2260,9 @@ they wrote it down, is up to the app; coven tracks no pending task for it.
 The code carries no name, and neither do coven's iCloud Keychain entries. A
 rename therefore cannot leave a saved recovery label behind. A restoring
 device learns the current name only after loading the store; before
-connecting, the app may show its id and provider, never a store name.
+connecting, the app may show its id, provider and account or location, never a
+store name. Dropbox and OneDrive show the member's signed-in account label.
+S3 shows the bucket and endpoint; CloudKit exposes no account identity.
 
 A new device gets the code in one of three ways:
 
@@ -4304,6 +4306,14 @@ token passes through the app:
   refreshes once, commits the new token, and retries that one request once. If
   the refresh fails or the retry is rejected again, the caller gets the failure.
   Every part of coven that uses storage follows this same rule.
+
+Storage setup records the signed-in member's account label in their location:
+Dropbox's email from `get_current_account`, or OneDrive's mail or principal name
+from `/me`. Joining and restoring through sign-in record that member's label,
+replacing the one in the code. Signing in again and completing setup refreshes it.
+This lets Ana distinguish stores on her personal and work accounts. The label is
+only for display, never routing or authority, and contains no tokens. S3 and
+CloudKit have no account label.
 
 Token expiry never consults the device clock. Ben sets his laptop's clock back a
 year; his token still works until Dropbox rejects it, and one refresh lets the

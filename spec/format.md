@@ -1980,6 +1980,8 @@ storage      bytes
 - `storage` is the provider location only, at most 16 KiB. Its bytes are
   `coven-storage`'s `StorageConfig` serialized as JSON. The format's codecs
   treat them as opaque bytes, and this document doesn't define that JSON.
+  Dropbox and OneDrive locations include the member's display-only account label,
+  so saved codes can distinguish accounts without carrying credentials.
 - The private-pair blob is unchanged, and explicitly belongs to `member`.
   Restore requires that id's current pair; an old code can't rebind it.
 - No store name is encoded. A restoring device learns it after loading, so

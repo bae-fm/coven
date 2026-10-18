@@ -122,11 +122,13 @@ fn location(provider: CloudProvider) -> StorageConfig {
             prefix: "store".into(),
         },
         CloudProvider::Dropbox => StorageConfig::Dropbox {
+            account_label: None,
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "store".into(),
             },
         },
         CloudProvider::OneDrive => StorageConfig::OneDrive {
+            account_label: None,
             drive_id: "drive".into(),
             folder_id: "store".into(),
         },

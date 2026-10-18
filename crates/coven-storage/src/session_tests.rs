@@ -6,6 +6,7 @@ use coven_crypto::SecretText;
 fn upload_sessions_encode_without_capacity_growth() {
     let session = UploadSession {
         location: StorageConfig::Dropbox {
+            account_label: None,
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "namespace".into(),
             },
@@ -38,6 +39,7 @@ fn recorded_upload_accepts_floor_creation_and_keeps_its_condition() {
     ] {
         let session = UploadSession {
             location: StorageConfig::Dropbox {
+                account_label: None,
                 location: crate::DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
                 },
@@ -110,6 +112,7 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
     let cases = [
         (
             StorageConfig::Dropbox {
+                account_label: None,
                 location: crate::DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
                 },
@@ -121,6 +124,7 @@ fn session_states_must_match_their_provider_and_have_nonempty_ids() {
         ),
         (
             StorageConfig::OneDrive {
+                account_label: None,
                 drive_id: "drive".into(),
                 folder_id: "folder".into(),
             },
@@ -230,6 +234,7 @@ fn restarting_s3_session_keeps_only_cleanup_identifiers_and_zero_progress() {
     assert_invalid_recording(&session);
     session.confirmed = 0;
     session.location = StorageConfig::Dropbox {
+        account_label: None,
         location: crate::DropboxLocation::SharedFolder {
             namespace_id: "namespace".into(),
         },
@@ -248,6 +253,7 @@ fn restarting_s3_session_keeps_only_cleanup_identifiers_and_zero_progress() {
 fn session_urls_and_unknown_state_fields_are_refused() {
     let mut session = recording(
         StorageConfig::OneDrive {
+            account_label: None,
             drive_id: "drive".into(),
             folder_id: "folder".into(),
         },
@@ -299,6 +305,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
 
     let mut session = recording(
         StorageConfig::Dropbox {
+            account_label: None,
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "namespace".into(),
             },
@@ -314,7 +321,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
     assert_invalid_recording(&session);
     session.part_size = 8 * 1024 * 1024;
     assert!(matches!(
-        session.check(&StorageConfig::Dropbox { location: crate::DropboxLocation::SharedFolder { namespace_id: "another".into() } }),
+        session.check(&StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::SharedFolder { namespace_id: "another".into() } }),
         Err(error) if error.failure() == StorageFailure::SessionMismatch
     ));
 }
@@ -331,6 +338,7 @@ fn onedrive_state(url: &str) -> SessionState {
 #[test]
 fn onedrive_publication_phases_require_their_real_progress_and_capability() {
     let location = StorageConfig::OneDrive {
+        account_label: None,
         drive_id: "drive".into(),
         folder_id: "folder".into(),
     };
@@ -380,4 +388,41 @@ fn onedrive_publication_phases_require_their_real_progress_and_capability() {
     session.confirmed = 0;
     session.state = SessionState::VerifyPublished;
     assert_invalid_recording(&session);
+}
+
+#[test]
+fn refreshed_account_labels_do_not_change_upload_destinations() {
+    for (mut location, state, size) in [
+        (
+            StorageConfig::Dropbox {
+                location: crate::DropboxLocation::AppFolder,
+                account_label: Some("old@example.com".into()),
+            },
+            SessionState::Dropbox {
+                id: SecretText::new("session".into()),
+            },
+            DROPBOX_PART_SIZE,
+        ),
+        (
+            StorageConfig::OneDrive {
+                drive_id: "drive".into(),
+                folder_id: "folder".into(),
+                account_label: Some("old@example.com".into()),
+            },
+            onedrive_state("https://upload.example/session"),
+            ONEDRIVE_PART_SIZE,
+        ),
+    ] {
+        let session = recording(location.clone(), state, size);
+        match &mut location {
+            StorageConfig::Dropbox { account_label, .. }
+            | StorageConfig::OneDrive { account_label, .. } => {
+                *account_label = Some("new@example.com".into());
+            }
+            _ => unreachable!(),
+        }
+        assert_ne!(location, session.location);
+        assert!(session.is_at(&location));
+        session.check(&location).unwrap();
+    }
 }

@@ -38,14 +38,17 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
     let locations = [
         s3_location(),
         StorageConfig::Dropbox {
+            account_label: Some("ana@example.com".into()),
             location: DropboxLocation::SharedFolder {
                 namespace_id: "ana-shared-folder".into(),
             },
         },
         StorageConfig::Dropbox {
+            account_label: Some("ben@example.com".into()),
             location: DropboxLocation::AppFolder,
         },
         StorageConfig::OneDrive {
+            account_label: Some("ana@work.example".into()),
             drive_id: "ana-drive".into(),
             folder_id: "household-folder".into(),
         },

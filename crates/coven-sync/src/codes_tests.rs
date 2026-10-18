@@ -25,12 +25,14 @@ fn restore_metadata_retains_the_creation_access_choice() {
     for (location, access) in [
         (
             StorageConfig::Dropbox {
+                account_label: None,
                 location: coven_storage::DropboxLocation::AppFolder,
             },
             OAuthAccess::Dropbox(coven_storage::DropboxAccess::AppFolder),
         ),
         (
             StorageConfig::Dropbox {
+                account_label: None,
                 location: coven_storage::DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
                 },

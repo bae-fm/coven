@@ -386,6 +386,7 @@ mod app_folder_tests {
             .await;
         let mut provider = DropboxStorage::new(
             StorageConfig::Dropbox {
+                account_label: None,
                 location: DropboxLocation::AppFolder,
             },
             session,

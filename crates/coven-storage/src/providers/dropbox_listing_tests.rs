@@ -101,7 +101,10 @@ async fn folder_pages_keep_the_selected_root() {
         };
         let server = TestServer::new(Router::new().fallback(handler)).await;
         let mut storage = DropboxStorage::new(
-            StorageConfig::Dropbox { location },
+            StorageConfig::Dropbox {
+                account_label: None,
+                location,
+            },
             session(CloudProvider::Dropbox),
         )
         .unwrap();

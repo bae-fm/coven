@@ -555,11 +555,13 @@ async fn lost_publication_replies_and_expired_parts_are_distinct() {
 fn sharing_configs() -> [StorageConfig; 3] {
     [
         StorageConfig::Dropbox {
+            account_label: None,
             location: crate::DropboxLocation::SharedFolder {
                 namespace_id: "namespace".into(),
             },
         },
         StorageConfig::OneDrive {
+            account_label: None,
             drive_id: "drive".into(),
             folder_id: "folder".into(),
         },
@@ -697,6 +699,7 @@ async fn invalid_account_grants_leave_the_fake_unchanged() {
         })
         .chain([(
             StorageConfig::Dropbox {
+                account_label: None,
                 location: crate::DropboxLocation::AppFolder,
             },
             "member",

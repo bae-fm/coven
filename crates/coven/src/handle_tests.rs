@@ -334,6 +334,7 @@ async fn closed_storage_calls_keep_their_public_errors_on_every_clone() {
         handle
             .setup_oauth_storage(
                 StorageConfig::Dropbox {
+                    account_label: None,
                     location: coven_storage::DropboxLocation::SharedFolder {
                         namespace_id: "folder".into()
                     }

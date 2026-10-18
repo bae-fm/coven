@@ -42,6 +42,7 @@ impl OneDriveStorage {
         let StorageConfig::OneDrive {
             drive_id,
             folder_id,
+            ..
         } = &config
         else {
             return Err(

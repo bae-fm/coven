@@ -45,9 +45,11 @@ impl DropboxStorage {
         match &self.config {
             StorageConfig::Dropbox {
                 location: DropboxLocation::SharedFolder { namespace_id },
+                ..
             } => Ok(namespace_id),
             StorageConfig::Dropbox {
                 location: DropboxLocation::AppFolder,
+                ..
             } => Err(StorageFailure::DropboxAppFolderNotShareable.into()),
             _ => unreachable!("Dropbox location checked at construction"),
         }
@@ -56,12 +58,14 @@ impl DropboxStorage {
         match &self.config {
             StorageConfig::Dropbox {
                 location: DropboxLocation::SharedFolder { namespace_id },
+                ..
             } => vec![(
                 "Dropbox-API-Path-Root",
                 json!({".tag":"namespace_id","namespace_id":namespace_id}).to_string(),
             )],
             StorageConfig::Dropbox {
                 location: DropboxLocation::AppFolder,
+                ..
             } => Vec::new(),
             _ => unreachable!("Dropbox location checked at construction"),
         }
@@ -70,11 +74,13 @@ impl DropboxStorage {
         match &self.config {
             StorageConfig::Dropbox {
                 location: DropboxLocation::AppFolder,
+                ..
             } => {
                 self.rpc("users/get_current_account", Value::Null).await?;
             }
             StorageConfig::Dropbox {
                 location: DropboxLocation::SharedFolder { namespace_id },
+                ..
             } => {
                 self.rpc(
                     "sharing/get_folder_metadata",

@@ -51,7 +51,7 @@ impl DeviceCredentials {
     }
 }
 
-fn held_tokens(keychain: &StoreKeychain) -> Result<OAuthTokens, SyncError> {
+pub(crate) fn held_tokens(keychain: &StoreKeychain) -> Result<OAuthTokens, SyncError> {
     let bytes = keychain
         .storage_credentials()?
         .ok_or(StorageFailure::Authentication.with_source("no sign-in is in device custody"))?;

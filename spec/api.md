@@ -157,8 +157,9 @@ pub enum Audience {
 - A `StoreLayout` says where an app's stores live on disk.
 - `Coven::storage_config` reads a closed store's saved location without opening
   its database or custody. The handle's `storage_config` reads the same committed
-  `StorageConfig`, so an app can show "Dropbox: Household" without keeping a second
-  copy. Neither returns credentials or contacts storage. Before setup they return
+  `StorageConfig`, including the member's account label, so an app can show
+  "Dropbox: ana@example.com" without keeping a second copy. Neither returns
+  credentials or contacts storage. Before setup they return
   `None`; disconnect retains the location, and unreadable settings remain an error.
 - Store lock files live beside each store directory. Deletion holds the writer
   and reader locks while removing the directory, then releases and removes the
@@ -307,6 +308,15 @@ impl IdSource for SequentialIds {
 /// Tests replace the connection boundary with in-memory storage.
 #[async_trait]
 pub trait StorageConnector: Send + Sync {
+    /// Read the signed-in account's display label before recording a member's location.
+    async fn account_label(
+        &self,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<String, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Read the signed-in OneDrive root.
     async fn onedrive_root(
         &self,
@@ -1606,7 +1616,7 @@ Example, choosing a not-shared Dropbox store when both app keys are registered:
 ```rust
 handle.authenticate(OAuthAccess::Dropbox(DropboxAccess::AppFolder)).await?;
 handle.setup_oauth_storage(
-    StorageConfig::Dropbox { location: DropboxLocation::AppFolder },
+    StorageConfig::Dropbox { location: DropboxLocation::AppFolder, account_label: None },
     "Ana's phone",
 ).await?;
 // A shared choice uses DropboxAccess::FullDropbox and
@@ -2453,6 +2463,13 @@ The returned `storage` is passed unchanged to `setup_oauth_storage`; selecting o
 creating a folder does not commit settings or credentials. These requests use the
 same token refresh and provider cooldown as setup. A failed page fails the listing.
 
+Setup replaces `account_label` with the signed-in member's label before committing
+the location and restore code, so personal and work accounts can be told apart.
+Dropbox uses the account email; OneDrive uses mail when present, otherwise the
+principal name. Joining and restoring record the member's own label, replacing
+any label in the code. These labels never select a folder, grant access or change
+an upload's destination. S3 and CloudKit have no account label.
+
 ```rust
 /// A provider's current folder name and the location storage setup accepts.
 pub struct StorageFolder {
@@ -2524,9 +2541,18 @@ pub enum StorageConfig {
         prefix: String,
     },
     /// Required creation choice: an App folder or a shared-capable namespace.
-    Dropbox { location: DropboxLocation },
+    Dropbox {
+        location: DropboxLocation,
+        /// Display only; None before setup. Coven reads this member's account at setup.
+        account_label: Option<String>,
+    },
     /// A OneDrive folder; paths within it start with the store id.
-    OneDrive { drive_id: String, folder_id: String },
+    OneDrive {
+        drive_id: String,
+        folder_id: String,
+        /// Display only; None before setup. Coven reads this member's account at setup.
+        account_label: Option<String>,
+    },
     /// The CloudKit custom zone reached by the built-in adapter.
     CloudKit {
         /// The app's CloudKit container.
@@ -2702,6 +2728,9 @@ impl DropboxLocation {
 }
 
 impl StorageConfig {
+    /// Compare provider location and settings, ignoring display-only account labels.
+    pub fn same_location(&self, other: &Self) -> bool;
+
     /// The provider of this location.
     pub fn provider(&self) -> CloudProvider;
     /// The sign-in this location requires (E10).
@@ -4221,7 +4250,8 @@ pub enum ProviderSignOut {
   iCloud Keychain may also hold the S3 key separately alongside the code.
 - `saved_restore_codes()` lists the registered service's saved codes so the
   app can offer a choice before opening a store. Entries expose the store id,
-  provider location and separate S3-key presence, with no secrets or store name.
+  provider location, including the member's account label, and separate S3-key
+  presence, with no secrets or store name.
   The app passes its selection to `restore_from_keychain`; no local store or
   provider connection is needed to list it.
 - An admin adds a person with an invite, and approves their join request

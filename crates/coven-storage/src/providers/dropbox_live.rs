@@ -171,6 +171,7 @@ impl Live {
         Arc::new(StorageConnection::from_provider(Arc::new(
             DropboxStorage::new(
                 StorageConfig::Dropbox {
+                    account_label: None,
                     location: DropboxLocation::SharedFolder { namespace_id },
                 },
                 session,

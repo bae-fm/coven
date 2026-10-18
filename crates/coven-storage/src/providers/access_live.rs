@@ -49,6 +49,7 @@ async fn provider_access_live_dropbox_app_folder() {
     .unwrap();
     let connector = ProviderConnector::new(clock.clone(), Arc::new(UuidIds));
     let location = StorageConfig::Dropbox {
+        account_label: None,
         location: DropboxLocation::AppFolder,
     };
     let storage = connector

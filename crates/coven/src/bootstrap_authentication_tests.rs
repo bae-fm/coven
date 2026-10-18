@@ -157,3 +157,64 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
     handle.close().await.unwrap();
     owner.close().await;
 }
+
+#[tokio::test]
+async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
+    for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
+        for from_keychain in [false, true] {
+            let owner = Owner::new(provider, false).await;
+            let install = Installation::new();
+            let mut code = coven_sync::read_restore_code(&owner.code.to_text().unwrap()).unwrap();
+            let mut location = StorageConfig::decode(code.storage.as_bytes()).unwrap();
+            match &mut location {
+                StorageConfig::Dropbox { account_label, .. }
+                | StorageConfig::OneDrive { account_label, .. } => {
+                    *account_label = Some("old@example.com".into());
+                }
+                _ => unreachable!(),
+            }
+            code.storage = location.encode().unwrap();
+            let builder = install
+                .authenticated_builder(&owner, owner.storage.clone())
+                .await;
+            let (_, cancel) = watch::channel(false);
+            let handle = if from_keychain {
+                StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+                    .set_synced_restore_code(&SecretBytes::new(code.to_bytes().unwrap().to_vec()))
+                    .unwrap();
+                let saved = crate::saved_restore::list(install.keychain.clone()).unwrap();
+                assert_eq!(saved[0].location, location);
+                restore_from_keychain(builder, &saved[0], None, "Laptop", |_| {}, &cancel)
+                    .await
+                    .unwrap()
+                    .unwrap()
+            } else {
+                restore_from_code(
+                    builder,
+                    &code.to_text().unwrap(),
+                    None,
+                    "Laptop",
+                    |_| {},
+                    &cancel,
+                )
+                .await
+                .unwrap()
+            };
+            let expected = owner.handle.storage_config().await.unwrap().unwrap();
+            assert_eq!(
+                handle.storage_config().await.unwrap(),
+                Some(expected.clone())
+            );
+            assert_eq!(
+                crate::saved_restore::list(install.keychain.clone()).unwrap()[0].location,
+                expected
+            );
+            assert_eq!(
+                handle.restore_code().await.unwrap(),
+                owner.code.to_text().unwrap().as_str()
+            );
+            handle.close().await.unwrap();
+            owner.close().await;
+        }
+    }
+}

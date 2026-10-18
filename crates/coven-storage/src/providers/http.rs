@@ -40,24 +40,30 @@ impl OAuthSession {
     }
     /// Resolve the signed-in account through the provider's own identity API.
     pub async fn account(&self) -> Result<String, StorageError> {
-        let (method, url) = match self.provider {
+        let api = match self.provider {
+            CloudProvider::Dropbox => "https://api.dropboxapi.com/2",
+            CloudProvider::OneDrive => "https://graph.microsoft.com/v1.0",
+            _ => unreachable!("checked OAuth provider"),
+        };
+        self.account_at(api).await
+    }
+    pub(crate) async fn account_at(&self, api: &str) -> Result<String, StorageError> {
+        let (method, url, body) = match self.provider {
             CloudProvider::Dropbox => (
                 Method::POST,
-                "https://api.dropboxapi.com/2/users/get_current_account",
+                endpoint(api, &["users", "get_current_account"], &[])?,
+                Body::Json(Value::Null),
             ),
             CloudProvider::OneDrive => (
                 Method::GET,
-                "https://graph.microsoft.com/v1.0/me?$select=mail,userPrincipalName",
+                endpoint(api, &["me"], &[("$select", "mail,userPrincipalName")])?,
+                Body::Empty,
             ),
-            _ => {
-                return Err(
-                    StorageFailure::InvalidConfiguration.with_source("provider does not use OAuth")
-                )
-            }
+            _ => unreachable!("checked OAuth provider"),
         };
         let value = json(
             self.provider,
-            self.send(method, url, &[], Body::Empty, true).await?,
+            self.send(method, &url, &[], body, true).await?,
         )
         .await?;
         let account = match self.provider {

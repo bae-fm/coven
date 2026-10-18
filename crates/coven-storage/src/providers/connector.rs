@@ -18,6 +18,15 @@ use std::sync::Arc;
 /// Tests replace the connection boundary with in-memory storage.
 #[async_trait::async_trait]
 pub trait StorageConnector: Send + Sync {
+    /// Read the signed-in account's display label before recording a member's location.
+    async fn account_label(
+        &self,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<String, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Read the signed-in OneDrive root.
     async fn onedrive_root(
         &self,
@@ -130,7 +139,7 @@ impl ProviderConnector {
             folder_api: None,
         }
     }
-    /// Send folder calls to an in-process provider API in application tests.
+    /// Send account and folder calls to an in-process provider API in application tests.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn with_folder_api(mut self, api: String) -> Self {
         self.folder_api = Some(api);
@@ -148,7 +157,7 @@ impl ProviderConnector {
     {
         let ProviderAuth::OAuth { tokens, custody } = auth else {
             return Err(StorageFailure::InvalidConfiguration
-                .with_source("folder selection requires OAuth sign-in"));
+                .with_source("account and folder requests require OAuth sign-in"));
         };
         let access = tokens.access;
         let api = match access {
@@ -165,6 +174,17 @@ impl ProviderConnector {
 
 #[async_trait::async_trait]
 impl StorageConnector for ProviderConnector {
+    async fn account_label(
+        &self,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<String, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.account_label().await
+        })
+        .await
+    }
+
     /// Read the signed-in OneDrive root.
     async fn onedrive_root(
         &self,

@@ -226,11 +226,12 @@ impl MemoryStorage {
             credentials: auth.credentials(),
         }
         .validate()?;
-        if config != self.provider.config {
+        if !config.same_location(&self.provider.config) {
             return Err(StorageFailure::InvalidConfiguration
                 .with_source("memory connector location mismatch"));
         }
         let mut connection = (*self.provider).clone();
+        connection.config = config;
         // Candidate setup must not mutate the old adapter's sign-in. Network
         // controls and request observations still belong to this test device.
         connection.tokens = Arc::new(Mutex::new(None));
@@ -494,7 +495,7 @@ impl ProviderOps for MemoryProvider {
             .ok_or(StorageFailure::NotFound.into())
     }
     async fn account(&self) -> Result<String, StorageError> {
-        self.before(MemoryRequest::Other("account")).await?;
+        self.before_request(MemoryRequest::Other("account")).await?;
         Ok(match &self.account {
             Account::Owner => OWNER_ACCOUNT.into(),
             Account::Recipient(account) => account.clone(),

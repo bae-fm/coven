@@ -470,6 +470,7 @@ pub(super) async fn endpoint(
 pub(super) fn provider(url: &str) -> StorageConnection<OneDriveStorage> {
     let mut storage = OneDriveStorage::new(
         StorageConfig::OneDrive {
+            account_label: None,
             drive_id: "drive".into(),
             folder_id: "root".into(),
         },

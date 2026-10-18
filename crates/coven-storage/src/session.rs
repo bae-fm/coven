@@ -205,7 +205,7 @@ impl UploadSession {
     }
     /// Whether this recorded transfer belongs to the connected location.
     pub fn is_at(&self, location: &StorageConfig) -> bool {
-        &self.location == location
+        self.location.same_location(location)
     }
     /// The destination encrypted-object path.
     pub fn path(&self) -> &ObjectPath {
@@ -379,7 +379,7 @@ impl UploadSession {
     }
     pub(crate) fn check(&self, location: &StorageConfig) -> Result<(), StorageError> {
         self.validate()?;
-        if &self.location != location {
+        if !self.location.same_location(location) {
             return Err(StorageFailure::SessionMismatch.into());
         }
         Ok(())

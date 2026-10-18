@@ -56,6 +56,8 @@ pub enum StorageConfig {
     Dropbox {
         /// Required choice: not-shared App folder or a shared-capable namespace.
         location: crate::DropboxLocation,
+        /// Signed-in member's display label; absent before setup. Never routes or authorizes.
+        account_label: Option<String>,
     },
     /// A OneDrive folder; paths within it start with the store id.
     OneDrive {
@@ -63,6 +65,8 @@ pub enum StorageConfig {
         drive_id: String,
         /// Folder shared with members' Microsoft accounts.
         folder_id: String,
+        /// Signed-in member's display label; absent before setup. Never routes or authorizes.
+        account_label: Option<String>,
     },
     /// The custom zone reached by the built-in CloudKit adapter.
     CloudKit {
@@ -76,10 +80,34 @@ pub enum StorageConfig {
 }
 
 impl StorageConfig {
+    /// Whether these settings reach the same location, ignoring display labels.
+    pub fn same_location(&self, other: &Self) -> bool {
+        match (self, other) {
+            (Self::Dropbox { location: a, .. }, Self::Dropbox { location: b, .. }) => a == b,
+            (
+                Self::OneDrive {
+                    drive_id: ad,
+                    folder_id: af,
+                    ..
+                },
+                Self::OneDrive {
+                    drive_id: bd,
+                    folder_id: bf,
+                    ..
+                },
+            ) => ad == bd && af == bf,
+            // These providers carry no account label.
+            (Self::S3 { .. }, Self::S3 { .. }) | (Self::CloudKit { .. }, Self::CloudKit { .. }) => {
+                self == other
+            }
+            _ => false,
+        }
+    }
+
     /// Access required to open this location.
     pub fn oauth_access(&self) -> Option<crate::OAuthAccess> {
         match self {
-            Self::Dropbox { location } => Some(crate::OAuthAccess::Dropbox(location.access())),
+            Self::Dropbox { location, .. } => Some(crate::OAuthAccess::Dropbox(location.access())),
             Self::OneDrive { .. } => Some(crate::OAuthAccess::OneDrive),
             Self::S3 { .. } | Self::CloudKit { .. } => None,
         }
@@ -128,13 +156,16 @@ impl StorageConfig {
             }
             Self::Dropbox {
                 location: crate::DropboxLocation::AppFolder,
+                ..
             } => vec![],
             Self::Dropbox {
                 location: crate::DropboxLocation::SharedFolder { namespace_id },
+                ..
             } => vec![namespace_id],
             Self::OneDrive {
                 drive_id,
                 folder_id,
+                ..
             } => vec![drive_id, folder_id],
             Self::CloudKit {
                 container,

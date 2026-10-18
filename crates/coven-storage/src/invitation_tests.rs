@@ -4,6 +4,7 @@ use serde_json::json;
 #[test]
 fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
     let location = StorageConfig::Dropbox {
+        account_label: None,
         location: crate::DropboxLocation::SharedFolder {
             namespace_id: "store".into(),
         },
@@ -14,7 +15,7 @@ fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
     assert_eq!(decoded.location(), &location);
     decoded.check(&location).unwrap();
     assert!(matches!(
-        decoded.check(&StorageConfig::Dropbox { location: crate::DropboxLocation::SharedFolder { namespace_id: "other".into() } }),
+        decoded.check(&StorageConfig::Dropbox { account_label: None, location: crate::DropboxLocation::SharedFolder { namespace_id: "other".into() } }),
         Err(error) if error.failure() == StorageFailure::InvitationMismatch
     ));
     let valid: serde_json::Value = serde_json::from_slice(recorded.as_bytes()).unwrap();
@@ -35,6 +36,7 @@ fn invitation_recordings_are_bound_to_a_valid_provider_and_location() {
 #[test]
 fn share_tokens_are_validated_and_not_printed() {
     let location = StorageConfig::OneDrive {
+        account_label: None,
         drive_id: "drive".into(),
         folder_id: "folder".into(),
     };
@@ -82,4 +84,31 @@ fn share_tokens_are_validated_and_not_printed() {
     .unwrap();
     assert!(!format!("{invitation:?}").contains("native-secret"));
     StorageInvitation::decode(invitation.encode().unwrap().as_bytes()).unwrap();
+}
+
+#[test]
+fn inviter_and_recipient_labels_do_not_change_the_shared_location() {
+    for mut location in [
+        StorageConfig::Dropbox {
+            location: crate::DropboxLocation::SharedFolder {
+                namespace_id: "shared".into(),
+            },
+            account_label: Some("ana@example.com".into()),
+        },
+        StorageConfig::OneDrive {
+            drive_id: "drive".into(),
+            folder_id: "folder".into(),
+            account_label: Some("ana@example.com".into()),
+        },
+    ] {
+        let invitation = StorageInvitation::for_account(location.clone()).unwrap();
+        match &mut location {
+            StorageConfig::Dropbox { account_label, .. }
+            | StorageConfig::OneDrive { account_label, .. } => {
+                *account_label = Some("ben@example.com".into());
+            }
+            _ => unreachable!(),
+        }
+        invitation.check(&location).unwrap();
+    }
 }

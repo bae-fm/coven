@@ -16,6 +16,7 @@ fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     let settings = StorageSettings::new(directory);
     assert_eq!(settings.read().unwrap(), None);
     let config = StorageConfig::Dropbox {
+        account_label: None,
         location: crate::DropboxLocation::SharedFolder {
             namespace_id: "namespace".into(),
         },

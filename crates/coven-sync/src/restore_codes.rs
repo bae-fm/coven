@@ -241,7 +241,8 @@ impl RestoreCodes {
     /// The returned commit includes the synced restore code and location, and its
     /// compensation remains available until store keys and the origin are applied.
     /// An OAuth setup commits `sign_in`'s current tokens, which then refresh in
-    /// device custody; a rollback holds them in the session again.
+    /// device custody; a rollback holds them in the session again. Reconnecting
+    /// with device custody keeps its current tokens, including any refresh.
     pub async fn prepare_setup(
         &self,
         data: ConnectionCredentials,
@@ -275,7 +276,13 @@ impl RestoreCodes {
                         )
                     })?,
                     None => owner.credentials.write(|keychain| {
-                        commit_credentials(keychain, &data.credentials, Some(&code))
+                        let credentials = match &data.credentials {
+                            StorageCredentials::OAuth(_) => {
+                                StorageCredentials::OAuth(crate::sign_in::held_tokens(keychain)?)
+                            }
+                            credentials => credentials.clone(),
+                        };
+                        commit_credentials(keychain, &credentials, Some(&code))
                     })?,
                 };
                 let rollback = move |owner: &RestoreCodesInner, previous| {

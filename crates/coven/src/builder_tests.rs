@@ -308,6 +308,7 @@ mod recovery {
                 prefix: "recovery".into(),
             },
             StorageConfig::Dropbox {
+                account_label: None,
                 location: coven_storage::DropboxLocation::SharedFolder {
                     namespace_id: "recovery".into(),
                 },
@@ -379,7 +380,7 @@ mod recovery {
             assert_eq!(code.store, directory.id());
             assert_eq!(
                 StorageConfig::decode(code.storage.as_bytes()).unwrap(),
-                config
+                setup.connection.storage
             );
             let mut status = handle.subscribe_sync_status();
             handle.stop_sync();

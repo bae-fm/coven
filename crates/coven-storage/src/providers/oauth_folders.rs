@@ -46,6 +46,12 @@ impl OAuthFolders {
         }
     }
 
+    pub(super) async fn account_label(&self) -> Result<String, StorageError> {
+        crate::cooldown::cooling(self.cooldown.as_ref())?;
+        let result = self.session.account_at(&self.api).await;
+        crate::cooldown::observed(self.cooldown.as_ref(), result).await
+    }
+
     fn require(&self, access: OAuthAccess) -> Result<(), StorageError> {
         if self.access != access {
             return Err(StorageFailure::InvalidConfiguration
@@ -151,6 +157,7 @@ impl OAuthFolders {
             let value = self.request(Method::POST, &url, Body::Json(body)).await?;
             for item in http::array(&value, "entries")? {
                 let storage = StorageConfig::Dropbox {
+                    account_label: None,
                     location: DropboxLocation::SharedFolder {
                         namespace_id: http::string(item, "shared_folder_id")?.into(),
                     },
@@ -186,6 +193,7 @@ fn onedrive_parent(parent: &StorageConfig) -> Result<(&str, &str), StorageError>
         StorageConfig::OneDrive {
             drive_id,
             folder_id,
+            ..
         } => Ok((drive_id, folder_id)),
         _ => {
             Err(StorageFailure::InvalidConfiguration.with_source("parent is not a OneDrive folder"))
@@ -224,6 +232,7 @@ fn onedrive_folder(value: &Value, drive: &str, name: &str) -> Result<StorageFold
         }
     }
     let storage = StorageConfig::OneDrive {
+        account_label: None,
         drive_id: drive.into(),
         folder_id: http::string(value, "id")?.into(),
     };

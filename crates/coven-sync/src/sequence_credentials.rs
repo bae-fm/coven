@@ -14,7 +14,7 @@ impl SequenceSync {
         next: ConnectionCredentials,
         commit: StorageCommit,
     ) -> Result<(), SyncError> {
-        if self.storage.config() != next.location {
+        if !self.storage.config().same_location(&next.location) {
             return Err(StorageFailure::InvitationMismatch.into());
         }
         let previous = previous.ok_or_else(|| {
