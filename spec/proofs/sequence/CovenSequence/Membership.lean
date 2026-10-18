@@ -27,13 +27,13 @@ theorem step_retired_member (L : Ledger S) (k : Nat) (x : Slot S) (m : S.Mem)
         · subst target
           rw [retired_member_refused R L a m role retired] at valid
           contradiction
-        · simp [noteClaim, ledgerEffect, applyEntry, same, retired, absent]
+        · simp [noteSlot, ledgerEffect, applyEntry, same, retired, absent]
       | removeMember target =>
         by_cases same : m = target <;>
-          simp [noteClaim, ledgerEffect, applyEntry, same, retired, absent]
+          simp [noteSlot, ledgerEffect, applyEntry, same, retired, absent]
       | _ => exact ⟨retired, absent⟩
     | _ => exact ⟨retired, absent⟩
-  · simp [valid, noteClaim, refuse, retired, absent]
+  · simp [valid, noteSlot, refuse, retired, absent]
 
 /-- A retired id stays absent at every later prefix. -/
 theorem retired_member_stays (seq : Nat → Slot S) (m : S.Mem) (i : Nat)
@@ -58,7 +58,7 @@ theorem removed_member_never_active (seq : Nat → Slot S) (i : Nat) (positive :
     (ledgerAt R seq k).retired m = true ∧ (ledgerAt R seq k).member m = false := by
   have effect : (ledgerAt R seq i).retired m = true ∧ (ledgerAt R seq i).member m = false := by
     rw [applied_ledger R seq positive applied, slot]
-    simp [noteClaim, ledgerEffect, applyEntry]
+    simp [noteSlot, ledgerEffect, applyEntry]
   exact retired_member_stays R seq m i effect.1 effect.2 k later
 
 end CovenSequence

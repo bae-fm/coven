@@ -1,3 +1,5 @@
+import CovenSequence.Authorship
+import CovenSequence.Keys
 import CovenSequence.Registration
 import CovenSequence.Owners
 import Lean
@@ -21,6 +23,11 @@ structure Batch where
 /-- The two permanent claim namespaces cannot collide. -/
 abbrev Key := Sum Nat Nat
 
+structure CircleChange (members : Nat) where
+  audience : Nat
+  member : Fin members
+  allowed : Bool
+
 abbrev sig (members : Nat) : Sig where
   Dev := Nat
   Digest := String
@@ -29,8 +36,8 @@ abbrev sig (members : Nat) : Sig where
   Path := Unit
   Batch := Batch
   Rows := List Row
-  Op := Empty
-  Aux := Unit
+  Op := CircleChange members
+  Aux := List (CircleChange members)
   Aud := Nat
 
 structure Audience where
@@ -59,10 +66,11 @@ def initialLedger (c : Config n) : Ledger (sig n) where
   keyGen := fun m => match c.members.find? (fun x => x.1 == m) with
     | some x => x.2.2
     | none => 0
-  aux := ()
+  aux := []
   copies := []
   refused := fun _ => false
   claims := fun _ => none
+  writeHistory := fun _ => none
 
 def initialAudience (version : Nat) : AudLedger (sig n) :=
   ⟨fun _ => none, [], 0, 0, 0, [], version, fun _ => false⟩
@@ -72,6 +80,14 @@ def initialAudiences (c : Config n) (a : Nat) : AudLedger (sig n) :=
     | some x => x.version
     | none => 0)
 
+/-- Audience membership is per member, and devices resolve it at the supplied prefix. -/
+def mayWrite (c : Config n) (L : Ledger (sig n)) (d a : Nat) : Bool :=
+  match L.deviceOf d with
+  | none => false
+  | some m => match L.aux.find? (fun change => change.audience == a && change.member == m) with
+    | some change => change.allowed
+    | none => c.audiences.any (fun x => x.id == a && decide (m.val ∈ x.writers))
+
 def baseRules (c : Config n) (records : Nat → ClaimRecord String) : Rules (sig n) where
   authorized := fun L d e => match e with
     | .addDevice _ m => L.member m
@@ -80,10 +96,11 @@ def baseRules (c : Config n) (records : Nat → ClaimRecord String) : Rules (sig
         | some m => L.deviceOf target == some m
         | none => false
     | .replaceKey m => Authority.isAdmin L d || L.deviceOf d == some m
+    | .other change => mayWrite c L d change.audience && L.member change.member
     | _ => Authority.isAdmin L d
-  applyOp := fun _ op => nomatch op
+  applyOp := fun changes op => op :: changes
   copyOk := fun _ _ _ _ => false
-  mayWrite := fun _ d a => c.audiences.any (fun x => x.id == a && decide (d ∈ x.writers))
+  mayWrite := mayWrite c
   merge := merge
   convert := fun _ _ b => b
   migrate := fun _ r => r
@@ -133,7 +150,7 @@ theorem member_without_active_device_can_register (c : Config n) (records : Nat 
   have unremoved : L.removed d = false :=
     unregistered_unremoved R seq (fun _ _ => rfl) k d fresh
   have effect : ledgerStep R L (k + 1) (.admin d (.addDevice d m)) =
-      noteClaim R (applyEntry R L (.addDevice d m)) (k + 1) (.admin d (.addDevice d m)) := by
+      noteSlot R L (applyEntry R L (.addDevice d m)) (k + 1) (.admin d (.addDevice d m)) := by
     simp [ledgerStep, valid, ledgerEffect]
   change ledgerValid R L _ = true ∧ _
   refine ⟨valid, self_registration_applied R L _ d m fresh member authorized, ?_, ?_⟩
@@ -240,4 +257,40 @@ def run (c : Config n) (entries : List (ClaimRecord String × Slot (sig n))) : J
     ("slots", toJson ((List.range entries.length).map fun k =>
       Json.mkObj (("slot", toJson (k + 1)) :: fields (k + 1))))])
 
+namespace AuthorshipExample
+
+def config : Config 3 := ⟨[(0, .admin, 0), (2, .member, 0)], [(0, 0), (2, 2)],
+  [⟨0, 1, [0, 2]⟩, ⟨1, 1, [0, 2]⟩]⟩
+def policy : Rules (sig 3) := rules config (fun k => ⟨k, "authenticated"⟩)
+def part (readThrough : Nat) : WPart (sig 3) := ⟨1, [], ⟨[1], [], []⟩, readThrough⟩
+def sequence : Nat → Slot (sig 3)
+  | 1 => .admin 0 (.other ⟨1, 2, false⟩)
+  | 2 => .writes 2 0 (fun a => if a = 1 then some (part 0) else none)
+  | 3 => .writes 2 0 (fun a => if a = 1 then some (part 1) else none)
+  | 4 => .admin 0 (.removeDevice 2)
+  | _ => .writes 2 0 (fun a => if a = 1 then some (part 0) else none)
+
+/-- Landing-time circle permission refuses Ben's offline original even though
+he authored it before reading his removal from Gifts. -/
+theorem landing_permission_counterexample :
+    policy.mayWrite (ledgerAt policy sequence 0) 2 1 = true ∧
+    policy.mayWrite (ledgerAt policy sequence 1) 2 1 = false := by decide
+
+theorem offline_edit_counts : AppliedTo policy sequence 1 2 := by unfold AppliedTo; decide
+
+theorem removal_read_refused : ¬ AppliedTo policy sequence 1 3 := by unfold AppliedTo; decide
+
+theorem device_cutoff_still_applies : ¬ AppliedTo policy sequence 1 5 := by unfold AppliedTo; decide
+
+/-- Sending the original with the exposed circle key and receiving it agree. -/
+theorem sending_and_apply_agree :
+    let key : Keys.Key Nat := ⟨1, 7⟩
+    let history : Keys.History Nat Nat := ⟨[⟨key, 30, 1⟩], [⟨key, 2, 1⟩]⟩
+    let custody : Keys.Custody Nat := fun k => if k = key then some 30 else none
+    let current : Keys.Current Nat Nat := fun a m =>
+      if m = 0 then some 2 else if a = 0 ∧ m = 2 then some 1 else none
+    Keys.sendingKey history custody current 2 0 1 = some ⟨key, 30, 1⟩ ∧
+      AppliedTo policy sequence 1 2 := by unfold AppliedTo; decide
+
+end AuthorshipExample
 end SequenceApply

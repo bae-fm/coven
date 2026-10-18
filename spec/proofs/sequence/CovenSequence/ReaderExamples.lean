@@ -48,6 +48,7 @@ def ledger0 : Ledger sig where
   copies := []
   refused := fun _ => false
   claims := fun _ => none
+  writeHistory := fun _ => none
 
 def aud0 : AudLedger sig where
   owner := fun _ => none
@@ -76,7 +77,7 @@ def rules : Rules sig where
   aud0 := fun _ => aud0
   rows0 := fun _ => ([] : List Nat)
 
-def part (b : Nat) : Unit → Option (WPart sig) := fun _ => some ⟨0, [], b⟩
+def part (b : Nat) : Unit → Option (WPart sig) := fun _ => some ⟨0, [], b, 0⟩
 
 def seqEx : Nat → Slot sig
   | 1 => .writes () 0 (part 10)

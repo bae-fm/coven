@@ -148,7 +148,7 @@ The authored schema selects conversion even when publication is after a raise. -
 theorem reload_matches_receiver (R : Rules S) (seq : Nat → Slot S) (A : S.Aud)
     (k g : Nat) (w : Write S Stamp) (batch : S.Batch) (claims : List S.Key)
     (parts : S.Aud → Option (WPart S)) (original : w.bytes A = some batch)
-    (part : parts A = some ⟨w.schema, claims, batch⟩)
+    (part : parts A = some ⟨w.schema, claims, batch, w.readThrough⟩)
     (slot : seq (k + 1) = .writes w.device g parts)
     (applied : AppliedTo R seq A (k + 1))
     (resetKeeps : R.sinceReset (audAt R seq A k).lastReset batch = batch) :

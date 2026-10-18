@@ -14,7 +14,7 @@ theorem step_unregistered_unremoved (L : Ledger S) (k : Nat) (x : Slot S)
       (ledgerStep R L k x).removed d = false := by
   intro d fresh
   unfold ledgerStep at fresh ⊢
-  simp only [noteClaim_deviceOf, noteClaim_removed] at fresh ⊢
+  simp only [noteSlot_deviceOf, noteSlot_removed] at fresh ⊢
   by_cases valid : ledgerValid R L x = true
   · simp only [valid, ite_true] at fresh ⊢
     cases x with

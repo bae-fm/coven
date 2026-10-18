@@ -6304,6 +6304,8 @@ Write-ups explain each model and state its assumptions:
 | After a rejected self-replacement's child claim is undone, an unheld binding keeps the pause; a current candidate is installed, and undo may release the pause only under the held active pair | `unheld_keeps_pause`, `candidate_installs`, `undo_requires_active` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
+| Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
+| Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |
 
 ### G.5 Snapshots, the floor and reloads (§16)
 

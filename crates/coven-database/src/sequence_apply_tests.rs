@@ -150,7 +150,7 @@ async fn compare(
             writes.push(stream);
         }
         slots.push(json!({"kind":"writes","device":device,"claim":at,"digest":format!("{at}"),"key_gen":key_gen[device as usize],
-            "parts":[{"audience":0,"version":1,"unique_claims":[],"owner_creations":owners,"writes":wn,"rows":rows}]}));
+            "parts":[{"audience":0,"version":1,"read_through":reads[device as usize],"unique_claims":[],"owner_creations":owners,"writes":wn,"rows":rows}]}));
         db.apply_slot::<crate::pending::tests::Record, _, _>(
             IncomingSlot {
                 slot: Slot(at),
@@ -247,7 +247,7 @@ async fn compare(
             };
             let (setter, number) = claims[&original.header.position];
             slots.push(json!({"kind":"writes","device":device,"claim":at,"digest":format!("{at}"),"key_gen":0,
-                "parts":[{"audience":0,"version":1,"unique_claims":[],"owner_creations":[],"writes":[n],
+                "parts":[{"audience":0,"version":1,"read_through":w.header.read_through,"unique_claims":[],"owner_creations":[],"writes":[n],
                 "rows":[{"row":1,"live":false,"value":value.parse::<usize>().unwrap(),"inputs":[[setter,number]]}]}]}));
             db.receive(w.into()).await.unwrap();
             rust.push(project(&db, &claims));

@@ -139,13 +139,27 @@ def selection (slot audience covers : Nat) : Json :=
   check (json% {"kind":"past","writes":[
     {"author":3,"number":1,"slot":8,"read_through":0}]}) (json% [[]])
 
+-- Unless a fixture supplies an earlier prefix, each write is authored after
+-- applying all preceding fixture slots.
+def authoredSlots (slots : List Json) : List Json := slots.zipIdx.map fun (slot, before) =>
+  match slot.getObjValAs? String "kind" with
+  | .ok "admin" => slot
+  | .ok "writes" =>
+    match slot.getObjValAs? (List Json) "parts" with
+    | .error error => panic! error
+    | .ok parts => slot.setObjVal! "parts" (toJson (parts.map fun p =>
+        match p.getObjVal? "read_through" with
+        | .ok _ => p
+        | .error _ => p.setObjVal! "read_through" (toJson before)))
+  | _ => panic! "fixture must name an admin or writes slot"
+
 def applyCase (slots : List Json) : Json := json% {
   "kind":"apply", "member_count":3,
   "initial":{"members":[{"member":0,"role":"admin","key_gen":0},
     {"member":1,"role":"member","key_gen":0}],
     "devices":[{"device":0,"member":0},{"device":1,"member":1}]},
   "audiences":[{"audience":0,"version":1,"writers":[0,1,2]},
-    {"audience":1,"version":0,"writers":[0]}],"slots":$(slots)}
+    {"audience":1,"version":0,"writers":[0]}],"slots":$(authoredSlots slots)}
 
 def admin (device claim : Nat) (entry : Json) : Json := json% {
   "kind":"admin","device":$(device),"claim":$(claim),"digest":$(s!"{device}:{claim}"),"entry":$(entry)}
@@ -541,5 +555,19 @@ def keyCase (slots held current : List Json) : Json := json% {
 
 #eval check (json% {"kind":"read","stopped":true,"applied":0,"fetched":[1],"first_kept":10})
   (json% {"reload":false,"apply":[]})
+
+-- Ben's unread removal preserves the old original; reading it forbids new
+-- originals, and a later device removal still cuts off the old original.
+#eval do
+  let old := (part 1 1 [7] [] [1] []).setObjVal! "read_through" (toJson (0 : Nat))
+  let after := (part 1 1 [8] [] [2] []).setObjVal! "read_through" (toJson (1 : Nat))
+  let future := (part 1 1 [9] [] [3] []).setObjVal! "read_through" (toJson (4 : Nat))
+  let input := (applyCase [admin 0 1 (json% {"kind":"circleMember","audience":1,"member":1,"allowed":false}),
+    writes 1 1 0 [old], writes 1 2 0 [after], writes 1 3 0 [future],
+    admin 0 2 (json% {"kind":"removeDevice","device":1}), writes 1 4 0 [old]]).setObjVal!
+      "audiences" (json% [{"audience":1,"version":1,"writers":[0,1]}])
+  let result ← run input
+  checkField result ["audiences","0","refused"] (json% [3,4,6])
+  checkField result ["audiences","0","unique_claims"] (json% [[7,2]])
 
 end SequenceTests

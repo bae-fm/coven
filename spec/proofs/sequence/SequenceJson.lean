@@ -51,6 +51,7 @@ def readEntry (n : Nat) (j : Json) : Except String (Entry (sig n)) := do
   | "changeRole" => return .changeRole (← member n j) (← readRole j)
   | "addDevice" => return .addDevice (← nat j "device") (← member n j)
   | "removeDevice" => return .removeDevice (← nat j "device")
+  | "circleMember" => return .other ⟨← nat j "audience", ← member n j, ← j.getObjValAs? Bool "allowed"⟩
   | "replaceKey" => return .replaceKey (← member n j)
   | _ => throw "unknown admin entry"
 
@@ -76,7 +77,7 @@ def readPart (c : Config n) (k : Nat) (j : Json) : Except String (Nat × WPart (
     if w ∉ writes then throw "owner creation names no write in its part"
   let rows ← (← j.getObjValAs? (List Json) "rows").mapM (readRow k)
   distinct (rows.map (·.id)) "row update"
-  return (a, ⟨← nat j "version", uniques.map Sum.inl ++ (owners.map (fun p => Sum.inr p.1)).eraseDups, ⟨writes, rows, owners⟩⟩)
+  return (a, ⟨← nat j "version", uniques.map Sum.inl ++ (owners.map (fun p => Sum.inr p.1)).eraseDups, ⟨writes, rows, owners⟩, ← nat j "read_through"⟩)
 
 def readSlot (c : Config n) (k : Nat) (j : Json) : Except String (ClaimRecord String × Slot (sig n)) := do
   let claim ← positive j "claim"

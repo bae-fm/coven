@@ -362,3 +362,103 @@ async fn creating_a_circle_does_not_require_a_snapshot_of_nonexistent_history() 
         .is_empty());
     ana.sync.database.close().await.unwrap();
 }
+
+async fn offline_circle_write(compare: bool) {
+    use serde_json::json;
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
+    ana.sync
+        .administer(StoreChange::AddCircleMember {
+            circle,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    ben.sync.pass().await.unwrap();
+    pin(
+        ben.database(),
+        "00000000-0000-4000-8000-000000000001",
+        circle,
+        "before removal",
+    )
+    .await;
+    let originals = ben.database().waiting_snapshot_headers().await.unwrap();
+    let original = originals
+        .iter()
+        .find(|header| {
+            header
+                .parts
+                .iter()
+                .any(|part| part.audience == coven_merge::Audience::Circle(circle))
+        })
+        .unwrap()
+        .clone();
+    ana.sync
+        .administer(StoreChange::RemoveCircleMember {
+            circle,
+            member: ben.identity.member(),
+        })
+        .await
+        .unwrap();
+    let removal = ana.database().applied_slot().await.unwrap();
+    assert!(original.header.read_through < removal);
+    let mut after_read = original.clone();
+    after_read.header.read_through = removal;
+    let (before_allowed, after_allowed) = {
+        let session = ana.sync.session.lock().await;
+        (
+            session.history.write_signer(&original).is_ok(),
+            session.history.write_signer(&after_read).is_ok(),
+        )
+    };
+    assert!(before_allowed);
+    assert!(!after_allowed);
+    ben.sync.pass().await.unwrap();
+    ana.sync.pass().await.unwrap();
+    assert_eq!(
+        pins(ana.database()).await,
+        vec![(
+            "00000000-0000-4000-8000-000000000001".into(),
+            "before removal".into()
+        )]
+    );
+    if compare {
+        // Prefix zero projects the shared state immediately before removal.
+        let part = |read_through| {
+            json!({"audience":1,"version":1,"read_through":read_through,
+            "unique_claims":[],"owner_creations":[],"writes":[1],"rows":[]})
+        };
+        let input = json!({"kind":"apply","member_count":3,
+            "initial":{"members":[{"member":0,"role":"admin","key_gen":0},
+                {"member":2,"role":"member","key_gen":0}],
+                "devices":[{"device":0,"member":0},{"device":2,"member":2}]},
+            "audiences":[{"audience":1,"version":1,"writers":[0,2]}],
+            "slots":[{"kind":"admin","device":0,"claim":1,"digest":"removal",
+                "entry":{"kind":"circleMember","audience":1,"member":2,"allowed":false}},
+                {"kind":"writes","device":2,"claim":1,"digest":"before","key_gen":0,"parts":[part(0)]},
+                {"kind":"writes","device":2,"claim":2,"digest":"after","key_gen":0,"parts":[part(1)]}]});
+        let model = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
+        let refused = model["audiences"][0]["refused"].as_array().unwrap();
+        assert_eq!(
+            (!refused.contains(&json!(2)), !refused.contains(&json!(3))),
+            (before_allowed, after_allowed)
+        );
+    }
+    ana.database().close().await.unwrap();
+    ben.database().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn circle_write_uses_authored_permission_after_removal() {
+    offline_circle_write(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_authored_circle_permission_matches_lean() {
+    offline_circle_write(true).await;
+}

@@ -29,7 +29,7 @@ prefix it applied. For each audience `A` the state has three parts:
   re-applies the counted `A` parts of slots `c+1` to `r-1`, converted.
 
 Only admin slots and key copies change the ledger, besides the claim records
-every slot records, and only slots that touch
+and preceding write permissions every slot records, and only slots that touch
 `A` change `A`'s audience ledger and rows. So a device that reads the admin
 slots and the parts of the audiences it belongs to computes exactly their
 state, and never needs another audience's parts.
@@ -94,6 +94,8 @@ structure WPart (S : Sig) where
   version : Nat
   claims : List S.Key
   batch : S.Batch
+  /-- The prefix applied when these originals were authored. -/
+  readThrough : Nat
 
 /-- An admin action that activates a prepared audience snapshot. -/
 inductive Boundary where
@@ -127,6 +129,8 @@ structure Ledger (S : Sig) where
   refused : Nat → Bool
   /-- Greatest included claim number and its slot digest; later slots win ties. -/
   claims : S.Dev → Option (ClaimRecord S.Digest)
+  /-- Write permission at preceding applied prefixes, retained for late originals. -/
+  writeHistory : Nat → Option (S.Dev → S.Aud → Bool)
 
 /-- What one audience's slots decide, besides its rows. -/
 structure AudLedger (S : Sig) where
@@ -246,20 +250,33 @@ def author : Slot S → S.Dev
   | .boundary d _ _ _ _ => d
 
 /-- Record a claimed slot's number and digest for its device, whether or not the slot is
-valid: a refused slot was still claimed. -/
-def noteClaim (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
-  { L with claims := fun e => if e = author x then
-      ClaimRecord.remember (L.claims e) ⟨R.number k x, R.digest k x⟩ else L.claims e }
+valid: a refused slot was still claimed. Also retain its preceding write permission. -/
+def noteSlot (before L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
+  { L with
+    claims := fun e => if e = author x then
+      ClaimRecord.remember (L.claims e) ⟨R.number k x, R.digest k x⟩ else L.claims e
+    writeHistory := fun j => if j = k - 1 then some (R.mayWrite before) else before.writeHistory j }
 
-@[simp] theorem noteClaim_member (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).member = L.member := rfl
-@[simp] theorem noteClaim_deviceOf (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).deviceOf = L.deviceOf := rfl
-@[simp] theorem noteClaim_removed (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).removed = L.removed := rfl
-@[simp] theorem noteClaim_keyGen (L : Ledger S) (k : Nat) (x : Slot S) : (noteClaim R L k x).keyGen = L.keyGen := rfl
+@[simp] theorem noteSlot_member (before L : Ledger S) (k : Nat) (x : Slot S) :
+    (noteSlot R before L k x).member = L.member := rfl
+@[simp] theorem noteSlot_deviceOf (before L : Ledger S) (k : Nat) (x : Slot S) :
+    (noteSlot R before L k x).deviceOf = L.deviceOf := rfl
+@[simp] theorem noteSlot_removed (before L : Ledger S) (k : Nat) (x : Slot S) :
+    (noteSlot R before L k x).removed = L.removed := rfl
+@[simp] theorem noteSlot_keyGen (before L : Ledger S) (k : Nat) (x : Slot S) :
+    (noteSlot R before L k x).keyGen = L.keyGen := rfl
 
-/-- Apply slot `k` to the ledger: its effect if it is a valid admin slot or key
-copy, its refusal if invalid, and in every case its claim number and digest. -/
+/-- Apply the effect or refusal, retaining the preceding permission and the
+slot's claim record even for refused slots. -/
 def ledgerStep (L : Ledger S) (k : Nat) (x : Slot S) : Ledger S :=
-  noteClaim R (if ledgerValid R L x then ledgerEffect R L k x else refuse L k) k x
+  noteSlot R L (if ledgerValid R L x then ledgerEffect R L k x else refuse L k) k x
+
+/-- Current permission is read directly; earlier prefixes use retained history. -/
+def authoredPermission (L : Ledger S) (current readThrough : Nat) (d : S.Dev) (A : S.Aud) : Bool :=
+  if readThrough = current then R.mayWrite L d A else
+    match L.writeHistory readThrough with
+    | some permission => permission d A
+    | none => false
 
 /-- Whether slot `x` has a part for, or announces for, audience `A`. -/
 def touches (A : S.Aud) : Slot S → Bool
@@ -271,8 +288,8 @@ def touches (A : S.Aud) : Slot S → Bool
 /-- Whether slot `k`'s part for `A` is valid, against the ledger and `A`'s
 ledger as of slot `k-1`.
 
-- A part counts under the removal cut-off, when its device may write to `A`,
-  and at a version `A` has reached.
+- A part counts under the current removal cut-off, with permission at its
+  authored `readThrough`, and at a version `A` has reached.
 - Every announcement covers less than its own slot, never decreases
   announced coverage and covers the last raise or reset.
 - A boundary requires its matching preparation, audience authority and
@@ -280,7 +297,8 @@ ledger as of slot `k-1`.
 def audValid (L : Ledger S) (P : AudLedger S) (k : Nat) (A : S.Aud) : Slot S → Bool
   | .writes d g parts =>
     match parts A with
-    | some w => counts L d g && R.mayWrite L d A && decide (w.version ≤ P.version)
+    | some w => counts L d g && authoredPermission R L (k - 1) w.readThrough d A &&
+        decide (w.readThrough < k) && decide (w.version ≤ P.version)
     | none => true
   | .snapshot d _ c _ =>
     active L d && decide (c < k) && decide (P.maxCover ≤ c) && decide (P.lastBoundary ≤ c)

@@ -65,7 +65,7 @@ For each audience `A`, a device's state has three parts:
   device, the greatest included claim number and the SHA-256 of that slot's
   complete bytes. Later slots replace the digest on an equal number; lower
   numbers preserve the existing record. A device with no included claim has
-  `none`.
+  `none`. Historical write permission is retained at each applied prefix.
 - **`A`'s audience ledger** holds the first slot that claimed each unique value
   or owner row of `A`, `A`'s announced snapshots and preparations, its schema version,
   its last raise or reset, its last reset, and its refused parts.
@@ -77,8 +77,8 @@ For each audience `A`, a device's state has three parts:
   authored-read reset gate before conversion.
 
 Only admin slots and key copies change the ledger, besides the claim evidence
-every slot records, and only slots with a part or announcement for `A` change
-`A`'s other two parts. A slot or part invalid at
+and preceding write permission every slot records. Only slots with a part or
+announcement for `A` change `A`'s other two parts. A slot or part invalid at
 its position is refused: it is consumed, and only its refusal is recorded.
 Removing a member retires its id permanently and removes every device registered
 to it. Re-inviting that person requires a fresh member id. An active member
@@ -95,7 +95,8 @@ These are the validity rules:
   member requires an id that is neither active nor retired.
 - **A part counts** when its device is registered and not removed, its member
   is a member, the part was made under that member's current key generation,
-  the device may write to `A`, and the part's version is one `A` has reached.
+  the device could write to `A` at the originals' `readThrough`, that prefix
+  precedes the landing slot, and the part's version is one `A` has reached.
 - **A raise or reset of `A`** requires a matching announced preparation and
   audience authority. Its coverage must include every earlier announcement
   (C6) and the last raise or reset. A raise must increase the version.
@@ -169,6 +170,17 @@ original device, number, timestamp, schema, bytes and `readThrough`.
   exactly the authored prefix plus own predecessors, including predecessors
   outside that prefix. A later claim does not add intervening remote writes.
 
+## Authored circle permission
+
+[`Authorship`](sequence/CovenSequence/Authorship.lean) proves
+`write_history_prefix` and `authored_permission_eq`: retained permissions are
+exactly those at the author's applied prefix. `write_permission_at_authored_prefix`
+checks that permission while applying the current store, device and key cut-offs.
+`SequenceApply.AuthorshipExample` checks Ben's unread removal from Gifts: his
+old original counts, one authored after reading removal is refused, and device
+removal still cuts off both. `sending_and_apply_agree` connects the accepted
+old original to `Keys.sendingKey`'s departed-circle choice.
+
 ## The removal cut-off
 
 [`Cutoff`](sequence/CovenSequence/Cutoff.lean):
@@ -182,8 +194,9 @@ original device, number, timestamp, schema, bytes and `readThrough`.
     was made under.
 
   Each audience only records the refusal, so no unique value or owner row is
-  taken and its rows are unchanged. The ledger only records the slot's claim
-  number and digest, and every device agrees by `prefix_determines_state`.
+  taken and its rows are unchanged. The ledger records the slot's claim
+  number, digest and preceding write permission. Every device agrees by
+  `prefix_determines_state`.
 
 A batch is cut off when it was "made under a replaced key". A batch that the
 member's other devices make under the new key counts.
@@ -780,7 +793,9 @@ share an id. An admin slot is
 `{"kind":"admin","device":0,"claim":1,"digest":"slot-1-hash","entry":{"kind":"removeDevice","device":1}}`.
 Entry kinds are `addMember` (`member`, `role`), `removeMember` (`member`),
 `changeRole` (`member`, `role`), `addDevice` (`device`, `member`), `removeDevice`
-(`device`), and `replaceKey` (`member`); roles are `"admin"` or `"member"`.
+(`device`), `replaceKey` (`member`), and `circleMember` (`audience`, `member`,
+`allowed`). Circle changes require an active audience member and an active
+target member. Roles are `"admin"` or `"member"`.
 For example, device 2 registers itself to current member 1 with
 `{"kind":"admin","device":2,"claim":1,"digest":"registration-hash","entry":{"kind":"addDevice","device":2,"member":1}}`.
 Device 2 must have no existing binding, even a removed one. It may register when
@@ -790,14 +805,15 @@ supplies already-authenticated entries: it carries no signatures, and the
 current member-key signature proving device 2 speaks for member 1 is assumed
 verified before this call. A refused registration records its claim number and digest but
 does not bind the id; a subsequent valid self-registration can succeed.
-A writes slot carries `key_gen` and at most one part per declared audience:
+Audience `writers` are member ids. A writes slot carries `key_gen` and at most
+one part per declared audience; each part supplies its authored `read_through`:
 
 ```json
 {"kind":"apply","member_count":1,
  "initial":{"members":[{"member":0,"role":"admin","key_gen":0}],"devices":[{"device":0,"member":0}]},
  "audiences":[{"audience":0,"version":1,"writers":[0]}],
  "slots":[{"kind":"writes","device":0,"claim":1,"digest":"slot-1-hash","key_gen":0,"parts":[
-   {"audience":0,"version":1,"unique_claims":[7],"owner_creations":[[9,1]],"writes":[1],
+   {"audience":0,"version":1,"read_through":0,"unique_claims":[7],"owner_creations":[[9,1]],"writes":[1],
     "rows":[{"row":9,"live":true,"value":7,"inputs":[[1,1]]}]}]}]}
 ```
 
@@ -986,8 +1002,9 @@ they do not replace the separate byte-format, merge or queue tests.
   not modelled.
 - Ordinary receive parts at a version above their audience's are refused.
   Captured publication and migration effects are separate in `RaiseQueue`;
-  batch decoding into individual original writes is not modelled. A device whose app
-  cannot apply a slot stops before it; that stop is not modelled.
+  each abstract part contains originals with one authored prefix. Decoding a
+  batch with mixed authored prefixes into individual originals is not modelled.
+  A device whose app cannot apply a slot stops before it; that stop is not modelled.
 - Reload models changed readable audiences and their local write gates.
   Delivery failures, circle invitation and the policy choosing the followed
   set remain abstract; a newly readable audience must load its own prefix.
@@ -999,7 +1016,7 @@ they do not replace the separate byte-format, merge or queue tests.
   equivalent journal facts; these are not derived from a device counter.
 - Not modelled:
   - concrete authority policies beyond membership, role changes, the runner's
-    device/key actions and store resets;
+    device/key actions, circle membership changes and store resets;
   - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;
   - the merge's internals, source-verdict calculation and converter callbacks,

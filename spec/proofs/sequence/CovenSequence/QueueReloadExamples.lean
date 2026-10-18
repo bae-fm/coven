@@ -105,6 +105,7 @@ def circleLedger : Ledger circleSig where
   copies := []
   refused := fun _ => false
   claims := fun _ => none
+  writeHistory := fun _ => none
 
 def circleAud : AudLedger circleSig :=
   ⟨fun _ => none, [], 0, 0, 0, [], 0, fun _ => false⟩
@@ -127,7 +128,7 @@ def circleRules : Rules circleSig where
   rows0 := fun _ => []
 
 def circleHistory : Nat → Slot circleSig
-  | 1 => .writes false 0 (fun _ => some ⟨0, [], 7⟩)
+  | 1 => .writes false 0 (fun _ => some ⟨0, [], 7, 0⟩)
   | 2 => .admin false (.other ())
   | _ => .writes false 0 (fun _ => none)
 

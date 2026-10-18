@@ -254,3 +254,11 @@ import SequenceApply
 #print axioms CovenSequence.Retention.idle_audience_blocks_floor
 #print axioms CovenSequence.missing_key_blocks_reload
 #print axioms CovenSequence.Device.stopped_checks_nothing
+#print axioms CovenSequence.write_history_prefix
+#print axioms CovenSequence.authored_permission_eq
+#print axioms CovenSequence.write_permission_at_authored_prefix
+#print axioms SequenceApply.AuthorshipExample.landing_permission_counterexample
+#print axioms SequenceApply.AuthorshipExample.offline_edit_counts
+#print axioms SequenceApply.AuthorshipExample.removal_read_refused
+#print axioms SequenceApply.AuthorshipExample.device_cutoff_still_applies
+#print axioms SequenceApply.AuthorshipExample.sending_and_apply_agree

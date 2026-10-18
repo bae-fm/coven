@@ -384,7 +384,7 @@ def adminRules : Rules adminSig where
     | _ => 0
   digest := fun k _ => k
   ledger0 := ⟨fun m => m, fun _ => false, fun _ => .admin, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
-    fun _ => none⟩
+    fun _ => none, fun _ => none⟩
   aud0 := fun _ => ⟨fun _ => none, [], 0, 0, 0, [], 0, fun _ => false⟩
   rows0 := fun _ => ()
 
@@ -457,7 +457,7 @@ theorem step_claims (L : Ledger S) (k : Nat) (x : Slot S) (e : S.Dev) :
       | admin a e => cases e <;> rfl
       | _ => rfl
     · rfl
-  simp only [ledgerStep, noteClaim, hin]
+  simp only [ledgerStep, noteSlot, hin]
 
 /-- Ledger replay uses exactly the same record fold as abstract settlement. -/
 theorem claims_eq (seq : Nat → Slot S) (h0 : ∀ e, R.ledger0.claims e = none) (d : S.Dev) :

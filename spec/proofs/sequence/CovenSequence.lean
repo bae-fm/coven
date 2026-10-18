@@ -28,3 +28,4 @@ import CovenSequence.KeysExamples
 import CovenSequence.KeyCustody
 import CovenSequence.AccessKeyReplacement
 import CovenSequence.MemberKeyReplacement
+import CovenSequence.Authorship
