@@ -146,6 +146,11 @@ pub enum Audience {
   The choice survives reopening and restore and cannot be changed by
   reconnecting.
 - A `StoreLayout` says where an app's stores live on disk.
+- `Coven::storage_config` reads a closed store's saved location without opening
+  its database or custody. The handle's `storage_config` reads the same committed
+  `StorageConfig`, so an app can show "Dropbox: Household" without keeping a second
+  copy. Neither returns credentials or contacts storage. Before setup they return
+  `None`; disconnect retains the location, and unreadable settings remain an error.
 - Store lock files live beside each store directory. Deletion holds the writer
   and reader locks while removing the directory, then releases and removes the
   lock files. Creation and lock-file removal are serialized by the layout.
@@ -1361,6 +1366,9 @@ impl StoreLayout {
 pub struct Coven;
 
 impl Coven {
+    /// Read the recorded location without opening the store or its custody (E1).
+    pub async fn storage_config(store_dir: &StoreDir) -> Result<Option<StorageConfig>, StorageError>;
+
     /// Configure creating, opening, restoring or joining a store.
     pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
@@ -1475,6 +1483,9 @@ pub enum IdentityCustody {
 impl CovenHandle {
     /// The stable id, including before storage setup.
     pub fn store_id(&self) -> StoreId;
+
+    /// The same committed location as Coven::storage_config; refused after close.
+    pub async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError>;
 
     /// Closes the store: stops syncing, operation and file work, closes every
     /// connection, erases the unlocked custody sessions and releases the writer

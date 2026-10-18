@@ -472,6 +472,7 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/coven.rs", "<free>", "blocking"),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
         ("crates/coven/src/store_layout.rs", "StoreLayout", "new"),
+        ("crates/coven/src/coven.rs", "Coven", "storage_config"),
         (
             "crates/coven/src/builder.rs",
             "CovenBuilder",

@@ -1,5 +1,6 @@
 use crate::*;
-use coven_foundation::files::StoreDirAccess;
+use coven_foundation::files::{StoreDirAccess, StoreFile};
+use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::Arc;
 
 fn builder(app: &TestCoven, layout: StoreLayout) -> CovenBuilder {
@@ -312,4 +313,80 @@ fn identity(app: &TestCoven, id: StoreId) -> MemberIdentity {
     )))
     .unwrap()
     .unwrap()
+}
+
+#[tokio::test]
+async fn saved_location_survives_disconnect_and_reopen_without_custody_reads() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let storage = Arc::new(MemoryStorage::builder().build().unwrap());
+    let builder = || {
+        app.builder(layout.clone())
+            .synced_tables(vec![])
+            .migrations(vec![])
+            .storage_connector(storage.clone())
+    };
+    let handle = builder().create_store("Household").await.unwrap();
+    let directory = layout.store_dir(&handle.store_id());
+    assert_eq!(handle.storage_config().await.unwrap(), None);
+    assert_eq!(Coven::storage_config(&directory).await.unwrap(), None);
+    let setup = handle
+        .setup_s3_storage(
+            storage.config(),
+            "Ana's phone",
+            "key".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    let expected = Some(setup.connection.storage);
+    assert_eq!(handle.storage_config().await.unwrap(), expected);
+    let mut wrong = storage.config();
+    let StorageConfig::S3 { bucket, .. } = &mut wrong else {
+        unreachable!()
+    };
+    *bucket = "another-bucket".into();
+    assert!(matches!(
+        handle
+            .setup_s3_storage(
+                wrong,
+                "Ana's phone",
+                "key".into(),
+                SecretText::new("secret".into())
+            )
+            .await,
+        Err(StorageSetupError::LocationChangeUnsupported)
+    ));
+    assert_eq!(handle.storage_config().await.unwrap(), expected);
+    handle.disconnect_storage().await.unwrap();
+    assert_eq!(handle.storage_config().await.unwrap(), expected);
+    handle.close().await.unwrap();
+    assert!(matches!(
+        handle.storage_config().await,
+        Err(SyncError::SecureStorage(KeyError::StoreClosed))
+    ));
+    let reopened = builder().open(directory.id()).await.unwrap();
+    assert_eq!(reopened.storage_config().await.unwrap(), expected);
+    reopened.close().await.unwrap();
+    // Neither a damaged database nor unavailable custody prevents showing the location.
+    std::fs::write(directory.database_path(), b"damaged").unwrap();
+    app.fail_next_keychain_operation();
+    assert_eq!(Coven::storage_config(&directory).await.unwrap(), expected);
+    assert!(matches!(
+        app.discard_store(&directory).await,
+        Err(StoreDeletionError::Key(_))
+    ));
+    directory
+        .owned_file(StoreFile::StorageSettings)
+        .replace(b"malformed")
+        .unwrap();
+    assert_eq!(
+        Coven::storage_config(&directory)
+            .await
+            .unwrap_err()
+            .failure(),
+        StorageFailure::Encoding
+    );
+    app.discard_store(&directory).await.unwrap();
 }

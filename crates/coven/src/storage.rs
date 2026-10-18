@@ -253,6 +253,11 @@ impl StorageConnections {
         self.directory.id()
     }
 
+    pub(crate) async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {
+        let _call = self.lock_open().await?;
+        self.codes.location().await
+    }
+
     /// Refuse an invite the location cannot share before any provider change.
     pub(crate) async fn prepare_invite(&self) -> Result<(), SyncError> {
         let location = self.codes.location().await?.ok_or(SyncError::NoStorage)?;

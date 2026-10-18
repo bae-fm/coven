@@ -8,6 +8,15 @@ use coven_foundation::files::StoreDirAccess;
 pub struct Coven;
 
 impl Coven {
+    /// Read the saved storage location without opening the store or its custody.
+    /// None means storage has never been set up; disconnect retains the location.
+    pub async fn storage_config(
+        store_dir: &StoreDir,
+    ) -> Result<Option<crate::StorageConfig>, crate::StorageError> {
+        let settings = coven_storage::StorageSettings::new(store_dir.clone());
+        blocking(move || settings.read()).await
+    }
+
     /// Configure creating, opening, restoring or joining a store.
     pub fn builder(layout: StoreLayout) -> CovenBuilder {
         CovenBuilder::new(layout)

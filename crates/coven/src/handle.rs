@@ -87,6 +87,12 @@ impl CovenHandle {
             .await
     }
 
+    /// The committed storage location, without credentials or provider requests.
+    /// None before setup; disconnect retains it. A closed handle refuses the call.
+    pub async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {
+        self.storage.storage_config().await
+    }
+
     /// Limits captured when each file upload drain or pin starts.
     pub fn transfer_limits(&self) -> TransferLimits {
         self.files.transfer_limits()
