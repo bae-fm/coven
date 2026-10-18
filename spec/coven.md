@@ -2366,10 +2366,20 @@ account, or the id of the S3 key made for them and who holds it. Any admin can
 then take it back later (§14.2, §14.3).
 
 **Dan's side, while he waits.** Starting after the slot the invite names, Dan's
-phone reads ahead, looking only at each slot's kind and any key copy's routing.
-This doesn't apply anything and gives no right to send. It keeps what it read and
-how far it got, stops at the first missing slot, and retries with the shared
-backoff (§6.7).
+phone first reads the floor's clear prefix for its key copies and `first`, the
+first kept slot. Without a copy for him, it reads ahead from the greater of
+`first` and its next unscanned slot, looking only at each slot's kind and any key
+copy's routing. Before a floor exists, `first` is 1. This applies nothing and
+gives no right to send.
+
+Suppose Dan's next unscanned slot is 4, retention has kept only slots 13–15, and
+his copy is at 14. A miss at 4 isn't the end. Probing 5, 6, 8, 12, 20 and onward
+never finds that kept window. The floor's `first` takes him directly to 13.
+
+At a missing slot, Dan's phone rereads the floor: retention may have deleted
+the slot since the previous floor read. It opens any newly carried copies, or
+continues at the newer `first` if that passed the miss. Otherwise it has reached
+the end. It keeps how far it got and retries with the shared backoff (§6.7).
 
 Once his copies arrive, Dan's phone opens them, checks the entry from Ana's
 approving device that admits him, loads the floor's snapshot and applies the
@@ -3012,11 +3022,21 @@ Before any floor exists, the sequence starts at slot 1.
 - **Snapshots may cover different slots.** The store's might cover 560 and
   Gifts' 520, with `first` at 501.
 - **It carries the original key-copy boxes** needed to open the store key. Their
-  routing is visible, as in the sequence (§12.1); the snapshot references are
-  encrypted ([format.md D8](format.md#d8-small-frames),
-  [D9](format.md#d9-sealed-objects)). So a new device can find its copy before it
-  holds any key.
+  routing and `first` are visible, as in the sequence (§12.1, §20.4); the snapshot
+  references are encrypted ([format.md D8](format.md#d8-small-frames),
+  [D9](format.md#d9-sealed-objects)). A new device can find its copy or the kept
+  slots before it holds any key.
+- **It captures those copies from history through the writer's applied slot,**
+  `at`, including copies for joining credentials whose admission has not yet
+  applied. The writer has applied every selected snapshot's announcement, so
+  `at` covers at least `first - 1`. A copy below `first` is therefore captured
+  before retention can delete its slot.
 - **It takes effect when written,** even while old slots still sit in storage.
+
+The clear `first` guides only the key scan until the floor authenticates. A
+provider can change it to make a joiner stop early, as it can by withholding
+objects; it cannot grant admission. After opening the body, the device requires
+its authenticated `first` to equal the prefix's, or refuses the floor as damaged.
 
 **Reading with a floor.** A pass reads the floor when its next slot is missing,
 and again before committing the slots it read; §6.1 and §6.2 give those rules.
@@ -3141,7 +3161,11 @@ first observed. Parts alone authorize no deletion. Recording even a floor that
 fits one part keeps ownership of provider cleanup if its reply is lost (§20.6).
 
 **The grace period** is usually seven days from each snapshot's announcement.
-It spares short absences a full reload; correctness does not need it.
+The deleting device compares its own clock with the provider's publication time
+for the announcement, including that time's resolution (§20.5). An old provider
+time or a fast deleting clock can shorten the wait to zero. Grace spares short
+absences a full reload; correctness, including a joiner's key scan, does not need
+it.
 
 The rules:
 
@@ -4338,6 +4362,10 @@ Key copies are ordinary slots, found by reading the sequence, never by listing
 Finding the sequence never lists anything. Slots, snapshots and members are found
 by exact path and by signed slots. Ana's `files/` folder can hold 20,000 photos;
 reading `seq/41` never enumerates them, or another store's objects.
+
+The provider already sees every slot number in `<store>/seq/<n>` and which
+objects are deleted. The floor's clear `first` exposes no additional slot-number
+information; it lets a device without keys find the kept sequence (§13.2).
 
 Listings are used for files and setup checks, and they follow three rules:
 
@@ -6471,6 +6499,9 @@ Write-ups explain each model and state its assumptions:
 | Audience-key preparation records only identities and public commitments; a restart reuses saved material before publishing | `saved_before_prepared`, `restart_reuses_saved`, `journal_depends_only_on_commitment` | `proofs/sequence/CovenSequence/KeyCustody.lean` | §12.4 |
 | After a rejected self-replacement's child claim is undone, an unheld binding keeps the pause; a current candidate is installed, and undo may release the pause only under the held active pair | `unheld_keeps_pause`, `candidate_installs`, `undo_requires_active` | `proofs/sequence/CovenSequence/MemberKeyReplacement.lean` | §12.3 |
 | *Body.* A write queued before a member-key replacement needs the old signing key, which is cut off afterward, and the new key can't authenticate its history | `self_replacement_counterexample`, `later_replacement_counterexample` | `proofs/sequence/CovenSequence/QueueReloadExamples.lean` | §12.3 |
+| With successful reads and polling, a claimed usable key copy is found despite immediate prefix deletion; an applied approval still admits a member not subsequently removed. The scan projects one store key and exact credential; cryptography and the approver binding are checked by the reader | `approved_progress`, `approved_eventually_key`, `approval_keeps_membership`, `approved_eventually_admitted`, `approved_never_declined` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
+| A scan with no matching copies reaches the end; an absent request without its approving binding reports declined | `no_copy_reaches_end`, `real_decline` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2 |
+| Exponential probes from missing slot 4 all miss a valid retained window at 13–15 containing an applied approval; a missing slot below an existing slot is deleted history | `retained_good`, `approval_is_kept`, `exponential_probes_miss_approval`, `missing_below_existing_is_deleted` | `proofs/sequence/CovenSequence/JoinScanExamples.lean` | §13.2 |
 | Writes after a removal or key replacement are refused with rows unchanged and no new unique-value or owner claim, while the claim number is recorded | `cutoff` | `proofs/sequence/CovenSequence/Cutoff.lean` | §14.1 |
 | Circle permission is judged at the authored applied prefix; landing still checks store membership, device removal and key generation | `write_permission_at_authored_prefix` | `proofs/sequence/CovenSequence/Authorship.lean` | §15.6, §15.8 |
 | Ben's unread Gifts removal permits the original under both sending-key selection and application; reading removal forbids a new original | `sending_and_apply_agree`, `removal_read_refused` | `proofs/sequence/SequenceApply.lean` | §15.8 |
@@ -6497,6 +6528,8 @@ Write-ups explain each model and state its assumptions:
 | Reselection keeps the old common target and includes the floor's `at` and every selected start; a missing body requires a later announcement for the same audience with no lower coverage | `reselect_monotone`, `reselect_replacement` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
 | On good storage, loading the selected ordinary floor body and replaying to the reselected target gives the full-history state at that target | `reselect_preserves_prefix` | `proofs/sequence/CovenSequence/Reload.lean` | §16.5 |
 | When the set of audiences changes, each loads its own prefix at the common target and is rebuilt from its eligible originals; a new circle keeps the queue | `reload_sound`, `new_circle_keeps_queue` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
+| Applying the selected announcements places the floor capture after every deleted slot; a needed copy below `first` is captured, while one at or above it remains readable | `capture_covers_floor`, `floor_captures_deleted_copy`, `kept_copy_readable` | `proofs/sequence/CovenSequence/JoinScan.lean` | §16.4, §16.6 |
+| A miss before a claimed copy requires a fresh floor read; even with intervening retention, that read supplies the copy or advances the scan | `miss_requires_refresh`, `raced_miss_recovers` | `proofs/sequence/CovenSequence/JoinScan.lean` | §13.2, §16.6 |
 | A floor needs coverage for every introduced audience, even an idle circle; complete coverage places the floor past the covered cut | `floor_requires_every_audience`, `complete_coverage_advances`, `floor_covered`, `idle_audience_blocks_floor` | `proofs/sequence/CovenSequence/Retention.lean` | §16.4, §16.6 |
 | On good storage with every key, every audience can be loaded to a target between the floor snapshots' coverage and the end | `audiences_can_load` | `proofs/sequence/CovenSequence/QueueReload.lean` | §16.5 |
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |

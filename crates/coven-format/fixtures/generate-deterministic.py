@@ -598,7 +598,8 @@ def main():
     circle_announcement = bounded_slot(sodium, 9, 3, frame(15,
         snapshot_id(circle_audience(CIRCLE), 1, 1) + u64(8) + b"\x00" + hashlib.sha256(circle_snapshot).digest()), claim=8)
     path = STORE_TEXT + b"floor"
-    prefix = bytes([39, 0, 1]) + bytes([1]) * 16 + collection([u64(2) + text(store_key), u64(8) + text(circle_key)])
+    prefix = bytes([39, 0, 1]) + bytes([1]) * 16 + u64(6)
+    prefix += collection([u64(2) + text(store_key), u64(8) + text(circle_key)])
     plaintext = frame(12, u64(1) + u64(11) + u64(6) + collection([u64(10), u64(9)]))
     plaintext += frame(6, u64(10) + text(announcement)) + frame(6, u64(9) + text(circle_announcement)) + frame(7, b"")
     body = prefix

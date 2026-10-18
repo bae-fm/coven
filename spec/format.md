@@ -1281,7 +1281,7 @@ snapshots  [announcement:Slot]
 | --- | --- |
 | `author` | the device that signed the floor |
 | `at` | the signer's applied slot. It covers all named announcements. Verify the signer against the membership at that slot (D9). |
-| `first` | the first kept slot |
+| `first` | the first kept slot; must equal the clear prefix's `first` (D9) |
 | `snapshots` | the slot of each named snapshot's announcement, in audience order, store first |
 
 - Every named snapshot covers at least `first - 1`. Different audiences may have
@@ -1346,7 +1346,7 @@ objects.
 | 33 | Sequence slot | `slot_kind:u8 \| key:uuid \| copy:Option<CopyBox>` |
 | 34 | Snapshot | `audience:Audience \| key:uuid \| covers:u64 \| purpose:Purpose` |
 | 36 | Join request | empty |
-| 39 | Floor | `key:uuid \| copies:[slot:Slot \| object:bytes]` |
+| 39 | Floor | `key:uuid \| first:Slot \| copies:[slot:Slot \| object:bytes]` |
 
 - The kind, version and prefix are in the clear.
 - The chunks hold the encrypted plaintext (below).
@@ -1492,12 +1492,18 @@ ephemeral:32 bytes | nonce:24 bytes | ciphertext:bytes | tag:16 bytes
 
 ### The floor (kind 39)
 
-The floor's prefix carries the key copies a new device needs before it holds
-any key (§16.4).
+The floor's prefix carries the first kept slot and the key copies a new device
+needs before it holds any key (§16.4).
 
 - `key` names the store key that seals the floor's body.
+- `first` guides a keyless joiner's scan past deleted slots (§13.2). It is
+  positive, like every `Slot`, and is authenticated with the complete prefix.
+  Until then it grants no authority. After opening the body, require its `first`
+  to equal the prefix's; refuse a mismatch as damaged.
 - `copies` keeps the exact, complete original key-copy slots needed to open that
-  key, in slot order. They are evidence, not newly sealed copies.
+  key, in slot order, from history applied through `at`. This includes copies
+  for joining credentials before admission. They are evidence, not newly sealed
+  copies.
 - Verify each copy with its original slot path and historical binding, from the
   authenticated store snapshot.
 - The floor's signer is `author`, in the state at `at`; `at` covers all
