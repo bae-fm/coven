@@ -192,8 +192,8 @@ fn clock() -> Arc<FixedClock> {
     ))
 }
 
-/// Pass `seconds` and keep §14.1's catch-up fresh for any upload in between.
-fn advance(_f: &Fixture, clock: &FixedClock, seconds: u64) {
+/// Advance the elapsed clock used by retry deadlines (§6.7).
+fn advance(clock: &FixedClock, seconds: u64) {
     clock.set(clock.now() + Duration::from_secs(seconds));
 }
 
@@ -545,7 +545,7 @@ async fn a_failed_download_is_not_requested_before_its_deadline() {
     b.files.sync_files().await.unwrap();
     assert_eq!(reads_of(&a, &file).await, reads);
     assert_eq!(file_records(&b).await.len(), 1);
-    advance(&b, &clock, 1);
+    advance(&clock, 1);
     b.files.sync_files().await.unwrap();
     assert_eq!(
         b.files.inner.database.missing_bytes(&file).await.unwrap(),
@@ -594,7 +594,7 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
     b.files.set_uploads_paused(false).await.unwrap();
     // The download's own one-second wait ends; the cooldown still holds it
     // and the upload queue.
-    advance(&b, &clock, 1);
+    advance(&clock, 1);
     let requests = a.storage.request_trace().len();
     let status = b.database.eager_cache_fill_status().await.unwrap();
     b.files.sync_files().await.unwrap();
@@ -605,7 +605,7 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
         DrainOutcome::Drained { uploaded: 0 }
     );
     assert_eq!(a.storage.request_trace().len(), requests);
-    advance(&b, &clock, 599);
+    advance(&clock, 599);
     b.files.sync_files().await.unwrap();
     assert_eq!(
         b.files.inner.database.missing_bytes(&file).await.unwrap(),

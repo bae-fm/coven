@@ -26,7 +26,7 @@ async fn full_storage_retries_eager_downloads_under_backoff() {
         let requests = a.storage.request_trace().len();
         b.files.sync_files().await.unwrap();
         assert_eq!(a.storage.request_trace().len(), requests);
-        advance(&b, &clock, wait);
+        advance(&clock, wait);
     }
     b.files.sync_files().await.unwrap();
     assert_eq!(
@@ -84,7 +84,7 @@ async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverab
             .is_empty());
         assert!(b.files.inner.next_retry().is_none());
         let requests = a.storage.request_trace().len();
-        advance(&b, &clock, 600);
+        advance(&clock, 600);
         b.files.sync_files().await.unwrap();
         assert_eq!(a.storage.request_trace().len(), requests);
         connect(&b, &a).await;
@@ -275,7 +275,7 @@ async fn io_differential_download_retries() {
                     )
                     .await
                     .unwrap();
-                    advance(&b, &clock, now);
+                    advance(&clock, now);
                     if changed {
                         connect(&b, &a).await;
                     }

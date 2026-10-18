@@ -32,7 +32,7 @@ fn network() -> PendingReason {
 }
 
 /// Advance the retry clock.
-fn advance(_f: &Fixture, clock: &FixedClock, seconds: u64) {
+fn advance(clock: &FixedClock, seconds: u64) {
     clock.set(clock.now() + Duration::from_secs(seconds));
 }
 
@@ -87,7 +87,7 @@ async fn a_transient_failure_persists_its_delay_and_waits_it_out() {
         );
         assert_eq!(f.storage.request_trace().len(), requests);
         assert_eq!(retry_in(&f), Some(Duration::from_secs(wait)));
-        advance(&f, &clock, wait);
+        advance(&clock, wait);
     }
     assert_eq!(
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
@@ -114,21 +114,21 @@ async fn reopening_keeps_the_remaining_delay_and_its_exponent() {
         f.files.inner.drain_uploads(true).await.unwrap();
     }
     assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(8));
-    advance(&f, &clock, 4);
+    advance(&clock, 4);
     // The device clock moves back an hour while the store is closed.
     clock.set(clock.now() - Duration::from_secs(3600));
     f.reopen().await;
     f.files.stop_background_for_counts().await;
     f.files.set_uploads_paused(false).await.unwrap();
-    advance(&f, &clock, 0);
+    advance(&clock, 0);
     // Restart waits min(T - now, W): the backward clock cannot stretch it.
     assert_eq!(retry_in(&f), Some(Duration::from_secs(8)));
-    advance(&f, &clock, 7);
+    advance(&clock, 7);
     assert_eq!(
         f.files.inner.drain_uploads(false).await.unwrap(),
         DrainOutcome::Drained { uploaded: 0 }
     );
-    advance(&f, &clock, 1);
+    advance(&clock, 1);
     f.storage
         .set_faults(fail_next(StorageFailure::Network, None))
         .await;
@@ -165,7 +165,7 @@ async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
         .unwrap();
     assert_eq!(cooldown.wait, Duration::from_secs(600));
     assert_eq!(retry_in(&f), Some(Duration::from_secs(600)));
-    advance(&f, &clock, 1);
+    advance(&clock, 1);
     let requests = f.storage.request_trace().len();
     assert_eq!(
         f.files.inner.drain_uploads(false).await.unwrap(),
@@ -179,7 +179,7 @@ async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
         "{refused:?}"
     );
     assert_eq!(f.storage.request_trace().len(), requests);
-    advance(&f, &clock, 599);
+    advance(&clock, 599);
     assert_eq!(
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         1
@@ -212,7 +212,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     })
     .await
     .unwrap();
-    advance(&f, &clock, 1);
+    advance(&clock, 1);
     tokio::time::timeout(Duration::from_secs(5), async {
         while f.queued(&file).await {
             uploads.next().await.unwrap();
@@ -603,7 +603,7 @@ async fn provider_bytes_are_progress_only_once_the_session_records_them() {
         }
     );
     assert_eq!(f.upload_reason(&file).await, Some(network()));
-    advance(&f, &clock, 1);
+    advance(&clock, 1);
     assert_eq!(
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         1

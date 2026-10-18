@@ -2254,7 +2254,7 @@ pub enum PendingSubject {
 
 /// A condition coven has not yet observed (§19.1).
 pub enum Prerequisite {
-    /// A completed read and apply through the current sequence end (§14.1).
+    /// A completed read and apply through the current sequence end (§11.1).
     SequenceCatchUp,
 
     Object(ObjectPath),

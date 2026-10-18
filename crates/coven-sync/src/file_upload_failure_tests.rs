@@ -60,7 +60,7 @@ async fn restored_sources_upload_after_backoff_without_provider_probes() {
             assert_eq!(retry_in(&f), Some(Duration::from_secs(wait)));
             assert_eq!(f.storage.request_trace().len(), requests);
             if wait == 1 {
-                advance(&f, &clock, wait);
+                advance(&clock, wait);
             }
         }
         if failure != FileSourceFailure::Missing {
@@ -72,7 +72,7 @@ async fn restored_sources_upload_after_backoff_without_provider_probes() {
             drained(f.files.inner.drain_uploads(false).await.unwrap()),
             0
         );
-        advance(&f, &clock, 2);
+        advance(&clock, 2);
         assert_eq!(
             drained(f.files.inner.drain_uploads(false).await.unwrap()),
             1
@@ -116,7 +116,7 @@ async fn a_disk_failure_retries_after_its_backoff() {
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         0
     );
-    advance(&f, &clock, 1);
+    advance(&clock, 1);
     assert_eq!(
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         1
@@ -138,7 +138,7 @@ async fn full_storage_retries_with_the_shared_backoff_and_cap() {
             0
         );
         assert_eq!(retry_in(&f), Some(Duration::from_secs(wait)));
-        advance(&f, &clock, wait);
+        advance(&clock, wait);
     }
     assert_eq!(
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
@@ -165,7 +165,7 @@ async fn new_credentials_retry_every_waiting_upload_once() {
     assert_eq!(f.queue().await.files.len(), 2);
     assert_eq!(retry_in(&f), None);
     let requests = f.storage.request_trace().len();
-    advance(&f, &clock, 600);
+    advance(&clock, 600);
     assert_eq!(
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         0
@@ -237,7 +237,7 @@ async fn failures_that_never_clear_stay_visible_through_reconnect_and_manual_ret
     assert_eq!(records[0].retry(), Retry::Never);
     assert_eq!(retry_in(&f), None);
     let requests = f.storage.request_trace().len();
-    advance(&f, &clock, 600);
+    advance(&clock, 600);
     f.files
         .set_storage(Some(f.storage.clone()), std::future::ready(Ok(())))
         .await
