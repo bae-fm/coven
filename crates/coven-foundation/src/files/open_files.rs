@@ -129,6 +129,7 @@ fn open_file_paths() -> Vec<PathBuf> {
 #[cfg(windows)]
 fn open_file_paths() -> Vec<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::Storage::FileSystem::{
         GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
         BY_HANDLE_FILE_INFORMATION, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_READ_DATA,
@@ -154,23 +155,16 @@ fn open_file_paths() -> Vec<PathBuf> {
                     // UNKNOWN with NO_ERROR is a successful report of an
                     // unknown type, which is not a disk file to enumerate.
                     if error.raw_os_error() != Some(0) {
-                        closed_handle_or_panic("inspect file type", handle, error);
+                        closed_handle_or_panic(
+                            "inspect file type",
+                            handle,
+                            entry.granted_access,
+                            error,
+                        );
                     }
                     return None;
                 }
                 if kind != FILE_TYPE_DISK {
-                    return None;
-                }
-                let mut information: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
-                if GetFileInformationByHandle(handle, &mut information) == 0 {
-                    closed_handle_or_panic(
-                        "inspect file handle",
-                        handle,
-                        std::io::Error::last_os_error(),
-                    );
-                    return None;
-                }
-                if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
                     return None;
                 }
                 let length = GetFinalPathNameByHandleW(
@@ -183,14 +177,37 @@ fn open_file_paths() -> Vec<PathBuf> {
                     closed_handle_or_panic(
                         "resolve file handle",
                         handle,
+                        entry.granted_access,
                         std::io::Error::last_os_error(),
                     );
                     return None;
                 }
                 assert!(length < name.len(), "open file path exceeds its buffer");
-                Some(PathBuf::from(std::ffi::OsString::from_wide(
-                    &name[..length],
-                )))
+                let path = PathBuf::from(std::ffi::OsString::from_wide(&name[..length]));
+                let mut information: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
+                if GetFileInformationByHandle(handle, &mut information) != 0 {
+                    if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
+                        return None;
+                    }
+                } else {
+                    let error = std::io::Error::last_os_error();
+                    // A handle granted data access without FILE_READ_ATTRIBUTES,
+                    // such as an inherited append-only log, can't report its
+                    // attributes; its path can, so ask the path instead.
+                    if error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+                        closed_handle_or_panic(
+                            "inspect file handle",
+                            handle,
+                            entry.granted_access,
+                            error,
+                        );
+                        return None;
+                    }
+                    if std::fs::metadata(&path).is_ok_and(|metadata| metadata.is_dir()) {
+                        return None;
+                    }
+                }
+                Some(path)
             }
         })
         .collect()
@@ -200,12 +217,13 @@ fn open_file_paths() -> Vec<PathBuf> {
 fn closed_handle_or_panic(
     operation: &str,
     handle: windows_sys::Win32::Foundation::HANDLE,
+    granted_access: u32,
     error: std::io::Error,
 ) {
     assert_eq!(
         error.raw_os_error(),
         Some(windows_sys::Win32::Foundation::ERROR_INVALID_HANDLE as i32),
-        "{operation} {handle:?}: {error}"
+        "{operation} {handle:?} (granted access {granted_access:#x}): {error}"
     );
     tracing::debug!(
         ?handle,
