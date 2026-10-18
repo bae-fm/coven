@@ -649,10 +649,11 @@ that follows.
 
 - Source evidence and received frozen-change representations preserve the
   original write, row and column identities through conversion and renaming.
-- A frozen dependent change keeps its generation, operation, old names and
-  scalar values, with the failed source identities in authored role order:
-  generation first, then replaced setters. Repeated identities stay when one
-  write supplied several roles.
+- A frozen dependent loss keeps its generation, old names and scalar values,
+  with the failed source identities in authored role order: generation first,
+  then replaced setters. Repeated identities stay when one write supplied
+  several roles. Its operation remains in the separately retained original
+  change, so dismissing the display loss cannot erase it.
 - Frozen display values have no live parent links. Their original source
   evidence is retained separately.
 - A delete with no scalar values still retains its write and row identity and its

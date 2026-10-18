@@ -5109,12 +5109,13 @@ in one section. Each record names:
 - whether its values are frozen: unauthorized changes, dependent changes, writes
   excluded by a schema change, and rows deleted by a breaking migration keep their
   values in the old shape;
-- for an excluded or dependent change, its write and operation, even for a delete
-  with no old values.
+- for an excluded or dependent change, its original write, even for a delete with
+  no old values.
 
 A taken-out row's record is not frozen: later edits to the row update its values.
-The sources and verdicts that dependent and owner checks need (§9.5, §9.6) are
-kept separately, so dismissing a record can't change a source's verdict.
+The original change, including its operation, sources and verdict (§9.5, §9.6),
+is kept separately. Dismissing the display record cannot erase that evidence or
+change a source's verdict.
 
 ### B.4 How lost-value records follow the writes
 
