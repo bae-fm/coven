@@ -5611,8 +5611,10 @@ runs six concurrent checks:
 - a PUT racing a multipart publication;
 - 2 replacements conditioned on the current ETag or generation.
 
-Copy profiles assemble their temporaries before racing the publishing copy. Each
-trial uses one fresh destination and distinct 64-KiB payloads, with every writer
+Copy profiles assemble their temporaries before racing the publishing copy.
+Create trials use a fresh destination. Replacement trials reuse the store's
+floor and read its current revision before each round, so every writer in that
+round tests the same condition. Each trial uses distinct 64-KiB payloads, with every writer
 released by one barrier. Each request's start, end and outcome are recorded, and
 all intervals must overlap; a trial that doesn't overlap fails certification too.
 Exactly one request must succeed, every other must refuse the condition
