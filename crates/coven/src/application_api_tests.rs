@@ -116,6 +116,29 @@
 //! use coven::MigrationOutcome;
 //! ```
 
+//!
+//! SQL callback types are available without another application dependency.
+//! ```
+//! use coven::{SqliteError as Error, SqliteResult as Result, Params, Row, ToSql, types::Value};
+//! fn map(row: &Row<'_>) -> Result<Value> { row.get(0) }
+//! fn query<P: Params>(sql: coven::SqlReadContext<'_>, params: P) -> Result<Value> {
+//!     sql.query_row("SELECT ?1", params, map)
+//! }
+//! fn bind(value: &dyn ToSql) { let _ = value.to_sql(); }
+//! let missing: Result<()> = Err(Error::QueryReturnedNoRows);
+//! assert!(matches!(missing, Err(Error::QueryReturnedNoRows)));
+//! ```
+//!
+//! Raw connections are outside coven's SQL surface.
+//! ```compile_fail
+//! use coven::Connection;
+//! ```
+//!
+//! Helpers absent from coven's signatures are not added to its surface.
+//! ```compile_fail
+//! use coven::OptionalExtension;
+//! ```
+
 #[test]
 fn app_file_replacement_preserves_open_readers_and_uses_the_format_chunk_size() {
     use crate::{write_atomic, CHUNK_SIZE};

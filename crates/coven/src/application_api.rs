@@ -29,8 +29,8 @@ pub use coven_database::{
     Lost, LostCell, LostValue, Migration, MigrationContext, MigrationError, OldWrites, Params,
     PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
     RemovalRule, Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey,
-    SchemaError, SnapshotError, SqlContext, SqlReadContext, SyncedTable, ToSql, UnsentWork,
-    UserFile, WriteBatch, WriteId, WriteWait,
+    SchemaError, SnapshotError, SqlContext, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
+    ToSql, UnsentWork, UserFile, WriteBatch, WriteId, WriteWait,
 };
 pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata};
 pub use coven_sync::{

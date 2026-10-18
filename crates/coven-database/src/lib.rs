@@ -146,8 +146,10 @@ pub use write_batch::{FileSource, WriteBatch};
 pub use write_boundary::{Boundary, BoundaryCoverage};
 pub use write_failure::WriteFailure;
 
-// SQL values and parameters are part of the API. Connections remain private.
-pub use rusqlite::{named_params, params, types, Params, Row, ToSql};
+// SQL values, parameters and callback results are public. Connections remain private.
+pub use rusqlite::{
+    named_params, params, types, Error as SqliteError, Params, Result as SqliteResult, Row, ToSql,
+};
 
 #[cfg(any(test, feature = "test-utils"))]
 pub mod test_utils;

@@ -14,13 +14,22 @@
 - A row is named by its table and its *key*: the values of its primary key
   columns, in order ([§9.2](coven.md#92-keys-and-unique-values)).
 
+Coven re-exports the rusqlite types used in its application signatures, so the app
+can name SQL callback results and errors without declaring a second dependency.
+`coven::SqliteError` and `coven::SqliteResult` name rusqlite's `Error` and `Result`.
+The root also exports `Params`, `Row`, `ToSql`, `types`, `params!` and
+`named_params!`. Raw connections and other rusqlite helpers are outside these
+re-exports.
+
 ```rust
 // External types used by the declarations below.
 use std::{collections::HashMap, future::Future, num::{NonZeroU64, NonZeroUsize},
           path::{Path, PathBuf}, pin::Pin, sync::Arc, time::{Duration, SystemTime}};
 use async_trait::async_trait;
 // These SQL items are also exported from coven at its root.
-pub use coven_database::{named_params, params, types, Params, Row, ToSql};
+pub use coven_database::{
+    named_params, params, types, Params, Row, SqliteError, SqliteResult, ToSql,
+};
 use tokio::{io::AsyncRead, sync::watch};
 use url::Url;
 use uuid::Uuid;
