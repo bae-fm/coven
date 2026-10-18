@@ -7,6 +7,7 @@ use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
 pub(super) async fn create(
     builder: CovenBuilder,
     name: String,
+    publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError> + Send + 'static,
 ) -> Result<CovenHandle, StoreCreationError> {
     let id = StoreId(builder.ids.new_id());
     let pending = Arc::new(
@@ -15,9 +16,9 @@ pub(super) async fn create(
             .begin_bootstrap(id, &name, builder.ids.as_ref())
             .await?,
     );
-    match prepare(builder, pending.clone()).await {
+    match prepare(builder, pending.clone(), publish).await {
         Ok(handle) => Ok(handle),
-        Err(error @ StoreCreationError::Published { .. }) => Err(error),
+        Err(error @ StoreCreationError::PublishedButNotSynced { .. }) => Err(error),
         Err(error) => Err(
             match crate::coven::blocking(move || pending.cancel()).await {
                 Ok(()) => error,
@@ -30,6 +31,7 @@ pub(super) async fn create(
 async fn prepare(
     builder: CovenBuilder,
     pending: Arc<BootstrapStore>,
+    publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError> + Send + 'static,
 ) -> Result<CovenHandle, StoreCreationError> {
     let directory = pending.directory();
     let database = builder.database(directory.clone())?.open().await?;
@@ -54,7 +56,7 @@ async fn prepare(
                 .keychain
                 .set_device_id(owners.device)
                 .map_err(CovenError::from)?;
-            pending.publish().map_err(StoreCreationError::from)
+            publish(&pending).map_err(StoreCreationError::from)
         });
         match result {
             Ok(()) => Ok((owners, None)),
@@ -82,10 +84,17 @@ async fn prepare(
     let handle = owners.into_handle(database, waits, false);
     match publication {
         None => Ok(handle),
-        Some(source) => Err(StoreCreationError::Published {
-            handle,
-            source: Box::new(source),
-        }),
+        Some(source) => {
+            let store = handle.store_id();
+            let source = match handle.close().await {
+                Ok(()) => source,
+                Err(cleanup) => source.with_cleanup(cleanup.into()),
+            };
+            Err(StoreCreationError::PublishedButNotSynced {
+                store,
+                source: Box::new(source),
+            })
+        }
     }
 }
 

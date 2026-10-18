@@ -19,7 +19,7 @@ pub enum StoreCreationError {
     /// Closing the database or its workers failed.
     #[error(transparent)]
     Sync(#[from] SyncError),
-    /// Rollback also failed; both causes remain available.
+    /// Closing or rollback also failed; both causes remain available.
     #[error("{operation}; cleanup failed: {cleanup}")]
     Cleanup {
         /// The original failure.
@@ -28,12 +28,12 @@ pub enum StoreCreationError {
         #[source]
         cleanup: Box<StoreCreationError>,
     },
-    /// The store is visible, but confirming publication durability failed.
-    #[error("store is published; durability failed: {source}")]
-    Published {
-        /// The complete open store, retaining session-only custody.
-        handle: crate::CovenHandle,
-        /// Failure after publication.
+    /// The complete store is visible and closed, but its directory sync failed.
+    #[error("store {store} was published but its directory sync failed: {source}")]
+    PublishedButNotSynced {
+        /// The published store; reopen it with `CovenBuilder::open`.
+        store: crate::StoreId,
+        /// The directory-sync failure, retaining any close failure as `Cleanup`.
         #[source]
         source: Box<StoreCreationError>,
     },

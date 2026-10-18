@@ -133,6 +133,11 @@ pub enum Audience {
   settings: its id and name, this device's id, and its storage settings.
 - Creating, restoring or joining a store makes the directory and writes
   the settings, so the app never chooses a device id ([§10](coven.md#10-members-roles-and-devices)).
+- A `create_store` error carries no open handle. If the store becomes visible
+  but syncing its directory fails, coven closes it and waits for release before
+  returning `StoreCreationError::PublishedButNotSynced { store, source }`.
+  The complete store stays on disk; the app can call `open(store)` with its
+  usual custody choices. Keeping the error cannot keep the store locked.
 - Provider access is chosen when storage is first attached (E5), not when the
   device-local directory is created. Dropbox's required `DropboxLocation`
   selects not-shared (`AppFolder`) or shared-capable (`SharedFolder`); it has
@@ -1164,10 +1169,15 @@ pub enum StoreCreationError {
     Identity(IdentityError),
     /// Closing connections or workers failed.
     Sync(SyncError),
-    /// Rollback also failed; both causes remain available.
+    /// Closing or rollback also failed; both causes remain available.
     Cleanup { operation: Box<StoreCreationError>, cleanup: Box<StoreCreationError> },
-    /// Complete store, retaining session custody; publication durability failed.
-    Published { handle: CovenHandle, source: Box<StoreCreationError> },
+    /// Complete store on disk, closed before returning; directory sync failed.
+    PublishedButNotSynced {
+        /// The published store; reopen it with `CovenBuilder::open`.
+        store: StoreId,
+        /// The directory-sync failure, retaining any close failure as `Cleanup`.
+        source: Box<StoreCreationError>,
+    },
 }
 
 /// Deleting the local store stopped at a step the caller may retry (E1).
@@ -1385,6 +1395,7 @@ impl CovenBuilder {
 
     /// Creates an open store and its member in the chosen custody before
     /// publication; cancellation does not interrupt creation or rollback.
+    /// Errors carry no handle; a published store is closed before returning.
     pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError>;
 
     /// Opens the store for reading and writing, taking the store's lock.

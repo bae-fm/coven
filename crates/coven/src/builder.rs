@@ -167,9 +167,15 @@ impl CovenBuilder {
 
     /// Create and open a store, initializing its member in the chosen custody
     /// before publication. Cancellation does not interrupt creation or rollback.
+    /// Errors carry no handle; a published store is closed before returning.
     pub async fn create_store(self, name: &str) -> Result<CovenHandle, StoreCreationError> {
         let name = name.to_owned();
-        crate::coven::completion(tokio::spawn(creation::create(self, name))).await
+        crate::coven::completion(tokio::spawn(creation::create(
+            self,
+            name,
+            coven_foundation::files::BootstrapStore::publish,
+        )))
+        .await
     }
 
     /// Opens the store for reading and writing, taking the store's lock.

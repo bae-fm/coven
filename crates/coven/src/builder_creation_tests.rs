@@ -4,6 +4,162 @@ use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::{Arc, Mutex};
 
+fn fail_publication_sync(
+    pending: &coven_foundation::files::BootstrapStore,
+) -> Result<(), coven_foundation::files::BootstrapDirectoryError> {
+    pending.publish()?;
+    Err(coven_foundation::files::DirectoryCreationError::Published {
+        id: pending.directory().id(),
+        source: std::io::Error::other("injected publication directory sync failure"),
+    }
+    .into())
+}
+
+#[tokio::test]
+async fn publication_sync_failure_releases_the_store_before_returning() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let builder = || {
+        app.builder(layout.clone())
+            .synced_tables(vec![])
+            .migrations(vec![Migration::addition(
+                1,
+                "initial content",
+                "CREATE TABLE initial_content (value TEXT NOT NULL); \
+                 INSERT INTO initial_content VALUES ('Household');",
+            )])
+    };
+    let expected = StoreId(SequentialIds::new().new_id());
+    let error = super::create(
+        builder().id_source(Arc::new(SequentialIds::new())),
+        "Household".into(),
+        fail_publication_sync,
+    )
+    .await
+    .unwrap_err();
+    let StoreCreationError::PublishedButNotSynced { store, source } = &error else {
+        panic!("{error:?}");
+    };
+    assert_eq!(*store, expected);
+    assert!(matches!(source.as_ref(), StoreCreationError::Directory(
+        coven_foundation::files::BootstrapDirectoryError::Create(
+            coven_foundation::files::DirectoryCreationError::Published { id, source }
+        )
+    ) if *id == expected && source.to_string() == "injected publication directory sync failure"));
+    let identity =
+        coven_crypto::custody::KeyringCustody::new(Arc::new(app.store_keychain(expected)));
+    let member = MemberKeyCustody::unlock(&identity).unwrap().unwrap();
+    assert_eq!(
+        layout.stores().await.unwrap(),
+        [StoreInfo {
+            id: expected,
+            name: "Household".into(),
+        }]
+    );
+    let reopened = builder().open(expected).await.unwrap();
+    assert_eq!(reopened.store_id(), expected);
+    let value: String = reopened
+        .read(|context| {
+            Ok(context.query_row("SELECT value FROM initial_content", [], |row| row.get(0))?)
+        })
+        .await
+        .unwrap();
+    assert_eq!(value, "Household");
+    assert_eq!(
+        MemberKeyCustody::unlock(&identity)
+            .unwrap()
+            .unwrap()
+            .keys()
+            .public_keys(),
+        member.keys().public_keys()
+    );
+    reopened.close().await.unwrap();
+    app.discard_store(&layout.store_dir(&expected))
+        .await
+        .unwrap();
+    assert!(layout.stores().await.unwrap().is_empty());
+    drop(error);
+}
+
+struct ClosingIdentity {
+    keys: Mutex<Option<MemberIdentity>>,
+    closing: tokio::sync::Notify,
+    release: Mutex<std::sync::mpsc::Receiver<()>>,
+}
+
+impl MemberKeyCustody for ClosingIdentity {
+    fn unlock(&self) -> Result<Option<MemberIdentity>, KeyError> {
+        Ok(self.keys.lock().unwrap().clone())
+    }
+
+    fn persist(&self, identity: &MemberIdentity) -> Result<(), KeyError> {
+        *self.keys.lock().unwrap() = Some(identity.clone());
+        Ok(())
+    }
+
+    fn forget(&self) -> Result<(), KeyError> {
+        panic!("publication failure must not roll back identity custody")
+    }
+
+    fn close(&self) {
+        self.closing.notify_one();
+        self.release
+            .lock()
+            .unwrap()
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .unwrap();
+        self.keys.lock().unwrap().take();
+    }
+}
+
+#[tokio::test]
+async fn publication_sync_failure_waits_for_close_and_releases_session_custody() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let expected = StoreId(SequentialIds::new().new_id());
+    let (release, wait) = std::sync::mpsc::channel();
+    let identity = Arc::new(ClosingIdentity {
+        keys: Mutex::new(None),
+        closing: tokio::sync::Notify::new(),
+        release: Mutex::new(wait),
+    });
+    let creation = tokio::spawn(super::create(
+        app.builder(layout.clone())
+            .id_source(Arc::new(SequentialIds::new()))
+            .synced_tables(vec![])
+            .migrations(vec![])
+            .identity_custody(IdentityCustody::Custom(identity.clone())),
+        "Household".into(),
+        fail_publication_sync,
+    ));
+    tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        identity.closing.notified(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !creation.is_finished(),
+        "creation returned before custody closed"
+    );
+    assert!(identity.keys.lock().unwrap().is_some());
+    release.send(()).unwrap();
+    let error = creation.await.unwrap().unwrap_err();
+    assert!(matches!(
+        &error,
+        StoreCreationError::PublishedButNotSynced { store, .. } if *store == expected
+    ));
+    assert!(identity.keys.lock().unwrap().is_none());
+    assert_eq!(Arc::strong_count(&identity), 1, "creation retained custody");
+    app.discard_store(&layout.store_dir(&expected))
+        .await
+        .unwrap();
+    assert!(layout.stores().await.unwrap().is_empty());
+    drop(error);
+}
+
 #[tokio::test]
 async fn creation_initializes_every_builtin_identity_custody_before_setup() {
     for custody in [

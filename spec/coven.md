@@ -1828,6 +1828,14 @@ existing device.
 
 #### 10.3 Creating a store
 
+`create_store` first makes the local database and initializes the member's
+custody before making the store visible. If the directory sync then fails,
+coven closes the handle through its normal close path and waits for release.
+It returns `StoreCreationError::PublishedButNotSynced`, naming the store and
+the directory-sync failure with its source (api.md E1). The complete store
+stays on disk, and the app reopens it with `open`. No creation error carries
+an open handle, so retaining an error cannot keep the store locked.
+
 Slot 1 creates the store and registers its first device and its first admin.
 Since nobody is a member yet, slot 1 carries its author's public key, and that key
 verifies its signature. The store id in slot 1 must match its path.
