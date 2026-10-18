@@ -45,13 +45,16 @@ pub use crate::storage::{ConnectedStorage, StorageSetup, StoreKeyState};
 #[cfg(any(test, feature = "test-utils"))]
 pub use crate::test_utils::TestCoven;
 pub use coven_format::admin::{MemberRole, SnapshotId};
+pub use coven_format::chunks::CHUNK_SIZE;
 pub use coven_format::value::StorageTime;
 pub use coven_format::{IamPolicy, S3Principal};
 pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
+#[cfg(feature = "test-utils")]
+pub use coven_foundation::files::{assert_no_open_files_under, open_files_under};
 pub use coven_foundation::files::{
-    BootstrapDirectoryError, DeviceReset, DirectoryCreationError, FileError, FileName,
-    FileNameError, SettingsError, StoreDir, StoreLockError,
+    write_atomic, BootstrapDirectoryError, DeviceReset, DirectoryCreationError, FileError,
+    FileName, FileNameError, SettingsError, StoreDir, StoreLockError,
 };
 pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{

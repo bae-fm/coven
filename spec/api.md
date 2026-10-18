@@ -1092,6 +1092,26 @@ impl FileError {
 /// File reads and custody report the same filesystem failures (§17, E1).
 pub use coven_foundation::files::FileError as DiskError;
 
+/// Replace an app-owned file using coven's durable replacement operation.
+/// Writes and syncs a temporary sibling, replaces the target, then syncs its
+/// directory. The parent must exist; concurrent readers see whole versions.
+/// A pre-replacement failure leaves the target unchanged. AfterReplace means
+/// the new bytes are visible but directory syncing failed.
+/// Windows requires FileRenameInfoEx and a filesystem supporting POSIX replacement;
+/// unsupported systems fail with the OS cause, without a weaker rename fallback.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FileError>;
+
+/// Every file under `dir` this process has open, once per descriptor or handle.
+/// Excludes directories and, on Windows, handles opened only to read attributes.
+/// Panics if the directory cannot be resolved or enumeration fails. Files closed
+/// during enumeration may disappear from the result.
+#[cfg(feature = "test-utils")]
+pub fn open_files_under(dir: &Path) -> Vec<PathBuf>;
+
+/// Panics naming the open files under `dir`, or if enumeration fails.
+#[cfg(feature = "test-utils")]
+pub fn assert_no_open_files_under(dir: &Path);
+
 /// The store's directory settings could not be read or written (E1).
 pub enum SettingsError {
     /// No settings file exists.
@@ -3444,6 +3464,10 @@ The photo's reason is in `pending()`; eager-fill status still describes the
 files and bytes completed. There is no competing failure state in that progress.
 
 ```rust
+/// Plaintext bytes in a full file, write-part or snapshot chunk: 64 KiB.
+/// Re-exported from coven-format so app buffers use the same chunk size.
+pub const CHUNK_SIZE: usize = 64 * 1024;
+
 /// Progress while keeping files whole on this device (§17.6, E8).
 pub struct PinProgress {
     /// Files whose bytes have all been kept.

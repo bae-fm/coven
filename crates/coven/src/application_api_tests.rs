@@ -115,3 +115,53 @@
 //! ```compile_fail
 //! use coven::MigrationOutcome;
 //! ```
+
+#[test]
+fn app_file_replacement_preserves_open_readers_and_uses_the_format_chunk_size() {
+    use crate::{write_atomic, CHUNK_SIZE};
+    use std::io::Read;
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings");
+    write_atomic(&path, b"old").unwrap();
+    let mut reader = std::fs::File::open(&path).unwrap();
+    let bytes = vec![7; CHUNK_SIZE + 3];
+    write_atomic(&path, &bytes).unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(
+        bytes
+            .chunks(CHUNK_SIZE)
+            .map(<[u8]>::len)
+            .collect::<Vec<_>>(),
+        [65536, 3]
+    );
+    let mut old = Vec::new();
+    reader.read_to_end(&mut old).unwrap();
+    assert_eq!(old, b"old");
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+
+    let occupied = directory.path().join("occupied");
+    std::fs::create_dir(&occupied).unwrap();
+    let error: crate::FileError =
+        write_atomic(&occupied, b"cannot replace a directory").unwrap_err();
+    assert!(!error.installed_new_bytes());
+    assert!(occupied.is_dir());
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 2);
+}
+
+#[cfg(feature = "test-utils")]
+#[test]
+fn app_tests_can_find_open_files_and_assert_they_are_released() {
+    use crate::{assert_no_open_files_under, open_files_under, write_atomic};
+
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("settings");
+    write_atomic(&path, b"settings").unwrap();
+    let path = path.canonicalize().unwrap();
+    assert_no_open_files_under(directory.path());
+    let file = std::fs::File::open(&path).unwrap();
+    assert_eq!(open_files_under(directory.path()), vec![path]);
+    assert!(std::panic::catch_unwind(|| assert_no_open_files_under(directory.path())).is_err());
+    drop(file);
+    assert_no_open_files_under(directory.path());
+}

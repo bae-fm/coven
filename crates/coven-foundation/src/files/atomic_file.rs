@@ -309,7 +309,12 @@ fn open_reader(path: &Path) -> io::Result<fs::File> {
     options.open(path)
 }
 
-pub(crate) fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
+/// Write and sync a temporary sibling, atomically replace `path`, then sync
+/// its directory. The parent must exist. Concurrent readers see whole versions.
+/// A pre-replacement failure leaves the target unchanged; `FileError::AfterReplace`
+/// reports that new bytes are visible but directory syncing failed.
+/// Windows requires the POSIX replacement support described by [`AtomicFile::replace`].
+pub fn replace(path: &Path, bytes: &[u8]) -> Result<(), FileError> {
     let temp = prepare(path, bytes)?;
     #[cfg(unix)]
     {

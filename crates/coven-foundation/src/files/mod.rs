@@ -15,9 +15,11 @@ mod layout;
 mod lock;
 mod lock_registry;
 mod observed_file;
+#[cfg(any(test, feature = "test-utils"))]
+mod open_files;
 mod settings;
 
-pub use atomic_file::{AtomicFile, FileError, FileWriter};
+pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter};
 pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;
 pub use device_reset::DeviceReset;
@@ -28,4 +30,6 @@ pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
 };
 pub use observed_file::{observe_file, ObservationError, ObservedFile};
+#[cfg(any(test, feature = "test-utils"))]
+pub use open_files::{assert_no_open_files_under, open_files_under};
 pub use settings::{SettingsError, StoreSettings};
