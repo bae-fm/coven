@@ -16,10 +16,14 @@ pub fn open_files_under(dir: &Path) -> Vec<PathBuf> {
     let dir = dir
         .canonicalize()
         .unwrap_or_else(|error| panic!("canonicalize {}: {error}", dir.display()));
-    open_file_paths()
+    #[cfg(not(windows))]
+    let open = open_file_paths()
         .into_iter()
         .filter(|path| path.starts_with(&dir))
-        .collect()
+        .collect();
+    #[cfg(windows)]
+    let open = open_file_paths_under(&dir);
+    open
 }
 
 /// Panic naming every file under `dir` this process has open.
@@ -115,8 +119,8 @@ fn open_file_paths() -> Vec<PathBuf> {
         .collect()
 }
 
-/// The disk files this process holds open for their data, read from one
-/// snapshot of its handles that the kernel takes at once.
+/// The disk files under `dir` this process holds open for their data, read
+/// from one snapshot of its handles that the kernel takes at once.
 ///
 /// Paths are named after the snapshot, one handle at a time, and a handle
 /// value freed meanwhile can be taken by a new handle. So only values that
@@ -126,17 +130,22 @@ fn open_file_paths() -> Vec<PathBuf> {
 /// snapshot. A handle opened only to read attributes, as `std::fs::metadata`
 /// and `canonicalize` do here and no Unix descriptor stands for, holds no file
 /// open, and neither does one on a directory.
+///
+/// Handles are named by their NT device path (`\Device\HarddiskVolume3\...`),
+/// which needs no drive-letter lookup; CI runners hold handles whose drive-letter
+/// name is refused. The directory gets its NT path the same way, and matches
+/// are reported under `dir`'s own spelling.
 #[cfg(windows)]
-fn open_file_paths() -> Vec<PathBuf> {
-    use std::os::windows::ffi::OsStringExt;
+fn open_file_paths_under(dir: &Path) -> Vec<PathBuf> {
     use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
     use windows_sys::Win32::Storage::FileSystem::{
-        GetFileInformationByHandle, GetFileType, GetFinalPathNameByHandleW,
-        BY_HANDLE_FILE_INFORMATION, FILE_APPEND_DATA, FILE_ATTRIBUTE_DIRECTORY, FILE_READ_DATA,
-        FILE_TYPE_DISK, FILE_TYPE_UNKNOWN, FILE_WRITE_DATA, VOLUME_NAME_DOS,
+        GetFileInformationByHandle, GetFileType, BY_HANDLE_FILE_INFORMATION, FILE_APPEND_DATA,
+        FILE_ATTRIBUTE_DIRECTORY, FILE_READ_DATA, FILE_TYPE_DISK, FILE_TYPE_UNKNOWN,
+        FILE_WRITE_DATA,
     };
 
     const DATA_ACCESS: u32 = FILE_READ_DATA | FILE_WRITE_DATA | FILE_APPEND_DATA;
+    let nt_dir = nt_directory_name(dir);
     let file_type = windows_handles::file_object_type();
     let mut name = vec![0u16; 32_768];
     windows_handles::snapshot()
@@ -167,33 +176,27 @@ fn open_file_paths() -> Vec<PathBuf> {
                 if kind != FILE_TYPE_DISK {
                     return None;
                 }
-                let length = GetFinalPathNameByHandleW(
-                    handle,
-                    name.as_mut_ptr(),
-                    name.len() as u32,
-                    VOLUME_NAME_DOS,
-                ) as usize;
-                if length == 0 {
-                    let error = std::io::Error::last_os_error();
-                    // A file deleted while open refuses to name itself
-                    // (STATUS_DELETE_PENDING reads as access denied). It no
-                    // longer has a path under any directory, so it is skipped.
-                    if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
-                        && delete_pending(handle)
-                    {
-                        tracing::debug!(?handle, "skipping a deleted file still open");
+                let nt_name = match nt_handle_name(handle, &mut name) {
+                    Ok(nt_name) => nt_name,
+                    Err(error) => {
+                        // A file deleted while open has no name left under any
+                        // directory, so it is skipped.
+                        if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+                            && delete_pending(handle)
+                        {
+                            tracing::debug!(?handle, "skipping a deleted file still open");
+                            return None;
+                        }
+                        closed_handle_or_panic(
+                            "resolve file handle",
+                            handle,
+                            entry.granted_access,
+                            error,
+                        );
                         return None;
                     }
-                    closed_handle_or_panic(
-                        "resolve file handle",
-                        handle,
-                        entry.granted_access,
-                        error,
-                    );
-                    return None;
-                }
-                assert!(length < name.len(), "open file path exceeds its buffer");
-                let path = PathBuf::from(std::ffi::OsString::from_wide(&name[..length]));
+                };
+                let path = dir.join(nt_suffix_under(&nt_name, &nt_dir)?);
                 let mut information: BY_HANDLE_FILE_INFORMATION = std::mem::zeroed();
                 if GetFileInformationByHandle(handle, &mut information) != 0 {
                     if information.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0 {
@@ -201,9 +204,8 @@ fn open_file_paths() -> Vec<PathBuf> {
                     }
                 } else {
                     let error = std::io::Error::last_os_error();
-                    // A handle granted data access without FILE_READ_ATTRIBUTES,
-                    // such as an inherited append-only log, can't report its
-                    // attributes; its path can, so ask the path instead.
+                    // A handle granted data access without FILE_READ_ATTRIBUTES
+                    // can't report its attributes; its path can.
                     if error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
                         closed_handle_or_panic(
                             "inspect file handle",
@@ -221,6 +223,69 @@ fn open_file_paths() -> Vec<PathBuf> {
             }
         })
         .collect()
+}
+
+/// The NT device path of an open handle: normalized when the system allows it,
+/// otherwise the name the handle was opened with.
+#[cfg(windows)]
+fn nt_handle_name(
+    handle: windows_sys::Win32::Foundation::HANDLE,
+    buffer: &mut [u16],
+) -> std::io::Result<String> {
+    use windows_sys::Win32::Foundation::ERROR_ACCESS_DENIED;
+    use windows_sys::Win32::Storage::FileSystem::{
+        GetFinalPathNameByHandleW, FILE_NAME_NORMALIZED, FILE_NAME_OPENED, VOLUME_NAME_NT,
+    };
+
+    let mut last = None;
+    for flags in [
+        VOLUME_NAME_NT | FILE_NAME_NORMALIZED,
+        VOLUME_NAME_NT | FILE_NAME_OPENED,
+    ] {
+        // SAFETY: the call writes at most `buffer.len()` units into `buffer`
+        // and only reads the handle's name; a closed handle only fails it.
+        let length = unsafe {
+            GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, flags)
+        } as usize;
+        if length != 0 {
+            assert!(length < buffer.len(), "open file path exceeds its buffer");
+            return Ok(String::from_utf16_lossy(&buffer[..length]));
+        }
+        let error = std::io::Error::last_os_error();
+        if error.raw_os_error() != Some(ERROR_ACCESS_DENIED as i32) {
+            return Err(error);
+        }
+        tracing::debug!(?handle, flags, "file name refused; trying the opened name");
+        last = Some(error);
+    }
+    Err(last.expect("at least one naming attempt ran"))
+}
+
+/// The NT device path of `dir`, through a handle that opens no file data.
+#[cfg(windows)]
+fn nt_directory_name(dir: &Path) -> String {
+    use std::os::windows::fs::OpenOptionsExt;
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::Storage::FileSystem::FILE_FLAG_BACKUP_SEMANTICS;
+
+    let directory = std::fs::OpenOptions::new()
+        .access_mode(0)
+        .custom_flags(FILE_FLAG_BACKUP_SEMANTICS)
+        .open(dir)
+        .unwrap_or_else(|error| panic!("open {}: {error}", dir.display()));
+    let mut buffer = vec![0u16; 32_768];
+    nt_handle_name(directory.as_raw_handle() as _, &mut buffer)
+        .unwrap_or_else(|error| panic!("resolve {}: {error}", dir.display()))
+}
+
+/// The part of `nt_name` below `nt_dir`, compared without case as Windows
+/// names are; None for a name outside it.
+#[cfg(windows)]
+fn nt_suffix_under(nt_name: &str, nt_dir: &str) -> Option<PathBuf> {
+    let dir = nt_dir.trim_end_matches('\\');
+    let head = nt_name.get(..dir.len())?;
+    let rest = &nt_name[dir.len()..];
+    (head.eq_ignore_ascii_case(dir) && rest.starts_with('\\')).then(|| PathBuf::from(&rest[1..]))
 }
 
 /// Whether the file behind `handle` is deleted and waiting for its last
