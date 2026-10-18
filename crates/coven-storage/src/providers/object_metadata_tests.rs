@@ -15,9 +15,9 @@ fn onedrive_immutable_publication_uses_copy_modification_time() {
 
 #[test]
 fn onedrive_replacement_uses_modification_time_and_etag() {
-    let positions = ObjectPath::floor(crate::test_utils::STORE_ID);
-    let item = json!({"id":"native", "name":positions.file_name(), "file":{"hashes":{"quickXorHash":"AAAAAA=="}}, "size":4, "createdDateTime":"2026-10-06T00:00:00Z", "lastModifiedDateTime":"2026-10-06T00:00:00.120Z", "eTag":"new"});
-    let one = onedrive(&positions, &item).unwrap();
+    let floor = ObjectPath::floor(crate::test_utils::STORE_ID);
+    let item = json!({"id":"native", "name":floor.file_name(), "file":{"hashes":{"quickXorHash":"AAAAAA=="}}, "size":4, "createdDateTime":"2026-10-06T00:00:00Z", "lastModifiedDateTime":"2026-10-06T00:00:00.120Z", "eTag":"new"});
+    let one = onedrive(&floor, &item).unwrap();
     assert_eq!(one.time_resolution, Duration::from_millis(1));
     assert_eq!(
         one.stored_at,

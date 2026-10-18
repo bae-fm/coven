@@ -457,9 +457,9 @@ async fn every_object_copy_publishes_single_request_creates_by_conditional_copy(
     storage.create(&entry, b"entry").await.unwrap();
     assert_eq!(state.lock().unwrap().copies, 4);
     // Floor creation also copies; replacements use conditional PUTs.
-    let positions = ObjectPath::floor(STORE_ID);
-    storage.create(&positions, b"floor").await.unwrap();
-    let previous = storage.status(&positions).await.unwrap().unwrap();
+    let floor = ObjectPath::floor(STORE_ID);
+    storage.create(&floor, b"floor").await.unwrap();
+    let previous = storage.status(&floor).await.unwrap().unwrap();
     storage.replace(&previous, b"next floor").await.unwrap();
     assert_eq!(state.lock().unwrap().copies, 5);
     assert_eq!(temporaries(&state), 0);

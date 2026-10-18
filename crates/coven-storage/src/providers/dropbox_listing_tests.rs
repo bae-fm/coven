@@ -184,10 +184,11 @@ async fn every_prefix_starts_at_its_folder_and_keeps_descendants() {
 #[tokio::test]
 async fn absent_requested_folder_checks_namespace_without_listing_siblings() {
     let remote = Arc::new(Mutex::new(Remote::default()));
-    remote.lock().unwrap().objects.insert(
-        ObjectPath::floor(STORE_ID).absolute(),
-        b"positions".to_vec(),
-    );
+    remote
+        .lock()
+        .unwrap()
+        .objects
+        .insert(ObjectPath::floor(STORE_ID).absolute(), b"floor".to_vec());
     let server = ListingServer::new(remote.clone()).await;
     let storage = provider(&server.server.url);
     let prefix = ObjectPrefix::device_files(STORE_ID, DeviceId(31));
@@ -212,7 +213,7 @@ async fn absent_requested_folder_checks_namespace_without_listing_siblings() {
 #[tokio::test]
 async fn scoped_listing_refuses_an_object_outside_the_requested_folder() {
     let path = ObjectPath::floor(STORE_ID);
-    let item = file_metadata(&path.absolute(), b"positions", &Remote::default());
+    let item = file_metadata(&path.absolute(), b"floor", &Remote::default());
     let server = TestServer::new(Router::new().fallback(move || {
         let item = item.clone();
         async move { reply(json!({"entries":[item],"has_more":false})) }
@@ -270,7 +271,7 @@ async fn failed_continuation_is_not_an_empty_folder_or_partial_success() {
         (503, json!({}), StorageFailure::Network),
     ] {
         let path = ObjectPath::join_request(STORE_ID, InviteId(uuid::Uuid::from_u128(1)));
-        let item = file_metadata(&path.absolute(), b"positions", &Remote::default());
+        let item = file_metadata(&path.absolute(), b"join request", &Remote::default());
         let replies = Arc::new(Mutex::new(VecDeque::from([
             (
                 200,
@@ -351,23 +352,23 @@ async fn listings_skip_stray_files_and_folders_beside_shared_stores() {
         ))
         .await;
     // Stray files and folders, including names close to a coven path, are
-    // no objects or writers (D10); the store's own objects still list.
+    // outside the layout (D10); the store's own objects still list.
     let write = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
     let entry = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
     storage.create(&write, b"write").await.unwrap();
     storage.create(&entry, b"entry").await.unwrap();
     {
         let mut remote = state.lock().unwrap();
-        for folder in ["devices/031", "store-log/new folder", "photos"] {
+        for folder in ["files/031", "seq/new folder", "photos"] {
             remote.folders.insert(format!("/{STORE_ID}/{folder}"));
         }
         for stray in [
             "notes.txt",
-            "devices/31/01",
-            "devices/031/1",
+            "seq/01",
+            "seq/+1",
             "photos/1",
-            "store-log/readme",
-            "store-log/32/1/extra",
+            "seq/readme",
+            "seq/1/extra",
         ] {
             let path = format!("/{STORE_ID}/{stray}");
             remote.objects.insert(path, b"stray".to_vec());

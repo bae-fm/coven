@@ -76,11 +76,7 @@ fn prefix_conversion_rejects_another_writer_or_store() {
 
 #[test]
 fn metadata_uses_publication_and_replacement_dates() {
-    for (path, expected) in [
-        (path(), 20),
-        (ObjectPath::floor(path().store()), 30),
-        (ObjectPath::floor(path().store()), 30),
-    ] {
+    for (path, expected) in [(path(), 20), (ObjectPath::floor(path().store()), 30)] {
         let object = publication_metadata(
             path.as_str(),
             path.as_str(),
@@ -105,31 +101,27 @@ fn metadata_uses_publication_and_replacement_dates() {
 
 #[test]
 fn replacements_retain_change_tags_even_with_equal_sizes_and_dates() {
-    for path in [
-        ObjectPath::floor(path().store()),
-        ObjectPath::floor(path().store()),
-    ] {
-        let observed = ["first-change-tag", "second-change-tag"].map(|tag| {
-            publication_metadata(
-                path.as_str(),
-                path.as_str(),
-                "64",
-                Some(20.0),
-                Some(30.125),
-                Some(tag),
-            )
-            .unwrap()
-        });
-        assert_eq!(observed[0].object_id, observed[1].object_id);
-        assert_eq!(observed[0].size, observed[1].size);
-        assert_eq!(observed[0].stored_at, observed[1].stored_at);
-        assert_eq!(
-            observed[0].stored_at,
-            coven_format::value::StorageTime::since_epoch(Duration::from_millis(30_125))
-        );
-        assert_eq!(observed[0].revision, "first-change-tag");
-        assert_eq!(observed[1].revision, "second-change-tag");
-    }
+    let path = ObjectPath::floor(path().store());
+    let observed = ["first-change-tag", "second-change-tag"].map(|tag| {
+        publication_metadata(
+            path.as_str(),
+            path.as_str(),
+            "64",
+            Some(20.0),
+            Some(30.125),
+            Some(tag),
+        )
+        .unwrap()
+    });
+    assert_eq!(observed[0].object_id, observed[1].object_id);
+    assert_eq!(observed[0].size, observed[1].size);
+    assert_eq!(observed[0].stored_at, observed[1].stored_at);
+    assert_eq!(
+        observed[0].stored_at,
+        coven_format::value::StorageTime::since_epoch(Duration::from_millis(30_125))
+    );
+    assert_eq!(observed[0].revision, "first-change-tag");
+    assert_eq!(observed[1].revision, "second-change-tag");
 }
 
 /// `NSDate` seconds rarely hold a millisecond exactly; the time lands on the
@@ -179,11 +171,7 @@ fn dates_land_on_whole_milliseconds() {
 
 #[test]
 fn metadata_requires_the_date_for_the_object_kind() {
-    for path in [
-        path(),
-        ObjectPath::floor(path().store()),
-        ObjectPath::floor(path().store()),
-    ] {
+    for path in [path(), ObjectPath::floor(path().store())] {
         let (created, modified) = if path.is_replaceable() {
             (Some(20.0), None)
         } else {
@@ -282,7 +270,7 @@ async fn cloudkit_live() {
     let config = native.config();
     let storage = StorageConnection::from_provider(native.clone());
     let first = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
-    let positions = ObjectPath::floor(store);
+    let floor = ObjectPath::floor(store);
     assert!(storage.status(&first).await.unwrap().is_none());
     storage.create(&first, b"encrypted bytes").await.unwrap();
     // Exact status must see publication immediately, independently of query indexing.
@@ -321,20 +309,20 @@ async fn cloudkit_live() {
             .unwrap(),
         b"crypt"
     );
-    storage.create(&positions, b"one").await.unwrap();
-    let prior = storage.status(&positions).await.unwrap().unwrap();
+    storage.create(&floor, b"one").await.unwrap();
+    let prior = storage.status(&floor).await.unwrap().unwrap();
     storage.replace(&prior, b"one").await.unwrap();
-    let replaced = storage.status(&positions).await.unwrap().unwrap();
+    let replaced = storage.status(&floor).await.unwrap().unwrap();
     assert_ne!(replaced.revision, prior.revision);
     assert_eq!(replaced.object_id, prior.object_id);
     assert!(replaced.stored_at >= prior.stored_at);
     storage.replace(&replaced, b"two").await.unwrap();
-    let changed = storage.read_object(&positions, None).await.unwrap();
+    let changed = storage.read_object(&floor, None).await.unwrap();
     assert_eq!(changed.bytes, b"two");
     assert_eq!(changed.metadata.size, replaced.size);
     assert_ne!(changed.metadata.revision, replaced.revision);
     assert_eq!(
-        storage.status(&positions).await.unwrap().unwrap(),
+        storage.status(&floor).await.unwrap().unwrap(),
         changed.metadata
     );
     let large = ObjectPath::file(store, DeviceId(7), FileId(ids.new_id()));
@@ -362,14 +350,14 @@ async fn cloudkit_live() {
         .replace(&changed.metadata, b"publication time")
         .await
         .unwrap();
-    let positions_metadata = native
-        .fetch(positions.as_str(), record::OBJECT_KEYS)
+    let floor_metadata = native
+        .fetch(floor.as_str(), record::OBJECT_KEYS)
         .wait()
         .await
         .unwrap()
         .metadata()
         .unwrap();
-    let before_publication = positions_metadata.stored_at;
+    let before_publication = floor_metadata.stored_at;
     restarted.finish_upload(&mut resumed).await.unwrap();
     let published = storage.status(&large).await.unwrap().unwrap();
     assert_eq!(published.object_id, large.as_str());
@@ -441,13 +429,10 @@ async fn cloudkit_live() {
         &first_metadata
     );
     assert_eq!(
-        listed
-            .iter()
-            .find(|object| object.path == positions)
-            .unwrap(),
-        &positions_metadata
+        listed.iter().find(|object| object.path == floor).unwrap(),
+        &floor_metadata
     );
-    for path in [&first, &positions, &large] {
+    for path in [&first, &floor, &large] {
         storage.delete(path).await.unwrap();
         storage.delete(path).await.unwrap();
         assert!(storage.status(path).await.unwrap().is_none());
@@ -680,7 +665,7 @@ impl Discovery {
             .unwrap();
         // Same store id and an extra object in another zone must stay invisible.
         let entry = ObjectPath::slot(store, NonZeroU64::MIN);
-        let positions = ObjectPath::floor(store);
+        let floor = ObjectPath::floor(store);
         let fixture_request = |path| {
             PublicationRequest::new(Arc::new(crate::test_utils::UnrestrictedPublications), path)
         };
@@ -690,8 +675,8 @@ impl Discovery {
             .unwrap();
         other_zone
             .create(
-                &fixture_request(positions.clone()),
-                &positions,
+                &fixture_request(floor.clone()),
+                &floor,
                 b"other zone revision",
             )
             .await

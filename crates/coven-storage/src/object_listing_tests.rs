@@ -17,13 +17,13 @@ fn names_outside_the_layout_are_skipped_and_counted() {
     // D10 gives each object one spelling, so none of these is one.
     for stray in [
         "Notes.txt",
-        "store-log/31/1/extra",
-        "store-log/31/01",
-        "store-log/031/1",
-        "store-log/31/0",
-        "devices/ana/1",
-        "positions/31/1",
-        "created/1",
+        "seq/1/extra",
+        "seq/01",
+        "seq/+1",
+        "seq/0",
+        "files/ana/1",
+        "Photos/31/1",
+        "floor/1",
         ".coven-uploads/5a7a4c66-6f1c-4d58-9f5d-3c2a9b5f2e10",
         ".coven-check/run/probe",
         "files/31/not-a-uuid",
@@ -55,7 +55,7 @@ fn folders_outside_the_layout_are_not_descended() {
 fn an_entry_outside_the_requested_prefix_is_the_providers_error() {
     let mut listing = listing(ObjectPrefix::files(STORE_ID));
     for name in [
-        format!("{STORE_ID}/store-log/31/1"),
+        format!("{STORE_ID}/seq/1"),
         format!("{STORE_ID}/Notes.txt"),
         "other/seq/1".to_owned(),
     ] {

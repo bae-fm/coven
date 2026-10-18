@@ -27,12 +27,8 @@ fn sequence_slots_have_one_store_wide_identity_and_floor_is_replaceable() {
         "seq/18446744073709551616",
         "seq",
         "floor/1",
-        "devices/1/1",
-        "store-log/1/1",
-        "positions/1",
-        "clock/1",
-        "created",
-        "keys/1/1",
+        "notes.txt",
+        "Photos/1/1",
     ] {
         assert!(
             ObjectPath::parse(&format!("{STORE_ID}/{tail}")).is_err(),
@@ -117,11 +113,8 @@ fn file_scans_keep_device_prefixes_and_snapshot_paths_keep_their_audience() {
         );
     }
     for folder in [
-        "devices",
-        "store-log",
-        "positions",
-        "clock",
-        "keys",
+        "Photos",
+        "notes.txt",
         "seq/1",
         "snapshots/store/01",
         "files/+1",

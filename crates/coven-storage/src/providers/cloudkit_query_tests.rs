@@ -72,12 +72,12 @@ fn directory_fields_preserve_full_ancestors_and_omit_nonexistent_levels() {
             ("directory4", &format!("{root}/snapshots/store/7")),
         ]
     );
-    let position = ObjectPath::floor(store());
+    let floor = ObjectPath::floor(store());
     assert_eq!(
-        directories(&position).collect::<Vec<_>>(),
+        directories(&floor).collect::<Vec<_>>(),
         [("directory1", root.as_str()),]
     );
-    for (_, directory) in directories(&snapshot).chain(directories(&position)) {
+    for (_, directory) in directories(&snapshot).chain(directories(&floor)) {
         coven_format::path::validate_directory(directory).unwrap();
     }
 }

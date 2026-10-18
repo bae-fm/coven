@@ -23,15 +23,14 @@ fn verdict_of(zone: &BTreeMap<String, Record>) -> Verdict {
     verdict(zone.get(MARKER_NAME))
 }
 
-/// Every record a live fixture writes also appears in a real store, including
-/// device 7's positions, which the earlier cleanup selected zones by.
+/// Ordinary store records cannot authorize deleting a live-test zone; only
+/// its explicit marker can.
 #[test]
 fn a_zone_holding_only_store_records_is_kept() {
     let store = StoreId(uuid::Uuid::from_u128(1));
     let file = ObjectPath::file(store, DeviceId(7), FileId(uuid::Uuid::from_u128(2)));
     let upload = upload_name(&file, &uuid::Uuid::from_u128(3).to_string()).unwrap();
     let mut zone: BTreeMap<String, Record> = [
-        ("CovenObject", ObjectPath::floor(store).as_str().to_owned()),
         ("CovenObject", ObjectPath::floor(store).as_str().to_owned()),
         (
             "CovenObject",

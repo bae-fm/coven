@@ -405,12 +405,12 @@ async fn missing_prefix_uses_exact_lookup_and_can_appear_later() {
             (Method::GET, "/graph/drives/drive/items/root".into()),
         ]
     );
-    let positions = ObjectPath::join_request(
+    let join_request = ObjectPath::join_request(
         STORE_ID,
         coven_foundation::id_source::InviteId(uuid::Uuid::from_u128(1)),
     );
     provider(&server.url)
-        .create(&positions, b"arrived")
+        .create(&join_request, b"arrived")
         .await
         .unwrap();
     assert_eq!(
@@ -419,7 +419,7 @@ async fn missing_prefix_uses_exact_lookup_and_can_appear_later() {
             .await
             .unwrap()[0]
             .path,
-        positions
+        join_request
     );
 }
 
@@ -535,8 +535,8 @@ async fn listings_skip_stray_files_and_folders() {
         let mut remote = state.lock().unwrap();
         for (id, folder) in [
             ("stray-photos", "Photos"),
-            ("stray-writer", "store-log/New folder"),
-            ("stray-object", "devices/31/2"),
+            ("stray-sequence", "seq/New folder"),
+            ("stray-object", "seq/3"),
         ] {
             remote
                 .dirs
@@ -545,9 +545,9 @@ async fn listings_skip_stray_files_and_folders() {
         for stray in [
             "Notes.txt",
             "Photos/1",
-            "devices/31/01",
-            "devices/31/2/1",
-            "store-log/readme",
+            "seq/01",
+            "seq/3/1",
+            "seq/readme",
             "join-requests",
         ] {
             let path = format!("{STORE_ID}/{stray}");
