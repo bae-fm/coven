@@ -262,3 +262,13 @@ import SequenceApply
 #print axioms SequenceApply.AuthorshipExample.removal_read_refused
 #print axioms SequenceApply.AuthorshipExample.device_cutoff_still_applies
 #print axioms SequenceApply.AuthorshipExample.sending_and_apply_agree
+#print axioms CovenSequence.Retention.choose_dominates
+#print axioms CovenSequence.Retention.chosen_newest
+#print axioms CovenSequence.Retention.chosen_has_no_mature_replacement
+#print axioms CovenSequence.Retention.chosen_mature
+#print axioms CovenSequence.Retention.immature_replacements_keep_body
+#print axioms CovenSequence.Retention.fresh_head_starves
+#print axioms CovenSequence.Retention.daily_coverage_precedes_announcement
+#print axioms CovenSequence.Retention.daily_announcements_starve
+#print axioms CovenSequence.Retention.daily_announcements_advance
+#print axioms CovenSequence.Deadline.selection_advances

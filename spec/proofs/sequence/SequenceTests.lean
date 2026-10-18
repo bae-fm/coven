@@ -570,4 +570,14 @@ def keyCase (slots held current : List Json) : Json := json% {
   checkField result ["audiences","0","refused"] (json% [3,4,6])
   checkField result ["audiences","0","unique_claims"] (json% [[7,2]])
 
+#eval do
+  let old := json% {"slot":2,"covers":1,"announced_at":0,"usable":true}
+  let fresh := json% {"slot":9,"covers":8,"announced_at":7,"usable":true}
+  let input := json% {"kind":"retention","snapshots":$([fresh,old]),"grace":7,"time":7}
+  check input (json% {"slot":2,"covers":1})
+  check (input.setObjVal! "time" (toJson (14 : Nat))) (json% {"slot":9,"covers":8})
+  check (input.setObjVal! "time" (toJson (6 : Nat))) Json.null
+  check (input.setObjVal! "snapshots" (toJson [fresh, old.setObjVal! "usable" (toJson false)])) Json.null
+  rejects (input.setObjVal! "snapshots" (toJson [old, fresh]))
+
 end SequenceTests

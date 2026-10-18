@@ -244,25 +244,15 @@ history stays. A failed undo stays in the journal and is reported (§11.3).
 
 #### 2.7 Storage bounds
 
-Snapshot coverage plus a grace period let history be deleted without waiting for
-absent devices. A returning device reloads and keeps the unsent writes that still
-count (§16.5, §16.6).
+Once a prefix is ready for deletion, assume every introduced audience announces
+covering snapshots within U that stay applicable through the floor update. With
+grace G, a successful conditional floor update within P after grace, and deletion
+within D after that, the prefix is deleted within U + G + P + D. Newer snapshots
+do not restart the grace period (§16.6).
 
-Four assumed bounds add up to a deadline. From the moment a prefix of history
-is ready to delete, it is deleted within U + G + P + D, assuming:
-
-- **U:** a snapshot is prepared, uploaded and announced successfully within U;
-- **G:** the grace period;
-- **P:** a successful conditional floor update within P after the grace period;
-- **D:** deletion within D after that update.
-
-Every introduced audience must supply snapshots that cover the prefix and stay
-usable through the floor update. Missing coverage holds deletion back. An
-audience with no reader online to supply its snapshot has no deletion deadline
-at all.
-
-The bound covers history only. It doesn't limit live rows, lost values, the
-evidence needed to check old signatures, or a write rate with no limit.
+Missing coverage gives no deadline. No absent device must acknowledge anything;
+a returning device reloads and keeps its unsent originals (§16.5). The bound
+covers history, not live rows, lost values, signature evidence, or unlimited writes.
 
 #### 2.8 Visible failures
 
@@ -3047,8 +3037,12 @@ coverage and the end of the sequence.
 
 #### 16.6 Deleting history
 
-Once every audience has a snapshot covering slots up to some point, and the grace
-period has passed, any device with permission to delete in storage:
+Ana snapshots every Household audience daily. After seven days, the first
+snapshots can advance the floor; newer announcements must not restart grace.
+
+For each introduced audience, choose the newest announced snapshot that applies
+(§16.2, §16.3) and has passed grace. Advance `first` to their least coverage plus
+one. A device with deletion permission:
 
 1. journals the new floor and the deletions it plans;
 2. writes the new floor, naming the new `first` and each audience's snapshot
@@ -3056,16 +3050,13 @@ period has passed, any device with permission to delete in storage:
    it read it;
 3. then deletes the slots below `first`.
 
-**The grace period** is usually seven days from the latest announcement of the
-snapshots chosen. It spares short absences a full reload. It is not needed for
-correctness. Deletion never waits for an absent device, and no device has to
-acknowledge anything. No deletion waits for the device that wrote the slots.
+**The grace period** is usually seven days from each snapshot's announcement.
+It spares short absences a full reload; correctness does not need it.
 
 The rules:
 
-- **Choose announced snapshots that apply** (§16.2, §16.3) and cover the slots to
-  delete for every introduced audience (§16.4). Missing or unchecked coverage
-  waits, even if that audience has no parts in the deleted writes.
+- **Every introduced audience needs checked coverage** (§16.4), even one with
+  no parts in the deleted writes. Missing coverage waits; absent devices do not.
 - **A lost race changes nothing.** If the floor changed, the conditional write
   fails. The device reads the current floor and decides again. It never moves
   `first`, or any audience's coverage, backward.
@@ -3074,9 +3065,9 @@ The rules:
 - **Failed deletions stay journaled and reported** (§19.1). A later floor update
   doesn't wait for them to finish.
 - **Keep the snapshots still in use:** those the floor names, those a pending
-  floor write names, and those a raise or reset still needs. A snapshot replaced
-  by a newer one is deleted only after its replacement has passed the grace
-  period and keeps the evidence still needed.
+  floor write names, and those a raise or reset still needs. Keep an older body
+  until a newer applicable snapshot has passed grace, covers at least as much
+  and keeps the needed evidence. Newer announcements do not extend that wait.
 - **An audience nobody can snapshot has no deadline.** If no member able to read
   a circle comes online to supply the coverage, that circle's uncovered history
   stays. History it already covers is deleted without waiting for that member.
@@ -6230,7 +6221,7 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | One applied prefix of the sequence determines membership and each readable audience's data at a schema version, given deterministic admin, merge and conversion rules | `prefix_determines_state` | `proofs/sequence/CovenSequence/Converge.lean` | §2.2, §8 |
 | Once caught up, a device never picks for a first attempt a key copied to a removed member's sealing keys | `revocation` | `proofs/sequence/CovenSequence/Keys.lean` | §2.5, §12.2 |
-| Given the four bounds as assumptions (every relevant audience announces a covering snapshot within U, the floor moves past the prefix within P once those snapshots are G old, and the prefix is deleted within D after that), it is deleted within U + G + P + D; no bound mentions absent devices. The theorem adds the assumed bounds; it doesn't derive them from the storage steps | `bounded_retention` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
+| Given covering announcements within U that stay applicable, grace G, a successful selected-floor update within P, and deletion within D, choosing the newest mature applicable snapshots advances past the prefix and deletes it within U + G + P + D regardless of newer snapshot frequency | `selection_advances`, `bounded_retention` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
 | An audience with no reader to supply coverage has no deletion deadline | `uncovered_has_no_deadline` | `proofs/sequence/CovenSequence/Deadline.lean` | §2.7, §16.6 |
 | Each result's assumptions and where its model stops | (write-up) | `proofs/sequence.md` | §2.9 |
 
@@ -6331,6 +6322,8 @@ Write-ups explain each model and state its assumptions:
 | Deleting history keeps kept slots genuine, floor snapshots honest, raise and reset bodies kept, and every sound reader sound | `store_good`, `store_reader` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 | Under any interleaving of storage and device steps, a device can still reach the full state at the end of the sequence | `deletion_keeps_reachable` | `proofs/sequence/CovenSequence/Device.lean` | §16.6 |
 | Model limit: prepared snapshots are loaded at their raise or reset entries; loading one directly from the floor is not modeled | (none) | — | §22 |
+| Choosing the newest snapshot before checking grace starves under daily announcements; choosing the newest mature applicable snapshot advances on day seven | `fresh_head_starves`, `daily_announcements_starve`, `daily_announcements_advance` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
+| Chosen snapshots have passed grace, and a qualifying snapshot cannot be hidden by newer announcements; immature replacements keep the old body | `chosen_mature`, `chosen_newest`, `choose_dominates`, `chosen_has_no_mature_replacement`, `immature_replacements_keep_body` | `proofs/sequence/CovenSequence/Retention.lean` | §16.6 |
 
 ### G.6 Files (§17)
 

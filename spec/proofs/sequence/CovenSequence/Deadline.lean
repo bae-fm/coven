@@ -1,16 +1,11 @@
 import CovenSequence.Retention
 
-/-! Successful service bounds, in abstract duration ticks. Snapshot service
-includes preparation, upload, announcement, contention and validation. The
-maintenance bound includes a successful conditional floor update. Neither
-service asks an absent device to acknowledge anything. -/
+/-! Successful service bounds in duration ticks. Snapshot service includes
+preparation, upload, announcement and validation; maintenance includes a
+successful conditional floor write. Neither waits for absent devices. -/
 namespace CovenSequence.Deadline
-
+open CovenSequence.Retention
 variable {Aud : Type}
-
-structure Snapshot where
-  covers : Nat
-  announcedAt : Nat
 
 /-- `usable` includes announcement validation and activation of a preparation;
 an uploaded body or an unactivated preparation is not a witness. -/
@@ -18,28 +13,64 @@ def Mature (relevant : List Aud) (usable : Aud → Snapshot → Prop)
     (cut grace time : Nat) : Prop :=
   ∀ a ∈ relevant, ∃ s, usable a s ∧ cut ≤ s.covers ∧ s.announcedAt + grace ≤ time
 
-structure Service (relevant : List Aud) (usable : Aud → Snapshot → Prop)
-    (floor : Nat → Nat) (removed : Nat → Nat → Prop) (cut ready U P D : Nat) : Prop where
-  snapshots : ∀ a ∈ relevant, ∃ s, usable a s ∧ cut ≤ s.covers ∧ s.announcedAt ≤ ready + U
-  maintenance : ∀ grace time, Mature relevant usable cut grace time →
-    ∃ pass, time ≤ pass ∧ pass ≤ time + P ∧ cut < floor pass
+/-- Coverage choices use every introduced audience, even one without writes. -/
+def selectedCoverage (relevant : List Aud) (catalog : Aud → List Snapshot)
+    (usable : Aud → Snapshot → Bool) (grace time : Nat) : List (Option Nat) :=
+  relevant.map fun a => (choose (catalog a) (usable a) grace time).map Snapshot.covers
+
+theorem selection_advances (relevant : List Aud) (nonempty : relevant ≠ [])
+    (catalog : Aud → List Snapshot) (usable : Aud → Snapshot → Bool)
+    (cut grace time : Nat)
+    (ordered : ∀ a ∈ relevant, (catalog a).Pairwise (fun x y => y.covers ≤ x.covers))
+    (witness : ∀ a ∈ relevant, ∃ s ∈ catalog a,
+      eligible (usable a) grace time s = true ∧ cut ≤ s.covers) :
+    ∃ first, floorStart (selectedCoverage relevant catalog usable grace time) = some first ∧
+      cut < first := by
+  apply complete_coverage_advances _ cut
+  · simpa [selectedCoverage] using nonempty
+  · intro c hc
+    obtain ⟨a, ha, rfl⟩ := List.mem_map.mp hc
+    obtain ⟨w, hw, he, hcut⟩ := witness a ha
+    obtain ⟨s, hs, _, _, hcover⟩ := choose_dominates Snapshot.covers (catalog a)
+      (ordered a ha) (usable a) grace time hw he
+    exact ⟨s.covers, by simp [hs], by omega⟩
+
+/-- Snapshot service includes announced coverage that remains applicable at
+maintenance. Catalogs retain announcement history, even after body replacement.
+Maintenance promises a successful write of the selected floor, not progress. -/
+structure Service (relevant : List Aud) (catalog : Nat → Aud → List Snapshot)
+    (usable : Nat → Aud → Snapshot → Bool) (floor : Nat → Nat)
+    (removed : Nat → Nat → Prop) (cut ready U G P D : Nat) : Prop where
+  nonempty : relevant ≠ []
+  ordered : ∀ time a, a ∈ relevant →
+    (catalog time a).Pairwise (fun x y => y.covers ≤ x.covers)
+  snapshots : ∀ time, ready + U ≤ time → time ≤ ready + U + G + P → ∀ a ∈ relevant,
+    ∃ s ∈ catalog time a, usable time a s = true ∧ cut ≤ s.covers ∧
+      s.announcedAt ≤ ready + U
+  maintenance : ∀ time, ∃ pass, time ≤ pass ∧ pass ≤ time + P ∧
+    ∀ first, floorStart (selectedCoverage relevant (catalog pass) (usable pass) G pass) = some first →
+      first ≤ floor pass
   deletion : ∀ pass, cut < floor pass →
     ∃ finish, pass ≤ finish ∧ finish ≤ pass + D ∧ ∀ i, 1 ≤ i → i ≤ cut → removed finish i
 
-/-- A ready cut is deleted within U+G+P+D. The services quantify only
-over relevant audiences, floor updates and deletion, never device presence. -/
-theorem bounded_retention (relevant : List Aud) (usable : Aud → Snapshot → Prop)
-    (floor : Nat → Nat) (removed : Nat → Nat → Prop) (cut ready U G P D : Nat)
-    (service : Service relevant usable floor removed cut ready U P D) :
+/-- No bound or spacing requirement is placed on newer announcements. -/
+theorem bounded_retention (relevant : List Aud) (catalog : Nat → Aud → List Snapshot)
+    (usable : Nat → Aud → Snapshot → Bool) (floor : Nat → Nat)
+    (removed : Nat → Nat → Prop) (cut ready U G P D : Nat)
+    (service : Service relevant catalog usable floor removed cut ready U G P D) :
     ∃ finish, finish ≤ ready + U + G + P + D ∧
       ∀ i, 1 ≤ i → i ≤ cut → removed finish i := by
-  have mature : Mature relevant usable cut G (ready + U + G) := by
+  obtain ⟨pass, lower, upper, written⟩ := service.maintenance (ready + U + G)
+  have witness : ∀ a ∈ relevant, ∃ s ∈ catalog pass a,
+      eligible (usable pass a) G pass s = true ∧ cut ≤ s.covers := by
     intro a ha
-    obtain ⟨s, hs, hc, ht⟩ := service.snapshots a ha
-    exact ⟨s, hs, hc, by omega⟩
-  obtain ⟨pass, _, upper, raised⟩ := service.maintenance G _ mature
-  obtain ⟨finish, _, doneBy, gone⟩ := service.deletion pass raised
-  exact ⟨finish, by omega, gone⟩
+    obtain ⟨s, hs, hu, hc, ht⟩ := service.snapshots pass (by omega) (by omega) a ha
+    exact ⟨s, hs, by simp [eligible, hu, show s.announcedAt + G ≤ pass by omega], hc⟩
+  obtain ⟨first, selected, advanced⟩ := selection_advances relevant service.nonempty
+    (catalog pass) (usable pass) cut G pass (service.ordered pass) witness
+  have raised := written first selected
+  obtain ⟨finish, _, upper', deleted⟩ := service.deletion pass (by omega)
+  exact ⟨finish, by omega, deleted⟩
 
 /-- If one relevant audience has no covering snapshot, no time satisfies the
 retention gate. Thus no unconditional deletion deadline follows. -/

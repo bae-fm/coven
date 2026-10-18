@@ -412,3 +412,108 @@ async fn idle_circle_requires_floor_coverage() {
 async fn sequence_audience_coverage_matches_lean() {
     idle_circle_coverage(true).await;
 }
+
+async fn daily_snapshots(compare: bool) {
+    use coven_merge::Audience;
+    use serde_json::json;
+    use std::time::{Duration, UNIX_EPOCH};
+    let group = Group::new();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let mut published = Vec::new();
+    let day_seconds = 24 * 60 * 60;
+    for day in 0..14usize {
+        let announced_at = day as u64 * day_seconds;
+        let now = announced_at + 1;
+        group
+            .clock
+            .set(UNIX_EPOCH + Duration::from_secs(announced_at));
+        let slot = ana.sync.snapshot(Audience::Store).await.unwrap();
+        group.clock.set(UNIX_EPOCH + Duration::from_secs(now));
+        let mut session = ana.sync.session.lock().await;
+        let announcement = session.history.announcements[&slot].clone();
+        published.push((slot, announcement.covers, announcement.snapshot));
+        let proposal = ana
+            .sync
+            .propose_floor(&session, &group.ring, &ana.identity)
+            .await
+            .unwrap();
+        let selected = match proposal {
+            Some(super::Retention::Floor {
+                first,
+                announcements,
+                ..
+            }) => {
+                assert!(day >= 7, "floor passed grace early on day {day}");
+                let expected = &published[day - 7];
+                assert_eq!(announcements, vec![expected.0 .0]);
+                assert_eq!(first, expected.1 + 1);
+                json!({"slot":announcements[0],"covers":first - 1})
+            }
+            None => {
+                assert!(day < 7, "daily snapshots starved the floor on day {day}");
+                serde_json::Value::Null
+            }
+            Some(_) => panic!("expected floor proposal"),
+        };
+        if compare {
+            let mut snapshots = Vec::new();
+            for (slot, covers, _) in published.iter().rev() {
+                let object = ana
+                    .sync
+                    .immutable_metadata(&ObjectPath::slot(group.store, slot.0.try_into().unwrap()))
+                    .await
+                    .unwrap();
+                let latest = object.stored_at.elapsed_since_epoch() + object.time_resolution;
+                snapshots.push(
+                    json!({"slot":slot.0,"covers":covers,"announced_at":latest.as_nanos(),
+                    "usable":session.history.usable(&session.history.announcements[slot])}),
+                );
+            }
+            let input = json!({"kind":"retention","snapshots":snapshots,
+                "grace":super::GRACE.as_nanos(),"time":Duration::from_secs(now).as_nanos()});
+            assert_eq!(
+                crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input),
+                selected
+            );
+        }
+        let mut ring = group.ring.clone();
+        ana.sync
+            .retain_sequence(&mut session, &mut ring, &ana.identity)
+            .await
+            .unwrap();
+        ana.sync
+            .retain_snapshots(&mut session, &mut ring, &ana.identity)
+            .await
+            .unwrap();
+        if day >= 7 {
+            let covered = published[day - 7].1;
+            assert!(group
+                .storage
+                .status(&ObjectPath::slot(group.store, covered.try_into().unwrap()))
+                .await
+                .unwrap()
+                .is_none());
+        }
+        for (index, (_, _, snapshot)) in published.iter().enumerate() {
+            let body = crate::snapshot_object::path(group.store, snapshot).unwrap();
+            assert_eq!(
+                group.storage.status(&body).await.unwrap().is_some(),
+                index + 7 >= day,
+                "day {day}, snapshot {index}: keep bodies until a replacement passes grace"
+            );
+        }
+    }
+    ana.database().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn daily_snapshots_advance_after_the_first_grace() {
+    daily_snapshots(false).await;
+}
+
+#[tokio::test]
+#[ignore = "requires COVEN_SEQUENCE_LEAN; scripts/check.sh builds sequenceRunner"]
+async fn sequence_daily_retention_matches_lean() {
+    daily_snapshots(true).await;
+}

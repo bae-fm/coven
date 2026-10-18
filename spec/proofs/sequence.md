@@ -414,6 +414,21 @@ storage meanwhile:
 `complete_coverage_advances` and `floor_covered` establish its bounds.
 `idle_audience_blocks_floor` checks a circle with no data writes.
 
+`choose` scans announcements newest first, filtering applicability and grace
+before selection. `chosen_mature` proves those gates and `chosen_newest` proves
+the slot choice. `choose_dominates` proves that no newer announcement hides an
+eligible coverage witness. The same selector
+controls replacement-body deletion: `immature_replacements_keep_body` retains
+an old body until an applicable replacement passes grace.
+`chosen_has_no_mature_replacement` excludes deleting the selected body by that
+rule. Announcement history is retained separately from replaceable bodies. Provider timestamps enter as
+upper bounds, including their resolution.
+
+`fresh_head_starves` and `daily_announcements_starve` refute choosing the newest
+usable snapshot before checking grace. Daily snapshots keep the old rule waiting
+through all fourteen days. `daily_announcements_advance` selects the day-zero
+snapshot on day seven, then advances daily.
+
 There is no separate step that advertises a floor before it takes effect. The
 reader's floor read after its fetch, and the claimant's after its claim, are
 what make one conditional floor write safe.
@@ -471,10 +486,13 @@ needed.
 
 [`Deadline`](sequence/CovenSequence/Deadline.lean):
 
-- `bounded_retention`: successful snapshot service U, grace G, maintenance
-  spacing P (including a successful conditional floor write), and deletion
-  service D delete a ready prefix within U+G+P+D. Coverage witnesses must stay
-  usable through the floor update; no device acknowledgements occur in the model.
+- `selection_advances` derives a floor beyond the prefix from eligible coverage
+  for every introduced audience, using the actual `choose` and `floorStart`.
+- `bounded_retention` combines that result with snapshot service U, grace G,
+  maintenance within P, and deletion within D. Maintenance promises to write
+  the selected floor; it does not assume advancement. Coverage announced by U
+  must remain applicable through the maintenance window. Newer announcements
+  have no frequency bound, and no device acknowledgements occur in the model.
 - `uncovered_has_no_deadline`: missing coverage in any relevant audience
   prevents the retention gate at every time. `cut_delete_allowed` connects
   the service's floor bound to the concrete storage deletion step.
@@ -748,6 +766,13 @@ key waits, prepared-body loads and snapshot contents are outside this case.
 ```
 
 Answer: `{"reload":false,"apply":[2,3]}`.
+
+**`retention`** calls `Retention.choose` for one audience. Input `snapshots`
+are newest first, with distinct positive `slot`, preceding `covers`, provider
+upper-bound `announced_at`, and boolean `usable`. Coverage must not decrease
+with announcement order. `grace` and `time` use the same duration ticks. The
+answer is null or the chosen `{"slot":...,"covers":...}`. Rust supplies
+applicability and provider timestamps from its real daily snapshots.
 
 **`floor`** calls `Retention.floorStart`. Its `coverage` array contains one
 number or null per introduced audience. It returns the first kept slot, or

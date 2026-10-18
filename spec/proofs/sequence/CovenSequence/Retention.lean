@@ -198,6 +198,120 @@ end CovenSequence
 
 namespace CovenSequence.Retention
 
+/-- The slot orders choices; the provider timestamp upper bound starts grace. -/
+structure Snapshot where
+  slot : Nat
+  covers : Nat
+  announcedAt : Nat
+  deriving DecidableEq
+
+def eligible (usable : Snapshot → Bool) (grace time : Nat) (s : Snapshot) : Bool :=
+  usable s && decide (s.announcedAt + grace ≤ time)
+
+/-- Announcements are newest first. Grace filters candidates before selection. -/
+def choose (snapshots : List Snapshot) (usable : Snapshot → Bool) (grace time : Nat) :
+    Option Snapshot := snapshots.find? (eligible usable grace time)
+
+/-- A qualifying witness cannot be hidden by more recent announcements. -/
+theorem choose_dominates (rank : Snapshot → Nat) (snapshots : List Snapshot)
+    (ordered : snapshots.Pairwise (fun newer older => rank older ≤ rank newer))
+    (usable : Snapshot → Bool) (grace time : Nat) {w : Snapshot}
+    (hw : w ∈ snapshots) (he : eligible usable grace time w = true) :
+    ∃ s, choose snapshots usable grace time = some s ∧
+      s ∈ snapshots ∧ eligible usable grace time s = true ∧ rank w ≤ rank s := by
+  induction snapshots with
+  | nil => simp at hw
+  | cons head tail ih =>
+    rw [List.pairwise_cons] at ordered
+    by_cases hh : eligible usable grace time head = true
+    · refine ⟨head, by simp [choose, hh], by simp, hh, ?_⟩
+      rcases List.mem_cons.mp hw with h | h
+      · subst w; exact Nat.le_refl _
+      · exact ordered.1 w h
+    · have hwt : w ∈ tail := by
+        rcases List.mem_cons.mp hw with h | h
+        · subst w; exact False.elim (hh he)
+        · exact h
+      obtain ⟨s, hs, hm, he, hr⟩ := ih ordered.2 hwt
+      exact ⟨s, by simpa [choose, hh] using hs, by simp [hm], he, hr⟩
+
+/-- Among eligible announcements, the selected slot is the newest. -/
+theorem chosen_newest (snapshots : List Snapshot)
+    (ordered : snapshots.Pairwise (fun newer older => older.slot ≤ newer.slot))
+    (usable : Snapshot → Bool) (grace time : Nat) {selected witness : Snapshot}
+    (chosen : choose snapshots usable grace time = some selected)
+    (member : witness ∈ snapshots) (qualifies : eligible usable grace time witness = true) :
+    witness.slot ≤ selected.slot := by
+  obtain ⟨s, hs, _, _, greatest⟩ :=
+    choose_dominates Snapshot.slot snapshots ordered usable grace time member qualifies
+  have same : s = selected := Option.some.inj (hs.symm.trans chosen)
+  simpa [same] using greatest
+
+/-- The selected snapshot cannot pass the replacement-body deletion gate. -/
+theorem chosen_has_no_mature_replacement (snapshots : List Snapshot)
+    (ordered : snapshots.Pairwise (fun newer older => older.slot ≤ newer.slot))
+    (usable : Snapshot → Bool) (grace time : Nat) {selected : Snapshot}
+    (chosen : choose snapshots usable grace time = some selected) :
+    ∀ newer ∈ snapshots, selected.slot < newer.slot →
+      eligible usable grace time newer = false := by
+  intro newer member later
+  cases qualifies : eligible usable grace time newer with
+  | false => rfl
+  | true =>
+    have := chosen_newest snapshots ordered usable grace time chosen member qualifies
+    omega
+
+/-- The same selection gates both floor use and replacement-body deletion. -/
+theorem chosen_mature (snapshots : List Snapshot) (usable : Snapshot → Bool)
+    (grace time : Nat) {s : Snapshot}
+    (selected : choose snapshots usable grace time = some s) :
+    s ∈ snapshots ∧ usable s = true ∧ s.announcedAt + grace ≤ time := by
+  have he := List.find?_some selected
+  exact ⟨List.mem_of_find?_eq_some selected, by simpa [eligible] using he⟩
+
+/-- A body is kept until some applicable replacement has passed grace. -/
+theorem immature_replacements_keep_body (snapshots : List Snapshot)
+    (usable : Snapshot → Bool) (grace time : Nat)
+    (fresh : ∀ s ∈ snapshots, usable s = true → time < s.announcedAt + grace) :
+    choose snapshots usable grace time = none := by
+  cases selected : choose snapshots usable grace time with
+  | none => rfl
+  | some s =>
+    obtain ⟨member, usable, mature⟩ := chosen_mature snapshots usable grace time selected
+    have := fresh s member usable
+    omega
+
+/-- Choosing before checking grace lets every fresh snapshot restart the wait. -/
+def newestThenGrace (snapshots : List Snapshot) (usable : Snapshot → Bool)
+    (grace time : Nat) : Option Snapshot := do
+  let s ← snapshots.find? usable
+  if s.announcedAt + grace ≤ time then some s else none
+
+theorem fresh_head_starves (s : Snapshot) (tail : List Snapshot)
+    (usable : Snapshot → Bool) (grace time : Nat)
+    (hu : usable s = true) (ht : s.announcedAt = time) (hg : 0 < grace) :
+    newestThenGrace (s :: tail) usable grace time = none := by
+  have h : ¬ s.announcedAt + grace ≤ time := by omega
+  simp [newestThenGrace, hu, h]
+
+def daily (day : Nat) : Snapshot := ⟨day + 2, day + 1, day⟩
+theorem daily_coverage_precedes_announcement (day : Nat) :
+    (daily day).covers < (daily day).slot := by simp [daily]
+
+def fortnight (day : Nat) : List Snapshot := ((List.range (day + 1)).map daily).reverse
+
+/-- Daily announcements hide already mature snapshots for all fourteen days. -/
+theorem daily_announcements_starve :
+    ∀ day ∈ List.range 14,
+      newestThenGrace (fortnight day) (fun _ => true) 7 day = none := by
+  decide
+
+/-- The first snapshot becomes eligible on day seven despite newer announcements. -/
+theorem daily_announcements_advance :
+    ∀ day ∈ (List.range 7).map (· + 7),
+      choose (fortnight day) (fun _ => true) 7 day = some (daily (day - 7)) := by
+  decide
+
 /-- One coverage per introduced audience, including the store. Missing any
 snapshot prevents a floor; an empty audience universe supplies no floor. -/
 def floorStart : List (Option Nat) → Option Nat

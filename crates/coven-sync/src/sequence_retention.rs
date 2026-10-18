@@ -11,7 +11,7 @@ use coven_database::{NewOperation, OperationRecord, OperationUpdate};
 use coven_format::{
     floor::{FloorFrames, FloorHeader},
     sealed_floor::FloorPrefixEncoder,
-    sequence::Purpose,
+    sequence::{Purpose, SnapshotAnnouncement},
 };
 use coven_merge::{Audience, Slot};
 use coven_storage::{ObjectPath, StorageFailure, StoredObject};
@@ -214,22 +214,23 @@ impl SequenceSync {
             }) {
                 continue;
             }
-            let Some((replacement, _)) = history
-                .announcements
-                .range((std::ops::Bound::Excluded(*slot), std::ops::Bound::Unbounded))
-                .rev()
-                .find(|(_, newer)| {
-                    newer.snapshot.audience == id.audience
-                        && newer.covers >= announcement.covers
-                        && history.usable(newer)
-                })
-            else {
-                continue;
-            };
             if self.database.snapshot_absent(id.clone()).await? {
                 continue;
             }
-            if !self.past_grace(&self.immutable_metadata(&self.path(replacement.0)?).await?) {
+            let replacement = self
+                .newest_mature_snapshot(
+                    history
+                        .announcements
+                        .range((std::ops::Bound::Excluded(*slot), std::ops::Bound::Unbounded))
+                        .rev()
+                        .filter(|(_, newer)| {
+                            newer.snapshot.audience == id.audience
+                                && newer.covers >= announcement.covers
+                                && history.usable(newer)
+                        }),
+                )
+                .await?;
+            if replacement.is_none() {
                 continue;
             }
             self.database
@@ -242,6 +243,20 @@ impl SequenceSync {
                 .await?;
         }
         self.resume_retention(session, ring, member).await
+    }
+
+    /// Candidates are in descending announcement-slot order. An immature
+    /// announcement cannot hide an older snapshot whose grace has passed.
+    async fn newest_mature_snapshot<'a>(
+        &self,
+        candidates: impl Iterator<Item = (&'a Slot, &'a SnapshotAnnouncement)>,
+    ) -> Result<Option<(&'a Slot, &'a SnapshotAnnouncement)>, SyncError> {
+        for (slot, snapshot) in candidates {
+            if self.past_grace(&self.immutable_metadata(&self.path(slot.0)?).await?) {
+                return Ok(Some((slot, snapshot)));
+            }
+        }
+        Ok(None)
     }
 
     async fn propose_floor(
@@ -263,23 +278,21 @@ impl SequenceSync {
             .collect();
         let mut selected = Vec::new();
         for audience in audiences {
-            let Some((slot, snapshot)) =
-                session
-                    .history
-                    .announcements
-                    .iter()
-                    .rev()
-                    .find(|(_, snapshot)| {
-                        snapshot.snapshot.audience == audience && session.history.usable(snapshot)
-                    })
-            else {
-                return Ok(None);
-            };
             // The proved floor loader starts from ordinary snapshots. An active
             // preparation is followed by an ordinary capture before retention.
-            if snapshot.purpose != Purpose::Ordinary {
+            let candidates = session
+                .history
+                .announcements
+                .iter()
+                .rev()
+                .filter(|(_, snapshot)| {
+                    snapshot.snapshot.audience == audience
+                        && snapshot.purpose == Purpose::Ordinary
+                        && session.history.usable(snapshot)
+                });
+            let Some((slot, snapshot)) = self.newest_mature_snapshot(candidates).await? else {
                 return Ok(None);
-            }
+            };
             if let Some(floor) = &session.floor {
                 if floor
                     .announcements
@@ -308,11 +321,6 @@ impl SequenceSync {
                 .map_or(1, |floor| floor.header.first.0)
         {
             return Ok(None);
-        }
-        for (slot, _) in &selected {
-            if !self.past_grace(&self.immutable_metadata(&self.path(slot.0)?).await?) {
-                return Ok(None);
-            }
         }
         let originals: BTreeMap<_, _> = self
             .database

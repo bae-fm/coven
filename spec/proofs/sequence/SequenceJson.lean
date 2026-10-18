@@ -316,10 +316,29 @@ def readMemberReplacement (j : Json) : Except String Json := do
   return Json.mkObj [("paused", toJson paused), ("active", toJson active),
     ("candidate", toJson candidate)]
 
+/-- Timestamp upper bounds and applicability come from authenticated Rust input.
+Coverage is monotone in announcement order; candidates arrive newest first. -/
+def readRetention (j : Json) : Except String Json := do
+  let candidates ← (← j.getObjValAs? (List Json) "snapshots").mapM fun item => do
+    let slot ← positive item "slot"
+    let covers ← nat item "covers"
+    if covers ≥ slot then throw "coverage must precede its announcement"
+    return ((⟨slot, covers, ← nat item "announced_at"⟩ : Retention.Snapshot),
+      ← item.getObjValAs? Bool "usable")
+  distinct (candidates.map (·.1.slot)) "announcement slot"
+  for (newer, older) in candidates.zip (candidates.drop 1) do
+    if newer.1.slot ≤ older.1.slot || newer.1.covers < older.1.covers then
+      throw "announcements must be newest first with monotone coverage"
+  let usable := fun s => candidates.any fun (candidate, applies) => candidate == s && applies
+  match Retention.choose (candidates.map (·.1)) usable (← nat j "grace") (← nat j "time") with
+  | none => return Json.null
+  | some selected => return Json.mkObj [("slot", toJson selected.slot), ("covers", toJson selected.covers)]
+
 def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
   | "read" => readRead j
+  | "retention" => readRetention j
   | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))
   | "reselect" => readReselect j
   | "apply" => readApply j
