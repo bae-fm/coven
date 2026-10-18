@@ -766,20 +766,24 @@ authorship root (D9, D11).
 
 ### D5.10 Dismissals (kind 3)
 
-A dismissal names a lost cell the app dismissed
-([api.md E4](api.md#e4-reading)):
+A dismissal names a lost value the app dismissed
+([api.md E4](api.md#e4-reading)). A frozen delete can have no old values, so it
+needs a target even when there is no column to name:
 
 ```
 row     RowId
-column  name
+target  u8: 0 cell, 1 empty frozen row
+column  name, only for target 0
 write   WriteId
 ```
 
+- For a cell, `write` is its setter. For an empty frozen row, it is the
+  original change's write; the target applies only while that loss is empty.
 - Dismissing a removed row is a delete of it, an ordinary row change, not a
   dismissal.
-- Changes come before dismissals of the same row.
-- Those dismissals are ordered by column, then write, with no duplicates. Each
-  names a write the author had read.
+- Changes come before dismissals of the same row. Cell dismissals come next,
+  ordered by column then write; dismissals of empty rows follow, ordered by write.
+- There are no duplicates. Each names a write the author had read.
 
 ### D5.11 Checking a part
 

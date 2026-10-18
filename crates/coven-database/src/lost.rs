@@ -25,7 +25,7 @@ pub(crate) enum LossTarget {
         row: coven_merge::RowId,
         generation: u64,
     },
-    Cells(Vec<coven_format::dismissal::Dismissal>),
+    Acknowledgements(Vec<coven_format::dismissal::Dismissal>),
 }
 
 /// Values retained when a cell loses or a row is removed.
@@ -160,6 +160,7 @@ impl LostValue {
                     .collect(),
             ),
         };
+        let original = record.cause.change_write();
         let replaced_by = match record.cause {
             LossCause::Write(write) => Replacement::Write(write),
             LossCause::Rules(rules) => Replacement::Rules(
@@ -219,16 +220,22 @@ impl LostValue {
                 Lost::Cell(cell) => std::slice::from_ref(cell),
                 Lost::Row(cells) => cells,
             };
-            LossTarget::Cells(
+            LossTarget::Acknowledgements(if cells.is_empty() {
+                vec![coven_format::dismissal::Dismissal {
+                    row: row.clone(),
+                    target: coven_format::dismissal::DismissalTarget::EmptyRow,
+                    write: original.expect("an empty frozen loss names its original change"),
+                }]
+            } else {
                 cells
                     .iter()
                     .map(|cell| coven_format::dismissal::Dismissal {
                         row: row.clone(),
-                        column: cell.column.clone(),
+                        target: coven_format::dismissal::DismissalTarget::Cell(cell.column.clone()),
                         write: cell.set_by,
                     })
-                    .collect(),
-            )
+                    .collect()
+            })
         };
         Ok(LostValue {
             table: row.table,

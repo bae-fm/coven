@@ -32,7 +32,7 @@ pub(crate) fn stream(write: DownloadedWrite) -> DownloadedWriteStream<Cursor<Vec
                 frames.sort_by_key(|frame| match frame {
                     WriteFrame::Change(row) => (row.row.clone(), None),
                     WriteFrame::Execution(row) => (row.row.clone(), None),
-                    WriteFrame::Dismissal(d) => (d.row.clone(), Some((d.column.clone(), d.write))),
+                    WriteFrame::Dismissal(d) => (d.row.clone(), Some((d.target.clone(), d.write))),
                 });
                 let bytes: Vec<_> = frames
                     .iter()

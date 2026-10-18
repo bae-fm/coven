@@ -294,7 +294,7 @@ async fn migrations_freeze_deleted_rows_and_preserve_surviving_written_reference
     );
     assert!(matches!(
         retained[0].target,
-        crate::lost::LossTarget::Cells(_)
+        crate::lost::LossTarget::Acknowledgements(_)
     ));
     a.inspect_writer_schema(|db, schema| {
         db.for_each::<_, crate::DbError>(

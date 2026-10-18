@@ -382,3 +382,75 @@ async fn a_dismissal_records_each_row_of_a_cascade_cycle_once() {
     a.close().await.unwrap();
     b.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_empty_frozen_delete_can_be_dismissed_after_receipt_and_snapshot() {
+    let ids = SequentialIds::new();
+    let source_store = TestStore::with_ids(&ids);
+    let a_store = TestStore::with_ids(&ids);
+    let b_store = TestStore::with_ids(&ids);
+    let source = open(&source_store, NOTES).await;
+    sql(&source, "INSERT INTO notes VALUES('n','excluded','body')")
+        .await
+        .unwrap();
+    sql(&source, "DELETE FROM notes").await.unwrap();
+    let mut writes = records(&source);
+    writes[1].parts[0].rows[0].old.clear();
+    let mut other = writes[1].clone();
+    other.header.position.number += 1;
+    other.header.timestamp = coven_merge::Timestamp::new(
+        other.header.timestamp.milliseconds() + 1,
+        0,
+        other.header.position.device,
+    )
+    .unwrap();
+    writes.push(other);
+    let a = crate::write_boundary::tests::version_two(&a_store, false).await;
+    let b = crate::write_boundary::tests::version_two(&b_store, false).await;
+    a.exclude_later_writes(2).await;
+    for write in &writes {
+        a.receive(write.clone().into()).await.unwrap();
+    }
+    for marker in records(&b) {
+        a.receive(marker.into()).await.unwrap();
+    }
+    let losses = a.lost_values().await.unwrap();
+    assert_eq!(losses.len(), 3);
+    let empty = losses
+        .iter()
+        .find(|loss| matches!(&loss.lost, crate::Lost::Row(cells) if cells.is_empty()))
+        .unwrap()
+        .clone();
+    crate::snapshot_write::tests::assert_loaded_losses(&a, &b).await;
+    let original_count = count(&b, "_coven_authored_changes");
+    let queued = records(&b).len();
+    b.dismiss_lost_values(std::slice::from_ref(&empty))
+        .await
+        .unwrap();
+    let remaining: Vec<_> = losses.into_iter().filter(|loss| loss != &empty).collect();
+    assert_eq!(remaining.len(), 2);
+    assert_eq!(
+        b.lost_values().await.unwrap(),
+        remaining,
+        "the empty loss must be acknowledged"
+    );
+    assert_eq!(count(&b, "_coven_authored_changes"), original_count);
+    assert_eq!(records(&b).len(), queued + 1);
+    let dismissal = records(&b).pop().unwrap();
+    assert!(dismissal.parts[0].rows.is_empty());
+    assert_eq!(dismissal.parts[0].dismissals.len(), 1);
+    a.receive(dismissal.clone().into()).await.unwrap();
+    a.receive(dismissal.into()).await.unwrap();
+    assert_eq!(a.lost_values().await.unwrap(), remaining);
+    b.dismiss_lost_values(std::slice::from_ref(&empty))
+        .await
+        .unwrap();
+    assert_eq!(records(&b).len(), queued + 1);
+    b.close().await.unwrap();
+    let b = crate::write_boundary::tests::version_two(&b_store, false).await;
+    assert_eq!(b.lost_values().await.unwrap(), remaining);
+    assert_eq!(count(&b, "_coven_authored_changes"), original_count);
+    b.close().await.unwrap();
+    a.close().await.unwrap();
+    source.close().await.unwrap();
+}

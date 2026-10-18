@@ -5113,7 +5113,9 @@ kept separately, so dismissing a record can't change a source's verdict.
   (§8.4).
 - A record is removed when a later write that had read the value replaces it in
   place (§8.2), when the app dismisses it, and when a taken-out row comes back.
-- A frozen record is never removed by a later replacement (§9.5).
+- A frozen record is never removed by a later replacement (§9.5). A frozen delete
+  with no values is still dismissible: its row and original write identify the
+  acknowledgement (format.md D5.10).
 
 ### B.5 How constraints are named
 

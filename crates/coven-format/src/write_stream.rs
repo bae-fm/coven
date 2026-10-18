@@ -188,7 +188,7 @@ pub struct PartDecoder {
     frames: FrameDecoder,
     received: u64,
     rows: u64,
-    previous: Option<(RowId, Option<(String, WriteId)>)>,
+    previous: Option<(RowId, Option<(crate::dismissal::DismissalTarget, WriteId)>)>,
 }
 impl PartDecoder {
     /// Begin the stream described by the authenticated write header.

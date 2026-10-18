@@ -699,7 +699,7 @@ async fn dismissing_a_frozen_loss_rewrites_no_row() {
     assert_eq!(frozen.len(), 1, "{frozen:#?}");
     assert!(matches!(
         frozen[0].target,
-        crate::lost::LossTarget::Cells(_)
+        crate::lost::LossTarget::Acknowledgements(_)
     ));
     assert_eq!(creation(&db), created);
     let rows = count(&db, "labels");

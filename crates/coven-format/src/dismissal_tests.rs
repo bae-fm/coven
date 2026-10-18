@@ -15,7 +15,7 @@ fn changed_row() -> crate::write::WriteRecord {
 fn dismissal(column: &str) -> Dismissal {
     Dismissal {
         row: test_utils::row(),
-        column: column.into(),
+        target: DismissalTarget::Cell(column.into()),
         write: coven_merge::WriteId {
             number: 2,
             ..test_utils::position()
@@ -69,7 +69,7 @@ fn malformed_or_duplicate_dismissals_and_reversed_frames_are_refused() {
     assert!(decoder.chunk(&reversed).is_err());
     let mut lost = dismissal("");
     assert!(lost.encode().is_err());
-    lost.column = "x".into();
+    lost.target = DismissalTarget::Cell("x".into());
     lost.write.number = 0;
     assert!(lost.encode().is_err());
     let bytes = dismissal("x").encode().unwrap();
@@ -124,4 +124,54 @@ fn dismissals_require_explicit_peer_reads_or_implicit_own_predecessors() {
             );
         }
     }
+}
+
+#[test]
+fn empty_rows_have_distinct_ordered_dismissals_and_their_own_write() {
+    let cell = dismissal("x");
+    let empty = Dismissal {
+        target: DismissalTarget::EmptyRow,
+        ..cell.clone()
+    };
+    let mut later = empty.clone();
+    later.write.device = coven_foundation::id_source::DeviceId(2);
+    later.write.number = 1;
+    let bytes = empty.encode().unwrap();
+    assert_eq!(
+        bytes,
+        test_utils::fixture_bytes(
+            "0300010000001f000000017400000004206b0000000100000000000000010000000000000002"
+        )
+    );
+    assert_eq!(Dismissal::decode(&bytes).unwrap(), empty);
+    assert_ne!(bytes, cell.encode().unwrap());
+    // The target tag follows RowId and precedes the write's two u64s.
+    assert_eq!(bytes[bytes.len() - 17], 1);
+    let mut unknown = bytes.clone();
+    let tag = unknown.len() - 17;
+    unknown[tag] = 2;
+    assert!(matches!(
+        Dismissal::decode(&unknown),
+        Err(Error::UnknownTag {
+            field: "dismissal target",
+            tag: 2
+        })
+    ));
+    crate::tests::mutations(&bytes, |bytes| {
+        if let Ok(value) = Dismissal::decode(bytes) {
+            assert_eq!(value.encode().unwrap(), bytes);
+        }
+    });
+    let mut record = changed_row();
+    record.parts[0].dismissals = vec![cell, empty.clone(), later.clone()];
+    assert_eq!(
+        decode_plaintext(&test_utils::write_plaintext(&record).unwrap()).unwrap(),
+        record
+    );
+    record.parts[0].dismissals.swap(0, 1);
+    assert!(WriteEncoder::new(&record).is_err());
+    record.parts[0].dismissals = vec![later, empty.clone()];
+    assert!(WriteEncoder::new(&record).is_err());
+    record.parts[0].dismissals = vec![empty.clone(), empty];
+    assert!(WriteEncoder::new(&record).is_err());
 }

@@ -785,7 +785,7 @@ pub fn frame_examples() -> Vec<Zeroizing<Vec<u8>>> {
     frames.push(Zeroizing::new(
         crate::dismissal::Dismissal {
             row: row(),
-            column: "x".into(),
+            target: crate::dismissal::DismissalTarget::Cell("x".into()),
             write: position(),
         }
         .encode()

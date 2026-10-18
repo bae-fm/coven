@@ -454,7 +454,7 @@ pub struct WritePart {
     /// Rows the SQL changed with no net change, in increasing row order; no
     /// row also has a change.
     pub executions: Vec<RowExecution>,
-    /// Lost cells acknowledged by this write, ordered by row, column and setter.
+    /// Lost values acknowledged by this write, ordered by row, target and write (D5.10).
     pub dismissals: Vec<crate::dismissal::Dismissal>,
 }
 impl WritePart {

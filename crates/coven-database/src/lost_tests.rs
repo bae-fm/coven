@@ -491,7 +491,10 @@ mod dropped_schema {
         );
         assert_eq!(after[0].table, "tags");
         assert_eq!(cell_column(&after[0]), "label");
-        assert!(matches!(after[0].target, crate::lost::LossTarget::Cells(_)));
+        assert!(matches!(
+            after[0].target,
+            crate::lost::LossTarget::Acknowledgements(_)
+        ));
         assert_eq!(evidence(&a, "tags"), sources, "verdicts outlive the table");
         let fresh = stores[2]
             .builder(tables(&["notes"]), migrations())
@@ -638,7 +641,7 @@ mod dropped_schema {
         };
         let frozen = losses
             .iter()
-            .find(|l| matches!(l.target, crate::lost::LossTarget::Cells(_)))
+            .find(|l| matches!(l.target, crate::lost::LossTarget::Acknowledgements(_)))
             .unwrap();
         assert_eq!(&frozen.lost, &hidden[0].lost);
         assert!(matches!(

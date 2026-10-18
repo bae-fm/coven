@@ -1,4 +1,4 @@
-//! Acknowledging cells and deleting removed rows in a causal write.
+//! Acknowledging lost values and deleting removed rows in a causal write.
 
 use crate::lost::LossTarget;
 use crate::merge_store::MergeStore;
@@ -8,7 +8,7 @@ use crate::write_rows::AppView;
 use crate::write_schema::WriteSchema;
 use crate::{DbError, LostValue};
 use coven_format::{
-    dismissal::Dismissal,
+    dismissal::{Dismissal, DismissalTarget},
     value::Value,
     write::{RowChange, Step, WritePart, WriteRecord},
 };
@@ -32,7 +32,7 @@ pub(crate) fn dismiss(
         let visible = AppView::after(database, schema);
         let store = MergeStore::new(database, &visible);
         let mut changes = BTreeMap::new();
-        let mut cells = BTreeSet::new();
+        let mut acknowledgements = BTreeSet::new();
         for value in values {
             match &value.target {
                 LossTarget::Removed { row, generation } => {
@@ -43,21 +43,21 @@ pub(crate) fn dismiss(
                         changes.insert(row.clone(), deletion(database, &store, &old.state)?);
                     }
                 }
-                LossTarget::Cells(dismissals) => {
+                LossTarget::Acknowledgements(dismissals) => {
                     for dismissal in dismissals {
                         if contains(database, dismissal)? {
-                            cells.insert(dismissal.clone());
+                            acknowledgements.insert(dismissal.clone());
                         }
                     }
                 }
             }
         }
-        if changes.is_empty() && cells.is_empty() {
+        if changes.is_empty() && acknowledgements.is_empty() {
             return Ok(());
         }
         cascade_deletes(database, schema, &store, device, &mut changes)?;
         let mut record = crate::write_record::changed(database, device, now, changes)?;
-        for dismissal in cells {
+        for dismissal in acknowledgements {
             let audience = dismissal.row.audience.clone();
             match record
                 .parts
@@ -195,7 +195,7 @@ fn contains(database: &DatabaseConnection, dismissal: &Dismissal) -> Result<bool
         .map(LostValue::from_record)
         .collect::<Result<Vec<_>, DbError>>()?;
     Ok(losses.iter().any(|loss| match &loss.target {
-        LossTarget::Cells(cells) => cells.contains(dismissal),
+        LossTarget::Acknowledgements(values) => values.contains(dismissal),
         LossTarget::Removed { .. } => false,
     }))
 }
@@ -220,25 +220,32 @@ pub(crate) fn apply(
                 [id],
                 crate::loss_record::read,
             )?;
-            let matches = match &loss.values {
-                LossValues::Cell { column, cell } => {
-                    *column == dismissal.column && cell.write == dismissal.write
+            let matches = match (&dismissal.target, &loss.values) {
+                (DismissalTarget::Cell(target), LossValues::Cell { column, cell }) => {
+                    column == target && cell.write == dismissal.write
                 }
-                LossValues::Row(cells) => {
+                (DismissalTarget::Cell(column), LossValues::Row(cells)) => {
                     loss.frozen
                         && cells
-                            .get(&dismissal.column)
+                            .get(column)
                             .is_some_and(|cell| cell.write == dismissal.write)
                 }
+                (DismissalTarget::EmptyRow, LossValues::Row(cells)) => {
+                    loss.frozen
+                        && cells.is_empty()
+                        && loss.cause.change_write() == Some(dismissal.write)
+                }
+                (DismissalTarget::EmptyRow, LossValues::Cell { .. }) => false,
             };
             if !matches {
                 continue;
             }
-            let keep = if let LossValues::Row(cells) = &mut loss.values {
-                cells.remove(&dismissal.column);
-                !cells.is_empty()
-            } else {
-                false
+            let keep = match (&dismissal.target, &mut loss.values) {
+                (DismissalTarget::Cell(column), LossValues::Row(cells)) => {
+                    cells.remove(column);
+                    !cells.is_empty()
+                }
+                _ => false,
             };
             if keep {
                 crate::loss_record::put(database, &loss, Some(id))?;

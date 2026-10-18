@@ -529,7 +529,7 @@ async fn a_migration_deletes_removed_rows_and_snapshots_their_losses() {
     );
     assert!(matches!(
         retained[0].target,
-        crate::lost::LossTarget::Cells(_)
+        crate::lost::LossTarget::Acknowledgements(_)
     ));
     let (header, snapshot) = decode(&frames(&a, Audience::Store).await);
     assert_eq!(header.schema_version, 2);
@@ -727,7 +727,7 @@ async fn excluded_snapshots_keep_only_undismissed_cells_and_rows() {
         dismissal.parts[0].rows.clear();
         dismissal.parts[0].dismissals = vec![Dismissal {
             row: excluded.parts[0].rows[0].row.clone(),
-            column: "title".into(),
+            target: coven_format::dismissal::DismissalTarget::Cell("title".into()),
             write: excluded.header.position,
         }];
         // An old-schema dismissal is excluded too; a migrated one applies.
