@@ -183,6 +183,21 @@ impl StorageConnections {
         self.codes.restore_code().await
     }
 
+    /// The S3 key this device's custody holds now, read where the connection
+    /// reads it, so a replaced key is the current one (§13.1). It never waits
+    /// for the connection; any other provider, or no key, gives None.
+    pub(crate) async fn s3_credentials_for_transfer(
+        &self,
+    ) -> Result<Option<S3Credentials>, SyncError> {
+        Ok(match self.codes.connection().await? {
+            Some(coven_storage::ConnectionCredentials {
+                credentials: coven_storage::StorageCredentials::S3(keys),
+                ..
+            }) => Some(keys),
+            _ => None,
+        })
+    }
+
     /// Install and record a replacement S3 key; it needs the connection.
     pub(crate) async fn replace_access_key(
         &self,

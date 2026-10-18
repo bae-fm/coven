@@ -4250,6 +4250,11 @@ pub enum ProviderSignOut {
   and the S3 key, because the person controls the showing device. The key
   accompanies the code; it is never part of the restore-code encoding.
   iCloud Keychain may also hold the S3 key separately alongside the code.
+- `s3_credentials_for_transfer()` gives the showing device's app the S3 key
+  this device holds now, read from the same custody its connection uses.
+  The app shows it only in the restore code's QR code, to the person's own
+  new device, behind the same tap that reveals the code. After a key
+  replacement it returns the new key. Other providers return `None`.
 - `saved_restore_codes()` lists the registered service's saved codes so the
   app can offer a choice before opening a store. Entries expose the store id,
   provider location, including the member's account label, and separate S3-key
@@ -4457,6 +4462,13 @@ impl CovenHandle {
     /// in the applied prefix; missing current keys report MemberKeysReplaced,
     /// and a retired pair is never exported.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
+
+    /// The S3 key this device holds now, for the app to show beside the
+    /// restore code, never inside it, to the person's own new device (§13.1).
+    /// A replaced key returns its replacement. None on other providers or
+    /// when this device holds no key. A locked keychain fails with
+    /// SyncError::SecureStorage(KeyError::KeychainTemporarilyUnavailable).
+    pub async fn s3_credentials_for_transfer(&self) -> Result<Option<S3Credentials>, SyncError>;
 
     /// Fixes a fresh member id or an existing active replacement target, as
     /// an admin. The invite expires after a day. Replacement preserves role,
@@ -4689,7 +4701,12 @@ Example, adding Ana's laptop. On her phone:
 
 ```rust
 let code = handle.restore_code().await?;
-show_blurred_qr_code(&code);
+// On S3 the key rides beside the code, as its own value.
+let s3_key = match handle.s3_credentials_for_transfer().await? {
+    Some(key) => Some(key.encode()?),
+    None => None,
+};
+show_blurred_qr_code(&code, s3_key.as_ref());
 ```
 
 On the laptop:
@@ -4706,10 +4723,11 @@ let mut builder = Coven::builder(layout.clone())
 if let Some(access) = metadata.oauth_access {
     builder.authenticate(access).await?;
 }
-let s3_credentials = if metadata.cloud_provider == CloudProvider::S3 {
-    Some(ask_for_s3_access_key().await?)
-} else {
-    None
+// `scanned_key` is the encoded key the phone showed beside the code, if any.
+let s3_credentials = match (metadata.cloud_provider, scanned_key) {
+    (CloudProvider::S3, Some(bytes)) => Some(S3Credentials::decode(&bytes)?),
+    (CloudProvider::S3, None) => Some(ask_for_s3_access_key().await?),
+    _ => None,
 };
 let handle = restore_from_code(
     builder,

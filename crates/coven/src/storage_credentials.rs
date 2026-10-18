@@ -8,6 +8,14 @@ impl CovenHandle {
         self.storage.restore_code().await
     }
 
+    /// The S3 key this device uses now, for the app to show beside the restore
+    /// code to the person's own new device, behind the same tap (§13.1, E10).
+    /// It is never part of the code. After a replacement it is the new key;
+    /// None on other providers or when this device holds no key.
+    pub async fn s3_credentials_for_transfer(&self) -> Result<Option<S3Credentials>, SyncError> {
+        self.storage.s3_credentials_for_transfer().await
+    }
+
     /// Commit a replacement S3 key and publish its id; the restore code is unchanged (E9).
     /// A publication failure retains the credentials; retry with the same key.
     /// Removal lists this key for deletion even if its access entry is refused.

@@ -145,10 +145,22 @@ async fn an_admin_replaces_a_members_key_and_their_device_adopts_it() {
             _ => panic!("S3 device key"),
         }
     };
+    let shown = || async {
+        network.devices[1]
+            .handle
+            .s3_credentials_for_transfer()
+            .await
+            .unwrap()
+            .unwrap()
+            .access_key_id
+    };
     assert_eq!(held(), "member-1");
-    // The member's device picks up the delivered key on its next sync.
+    assert_eq!(shown().await, "member-1");
+    // The member's device picks up the delivered key on its next sync, and
+    // shows that key beside its restore code from then on.
     network.sync(1).await;
     assert_eq!(held(), new_key);
+    assert_eq!(shown().await, new_key);
     network.close().await;
 }
 

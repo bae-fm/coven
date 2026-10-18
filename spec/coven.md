@@ -2271,7 +2271,7 @@ A new device gets the code in one of three ways:
 
 - **Scanning** a QR code on one of the person's devices that has the store open.
   The QR code is blurred until the person taps to show it. Because the person
-  controls both devices, this transfer may also carry their S3 key.
+  controls both devices, this transfer may also carry their S3 key (below).
 - **iCloud Keychain,** on Apple platforms. It holds the code and may hold the S3
   key separately beside it. Coven refreshes the Keychain code after setup, joining
   and member-key replacement. A changed S3 key updates its own entry without
@@ -2290,6 +2290,23 @@ password manager say, and enters it, unless the QR transfer or Keychain supplied
 it. On Dropbox and OneDrive, the new device asks coven to sign in to the person's
 own account first, through the sign-in presenter the app supplied; coven keeps the
 tokens. A new device on the same Apple account still needs that sign-in.
+
+Say Ana keeps a store on S3. When her phone shows the restore code for her new
+laptop, the app also asks coven for the key the phone uses,
+`s3_credentials_for_transfer()`, and shows it in the same QR code, beside the
+restore code. The laptop scans both and restores without Ana typing the key.
+
+- The key travels beside the code, never inside it, so the restore code alone
+  never gives anyone storage access.
+- The app shows the key only to the person's own new device, only in the restore
+  code's QR code, and behind the same tap. Anyone who sees it can reach the store's
+  storage as Ana until her key is replaced.
+- The call returns the key the phone holds now. If Ana's key was replaced
+  (§14.3), it is the replacement her phone installed, not the one she first
+  entered.
+- On Dropbox, OneDrive and iCloud there is no key to show, and the call returns
+  `None`: the new device reaches storage through its own sign-in or Apple
+  account.
 
 Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then:
 
