@@ -27,6 +27,9 @@ impl Device {
     pub(crate) fn database(&self) -> &Database {
         &self.sync.database
     }
+    pub(crate) fn files(&self) -> &Files {
+        &self.sync.files
+    }
 }
 #[cfg(test)]
 pub(crate) struct Group {

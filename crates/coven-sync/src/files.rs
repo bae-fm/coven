@@ -74,6 +74,18 @@ struct FilesInner {
     /// One eager fill at a time, and none while the connection changes.
     eager_fill: tokio::sync::Mutex<()>,
     cancel_eager: watch::Sender<u64>,
+    /// A sequence pass needs the same download capacity as this worker.
+    sequence_active: watch::Sender<bool>,
+}
+pub(crate) struct SequenceDownloads<'a> {
+    active: &'a watch::Sender<bool>,
+    wake: &'a Notify,
+}
+impl Drop for SequenceDownloads<'_> {
+    fn drop(&mut self) {
+        self.active.send_replace(false);
+        self.wake.notify_one();
+    }
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
@@ -98,6 +110,7 @@ impl Files {
         let mut changes = database.queued_work_changes();
         let mut sending = send.subscribe();
         let (cancel_eager, _) = watch::channel(0);
+        let (sequence_active, _) = watch::channel(false);
         let (stop, mut stopping) = watch::channel(false);
         let inner = Arc::new(FilesInner {
             database,
@@ -117,6 +130,7 @@ impl Files {
             closed: AtomicBool::new(false),
             eager_fill: tokio::sync::Mutex::new(()),
             cancel_eager,
+            sequence_active,
         });
         let weak = Arc::downgrade(&inner);
         let wake = inner.wake.clone();
@@ -152,8 +166,6 @@ impl Files {
                         }
                         Err(error) => tracing::error!(?error, "upload queue failed"),
                     }
-                    // Outside a pass nothing reports it; the next pass's
-                    // file work tries the fill again and fails with it.
                     if let Err(error) = owner.fill_eager().await {
                         tracing::error!(?error, "eager cache fill failed");
                     }
@@ -209,11 +221,15 @@ impl Files {
         Ok(())
     }
 
-    /// §6.6, §6.7: wake the upload worker, and fill the eager cache with new
-    /// references and the failed downloads whose retry waits are due.
-    pub(crate) async fn sync_files(&self) -> Result<(), SyncError> {
-        self.inner.wake.notify_one();
-        self.inner.fill_eager().await
+    /// A serialized sequence pass interrupts background downloads, releasing
+    /// their shared capacity. Dropping the guard resumes retained requests,
+    /// including when the pass fails or its caller cancels (§6.6, §17.6).
+    pub(crate) fn sequence_downloads(&self) -> SequenceDownloads<'_> {
+        self.inner.sequence_active.send_replace(true);
+        SequenceDownloads {
+            active: &self.inner.sequence_active,
+            wake: &self.inner.wake,
+        }
     }
 
     /// Finish transfers before verifying and committing a connection change.

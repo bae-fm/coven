@@ -342,7 +342,7 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
         }
         crate::tests::apply_write(&b.database, write).await.unwrap();
     }
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     // The last file completed although every earlier one failed.
     assert_eq!(
         b.files.inner.database.missing_bytes(&good).await.unwrap(),
@@ -399,7 +399,7 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
             .count()
     };
     let before = damaged_reads(&a.storage.reads().await);
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(
         b.files
             .inner
@@ -421,7 +421,7 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
 }
 
 #[tokio::test]
-async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
+async fn a_fill_preserves_eager_cancellation_and_retries_network_failures() {
     let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
     let clock = clock();
@@ -441,7 +441,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
         crate::tests::apply_write(&b.database, write).await.unwrap();
     }
     // The network failure is the file's pending record, not a fill state.
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert!(matches!(
         file_records(&b).await.as_slice(),
         [crate::PendingReason::Storage {
@@ -451,7 +451,7 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
     ));
     a.storage.set_online(true);
     clock.set(clock.now() + Duration::from_secs(1));
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(
         b.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
@@ -483,14 +483,14 @@ async fn a_sync_preserves_eager_cancellation_and_retries_network_failures() {
         status.next().await.unwrap(),
         EagerCacheFillStatus::Cancelled(_)
     ) {}
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert!(b.files.inner.database.missing_bytes(&second).await.unwrap() > 0);
     b.close().await;
     a.close().await;
 }
 
-/// A fill that cannot read its own work fails the pass's step rather than
-/// leaving it `Synced` with nothing recorded (§17.6, E5).
+/// A fill that cannot read its own work returns the database failure to its
+/// worker, which logs it (§17.6).
 #[tokio::test]
 async fn a_fill_that_cannot_read_its_work_fails_its_step() {
     let clock = clock();
@@ -500,7 +500,7 @@ async fn a_fill_that_cannot_read_its_work_fails_its_step() {
     apply_all(&a, &b).await;
     b.database.close().await.unwrap();
     assert!(matches!(
-        b.files.sync_files().await,
+        b.files.inner.fill_eager().await,
         Err(crate::SyncError::Database(
             coven_database::DbError::StoreClosed
         ))
@@ -523,7 +523,7 @@ async fn a_failed_download_is_not_requested_before_its_deadline() {
     let mut b = eager_reader(&a, &clock).await;
     apply_all(&a, &b).await;
     a.storage.set_online(false);
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     let waits = b.files.inner.database.download_waits().await.unwrap();
     let [(subject, wait)] = waits.as_slice() else {
         panic!("one persisted wait: {waits:?}");
@@ -537,16 +537,16 @@ async fn a_failed_download_is_not_requested_before_its_deadline() {
     assert_eq!(wait.not_before, clock.now() + Duration::from_secs(1));
     a.storage.set_online(true);
     let reads = reads_of(&a, &file).await;
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(reads_of(&a, &file).await, reads);
     // Reopening arms the remaining wait from the persisted row.
     b.reopen().await;
     connect(&b, &a).await;
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(reads_of(&a, &file).await, reads);
     assert_eq!(file_records(&b).await.len(), 1);
     advance(&clock, 1);
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(
         b.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
@@ -582,7 +582,7 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
             ..Faults::none()
         })
         .await;
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     let cooldown = b
         .database
         .retry_wait(RetrySubject::Provider)
@@ -597,7 +597,7 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
     advance(&clock, 1);
     let requests = a.storage.request_trace().len();
     let status = b.database.eager_cache_fill_status().await.unwrap();
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     // Not attempted at all: the fill never started.
     assert_eq!(b.database.eager_cache_fill_status().await.unwrap(), status);
     assert_eq!(
@@ -606,7 +606,7 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
     );
     assert_eq!(a.storage.request_trace().len(), requests);
     advance(&clock, 599);
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(
         b.files.inner.database.missing_bytes(&file).await.unwrap(),
         0

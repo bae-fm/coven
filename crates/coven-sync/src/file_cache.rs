@@ -101,6 +101,10 @@ impl FilesInner {
     /// no file subject holds, such as reading the work, fails the fill.
     pub(crate) async fn fill_eager(self: &Arc<Self>) -> Result<(), crate::SyncError> {
         let _fill = self.eager_fill.lock().await;
+        let mut sequence = self.sequence_active.subscribe();
+        if *sequence.borrow_and_update() {
+            return Ok(());
+        }
         if self
             .storage
             .read()
@@ -109,7 +113,10 @@ impl FilesInner {
         {
             return Ok(());
         }
-        self.fill_pins().await?;
+        self.fill_pins(&mut sequence).await?;
+        if *sequence.borrow_and_update() {
+            return Ok(());
+        }
         let files = self.database.eager_work().await?;
         if files.is_empty() {
             return Ok(());
@@ -132,6 +139,9 @@ impl FilesInner {
         self.database.request_eager(pending.clone()).await?;
         let mut cancel = self.cancel_eager.subscribe();
         for file in &pending {
+            if *sequence.borrow_and_update() {
+                return Ok(());
+            }
             self.forget_connection_wait(download_subject(file));
             let work = async {
                 self.database.validate(file).await?;
@@ -141,6 +151,10 @@ impl FilesInner {
                     .await
             };
             let result = tokio::select! {
+                biased;
+                // Release the response but retain requests and committed ranges.
+                // Once a download returns, record its outcome before yielding.
+                _ = sequence.changed() => return Ok(()),
                 _ = cancel.changed() => {
                     // Cancelled downloads are not retried; new references remain eligible.
                     for file in &pending {
@@ -181,7 +195,10 @@ impl FilesInner {
     /// from storage as an app's pin is. One file's failure is its own
     /// pending record; a pin whose row no longer names its file has nothing
     /// to keep.
-    async fn fill_pins(self: &Arc<Self>) -> Result<(), crate::SyncError> {
+    async fn fill_pins(
+        self: &Arc<Self>,
+        sequence: &mut tokio::sync::watch::Receiver<bool>,
+    ) -> Result<(), crate::SyncError> {
         let files = self.database.pin_requests().await?;
         if files.is_empty() {
             return Ok(());
@@ -190,18 +207,25 @@ impl FilesInner {
             self.database.download_waits().await?.into_iter().collect();
         let _pins = self.pins.lock().await;
         for file in files {
+            if *sequence.borrow_and_update() {
+                return Ok(());
+            }
             let retry = download_subject(&file);
             if !self.connection_due(retry) || !self.waits.due(retry, waits.get(&retry)) {
                 continue;
             }
             self.forget_connection_wait(retry);
-            let kept = async {
+            let keep = async {
                 UploadedFile::open(self.clone(), file.clone())
                     .await?
                     .keep_whole()
                     .await
-            }
-            .await;
+            };
+            let kept = tokio::select! {
+                biased;
+                _ = sequence.changed() => return Ok(()),
+                result = keep => result,
+            };
             let subject = PendingSubject::File {
                 device: file.uploader(),
                 file: file.id(),

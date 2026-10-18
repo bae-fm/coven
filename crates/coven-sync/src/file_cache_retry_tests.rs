@@ -17,18 +17,18 @@ async fn full_storage_retries_eager_downloads_under_backoff() {
                 ..Faults::none()
             })
             .await;
-        b.files.sync_files().await.unwrap();
+        b.files.inner.fill_eager().await.unwrap();
         let waits = b.files.inner.database.download_waits().await.unwrap();
         assert_eq!(waits.len(), 1);
         assert_eq!(waits[0].1.wait, Duration::from_secs(wait));
         let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
         assert_eq!(records[0].retry(), Retry::Automatic);
         let requests = a.storage.request_trace().len();
-        b.files.sync_files().await.unwrap();
+        b.files.inner.fill_eager().await.unwrap();
         assert_eq!(a.storage.request_trace().len(), requests);
         advance(&clock, wait);
     }
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(
         b.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
@@ -57,7 +57,7 @@ async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverab
                 ..Faults::none()
             })
             .await;
-        b.files.sync_files().await.unwrap();
+        b.files.inner.fill_eager().await.unwrap();
         let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
         assert_eq!(
             records[0].reason,
@@ -85,14 +85,14 @@ async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverab
         assert!(b.files.inner.next_retry().is_none());
         let requests = a.storage.request_trace().len();
         advance(&clock, 600);
-        b.files.sync_files().await.unwrap();
+        b.files.inner.fill_eager().await.unwrap();
         assert_eq!(a.storage.request_trace().len(), requests);
         connect(&b, &a).await;
-        b.files.sync_files().await.unwrap();
+        b.files.inner.fill_eager().await.unwrap();
         if failure == StorageFailure::Protocol {
             b.reopen().await;
             connect(&b, &a).await;
-            b.files.sync_files().await.unwrap();
+            b.files.inner.fill_eager().await.unwrap();
             assert_eq!(a.storage.request_trace().len(), requests);
             assert_eq!(
                 b.database.pending::<crate::PendingRecord>().await.unwrap(),
@@ -124,12 +124,12 @@ async fn cancellation_while_waiting_for_credentials_survives_reconnection() {
             ..Faults::none()
         })
         .await;
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     let records = file_records(&b).await;
     b.files.cancel_eager_cache_fill().await.unwrap();
     let requests = a.storage.request_trace().len();
     connect(&b, &a).await;
-    b.files.sync_files().await.unwrap();
+    b.files.inner.fill_eager().await.unwrap();
     assert_eq!(a.storage.request_trace().len(), requests);
     assert_eq!(file_records(&b).await, records);
     assert_eq!(
@@ -260,7 +260,7 @@ async fn io_differential_download_retries() {
                             ..Faults::none()
                         })
                         .await;
-                    b.files.sync_files().await.unwrap();
+                    b.files.inner.fill_eager().await.unwrap();
                     let timed = !b
                         .files
                         .inner
@@ -280,7 +280,7 @@ async fn io_differential_download_retries() {
                         connect(&b, &a).await;
                     }
                     let requests = a.storage.request_trace().len();
-                    b.files.sync_files().await.unwrap();
+                    b.files.inner.fill_eager().await.unwrap();
                     actual.push(serde_json::json!({
                         "timed": timed,
                         "retried": a.storage.request_trace().len() > requests,

@@ -323,3 +323,188 @@ async fn io_differential_folder() {
     }
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
+
+#[tokio::test]
+async fn stalled_eager_downloads_leave_sequence_passes_free() {
+    use coven_database::{
+        CacheFill, DatabaseBuilder, DbError, EagerCacheFillStatus, FileDecl, Migration, Provenance,
+        RowIdentity, SyncedTable,
+    };
+    use coven_foundation::id_source::{IdSource, MemberId};
+    use std::time::Duration;
+    let group = Group::new();
+    let mut devices = Vec::new();
+    for (seed, fill) in [(1, CacheFill::CacheLazy), (2, CacheFill::CacheEager)] {
+        let (temp, directory) = group.directory();
+        let database = DatabaseBuilder::new(directory)
+            .synced_tables(vec![
+                SyncedTable::new("notes", RowIdentity::SharedKey),
+                SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
+                    "files", 1 << 20, Provenance::AppProvided, fill,
+                )),
+            ])
+            .migrations(vec![Migration::addition(1, "files", "CREATE TABLE notes(id TEXT NOT NULL PRIMARY KEY,title TEXT NOT NULL); CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
+            .open().await.unwrap();
+        let identity = coven_crypto::MemberIdentity::new(
+            MemberId(group.ids.new_id()),
+            coven_format::test_utils::keys_from_seed(seed),
+        );
+        devices.push(
+            group
+                .attach(
+                    temp,
+                    identity,
+                    Some(group.ring.clone()),
+                    group.storage.for_device(),
+                    database,
+                )
+                .await,
+        );
+    }
+    let ana = &devices[0];
+    let ben = &devices[1];
+    group.create(ana).await;
+    group.admit(ana, ben).await;
+    ana.database()
+        .write_with_files::<_, _, _, DbError>(
+            |batch| {
+                batch.put_file("files", "recording", b"sound".to_vec());
+                Ok(())
+            },
+            |sql| {
+                sql.execute("INSERT INTO files(id) VALUES('recording')", [])?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+    let file = ana.database().file_ref("files", "recording").await.unwrap();
+    ana.files().retry_uploads_now().await.unwrap();
+    let (started, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_body_at(
+            coven_storage::ObjectPath::file(group.store, file.uploader(), file.id()),
+            1,
+            started,
+            held,
+        )
+        .await;
+    ana.sync.pass().await.unwrap();
+    // Wait for both facts: the file response is held and the pass completed.
+    // Releasing the body before completion would hide the bug.
+    let (pass, ()) = tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::join!(ben.sync.pass(), async {
+            observed.await.unwrap();
+        })
+    })
+    .await
+    .expect("a held file must not hold a sequence pass");
+    assert!(matches!(
+        pass.unwrap(),
+        crate::SequenceStatus::Synced { .. }
+    ));
+    assert!(
+        matches!(ben.database().eager_cache_fill_status().await.unwrap(),
+        EagerCacheFillStatus::Downloading(progress) if progress.bytes_cached < progress.bytes_total)
+    );
+    // The next response also waits, proving that the pass does not need the
+    // file to finish. The first response must yield the single download slot.
+    let (restarted, retry_observed) = tokio::sync::oneshot::channel();
+    let (retry_resume, retry_held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_body_at(
+            coven_storage::ObjectPath::file(group.store, file.uploader(), file.id()),
+            1,
+            restarted,
+            retry_held,
+        )
+        .await;
+    let applied = ben.database().applied_slot().await.unwrap();
+    insert(ana.database(), "later", "arrived while the file waited").await;
+    ana.sync.pass().await.unwrap();
+    // A cancelled pass must release the pause as well as its session lock.
+    let (reading, read_observed) = tokio::sync::oneshot::channel();
+    let (read_resume, read_held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_next_read(
+            ObjectPath::slot(group.store, std::num::NonZeroU64::new(applied + 1).unwrap()),
+            reading,
+            read_held,
+        )
+        .await;
+    {
+        let pass = ben.sync.pass();
+        tokio::pin!(pass);
+        tokio::time::timeout(Duration::from_secs(20), async {
+            tokio::select! {
+                result = &mut pass => panic!("held sequence read returned: {result:?}"),
+                result = read_observed => result.unwrap(),
+            }
+        })
+        .await
+        .unwrap();
+    }
+    assert!(read_resume.send(()).is_err());
+    assert!(
+        resume.send(()).is_err(),
+        "the first response released its lease"
+    );
+    tokio::time::timeout(Duration::from_secs(20), retry_observed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        ben.database().eager_cache_fill_status().await.unwrap(),
+        EagerCacheFillStatus::Downloading(_)
+    ));
+    let (restarted, observed) = tokio::sync::oneshot::channel();
+    let (resume, held) = tokio::sync::oneshot::channel();
+    group
+        .storage
+        .hold_body_at(
+            ObjectPath::file(group.store, file.uploader(), file.id()),
+            1,
+            restarted,
+            held,
+        )
+        .await;
+    let pass = tokio::time::timeout(Duration::from_secs(20), ben.sync.pass())
+        .await
+        .expect("later slots must apply while the file waits")
+        .unwrap();
+    assert!(matches!(pass, crate::SequenceStatus::Synced { .. }));
+    assert!(ben.database().applied_slot().await.unwrap() > applied);
+    assert_eq!(
+        rows(ben.database()).await,
+        [("later".into(), "arrived while the file waited".into())]
+    );
+    assert!(
+        matches!(ben.database().eager_cache_fill_status().await.unwrap(),
+        EagerCacheFillStatus::Downloading(progress) if progress.bytes_cached < progress.bytes_total)
+    );
+    assert!(retry_resume.send(()).is_err());
+    tokio::time::timeout(Duration::from_secs(20), observed)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        ben.database().eager_cache_fill_status().await.unwrap(),
+        EagerCacheFillStatus::Downloading(_)
+    ));
+    let mut progress = ben.database().subscribe_eager_cache_fill_status();
+    resume.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while !matches!(progress.next().await.unwrap(), EagerCacheFillStatus::Idle) {}
+    })
+    .await
+    .unwrap();
+    assert_eq!(ben.files().read_file(&file).await.unwrap(), b"sound");
+    for device in devices {
+        device.files().close().await;
+        device.database().close().await.unwrap();
+    }
+}
