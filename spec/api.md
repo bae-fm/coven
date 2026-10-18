@@ -3509,6 +3509,7 @@ pub struct JoinRequest {
     /// The name the new device gave itself, for the admin to check.
     pub device_name: String,
     pub provider_account_email: Option<String>,
+    /* private authenticated request record; construct only by receiving a checked request */
 }
 
 /// What a restore code or invite is for: the store and member ids, store
