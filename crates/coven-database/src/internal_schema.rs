@@ -8,7 +8,7 @@
 //! merged inputs) is kept by cell. Metadata and lost values use coven-format's snapshot
 //! field encodings inside blobs.
 //! Loss targets name their row directly: a write excluded by a schema change
-//! or reset need not have an accepted generation in `_coven_rows`.
+//! (§18.6) need not have an accepted generation in `_coven_rows`.
 //! An upload's `record` is one plaintext value: the write header frame followed
 //! by its audience parts' row-frame streams. Its first attempt fixes the format
 //! and key ids in `sealing_keys`, encoded as the D9 write prefix. Each attempted
