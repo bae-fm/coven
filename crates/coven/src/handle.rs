@@ -87,6 +87,11 @@ impl CovenHandle {
             .await
     }
 
+    /// This installation's device id, available before setup and retained after close.
+    pub fn device_id(&self) -> DeviceId {
+        self.device
+    }
+
     /// The committed storage location, without credentials or provider requests.
     /// None before setup; disconnect retains it. A closed handle refuses the call.
     pub async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError> {

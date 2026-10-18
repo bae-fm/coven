@@ -33,6 +33,8 @@ pub struct DeviceInfo {
     pub name: String,
     /// Active, removed, or replaced by a kept registration (§14.1).
     pub state: DeviceState,
+    /// Whether this is the local installation, regardless of registration state.
+    pub is_self: bool,
 }
 
 /// A circle the local member belongs to (E12).
@@ -99,8 +101,10 @@ pub(crate) fn members(
                 "SELECT device,name,state FROM _coven_devices WHERE member=?1",
                 [id.0.as_bytes().as_slice()],
                 |r| {
+                    let id = DeviceId(counter(r.get(0)?));
                     Ok(DeviceInfo {
-                        id: DeviceId(counter(r.get(0)?)),
+                        id,
+                        is_self: id == device,
                         name: r.get(1)?,
                         state: crate::store_state_tables::device_state(r.get(2)?)?,
                     })

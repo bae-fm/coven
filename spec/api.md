@@ -1484,6 +1484,9 @@ impl CovenHandle {
     /// The stable id, including before storage setup.
     pub fn store_id(&self) -> StoreId;
 
+    /// This installation's device id, available before setup and retained after close.
+    pub fn device_id(&self) -> DeviceId;
+
     /// The same committed location as Coven::storage_config; refused after close.
     pub async fn storage_config(&self) -> Result<Option<StorageConfig>, SyncError>;
 
@@ -4057,6 +4060,8 @@ pub struct DeviceInfo {
     pub id: DeviceId,
     pub name: String,
     pub state: DeviceState,
+    /// This installation's device id matches, even when removed or replaced.
+    pub is_self: bool,
 }
 
 pub enum DeviceState {

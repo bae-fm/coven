@@ -390,3 +390,23 @@ async fn saved_location_survives_disconnect_and_reopen_without_custody_reads() {
     );
     app.discard_store(&directory).await.unwrap();
 }
+
+#[tokio::test]
+async fn device_id_is_available_before_setup_and_survives_reopen() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreLayout::new(root.path().into());
+    let app = TestCoven::new();
+    let handle = builder(&app, layout.clone())
+        .create_store("Household")
+        .await
+        .unwrap();
+    let store = handle.store_id();
+    let device = handle.device_id();
+    assert_eq!(handle.clone().device_id(), device);
+    assert!(handle.members().await.unwrap().is_empty());
+    handle.close().await.unwrap();
+    assert_eq!(handle.device_id(), device);
+    let handle = builder(&app, layout).open(store).await.unwrap();
+    assert_eq!(handle.device_id(), device);
+    handle.close().await.unwrap();
+}

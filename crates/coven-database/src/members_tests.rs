@@ -42,6 +42,10 @@ async fn fixture(db: &crate::Database) {
     };
     state.devices = [
         (own, device(1, "mine", DeviceState::Active)),
+        (
+            DeviceId(11),
+            device(1, "my other device", DeviceState::Removed),
+        ),
         (DeviceId(20), device(2, "phone", DeviceState::Active)),
         (DeviceId(21), device(2, "lost", DeviceState::Removed)),
         (DeviceId(22), device(2, "restored", DeviceState::Replaced)),
@@ -94,11 +98,20 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
             id: member(1),
             keys: keys(1),
             role: MemberRole::Admin,
-            devices: vec![DeviceInfo {
-                id: own,
-                name: "mine".into(),
-                state: DeviceState::Active,
-            }],
+            devices: vec![
+                DeviceInfo {
+                    id: own,
+                    name: "mine".into(),
+                    state: DeviceState::Active,
+                    is_self: true,
+                },
+                DeviceInfo {
+                    id: DeviceId(11),
+                    name: "my other device".into(),
+                    state: DeviceState::Removed,
+                    is_self: false,
+                },
+            ],
             is_self: true,
         },
         MemberInfo {
@@ -115,12 +128,16 @@ async fn members_list_every_device_with_its_state_and_the_local_member() {
                 id: DeviceId(id),
                 name: name.into(),
                 state,
+                is_self: false,
             })
             .collect(),
             is_self: false,
         },
     ];
     expected.sort_by_key(|a| a.id);
+    for member in &mut expected {
+        member.devices.sort_by_key(|device| device.id);
+    }
     assert_eq!(members, expected);
     assert_eq!(
         db.circles().await.unwrap(),
@@ -210,4 +227,37 @@ async fn read_failures_reach_callers_and_subscribers() {
         db.members().await,
         Err(crate::CovenError::Database(DbError::StoreClosed))
     ));
+}
+
+#[tokio::test]
+async fn retired_local_registration_still_identifies_this_installation() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    fixture(&db).await;
+    let own = db.inspect_writer(|sql| sql.local_device()).unwrap();
+    for state in [DeviceState::Removed, DeviceState::Replaced] {
+        let mut prefix = db.store_state().await.unwrap();
+        prefix.devices.get_mut(&own).unwrap().state = state;
+        db.admin_fixture(
+            coven_format::admin::StoreChange::DeleteCircle {
+                circle: CircleId(uuid::Uuid::from_u128(8)),
+            },
+            prefix,
+            None,
+        )
+        .await
+        .unwrap();
+        let devices: Vec<_> = db
+            .members()
+            .await
+            .unwrap()
+            .into_iter()
+            .flat_map(|member| member.devices)
+            .filter(|device| device.is_self)
+            .collect();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].id, own);
+        assert_eq!(devices[0].state, state);
+    }
+    db.close().await.unwrap();
 }
