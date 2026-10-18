@@ -1247,9 +1247,12 @@ is a new insert; any children the app wants back, it inserts in the same write.
   with that write's timestamp, as with any cell. Coven's merge records keep the
   reference as written, with its parent's generation: the cell reads as null while
   that generation is deleted, and as written again if a reset brings the
-  generation back (§19.4). A later concurrent write that displaces it records the
-  written value as lost, whichever write arrived first. Lost values and snapshots
-  always carry the reference as written, without the null. E.g. links point at
+  generation back (§19.4). Explicitly assigning NULL while it displays NULL
+  records a new setter that clears the retained reference, so a later reset cannot
+  revive the link. Ordinary no-op updates record nothing. A later concurrent write
+  that displaces it records the written value as lost, whichever write arrived
+  first. Lost values and snapshots always carry the reference as written, without
+  the null. E.g. links point at
   notes with set null:
 
   ```

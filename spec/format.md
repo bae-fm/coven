@@ -721,7 +721,8 @@ and each later operation takes the next number, except as below.
 - An insert step sets every stored column.
 - An update step sets the columns that operation changed, expanded to complete
   reference tuples and generated inputs like a row change, with the parents its
-  references named at that moment.
+  references named at that moment. Clearing a retained reference with an explicit
+  NULL counts as a change (§9.1).
 - A delete step sets none.
 - Inserting a removed row's key is an update step setting every column.
 - Generated columns are never set.

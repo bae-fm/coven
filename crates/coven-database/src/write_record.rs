@@ -196,9 +196,21 @@ pub(crate) fn changes(
                         break;
                     }
                 }
+                let state = stored.row(&row)?.state;
                 let old_values = new_values
                     .keys()
-                    .map(|c| (c.clone(), old.values.get(c).cloned().unwrap_or(Value::Null)))
+                    .map(|c| {
+                        (
+                            c.clone(),
+                            match (state.cells().get(c), old.values.get(c)) {
+                                (Some(cell), _) => cell.value.value.clone(),
+                                (None, Some(value)) => value.clone(),
+                                // A column introduced by this migration has no
+                                // old cell; the update's old-value field is NULL.
+                                (None, None) => Value::Null,
+                            },
+                        )
+                    })
                     .collect();
                 (Operation::Update(columns(&new_values)), old_values)
             } else if generation % 2 == 1 {

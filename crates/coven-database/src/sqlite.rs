@@ -4,6 +4,8 @@
 mod event_capture;
 #[path = "local_write.rs"]
 mod local_write;
+#[path = "reference_assignments.rs"]
+pub(crate) mod reference_assignments;
 #[path = "rowid_policy.rs"]
 mod rowid_policy;
 #[path = "stream_capture.rs"]

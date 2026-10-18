@@ -16,13 +16,16 @@ use crate::DbError;
 use coven_format::value::Value;
 use coven_format::write::Step;
 use coven_merge::{Audience, Change, ColumnValue, Operation, Parent, RowId};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 struct Tracker<'a> {
     db: &'a DatabaseConnection,
     schema: &'a WriteSchema,
     before: &'a AppView<'a>,
     after: &'a AppView<'a>,
+    stored: &'a crate::merge_store::MergeStore<'a>,
+    /// Columns already assigned by this write, including unchanged group members.
+    written: BTreeMap<RowId, BTreeSet<String>>,
     /// Values as the operations so far left them.
     current: BTreeMap<AppKey, Option<AppValues>>,
     /// Each app row's merge row as of its last operation.
@@ -259,12 +262,15 @@ pub(crate) fn capture(
     before: &AppView<'_>,
     after: &AppView<'_>,
     events: &[Event],
+    stored: &crate::merge_store::MergeStore<'_>,
 ) -> Result<BTreeMap<RowId, Vec<Step>>, DbError> {
     let mut tracker = Tracker {
         db,
         schema,
         before,
         after,
+        stored,
+        written: BTreeMap::new(),
         current: BTreeMap::new(),
         rows: BTreeMap::new(),
         generations: BTreeMap::new(),
@@ -310,21 +316,35 @@ pub(crate) fn capture(
                 let old = old.as_ref().expect("an update has old values");
                 let new = new.as_ref().expect("an update has new values");
                 tracker.existing(old_key, old)?;
-                let changed = new
+                let mut changed: BTreeSet<_> = new
                     .iter()
                     .filter(|(name, value)| old.get(*name) != Some(*value))
-                    .map(|(name, _)| name.clone());
+                    .map(|(name, _)| name.clone())
+                    .collect();
                 tracker.current.insert(old_key.clone(), Some(new.clone()));
                 // An update changing the row's audience moves it: the old
                 // audience's row ends, and the update is the first operation
                 // on the new audience's row, which the move began (§15.4).
                 let row = tracker.existing(old_key, new)?;
-                let columns = tracker.columns(
-                    table,
-                    new,
-                    Some(&row.audience),
-                    changed.collect::<Vec<_>>(),
-                )?;
+                if !event.null_assignments.is_empty() {
+                    let state = tracker.stored.row(&row)?.state;
+                    if state.generation() == tracker.generation(&row)? {
+                        for column in &event.null_assignments {
+                            if !tracker
+                                .written
+                                .get(&row)
+                                .is_some_and(|names| names.contains(column))
+                                && state
+                                    .cells()
+                                    .get(column)
+                                    .is_some_and(|cell| cell.value.value != Value::Null)
+                            {
+                                changed.insert(column.clone());
+                            }
+                        }
+                    }
+                }
+                let columns = tracker.columns(table, new, Some(&row.audience), changed)?;
                 let generation = tracker.generation(&row)?;
                 steps.push((
                     row,
@@ -387,6 +407,14 @@ pub(crate) fn capture(
             }
         }
         for (row, step) in steps {
+            if let Operation::Insert(columns) | Operation::Update(columns) = &step.change.operation
+            {
+                tracker
+                    .written
+                    .entry(row.clone())
+                    .or_default()
+                    .extend(columns.keys().cloned());
+            }
             operations.entry(row).or_default().push(step);
         }
         sequence = sequence

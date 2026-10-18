@@ -25,6 +25,8 @@ impl DatabaseConnection {
         #[cfg(test)]
         let _profile = self.profile_statements();
         self.local_transaction(|database, phase| {
+            let assignments =
+                super::reference_assignments::ReferenceAssignments::begin(database, schema)?;
             let deleted_circles = crate::store_state_tables::deleted_circles(database)?;
             let result = {
                 let _scope = database.authorization.write();
@@ -39,21 +41,58 @@ impl DatabaseConnection {
                 let _scope = database.authorization.write();
                 files.clear_null_ids(&captured)?;
             }
-            let events = phase.finish_app()?;
+            let surviving = assignments.finish(database)?;
+            let events = phase.finish_app(&surviving)?;
             let captured = crate::write_capture::capture(schema, &events)?;
             files.validate(&captured)?;
             let before = crate::write_rows::AppView::before(database, schema, &captured)?;
             let after = crate::write_rows::AppView::after(database, schema);
             let store = crate::merge_store::MergeStore::new(database, &before);
-            let steps =
-                crate::execution_capture::capture(database, schema, &before, &after, &events)?;
+            let steps = crate::execution_capture::capture(
+                database, schema, &before, &after, &events, &store,
+            )?;
+            let mut changed = before.changes(&after, captured.keys().cloned())?;
+            // The execution records intentional clears that the displayed values
+            // alone cannot distinguish from no-op updates.
+            for (row, operations) in &steps {
+                let key = (row.table.clone(), row.key.clone());
+                let (Some(old), Some(new)) = (before.row(&key)?, after.row(&key)?) else {
+                    continue;
+                };
+                if old.audience != row.audience || new.audience != row.audience {
+                    continue;
+                }
+                for step in operations {
+                    let coven_merge::Operation::Update(columns) = &step.change.operation else {
+                        continue;
+                    };
+                    for (column, value) in columns {
+                        if value.value == coven_format::value::Value::Null
+                            && old.values.get(column) == Some(&value.value)
+                            && new.values.get(column) == Some(&value.value)
+                        {
+                            let state = store.row(row)?.state;
+                            if state
+                                .cells()
+                                .get(column)
+                                .is_some_and(|cell| cell.value.value != value.value)
+                            {
+                                changed
+                                    .entry(key.clone())
+                                    .or_default()
+                                    .insert(column.clone());
+                            }
+                        }
+                    }
+                }
+            }
             let changes = crate::write_record::changes(
                 database,
                 schema,
                 &before,
                 &after,
                 &store,
-                &before.changes(&after, captured.keys().cloned())?,
+                &changed,
                 &deleted_circles,
             )?;
             let record =
@@ -129,8 +168,9 @@ impl LocalPhase<'_> {
 
     /// End the app phase: return its row operations and observe the rest of
     /// the transaction with a session.
-    pub(crate) fn finish_app(&mut self) -> Result<Vec<Event>, DbError> {
+    pub(crate) fn finish_app(&mut self, assignments: &[i64]) -> Result<Vec<Event>, DbError> {
         let recording = self.recording.take().expect("the app phase ends once");
+        recording.complete_assignments(assignments);
         self.app = recording.events();
         drop(recording);
         if let Some(observation) = &self.database.observation {

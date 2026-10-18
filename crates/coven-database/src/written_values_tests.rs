@@ -43,7 +43,7 @@ async fn reference(db: &Database, lost: bool) -> Option<String> {
 
 #[tokio::test]
 async fn restored_parents_restore_live_references_while_losses_keep_written_values() {
-    for lost in [false, true] {
+    for (lost, cleared) in [(false, false), (true, false), (false, true)] {
         let ids = SequentialIds::new();
         let a_store = TestStore::with_ids(&ids);
         let b_store = TestStore::with_ids(&ids);
@@ -105,6 +105,35 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
             assert_eq!(written.value, Value::Text("parent".into()));
             assert_eq!(written.parents.values().next().unwrap().generation, 1);
         });
+        if cleared {
+            let queued = records(&b).len();
+            sql(&b, "UPDATE children SET id=id").await.unwrap();
+            assert_eq!(
+                records(&b).len(),
+                queued,
+                "an unrelated no-op retains the link"
+            );
+            sql(&b, "UPDATE children SET parent=NULL").await.unwrap();
+            let writes = records(&b);
+            assert_eq!(
+                writes.len(),
+                queued + 1,
+                "explicit NULL must clear the written link"
+            );
+            let change = &writes.last().unwrap().parts[0].rows[0];
+            assert_eq!(change.old["parent"], Value::Text("parent".into()));
+            let coven_merge::Operation::Update(columns) = &change.change.operation else {
+                panic!("clearing the link is an update");
+            };
+            assert_eq!(columns["parent"].value, Value::Null);
+            assert!(columns["parent"].parents.is_empty());
+            sql(&b, "UPDATE children SET parent=NULL").await.unwrap();
+            assert_eq!(
+                records(&b).len(),
+                queued + 1,
+                "an ordinary NULL no-op records nothing"
+            );
+        }
         b.close().await.unwrap();
         let b = open(&b_store, 2).await;
         b.inspect_writer_schema(|db, schema| {
@@ -123,8 +152,8 @@ async fn restored_parents_restore_live_references_while_losses_keep_written_valu
         });
         assert_eq!(
             reference(&b, lost).await,
-            Some("parent".into()),
-            "lost={lost}"
+            if cleared { None } else { Some("parent".into()) },
+            "lost={lost}, cleared={cleared}"
         );
         assert_eq!(crate::write::tests::count(&b, "_coven_written_values"), 0);
         for db in [a, b] {
@@ -513,4 +542,190 @@ async fn generated_cells_lose_their_written_values_in_every_arrival_order() {
             db.close().await.unwrap();
         }
     }
+}
+#[tokio::test]
+async fn null_assignments_follow_their_row_and_complete_reference_group() {
+    use crate::tests::TestStore;
+    use crate::write::tests::{records, sql};
+    use coven_format::value::Value;
+    use coven_foundation::id_source::SequentialIds;
+    use coven_merge::{Audience, Operation, RowId};
+
+    let ids = SequentialIds::new();
+    let sa = TestStore::with_ids(&ids);
+    let sb = TestStore::with_ids(&ids);
+    let tables = || {
+        vec![
+            crate::SyncedTable::new("parents", crate::RowIdentity::SharedKey)
+                .key_columns(["id", "part"]),
+            crate::SyncedTable::new("children", crate::RowIdentity::SharedKey)
+                .shared_trigger("clear_inner"),
+        ]
+    };
+    let schema = "CREATE TABLE parents(id TEXT NOT NULL, part TEXT NOT NULL, PRIMARY KEY(id,part));
+    CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,pa TEXT,pb TEXT,label TEXT,
+    FOREIGN KEY(pa,pb) REFERENCES parents(id,part) ON DELETE SET NULL);
+    CREATE TRIGGER clear_inner AFTER UPDATE OF label ON children
+    WHEN NOT coven_applying() AND new.id='outer'
+    BEGIN UPDATE children SET pa=NULL WHERE id='inner'; END";
+    let a = sa.schema(tables(), schema).await.unwrap();
+    let b = sb.schema(tables(), schema).await.unwrap();
+    sql(&a, "INSERT INTO parents VALUES('p','1')")
+        .await
+        .unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
+    sql(
+        &b,
+        "INSERT INTO children VALUES('outer','p','1','old'),('inner','p','1','old')",
+    )
+    .await
+    .unwrap();
+    sql(&a, "DELETE FROM parents").await.unwrap();
+    b.receive(records(&a).remove(1).into()).await.unwrap();
+    let queued = records(&b).len();
+    // Capture objects roll back with a failed app statement, and cannot be
+    // named by app SQL even while the legitimate assignment triggers exist.
+    assert!(sql(
+        &b,
+        "INSERT INTO _coven_null_assignments VALUES('children','pa')"
+    )
+    .await
+    .is_err());
+    b.inspect_writer(|db| {
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM temp.sqlite_schema WHERE name GLOB '_coven_null_assignment*'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        );
+        db.fail_at("refuse", "BEFORE INSERT ON _coven_uploads", "refuse");
+    });
+    assert!(
+        sql(&b, "UPDATE children SET label='edited' WHERE id='outer'")
+            .await
+            .is_err()
+    );
+    assert_eq!(records(&b).len(), queued);
+    b.inspect_writer(|db| db.batch("DROP TRIGGER refuse").unwrap());
+    sql(&b, "UPDATE children SET label='edited' WHERE id='outer'")
+        .await
+        .unwrap();
+    let write = records(&b).pop().unwrap();
+    assert_eq!(write.parts[0].rows.len(), 2);
+    let inner = write.parts[0]
+        .rows
+        .iter()
+        .find(|change| {
+            change.row.key == coven_format::key::encode_key(&[Value::Text("inner".into())]).unwrap()
+        })
+        .unwrap();
+    let Operation::Update(columns) = &inner.change.operation else {
+        panic!("update");
+    };
+    assert_eq!(
+        columns.keys().map(String::as_str).collect::<Vec<_>>(),
+        ["pa", "pb"]
+    );
+    for column in ["pa", "pb"] {
+        assert_eq!(columns[column].value, Value::Null);
+        assert!(columns[column].parents.is_empty());
+    }
+    assert_eq!(inner.old["pa"], Value::Text("p".into()));
+    assert_eq!(inner.old["pb"], Value::Text("1".into()));
+    b.inspect_writer_schema(|db, schema| {
+        let app = crate::write_rows::AppView::after(db, schema);
+        let store = crate::merge_store::MergeStore::new(db, &app);
+        let row = RowId {
+            table: "children".into(),
+            key: coven_format::key::encode_key(&[Value::Text("outer".into())]).unwrap(),
+            audience: Audience::Store,
+        };
+        assert_eq!(
+            store.row(&row).unwrap().state.cells()["pa"].value.value,
+            Value::Text("p".into()),
+            "a nested trigger must not clear the outer row"
+        );
+    });
+    sql(
+        &b,
+        "UPDATE children SET pa=pa WHERE id='outer'; UPDATE children SET pa=NULL WHERE id='outer'",
+    )
+    .await
+    .unwrap();
+    let write = records(&b).pop().unwrap();
+    assert_eq!(write.parts[0].rows.len(), 1);
+    let steps = &write.parts[0].rows[0].execution.steps;
+    assert_eq!(steps.len(), 2);
+    assert!(matches!(&steps[0].change.operation, Operation::Update(columns) if columns.len() == 2));
+    assert!(matches!(&steps[1].change.operation, Operation::Update(columns) if columns.is_empty()));
+    let queued = records(&b).len();
+    sql(&b, "UPDATE children SET pa=NULL,pb=NULL")
+        .await
+        .unwrap();
+    assert_eq!(records(&b).len(), queued);
+    b.inspect_writer(|db| {
+        assert_eq!(
+            db.query_row(
+                "SELECT count(*) FROM temp.sqlite_schema WHERE name GLOB '_coven_null_assignment*'",
+                [],
+                |r| r.get::<_, i64>(0)
+            )
+            .unwrap(),
+            0
+        )
+    });
+    a.close().await.unwrap();
+    b.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn rolled_back_null_assignments_do_not_clear_written_references() {
+    let ids = SequentialIds::new();
+    let sa = TestStore::with_ids(&ids);
+    let sb = TestStore::with_ids(&ids);
+    let schema = "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY);
+    CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id) ON DELETE SET NULL);
+    CREATE TRIGGER refuse AFTER UPDATE ON children WHEN NOT coven_applying() AND new.id='refuse'
+    BEGIN SELECT RAISE(ABORT,'refused'); END";
+    let a = sa.schema(tables(), schema).await.unwrap();
+    let b = sb.schema(tables(), schema).await.unwrap();
+    sql(&a, "INSERT INTO parents VALUES('p')").await.unwrap();
+    b.receive(records(&a).remove(0).into()).await.unwrap();
+    sql(&b, "INSERT INTO children VALUES('refuse','p'),('okay','p')")
+        .await
+        .unwrap();
+    sql(&a, "DELETE FROM parents").await.unwrap();
+    b.receive(records(&a).remove(1).into()).await.unwrap();
+    let queued = records(&b).len();
+    b.write(|sql| {
+        assert!(sql.execute("UPDATE children SET parent=NULL", []).is_err());
+        Ok(())
+    })
+    .await
+    .unwrap();
+    assert_eq!(
+        records(&b).len(),
+        queued,
+        "a rolled-back assignment must record nothing"
+    );
+    b.write(|sql| {
+        assert!(sql
+            .execute("UPDATE children SET parent=NULL WHERE id='refuse'", [])
+            .is_err());
+        sql.execute("UPDATE children SET parent=NULL WHERE id='okay'", [])?;
+        Ok(())
+    })
+    .await
+    .unwrap();
+    let write = records(&b).pop().unwrap();
+    assert_eq!(write.parts[0].rows.len(), 1);
+    assert_eq!(
+        write.parts[0].rows[0].row.key,
+        coven_format::key::encode_key(&[Value::Text("okay".into())]).unwrap()
+    );
+    a.close().await.unwrap();
+    b.close().await.unwrap();
 }
