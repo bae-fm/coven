@@ -53,3 +53,61 @@ fn appendix_e_types_and_variants_are_available_at_the_crate_root() {
     let _results: fn(&S3Detection) -> &[S3ProbeResult] = |detection| &detection.results;
     let _probe: fn(&S3ProbeResult) -> &S3Probe = |result| &result.probe;
 }
+
+#[cfg(feature = "test-utils")]
+#[tokio::test]
+async fn application_tests_use_memory_storage_through_the_facade() {
+    use coven::{
+        BodyFailure, Faults, MemoryKeyAdmin, MemoryRequest, MemoryStorage, MemoryStorageBuilder,
+        Storage, StorageFailure, TestCoven,
+    };
+    use std::sync::Arc;
+    let root = tempfile::tempdir().unwrap();
+    let app = TestCoven::new();
+    let layout = coven::StoreLayout::new(root.path().into());
+    let builder: MemoryStorageBuilder = MemoryStorage::builder();
+    let storage: Arc<MemoryStorage> = Arc::new(builder.build().unwrap());
+    let _keys: MemoryKeyAdmin = storage.key_admin();
+    let handle = app
+        .builder(layout)
+        .synced_tables(vec![])
+        .migrations(vec![])
+        .storage_connector(storage.clone())
+        .create_store("Household")
+        .await
+        .unwrap();
+    handle
+        .setup_s3_storage(
+            storage.config(),
+            "Ana's laptop",
+            "key".into(),
+            coven::SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        handle.storage_config().await.unwrap(),
+        Some(storage.config())
+    );
+    let path = coven::ObjectPath::slot(handle.store_id(), 99.try_into().unwrap());
+    storage.plant(&path, b"provider bytes").await.unwrap();
+    assert_eq!(storage.read(&path).await.unwrap(), b"provider bytes");
+    let mut faults = Faults::none();
+    faults
+        .body_failures
+        .insert(path.clone(), BodyFailure::Interrupted(0));
+    storage.set_faults(faults).await;
+    assert_eq!(
+        storage.read(&path).await.unwrap_err().failure(),
+        StorageFailure::Network
+    );
+    storage.set_faults(Faults::none()).await;
+    assert_eq!(
+        storage.for_device().read(&path).await.unwrap(),
+        b"provider bytes"
+    );
+    assert!(storage
+        .request_trace()
+        .contains(&MemoryRequest::Read(path, None)));
+    handle.close().await.unwrap();
+}

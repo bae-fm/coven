@@ -4,7 +4,7 @@ version.workspace = true
 edition.workspace = true
 
 [features]
-test-utils = ["coven-sync/test-utils", "coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
+test-utils = ["coven-storage/test-utils", "coven-sync/test-utils", "coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
 
 [dependencies]
 coven-foundation.workspace = true

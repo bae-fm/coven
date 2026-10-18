@@ -75,6 +75,13 @@ pub use coven_storage::providers::{
     DropboxClients, OAuthClients, OAuthError, OAuthPresenter, OAuthRedirectError, ProviderResponse,
     StorageFolder,
 };
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_storage::test_utils::{
+    BodyFailure, Faults, MemoryKeyAdmin, MemoryProvider, MemoryRequest, MemoryStorage,
+    MemoryStorageBuilder,
+};
+#[cfg(any(test, feature = "test-utils"))]
+pub use coven_storage::Storage;
 pub use coven_storage::{
     AccessKeyAdmin, AdminCredential, ListedKey, MintScope, S3MemberKey, StoreListing,
     UnkeyedPrincipal,

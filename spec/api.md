@@ -7,7 +7,7 @@
   fields are marked `/* private */`; `cfg` attributes show platform and feature availability. Types
   from dependencies keep their qualified names. Standard trait implementations retain their Rust
   meanings; conversions and operational traits are shown where callers use them. Feature gates
-  belong to the defining crate; the two dependency-only gates below name it.
+  belong to the defining crate; dependency-only gates below name that crate.
 - Calls on `handle` are on the `CovenHandle` that opening a store returns.
 - App-facing calls reaching storage or the database are `async`;
   transaction callbacks (`SqlContext`, `MigrationContext`) are synchronous.
@@ -252,6 +252,20 @@ impl TestCoven {
     /// Refuse the next keychain operation before changing any stored value.
     pub fn fail_next_keychain_operation(&self);
 }
+
+/// Application storage fixtures, available with coven's test-utils feature.
+/// MemoryStorage implements StorageConnector: pass Arc<MemoryStorage> to the builder.
+/// Its builder configures the provider location, clock, transfers and listing pages.
+/// Clones retain objects; for_device gives another connection to those objects.
+/// Faults and BodyFailure inject request and response-body failures, and
+/// MemoryRequest records the attempted calls. Storage supplies reads and listings.
+#[cfg(feature = "test-utils")]
+pub use coven_storage::test_utils::{
+    BodyFailure, Faults, MemoryKeyAdmin, MemoryProvider, MemoryRequest, MemoryStorage,
+    MemoryStorageBuilder,
+};
+#[cfg(feature = "test-utils")]
+pub use coven_storage::Storage;
 
 /// A controlled clock; forward settings advance elapsed time and wake sleepers.
 #[cfg(feature = "test-utils")]
@@ -4577,7 +4591,7 @@ impl OAuthClients {
     pub fn with_google_client_secret(self, secret: SecretText) -> Result<Self, OAuthError>;
 
     /// Redirect token requests to an HTTP fake while retaining the real protocol.
-    // Requires coven-storage/test-utils; coven/test-utils does not enable it.
+    // Enabled by coven/test-utils.
     #[cfg(feature = "test-utils")]
     pub fn with_token_endpoint(mut self, endpoint: String) -> Self;
 }
