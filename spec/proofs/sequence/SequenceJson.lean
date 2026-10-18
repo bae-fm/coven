@@ -9,6 +9,7 @@ import CovenSequence.Reload
 import CovenSequence.QueueReloadExamples
 import CovenSequence.AccessKeyReplacement
 import CovenSequence.MemberKeyReplacement
+import CovenSequence.JoinScan
 
 /-! One case per process; malformed inputs fail on stderr with nonzero exit. -/
 namespace SequenceJson
@@ -339,10 +340,33 @@ def readRetention (j : Json) : Except String Json := do
   | none => return Json.null
   | some selected => return Json.mkObj [("slot", toJson selected.slot), ("covers", toJson selected.covers)]
 
+/-- Copy slots and the captured position come from the actual sealed Rust
+history. The scan and outcome are the functions proved in `JoinScan`. -/
+def readJoinScan (j : Json) : Except String Json := do
+  let copies ← j.getObjValAs? (List Nat) "copies"
+  distinct copies "copy slot"
+  let first ← positive j "first"
+  let head ← nat j "head"
+  let capturedAt ← nat j "captured_at"
+  if capturedAt > head || first > capturedAt + 1 then throw "invalid floor capture"
+  if copies.any (fun c => c = 0 || head < c) then throw "copy outside claimed history"
+  let scanned ← positive j "scanned"
+  let copy := fun slot => decide (slot ∈ copies)
+  let result := JoinScan.run copy (fun _ => JoinScan.view copy first head capturedAt)
+    0 ⟨scanned, false⟩ (head + 2)
+  let key ← match result with
+    | .key => pure true
+    | .endOfSequence => pure false
+    | .advance _ => throw "scan did not reach its target"
+  return toJson (match JoinScan.outcome key (← j.getObjValAs? Bool "binding")
+      (← j.getObjValAs? Bool "pending") with
+    | .waiting => "Waiting" | .admitted => "Admitted" | .declined => "Declined")
+
 def run (j : Json) : Except String Json := do
   match ← j.getObjValAs? String "kind" with
   | "settle" => readSettle j
   | "read" => readRead j
+  | "joinScan" => readJoinScan j
   | "retention" => readRetention j
   | "floor" => return toJson (Retention.floorStart (← j.getObjValAs? (List (Option Nat)) "coverage"))
   | "reselect" => readReselect j

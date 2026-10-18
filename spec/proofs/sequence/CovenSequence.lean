@@ -29,3 +29,5 @@ import CovenSequence.KeyCustody
 import CovenSequence.AccessKeyReplacement
 import CovenSequence.MemberKeyReplacement
 import CovenSequence.Authorship
+import CovenSequence.JoinScan
+import CovenSequence.JoinScanExamples

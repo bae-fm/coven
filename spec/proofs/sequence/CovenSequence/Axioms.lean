@@ -276,3 +276,23 @@ import SequenceApply
 #print axioms CovenSequence.Retention.daily_announcements_starve
 #print axioms CovenSequence.Retention.daily_announcements_advance
 #print axioms CovenSequence.Deadline.selection_advances
+
+#print axioms CovenSequence.JoinScan.captured_iff
+#print axioms CovenSequence.JoinScan.floor_captures_deleted_copy
+#print axioms CovenSequence.JoinScan.approved_progress
+#print axioms CovenSequence.JoinScan.approved_eventually_key
+#print axioms CovenSequence.JoinScan.miss_requires_refresh
+#print axioms CovenSequence.JoinScan.approved_never_declined
+#print axioms CovenSequence.JoinScan.real_decline
+#print axioms CovenSequence.JoinScan.approved_eventually_admitted
+#print axioms CovenSequence.JoinScanExamples.missing_below_existing_is_deleted
+#print axioms CovenSequence.JoinScanExamples.retained_good
+#print axioms CovenSequence.JoinScanExamples.approval_is_kept
+#print axioms CovenSequence.JoinScanExamples.exponential_probes_miss_approval
+
+#print axioms CovenSequence.JoinScan.capture_covers_floor
+#print axioms CovenSequence.JoinScan.kept_copy_readable
+#print axioms CovenSequence.JoinScan.raced_miss_recovers
+#print axioms CovenSequence.JoinScan.no_copy_reaches_end
+
+#print axioms CovenSequence.JoinScan.approval_keeps_membership
