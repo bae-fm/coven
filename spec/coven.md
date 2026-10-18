@@ -1445,7 +1445,9 @@ The rules in full:
 - **Which columns count.** A constraint reads its columns, the columns its
   expressions use, and, for a partial index, the columns its `WHERE` clause uses.
   A generated column counts as set by each write whose changes to its inputs
-  changed its value.
+  changed its value. A constraint that reads no columns, such as a unique index
+  on `(1)`, dates its claim from the write that started the row's current
+  generation: unrelated edits cannot change that constant claim.
 - **A claim made of several writes.** Notes are unique by `(folder, title)`, and
   note 2 is "Draft" in Home:
 
