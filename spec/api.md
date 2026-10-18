@@ -3311,8 +3311,10 @@ pub enum ProviderSignOut {
 - Before `create_invite` makes any provider change, an App-folder Dropbox
   store fails with `DropboxAppFolderNotShareable`: sharing it requires store
   relocation, outside this operation.
-- Inviting the account that holds the store fails with `InviteeIsStoreOwner`,
-  before any provider change.
+- Inviting the account that holds the store fails with `InviteeIsStoreOwner`.
+  CloudKit identifies this case from the saved share: it saves the share, then
+  refuses when the returned participants contain no added invitee. The share
+  may have changed, but this refusal retains no unwanted participant.
 - A replacement invite fixes an existing active id before the requester
   generates keys. Approval binds the exact signed request's new pair after
   publishing copies of every store key and the held circle keys. The
