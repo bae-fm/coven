@@ -3960,7 +3960,8 @@ pub struct CircleMemberInfo {
     ([`explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
   - The author reloading after a competing raise uses the same per-change
     rule as peers. New writes use the atomically reloaded state; an implicit
-    own read of an excluded position creates no data dependence. Source
+    own read of an excluded original write creates no data dependence. Only
+    the change's recorded data sources establish that dependence (§9.5). Source
     evidence and verdicts survive snapshots and loss dismissal (§9.5).
   - A failed callback aborts the receive or reload transaction, preserving
     the preceding committed values, losses, source verdicts and applied slot.
