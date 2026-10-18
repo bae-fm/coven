@@ -473,6 +473,8 @@ mod sequence {
         let mut routing =
             FloorPrefixDecoder::start(&bytes[..FloorPrefixDecoder::HEADER_LENGTH]).unwrap();
         assert_eq!(routing.key, f::store_key().id());
+        assert_eq!(routing.first.0, 6);
+        let first = routing.first;
         let mut prefix_length = FloorPrefixDecoder::HEADER_LENGTH;
         let mut copies = Vec::new();
         while routing.remaining() != 0 {
@@ -501,7 +503,7 @@ mod sequence {
         let mut input = plain.as_slice();
         let mut frames = FrameDecoder::new(None);
         let mut floor =
-            FloorFrames::decode_header(&frames.next(&mut input).unwrap().unwrap()).unwrap();
+            FloorFrames::decode_header(&frames.next(&mut input).unwrap().unwrap(), first).unwrap();
         assert_eq!(floor.header().first.0, 6);
         assert_eq!(floor.header().at, 11);
         let mut originals = Vec::new();
@@ -732,7 +734,8 @@ mod fixture_mutations {
     fn floor(mut bytes: &[u8]) -> Result<(), Error> {
         let first = take(&mut bytes, FloorPrefixDecoder::HEADER_LENGTH)?;
         let mut reader = FloorPrefixDecoder::start(first)?;
-        let (mut writer, header) = FloorPrefixEncoder::start(reader.key, reader.remaining())?;
+        let (mut writer, header) =
+            FloorPrefixEncoder::start(reader.key, reader.first, reader.remaining())?;
         assert_eq!(first, header);
         while reader.remaining() > 0 {
             let length = reader.copy_length(bytes)?;

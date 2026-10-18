@@ -111,10 +111,11 @@ impl SequenceSync {
         session.scanned = session.scanned.max(slot.saturating_add(1));
     }
 
-    /// The floor's copies come first; without one for this member, inspect
-    /// slot kinds and copy routing from the scan position to the first miss.
-    /// This applies nothing and advances no applied slot. The scan position
-    /// moves past every slot read, so a later poll reads only new slots.
+    /// The floor supplies copies and the first kept slot before keys are held.
+    /// A miss rereads it, since retention may have passed the scan meanwhile.
+    /// This applies nothing and advances no applied slot. A scan without keys
+    /// keeps its position only on success; opened keys must remain discoverable
+    /// until authenticated history retains them in custody.
     pub(crate) async fn bootstrap_keys(
         &self,
         session: &mut Session,
@@ -122,19 +123,30 @@ impl SequenceSync {
     ) -> Result<Bootstrap, SyncError> {
         let mut keys = Vec::new();
         let mut needed = None;
-        if let Some((key, routed)) = floor_object::routed_keys(
-            &self.database,
-            self.storage.as_ref(),
-            &ObjectPath::floor(self.store()),
-            member,
-        )
-        .await?
-        {
-            needed = Some(key);
-            keys.extend(routed);
-        }
-        if !keys.iter().any(|key| matches!(key, RoutedKey::Store(_))) {
-            let mut next = session.scanned.max(1);
+        let mut next = session.scanned.max(1);
+        let mut missed = false;
+        loop {
+            let first = match floor_object::routed_keys(
+                &self.database,
+                self.storage.as_ref(),
+                &ObjectPath::floor(self.store()),
+                member,
+            )
+            .await?
+            {
+                Some((key, first, routed)) => {
+                    needed = Some(key);
+                    keys.extend(routed);
+                    first.0
+                }
+                None => 1,
+            };
+            if keys.iter().any(|key| matches!(key, RoutedKey::Store(_)))
+                || (missed && first <= next)
+            {
+                break;
+            }
+            next = next.max(first);
             while let Some(input) = self.fetch(&self.path(next)?).await? {
                 let path = self.path(next)?;
                 let prefix = slot_object::clear_prefix(input.local_bytes().await?, &path)?;
@@ -160,8 +172,11 @@ impl SequenceSync {
                     }
                 }
                 next = next.checked_add(1).ok_or(SyncError::SequenceExhausted)?;
-                session.scanned = next;
             }
+            if keys.iter().any(|key| matches!(key, RoutedKey::Store(_))) {
+                break;
+            }
+            missed = true;
         }
         let mut ring: Option<StoreKeyring> = None;
         let mut circles = Vec::new();
@@ -172,7 +187,7 @@ impl SequenceSync {
                 (key @ RoutedKey::Circle(_), _) => circles.push(key),
             }
         }
-        Ok(match (ring, needed) {
+        let result = match (ring, needed) {
             (Some(mut ring), _) => {
                 for key in circles {
                     key.insert(&mut ring)?;
@@ -181,7 +196,11 @@ impl SequenceSync {
             }
             (None, Some(key)) => Bootstrap::Missing(key),
             (None, None) => Bootstrap::Empty,
-        })
+        };
+        if !matches!(result, Bootstrap::Keys(_)) {
+            session.scanned = next;
+        }
+        Ok(result)
     }
 
     /// This member's binding in the applied history.

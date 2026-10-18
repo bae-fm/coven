@@ -1,4 +1,4 @@
-//! Streamed floor routing: a key id and original key-copy slots (D9).
+//! Streamed floor routing: a key id, first kept slot and original key copies (D9).
 //! The clear prefix has no total-size bound. Each returned piece is bounded.
 
 use crate::error::{bound, require, Error, Rule};
@@ -13,13 +13,14 @@ pub struct FloorPrefixEncoder {
     previous: Option<Slot>,
 }
 impl FloorPrefixEncoder {
-    /// Emit kind 39, format, store key and copy count.
-    pub fn start(key: KeyId, copies: u32) -> Result<(Self, Vec<u8>), Error> {
+    /// Emit kind 39, format, store key, first kept slot and copy count.
+    pub fn start(key: KeyId, first: Slot, copies: u32) -> Result<(Self, Vec<u8>), Error> {
         bound(copies as usize, MAX_ITEMS, "floor key copies")?;
         let mut out = Encoder::new();
         39u8.put(&mut out)?;
         crate::FORMAT_VERSION.put(&mut out)?;
         key.put(&mut out)?;
+        first.put(&mut out)?;
         copies.put(&mut out)?;
         Ok((
             Self {
@@ -48,22 +49,26 @@ impl FloorPrefixEncoder {
 pub struct FloorPrefixDecoder {
     /// Store key sealing the floor stream.
     pub key: KeyId,
+    /// First kept slot; guides key discovery until the floor authenticates.
+    pub first: Slot,
     remaining: u32,
     previous: Option<Slot>,
 }
 impl FloorPrefixDecoder {
     /// Exact initial routing length, before copy pieces.
-    pub const HEADER_LENGTH: usize = 23;
+    pub const HEADER_LENGTH: usize = 31;
     /// Read exactly the initial routing and bounded copy count.
     pub fn start(bytes: &[u8]) -> Result<Self, Error> {
         crate::sealed::prefix(bytes, 39)?;
         let mut input = Decoder::new(&bytes[3..])?;
         let key = KeyId::get(&mut input)?;
+        let first = Slot::get(&mut input)?;
         let remaining = u32::get(&mut input)?;
         bound(remaining as usize, MAX_ITEMS, "floor key copies")?;
         input.finish()?;
         Ok(Self {
             key,
+            first,
             remaining,
             previous: None,
         })

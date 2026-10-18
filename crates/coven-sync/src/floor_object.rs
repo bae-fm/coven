@@ -27,9 +27,9 @@ pub(crate) struct FloorObject {
     pub(crate) copies: Vec<OriginalSlot>,
 }
 
-/// The floor's sealing key and the key copies in its clear prefix routed to
-/// this member, read before any store key is held (§13). The keys stay
-/// tentative until the floor and its history authenticate.
+/// The floor's sealing key, first kept slot and copies routed to this member,
+/// read before any store key is held (§13). Both the scan position and keys
+/// remain unauthenticated until the floor and its history authenticate.
 pub(crate) async fn routed_keys(
     database: &Database,
     storage: &dyn Storage,
@@ -38,6 +38,7 @@ pub(crate) async fn routed_keys(
 ) -> Result<
     Option<(
         coven_foundation::id_source::KeyId,
+        coven_merge::Slot,
         Vec<snapshot_object::RoutedKey>,
     )>,
     SyncError,
@@ -52,6 +53,7 @@ pub(crate) async fn routed_keys(
     let prefix = read_exact(&mut raw, FloorPrefixDecoder::HEADER_LENGTH, path)?;
     let mut decoder = checked(path, FloorPrefixDecoder::start(&prefix))?;
     let key = decoder.key;
+    let first = decoder.first;
     let mut keys = Vec::new();
     while decoder.remaining() > 0 {
         let mut bytes = read_exact(&mut raw, 12, path)?;
@@ -65,7 +67,7 @@ pub(crate) async fn routed_keys(
         )?);
     }
     checked(path, decoder.finish())?;
-    Ok(Some((key, keys)))
+    Ok(Some((key, first, keys)))
 }
 
 impl FloorObject {
@@ -94,6 +96,7 @@ impl FloorObject {
         let mut prefix = read_exact(&mut raw, FloorPrefixDecoder::HEADER_LENGTH, path)?;
         let mut decoder = checked(path, FloorPrefixDecoder::start(&prefix))?;
         let key_id = decoder.key;
+        let first = decoder.first;
         let mut copies = Vec::new();
         while decoder.remaining() > 0 {
             let mut bytes = read_exact(&mut raw, 12, path)?;
@@ -122,7 +125,7 @@ impl FloorObject {
         );
         let mut decoder = checked(
             path,
-            FloorFrames::decode_header(&snapshot_object::frame(&mut plain, path)?),
+            FloorFrames::decode_header(&snapshot_object::frame(&mut plain, path)?, first),
         )?;
         let header = decoder.header().clone();
         let mut announcements = Vec::new();

@@ -50,8 +50,9 @@ impl SequenceSync {
                     if request.pending(self.storage.as_ref()).await? {
                         return Ok(JoinOutcome::Waiting);
                     }
-                    // Approval may have raced the scan's ending miss: read
-                    // again before deciding that the request was declined.
+                    // Approval may have raced the ending miss. Scan again
+                    // after observing request deletion; bootstrap follows any
+                    // floor that advances during this final scan as well.
                     match self.bootstrap_keys(&mut session, &member).await? {
                         Bootstrap::Keys(ring) => ring,
                         Bootstrap::Missing(_) | Bootstrap::Empty => {
@@ -124,3 +125,7 @@ impl SequenceSync {
             MemberBinding::Bound { device } if device == request.approver())
     }
 }
+
+#[cfg(test)]
+#[path = "sequence_join_tests.rs"]
+mod tests;

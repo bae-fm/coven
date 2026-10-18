@@ -114,10 +114,12 @@ impl FloorFrames {
             frame,
         ))
     }
-    /// Start decoding from its initial header frame.
-    pub fn decode_header(bytes: &[u8]) -> Result<Self, Error> {
+    /// Start decoding from its initial header frame, checking the clear prefix.
+    pub fn decode_header(bytes: &[u8], first: Slot) -> Result<Self, Error> {
+        let header = FloorHeader::decode(bytes)?;
+        require(header.first == first, "floor first", Rule::Coverage)?;
         Ok(Self {
-            header: FloorHeader::decode(bytes)?,
+            header,
             next: 0,
             ended: false,
         })

@@ -79,6 +79,7 @@ impl SequenceSync {
             .collect();
         let (mut routing, mut prefix) = FloorPrefixEncoder::start(
             capture.key,
+            Slot(capture.first),
             capture
                 .copies
                 .len()

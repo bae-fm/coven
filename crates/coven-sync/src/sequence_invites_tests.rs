@@ -1,44 +1,7 @@
 use crate::sequence_sync::tests::*;
 use crate::*;
 use coven_format::{admin::MemberRole, MemberAccess};
-use coven_storage::{test_utils::MemoryStorage, InviteStorage, ObjectPath, Storage};
-
-struct Joiner {
-    device: Device,
-    request: JoiningIdentity,
-}
-
-async fn join(group: &Group, code: &str, name: &str) -> Joiner {
-    let code = read_invite_code(code).unwrap();
-    let InviteStorage::Account(invitation) =
-        InviteStorage::decode(code.storage.as_bytes()).unwrap()
-    else {
-        panic!("an account invite");
-    };
-    let (temp, directory) = group.directory();
-    let request = JoiningIdentity::prepare(&directory, &code, name).unwrap();
-    let storage = MemoryStorage::for_recipient(&group.storage, "carol@example.org").unwrap();
-    let device = group
-        .open_with(temp, request.identity(), None, storage)
-        .await;
-    device.sync.accept_join(&invitation).await.unwrap();
-    device.sync.submit_join(&request).await.unwrap();
-    Joiner { device, request }
-}
-
-async fn invite(ana: &Device) -> Invite {
-    ana.sync
-        .create_invite(
-            InviteTarget::NewMember {
-                role: MemberRole::Member,
-            },
-            InviteAccess::ProviderAccount {
-                email: "Carol@example.org".into(),
-            },
-        )
-        .await
-        .unwrap()
-}
+use coven_storage::{ObjectPath, Storage};
 
 #[tokio::test]
 async fn an_approved_request_binds_its_pair_after_copies_and_the_joiner_registers() {
