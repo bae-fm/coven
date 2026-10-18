@@ -202,7 +202,7 @@ fn introduction_layouts_preserve_exact_key_ids_and_hashes() {
 
 #[test]
 fn store_changes_keep_their_tags_and_reject_truncated_or_extended_payloads() {
-    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16];
+    let tags = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 14, 15, 15, 16, 17];
     let changes = test_utils::store_changes();
     assert_eq!(changes.len(), tags.len());
     for (change, tag) in changes.into_iter().zip(tags) {
@@ -318,7 +318,8 @@ fn every_change_fits_one_request_at_its_field_bounds() {
                     },
                 };
             }
-            StoreChange::AddDevice { name, .. }
+            StoreChange::RenameStore { name }
+            | StoreChange::AddDevice { name, .. }
             | StoreChange::CreateCircle { name, .. }
             | StoreChange::RenameCircle { name, .. } => *name = "n".repeat(1024),
             _ => (),
@@ -450,4 +451,30 @@ fn member_key_changes_pin_ids_pairs_and_tag_order() {
     let mut changed = creation.clone();
     changed[signing..signing + 32].copy_from_slice(&weak);
     assert_eq!(Object::decode(&changed), Err(Error::InvalidSigningKey));
+}
+
+#[test]
+fn store_rename_uses_tag_17_and_the_name_bounds() {
+    for (name, valid) in [
+        ("Family", true),
+        ("家", true),
+        (&"x".repeat(1024), true),
+        ("", false),
+        ("bad\0name", false),
+        (&"x".repeat(1025), false),
+    ] {
+        let change = StoreChange::RenameStore { name: name.into() };
+        let encoded = change.encode();
+        let decoded = StoreChange::decode(&encode_frame(4, &change).unwrap());
+        if valid {
+            let bytes = encoded.unwrap();
+            assert_eq!(bytes[HEADER], 17);
+            assert_eq!(&bytes[HEADER + 5..], name.as_bytes());
+            assert_eq!(decoded.unwrap(), change);
+            assert_eq!(StoreChange::decode(&bytes).unwrap(), change);
+        } else {
+            assert!(encoded.is_err());
+            assert!(decoded.is_err());
+        }
+    }
 }

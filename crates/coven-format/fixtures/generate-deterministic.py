@@ -436,6 +436,7 @@ def changes(sodium):
         b"\x0f" + store_audience() + bytes([3]) * 16 + bytes([0x91]) * 32,
         b"\x0f" + circle_audience(CIRCLE) + bytes([4]) * 16 + bytes([0xA2]) * 32,
         b"\x10" + ANA + pair(sodium, 0x33) + pair(sodium, 0x34),
+        b"\x11" + text(b"N"),
     ]
 
 
@@ -470,7 +471,7 @@ def restore_code():
     storage = (b'{"S3":{"bucket":"bucket","region":"region","endpoint":null,'
                b'"profile":null,"prefix":"store"}}')
     keys = b"CVMK\x01" + bytes([0x33]) * 64
-    return frame(10, STORE + text(b"S") + ANA + text(keys) + text(storage))
+    return frame(10, STORE + ANA + text(keys) + text(storage))
 
 
 def invite_code():

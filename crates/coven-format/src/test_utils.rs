@@ -617,7 +617,6 @@ pub fn snapshot_frames() -> Vec<Vec<u8>> {
 pub fn restore() -> RestoreCode {
     RestoreCode {
         store: StoreId(Uuid::from_bytes([0x10; 16])),
-        name: "S".into(),
         member: member_id(),
         member_keys: member_keys(),
         storage: SecretBytes::new(
@@ -718,6 +717,7 @@ pub fn store_changes() -> Vec<StoreChange> {
             expected: member(),
             keys: replacement(),
         },
+        StoreChange::RenameStore { name: "N".into() },
     ]
 }
 /// Every independently decoded ordinary object kind.

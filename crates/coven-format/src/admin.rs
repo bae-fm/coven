@@ -66,6 +66,11 @@ pub enum StoreChange {
         /// The name of the device that wrote this entry, belonging to its author.
         device_name: String,
     },
+    /// Set the store name, as an admin in the preceding state (§10).
+    RenameStore {
+        /// The new name.
+        name: String,
+    },
     /// Add a member's stable id with both public keys and their initial role.
     AddMember {
         /// The added member's stable id, fixed by the admin's invite.
@@ -192,7 +197,8 @@ impl StoreChange {
                 name(n)?;
                 name(device_name)
             }
-            Self::AddDevice { name: n, .. }
+            Self::RenameStore { name: n }
+            | Self::AddDevice { name: n, .. }
             | Self::CreateCircle { name: n, .. }
             | Self::RenameCircle { name: n, .. } => name(n),
             Self::RaiseSchema {
@@ -253,6 +259,7 @@ store_changes!(
     14 => SetAccess { member, access },
     15 => RotateKey { audience, key, key_hash },
     16 => ReplaceMemberKeys { member, expected, keys },
+    17 => RenameStore { name => crate::wire::get_name },
 );
 
 impl StoreChange {

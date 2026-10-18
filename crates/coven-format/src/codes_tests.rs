@@ -169,9 +169,9 @@ fn padding_material_lengths_and_hostile_sizes_are_errors() {
     code.storage = SecretBytes::new(vec![1; MAX_STORAGE + 1]);
     assert!(code.to_text().is_err());
     let mut encoded = test_utils::restore().to_bytes().unwrap();
-    // Prefix, store id, name length, name, member id, key length, then
+    // Prefix, store id, member id, key length, then
     // crypto's CVMK header.
-    encoded[48] = b'X';
+    encoded[43] = b'X';
     assert!(matches!(
         RestoreCode::from_bytes(&encoded),
         Err(Error::Material(_))
@@ -208,7 +208,6 @@ fn invite_frames_require_initial_key_and_writer_cursor_evidence() {
 #[test]
 fn maximum_storage_and_names_use_zeroizing_frame_and_text_types() {
     let mut code = test_utils::restore();
-    code.name = "N".repeat(1024);
     code.storage = SecretBytes::new(vec![0xab; MAX_STORAGE]);
     let bytes: Zeroizing<Vec<u8>> = code.to_bytes().unwrap();
     let text: Zeroizing<String> = code.to_text().unwrap();
@@ -241,4 +240,13 @@ fn arbitrary_code_text_never_panics() {
             assert_eq!(code.to_text().unwrap(), text);
         }
     }
+}
+
+#[test]
+fn restore_layout_places_member_immediately_after_store() {
+    let code = test_utils::restore();
+    let bytes = code.to_bytes().unwrap();
+    assert_eq!(&bytes[7..23], code.store.0.as_bytes());
+    assert_eq!(&bytes[23..39], code.member.0.as_bytes());
+    assert_eq!(&bytes[43..48], b"CVMK\x01");
 }

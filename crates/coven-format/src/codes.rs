@@ -12,13 +12,11 @@ const MAX_STORAGE: usize = 16 * 1024;
 const MAX_CODE_BYTES: usize = 18 * 1024;
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
-/// A person's keys and the store's identity, name and location (§13.1).
+/// A person's keys and the store's identity and location (§13.1).
 #[derive(Debug)]
 pub struct RestoreCode {
     /// The store's id.
     pub store: StoreId,
-    /// The store's display name.
-    pub name: String,
     /// The stable member the private pair belongs to. Restore requires this
     /// id's current pair; an old code cannot rebind it (D13).
     pub member: MemberId,
@@ -34,7 +32,6 @@ impl RestoreCode {
         encode_code(
             10,
             self.store,
-            &self.name,
             &[
                 self.member.0.as_bytes(),
                 &(keys.as_bytes().len() as u32).to_be_bytes(),
@@ -49,7 +46,6 @@ impl RestoreCode {
         let (kind, mut input) = decode_frame(bytes)?;
         require(kind == 10, "restore code kind", Rule::Kind)?;
         let store = Wire::get(&mut input)?;
-        let label = crate::wire::get_name(&mut input)?;
         let member = Wire::get(&mut input)?;
         let keys_len = u32::get(&mut input)? as usize;
         let member_keys =
@@ -58,7 +54,6 @@ impl RestoreCode {
         input.finish()?;
         Ok(Self {
             store,
-            name: label,
             member,
             member_keys,
             storage,
@@ -101,11 +96,13 @@ impl InviteCode {
     /// Encode a bounded frame into a buffer erased on drop, allocated once.
     pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
         let secret = self.secret.to_secret_bytes();
+        name(&self.name)?;
         encode_code(
             11,
             self.store,
-            &self.name,
             &[
+                &(self.name.len() as u32).to_be_bytes(),
+                self.name.as_bytes(),
                 self.invite.0.as_bytes(),
                 self.member.0.as_bytes(),
                 secret.as_bytes(),
@@ -170,16 +167,12 @@ fn storage(input: &mut Decoder<'_>) -> Result<SecretBytes, Error> {
 fn encode_code(
     kind: u8,
     store: StoreId,
-    label: &str,
     material: &[&[u8]],
     storage: &SecretBytes,
 ) -> Result<Zeroizing<Vec<u8>>, Error> {
-    name(label)?;
     bound(storage.as_bytes().len(), MAX_STORAGE, "storage settings")?;
     let size = FRAME_PREFIX_LEN
         + 16
-        + 4
-        + label.len()
         + material.iter().map(|s| s.len()).sum::<usize>()
         + 4
         + storage.as_bytes().len();
@@ -192,8 +185,6 @@ fn encode_code(
     bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
     bytes.extend_from_slice(&((size - FRAME_PREFIX_LEN) as u32).to_be_bytes());
     bytes.extend_from_slice(store.0.as_bytes());
-    bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
-    bytes.extend_from_slice(label.as_bytes());
     for part in material {
         bytes.extend_from_slice(part);
     }
