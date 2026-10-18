@@ -2,7 +2,9 @@
 //! owns unpublished directories and crypto owns final key custody (§13, E10).
 
 use super::*;
-use coven_crypto::custody::{InMemoryCustody, Keychain, StoreKeychain};
+#[cfg(test)]
+use coven_crypto::custody::Keychain;
+use coven_crypto::custody::{InMemoryCustody, StoreKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::StoreDirAccess;
@@ -58,9 +60,6 @@ pub enum BootstrapError {
     /// Final custody could not be read or written.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),
-    /// The singular keychain API cannot choose among several stores.
-    #[error("keychain contains multiple stores: {0:?}")]
-    MultipleStores(Vec<StoreId>),
     /// Cleanup failed too; retry can inspect both failures.
     #[error("{operation}; cleanup failed: {cleanup}")]
     Cleanup {
@@ -129,12 +128,14 @@ pub async fn restore_from_code(
     .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
 }
 
-/// Restore from the one discoverable iCloud code. Multiple stores require the
-/// app to choose an explicit code; this call never selects one arbitrarily.
+/// Restore the entry selected from `saved_restore_codes`. Reads the current
+/// code by store id, including a replacement saved since listing. Returns None
+/// if that store's code is no longer saved.
 /// S3 uses the explicit key when supplied, otherwise its separately synced key.
 /// Missing keys, wrong-provider keys and keychain failures precede bootstrap.
 pub async fn restore_from_keychain(
     builder: CovenBuilder,
+    saved: &SavedRestoreCode,
     s3_credentials: Option<S3Credentials>,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
@@ -142,12 +143,12 @@ pub async fn restore_from_keychain(
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
     let keychain = builder.keychain()?;
-    let Some(code) = keychain_code(keychain.as_ref())? else {
+    let scoped = StoreKeychain::new(keychain, saved.store_id);
+    let Some((code, location)) = keychain_code(&scoped, saved.store_id)? else {
         return Ok(None);
     };
-    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
     let s3_credentials = if location.provider() == CloudProvider::S3 && s3_credentials.is_none() {
-        StoreKeychain::new(keychain, code.store)
+        scoped
             .synced_s3_credentials()?
             .map(|bytes| S3Credentials::decode(bytes.as_bytes()).map_err(SyncError::from))
             .transpose()?
@@ -193,22 +194,14 @@ pub async fn join_with_invite(
     .await
 }
 
-fn keychain_code(keychain: &Keychain) -> Result<Option<RestoreCode>, BootstrapError> {
-    let mut codes = keychain.synced_restore_codes()?;
-    if codes.len() > 1 {
-        return Err(BootstrapError::MultipleStores(
-            codes.into_iter().map(|(id, _)| id).collect(),
-        ));
-    }
-    let Some((id, bytes)) = codes.pop() else {
-        return Ok(None);
-    };
-    let code = RestoreCode::from_bytes(bytes.as_bytes()).map_err(|_| CodeError::Invalid)?;
-    if code.store != id {
-        return Err(CodeError::Invalid.into());
-    }
-    StorageConfig::decode(code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-    Ok(Some(code))
+fn keychain_code(
+    keychain: &StoreKeychain,
+    store: StoreId,
+) -> Result<Option<(RestoreCode, StorageConfig)>, BootstrapError> {
+    keychain
+        .synced_restore_code()?
+        .map(|bytes| crate::saved_restore::decode(store, bytes.as_bytes()).map_err(Into::into))
+        .transpose()
 }
 
 enum BootstrapRequest {

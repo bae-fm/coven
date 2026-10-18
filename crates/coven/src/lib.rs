@@ -13,6 +13,7 @@ mod coven;
 mod error;
 mod handle;
 mod read_handle;
+mod saved_restore;
 #[cfg(any(test, feature = "test-utils"))]
 mod test_utils;
 

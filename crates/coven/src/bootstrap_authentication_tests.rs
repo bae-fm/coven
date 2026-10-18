@@ -20,10 +20,17 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
             StoreKeychain::new(install.keychain.clone(), owner.directory.id())
                 .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
                 .unwrap();
-            restore_from_keychain(builder, None, "Laptop", |_| {}, &cancel)
-                .await
-                .unwrap()
-                .unwrap()
+            restore_from_keychain(
+                builder,
+                &crate::saved_restore::list(install.keychain.clone()).unwrap()[0],
+                None,
+                "Laptop",
+                |_| {},
+                &cancel,
+            )
+            .await
+            .unwrap()
+            .unwrap()
         } else {
             restore_from_code(
                 builder,

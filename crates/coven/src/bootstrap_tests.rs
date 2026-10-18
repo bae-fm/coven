@@ -1,5 +1,5 @@
 use super::*;
-use coven_crypto::custody::KeyringCustody;
+use coven_crypto::custody::{Keychain, KeyringCustody};
 use coven_database::DatabaseBuilder;
 use coven_storage::{
     test_utils::{Faults, MemoryStorage},
@@ -91,7 +91,12 @@ async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
         handle.restore_code().await.unwrap(),
         owner.code.to_text().unwrap().as_str()
     );
-    let synced = keychain_code(&install.keychain).unwrap().unwrap();
+    let (synced, _) = keychain_code(
+        &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+        owner.directory.id(),
+    )
+    .unwrap()
+    .unwrap();
     assert_eq!(
         synced.to_text().unwrap().as_str(),
         handle.restore_code().await.unwrap()
@@ -276,7 +281,14 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let directory = install.layout.store_dir(&owner.directory.id());
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(
-        keychain_code(&install.keychain).unwrap().unwrap().member,
+        keychain_code(
+            &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+            owner.directory.id(),
+        )
+        .unwrap()
+        .unwrap()
+        .0
+        .member,
         request.member
     );
     handle.close().await.unwrap();
@@ -536,34 +548,6 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
 }
 
 #[tokio::test]
-async fn keychain_discovery_refuses_ambiguous_or_mismatched_store_ids() {
-    let owner = Owner::new(CloudProvider::S3, false).await;
-    let install = Installation::new();
-    assert!(keychain_code(&install.keychain).unwrap().is_none());
-    let scoped = StoreKeychain::new(install.keychain.clone(), owner.directory.id());
-    scoped
-        .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
-        .unwrap();
-    assert_eq!(
-        keychain_code(&install.keychain).unwrap().unwrap().store,
-        owner.directory.id()
-    );
-    let other = StoreKeychain::new(install.keychain.clone(), StoreId(UuidIds.new_id()));
-    other
-        .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
-        .unwrap();
-    assert!(
-        matches!(keychain_code(&install.keychain), Err(BootstrapError::MultipleStores(ids)) if ids.len() == 2)
-    );
-    scoped.delete_synced_restore_code().unwrap();
-    assert!(matches!(
-        keychain_code(&install.keychain),
-        Err(BootstrapError::Code(CodeError::Invalid))
-    ));
-    owner.close().await;
-}
-
-#[tokio::test]
 async fn a_member_removed_while_joining_receives_the_provider_refusal() {
     let owner = Owner::new(CloudProvider::OneDrive, false).await;
     let invite = owner.invite().await;
@@ -764,12 +748,16 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     );
 
     assert_eq!(
-        keychain_code(&install.keychain)
-            .unwrap()
-            .unwrap()
-            .to_text()
-            .unwrap()
-            .as_str(),
+        keychain_code(
+            &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+            owner.directory.id(),
+        )
+        .unwrap()
+        .unwrap()
+        .0
+        .to_text()
+        .unwrap()
+        .as_str(),
         retained
     );
     handle.close().await.unwrap();
@@ -830,10 +818,17 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                         owner.code.to_bytes().unwrap().to_vec(),
                     ))
                     .unwrap();
-                restore_from_keychain(builder, owner.s3_credentials(), "Laptop", |_| {}, &cancel)
-                    .await
-                    .unwrap()
-                    .unwrap()
+                restore_from_keychain(
+                    builder,
+                    &crate::saved_restore::list(install.keychain.clone()).unwrap()[0],
+                    owner.s3_credentials(),
+                    "Laptop",
+                    |_| {},
+                    &cancel,
+                )
+                .await
+                .unwrap()
+                .unwrap()
             } else {
                 restore_from_code(
                     builder,
@@ -927,10 +922,20 @@ async fn joining_retains_the_approved_member_in_session_custody() {
 
 #[tokio::test]
 async fn missing_keychain_code_returns_none_without_creating_a_store() {
+    let owner = Owner::new(CloudProvider::CloudKit, false).await;
     let install = Installation::new();
+    let scoped = StoreKeychain::new(install.keychain.clone(), owner.directory.id());
+    scoped
+        .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+        .unwrap();
+    let saved = crate::saved_restore::list(install.keychain.clone())
+        .unwrap()
+        .remove(0);
+    scoped.delete_synced_restore_code().unwrap();
     let (_, cancel) = watch::channel(false);
     let result = restore_from_keychain(
         Coven::builder(install.layout.clone()).with_keychain(install.keychain.clone()),
+        &saved,
         None,
         "Laptop",
         |_| {},
@@ -940,6 +945,7 @@ async fn missing_keychain_code_returns_none_without_creating_a_store() {
     .unwrap();
     assert!(result.is_none());
     assert!(install.layout.stores().await.unwrap().is_empty());
+    owner.close().await;
 }
 
 #[path = "bootstrap_authentication_tests.rs"]

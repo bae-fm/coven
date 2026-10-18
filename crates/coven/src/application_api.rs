@@ -11,6 +11,7 @@ pub use crate::error::{
 };
 pub use crate::handle::{CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
+pub use crate::saved_restore::{saved_restore_codes, SavedRestoreCode};
 pub use crate::store_layout::{StoreLayout, StoreLayoutError};
 pub use coven_crypto::custody::{
     set_keyring_service, IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError,

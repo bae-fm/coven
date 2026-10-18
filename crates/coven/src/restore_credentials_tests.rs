@@ -81,6 +81,7 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
         let (_, cancel) = watch::channel(false);
         let handle = restore_from_keychain(
             install.builder(&owner, owner.storage.clone()),
+            &crate::saved_restore::list(install.keychain.clone()).unwrap()[0],
             explicit.then(|| key.clone()),
             "Laptop",
             |_| {},
@@ -125,6 +126,7 @@ async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
             let result = if from_keychain {
                 restore_from_keychain(
                     builder,
+                    &crate::saved_restore::list(install.keychain.clone()).unwrap()[0],
                     supplied,
                     "Laptop",
                     |_| panic!("bootstrap began"),
@@ -187,12 +189,16 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
         store
             .set_synced_s3_credentials(&SecretBytes::new(b"bad key encoding".to_vec()))
             .unwrap();
+        let saved = crate::saved_restore::list(install.keychain.clone())
+            .unwrap()
+            .remove(0);
         if refused_read {
             install.keychain.fail_operations_after(&[1]);
         }
         let (_, cancel) = watch::channel(false);
         let error = restore_from_keychain(
             install.builder(&owner, owner.storage.clone()),
+            &saved,
             None,
             "Laptop",
             |_| panic!("bootstrap began"),
@@ -302,9 +308,13 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
         let key = owner.s3_credentials().unwrap().encode().unwrap();
         store.set_synced_restore_code(&code).unwrap();
         store.set_synced_s3_credentials(&key).unwrap();
+        let saved = crate::saved_restore::list(install.keychain.clone())
+            .unwrap()
+            .remove(0);
         let (stop, cancel) = watch::channel(false);
         let result = restore_from_keychain(
             install.builder(&owner, owner.storage.clone()),
+            &saved,
             None,
             "Laptop",
             cancel_at(&phase, &stop),

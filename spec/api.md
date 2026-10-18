@@ -225,6 +225,9 @@ impl TestCoven {
     /// Discard through the same locked directory and keychain path as `Coven`.
     pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError>;
 
+    /// List this installation's saved codes through the production discovery path (E10).
+    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreCode>, BootstrapError>;
+
     /// Seed the simulated OS custody as if this installation had opened keys.
     pub fn keep_store_keys(
         &self,
@@ -4009,6 +4012,11 @@ pub enum ProviderSignOut {
   and the S3 key, because the person controls the showing device. The key
   accompanies the code; it is never part of the restore-code encoding.
   iCloud Keychain may also hold the S3 key separately alongside the code.
+- `saved_restore_codes()` lists the registered service's saved codes so the
+  app can offer a choice before opening a store. Entries expose the store id,
+  provider location and separate S3-key presence, with no secrets or store name.
+  The app passes its selection to `restore_from_keychain`; no local store or
+  provider connection is needed to list it.
 - An admin adds a person with an invite, and approves their join request
   ([§13.2](coven.md#132-adding-a-person-invites)).
 - Before `create_invite` makes any provider change, an App-folder Dropbox
@@ -4056,8 +4064,6 @@ pub enum ProviderSignOut {
     returning the handle.
   - Restore and joining register the supplied device name. Every installation
     receives its own device id; resuming a pending join keeps that id.
-  - The singular keychain call returns an ambiguity error if several stores
-    are discoverable; it never chooses one arbitrarily.
   - Loading uses snapshots and logs through their owners. The file-transfer
     queue starts with the returned handle and uses the builder's limits.
 
@@ -4137,8 +4143,6 @@ pub enum BootstrapError {
     SecureStorage(KeyError),
     /// Provider admission, signed membership or snapshot loading failed.
     Sync(SyncError),
-    /// The app must select a code explicitly when several stores are available.
-    MultipleStores(Vec<StoreId>),
     /// Cleanup failed too; neither failure is hidden.
     Cleanup { operation: Box<BootstrapError>, cleanup: Box<BootstrapError> },
     /// Publication took effect, but durability or cleanup failed. The handle
@@ -4208,7 +4212,7 @@ impl OAuthRedirectError {
 
 impl CovenHandle {
     /// Shows this member's code again: stable id, current private pair, store
-    /// id/name and location; no storage credentials. The pair is the one current
+    /// id and location; no name or storage credentials. The pair is the one current
     /// in the applied prefix; missing current keys report MemberKeysReplaced,
     /// and a retired pair is never exported.
     pub async fn restore_code(&self) -> Result<String, SyncError>;
@@ -4317,15 +4321,32 @@ pub async fn restore_from_code(
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError>;
 
-/// Opens the store on a new Apple device from its iCloud Keychain restore
-/// code (§13.1). On S3, uses the supplied credentials when Some; None reads
+/// A saved restore choice, containing no secrets or store name (§13.1).
+pub struct SavedRestoreCode {
+    pub store_id: StoreId,
+    /// Provider and account or location as the code holds them, without credentials.
+    /// provider() identifies the provider; oauth_access() names its sign-in requirement.
+    pub location: StorageConfig,
+    /// Whether a separate S3 key was present when this entry was listed.
+    pub has_s3_credentials: bool,
+}
+
+/// The registered service's saved iCloud Keychain codes; empty when none are saved.
+/// Read failures, malformed codes and ambiguous entries fail the whole call.
+/// Native non-Apple platforms return BootstrapError::SecureStorage(KeyError::Unsupported).
+pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreCode>, BootstrapError>;
+
+/// Opens the selected store on a new Apple device from its current iCloud
+/// Keychain restore code (§13.1). On S3, uses supplied credentials when Some; None reads
 /// the S3 key held separately alongside the code. An absent key fails with
 /// BootstrapError::Sync carrying StorageFailure::InvalidConfiguration;
 /// a keychain read failure is returned. Other providers require None and
 /// their own sign-in.
-/// Returns None when the keychain holds no store.
+/// Reads by store id, including a code or key refreshed since listing.
+/// Returns None when the selected store's code is no longer saved.
 pub async fn restore_from_keychain(
     builder: CovenBuilder,
+    saved: &SavedRestoreCode,
     s3_credentials: Option<S3Credentials>,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
@@ -4434,15 +4455,16 @@ On the laptop:
 
 ```rust
 let info = decode_code_info(&scanned)?;
+let metadata = info.metadata();
 let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone())
     .clock(clock.clone());
-if let Some(access) = info.oauth_access {
+if let Some(access) = metadata.oauth_access {
     builder.authenticate(access).await?;
 }
-let s3_credentials = if info.cloud_provider == CloudProvider::S3 {
+let s3_credentials = if metadata.cloud_provider == CloudProvider::S3 {
     Some(ask_for_s3_access_key().await?)
 } else {
     None
@@ -4456,6 +4478,33 @@ let handle = restore_from_code(
     &cancel_rx,
 )
 .await?;
+```
+
+If the laptop uses iCloud Keychain instead, Ana chooses from the saved entries:
+
+```rust
+let saved = saved_restore_codes().await?;
+let selected = choose_saved_store(&saved);
+let mut builder = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .oauth_clients(oauth_clients.clone());
+if let Some(access) = selected.location.oauth_access() {
+    builder.authenticate(access).await?;
+}
+let s3_credentials = if selected.location.provider() == CloudProvider::S3
+    && !selected.has_s3_credentials
+{
+    Some(ask_for_s3_access_key().await?)
+} else {
+    None
+};
+match restore_from_keychain(
+    builder, selected, s3_credentials, "Ana's laptop", |step| show_step(step), &cancel_rx,
+).await? {
+    Some(handle) => show_store(handle),
+    None => show_saved_code_removed(),
+}
 ```
 
 Example, Ana adding Carol. On Ana's phone:

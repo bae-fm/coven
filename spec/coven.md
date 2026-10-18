@@ -2268,6 +2268,13 @@ A new device gets the code in one of three ways:
   changing the code (api.md [E9](api.md#e9-members-and-devices)).
 - **Typing** it in.
 
+On Ana's new laptop, `saved_restore_codes()` lets the app offer the stores whose
+codes coven saved in iCloud Keychain. Each entry gives the store id, the provider
+and its account or location as the code holds them, and whether an S3 key is
+saved beside it. There is no store name to become stale after a rename. Ana
+chooses an entry and the app passes it to `restore_from_keychain` (api.md
+[E10](api.md#e10-joining-and-restore)).
+
 Storage access is separate. On S3 the person keeps their access key apart, in a
 password manager say, and enters it, unless the QR transfer or Keychain supplied
 it. On Dropbox and OneDrive, the new device asks coven to sign in to the person's

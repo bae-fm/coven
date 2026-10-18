@@ -75,7 +75,7 @@ retry due now.
 ## A person's new device: the restore code
 
 A *restore code* holds the member's id and current private keys, the store's id
-and name, and the storage location. It never holds storage credentials: no S3
+and the storage location. It carries no store name or storage credentials: no S3
 key, no OAuth token. Setup returns it, and `handle.restore_code()` shows it
 again. Its text form starts with `CVR1-`.
 
@@ -87,18 +87,24 @@ password manager say, unless a QR scan from their own device or iCloud Keychain
 supplies it alongside the code. On Dropbox and OneDrive the new device signs in
 to the person's own account.
 
+On Apple platforms, `saved_restore_codes().await?` lists the store ids and
+provider locations coven saved, and whether each has an S3 key beside its code.
+The app passes the chosen entry to `restore_from_keychain`. It shows no store
+name until loading the store, so a rename cannot leave a stale recovery label.
+
 Ana's new laptop scans the code from her phone:
 
 ```rust
 let info = decode_code_info(&scanned)?;
+let metadata = info.metadata();
 let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone());
-if let Some(access) = info.oauth_access {
+if let Some(access) = metadata.oauth_access {
     builder.authenticate(access).await?;
 }
-let s3_credentials = if info.cloud_provider == CloudProvider::S3 {
+let s3_credentials = if metadata.cloud_provider == CloudProvider::S3 {
     Some(ask_for_s3_access_key().await?)
 } else {
     None

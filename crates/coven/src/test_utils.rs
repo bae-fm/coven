@@ -46,6 +46,12 @@ impl TestCoven {
         Coven::builder(layout).with_keychain(self.keychain.clone())
     }
 
+    /// List this installation's saved codes through the production discovery path.
+    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreCode>, BootstrapError> {
+        let keychain = self.keychain.clone();
+        crate::coven::blocking(move || crate::saved_restore::list(keychain)).await
+    }
+
     /// Discard through the same locked directory and keychain path as `Coven`.
     pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = directory.clone();

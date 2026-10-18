@@ -8,6 +8,7 @@ const CONNECTION: &str = "crates/coven/src/storage.rs";
 const MEMORY_STORAGE: &str = "crates/coven-storage/src/test_utils.rs";
 const MEMORY_CONNECTOR: &str = "crates/coven-storage/src/memory_connector.rs";
 const CONNECTION_CONTROL: &str = "crates/coven/src/storage_control.rs";
+const SAVED_RESTORE: &str = "crates/coven/src/saved_restore.rs";
 pub(crate) const POLICY: Policy = Policy {
     crate_order: &[
         "coven-foundation",
@@ -479,6 +480,9 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder_creation.rs", "<free>", "create"),
         ("crates/coven/src/builder_creation.rs", "<free>", "prepare"),
         ("crates/coven/src/coven.rs", "Coven", "discard_store"),
+        // Recovery discovery acquires the registered keychain and scopes its entries.
+        (SAVED_RESTORE, "<free>", "saved_restore_codes"),
+        (SAVED_RESTORE, "<free>", "list"),
         ("crates/coven/src/handle.rs", "CovenHandle", "close"),
         ("crates/coven/src/handle.rs", "CovenHandle", "new"),
         (

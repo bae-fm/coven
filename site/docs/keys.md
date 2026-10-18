@@ -89,7 +89,9 @@ and for provider credentials and sign-in tokens.
 On Apple platforms coven also keeps the [restore code](/docs/sharing#a-person-s-new-device-the-restore-code)
 in a synced iCloud Keychain entry, and an S3 key in a separate synced entry
 beside it. Replacing the S3 key updates that entry without changing the code.
-`restore_from_keychain` reads them on a new device.
+`saved_restore_codes()` lists the saved stores by id and provider location,
+including whether an S3 key is saved beside each code. Pass the selected entry
+to `restore_from_keychain` to read its current code and key on a new device.
 
 ## Host secrets
 
