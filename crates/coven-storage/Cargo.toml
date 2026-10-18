@@ -2,6 +2,7 @@
 name = "coven-storage"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [dependencies]
 coven-foundation.workspace = true
@@ -20,7 +21,7 @@ tracing.workspace = true
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }
 oauth2.workspace = true
 open.workspace = true
-aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client", "rustls"] }
+aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
 aws-credential-types.workspace = true
 aws-smithy-async.workspace = true
 aws-smithy-runtime-api.workspace = true

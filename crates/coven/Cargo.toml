@@ -2,6 +2,7 @@
 name = "coven"
 version.workspace = true
 edition.workspace = true
+license.workspace = true
 
 [features]
 test-utils = ["coven-storage/test-utils", "coven-sync/test-utils", "coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]

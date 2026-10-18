@@ -6,6 +6,7 @@ members = ["crates/coven-foundation", "crates/coven-crypto", "crates/coven-merge
 [workspace.package]
 edition = "2021"
 version = "0.1.0"
+license = "Apache-2.0"
 
 # One version per external dependency for the whole workspace (Appendix F.1). Members
 # name these with `workspace = true` and the features they need; they never
