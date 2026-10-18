@@ -2263,6 +2263,9 @@ device learns the current name only after loading the store; before
 connecting, the app may show its id, provider and account or location, never a
 store name. Dropbox and OneDrive show the member's signed-in account label.
 S3 shows the bucket and endpoint; CloudKit exposes no account identity.
+`decode_code_info` exposes this location for a typed or scanned code, matching
+the Keychain list so Ana can distinguish her personal and work accounts before
+connecting.
 
 A new device gets the code in one of three ways:
 

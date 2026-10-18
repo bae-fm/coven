@@ -50,6 +50,8 @@ pub struct CodeMetadata {
     pub member: MemberId,
     /// The storage provider.
     pub cloud_provider: CloudProvider,
+    /// The code's provider location and account label, without credentials or share tokens.
+    pub location: StorageConfig,
     /// The sign-in required by this code; S3 and CloudKit do not use OAuth.
     pub oauth_access: Option<OAuthAccess>,
 }
@@ -78,6 +80,7 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
         member,
         cloud_provider: location.provider(),
         oauth_access: location.oauth_access(),
+        location,
     };
     Ok(match code {
         DecodedCode::Restore(code) => CodeInfo::Restore(metadata(code.store, code.member)),

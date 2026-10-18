@@ -4241,9 +4241,11 @@ pub enum ProviderSignOut {
   separately, such as in a password manager, and supplies it on the new device. Dropbox
   and OneDrive likewise require the person's provider sign-in.
 - Restore codes and coven's iCloud Keychain entries carry no name. Before
-  connecting, a restoring device may show the id and provider, never a store
-  name; it learns the name only after loading. An invite carries the current
+  connecting, a restoring device may show the id, provider and account or location,
+  never a store name; it learns the name only after loading. An invite carries the current
   name copied when it was made and expires within a day (§13.2).
+  `decode_code_info` exposes the same location as a saved Keychain entry, so a
+  typed or scanned code can show which account it is for before connecting.
 - A QR scan from one of the person's own devices may supply both the code
   and the S3 key, because the person controls the showing device. The key
   accompanies the code; it is never part of the restore-code encoding.
@@ -4324,7 +4326,7 @@ impl CodeInfo {
     pub fn metadata(&self) -> &CodeMetadata;
 }
 
-/// Facts that either code carries, without secrets or a display name.
+/// Facts that either code carries, without secrets or a store name.
 pub struct CodeMetadata {
     /// The store named by the code.
     pub store_id: StoreId,
@@ -4332,6 +4334,8 @@ pub struct CodeMetadata {
     pub member: MemberId,
     /// The provider holding the store.
     pub cloud_provider: CloudProvider,
+    /// The code's provider location and account label, without credentials or share tokens.
+    pub location: StorageConfig,
     /// Sign-in request for this code: the location's Dropbox access level or
     /// OneDrive's scopes; None for S3 and CloudKit.
     pub oauth_access: Option<OAuthAccess>,
@@ -4516,7 +4520,7 @@ pub struct JoinRequest {
     /* private authenticated request record; construct only by receiving a checked request */
 }
 
-/// The store and member ids, provider, and sign-in requirement. Only an
+/// The store and member ids, provider location and account, and sign-in requirement. Only an
 /// invite returns a store name, captured when the invite was made.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
@@ -4693,6 +4697,7 @@ On the laptop:
 ```rust
 let info = decode_code_info(&scanned)?;
 let metadata = info.metadata();
+show_provider_location(&metadata.location);
 let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())

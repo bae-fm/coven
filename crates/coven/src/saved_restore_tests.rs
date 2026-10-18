@@ -63,6 +63,9 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
     // Save out of order; discovery keeps the existing store-id ordering.
     for (index, location) in locations.into_iter().enumerate().rev() {
         let code = code(index as u128 + 1, &location);
+        let decoded = decode_code_info(&code.to_text().unwrap()).unwrap();
+        assert_eq!(decoded.metadata().store_id, code.store);
+        assert_eq!(decoded.metadata().location, location);
         let store = save(&app, &code);
         let has_s3_credentials = index == 0;
         if has_s3_credentials {
@@ -116,6 +119,33 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
         Some(OAuthAccess::Dropbox(DropboxAccess::AppFolder))
     );
     assert!(!format!("{saved:?}").contains("never-in-the-list"));
+}
+
+#[tokio::test]
+async fn dropbox_accounts_are_distinguishable_in_both_saved_and_decoded_choices() {
+    let app = TestCoven::new();
+    let mut decoded = Vec::new();
+    for (index, label) in ["ana@example.com", "ana@work.example"]
+        .into_iter()
+        .enumerate()
+    {
+        let location = StorageConfig::Dropbox {
+            location: DropboxLocation::AppFolder,
+            account_label: Some(label.into()),
+        };
+        let code = code(index as u128 + 1, &location);
+        save(&app, &code);
+        decoded.push(decode_code_info(&code.to_text().unwrap()).unwrap());
+    }
+    let saved = app.saved_restore_codes().await.unwrap();
+    assert_eq!(saved.len(), 2);
+    assert_ne!(saved[0].location, saved[1].location);
+    assert!(saved[0].location.same_location(&saved[1].location));
+    for (saved, decoded) in saved.iter().zip(decoded) {
+        assert_eq!(saved.store_id, decoded.metadata().store_id);
+        assert_eq!(saved.location, decoded.metadata().location);
+        assert!(matches!(decoded, CodeInfo::Restore(_)));
+    }
 }
 
 #[tokio::test]

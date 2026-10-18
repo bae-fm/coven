@@ -7,7 +7,7 @@ fn location() -> StorageConfig {
     StorageConfig::S3 {
         bucket: "bucket".into(),
         region: "region".into(),
-        endpoint: None,
+        endpoint: Some("https://s3.us-east-1.amazonaws.com".parse().unwrap()),
         profile: None,
         prefix: "store".into(),
     }
@@ -20,24 +20,60 @@ fn credentials() -> S3Credentials {
     }
 }
 
+fn invite(storage: InviteStorage) -> InviteCode {
+    InviteCode {
+        store: StoreId(uuid::Uuid::from_u128(1)),
+        name: "Household".into(),
+        invite: InviteId(uuid::Uuid::from_u128(2)),
+        // The admin's chosen id for the invited person, not the inviter's.
+        member: MemberId(uuid::Uuid::from_u128(2)),
+        secret: InviteSecret::generate().unwrap(),
+        initial_key: KeyId(uuid::Uuid::from_u128(3)),
+        inviting_writer: DeviceId(4),
+        read_through: 12,
+        storage: storage.encode().unwrap(),
+    }
+}
+
 #[test]
-fn restore_metadata_retains_the_creation_access_choice() {
+fn restore_metadata_retains_each_location_and_its_sign_in_requirement() {
     for (location, access) in [
+        (location(), None),
         (
             StorageConfig::Dropbox {
-                account_label: None,
+                account_label: Some("ana@example.com".into()),
                 location: coven_storage::DropboxLocation::AppFolder,
             },
-            OAuthAccess::Dropbox(coven_storage::DropboxAccess::AppFolder),
+            Some(OAuthAccess::Dropbox(
+                coven_storage::DropboxAccess::AppFolder,
+            )),
         ),
         (
             StorageConfig::Dropbox {
-                account_label: None,
+                account_label: Some("ana@work.example".into()),
                 location: coven_storage::DropboxLocation::SharedFolder {
                     namespace_id: "namespace".into(),
                 },
             },
-            OAuthAccess::Dropbox(coven_storage::DropboxAccess::FullDropbox),
+            Some(OAuthAccess::Dropbox(
+                coven_storage::DropboxAccess::FullDropbox,
+            )),
+        ),
+        (
+            StorageConfig::OneDrive {
+                account_label: Some("ana@work.example".into()),
+                drive_id: "drive".into(),
+                folder_id: "household".into(),
+            },
+            Some(OAuthAccess::OneDrive),
+        ),
+        (
+            StorageConfig::CloudKit {
+                container: "iCloud.notes".into(),
+                owner: "owner-record".into(),
+                zone: "household".into(),
+            },
+            None,
         ),
     ] {
         let code = RestoreCode {
@@ -51,7 +87,9 @@ fn restore_metadata_retains_the_creation_access_choice() {
         let CodeInfo::Restore(metadata) = decode_code_info(&code).unwrap() else {
             panic!("restore metadata");
         };
-        assert_eq!(metadata.oauth_access, Some(access));
+        assert_eq!(metadata.oauth_access, access);
+        assert_eq!(metadata.cloud_provider, location.provider());
+        assert_eq!(metadata.location, location);
         let decoded = read_restore_code(&code).unwrap();
         assert_eq!(
             StorageConfig::decode(decoded.storage.as_bytes()).unwrap(),
@@ -69,23 +107,10 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         storage: location().encode().unwrap(),
     };
     let restore_text = restore.to_text().unwrap();
-    let invite = InviteCode {
-        store: restore.store,
-        name: "Household".into(),
-        invite: InviteId(uuid::Uuid::from_u128(2)),
-        // The admin's chosen id for the invited person, not the inviter's.
-        member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(2)),
-        secret: InviteSecret::generate().unwrap(),
-        initial_key: KeyId(uuid::Uuid::from_u128(3)),
-        inviting_writer: DeviceId(4),
-        read_through: 12,
-        storage: InviteStorage::S3 {
-            invitation: StorageInvitation::for_account(location()).unwrap(),
-            credentials: credentials(),
-        }
-        .encode()
-        .unwrap(),
-    };
+    let invite = invite(InviteStorage::S3 {
+        invitation: StorageInvitation::for_account(location()).unwrap(),
+        credentials: credentials(),
+    });
     let invite_text = invite.to_text().unwrap();
     let decoded = read_invite_code(&invite_text).unwrap();
     assert_eq!(decoded.initial_key, invite.initial_key);
@@ -100,6 +125,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
                 store_id: restore.store,
                 member,
                 cloud_provider: CloudProvider::S3,
+                location: location(),
                 oauth_access: None,
             };
             match kind {
@@ -150,4 +176,40 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         decode_code_info(&invalid.to_text().unwrap()),
         Err(CodeError::Invalid)
     ));
+}
+
+#[test]
+fn invite_metadata_exposes_locations_without_provider_admission_secrets() {
+    use serde_json::json;
+    for (location, acceptance) in [
+        (
+            StorageConfig::OneDrive {
+                drive_id: "drive".into(),
+                folder_id: "household".into(),
+                account_label: Some("ana@example.com".into()),
+            },
+            json!({"OneDriveShare":{"token":"provider-admission-secret"}}),
+        ),
+        (
+            StorageConfig::CloudKit {
+                container: "iCloud.notes".into(),
+                owner: "owner-record".into(),
+                zone: "household".into(),
+            },
+            json!({"CloudKitShare":{"url":"https://www.icloud.com/share/provider-admission-secret"}}),
+        ),
+    ] {
+        let invitation = StorageInvitation::decode(
+            &serde_json::to_vec(&json!({"location":location,"acceptance":acceptance})).unwrap(),
+        )
+        .unwrap();
+        let code = invite(InviteStorage::Account(invitation));
+        let info = decode_code_info(&code.to_text().unwrap()).unwrap();
+        assert_eq!(info.metadata().location, location);
+        assert!(!format!("{info:?}").contains("provider-admission-secret"));
+        assert_eq!(
+            info.metadata().location.encode().unwrap().as_bytes(),
+            location.encode().unwrap().as_bytes()
+        );
+    }
 }
