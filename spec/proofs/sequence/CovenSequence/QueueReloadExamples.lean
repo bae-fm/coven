@@ -95,6 +95,7 @@ abbrev circleSig : Sig where
   Aud := Unit
 
 def circleLedger : Ledger circleSig where
+  name := "Household"
   member := fun _ => true
   retired := fun _ => false
   role := fun _ => .admin

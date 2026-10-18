@@ -155,7 +155,7 @@ def authoredSlots (slots : List Json) : List Json := slots.zipIdx.map fun (slot,
 
 def applyCase (slots : List Json) : Json := json% {
   "kind":"apply", "member_count":3,
-  "initial":{"members":[{"member":0,"role":"admin","key_gen":0},
+  "initial":{"name":"Household","members":[{"member":0,"role":"admin","key_gen":0},
     {"member":1,"role":"member","key_gen":0}],
     "devices":[{"device":0,"member":0},{"device":1,"member":1}]},
   "audiences":[{"audience":0,"version":1,"writers":[0,1,2]},
@@ -579,5 +579,20 @@ def keyCase (slots held current : List Json) : Json := json% {
   check (input.setObjVal! "time" (toJson (6 : Nat))) Json.null
   check (input.setObjVal! "snapshots" (toJson [fresh, old.setObjVal! "usable" (toJson false)])) Json.null
   rejects (input.setObjVal! "snapshots" (toJson [old, fresh]))
+
+-- Rename authority uses the preceding role, and refusal keeps the last applied name.
+#eval do
+  let result ← run (applyCase [
+    admin 1 1 (json% {"kind":"renameStore","name":"Refused"}),
+    admin 0 1 (json% {"kind":"renameStore","name":"Home"}),
+    admin 0 2 (json% {"kind":"changeRole","member":1,"role":"admin"}),
+    admin 0 3 (json% {"kind":"changeRole","member":0,"role":"member"}),
+    admin 0 4 (json% {"kind":"renameStore","name":"Demoted"}),
+    admin 1 2 (json% {"kind":"renameStore","name":"Family"})])
+  checkField result ["slots","0","ledger","name"] (toJson "Household")
+  checkField result ["slots","1","ledger","name"] (toJson "Home")
+  checkField result ["slots","4","ledger","name"] (toJson "Home")
+  checkField result ["ledger","name"] (toJson "Family")
+  checkField result ["ledger","refused"] (json% [1,5])
 
 end SequenceTests

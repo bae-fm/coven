@@ -17,7 +17,7 @@ prefix it applied. For each audience `A` the state has three parts:
 
 - the *ledger*: what admin slots decide, the same for every audience. That is
   members and roles, devices and their removal, member key generations, other admin
-  state (names, access, circle membership) abstractly as `aux`, key
+  state (access, circles) abstractly as `aux`, the current store name, key
   copies, refused admin slots, and per device the greatest claim number and
   its slot digest;
 - the *audience ledger* of `A`: the first slot that claimed each unique value
@@ -56,7 +56,7 @@ structure Sig where
   Batch : Type
   /-- One audience's merged rows. -/
   Rows : Type
-  /-- Admin operations other than membership and roles: renames, access, circles. -/
+  /-- Admin operations other than membership, roles and store renames: access, circles. -/
   Op : Type
   /-- The admin state those operations change. -/
   Aux : Type
@@ -86,6 +86,7 @@ inductive Entry (S : Sig) where
   | addDevice (d : S.Dev) (m : S.Mem)
   | removeDevice (d : S.Dev)
   | replaceKey (m : S.Mem)
+  | renameStore (name : String)
   | other (o : S.Op)
 
 /-- One audience's part of a batch: its schema version, the unique values and
@@ -116,6 +117,8 @@ inductive Slot (S : Sig) where
 
 /-- What admin slots decide. -/
 structure Ledger (S : Sig) where
+  /-- Creation name, replaced only by an applied store rename. -/
+  name : String
   member : S.Mem → Bool
   /-- Removed member ids remain unavailable forever. -/
   retired : S.Mem → Bool
@@ -206,7 +209,7 @@ def structural (L : Ledger S) (author : S.Dev) : Entry S → Bool
   | .addDevice d m => decide (author = d) && (L.deviceOf d).isNone && L.member m
   | .removeDevice d => (L.deviceOf d).isSome && !L.removed d
   | .replaceKey m => L.member m
-  | .other _ => true
+  | .renameStore _ | .other _ => true
 
 /-- An entry's effect. Removal retires the member id and every device bound to it. -/
 def applyEntry (L : Ledger S) : Entry S → Ledger S
@@ -222,6 +225,7 @@ def applyEntry (L : Ledger S) : Entry S → Ledger S
   | .addDevice d m => { L with deviceOf := fun x => if x = d then some m else L.deviceOf x }
   | .removeDevice d => { L with removed := fun x => if x = d then true else L.removed x }
   | .replaceKey m => { L with keyGen := fun x => if x = m then L.keyGen m + 1 else L.keyGen x }
+  | .renameStore name => { L with name }
   | .other o => { L with aux := R.applyOp L.aux o }
 
 /-- Whether an admin slot or key copy is valid; every other kind is left to

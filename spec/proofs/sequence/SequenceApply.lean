@@ -46,6 +46,7 @@ structure Audience where
   writers : List Nat
 
 structure Config (n : Nat) where
+  name : String
   members : List (Fin n × Role × Nat)
   devices : List (Nat × Fin n)
   audiences : List Audience
@@ -56,6 +57,7 @@ def merge (rows : List Row) (batch : Batch) : List Row :=
   batch.rows.foldl (fun rs r => rs.filter (fun old => old.id != r.id) ++ [r]) rows
 
 def initialLedger (c : Config n) : Ledger (sig n) where
+  name := c.name
   member := fun m => c.members.any (fun x => x.1 == m)
   retired := fun _ => false
   role := fun m => match c.members.find? (fun x => x.1 == m) with
@@ -143,7 +145,7 @@ theorem member_without_active_device_can_register (c : Config n) (records : Nat 
     have h := Authority.every_prefix_has_admin (baseRules c records) seq initial k
     simpa [L, R, rules, Authority.withRoles_decision_eq] using h
   have authorized : R.authorized L d (.addDevice d m) = true := by
-    simp [R, rules, Authority.withRoles, Authority.allowed, Authority.membershipChange,
+    simp [R, rules, Authority.withRoles, Authority.allowed, Authority.requiresAdmin,
       baseRules, applyEntry, Authority.HasAdmin] at admin ⊢
     exact ⟨member, admin⟩
   have valid := self_registration_valid R L d m fresh member authorized
@@ -172,6 +174,7 @@ def roleJson : Role → Json
 
 def ledgerJson (L : Ledger (sig n)) (devices : List Nat) (through : Nat) : Json :=
   Json.mkObj [
+    ("name", toJson L.name),
     ("members", toJson ((List.finRange n).filterMap fun m =>
       if L.member m then some (Json.arr #[toJson m.val, roleJson (L.role m)]) else none)),
     ("retired", toJson ((List.finRange n).filterMap fun m =>
@@ -259,7 +262,7 @@ def run (c : Config n) (entries : List (ClaimRecord String × Slot (sig n))) : J
 
 namespace AuthorshipExample
 
-def config : Config 3 := ⟨[(0, .admin, 0), (2, .member, 0)], [(0, 0), (2, 2)],
+def config : Config 3 := ⟨"Household", [(0, .admin, 0), (2, .member, 0)], [(0, 0), (2, 2)],
   [⟨0, 1, [0, 2]⟩, ⟨1, 1, [0, 2]⟩]⟩
 def policy : Rules (sig 3) := rules config (fun k => ⟨k, "authenticated"⟩)
 def part (readThrough : Nat) : WPart (sig 3) := ⟨1, [], ⟨[1], [], []⟩, readThrough⟩

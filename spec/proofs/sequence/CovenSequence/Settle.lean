@@ -383,7 +383,7 @@ def adminRules : Rules adminSig where
     | .admin false _ => 2
     | _ => 0
   digest := fun k _ => k
-  ledger0 := ⟨fun m => m, fun _ => false, fun _ => .admin, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
+  ledger0 := ⟨"Household", fun m => m, fun _ => false, fun _ => .admin, fun _ => some true, fun _ => false, fun _ => 0, (), [], fun _ => false,
     fun _ => none, fun _ => none⟩
   aud0 := fun _ => ⟨fun _ => none, [], 0, 0, 0, [], 0, fun _ => false⟩
   rows0 := fun _ => ()

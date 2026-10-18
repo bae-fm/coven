@@ -42,7 +42,7 @@ def readConfig (n : Nat) (j : Json) : Except String (Config n) := do
     distinct writers "audience writer"
     return (⟨← nat a "audience", ← nat a "version", writers⟩ : Audience)
   distinct (audiences.map (·.id)) "audience"
-  return ⟨members, devices, audiences⟩
+  return ⟨← initial.getObjValAs? String "name", members, devices, audiences⟩
 
 def readEntry (n : Nat) (j : Json) : Except String (Entry (sig n)) := do
   match ← j.getObjValAs? String "kind" with
@@ -52,6 +52,7 @@ def readEntry (n : Nat) (j : Json) : Except String (Entry (sig n)) := do
   | "addDevice" => return .addDevice (← nat j "device") (← member n j)
   | "removeDevice" => return .removeDevice (← nat j "device")
   | "circleMember" => return .other ⟨← nat j "audience", ← member n j, ← j.getObjValAs? Bool "allowed"⟩
+  | "renameStore" => return .renameStore (← j.getObjValAs? String "name")
   | "replaceKey" => return .replaceKey (← member n j)
   | _ => throw "unknown admin entry"
 

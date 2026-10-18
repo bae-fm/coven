@@ -38,6 +38,7 @@ abbrev sig : Sig where
   decPath := inferInstanceAs (DecidableEq Nat)
 
 def ledger0 : Ledger sig where
+  name := "Household"
   member := fun _ => true
   retired := fun _ => false
   role := fun _ => .admin
