@@ -174,11 +174,21 @@ fn open_file_paths() -> Vec<PathBuf> {
                     VOLUME_NAME_DOS,
                 ) as usize;
                 if length == 0 {
+                    let error = std::io::Error::last_os_error();
+                    // A file deleted while open refuses to name itself
+                    // (STATUS_DELETE_PENDING reads as access denied). It no
+                    // longer has a path under any directory, so it is skipped.
+                    if error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+                        && delete_pending(handle)
+                    {
+                        tracing::debug!(?handle, "skipping a deleted file still open");
+                        return None;
+                    }
                     closed_handle_or_panic(
                         "resolve file handle",
                         handle,
                         entry.granted_access,
-                        std::io::Error::last_os_error(),
+                        error,
                     );
                     return None;
                 }
@@ -211,6 +221,27 @@ fn open_file_paths() -> Vec<PathBuf> {
             }
         })
         .collect()
+}
+
+/// Whether the file behind `handle` is deleted and waiting for its last
+/// handle to close. A failed query answers no, so the caller stays loud.
+#[cfg(windows)]
+fn delete_pending(handle: windows_sys::Win32::Foundation::HANDLE) -> bool {
+    use windows_sys::Win32::Storage::FileSystem::{
+        FileStandardInfo, GetFileInformationByHandleEx, FILE_STANDARD_INFO,
+    };
+    // SAFETY: the call only reads the handle's standard information into a
+    // buffer of the size it is given; a closed handle only fails it.
+    unsafe {
+        let mut information: FILE_STANDARD_INFO = std::mem::zeroed();
+        GetFileInformationByHandleEx(
+            handle,
+            FileStandardInfo,
+            (&mut information as *mut FILE_STANDARD_INFO).cast(),
+            std::mem::size_of::<FILE_STANDARD_INFO>() as u32,
+        ) != 0
+            && information.DeletePending
+    }
 }
 
 #[cfg(windows)]
