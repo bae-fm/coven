@@ -5126,6 +5126,8 @@ them by what they are:
   at. Two keys on one column into different tables stay two.
 - **A unique constraint** by its terms, in order, each a column's name or an
   expression's text as written, and by its `WHERE` clause when it is partial.
+  Sort order is excluded: `lower(title) ASC` and `lower(title) DESC` name the same
+  term because ordering does not change which values conflict.
   `UNIQUE(title)` and `UNIQUE(lower(title))` stay two.
 - **A CHECK** by its name, or, when unnamed, by its full expression text from the
   schema. Only outer ASCII whitespace is removed; quoting, comments and internal
