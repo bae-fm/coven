@@ -5,7 +5,7 @@
 //! the connection refuses requests while it is live and records it, durably,
 //! before returning the response that asked for it.
 
-use crate::StorageError;
+use crate::{StorageError, StorageFailure};
 use std::time::Duration;
 
 /// The longest ordinary delay between unsuccessful attempts.
@@ -52,6 +52,43 @@ pub trait Cooldown: Send + Sync {
     /// Arm and persist a wait the provider requested, before any consumer can
     /// retry. A failure is returned; it never permits an immediate retry.
     async fn record(&self, wait: Duration) -> Result<(), StorageError>;
+}
+
+/// Refuse a request while the store's shared provider cooldown is live.
+pub(crate) fn cooling(cooldown: &dyn Cooldown) -> Result<(), StorageError> {
+    match cooldown.remaining() {
+        Some(remaining) => Err(StorageFailure::RateLimited.with_source(CoolingDown { remaining })),
+        None => Ok(()),
+    }
+}
+
+/// Persist provider-requested waits before returning them to any consumer.
+pub(crate) async fn observed<T>(
+    cooldown: &dyn Cooldown,
+    result: Result<T, StorageError>,
+) -> Result<T, StorageError> {
+    let error = match result {
+        Ok(value) => return Ok(value),
+        Err(error) => error,
+    };
+    let Some(after) = error.retry_after() else {
+        return Err(error);
+    };
+    if after == RetryAfter::NoTimeBasis {
+        tracing::warn!(
+            ?error,
+            "Retry-After names a date without a response Date; waiting the longest ordinary delay"
+        );
+    }
+    let wait = after.wait();
+    match cooldown.record(wait).await {
+        Ok(()) => Err(error),
+        Err(cause) => Err(StorageFailure::File.with_source(CooldownNotRecorded {
+            wait,
+            response: error,
+            cause,
+        })),
+    }
 }
 
 /// No cooldown is kept: raw fixtures and probes outside a store's lifetime.

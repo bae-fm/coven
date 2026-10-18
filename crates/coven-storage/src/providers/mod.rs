@@ -7,7 +7,10 @@ pub use admin_access::{obtain_admin_access, AdminAccessSource, DeviceSignInPrese
 mod http;
 mod http_body;
 mod oauth;
+mod oauth_folders;
+pub use oauth_folders::StorageFolder;
 mod object_metadata;
+mod onedrive_item;
 mod pagination;
 pub use http::{OAuthSession, ProviderResponse};
 pub use oauth::{

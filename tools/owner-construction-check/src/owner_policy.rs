@@ -4,6 +4,7 @@
 
 use crate::policy::{Capabilities, Capability, Gate, Policy};
 
+const PROVIDER_CONNECTOR: &str = "crates/coven-storage/src/providers/connector.rs";
 const CONNECTION: &str = "crates/coven/src/storage.rs";
 const MEMORY_STORAGE: &str = "crates/coven-storage/src/test_utils.rs";
 const MEMORY_CONNECTOR: &str = "crates/coven-storage/src/memory_connector.rs";
@@ -34,6 +35,12 @@ pub(crate) const POLICY: Policy = Policy {
     // One list for owner construction, runtime acquisition and task starts.
     // Owner constructors include their private representations; names grant no exemption.
     composition_roots: &[
+        (PROVIDER_CONNECTOR, "ProviderConnector", "with_folders"),
+        (
+            "crates/coven-storage/src/providers/oauth_folders.rs",
+            "OAuthFolders",
+            "new",
+        ),
         (MEMORY_CONNECTOR, "MemoryStorage", "with_transfers"),
         (
             "crates/coven-crypto/src/custody/key_session.rs",
@@ -195,16 +202,8 @@ pub(crate) const POLICY: Policy = Policy {
             "CloudKitStorage",
             "new",
         ),
-        (
-            "crates/coven-storage/src/providers/connector.rs",
-            "ProviderConnector",
-            "connect",
-        ),
-        (
-            "crates/coven-storage/src/providers/connector.rs",
-            "ProviderConnector",
-            "new",
-        ),
+        (PROVIDER_CONNECTOR, "ProviderConnector", "connect"),
+        (PROVIDER_CONNECTOR, "ProviderConnector", "new"),
         (
             "crates/coven-storage/src/providers/dropbox.rs",
             "DropboxStorage",

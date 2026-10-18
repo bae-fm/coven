@@ -16,6 +16,9 @@ mod member_keys;
 mod deletion;
 pub use deletion::IfUnsent;
 
+#[path = "handle_folders.rs"]
+mod folders;
+
 use crate::*;
 use coven_crypto::custody::{StoreCustody, StoreKeychain};
 use coven_database::Database;

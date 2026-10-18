@@ -838,6 +838,9 @@ impl StorageConnections {
 #[path = "storage_control.rs"]
 mod control;
 
+#[path = "storage_folders.rs"]
+mod folders;
+
 #[path = "storage_s3.rs"]
 mod s3;
 

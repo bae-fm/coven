@@ -284,6 +284,45 @@ impl IdSource for SequentialIds {
 /// Tests replace the connection boundary with in-memory storage.
 #[async_trait]
 pub trait StorageConnector: Send + Sync {
+    /// Read the signed-in OneDrive root.
+    async fn onedrive_root(
+        &self,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Read all immediate OneDrive child folders.
+    async fn onedrive_folders(
+        &self,
+        _parent: &StorageConfig,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<Vec<StorageFolder>, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Create a OneDrive folder without renaming or replacing an occupied name.
+    async fn create_onedrive_folder(
+        &self,
+        _parent: &StorageConfig,
+        _name: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Read all shared Dropbox namespaces.
+    async fn dropbox_shared_folders(
+        &self,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn Cooldown>,
+    ) -> Result<Vec<StorageFolder>, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Create the owner's CloudKit location from the entitled container.
     /// A connector without native CloudKit support refuses this capability.
     async fn prepare_cloudkit(
@@ -2377,6 +2416,43 @@ where one exists; setup adds the failed check or its distinct local failure
 without reclassifying storage failures. Missing member keys are always
 `StorageFailure::MemberKeysMissing`. Pending records retain this same
 classification when the native cause cannot survive closing the app.
+
+Choosing a folder uses the handle's pending `authenticate` sign-in, so the app never
+needs tokens. `onedrive_root` starts at the person's default drive; `onedrive_folders`
+reads its immediate child folders across every page. Shared folders use the target
+drive and item ids. `create_onedrive_folder` returns
+the newly created folder, or the provider's error if its name is occupied. Dropbox
+selection requires Full Dropbox access and returns shared-folder namespace ids.
+
+The returned `storage` is passed unchanged to `setup_oauth_storage`; selecting or
+creating a folder does not commit settings or credentials. These requests use the
+same token refresh and provider cooldown as setup. A failed page fails the listing.
+
+```rust
+/// A provider's current folder name and the location storage setup accepts.
+pub struct StorageFolder {
+    pub name: String,
+    pub storage: StorageConfig,
+}
+
+impl CovenHandle {
+    /// Read the signed-in person's default OneDrive root and its actual item id.
+    pub async fn onedrive_root(&self) -> Result<StorageFolder, StorageSetupError>;
+
+    /// Read all immediate child folders, without reading file contents.
+    pub async fn onedrive_folders(
+        &self, parent: &StorageConfig,
+    ) -> Result<Vec<StorageFolder>, StorageSetupError>;
+
+    /// Create this exact name; an occupied name is never renamed or replaced.
+    pub async fn create_onedrive_folder(
+        &self, parent: &StorageConfig, name: &str,
+    ) -> Result<StorageFolder, StorageSetupError>;
+
+    /// Shared namespaces accessible through the pending Full Dropbox sign-in.
+    pub async fn dropbox_shared_folders(&self) -> Result<Vec<StorageFolder>, StorageSetupError>;
+}
+```
 
 ```rust
 /// The provider holding a store (§20.2).

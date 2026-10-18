@@ -41,12 +41,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
     /// Refuse, without sending, while a provider cooldown is live. A refused
     /// request has not reached storage.
     pub(crate) fn cooling(&self) -> Result<(), StorageError> {
-        match self.cooldown.remaining() {
-            Some(remaining) => {
-                Err(StorageFailure::RateLimited.with_source(CoolingDown { remaining }))
-            }
-            None => Ok(()),
-        }
+        crate::cooldown::cooling(self.cooldown.as_ref())
     }
 
     fn publication(&self, path: &ObjectPath) -> Result<PublicationRequest, StorageError> {
@@ -61,28 +56,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         &self,
         result: Result<T, StorageError>,
     ) -> Result<T, StorageError> {
-        let error = match result {
-            Ok(value) => return Ok(value),
-            Err(error) => error,
-        };
-        let Some(after) = error.retry_after() else {
-            return Err(error);
-        };
-        if after == RetryAfter::NoTimeBasis {
-            tracing::warn!(
-                provider = ?self.config().provider(),
-                "Retry-After names a date without a response Date; waiting the longest ordinary delay"
-            );
-        }
-        let wait = after.wait();
-        match self.cooldown.record(wait).await {
-            Ok(()) => Err(error),
-            Err(cause) => Err(StorageFailure::File.with_source(CooldownNotRecorded {
-                wait,
-                response: error,
-                cause,
-            })),
-        }
+        crate::cooldown::observed(self.cooldown.as_ref(), result).await
     }
     async fn list_checked(&self, prefix: &ObjectPrefix) -> Result<Vec<StoredObject>, StorageError> {
         let mut listing = ObjectListing::new(prefix.clone(), self.config().provider());

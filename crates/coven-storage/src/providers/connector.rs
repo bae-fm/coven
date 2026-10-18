@@ -1,6 +1,9 @@
 //! Provider construction from an explicit location and device credentials.
 
-use super::{DropboxStorage, OAuthSession, OneDriveStorage, S3Storage};
+use super::{
+    oauth_folders::OAuthFolders, DropboxStorage, OAuthSession, OneDriveStorage, S3Storage,
+    StorageFolder,
+};
 use crate::{
     ProviderAuth, ProviderOps, S3Credentials, S3Detection, StorageConfig, StorageConnection,
     StorageCredentials, StorageError, StorageFailure,
@@ -15,6 +18,45 @@ use std::sync::Arc;
 /// Tests replace the connection boundary with in-memory storage.
 #[async_trait::async_trait]
 pub trait StorageConnector: Send + Sync {
+    /// Read the signed-in OneDrive root.
+    async fn onedrive_root(
+        &self,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Read all immediate OneDrive child folders.
+    async fn onedrive_folders(
+        &self,
+        _parent: &StorageConfig,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<Vec<StorageFolder>, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Create a OneDrive folder without renaming or replacing an occupied name.
+    async fn create_onedrive_folder(
+        &self,
+        _parent: &StorageConfig,
+        _name: &str,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
+    /// Read all shared Dropbox namespaces.
+    async fn dropbox_shared_folders(
+        &self,
+        _auth: ProviderAuth,
+        _cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<Vec<StorageFolder>, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+
     /// Create the owner's CloudKit location from the entitled container.
     /// A connector without native CloudKit support refuses this capability.
     async fn prepare_cloudkit(
@@ -75,16 +117,105 @@ pub trait StorageConnector: Send + Sync {
 pub struct ProviderConnector {
     clock: ClockRef,
     ids: IdSourceRef,
+    #[cfg(any(test, feature = "test-utils"))]
+    folder_api: Option<String>,
 }
 impl ProviderConnector {
     /// Retain the capabilities used to construct subsequent connections.
     pub fn new(clock: ClockRef, ids: IdSourceRef) -> Self {
-        Self { clock, ids }
+        Self {
+            clock,
+            ids,
+            #[cfg(any(test, feature = "test-utils"))]
+            folder_api: None,
+        }
+    }
+    /// Send folder calls to an in-process provider API in application tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn with_folder_api(mut self, api: String) -> Self {
+        self.folder_api = Some(api);
+        self
+    }
+    async fn with_folders<T, F, Fut>(
+        &self,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+        request: F,
+    ) -> Result<T, StorageError>
+    where
+        F: FnOnce(OAuthFolders) -> Fut,
+        Fut: std::future::Future<Output = Result<T, StorageError>>,
+    {
+        let ProviderAuth::OAuth { tokens, custody } = auth else {
+            return Err(StorageFailure::InvalidConfiguration
+                .with_source("folder selection requires OAuth sign-in"));
+        };
+        let access = tokens.access;
+        let api = match access {
+            crate::OAuthAccess::Dropbox(_) => "https://api.dropboxapi.com/2",
+            crate::OAuthAccess::OneDrive => "https://graph.microsoft.com/v1.0",
+        }
+        .to_owned();
+        #[cfg(any(test, feature = "test-utils"))]
+        let api = self.folder_api.clone().unwrap_or(api);
+        let session = OAuthSession::new(access.provider(), tokens, custody, self.clock.clone())?;
+        request(OAuthFolders::new(session, access, api, cooldown)).await
     }
 }
 
 #[async_trait::async_trait]
 impl StorageConnector for ProviderConnector {
+    /// Read the signed-in OneDrive root.
+    async fn onedrive_root(
+        &self,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.onedrive_root().await
+        })
+        .await
+    }
+
+    /// Read all immediate OneDrive child folders.
+    async fn onedrive_folders(
+        &self,
+        parent: &StorageConfig,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<Vec<StorageFolder>, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.onedrive_folders(parent).await
+        })
+        .await
+    }
+
+    /// Create a OneDrive folder without renaming or replacing an occupied name.
+    async fn create_onedrive_folder(
+        &self,
+        parent: &StorageConfig,
+        name: &str,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<StorageFolder, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.create_onedrive_folder(parent, name).await
+        })
+        .await
+    }
+
+    /// Read all shared Dropbox namespaces.
+    async fn dropbox_shared_folders(
+        &self,
+        auth: ProviderAuth,
+        cooldown: Arc<dyn crate::Cooldown>,
+    ) -> Result<Vec<StorageFolder>, StorageError> {
+        self.with_folders(auth, cooldown, |folders| async move {
+            folders.dropbox_shared_folders().await
+        })
+        .await
+    }
+
     async fn prepare_cloudkit(
         &self,
         container: &str,

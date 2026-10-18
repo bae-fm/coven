@@ -4292,6 +4292,12 @@ explains how coven tells them apart and checks them.
 
 #### 20.3 Where a store lives
 
+Before setup, the app chooses a provider location. The folder calls in Appendix E
+use coven's held sign-in to show OneDrive folders or Dropbox shared namespaces;
+they return names and location ids, without reading the files inside. Ana can pick
+Household or create a OneDrive folder for it, then pass that location to setup.
+Choosing the location is separate from accessing the store's objects below it.
+
 Every object path starts with the store's id: slots, the floor, snapshots, files,
 the setup check's test objects, and S3 detection's probes. The one exception is
 the own-bucket marker `coven-bucket`, at the root of a bucket that a
