@@ -156,6 +156,59 @@ where
         }
     }
 
+    /// Process each value on a worker after releasing the connection.
+    /// Equality compares processed values; request handles and event metadata remain.
+    pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U>
+    where
+        T: Clone + PartialEq,
+        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+        U: Send + 'static,
+    {
+        let process = Arc::new(process);
+        let ReconfigurableLiveQuery {
+            lifetime,
+            query,
+            commits,
+            current,
+            running,
+            previous: _,
+        } = self;
+        let next_process = Arc::clone(&process);
+        let mapped: Query<Q, U> =
+            Arc::new(move |request| process_run(query(request), Arc::clone(&next_process)));
+        let running = running.map(
+            |Running {
+                 request,
+                 revision,
+                 cause,
+                 run,
+             }| Running {
+                request,
+                revision,
+                cause,
+                run: process_run(run, Arc::clone(&process)),
+            },
+        );
+        // A new output type has no previous result to compare. Rerun the current
+        // request if it has already completed so the transformed query answers it.
+        if running.is_none() {
+            if let Some(request) = &current {
+                let mut requests = lifetime.0.requests.lock().expect("request lock poisoned");
+                if requests.pending.is_none() {
+                    requests.pending = Some(request.clone());
+                }
+            }
+        }
+        ReconfigurableLiveQuery {
+            lifetime,
+            query: mapped,
+            commits,
+            current,
+            running,
+            previous: None,
+        }
+    }
+
     /// Return the next result and its request. Cancelling this wait retains the
     /// in-flight run, so its request revision is not lost.
     pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Q, T>
@@ -269,48 +322,8 @@ impl<T: Send + 'static> LiveQuery<T> {
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static,
     {
-        let process = Arc::new(process);
-        let ReconfigurableLiveQuery {
-            lifetime,
-            query,
-            commits,
-            current,
-            running,
-            previous: _,
-        } = self.inner;
-        let next_process = Arc::clone(&process);
-        let mapped: Query<(), U> =
-            Arc::new(move |request| process_run(query(request), Arc::clone(&next_process)));
-        let running = running.map(
-            |Running {
-                 request,
-                 revision,
-                 cause,
-                 run,
-             }| Running {
-                request,
-                revision,
-                cause,
-                run: process_run(run, Arc::clone(&process)),
-            },
-        );
-        // A new output type has no previous result to compare. Rerun the current
-        // request if it has already completed so the transformed query answers it.
-        if running.is_none() {
-            if let Some(request) = current {
-                let mut requests = lifetime.0.requests.lock().expect("request lock poisoned");
-                requests.pending = Some(request);
-            }
-        }
         LiveQuery {
-            inner: ReconfigurableLiveQuery {
-                lifetime,
-                query: mapped,
-                commits,
-                current,
-                running,
-                previous: None,
-            },
+            inner: self.inner.process(process),
         }
     }
 }

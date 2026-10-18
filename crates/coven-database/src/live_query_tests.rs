@@ -398,16 +398,17 @@ async fn cancelled_next_keeps_its_request_and_inflight_result() {
     tokio::select! { _ = entry => {}, _ = query.next() => panic!("run should be blocked"), }
     assert_eq!(requests.set(6).unwrap(), LiveQueryRevision(1));
     assert_eq!(requests.set(7).unwrap(), LiveQueryRevision(2));
+    let mut query = query.process(|value| Ok(format!("value {value}")));
     release.send(()).unwrap();
     let first = query.next().await;
     assert_eq!(
         (first.request, first.revision, first.result.unwrap()),
-        (5, LiveQueryRevision(0), 5)
+        (5, LiveQueryRevision(0), "value 5".into())
     );
     let second = query.next().await;
     assert_eq!(
         (second.request, second.revision, second.result.unwrap()),
-        (7, LiveQueryRevision(2), 7)
+        (7, LiveQueryRevision(2), "value 7".into())
     );
     db.close().await.unwrap();
 }
@@ -704,4 +705,121 @@ async fn changing_an_integer_primary_key_through_rowid_is_observed() {
     .unwrap();
     assert_eq!(next(&mut query).await.unwrap(), 2);
     db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn processing_a_completed_query_preserves_a_newer_pending_request() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let mut query = db.subscribe_reconfigurable(1, |request, _| Ok(*request));
+    let requests = query.requests();
+    assert_eq!(query.next().await.result.unwrap(), 1);
+    let revision = requests.set(2).unwrap();
+    let mut query = query.process(|value| Ok(value.to_string()));
+    let event = query.next().await;
+    assert_eq!(
+        (
+            event.request,
+            event.revision,
+            event.cause,
+            event.result.unwrap()
+        ),
+        (2, revision, LiveQueryCause::Request, "2".into())
+    );
+    // With no pending replacement, changing output type answers the current request.
+    let mut query = query.process(|value| Ok(value.len()));
+    let event = query.next().await;
+    assert_eq!(
+        (event.request, event.revision, event.result.unwrap()),
+        (2, revision, 1)
+    );
+    drop(query);
+    assert_eq!(requests.set(3), Err(LiveQueryClosed));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn processing_preserves_query_errors_and_recovers_from_callback_errors() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let count = calls.clone();
+    let mut query = db
+        .subscribe_reconfigurable(0, |request, sql| {
+            Ok(sql.query_row("SELECT ?1 WHERE ?1 != 0", [request], |row| {
+                row.get::<_, i32>(0)
+            })?)
+        })
+        .process(move |value| {
+            count.fetch_add(1, Ordering::SeqCst);
+            if value == 1 {
+                return Err(DbError::TransactionEnded.into());
+            }
+            Ok(value.to_string())
+        });
+    let requests = query.requests();
+    let event = query.next().await;
+    assert!(matches!(
+        event.result,
+        Err(crate::CovenError::Database(DbError::Sqlite(
+            rusqlite::Error::QueryReturnedNoRows
+        )))
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+    for request in [1, 2, 1, 2] {
+        let revision = requests.set(request).unwrap();
+        let event = query.next().await;
+        assert_eq!(
+            (event.request, event.revision, event.cause),
+            (request, revision, LiveQueryCause::Request)
+        );
+        if request == 1 {
+            assert!(matches!(
+                event.result,
+                Err(crate::CovenError::Database(DbError::TransactionEnded))
+            ));
+        } else {
+            assert_eq!(event.result.unwrap(), "2");
+        }
+    }
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    db.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn reconfigurable_processing_releases_the_connection_before_its_worker_runs() {
+    let store = TestStore::new();
+    let db = store.builder(vec![], vec![]).open().await.unwrap();
+    let (entered, entry) = tokio::sync::oneshot::channel();
+    let entered = Mutex::new(Some(entered));
+    let (release, released) = mpsc::channel();
+    let released = Mutex::new(released);
+    let mut query = db
+        .subscribe_reconfigurable(7, |request, sql| {
+            Ok(sql.query_row("SELECT ?1", [request], |row| row.get::<_, i32>(0))?)
+        })
+        .process(move |value| {
+            entered.lock().unwrap().take().unwrap().send(()).unwrap();
+            released
+                .lock()
+                .unwrap()
+                .recv_timeout(Duration::from_secs(10))
+                .unwrap();
+            Ok(value.to_string())
+        });
+    tokio::select! {
+        result = entry => result.unwrap(),
+        _ = query.next() => panic!("processing is held"),
+    }
+    // Closing waits for active reads, so this would block if processing held its lease.
+    tokio::time::timeout(Duration::from_secs(5), db.close())
+        .await
+        .unwrap()
+        .unwrap();
+    release.send(()).unwrap();
+    let event = query.next().await;
+    assert_eq!(
+        (event.request, event.revision, event.result.unwrap()),
+        (7, LiveQueryRevision(0), "7".into())
+    );
 }

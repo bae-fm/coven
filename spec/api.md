@@ -2075,6 +2075,15 @@ where
     Q: Clone + PartialEq + Send + Sync + 'static,
     T: Send + 'static,
 {
+    /// Process each successful value on a worker after releasing its connection.
+    /// Request, revision and cause stay on the event; errors remain results.
+    /// Equality compares processed values. Existing request handles still work.
+    pub fn process<P, U>(self, process: P) -> ReconfigurableLiveQuery<Q, U>
+    where
+        T: Clone + PartialEq,
+        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+        U: Send + 'static;
+
     /// A handle that replaces the request.
     pub fn requests(&self) -> LiveQueryRequests<Q>;
 
