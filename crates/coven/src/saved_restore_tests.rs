@@ -125,7 +125,9 @@ async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() 
         app.fail_keychain_operations_after(&[after]);
         assert!(matches!(
             app.saved_restore_codes().await,
-            Err(BootstrapError::SecureStorage(KeyError::Keychain(_)))
+            Err(BootstrapError::SecureStorage(
+                KeyError::KeychainTemporarilyUnavailable(_)
+            ))
         ));
         assert_eq!(app.saved_restore_codes().await.unwrap().len(), 2);
     }

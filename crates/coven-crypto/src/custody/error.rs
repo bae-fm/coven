@@ -34,7 +34,11 @@ pub enum KeyError {
     Unavailable(#[source] Box<dyn std::error::Error + Send + Sync>),
     /// The OS credential store refused an operation.
     #[error("keychain failed: {0}")]
-    Keychain(#[from] KeychainError),
+    Keychain(#[source] KeychainError),
+    /// Native NoStorageAccess: custody cannot be accessed in this session,
+    /// including when locked. The native cause says why access was denied.
+    #[error("keychain is unavailable in this session: {0}")]
+    KeychainTemporarilyUnavailable(#[source] KeychainError),
     /// The startup registration has not happened.
     #[error("call set_keyring_service before constructing keychain custody")]
     ServiceNotRegistered,
@@ -61,6 +65,15 @@ pub enum KeyError {
 /// A native keychain error whose diagnostic output never includes secret bytes.
 /// Its original typed cause remains available through `std::error::Error`.
 pub struct KeychainError(keyring_core::Error);
+
+impl From<KeychainError> for KeyError {
+    fn from(error: KeychainError) -> Self {
+        match &error.0 {
+            keyring_core::Error::NoStorageAccess(_) => Self::KeychainTemporarilyUnavailable(error),
+            _ => Self::Keychain(error),
+        }
+    }
+}
 
 impl From<keyring_core::Error> for KeychainError {
     fn from(mut error: keyring_core::Error) -> Self {

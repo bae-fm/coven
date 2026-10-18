@@ -209,7 +209,7 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
         if refused_read {
             assert!(matches!(
                 error,
-                BootstrapError::SecureStorage(KeyError::Keychain(_))
+                BootstrapError::SecureStorage(KeyError::KeychainTemporarilyUnavailable(_))
             ));
         } else {
             assert!(

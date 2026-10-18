@@ -1308,6 +1308,8 @@ pub enum KeyError {
     Unavailable(Box<dyn std::error::Error + Send + Sync>),
     /// The OS credential store refused the call.
     Keychain(KeychainError),
+    /// Native NoStorageAccess, including a locked session; retains the native cause.
+    KeychainTemporarilyUnavailable(KeychainError),
     /// The keyring service was not registered at startup.
     ServiceNotRegistered,
     /// A different service name was already registered.

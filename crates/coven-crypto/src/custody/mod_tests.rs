@@ -175,7 +175,10 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
     let original = StoreKeyring::new(StoreKey::generate(KeyId(key_ids.new_id())).unwrap());
     custody.persist(&original).unwrap();
     fake.fail_next_operation();
-    assert!(matches!(custody.forget(), Err(KeyError::Keychain(_))));
+    assert!(matches!(
+        custody.forget(),
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
+    ));
     assert_eq!(
         custody
             .unlock()
@@ -190,7 +193,7 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
         custody.persist(&StoreKeyring::new(
             StoreKey::generate(KeyId(key_ids.new_id())).unwrap()
         )),
-        Err(KeyError::Keychain(_))
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
     assert_eq!(
         custody
@@ -202,7 +205,10 @@ fn keychain_failure_preserves_material_and_reaches_the_caller() {
         original.to_secret_bytes().as_bytes()
     );
     fake.fail_next_operation();
-    assert!(matches!(custody.unlock(), Err(KeyError::Keychain(_))));
+    assert!(matches!(
+        custody.unlock(),
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
+    ));
 }
 
 #[test]

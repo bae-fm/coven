@@ -144,7 +144,7 @@ fn synced_restore_code_failures_preserve_the_previous_code() {
     fake.fail_next_operation();
     assert!(matches!(
         store.set_synced_restore_code(&SecretBytes::new(b"replacement".to_vec())),
-        Err(KeyError::Keychain(_))
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
     assert_eq!(
         store.synced_restore_code().unwrap().unwrap().as_bytes(),
@@ -153,7 +153,7 @@ fn synced_restore_code_failures_preserve_the_previous_code() {
     fake.fail_next_operation();
     assert!(matches!(
         store.delete_synced_restore_code(),
-        Err(KeyError::Keychain(_))
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
     assert_eq!(
         store.synced_restore_code().unwrap().unwrap().as_bytes(),
@@ -162,12 +162,12 @@ fn synced_restore_code_failures_preserve_the_previous_code() {
     fake.fail_next_operation();
     assert!(matches!(
         store.synced_restore_code(),
-        Err(KeyError::Keychain(_))
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
     fake.fail_next_operation();
     assert!(matches!(
         fake.synced_restore_codes(),
-        Err(KeyError::Keychain(_))
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
     assert_eq!(
         fake.synced_restore_codes().unwrap()[0].1.as_bytes(),
@@ -443,7 +443,10 @@ fn host_secret_failures_keep_the_name_list_a_superset_and_allow_retry() {
                         Some(value) => store.set_host_secret("token", value),
                         None => store.delete_host_secret("token"),
                     };
-                    assert!(matches!(result, Err(KeyError::Keychain(_))));
+                    assert!(matches!(
+                        result,
+                        Err(KeyError::KeychainTemporarilyUnavailable(_))
+                    ));
                     assert_host_names_cover_values(&store, &["token", "other"]);
                     let expected = if value.is_none() && after == 2 {
                         None
@@ -498,7 +501,10 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
         } else {
             store.set_host_secret("token", "secret")
         };
-        assert!(matches!(result, Err(KeyError::Keychain(_))));
+        assert!(matches!(
+            result,
+            Err(KeyError::KeychainTemporarilyUnavailable(_))
+        ));
         drop(store);
         let entries = std::mem::take(&mut fake.memory_backend().lock().unwrap().entries);
         drop(fake);
@@ -670,7 +676,7 @@ fn deletion_can_retry_after_each_keychain_failure() {
         fail_operation(&fake, after);
         assert!(matches!(
             store.delete_store_entries(),
-            Err(KeyError::Keychain(_))
+            Err(KeyError::KeychainTemporarilyUnavailable(_))
         ));
         assert_host_names_cover_values(&store, &["token", "other"]);
         if after <= 3 {

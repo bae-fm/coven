@@ -2216,6 +2216,11 @@ restore code before releasing writes, as on any successful replacement.
 store the app supplies. Members' private keys and audience keys stay in custody,
 never in the database.
 
+A locked session can make an existing keychain entry inaccessible. Coven reports
+native `NoStorageAccess` as `KeychainTemporarilyUnavailable`, separately from other
+keychain failures, so the app can ask the person to unlock the session. The native
+cause is retained; a refusal is never reported as a missing key.
+
 Preparation follows that boundary too. The journal records the audience and
 new key's id before saving its material in custody. Once saved, its public hash
 joins the journal, and copies can be claimed. A restart reuses the saved key;
