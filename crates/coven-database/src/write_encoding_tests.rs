@@ -629,3 +629,31 @@ async fn schema_version_zero_round_trips_through_streamed_receive() {
     assert_eq!(db.applied_slot().await.unwrap(), 1);
     db.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn a_clock_before_1970_starts_at_zero_and_keeps_its_counter_after_reopen() {
+    let store = TestStore::new();
+    let clock = Arc::new(FixedClock::new(UNIX_EPOCH - Duration::from_secs(1)));
+    let db = open(&store, &clock).await;
+    assert!(db
+        .inspect_writer(|sql| super::latest_timestamp(sql).unwrap())
+        .is_none());
+    sql(&db, "INSERT INTO notes VALUES('n','first','')")
+        .await
+        .unwrap();
+    let first = records(&db).pop().unwrap().header.timestamp;
+    assert_eq!((first.milliseconds(), first.counter()), (0, 0));
+    sql(&db, "UPDATE notes SET title='second'").await.unwrap();
+    let second = records(&db).pop().unwrap().header.timestamp;
+    assert_eq!((second.milliseconds(), second.counter()), (0, 1));
+    db.close().await.unwrap();
+    let db = open(&store, &clock).await;
+    sql(&db, "UPDATE notes SET title='third'").await.unwrap();
+    let third = records(&db).pop().unwrap().header.timestamp;
+    assert_eq!((third.milliseconds(), third.counter()), (0, 2));
+    assert_eq!(
+        (second.device(), third.device()),
+        (first.device(), first.device())
+    );
+    db.close().await.unwrap();
+}

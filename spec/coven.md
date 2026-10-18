@@ -857,7 +857,8 @@ that have seen the future stamp keep using that time with rising counters.
 **Edge cases.**
 
 - **A clock before 1970** is never past the latest timestamp, so the write takes
-  the latest time with its counter raised.
+  the latest time with its counter raised. With no latest timestamp, it starts at
+  `0 ms #0`, the first representable time and counter.
 - **The end of the range.** A wall clock past the last time 48 bits hold, in the
   year 10889, fails the write with `DbError::ClockOutOfRange`. So does a latest
   timestamp already at that time with its counter at the maximum.
