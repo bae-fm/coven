@@ -21,7 +21,7 @@ pub struct WriteHeader {
     pub read_through: u64,
     /// The app schema version (§18).
     pub schema_version: u32,
-    /// Whether to apply rows, retain them as lost, or consume a migration write.
+    /// An ordinary write or a breaking migration marker; exclusion is decided on receipt.
     pub disposition: WriteDisposition,
 }
 wire_struct!(

@@ -211,7 +211,7 @@ async fn older_schema_inserts_use_new_defaults_without_inventing_cell_setters() 
     source.close().await.unwrap();
 }
 #[tokio::test]
-async fn author_marked_loss_keeps_values_and_cause_without_needing_the_old_table() {
+async fn receiver_exclusion_keeps_values_and_cause_without_needing_the_old_table() {
     let ids = SequentialIds::new();
     let source_store = TestStore::with_ids(&ids);
     let receiver_store = TestStore::with_ids(&ids);
