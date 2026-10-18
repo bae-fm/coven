@@ -196,8 +196,8 @@ pub enum DbError {
         /// Configured encrypted-input limit.
         maximum: u64,
     },
-    /// A value or row exceeds the format (§4), or a write's plaintext and sealing
-    /// key ids cannot fit in its SQLite queue row (§6.3).
+    /// A value or row exceeds the format (format.md D1, D2, D5), or a write's
+    /// plaintext and sealing key ids cannot fit in its SQLite queue row (§6.3).
     #[error("{field} length {actual} exceeds {maximum}")]
     TooLarge {
         /// The bounded field or collection.

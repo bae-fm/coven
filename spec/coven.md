@@ -350,7 +350,9 @@ Coven keeps its own bookkeeping in tables inside the same database, which the ap
 can't read or write. The app reads its own tables normally, on several read-only
 connections at once. It can subscribe to a query, which reruns only when rows it
 read change. Another process, such as a home-screen widget, can open the store
-read-only while the app has it open.
+read-only while the app has it open. A writable open requires SQLite's WAL journal
+mode so readers can keep their snapshots while a write commits. If SQLite keeps
+another mode, opening fails with `WalUnavailable`.
 
 **Edge cases.**
 
