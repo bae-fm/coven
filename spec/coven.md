@@ -1261,7 +1261,10 @@ is a new insert; any children the app wants back, it inserts in the same write.
   A device that gets Ana's delete and Ben's insert first reads link 6 as null,
   with the cell still naming Ben's write. Dan's write then wins over Ben's, so
   every device ends with link 6 on note 44, whatever order the writes arrived in.
-- **Set null that would fail a CHECK.** The child is taken out, as under restrict.
+- **Set null that would fail a CHECK.** With `CHECK(a IS NOT NULL OR b IS NOT NULL)`,
+  clearing either reference alone passes, but clearing both fails. Coven judges
+  all substitutions for deleted parents together. If they fail, the child is taken
+  out under those foreign-key rules, as under restrict.
 - **A parent taken out, not deleted.** A child whose parent is taken out by a rule
   is taken out with it under every action, set null included, and comes back with
   it. E.g. note 46 loses its title to note 45 and is taken out; link 7, which

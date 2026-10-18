@@ -174,17 +174,7 @@ impl<'a> DatabaseRemovalView<'a> {
                 "CASCADE" => OnDelete::Cascade,
                 "RESTRICT" => OnDelete::Restrict,
                 "NO ACTION" => OnDelete::NoAction,
-                "SET NULL" => {
-                    let replacement = crate::removal_sql::null_reference(table, fk);
-                    let permitted = crate::removal_sql::permits(
-                        self.database,
-                        table,
-                        rules,
-                        &values,
-                        &replacement,
-                    )?;
-                    OnDelete::SetNull { permitted }
-                }
+                "SET NULL" => OnDelete::SetNull { permitted: true },
                 action => panic!("unknown SQLite ON DELETE action {action}"),
             };
             references.insert(
@@ -195,6 +185,8 @@ impl<'a> DatabaseRemovalView<'a> {
                 },
             );
         }
+        let mut replacement = AppValues::new();
+        let mut substituted = Vec::new();
         for (name, reference) in &references {
             let parent_generation = self.state(&reference.parent.row)?.generation();
             let reading = coven_merge::resolve_reference(id, reference, parent_generation)
@@ -208,7 +200,23 @@ impl<'a> DatabaseRemovalView<'a> {
                     .iter()
                     .find(|fk| self.schema.foreign_key(table, fk) == *name)
                     .expect("reference columns");
-                values.extend(crate::removal_sql::null_reference(table, fk));
+                replacement.extend(crate::removal_sql::null_reference(table, fk));
+                substituted.push(name.clone());
+            }
+        }
+        // A CHECK sees the complete row after every required substitution.
+        // If that row fails, retain the written references and take the row
+        // out under those foreign keys, not under an invented CHECK loss.
+        if !replacement.is_empty() {
+            if crate::removal_sql::permits(self.database, table, rules, &values, &replacement)? {
+                values.extend(replacement);
+            } else {
+                for name in substituted {
+                    references
+                        .get_mut(&name)
+                        .expect("substituted reference")
+                        .on_delete = OnDelete::SetNull { permitted: false };
+                }
             }
         }
         values = crate::removal_sql::evaluate_values(self.database, table, &values)?;
@@ -371,3 +379,7 @@ impl RemovalView for DatabaseRemovalView<'_> {
         Ok(members)
     }
 }
+
+#[cfg(test)]
+#[path = "removal_view_tests.rs"]
+mod tests;
