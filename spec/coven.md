@@ -6161,8 +6161,9 @@ used to pass collaborators; they are passed by name.
   passed on, and nothing returns `Result<_, String>`.
 - **Failures keep their causes.** Failed app calls and whole-pass sync failures
   keep typed causes. `Offline` means the last attempt couldn't reach storage;
-  `Failed` means storage answered with an error that prevents the whole pass
-  (api.md E5). Every object or operation that can't advance has a typed pending
+  `Failed` means a provider refusal or a local failure prevents the whole pass
+  (api.md E5). A local database or file failure remains a failure even when no
+  provider request ran. Every object or operation that can't advance has a typed pending
   record, including maintenance and prerequisites (§19.1, api.md E5). A
   persisted reason never replaces its category with text.
 - **Files.** A source file holds at most 1,000 lines, and its tests live beside it
@@ -6452,7 +6453,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | sync status | no storage set up, stopped, offline, syncing, synced, blocked at a slot with a reason, or failed | §19.1 |
 | `Stopped`, `Disconnected` | opening leaves configured storage stopped, or disconnected when none is set up | F.4 |
 | `Blocked`, `Synced` | a pass stopped at a slot; a pass reached the end of the sequence | §6.4 |
-| `Offline`, `Failed` | the last attempt couldn't reach storage; storage answered with an error that prevents the whole pass | F.5 |
+| `Offline`, `Failed` | the last attempt couldn't reach storage; a provider refusal or local failure prevents the whole pass | F.5 |
 | `NoStorage` | no storage is connected | §17.4, §17.5 |
 | `Storage` | a network or provider failure, kept with the provider's category | §17.5 |
 | `Waits(Object(path))` | storage confirms a file absent while its uploader is active | §17.5 |
