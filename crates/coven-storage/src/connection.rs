@@ -108,18 +108,17 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
 
     pub(crate) async fn begin_upload_checked(
         &self,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        if path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
+        target.check()?;
         if total == 0 {
             return Err(StorageFailure::InvalidPart.into());
         }
         self.provider
-            .begin_upload(&self.publication(path)?, path, total)
+            .begin_upload(&self.publication(target.path())?, target, total)
             .await
+            .map_err(|error| target.error(error))
     }
     pub(crate) async fn upload_part_checked(
         &self,
@@ -142,6 +141,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         self.provider
             .upload_part(&self.publication(session.path())?, session, bytes, end)
             .await
+            .map_err(|error| session.target.error(error))
     }
     pub(crate) async fn finish_upload_checked(
         &self,
@@ -154,6 +154,7 @@ impl<P: ProviderOps + ?Sized> StorageConnection<P> {
         self.provider
             .finish_upload(&self.publication(session.path())?, session)
             .await
+            .map_err(|error| session.target.error(error))
     }
     pub(crate) async fn abort_upload_checked(
         &self,
@@ -299,8 +300,23 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         self.cooling()?;
-        self.observed(self.begin_upload_checked(path, total).await)
-            .await
+        self.observed(
+            self.begin_upload_checked(&UploadTarget::Create(path.clone()), total)
+                .await,
+        )
+        .await
+    }
+    async fn begin_replace(
+        &self,
+        previous: &StoredObject,
+        total: u64,
+    ) -> Result<UploadSession, StorageError> {
+        self.cooling()?;
+        self.observed(
+            self.begin_upload_checked(&UploadTarget::Replace(previous.clone()), total)
+                .await,
+        )
+        .await
     }
     async fn restart_upload(&self, expired: &UploadSession) -> Result<UploadSession, StorageError> {
         self.cooling()?;
@@ -315,7 +331,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             ) {
                 self.abort_upload_checked(expired).await?;
             }
-            self.begin_upload_checked(expired.path(), expired.total_bytes())
+            self.begin_upload_checked(expired.target(), expired.total_bytes())
                 .await
         }
         .await;
@@ -331,6 +347,7 @@ impl<P: ProviderOps + ?Sized> Storage for StorageConnection<P> {
             self.provider
                 .resume_upload(&self.publication(session.path())?, session)
                 .await
+                .map_err(|error| session.target.error(error))
         }
         .await;
         self.observed(result).await

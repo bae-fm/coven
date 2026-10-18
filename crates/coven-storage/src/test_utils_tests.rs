@@ -342,7 +342,7 @@ async fn recorded_sessions_cannot_redirect_or_regress_provider_state() {
     let mut upload = storage.begin_upload(&path, 8).await.unwrap();
     storage.upload_part(&mut upload, b"data").await.unwrap();
     let mut wrong_path = upload.clone();
-    wrong_path.path = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
+    wrong_path.target = UploadTarget::Create(ObjectPath::slot(STORE_ID, 2.try_into().unwrap()));
     let mut wrong_size = upload.clone();
     wrong_size.total = 12;
     for mut invalid in [wrong_path, wrong_size] {

@@ -52,7 +52,7 @@ pub struct S3Settings {
     pub signing: S3Signing,
     /// The condition a create-once single PUT sends.
     pub single_put: S3SinglePut,
-    /// Which creates publish by a conditional copy of a staged temporary.
+    /// Which publications proceed by a conditional copy of a staged temporary.
     pub copy_publication: S3CopyPublication,
     /// What the native multipart `Last-Modified` dates.
     pub multipart_timestamp: S3MultipartTimestamp,
@@ -86,16 +86,16 @@ pub enum S3SinglePut {
     GenerationMatch,
 }
 
-/// Which creates publish by a conditional copy of a reserved temporary (§20.6).
+/// Which publications proceed by a conditional copy of a reserved temporary (§20.6).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum S3CopyPublication {
-    /// None: a single PUT and a multipart completion (`If-None-Match: *` on
-    /// CompleteMultipartUpload) each carry the create-once condition.
+    /// None: a single PUT and a multipart completion each carry the
+    /// destination condition (`If-None-Match` or `If-Match`).
     Never,
     /// Multipart uploads assemble a temporary and copy it with this
-    /// destination condition; a single PUT carries the create-once condition.
+    /// destination condition; a single PUT carries the destination condition.
     Multipart(S3CopyCondition),
-    /// Every create, single-request or multipart, stages a temporary and
+    /// Every create or replacement, single-request or multipart, stages a temporary and
     /// copies it with this destination condition.
     Every(S3CopyCondition),
 }
@@ -107,7 +107,7 @@ impl S3CopyPublication {
             Self::Multipart(condition) | Self::Every(condition) => Some(condition),
         }
     }
-    /// The condition of the copy that publishes a single-request create, if any.
+    /// The condition of the copy that publishes a single-request body, if any.
     pub(crate) fn single_request(self) -> Option<S3CopyCondition> {
         match self {
             Self::Never | Self::Multipart(_) => None,

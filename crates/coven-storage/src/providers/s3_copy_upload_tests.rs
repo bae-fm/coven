@@ -456,12 +456,12 @@ async fn every_object_copy_publishes_single_request_creates_by_conditional_copy(
     let entry = ObjectPath::slot(STORE_ID, 2.try_into().unwrap());
     storage.create(&entry, b"entry").await.unwrap();
     assert_eq!(state.lock().unwrap().copies, 4);
-    // Floor creation also copies; replacements use conditional PUTs.
+    // Floor creation and replacement both use conditional copies.
     let floor = ObjectPath::floor(STORE_ID);
     storage.create(&floor, b"floor").await.unwrap();
     let previous = storage.status(&floor).await.unwrap().unwrap();
     storage.replace(&previous, b"next floor").await.unwrap();
-    assert_eq!(state.lock().unwrap().copies, 5);
+    assert_eq!(state.lock().unwrap().copies, 6);
     assert_eq!(temporaries(&state), 0);
     let listed = storage.list(&ObjectPrefix::all(STORE_ID)).await.unwrap();
     assert_eq!(listed.len(), 3);
@@ -823,4 +823,95 @@ async fn resumed_multipart_parts_follow_every_page_before_advancing() {
     assert_eq!(state.lock().unwrap().part_pages, 3);
     assert_eq!(recorded.confirmed_bytes(), recorded.total_bytes());
     storage.finish_upload(&mut recorded).await.unwrap();
+}
+
+pub(super) fn condition_holds(state: &Remote, key: &str, headers: &HeaderMap) -> bool {
+    let expected = if state.gcs {
+        let value = headers["x-goog-if-generation-match"].to_str().unwrap();
+        if value == "0" {
+            return !state.objects.contains_key(key);
+        }
+        value
+    } else if headers.contains_key("if-none-match")
+        || headers.contains_key("cf-copy-destination-if-none-match")
+    {
+        return !state.objects.contains_key(key);
+    } else {
+        headers
+            .get("if-match")
+            .or_else(|| headers.get("cf-copy-destination-if-match"))
+            .expect("conditional publication")
+            .to_str()
+            .unwrap()
+    };
+    let current = if state.gcs {
+        state.revisions.get(key)
+    } else {
+        state.etags.get(key)
+    };
+    current.map(String::as_str) == Some(expected)
+}
+
+#[tokio::test]
+async fn recorded_floor_uploads_keep_each_s3_profiles_revision_condition() {
+    for profile in profile::PROFILES {
+        let state = Arc::new(Mutex::new(Remote {
+            gcs: profile.settings.signing == S3Signing::GoogleHmac,
+            ..Remote::default()
+        }));
+        let server =
+            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        crate::test_utils::Conformance::new(
+            Arc::new(profile_provider(&server.url, profile.settings)),
+            STORE_ID,
+        )
+        .conditional_floor_upload()
+        .await;
+        let state = state.lock().unwrap();
+        assert!(state.uploads.is_empty());
+        assert!(state.objects.is_empty());
+    }
+}
+
+#[tokio::test]
+async fn a_shared_temporary_marker_cannot_accept_two_floor_replacements() {
+    let (_server, state, storage) = every_object_provider().await;
+    let path = ObjectPath::floor(STORE_ID);
+    storage.create(&path, b"old").await.unwrap();
+    let previous = storage.status(&path).await.unwrap().unwrap();
+    let (arrived_first, first_arrival) = tokio::sync::oneshot::channel();
+    let (release_first, first_release) = tokio::sync::oneshot::channel();
+    let (arrived_second, second_arrival) = tokio::sync::oneshot::channel();
+    let (release_second, second_release) = tokio::sync::oneshot::channel();
+    let (finished_first, first_finished) = tokio::sync::oneshot::channel();
+    state.lock().unwrap().held_copy = Some(HeldCopy {
+        arrived: arrived_first,
+        release: first_release,
+    });
+    let first = async {
+        let result = storage.replace(&previous, b"next").await;
+        finished_first.send(()).unwrap();
+        result
+    };
+    let second = async {
+        first_arrival.await.unwrap();
+        state.lock().unwrap().held_copy = Some(HeldCopy {
+            arrived: arrived_second,
+            release: second_release,
+        });
+        let (result, ()) = tokio::join!(storage.replace(&previous, b"next"), async {
+            second_arrival.await.unwrap();
+            // The first copy carries the second attempt's staged marker, then
+            // deletes their shared temporary before the second copy reaches it.
+            release_first.send(()).unwrap();
+            first_finished.await.unwrap();
+            release_second.send(()).unwrap();
+        });
+        result
+    };
+    let (first, second) = tokio::join!(first, second);
+    first.unwrap();
+    assert_eq!(second.unwrap_err().failure(), StorageFailure::Conflict);
+    assert_eq!(storage.read(&path).await.unwrap(), b"next");
+    assert_eq!(temporaries(&state), 0);
 }

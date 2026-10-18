@@ -1,9 +1,9 @@
 # Storage publication, files, clocks and authorship
 
 The Lean package in [storage](storage/) covers create-once publication,
-immutable bytes, file lifetimes, timestamp ordering, signed openings and
-provider key custody. The [sequence model](sequence.md) covers device-copy
-detection, claim settlement, floor replacement, cut-off and snapshot selection.
+immutable bytes, conditional floor uploads, file lifetimes, timestamp ordering,
+signed openings and provider key custody. The [sequence model](sequence.md) covers device-copy
+detection, claim settlement, floor coverage, cut-off and snapshot selection.
 Neither package proves the binary encodings in `format.md`.
 
 ## Create-once publication
@@ -41,6 +41,22 @@ Atomic conditional copy, truthful reads and provider replies are assumptions.
 `createRunner` compares these model operations with the S3 and OneDrive
 request-level tests through `COVEN_CREATE_LEAN`. Provider certification and
 live races are separate from these proofs.
+
+## Conditional floor uploads
+
+[FloorUpload.lean](storage/CovenStorage/FloorUpload.lean) models the floor as one
+object with a revision. Each upload retains either an absent-path condition or
+the revision it originally observed. Receiving parts cannot change that condition.
+Incomplete or stale publication leaves the floor unchanged; successful publication
+stores the whole object. Two uploads sharing one condition cannot both publish.
+
+The model assumes invisible staging, atomic comparison at publication and a fresh
+revision for new floor bytes. It does not prove a provider's implementation or
+local journal persistence. `floorUploadRunner` compares interleaved production
+storage calls, including serialized session restoration, with the model through
+`COVEN_FLOOR_UPLOAD_LEAN`. Native request tests check the provider conditions;
+sequence tests check that failed parts, uncertain replies and failed cleanup
+retain the journal and prevent early slot deletion.
 
 ## Files
 

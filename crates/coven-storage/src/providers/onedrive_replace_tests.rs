@@ -66,6 +66,9 @@ pub(super) fn transfer(
         state.replacements.remove(id);
         return response(404, json!({"error":{"code":"itemNotFound"}}).to_string());
     }
+    if method == Method::GET {
+        return reply(json!({"nextExpectedRanges":[format!("{}-", upload.bytes.len())]}));
+    }
     assert_eq!(headers["content-length"], body.len().to_string());
     if method == Method::POST {
         assert!(upload.deferred);
@@ -629,4 +632,13 @@ async fn a_cancellation_refused_by_the_sessions_own_condition_is_not_a_cleanup_f
         }
         assert_eq!(storage.read(&path).await.unwrap(), b"original");
     }
+}
+
+#[tokio::test]
+async fn recorded_floor_uploads_keep_onedrive_revision_conditions() {
+    let state = remote();
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
+        .conditional_floor_upload()
+        .await;
 }

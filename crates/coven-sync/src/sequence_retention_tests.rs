@@ -21,14 +21,39 @@ async fn independent_sealings_of_the_same_floor_differ_and_both_authenticate() {
     for _ in 0..2 {
         let proposal = ana
             .sync
-            .propose_floor(&session, &group.ring, &ana.identity)
+            .propose_floor(&session, &group.ring)
             .await
             .unwrap()
             .unwrap();
-        let super::Retention::Floor { bytes, .. } = proposal else {
+        let super::Retention::Capture(capture) = &proposal else {
             panic!("expected a floor proposal");
         };
-        sealed.push(bytes);
+        let record = ana
+            .database()
+            .start_operation(coven_database::NewOperation {
+                kind: "sequence-retention".into(),
+                data: serde_json::to_vec(&proposal).unwrap(),
+                started_by: "coven".into(),
+                pauses_writes: false,
+            })
+            .await
+            .unwrap();
+        let artifact = ana
+            .sync
+            .capture_floor(capture, &group.ring, &ana.identity)
+            .await
+            .unwrap();
+        sealed.push(
+            ana.sync
+                .artifact_file(&capture.name)
+                .unwrap()
+                .open_reader()
+                .unwrap()
+                .read_at(0, artifact.size as usize)
+                .unwrap(),
+        );
+        ana.sync.cleanup_floor(&artifact).await.unwrap();
+        ana.database().finish_operation(record).await.unwrap();
     }
     assert_ne!(sealed[0], sealed[1]);
     let path = ObjectPath::floor(group.store);
@@ -314,7 +339,7 @@ async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_late
     let trace = ana.storage.request_trace().split_off(traced);
     let refused = trace
         .iter()
-        .position(|request| *request == MemoryRequest::Replace(floor_path.clone()))
+        .position(|request| *request == MemoryRequest::Other("finish_upload"))
         .expect("the pass attempts the floor replacement");
     assert!(
         trace[refused..]
@@ -355,6 +380,198 @@ async fn a_refused_floor_replacement_with_the_floor_unchanged_advances_on_a_late
     ana.sync.database.close().await.unwrap();
 }
 
+#[tokio::test]
+async fn floors_above_the_request_limit_create_and_replace_atomically() {
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    let floor_path = ObjectPath::floor(group.store);
+    let mut previous = None;
+    for (index, id) in ["first", "second"].into_iter().enumerate() {
+        insert(ana.database(), id, "retained in the snapshot").await;
+        ana.sync.pass().await.unwrap();
+        let covered = ana.database().applied_slot().await.unwrap();
+        ana.sync
+            .snapshot(coven_merge::Audience::Store)
+            .await
+            .unwrap();
+        group.clock.set(
+            std::time::UNIX_EPOCH
+                + (super::GRACE + std::time::Duration::from_secs(1)) * (index as u32 + 1),
+        );
+        ana.sync.pass().await.unwrap();
+        let floor = group.storage.status(&floor_path).await.unwrap().unwrap();
+        assert!(floor.size > group.storage.single_request_limit());
+        assert_ne!(previous.as_ref(), Some(&floor));
+        assert!(group
+            .storage
+            .status(&ObjectPath::slot(group.store, covered.try_into().unwrap()))
+            .await
+            .unwrap()
+            .is_none());
+        assert!(ana.database().operations().await.unwrap().is_empty());
+        previous = Some(floor);
+    }
+    ana.database().close().await.unwrap();
+}
+
+#[tokio::test]
+async fn interrupted_floor_parts_and_publication_keep_their_journal_across_reopening() {
+    for replacement in [false, true] {
+        for fault in [0, 1, 2] {
+            let mut group = Group::new();
+            group.storage = coven_storage::test_utils::MemoryStorage::builder()
+                .clock(group.clock.clone())
+                .transfer_limits(256, 128)
+                .build()
+                .unwrap();
+            let ana = group.device(1).await;
+            group.create(&ana).await;
+            if replacement {
+                ana.sync
+                    .snapshot(coven_merge::Audience::Store)
+                    .await
+                    .unwrap();
+                group
+                    .clock
+                    .set(std::time::UNIX_EPOCH + super::GRACE + std::time::Duration::from_secs(1));
+                ana.sync.pass().await.unwrap();
+            }
+            insert(ana.database(), "held", "covered by the proposed floor").await;
+            ana.sync.pass().await.unwrap();
+            let covered = ObjectPath::slot(
+                group.store,
+                ana.database()
+                    .applied_slot()
+                    .await
+                    .unwrap()
+                    .try_into()
+                    .unwrap(),
+            );
+            ana.sync
+                .snapshot(coven_merge::Audience::Store)
+                .await
+                .unwrap();
+            group.clock.set(
+                std::time::UNIX_EPOCH + (super::GRACE + std::time::Duration::from_secs(1)) * 2,
+            );
+            let path = ObjectPath::floor(group.store);
+            let before = group.storage.status(&path).await.unwrap();
+            ana.storage
+                .set_faults(Faults {
+                    drop_part: fault == 0,
+                    lose_part_reply: fault == 1,
+                    lose_completion_reply: fault == 2,
+                    ..Faults::none()
+                })
+                .await;
+            ana.sync.pass().await.unwrap();
+            assert!(group.storage.status(&covered).await.unwrap().is_some());
+            if fault != 2 {
+                assert_eq!(group.storage.status(&path).await.unwrap(), before);
+            }
+            let records = ana.database().operations().await.unwrap();
+            let record = records
+                .iter()
+                .find(|record| record.kind == "sequence-retention")
+                .unwrap();
+            let super::Retention::Floor(artifact) = serde_json::from_slice(&record.data).unwrap()
+            else {
+                panic!("upload lost its artifact");
+            };
+            assert!(artifact.session.is_some());
+            let bytes = ana
+                .sync
+                .artifact_file(&artifact.capture.name)
+                .unwrap()
+                .open_reader()
+                .unwrap()
+                .read_at(0, artifact.size as usize)
+                .unwrap();
+            let operation = record.id;
+            let ana = group.reopen(ana).await;
+            ana.sync.retry_pending_operation(operation).await.unwrap();
+            assert_eq!(group.storage.read(&path).await.unwrap(), bytes);
+            assert!(group.storage.status(&covered).await.unwrap().is_none());
+            assert!(ana.database().operation(operation).await.unwrap().is_none());
+            assert!(ana
+                .sync
+                .artifact_file(&artifact.capture.name)
+                .unwrap()
+                .open_reader()
+                .is_err());
+            ana.database().close().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test]
+async fn a_failed_floor_abort_keeps_the_record_and_prevents_deletion() {
+    let mut group = Group::new();
+    group.storage = coven_storage::test_utils::MemoryStorage::builder()
+        .clock(group.clock.clone())
+        .transfer_limits(256, 128)
+        .build()
+        .unwrap();
+    let ana = group.device(1).await;
+    group.create(&ana).await;
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + super::GRACE + std::time::Duration::from_secs(1));
+    ana.sync.pass().await.unwrap();
+    insert(ana.database(), "held", "covered").await;
+    ana.sync.pass().await.unwrap();
+    let covered = ObjectPath::slot(
+        group.store,
+        ana.database()
+            .applied_slot()
+            .await
+            .unwrap()
+            .try_into()
+            .unwrap(),
+    );
+    ana.sync
+        .snapshot(coven_merge::Audience::Store)
+        .await
+        .unwrap();
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + (super::GRACE + std::time::Duration::from_secs(1)) * 2);
+    ana.storage
+        .set_faults(Faults {
+            refuse_replacements: 1,
+            abort_failures: 1,
+            ..Faults::none()
+        })
+        .await;
+    ana.sync.pass().await.unwrap();
+    assert!(group.storage.status(&covered).await.unwrap().is_some());
+    let records = ana.database().operations().await.unwrap();
+    let record = records
+        .iter()
+        .find(|record| record.kind == "sequence-retention")
+        .unwrap();
+    let super::Retention::Floor(artifact) = serde_json::from_slice(&record.data).unwrap() else {
+        panic!("cleanup lost its upload");
+    };
+    let operation = record.id;
+    assert!(artifact.session.is_some());
+    let ana = group.reopen(ana).await;
+    ana.sync.retry_pending_operation(operation).await.unwrap();
+    assert!(group.storage.status(&covered).await.unwrap().is_none());
+    assert!(ana.database().operation(operation).await.unwrap().is_none());
+    ana.database().close().await.unwrap();
+}
+
 async fn idle_circle_coverage(compare: bool) {
     use coven_merge::Audience;
     let group = Group::new();
@@ -377,13 +594,9 @@ async fn idle_circle_coverage(compare: bool) {
                 + std::time::Duration::from_secs(if covered { 2 } else { 1 }),
         );
         let session = ana.sync.session.lock().await;
-        let proposal = ana
-            .sync
-            .propose_floor(&session, &group.ring, &ana.identity)
-            .await
-            .unwrap();
+        let proposal = ana.sync.propose_floor(&session, &group.ring).await.unwrap();
         let first = proposal.map(|proposal| match proposal {
-            super::Retention::Floor { first, .. } => first,
+            super::Retention::Capture(capture) => capture.first,
             _ => panic!("expected floor"),
         });
         assert_eq!(
@@ -433,17 +646,11 @@ async fn daily_snapshots(compare: bool) {
         let mut session = ana.sync.session.lock().await;
         let announcement = session.history.announcements[&slot].clone();
         published.push((slot, announcement.covers, announcement.snapshot));
-        let proposal = ana
-            .sync
-            .propose_floor(&session, &group.ring, &ana.identity)
-            .await
-            .unwrap();
+        let proposal = ana.sync.propose_floor(&session, &group.ring).await.unwrap();
         let selected = match proposal {
-            Some(super::Retention::Floor {
-                first,
-                announcements,
-                ..
-            }) => {
+            Some(super::Retention::Capture(capture)) => {
+                let first = capture.first;
+                let announcements = capture.announcements;
                 assert!(day >= 7, "floor passed grace early on day {day}");
                 let expected = &published[day - 7];
                 assert_eq!(announcements, vec![expected.0 .0]);

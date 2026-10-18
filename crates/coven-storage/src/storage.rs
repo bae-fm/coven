@@ -130,10 +130,11 @@ pub trait Storage: Send + Sync {
         Err(StorageFailure::InvalidConfiguration.with_source("provider has no sharing account"))
     }
     /// Largest complete encrypted body sent in one request, in bytes. Larger
-    /// create-once objects use recorded resumable or multipart uploads. Floor
+    /// objects use recorded resumable or multipart uploads. Buffered floor
     /// replacements accept complete bodies up to this limit; OneDrive stages
     /// the body in a revision-bound session before conditional publication.
-    /// Callers retaining sessions across crashes use `begin_upload` and record them.
+    /// Callers retaining sessions across crashes record `begin_upload` or
+    /// `begin_replace` sessions.
     /// S3 uses 5 GiB, Dropbox 150 MiB and OneDrive 250,000,000 bytes.
     /// CloudKit uses bounded 8 MiB assets.
     fn single_request_limit(&self) -> u64;
@@ -145,8 +146,8 @@ pub trait Storage: Send + Sync {
     /// Create a complete encrypted object, refusing an occupied path with
     /// [`StorageFailure::AlreadyExists`]. Occupation alone proves nothing: a
     /// retry compares the occupant's complete bytes itself (§5.1, §19.3).
-    /// Bodies above [`Self::single_request_limit`] use a session for immutable
-    /// paths; a writes slot can contain multiple writes in one object.
+    /// Bodies above [`Self::single_request_limit`] use a session; a writes
+    /// slot can contain multiple writes in one object.
     /// A failed transfer aborts the session;
     /// if abort fails too, [`StorageError::Cleanup`] retains both causes.
     /// Returns the object's metadata when the provider's one-request reply
@@ -253,10 +254,17 @@ pub trait Storage: Send + Sync {
     /// preserving its failure cause; group and parent access remain reported.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
     /// Begin a create-once upload, returning the value to record before parts are sent.
-    /// The replaceable floor is refused; `replace` owns its conditional write.
+    /// This also creates an absent floor without exposing partial bytes.
     async fn begin_upload(
         &self,
         path: &ObjectPath,
+        total: u64,
+    ) -> Result<UploadSession, StorageError>;
+    /// Begin a floor upload bound to this observed native revision.
+    /// Record it before sending parts; restarting never adopts a newer revision.
+    async fn begin_replace(
+        &self,
+        previous: &StoredObject,
         total: u64,
     ) -> Result<UploadSession, StorageError>;
     /// Begin a fresh recorded session after resumption or publication reports
@@ -275,8 +283,14 @@ pub trait Storage: Send + Sync {
         ) {
             self.abort_upload(expired).await?;
         }
-        self.begin_upload(expired.path(), expired.total_bytes())
-            .await
+        match expired.target() {
+            crate::UploadTarget::Create(path) => {
+                self.begin_upload(path, expired.total_bytes()).await
+            }
+            crate::UploadTarget::Replace(previous) => {
+                self.begin_replace(previous, expired.total_bytes()).await
+            }
+        }
     }
     /// Refresh a recorded session from the provider after interruption.
     /// Persist the returned state even on failure, as with `finish_upload`.

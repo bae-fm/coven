@@ -1,4 +1,4 @@
-use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError, StorageFailure};
+use crate::{CloudProvider, ObjectPath, StorageConfig, StorageError, StorageFailure, StoredObject};
 use coven_crypto::SecretBytes;
 use coven_crypto::SecretText;
 use serde::{Deserialize, Serialize};
@@ -7,8 +7,41 @@ pub(crate) const CLOUDKIT_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const DROPBOX_PART_SIZE: usize = 8 * 1024 * 1024;
 pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 
-/// A create-once provider upload recorded by the caller's operation (§17.7, §11).
-/// The floor uses conditional replacement and cannot have a create-once session.
+/// The one condition under which all uploaded bytes may become visible.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum UploadTarget {
+    /// Publish only while the path is absent.
+    Create(ObjectPath),
+    /// Publish only while this floor revision still occupies the path.
+    Replace(StoredObject),
+}
+impl UploadTarget {
+    /// The encrypted object's destination.
+    pub fn path(&self) -> &ObjectPath {
+        match self {
+            Self::Create(path) => path,
+            Self::Replace(previous) => &previous.path,
+        }
+    }
+    pub(crate) fn check(&self) -> Result<(), StorageError> {
+        if let Self::Replace(previous) = self {
+            if !previous.path.is_replaceable() {
+                return Err(StorageFailure::InvalidPath.into());
+            }
+            previous.check(&previous.path)?;
+        }
+        Ok(())
+    }
+    pub(crate) fn error(&self, error: StorageError) -> StorageError {
+        match self {
+            Self::Create(_) => error,
+            Self::Replace(_) => error.replacement(),
+        }
+    }
+}
+
+/// A provider upload recorded by the caller's operation (§17.7, §11).
+/// The destination retains its original absent/revision condition across retries.
 ///
 /// Record it before sending parts and after each call, including failed calls:
 /// a publication conflict invalidates the native session even if abort fails.
@@ -20,7 +53,7 @@ pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 /// identifying publication, and the session is recorded before the native
 /// multipart upload exists: the first part initiates it. Abort deletes it even after native multipart completion; failed
 /// copy or cleanup keeps the recording incomplete so it can be retried.
-/// OneDrive returns its planned temporary UUID before any provider request.
+/// OneDrive creation returns its planned temporary UUID before any provider request.
 /// After recording it, resume and record the returned native capability before
 /// sending parts. The UUID stays through receipt, copying, verification
 /// and deletion; native transfer completion alone is not publication.
@@ -33,7 +66,7 @@ pub(crate) const ONEDRIVE_PART_SIZE: usize = 24 * 320 * 1024;
 #[serde(try_from = "RecordedUploadSession")]
 pub struct UploadSession {
     pub(crate) location: StorageConfig,
-    pub(crate) path: ObjectPath,
+    pub(crate) target: UploadTarget,
     pub(crate) total: u64,
     pub(crate) confirmed: u64,
     pub(crate) part_size: usize,
@@ -46,7 +79,7 @@ pub struct UploadSession {
 #[serde(deny_unknown_fields)]
 struct RecordedUploadSession {
     location: StorageConfig,
-    path: ObjectPath,
+    target: UploadTarget,
     total: u64,
     confirmed: u64,
     part_size: usize,
@@ -58,7 +91,7 @@ impl TryFrom<RecordedUploadSession> for UploadSession {
     fn try_from(recorded: RecordedUploadSession) -> Result<Self, Self::Error> {
         let session = Self {
             location: recorded.location,
-            path: recorded.path,
+            target: recorded.target,
             total: recorded.total,
             confirmed: recorded.confirmed,
             part_size: recorded.part_size,
@@ -97,6 +130,9 @@ pub(crate) enum SessionState {
     OneDrive {
         temporary: uuid::Uuid,
         upload: OneDriveUpload,
+    },
+    OneDriveReplacement {
+        url: SecretText,
     },
     CloudKit {
         id: SecretText,
@@ -173,7 +209,11 @@ impl UploadSession {
     }
     /// The destination encrypted-object path.
     pub fn path(&self) -> &ObjectPath {
-        &self.path
+        self.target.path()
+    }
+    /// The original publication condition, retained by every resumed session.
+    pub fn target(&self) -> &UploadTarget {
+        &self.target
     }
     /// Bytes confirmed by the provider; only these may advance the operation.
     pub fn confirmed_bytes(&self) -> u64 {
@@ -204,7 +244,7 @@ impl UploadSession {
     }
     /// Read a recording only if its provider, destination, state and progress agree.
     /// Validation covers the location, state variant, nonempty identifiers, part
-    /// counts and sizes, and confirmed byte offset; replaceable paths are refused.
+    /// counts and sizes, and confirmed byte offset; replacement requires a floor.
     /// The adapter also checks that it names the adapter's location before any request.
     pub fn decode(bytes: &[u8]) -> Result<Self, StorageError> {
         let value: RecordedUploadSession = serde_json::from_slice(bytes)
@@ -213,9 +253,7 @@ impl UploadSession {
     }
     fn validate(&self) -> Result<(), StorageError> {
         self.location.validate()?;
-        if self.path.is_replaceable() {
-            return Err(StorageFailure::InvalidPath.into());
-        }
+        self.target.check()?;
         if self.part_size == 0
             || self.total == 0
             || self.confirmed > self.total
@@ -258,7 +296,10 @@ impl UploadSession {
                 }
             }
             SessionState::Dropbox { id } if provider == CloudProvider::Dropbox => nonempty(id)?,
-            SessionState::OneDrive { upload, .. } if provider == CloudProvider::OneDrive => {
+            SessionState::OneDrive { upload, .. }
+                if provider == CloudProvider::OneDrive
+                    && matches!(self.target, UploadTarget::Create(_)) =>
+            {
                 match upload {
                     OneDriveUpload::Planned { .. } => {
                         if self.confirmed != 0 {
@@ -295,10 +336,21 @@ impl UploadSession {
                     | OneDriveUpload::Refused => {}
                 }
             }
+            SessionState::OneDriveReplacement { url }
+                if provider == CloudProvider::OneDrive
+                    && matches!(self.target, UploadTarget::Replace(_)) =>
+            {
+                transfer_url(url)?;
+                if self.confirmed == self.total {
+                    return Err(StorageFailure::InvalidPart.into());
+                }
+            }
             SessionState::CloudKit { id } if provider == CloudProvider::CloudKit => {
                 check_cloudkit_id(id.as_str())?
             }
-            SessionState::VerifyPublished if provider == CloudProvider::Dropbox => {
+            SessionState::VerifyPublished
+                if provider == CloudProvider::Dropbox && !self.path().is_replaceable() =>
+            {
                 if self.confirmed == self.total {
                     return Err(StorageFailure::InvalidPart.into());
                 }

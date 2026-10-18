@@ -2,6 +2,7 @@ use super::*;
 use crate::{history::tests::Projection, history::History, sequence_sync::tests::*};
 use coven_crypto::StoreKeyring;
 use coven_format::sealed_slot::{BoundedSlot, SlotKind, SlotObjectPrefix};
+use coven_foundation::files::StoreDirAccess;
 use coven_merge::Audience;
 use serde_json::json;
 

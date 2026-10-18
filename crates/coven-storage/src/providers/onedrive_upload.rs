@@ -92,7 +92,7 @@ impl OneDriveStorage {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        self.delete_temporary_at(publication, session.path.store(), temporary(session)?)
+        self.delete_temporary_at(publication, session.path().store(), temporary(session)?)
             .await
     }
     async fn delete_temporary_at(
@@ -119,7 +119,7 @@ impl OneDriveStorage {
     pub(super) fn plan_temporary(&self, path: &ObjectPath, total: u64) -> UploadSession {
         UploadSession {
             location: self.config(),
-            path: path.clone(),
+            target: UploadTarget::Create(path.clone()),
             total,
             confirmed: 0,
             part_size: crate::session::ONEDRIVE_PART_SIZE,
@@ -140,13 +140,13 @@ impl OneDriveStorage {
         set_upload(session, OneDriveUpload::Planned { unstarted: false })?;
         self.directory(
             publication,
-            &[&session.path.store().to_string(), TEMPORARIES],
+            &[&session.path().store().to_string(), TEMPORARIES],
         )
         .await?;
         let temporary = temporary(session)?;
         let url = format!(
             "{}/createUploadSession",
-            self.temporary_url(session.path.store(), temporary)?
+            self.temporary_url(session.path().store(), temporary)?
         );
         let started = async {
             let response = self
@@ -221,13 +221,13 @@ impl OneDriveStorage {
     ) -> Result<(), StorageError> {
         // A recording may precede the final part, copy, or deletion reply.
         // The native upload is closed; resolve whether its temporary survived.
-        let url = self.temporary_url(session.path.store(), temporary(session)?)?;
+        let url = self.temporary_url(session.path().store(), temporary(session)?)?;
         let response = self
             .publish(publication, Method::GET, &url, Body::Empty)
             .await?;
         if response.status().as_u16() == 404 {
             self.check_folder().await?;
-            let object = self.status(&session.path).await?.ok_or(
+            let object = self.status(session.path()).await?.ok_or(
                 StorageFailure::SessionExpired
                     .with_source("OneDrive session and destination are absent"),
             )?;
@@ -257,7 +257,7 @@ impl OneDriveStorage {
         }
         // The saved upload can predate a successful copy reply. An occupied
         // destination must be compared before either identity is forgotten.
-        if let Some(object) = self.status(&session.path).await? {
+        if let Some(object) = self.status(session.path()).await? {
             return self.verify_existing(publication, session, object).await;
         }
         let item = http::string(&value, "id")?.to_owned();
@@ -388,7 +388,7 @@ impl OneDriveStorage {
         let OneDriveUpload::Uploaded { item } = upload(session)? else {
             unreachable!()
         };
-        let parent = self.parents(publication, &session.path).await?;
+        let parent = self.parents(publication, session.path()).await?;
         let url = format!(
             "{}?@microsoft.graph.conflictBehavior=fail",
             self.item(item, &["copy"])?
@@ -400,7 +400,7 @@ impl OneDriveStorage {
                 &url,
                 Body::Json(json!({
                     "parentReference": {"driveId": self.drive, "id": parent},
-                    "name": session.path.file_name()
+                    "name": session.path().file_name()
                 })),
             )
             .await?;
@@ -514,8 +514,8 @@ impl OneDriveStorage {
                     }
                 };
                 if completed {
-                    let value = self.metadata(&session.path).await?;
-                    let object = object_metadata::onedrive(&session.path, &value)?;
+                    let value = self.metadata(session.path()).await?;
+                    let object = object_metadata::onedrive(session.path(), &value)?;
                     if object.size != session.total {
                         return Err(StorageFailure::Protocol
                             .with_source("OneDrive copied an incomplete object"));

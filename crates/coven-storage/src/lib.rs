@@ -62,7 +62,7 @@ pub use credentials::*;
 pub use error::*;
 pub use invitation::StorageInvitation;
 pub use path::*;
-pub use session::UploadSession;
+pub use session::{UploadSession, UploadTarget};
 pub use settings::StorageSettings;
 pub use storage::*;
 

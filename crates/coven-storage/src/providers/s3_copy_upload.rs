@@ -46,7 +46,7 @@ impl S3Storage {
             | SessionState::S3Planned { token, .. } => token,
             _ => return Err(StorageFailure::SessionMismatch.into()),
         };
-        self.upload_key(&session.path, token)
+        self.upload_key(session.path(), token)
     }
 
     /// The temporary a single-request create stages, named by the create
@@ -59,9 +59,24 @@ impl S3Storage {
         path: impl Into<Destination<'a>>,
         bytes: &[u8],
     ) -> Result<String, StorageError> {
-        let path = path.into();
+        self.publication_temporary_key(path.into(), bytes, None)
+    }
+
+    fn publication_temporary_key(
+        &self,
+        path: Destination<'_>,
+        bytes: &[u8],
+        expected: Option<&str>,
+    ) -> Result<String, StorageError> {
         let mut hasher = coven_crypto::ObjectHasher::new();
-        hasher.update(b"coven/copy-temporary/v1");
+        match expected {
+            None => hasher.update(b"coven/copy-temporary/v1"),
+            Some(revision) => {
+                hasher.update(b"coven/replace-temporary/v1");
+                hasher.update(&(revision.len() as u64).to_be_bytes());
+                hasher.update(revision.as_bytes());
+            }
+        }
         hasher.update(&(path.as_str().len() as u64).to_be_bytes());
         hasher.update(path.as_str().as_bytes());
         hasher.update(bytes);
@@ -86,6 +101,7 @@ impl S3Storage {
             .bucket(&self.bucket)
             .key(key)
             .metadata("coven-upload", token.as_str())
+            .metadata("coven-revision", token.as_str())
             .customize()
             .interceptor(publication.clone())
             .send()
@@ -266,8 +282,12 @@ impl S3Storage {
             .copy(
                 Some(publication),
                 &self.session_key(session)?,
-                Destination::Object(&session.path),
+                Destination::Object(session.path()),
                 condition,
+                match session.target() {
+                    UploadTarget::Create(_) => None,
+                    UploadTarget::Replace(previous) => Some(&previous.replace_token),
+                },
             )
             .await;
         let result = match result.map_err(s3_error) {
@@ -315,11 +335,25 @@ impl S3Storage {
         temporary: &str,
         path: Destination<'_>,
         condition: S3CopyCondition,
+        expected: Option<&str>,
     ) -> Result<
         aws_sdk_s3::operation::copy_object::CopyObjectOutput,
         aws_sdk_s3::error::SdkError<aws_sdk_s3::operation::copy_object::CopyObjectError>,
     > {
-        let (header, value) = condition.header();
+        let (header, value) = match expected {
+            None => {
+                let (header, value) = condition.header();
+                (header, value.to_owned())
+            }
+            Some(revision) => (
+                match condition {
+                    S3CopyCondition::IfNoneMatch => "if-match",
+                    S3CopyCondition::GenerationMatch => "x-goog-if-generation-match",
+                    S3CopyCondition::CloudflareIfNoneMatch => "cf-copy-destination-if-match",
+                },
+                revision.to_owned(),
+            ),
+        };
         let mut request = self
             .client
             .copy_object()
@@ -328,7 +362,7 @@ impl S3Storage {
             .copy_source(format!("/{}/{temporary}", self.bucket))
             .customize()
             .mutate_request(move |request| {
-                request.headers_mut().insert(header, value);
+                request.headers_mut().insert(header, value.clone());
             });
         if let Some(publication) = publication {
             request = request.interceptor(publication.clone());
@@ -356,8 +390,23 @@ impl S3Storage {
         bytes: &[u8],
         condition: S3CopyCondition,
     ) -> Result<(), StorageError> {
+        self.publish_by_copy(publication, path, bytes, condition, None)
+            .await
+    }
+
+    pub(super) async fn publish_by_copy(
+        &self,
+        publication: Option<&PublicationRequest>,
+        path: Destination<'_>,
+        bytes: &[u8],
+        condition: S3CopyCondition,
+        expected: Option<&str>,
+    ) -> Result<(), StorageError> {
         let token = SecretText::new(self.ids.new_id().to_string());
-        let temporary = self.create_temporary_key(path, bytes)?;
+        let temporary = match expected {
+            None => self.create_temporary_key(path, bytes)?,
+            Some(_) => self.publication_temporary_key(path, bytes, expected)?,
+        };
         let published = async {
             let mut put = self
                 .client
@@ -375,11 +424,21 @@ impl S3Storage {
             }
             put.send().await.map_err(s3_error)?;
             match self
-                .copy(publication, &temporary, path, condition)
+                .copy(publication, &temporary, path, condition, expected)
                 .await
                 .map_err(s3_error)
             {
                 Ok(_) => Ok(()),
+                // Floor recovery authenticates the current floor after an
+                // uncertain result. A shared temporary's marker cannot turn a
+                // different attempt's refused revision into success.
+                Err(error) if expected.is_some() => {
+                    Err(if error.failure() == StorageFailure::NotFound {
+                        StorageFailure::Conflict.with_source(error)
+                    } else {
+                        error
+                    })
+                }
                 Err(error)
                     if matches!(
                         error.failure(),

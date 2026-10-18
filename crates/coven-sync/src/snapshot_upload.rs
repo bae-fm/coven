@@ -78,7 +78,7 @@ impl SequenceSync {
             let recorded = source.artifact.session.clone();
             match recorded_upload::upload(
                 self.storage.as_ref(),
-                &path,
+                &coven_storage::UploadTarget::Create(path.clone()),
                 total,
                 recorded,
                 &mut source,

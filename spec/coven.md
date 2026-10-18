@@ -3073,6 +3073,12 @@ plus one. A device with deletion permission:
    it read it;
 3. then deletes the slots below `first`.
 
+A floor can exceed one provider request: it contains the original announcements
+for every required audience. Ana records its fixed encrypted bytes and upload
+session, sends its parts, and publishes them as one floor under the revision she
+first observed. Parts alone authorize no deletion. Recording even a floor that
+fits one part keeps ownership of provider cleanup if its reply is lost (§20.6).
+
 **The grace period** is usually seven days from each snapshot's announcement.
 It spares short absences a full reload; correctness does not need it.
 
@@ -3406,8 +3412,9 @@ depends on it.
 32 MiB, whichever is less, uploads in one create. A larger one goes up in parts,
 through the provider's resumable or multipart upload. Providers require this
 above a size: Dropbox, for example, above 150 MiB per request. Any object past the
-provider's single-request limit goes up this way, a large writes slot or snapshot
-included.
+provider's single-request limit goes up this way, a large writes slot, snapshot
+or floor included. A floor keeps its original absent or observed-revision
+condition in the session, because a retry must not overwrite a competing floor.
 
 - The upload session records each part the provider confirms, and its byte count,
   before reporting progress. Resuming, and the app's `uploads()` and
@@ -4128,7 +4135,9 @@ a matching replacement and a refusal with a stale revision. A provider without
 conditional replacement is refused. On OneDrive, racing replacements can all be
 refused while the floor keeps its bytes; the device rereads the floor and tries
 again on a later pass, as after any refusal (Appendix E.2). At most one
-replacement ever succeeds.
+replacement using that observed revision succeeds. The rule covers floors
+published in parts too: the final publication compares the original revision
+and exposes all the bytes together; it never adopts a newer revision on retry.
 
 **Complete reads, whole and by byte range.** A complete-object read streams
 through bounded buffers, so the reader checks each chunk as it arrives without a
@@ -4163,7 +4172,7 @@ The four providers reach these requirements in different ways. In brief:
 | Provider | Members reach the store by | Large objects published by |
 |---|---|---|
 | Dropbox | a shared folder, from their own account | its resumable upload |
-| OneDrive | a shared folder, from their own account | upload to a temporary, then a copy that fails on an occupied name |
+| OneDrive | a shared folder, from their own account | creation: upload to a temporary, then a copy that fails on an occupied name; floor replacement: a session bound to its observed revision |
 | iCloud (CloudKit) | a CloudKit share of the store's zone, from their own account | an atomic save once every part exists |
 | S3 services | their own access key | per service: conditional completion, or a conditional copy |
 
@@ -4359,9 +4368,16 @@ condition (*conditional completion*).
 
 Where it doesn't, coven uploads to a private *temporary* and publishes it with one
 server-side copy that refuses an occupied name. OneDrive's upload sessions expose
-unfinished items, so OneDrive always publishes this way. AWS dates multipart
-objects from their start, and GCS doesn't enforce create-once on completion, so
+unfinished new items, so OneDrive always creates objects this way. AWS dates
+multipart objects from their start, and GCS doesn't enforce create-once on completion, so
 both copy too. The copy's completion is the object's publication time.
+
+A floor replacement keeps the old floor visible while its parts arrive. The
+session records the revision first observed, and final publication must still
+match it. Dropbox finishes with that revision; S3 completes or copies under it;
+CloudKit saves the fetched floor record and new parts together. OneDrive uses a
+session bound to the observed item and revision, whose final fragment publishes
+(Appendix E.2). No provider may expose the parts as a floor.
 
 How a temporary is kept safe:
 
@@ -4391,7 +4407,7 @@ object by copy, small ones included.
 One S3 `CopyObject` copies at most 5 GiB. On a profile that publishes by S3 copy
 (AWS, SeaweedFS), a larger upload is refused before any request with
 `StorageFailure::CopyTooLarge`, because it can't be published atomically there. A
-batch, snapshot or file past that limit waits with that named failure. The
+batch, snapshot, floor or file past that limit waits with that named failure. The
 sequence format adds no cap of its own on batch size.
 
 Appendix E.10 gives the full mechanics: session records, the every-object copy
@@ -4723,7 +4739,7 @@ Each kind of work adds its own requests:
 | admin preparation | its actual requests: key copies, access changes, deliveries, snapshot uploads |
 | a snapshot | its upload and its announcement claim |
 | a reload | the floor's named snapshots, and the slots after them it needs |
-| deleting history | one conditional floor write, and the deletes |
+| deleting history | the floor upload's parts and one conditional publication, its cleanup, and the deletes |
 | files | their own reads, upload parts and deletes, outside the pass |
 | reading an object | one bounded stream; a snapshot's start takes at most two range requests and the rest one more stream (§6.5) |
 
@@ -5344,7 +5360,8 @@ an incomplete asset as a complete object. Bounded asset parts let ranged reads
 skip unrelated parts.
 
 - CloudKit has no app-controlled resumable byte upload, so coven keeps its own
-  durable session: its id, destination, total size and confirmed part boundary.
+  durable session: its id, destination, original absent or observed-revision
+  condition, total size and confirmed part boundary.
 - Each asset part and its confirmed boundary are saved together in the custom
   zone, using [atomic
   modification](https://developer.apple.com/documentation/cloudkit/ckmodifyrecordsoperation/isatomic).
@@ -5353,6 +5370,11 @@ skip unrelated parts.
 - The destination record is created only once every part exists, atomically
   marking the session published. Its `creationDate` therefore dates complete
   publication, never the session's start or an early part.
+- A floor replacement instead fetches the record with its observed change tag.
+  One atomic transaction saves that record with the new upload reference, marks
+  the new session published, and deletes the former upload root. Otherwise a
+  replacement would strand the former asset chain. Replacing a multipart floor
+  with one asset removes its old upload reference in the same transaction.
 - Pending sessions and parts use their own record types and reserved names
   outside coven's paths, so listings can't mistake them for published objects.
 - The session id identifies a lost successful publication reply.
@@ -5404,19 +5426,24 @@ replaced through an upload session instead.
   the upload URL.
 - Another write changing the item before completion drops the session (404) or
   refuses its request (409 `resourceModified`). Either is a refused replacement
-  (`Conflict`), never a reason to write the floor again.
+  (`Conflict`). That session cannot publish; retention rereads and authenticates
+  the floor before deciding what to do next.
 - Racing writers can all be refused, leaving the floor's bytes and eTag
   unchanged. At most one writer succeeds, and the floor then holds its bytes.
-- A failed replacement cancels its session, whose own condition may refuse that
-  too with `resourceModified`, and is not retried.
+- A recorded session keeps its confirmed offset after every result, including a
+  lost reply. Resume queries the same upload URL; a restart retains the original
+  revision. It never requests a newer revision to make a failed condition pass.
+- A buffered replacement cancels its failed session without retrying it. A
+  recorded floor operation keeps failed cleanup for retry. Cancellation can be
+  refused with `resourceModified` once the session can no longer publish.
 - Microsoft documents that `If-Match` is compared when the session is created,
   not that it holds through completion. Two-account live races are the evidence
   that it does (2026-10-17: one winner in every round, 200 two-writer and 50
   eight-writer rounds).
 
-**OneDrive upload sessions.** OneDrive's sessions expose unfinished items, so
-coven uploads to `<store>/.coven-uploads/<session>` inside the configured folder.
-That reserved place is distinct from every coven path.
+**Creating through OneDrive upload sessions.** Sessions that create items expose
+unfinished items, so coven uploads to `<store>/.coven-uploads/<session>` inside
+the configured folder. That reserved place is distinct from every coven path.
 
 - The session's random UUID is recorded before native initiation, so a lost
   initiation reply cannot strand an unnamed temporary. The returned upload
@@ -5448,7 +5475,7 @@ That reserved place is distinct from every coven path.
 |---|---|
 | signing | AWS SigV4, or Google HMAC |
 | single-PUT create-once condition | `If-None-Match: *`, or `x-goog-if-generation-match: 0` |
-| copy publication (`S3CopyPublication`) | **never**: single PUTs and multipart completions carry the create-once condition; **multipart uploads only**; or **every object**, single-request creates included. Copies carry a destination condition: `If-None-Match: *`, `x-goog-if-generation-match: 0` or `cf-copy-destination-if-none-match: *` |
+| copy publication (`S3CopyPublication`) | **never**: single PUTs and multipart completions carry the create-once condition; **multipart uploads only**; or **every object**, single-request creates and floor replacements included. Creates carry a destination condition: `If-None-Match: *`, `x-goog-if-generation-match: 0` or `cf-copy-destination-if-none-match: *`; replacements use the observed revision as E.10 describes |
 | native multipart timestamp | completion, or start |
 | checksum policy | scope stated; unstated scope ignored; or none returned |
 | listing | V2 or V1 |
@@ -5785,8 +5812,8 @@ order. Detection never chooses copy publication for every object (E.6).
 
 **Where uploads go.** A copy-publication profile uploads unconditionally to
 `<prefix>/<store>/.coven-uploads/<session>`, where `<session>` is the upload's
-random UUID. Other profiles upload at the destination: the shared slot path or an
-immutable object's path. That reserved place is distinct from every coven path.
+random UUID. Other profiles upload at the destination: a slot, another immutable
+object, or the floor. That reserved place is distinct from every coven path.
 
 **Session records.** Every S3 session is recorded with its name before its native
 multipart upload exists. The first part starts the native upload, and the record
@@ -5800,16 +5827,21 @@ then gains the native id.
   keeps the journal until provider evidence settles cleanup.
 - Aborting never deletes a destination or another claimant's session.
 - Retrying or resuming a record derives the same name, including after multipart
-  completion or a lost copy reply.
+  completion or a lost copy reply. A floor replacement also retains its original
+  observed revision; a replacement session never acquires a newer one.
 
 **Copy publication.** The assembled temporary is sent with one server-side
 `CopyObject` to the destination, carrying the profile's destination condition
-(`x-goog-if-generation-match: 0` for GCS).
+(`x-goog-if-generation-match: 0` for a GCS create). A floor replacement instead
+uses its recorded revision: `If-Match`, `x-goog-if-generation-match`, or
+`cf-copy-destination-if-match`, according to the profile. Conditional multipart
+completion likewise uses `If-Match` for replacement.
 
 - The destination's time is the copy's completion, never the temporary's
   creation or the multipart start.
-- An occupied destination stays untouched. The session marker tells this
-  session's lost successful reply apart from another object occupying the path.
+- A failed destination condition leaves the floor or immutable object untouched.
+  The session marker tells this session's lost successful reply apart from
+  another object occupying the path.
 - Deleting the temporary follows §20.6.
 
 **Every object by copy (SeaweedFS).** A single-request create is published the
@@ -5827,6 +5859,14 @@ same way:
   destination carries its marker; otherwise the copy's answer stands.
 - The temporary is deleted whatever the copy's outcome. A failed deletion fails
   the call, with both errors kept.
+
+A buffered floor replacement on an every-copy profile also uses a conditional
+copy, so it cannot race a multipart copy through a different publication method.
+Its temporary name includes the observed revision and fixed bytes: SHA-256 over
+`coven/replace-temporary/v1`, the revision length and revision, then the path
+length, path and bytes; lengths are big-endian u64s. The first 16 bytes form the
+UUID. An uncertain result is settled by authenticating the floor; a shared
+attempt's marker cannot make a refused revision count as success.
 
 **Attempts that share a temporary.** Concurrent attempts of one create, such as
 two creators of one path with identical bytes, share its temporary. One can delete
@@ -5891,8 +5931,9 @@ mutation, never throttling.
 - The invalidated session is recorded even on failure. It keeps only the ids
   needed for cleanup and can't complete or copy again.
 - A replacement session starts only after cleanup succeeds, at offset zero, with
-  the same path, size and fixed bytes.
-- An occupied destination still needs complete byte comparison (§5.1).
+  the same path, size, fixed bytes and absent or observed-revision condition.
+- An occupied immutable destination still needs complete byte comparison (§5.1).
+  A floor is settled by authenticating the current floor (§16.6).
 
 ### E.11 Times, revisions and checksums per provider
 
@@ -6428,6 +6469,7 @@ Write-ups explain each model and state its assumptions:
 
 | Claim | Theorems | File | Section |
 |---|---|---|---|
+| Assuming hidden staging, atomic comparison and a fresh revision on publication, parts preserve the original condition; incomplete or stale publication leaves the floor unchanged; success stores the whole object; two uploads using one condition cannot both publish | `receive_preserves_condition`, `incomplete_keeps_floor`, `stale_keeps_floor`, `stored_whole`, `one_winner` | `proofs/storage/CovenStorage/FloorUpload.lean` | §16.6, §20.6 |
 | *Body.* A copy that checks a free name and then writes it lets two racers both win | `check_then_write_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
 | *Body.* A conditional PUT racing a copy can be accepted beside it | `put_racing_copy_two_winners` | `proofs/storage/CovenStorage/CopyPublication.lean` | §20.6 |
 | *Body.* At most one store's setup passes per bucket, however far listings lag | `at_most_one_store` | `proofs/storage/CovenStorage/BucketClaim.lean` | §20.7 |

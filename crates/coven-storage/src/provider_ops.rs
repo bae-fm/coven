@@ -94,11 +94,11 @@ pub trait ProviderOps: Send + Sync {
     }
     /// Remove exclusive grants and return grants that still reach the account.
     async fn revoke_access(&self, account: &str) -> Result<Vec<RetainedAccess>, StorageError>;
-    /// Begin a nonempty upload to a checked immutable destination.
+    /// Begin a nonempty upload with its original publication condition.
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError>;
     /// Recover native progress of a validated, incomplete session.

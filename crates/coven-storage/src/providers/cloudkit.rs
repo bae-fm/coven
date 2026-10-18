@@ -126,6 +126,39 @@ impl CloudKitStorage {
         .ok_or(StorageFailure::Protocol.with_source("CloudKit omitted its saved record"))?
         .metadata()
     }
+    /// Fetch the native record carrying exactly the observed change tag. The
+    /// same transaction replaces its bytes and removes its former asset chain.
+    async fn replacement_object(
+        &self,
+        previous: &StoredObject,
+        size: u64,
+    ) -> Result<(Record, Vec<Retained<CKRecordID>>), StorageError> {
+        let path = &previous.path;
+        let mut record = self
+            .fetch(path.as_str(), record::OBJECT_KEYS)
+            .wait()
+            .await
+            .map_err(|error| {
+                if error.failure() == StorageFailure::NotFound {
+                    StorageFailure::Conflict.with_source(error)
+                } else {
+                    error
+                }
+            })?;
+        let current = record.metadata()?;
+        current.check(path)?;
+        if current.replace_token != previous.replace_token {
+            return Err(StorageFailure::Conflict.into());
+        }
+        let obsolete = match record.optional_text("upload")? {
+            Some(token) => vec![self.record_id(&record::upload_name(path, &token)?)],
+            None => vec![],
+        };
+        record.set_object_fields(path, size);
+        record.remove_field("data");
+        record.remove_field("upload");
+        Ok((record, obsolete))
+    }
     async fn require_owner(&self) -> Result<(), StorageError> {
         if native::current_account(&self.container).wait().await? != self.owner {
             return Err(StorageFailure::NotStoreOwner.into());
@@ -163,23 +196,17 @@ impl ProviderOps for CloudKitStorage {
         previous: &StoredObject,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        let path = &previous.path;
-        let mut record = self
-            .fetch(path.as_str(), record::OBJECT_KEYS)
-            .wait()
+        let (mut record, obsolete) = self
+            .replacement_object(previous, bytes.len() as u64)
             .await?;
-        let current = record.metadata()?;
-        current.check(path)?;
-        if current.replace_token != previous.replace_token {
-            return Err(StorageFailure::Conflict.into());
-        }
-        record.set_object_fields(path, bytes.len() as u64);
         let asset = record.set_asset(&self.files, bytes)?;
         publication.check()?;
-        native::conditional_object(
-            |operation| unsafe { self.database.addOperation(operation) },
-            record,
-            path,
+        native::modify(
+            &self.database,
+            vec![record],
+            &obsolete,
+            CKRecordSavePolicy::IfServerRecordUnchanged,
+            Some(previous.path.as_str()),
             vec![asset],
         )
         .wait()
@@ -187,6 +214,7 @@ impl ProviderOps for CloudKitStorage {
         .map(drop)
         .map_err(StorageError::replacement)
     }
+
     async fn status(&self, path: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         match self
             .fetch(record::record_name(path), record::OBJECT_KEYS)
@@ -261,11 +289,11 @@ impl ProviderOps for CloudKitStorage {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
-        self.prepare_upload(path, total)
+        self.prepare_upload(target, total)
     }
     async fn resume_upload(
         &self,

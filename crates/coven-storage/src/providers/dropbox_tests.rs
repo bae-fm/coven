@@ -279,7 +279,16 @@ pub(super) async fn endpoint(
         }
         "/2/files/upload_session/finish" => {
             let path = arg["commit"]["path"].as_str().unwrap().to_owned();
-            if state.objects.contains_key(&path) {
+            let mode = &arg["commit"]["mode"];
+            let accepts = if mode == "add" {
+                !state.objects.contains_key(&path)
+            } else {
+                assert_eq!(mode[".tag"], "update");
+                state.objects.contains_key(&path)
+                    && state.revisions.get(&path).map(u64::to_string).as_deref()
+                        == mode["update"].as_str()
+            };
+            if !accepts {
                 return error("path/conflict/file/...");
             }
             let id = arg["cursor"]["session_id"].as_str().unwrap();
@@ -296,6 +305,7 @@ pub(super) async fn endpoint(
             );
             let bytes = state.uploads.remove(id).unwrap().bytes;
             let size = bytes.len();
+            *state.revisions.entry(path.clone()).or_insert(0) += 1;
             state.objects.insert(path.clone(), bytes);
             if std::mem::replace(&mut state.fail_reply, false) {
                 return response(503, "{}");
@@ -898,4 +908,13 @@ mod sequence {
             assert_eq!(storage.status(&path).await.unwrap().unwrap(), first);
         }
     }
+}
+
+#[tokio::test]
+async fn recorded_floor_uploads_keep_dropbox_revision_conditions() {
+    let state = Arc::new(Mutex::new(Remote::default()));
+    let server = TestServer::new(Router::new().fallback(endpoint).with_state(state)).await;
+    crate::test_utils::Conformance::new(Arc::new(provider(&server.url)), STORE_ID)
+        .conditional_floor_upload()
+        .await;
 }

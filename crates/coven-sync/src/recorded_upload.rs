@@ -1,6 +1,6 @@
-//! Resumable publication of repeatable bytes shared by files and snapshots.
+//! Resumable publication of repeatable file, snapshot, claim, and floor bytes.
 
-use coven_storage::{ObjectPath, Storage, StorageError, StorageFailure, UploadSession};
+use coven_storage::{Storage, StorageError, StorageFailure, UploadSession, UploadTarget};
 
 /// Repeatable byte reads, durable session progress, and a caller's pause state.
 pub(crate) trait UploadSource: Send {
@@ -45,22 +45,23 @@ async fn source_digest<S: UploadSource>(source: &mut S, total: u64) -> Result<Up
     Ok(Uploaded::Occupied((total, hasher.finish())))
 }
 
-fn occupied(error: &StorageError) -> bool {
-    error.failure() == StorageFailure::AlreadyExists
+fn occupied(target: &UploadTarget, error: &StorageError) -> bool {
+    !target.path().is_replaceable()
+        && error.failure() == StorageFailure::AlreadyExists
         && !matches!(error, StorageError::Cleanup { .. })
 }
 
 /// Persist every confirmed session before continuing; read only its next part.
 pub(crate) async fn upload<S: UploadSource>(
     storage: &dyn Storage,
-    path: &ObjectPath,
+    target: &UploadTarget,
     total: u64,
     recorded: Option<UploadSession>,
     source: &mut S,
 ) -> Result<Uploaded, S::Error> {
     let mut session = match recorded {
         Some(mut session) => {
-            if session.path() != path || session.total_bytes() != total {
+            if session.target() != target || session.total_bytes() != total {
                 return Err(StorageError::from(StorageFailure::SessionMismatch).into());
             }
             if session.is_at(&storage.config()) {
@@ -68,7 +69,7 @@ pub(crate) async fn upload<S: UploadSource>(
                     Ok(()) => (),
                     Err(error) => {
                         let error = save_failure(source, session.clone(), error).await?;
-                        if occupied(&error) {
+                        if occupied(target, &error) {
                             return source_digest(source, total).await;
                         }
                         if error.failure() != StorageFailure::SessionExpired
@@ -78,7 +79,7 @@ pub(crate) async fn upload<S: UploadSource>(
                         }
                         session = match storage.restart_upload(&session).await {
                             Ok(session) => session,
-                            Err(error) if occupied(&error) => {
+                            Err(error) if occupied(target, &error) => {
                                 return source_digest(source, total).await
                             }
                             Err(error) => return Err(error.into()),
@@ -86,19 +87,24 @@ pub(crate) async fn upload<S: UploadSource>(
                     }
                 }
             } else {
+                if matches!(target, UploadTarget::Replace(_)) {
+                    return Err(StorageError::from(StorageFailure::SessionMismatch).into());
+                }
                 // A location move copies published objects, but provider sessions
                 // belong to the old location. Send the same bytes in a new one.
-                match storage.begin_upload(path, total).await {
+                match begin(storage, target, total).await {
                     Ok(replacement) => session = replacement,
-                    Err(error) if occupied(&error) => return source_digest(source, total).await,
+                    Err(error) if occupied(target, &error) => {
+                        return source_digest(source, total).await
+                    }
                     Err(error) => return Err(error.into()),
                 }
             }
             session
         }
-        None => match storage.begin_upload(path, total).await {
+        None => match begin(storage, target, total).await {
             Ok(session) => session,
-            Err(error) if occupied(&error) => return source_digest(source, total).await,
+            Err(error) if occupied(target, &error) => return source_digest(source, total).await,
             Err(error) => return Err(error.into()),
         },
     };
@@ -128,13 +134,25 @@ pub(crate) async fn upload<S: UploadSource>(
         return Ok(Uploaded::Paused);
     }
     if let Err(error) = storage.finish_upload(&mut session).await {
-        if occupied(&error) {
+        let error = save_failure(source, session, error).await?;
+        if occupied(target, &error) {
             return source_digest(source, total).await;
         }
-        return Err(save_failure(source, session, error).await?.into());
+        return Err(error.into());
     }
     source.save(session).await?;
     Ok(Uploaded::Stored)
+}
+
+async fn begin(
+    storage: &dyn Storage,
+    target: &UploadTarget,
+    total: u64,
+) -> Result<UploadSession, StorageError> {
+    match target {
+        UploadTarget::Create(path) => storage.begin_upload(path, total).await,
+        UploadTarget::Replace(previous) => storage.begin_replace(previous, total).await,
+    }
 }
 
 async fn save_failure<S: UploadSource>(

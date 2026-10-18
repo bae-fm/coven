@@ -794,7 +794,7 @@ async fn minted_copy_profile_keys_abort_a_session_whose_initiation_reply_was_los
             path.clone(),
         );
         let session = storage
-            .begin_upload(&publication, &path, 6 * 1024 * 1024)
+            .begin_upload(&publication, &UploadTarget::Create(path), 6 * 1024 * 1024)
             .await
             .unwrap();
         assert!(matches!(session.state, SessionState::S3Planned { .. }));

@@ -192,7 +192,7 @@ impl SequenceSync {
                 .transpose()?;
             match recorded_upload::upload(
                 self.storage.as_ref(),
-                path,
+                &coven_storage::UploadTarget::Create(path.clone()),
                 upload.size,
                 recorded,
                 &mut ClaimSource {

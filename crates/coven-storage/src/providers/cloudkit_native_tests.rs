@@ -96,3 +96,64 @@ async fn object_publications_use_atomic_change_tag_conditions_and_retain_the_fet
         }
     }
 }
+
+#[tokio::test]
+async fn multipart_floor_publication_replaces_its_asset_chain_in_one_conditional_transaction() {
+    let path = crate::ObjectPath::floor(crate::test_utils::STORE_ID);
+    let id = |name: &str| unsafe {
+        CKRecordID::initWithRecordName(CKRecordID::alloc(), &NSString::from_str(name))
+    };
+    let mut floor = Record::new("CovenObject", &id(path.as_str()));
+    floor.set_object_fields(&path, 12);
+    let files = coven_foundation::files::AssetFiles::new().unwrap();
+    let asset = floor.set_asset(&files, b"former asset").unwrap();
+    floor.remove_field("data");
+    floor.set_text("upload", "new-upload");
+    let pointer = floor.raw() as *const CKRecord;
+    let mut upload = Record::new("CovenUpload", &id("new-upload"));
+    upload.set_text("state", "published");
+    upload.set_reference("owner", &id(path.as_str()));
+    let obsolete = id("old-upload");
+    let result = modify_with(
+        |operation| unsafe {
+            assert!(operation.atomic());
+            assert_eq!(
+                operation.savePolicy(),
+                CKRecordSavePolicy::IfServerRecordUnchanged
+            );
+            let records = operation.recordsToSave().unwrap();
+            let deleted = operation.recordIDsToDelete().unwrap();
+            assert_eq!(records.count(), 2);
+            assert_eq!(deleted.count(), 1);
+            assert_eq!(
+                deleted.objectAtIndex(0).recordName().to_string(),
+                "old-upload"
+            );
+            let saved = records.objectAtIndex(0);
+            assert_eq!(&*saved as *const CKRecord, pointer);
+            assert!(saved.objectForKey(&NSString::from_str("data")).is_none());
+            assert_eq!(
+                Record::from_callback(&saved).text("upload").unwrap(),
+                "new-upload"
+            );
+            operation
+                .modifyRecordsCompletionBlock()
+                .as_ref()
+                .unwrap()
+                .call((
+                    &*records as *const _ as *mut _,
+                    &*deleted as *const _ as *mut _,
+                    std::ptr::null_mut(),
+                ));
+        },
+        vec![floor, upload],
+        &[obsolete],
+        CKRecordSavePolicy::IfServerRecordUnchanged,
+        Some(path.as_str()),
+        vec![asset],
+    )
+    .wait()
+    .await
+    .unwrap();
+    assert_eq!(result.len(), 2);
+}

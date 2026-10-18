@@ -30,7 +30,7 @@ fn token(session: &UploadSession) -> Result<&str, StorageError> {
     }
 }
 fn check_record(record: &Record, session: &UploadSession) -> Result<u64, StorageError> {
-    if record.text("path")? != session.path.as_str() || record.number("total")? != session.total {
+    if record.text("path")? != session.path().as_str() || record.number("total")? != session.total {
         return Err(StorageFailure::SessionMismatch.into());
     }
     let confirmed = record.number("confirmed")?;
@@ -46,14 +46,14 @@ fn check_record(record: &Record, session: &UploadSession) -> Result<u64, Storage
 impl CloudKitStorage {
     pub(super) fn prepare_upload(
         &self,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         // No server allocation precedes the caller's durable recording. The first
         // part creates the upload record and its first asset in one transaction.
         Ok(UploadSession {
             location: self.config(),
-            path: path.clone(),
+            target: target.clone(),
             total,
             confirmed: 0,
             part_size: PART_SIZE,
@@ -63,7 +63,7 @@ impl CloudKitStorage {
         })
     }
     pub(super) async fn resume(&self, session: &mut UploadSession) -> Result<(), StorageError> {
-        let name = record::upload_name(&session.path, token(session)?)?;
+        let name = record::upload_name(session.path(), token(session)?)?;
         let record = match self.fetch(&name, SESSION_KEYS).wait().await {
             Ok(record) => record,
             Err(error) if error.failure() == StorageFailure::NotFound && session.confirmed == 0 => {
@@ -96,12 +96,12 @@ impl CloudKitStorage {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        let root = record::upload_name(&session.path, token(session)?)?;
+        let root = record::upload_name(session.path(), token(session)?)?;
         let mut upload = match self.fetch(&root, SESSION_KEYS).wait().await {
             Ok(record) => record,
             Err(error) if error.failure() == StorageFailure::NotFound && session.confirmed == 0 => {
                 let mut record = Record::new("CovenUpload", &self.record_id(&root));
-                record.set_text("path", session.path.as_str());
+                record.set_text("path", session.path().as_str());
                 record.set_number("total", session.total);
                 record.set_number("confirmed", 0);
                 record.set_text("state", "pending");
@@ -162,7 +162,7 @@ impl CloudKitStorage {
     }
     async fn confirm_publication(&self, session: &UploadSession) -> Result<(), StorageError> {
         let object = self
-            .fetch(session.path.as_str(), OBJECT_KEYS)
+            .fetch(session.path().as_str(), OBJECT_KEYS)
             .wait()
             .await?;
         if object.text("upload")? != token(session)? || object.metadata()?.size != session.total {
@@ -178,7 +178,7 @@ impl CloudKitStorage {
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
-        let root = record::upload_name(&session.path, token(session)?)?;
+        let root = record::upload_name(session.path(), token(session)?)?;
         let mut upload = self.fetch(&root, SESSION_KEYS).wait().await?;
         if check_record(&upload, session)? != session.total {
             return Err(StorageFailure::InvalidPart.into());
@@ -187,17 +187,22 @@ impl CloudKitStorage {
             Publication::Aborted => return Err(StorageFailure::SessionExpired.into()),
             Publication::Published => self.confirm_publication(session).await?,
             Publication::Pending => {
-                let mut object = self.object(&session.path, session.total);
+                let (mut object, obsolete) = match session.target() {
+                    UploadTarget::Create(path) => (self.object(path, session.total), vec![]),
+                    UploadTarget::Replace(previous) => {
+                        self.replacement_object(previous, session.total).await?
+                    }
+                };
                 object.set_text("upload", token(session)?);
                 upload.set_text("state", "published");
-                upload.set_reference("owner", &self.record_id(session.path.as_str()));
+                upload.set_reference("owner", &self.record_id(session.path().as_str()));
                 publication.check()?;
                 native::modify(
                     &self.database,
                     vec![object, upload],
-                    &[],
+                    &obsolete,
                     CKRecordSavePolicy::IfServerRecordUnchanged,
-                    Some(session.path.as_str()),
+                    Some(session.path().as_str()),
                     vec![],
                 )
                 .wait()
@@ -212,7 +217,7 @@ impl CloudKitStorage {
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        let root = record::upload_name(&session.path, token(session)?)?;
+        let root = record::upload_name(session.path(), token(session)?)?;
         let mut upload = match self.fetch(&root, SESSION_KEYS).wait().await {
             Ok(record) => record,
             Err(error) if error.failure() == StorageFailure::NotFound => return Ok(()),

@@ -12,6 +12,10 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+#[path = "memory_upload.rs"]
+mod memory_upload;
+use memory_upload::Pending;
+
 #[path = "memory_reads.rs"]
 mod memory_reads;
 pub use memory_reads::BodyFailure;
@@ -48,45 +52,6 @@ impl Object {
         }
     }
 }
-struct Pending {
-    path: ObjectPath,
-    total: u64,
-    bytes: Vec<u8>,
-    part_size: usize,
-}
-impl Pending {
-    fn check(&self, session: &UploadSession) -> Result<(), StorageError> {
-        if self.path != session.path
-            || self.total != session.total
-            || self.part_size != session.part_size
-        {
-            return Err(StorageFailure::SessionMismatch.into());
-        }
-        if (self.bytes.len() as u64) < session.confirmed || self.bytes.len() as u64 > self.total {
-            return Err(
-                StorageFailure::Protocol.with_source("memory provider lost confirmed progress")
-            );
-        }
-        Ok(())
-    }
-}
-fn confirm_published(
-    state: &State,
-    session: &mut UploadSession,
-    id: u64,
-) -> Result<(), StorageError> {
-    let object = state
-        .objects
-        .get(&session.path)
-        .ok_or(StorageFailure::SessionExpired)?;
-    if object.upload_id != Some(id) || object.bytes.len() as u64 != session.total {
-        return Err(StorageFailure::AlreadyExists.into());
-    }
-    session.confirmed = session.total;
-    session.state = SessionState::Memory { id, complete: true };
-    Ok(())
-}
-
 /// The account holding a fake store, as `account()` reports it to its owner.
 const OWNER_ACCOUNT: &str = "owner@example.test";
 
@@ -833,54 +798,17 @@ impl ProviderOps for MemoryProvider {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
-        publication.check()?;
-        self.before(MemoryRequest::Other("begin_upload")).await?;
-        let mut state = self.state.lock().await;
-        if state.objects.contains_key(path) && !state.faults.overwrite_create {
-            return Err(StorageFailure::AlreadyExists.into());
-        }
-        let id = state.next_id()?;
-        state.uploads.insert(
-            id,
-            Pending {
-                path: path.clone(),
-                total,
-                bytes: Vec::new(),
-                part_size: self.part_size,
-            },
-        );
-        Ok(UploadSession {
-            location: self.config(),
-            path: path.clone(),
-            total,
-            confirmed: 0,
-            part_size: self.part_size,
-            state: SessionState::Memory {
-                id,
-                complete: false,
-            },
-        })
+        self.memory_begin_upload(publication, target, total).await
     }
     async fn resume_upload(
         &self,
         publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        publication.check()?;
-        self.before(MemoryRequest::Other("resume_upload")).await?;
-        let id = self.session_id(session)?;
-        let state = self.state.lock().await;
-        match state.uploads.get(&id) {
-            Some(pending) => {
-                pending.check(session)?;
-                session.confirmed = pending.bytes.len() as u64;
-            }
-            None => confirm_published(&state, session, id)?,
-        }
-        Ok(())
+        self.memory_resume_upload(publication, session).await
     }
     async fn upload_part(
         &self,
@@ -889,88 +817,22 @@ impl ProviderOps for MemoryProvider {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        publication.check()?;
-        self.before(MemoryRequest::Other("upload_part")).await?;
-        let id = self.session_id(session)?;
-        let mut state = self.state.lock().await;
-        let pending = state
-            .uploads
-            .get(&id)
-            .ok_or(StorageFailure::SessionExpired)?;
-        pending.check(session)?;
-        if pending.bytes.len() as u64 != session.confirmed {
-            return Err(StorageFailure::InvalidPart.into());
-        }
-        if std::mem::replace(&mut state.faults.drop_part, false) {
-            return Err(StorageFailure::Network.into());
-        }
-        state
-            .uploads
-            .get_mut(&id)
-            .ok_or(StorageFailure::SessionExpired)?
-            .bytes
-            .extend_from_slice(bytes);
-        if std::mem::replace(&mut state.faults.lose_part_reply, false) {
-            return Err(StorageFailure::Network.into());
-        }
-        state.sent_bytes += bytes.len() as u64;
-        state.largest_part = state.largest_part.max(bytes.len());
-        session.confirmed = end;
-        Ok(())
+        self.memory_upload_part(publication, session, bytes, end)
+            .await
     }
     async fn finish_upload(
         &self,
         publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        publication.check()?;
-        self.before(MemoryRequest::Other("finish_upload")).await?;
-        let id = self.session_id(session)?;
-        let mut state = self.state.lock().await;
-        let Some(pending) = state.uploads.get(&id) else {
-            return confirm_published(&state, session, id);
-        };
-        pending.check(session)?;
-        if pending.bytes.len() as u64 != session.total || session.confirmed != session.total {
-            return Err(StorageFailure::InvalidPart.into());
-        }
-        if state.objects.contains_key(&session.path) && !state.faults.overwrite_create {
-            return Err(StorageFailure::AlreadyExists.into());
-        }
-        let revision = state.next_id()?;
-        let pending = state
-            .uploads
-            .remove(&id)
-            .ok_or(StorageFailure::SessionExpired)?;
-        state.objects.insert(
-            pending.path,
-            Object {
-                revision,
-                bytes: pending.bytes.into(),
-                stored_at: self.storage_time()?,
-                upload_id: Some(id),
-            },
-        );
-        if std::mem::replace(&mut state.faults.lose_completion_reply, false) {
-            return Err(StorageFailure::Network.into());
-        }
-        session.state = SessionState::Memory { id, complete: true };
-        Ok(())
+        self.memory_finish_upload(publication, session).await
     }
     async fn abort_upload(
         &self,
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        publication.check()?;
-        self.before(MemoryRequest::Other("abort_upload")).await?;
-        let id = self.session_id(session)?;
-        let mut state = self.state.lock().await;
-        if let Some(pending) = state.uploads.get(&id) {
-            pending.check(session)?;
-        }
-        state.uploads.remove(&id);
-        Ok(())
+        self.memory_abort_upload(publication, session).await
     }
 }
 

@@ -619,8 +619,8 @@ pub(crate) async fn compare_published_part(
     end: u64,
 ) -> Result<(), StorageError> {
     let range = ByteRange::new(session.confirmed, end)?;
-    let actual = storage.read_object(&session.path, Some(range)).await?;
-    actual.check(&session.path, Some(range))?;
+    let actual = storage.read_object(session.path(), Some(range)).await?;
+    actual.check(session.path(), Some(range))?;
     if actual.metadata.size != session.total || actual.bytes != bytes {
         return Err(StorageFailure::AlreadyExists.into());
     }

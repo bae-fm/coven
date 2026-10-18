@@ -276,7 +276,7 @@ impl S3Storage {
         else {
             return Err(StorageFailure::SessionMismatch.into());
         };
-        self.confirm_marker(Destination::Object(&session.path), session.total, token)
+        self.confirm_marker(Destination::Object(session.path()), session.total, token)
             .await
     }
     /// Whether `path` holds the object this publication's marker names: its
@@ -395,6 +395,18 @@ impl ProviderOps for S3Storage {
         bytes: &[u8],
     ) -> Result<(), StorageError> {
         let path = &previous.path;
+        if let Some(condition) = self.settings.copy_publication.single_request() {
+            return self
+                .publish_by_copy(
+                    Some(publication),
+                    Destination::Object(path),
+                    bytes,
+                    condition,
+                    Some(&previous.replace_token),
+                )
+                .await
+                .map_err(StorageError::replacement);
+        }
         self.put(
             Some(publication),
             Destination::Object(path),
@@ -532,7 +544,7 @@ impl ProviderOps for S3Storage {
     async fn begin_upload(
         &self,
         _publication: &PublicationRequest,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         // A copy above the single-copy limit cannot publish atomically (§20.6).
@@ -547,7 +559,7 @@ impl ProviderOps for S3Storage {
         let token = SecretText::new(self.ids.new_id().to_string());
         Ok(UploadSession {
             location: self.config(),
-            path: path.clone(),
+            target: target.clone(),
             total,
             confirmed: 0,
             part_size,
@@ -758,7 +770,10 @@ impl ProviderOps for S3Storage {
                     .build(),
             );
         if self.settings.copy_publication == S3CopyPublication::Never {
-            request = request.if_none_match("*");
+            request = match session.target() {
+                UploadTarget::Create(_) => request.if_none_match("*"),
+                UploadTarget::Replace(previous) => request.if_match(&previous.replace_token),
+            };
         }
         let result = request
             .customize()

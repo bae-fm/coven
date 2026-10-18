@@ -438,18 +438,26 @@ impl ProviderOps for OneDriveStorage {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         publication.check()?;
-        Ok(self.plan_temporary(path, total))
+        match target {
+            UploadTarget::Create(path) => Ok(self.plan_temporary(path, total)),
+            UploadTarget::Replace(previous) => {
+                self.begin_replacement(publication, previous, total).await
+            }
+        }
     }
     async fn resume_upload(
         &self,
         publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        self.resume_temporary(publication, session).await
+        match session.target() {
+            UploadTarget::Create(_) => self.resume_temporary(publication, session).await,
+            UploadTarget::Replace(_) => self.resume_replacement(session).await,
+        }
     }
     async fn upload_part(
         &self,
@@ -458,21 +466,34 @@ impl ProviderOps for OneDriveStorage {
         bytes: &[u8],
         end: u64,
     ) -> Result<(), StorageError> {
-        self.send_part(publication, session, bytes, end).await
+        match session.target() {
+            UploadTarget::Create(_) => self.send_part(publication, session, bytes, end).await,
+            UploadTarget::Replace(_) => {
+                self.replacement_part(publication, session, bytes, end)
+                    .await
+            }
+        }
     }
     async fn finish_upload(
         &self,
         publication: &PublicationRequest,
         session: &mut UploadSession,
     ) -> Result<(), StorageError> {
-        self.publish_temporary(publication, session).await
+        match session.target() {
+            UploadTarget::Create(_) => self.publish_temporary(publication, session).await,
+            // The last fragment publishes; the connection accepts Complete before this call.
+            UploadTarget::Replace(_) => Err(StorageFailure::InvalidPart.into()),
+        }
     }
     async fn abort_upload(
         &self,
         publication: &PublicationRequest,
         session: &UploadSession,
     ) -> Result<(), StorageError> {
-        self.abort_temporary(publication, session).await
+        match session.target() {
+            UploadTarget::Create(_) => self.abort_temporary(publication, session).await,
+            UploadTarget::Replace(_) => self.cancel_replacement(replace::url(session)?).await,
+        }
     }
 }
 fn body_headers(body: &Body) -> Vec<(&'static str, String)> {

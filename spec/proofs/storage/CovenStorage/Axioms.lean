@@ -140,3 +140,9 @@ import CovenStorage
 #print axioms CovenStorage.AdminAccess.failure_makes_nothing_until_supplied
 #print axioms CovenStorage.AdminAccess.check_keeps_admin
 #print axioms CovenStorage.AdminAccess.old_rule_mints_without_supply
+
+#print axioms CovenStorage.FloorUpload.receive_preserves_condition
+#print axioms CovenStorage.FloorUpload.incomplete_keeps_floor
+#print axioms CovenStorage.FloorUpload.stale_keeps_floor
+#print axioms CovenStorage.FloorUpload.stored_whole
+#print axioms CovenStorage.FloorUpload.one_winner

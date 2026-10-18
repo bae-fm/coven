@@ -79,6 +79,11 @@ impl Record {
             );
         })
     }
+    pub(super) fn remove_field(&mut self, key: &str) {
+        objc2::rc::autoreleasepool(|_| unsafe {
+            self.0.setObject_forKey(None, &NSString::from_str(key));
+        });
+    }
     pub(super) fn set_reference(&mut self, key: &str, id: &CKRecordID) {
         objc2::rc::autoreleasepool(|_| unsafe {
             let reference = CKReference::initWithRecordID_action(

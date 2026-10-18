@@ -152,13 +152,6 @@ impl Conformance {
             );
         }
         for path in [ObjectPath::floor(self.store)] {
-            if !matches!(
-                self.storage.begin_upload(&path, 1).await,
-                Err(error) if error.failure() == StorageFailure::InvalidPath
-            ) {
-                return Err(StorageFailure::Protocol
-                    .with_source("replaceable object accepted a recorded upload"));
-            }
             self.storage.create(&path, b"last record").await?;
             let mut previous = self
                 .storage
@@ -466,5 +459,78 @@ impl Conformance {
             );
         }
         errors
+    }
+}
+
+impl Conformance {
+    /// Competing recorded floor uploads keep the original absent/revision
+    /// condition through parts, serialization, resumption and publication.
+    pub async fn conditional_floor_upload(&self) {
+        let storage = &self.storage;
+        let path = ObjectPath::floor(self.store);
+        for seeded in [false, true] {
+            if seeded {
+                storage.create(&path, b"previous").await.unwrap();
+            }
+            let previous = storage.status(&path).await.unwrap();
+            // Ask the provider for its part boundary before constructing the
+            // contending transfers; aborting this empty session publishes nothing.
+            let probe = match &previous {
+                Some(previous) => storage.begin_replace(previous, 1).await.unwrap(),
+                None => storage.begin_upload(&path, 1).await.unwrap(),
+            };
+            let part_size = probe.part_size();
+            storage.abort_upload(&probe).await.unwrap();
+            let total = part_size as u64 + 1;
+            let mut uploads = Vec::new();
+            for _ in 0..2 {
+                uploads.push(match &previous {
+                    Some(previous) => storage.begin_replace(previous, total).await.unwrap(),
+                    None => storage.begin_upload(&path, total).await.unwrap(),
+                });
+            }
+            for (index, upload) in uploads.iter_mut().enumerate() {
+                storage
+                    .upload_part(upload, &vec![index as u8; part_size])
+                    .await
+                    .unwrap();
+                assert_eq!(storage.status(&path).await.unwrap(), previous);
+                let target = upload.target().clone();
+                *upload = UploadSession::decode(upload.encode().unwrap().as_bytes()).unwrap();
+                storage.resume_upload(upload).await.unwrap();
+                assert_eq!(upload.confirmed_bytes(), part_size as u64);
+                assert_eq!(upload.target(), &target);
+            }
+            storage.upload_part(&mut uploads[0], b"a").await.unwrap();
+            storage.finish_upload(&mut uploads[0]).await.unwrap();
+            let result = match storage.upload_part(&mut uploads[1], b"b").await {
+                Ok(()) => storage.finish_upload(&mut uploads[1]).await,
+                Err(error) => Err(error),
+            };
+            let error = result.unwrap_err();
+            assert_eq!(
+                error.failure(),
+                if seeded {
+                    StorageFailure::Conflict
+                } else {
+                    StorageFailure::AlreadyExists
+                }
+            );
+            assert!(!matches!(error, StorageError::Cleanup { .. }));
+            for upload in &uploads {
+                storage.abort_upload(upload).await.unwrap();
+            }
+            let mut expected = vec![0; part_size];
+            expected.push(b'a');
+            assert_eq!(storage.read(&path).await.unwrap(), expected);
+            let current = storage.status(&path).await.unwrap().unwrap();
+            if let Some(previous) = previous {
+                assert_ne!(current.revision, previous.revision);
+            }
+            // The next buffered replacement must also retire a multipart floor.
+            storage.replace(&current, b"last").await.unwrap();
+            assert_eq!(storage.read(&path).await.unwrap(), b"last");
+            storage.delete(&path).await.unwrap();
+        }
     }
 }

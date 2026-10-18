@@ -489,7 +489,7 @@ impl ProviderOps for DropboxStorage {
     async fn begin_upload(
         &self,
         publication: &PublicationRequest,
-        path: &ObjectPath,
+        target: &UploadTarget,
         total: u64,
     ) -> Result<UploadSession, StorageError> {
         let value = http::json(
@@ -506,7 +506,7 @@ impl ProviderOps for DropboxStorage {
         .await?;
         Ok(UploadSession {
             location: self.config(),
-            path: path.clone(),
+            target: target.clone(),
             total,
             confirmed: 0,
             part_size: crate::session::DROPBOX_PART_SIZE,
@@ -535,11 +535,14 @@ impl ProviderOps for DropboxStorage {
                 session.confirmed = confirmed;
                 Ok(())
             }
+            UploadLookup::Gone if session.path().is_replaceable() => {
+                Err(StorageFailure::SessionExpired.into())
+            }
             UploadLookup::Gone => {
                 let value = match self
                     .rpc(
                         "files/get_metadata",
-                        json!({"path":session.path.absolute()}),
+                        json!({"path":session.path().absolute()}),
                     )
                     .await
                 {
@@ -549,7 +552,7 @@ impl ProviderOps for DropboxStorage {
                     }
                     Err(error) => return Err(error),
                 };
-                check_file(&value, &session.path, session.total)?;
+                check_file(&value, session.path(), session.total)?;
                 session.confirmed = 0;
                 session.state = SessionState::VerifyPublished;
                 Ok(())
@@ -579,9 +582,15 @@ impl ProviderOps for DropboxStorage {
         if session.confirmed != session.total {
             return Err(StorageFailure::InvalidPart.into());
         }
-        let response = self.content("files/upload_session/finish",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"commit":{"path":session.path.absolute(),"mode":"add","autorename":false,"strict_conflict":true,"mute":true}}),Vec::new(),None, Some(publication)).await?;
+        let mode = match session.target() {
+            UploadTarget::Create(_) => json!("add"),
+            UploadTarget::Replace(previous) => {
+                json!({".tag":"update", "update":previous.replace_token})
+            }
+        };
+        let response = self.content("files/upload_session/finish",json!({"cursor":{"session_id":self.id(session)?,"offset":session.confirmed},"commit":{"path":session.path().absolute(),"mode":mode,"autorename":false,"strict_conflict":true,"mute":true}}),Vec::new(),None, Some(publication)).await?;
         let value = http::json(PROVIDER, response).await?;
-        check_file(&value, &session.path, session.total)?;
+        check_file(&value, session.path(), session.total)?;
         session.state = SessionState::Complete;
         Ok(())
     }

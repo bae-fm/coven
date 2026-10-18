@@ -45,6 +45,8 @@ pub struct Faults {
     pub lose_part_reply: bool,
     /// Publish the next upload but lose the completion reply.
     pub lose_completion_reply: bool,
+    /// Refuse this many upload aborts, retaining the pending bytes.
+    pub abort_failures: usize,
     /// Expire all pending sessions before the next call.
     pub expire_uploads: bool,
     /// Accept creates at occupied paths, violating the provider contract.
@@ -81,6 +83,7 @@ impl Faults {
             lose_part_reply: false,
             lose_completion_reply: false,
             expire_uploads: false,
+            abort_failures: 0,
             overwrite_create: false,
             fail_duplicate_cleanup: false,
             refuse_replacements: 0,

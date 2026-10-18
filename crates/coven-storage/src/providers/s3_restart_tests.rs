@@ -414,7 +414,11 @@ mod sequence {
             );
             assert_eq!(storage.read(&path).await.unwrap(), b"floor two");
             let second = storage.status(&path).await.unwrap().unwrap();
-            state.lock().unwrap().lose_create_reply = true;
+            if profile.settings.copy_publication.single_request().is_some() {
+                state.lock().unwrap().fail_copy_reply = true;
+            } else {
+                state.lock().unwrap().lose_create_reply = true;
+            }
             assert_eq!(
                 storage
                     .replace(&second, b"floor three")

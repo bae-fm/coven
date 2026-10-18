@@ -3,18 +3,22 @@ use super::*;
 use crate::session::ONEDRIVE_PART_SIZE;
 use crate::transfer::with_cleanup;
 
+pub(super) fn url(session: &UploadSession) -> Result<&str, StorageError> {
+    match &session.state {
+        SessionState::OneDriveReplacement { url } => Ok(url.as_str()),
+        _ => Err(StorageFailure::SessionMismatch.into()),
+    }
+}
+
 impl OneDriveStorage {
-    /// A direct `PUT /content` with `If-Match` lets two writers holding the
-    /// same eTag both succeed. Graph compares a session's `If-Match` when it
-    /// creates the session and drops the session if the item changes before
-    /// its final request. Microsoft documents only the first part; live
-    /// two-account races are the evidence for the second.
-    pub(super) async fn replace_content(
+    /// A direct PUT /content does not exclude competing replacements. A native
+    /// session retains the observed eTag through its final fragment (E.2).
+    async fn replacement_url(
         &self,
         publication: &PublicationRequest,
         previous: &StoredObject,
-        bytes: &[u8],
-    ) -> Result<(), StorageError> {
+        deferred: bool,
+    ) -> Result<SecretText, StorageError> {
         let created = http::json(
             PROVIDER,
             self.session
@@ -23,12 +27,10 @@ impl OneDriveStorage {
                     Method::POST,
                     &self.item(&previous.object_id, &["createUploadSession"])?,
                     &[("If-Match", previous.replace_token.clone())],
-                    Body::Json(json!({
-                        "item": {"@microsoft.graph.conflictBehavior": "replace"},
-                        // A zero-length fragment is invalid, so an empty body
-                        // needs a session that waits for explicit completion.
-                        "deferCommit": bytes.is_empty()
-                    })),
+                    Body::Json(
+                        json!({"item": {"@microsoft.graph.conflictBehavior": "replace"},
+                "deferCommit": deferred}),
+                    ),
                     true,
                 )
                 .await?,
@@ -37,76 +39,178 @@ impl OneDriveStorage {
         let created = self.checked_folder_operation(created).await?;
         let url = http::string(&created, "uploadUrl")?;
         validate_download_url(&self.api, url)?;
-        let result = self
-            .send_replacement(publication, previous, url, bytes)
-            .await;
-        if result.is_ok() {
-            return result;
-        }
-        // Cancelling cannot publish bytes, so it runs even when publication
-        // authority was withdrawn after the session was created.
-        let cancellation = async {
-            let response = self
-                .session
-                .send(Method::DELETE, url, &[], Body::Empty, false)
-                .await?;
-            if response.status().as_u16() == 404 {
-                return Ok(());
-            }
-            match http::checked(PROVIDER, response).await {
-                // The session's own revision condition refuses its deletion
-                // once another write changed the item: it can never publish.
-                Err(error) if upload::native_code(&error, "resourceModified") => Ok(()),
-                result => result.map(drop),
-            }
-        }
-        .await;
-        with_cleanup(result, cancellation)
+        Ok(SecretText::new(url.into()))
     }
 
-    async fn send_replacement(
+    pub(super) async fn begin_replacement(
+        &self,
+        publication: &PublicationRequest,
+        previous: &StoredObject,
+        total: u64,
+    ) -> Result<UploadSession, StorageError> {
+        let url = self.replacement_url(publication, previous, false).await?;
+        Ok(UploadSession {
+            location: self.config(),
+            target: UploadTarget::Replace(previous.clone()),
+            total,
+            confirmed: 0,
+            part_size: ONEDRIVE_PART_SIZE,
+            state: SessionState::OneDriveReplacement { url },
+        })
+    }
+
+    pub(super) async fn resume_replacement(
+        &self,
+        session: &mut UploadSession,
+    ) -> Result<(), StorageError> {
+        let response = self
+            .session
+            .send(Method::GET, url(session)?, &[], Body::Empty, false)
+            .await?;
+        let (value, receipt) = http::json_response(PROVIDER, response)
+            .await
+            .map_err(replacement_error)?;
+        session.confirmed = upload::next_offset(
+            &value["nextExpectedRanges"],
+            session.confirmed,
+            session.total,
+            || {
+                http::invalid_response(
+                    PROVIDER,
+                    receipt.status(),
+                    receipt.headers().clone(),
+                    receipt.body().to_vec(),
+                )
+            },
+        )?;
+        Ok(())
+    }
+
+    async fn replacement_fragment(
         &self,
         publication: &PublicationRequest,
         previous: &StoredObject,
         url: &str,
+        start: u64,
+        total: u64,
         bytes: &[u8],
     ) -> Result<(), StorageError> {
-        if bytes.is_empty() {
-            // The deferred session's completion keeps the original condition.
-            let response = self
-                .session
-                .publish(
-                    publication,
-                    Method::POST,
-                    url,
-                    &[
-                        ("If-Match", previous.replace_token.clone()),
-                        ("Content-Length", "0".into()),
-                    ],
-                    Body::Bytes(Vec::new()),
-                    false,
-                )
-                .await?;
-            return acknowledged(response, previous, 0, 0).await;
-        }
-        let mut start = 0;
-        for part in bytes.chunks(ONEDRIVE_PART_SIZE) {
-            let end = start + part.len();
-            let body = Body::Bytes(part.to_vec());
-            let mut headers = body_headers(&body);
-            headers.push((
-                "Content-Range",
-                format!("bytes {start}-{}/{}", end - 1, bytes.len()),
-            ));
-            let response = self
-                .session
-                .publish(publication, Method::PUT, url, &headers, body, false)
-                .await?;
-            acknowledged(response, previous, end as u64, bytes.len() as u64).await?;
-            start = end;
+        let end = start + bytes.len() as u64;
+        let body = Body::Bytes(bytes.to_vec());
+        let mut headers = body_headers(&body);
+        headers.push((
+            "Content-Range",
+            format!("bytes {start}-{}/{total}", end - 1),
+        ));
+        let response = self
+            .session
+            .publish(publication, Method::PUT, url, &headers, body, false)
+            .await?;
+        acknowledged(response, previous, end, total).await
+    }
+
+    pub(super) async fn replacement_part(
+        &self,
+        publication: &PublicationRequest,
+        session: &mut UploadSession,
+        bytes: &[u8],
+        end: u64,
+    ) -> Result<(), StorageError> {
+        let UploadTarget::Replace(previous) = session.target() else {
+            return Err(StorageFailure::SessionMismatch.into());
+        };
+        self.replacement_fragment(
+            publication,
+            previous,
+            url(session)?,
+            session.confirmed,
+            session.total,
+            bytes,
+        )
+        .await?;
+        session.confirmed = end;
+        if end == session.total {
+            session.state = SessionState::Complete;
         }
         Ok(())
     }
+
+    pub(super) async fn cancel_replacement(&self, url: &str) -> Result<(), StorageError> {
+        let response = self
+            .session
+            .send(Method::DELETE, url, &[], Body::Empty, false)
+            .await?;
+        if response.status().as_u16() == 404 {
+            return Ok(());
+        }
+        match http::checked(PROVIDER, response).await {
+            Err(error) if upload::native_code(&error, "resourceModified") => Ok(()),
+            result => result.map(drop),
+        }
+    }
+
+    pub(super) async fn replace_content(
+        &self,
+        publication: &PublicationRequest,
+        previous: &StoredObject,
+        bytes: &[u8],
+    ) -> Result<(), StorageError> {
+        // An empty replacement needs explicit completion; nonempty sessions
+        // publish when their final fragment arrives.
+        let url = self
+            .replacement_url(publication, previous, bytes.is_empty())
+            .await?;
+        let result = async {
+            if bytes.is_empty() {
+                let response = self
+                    .session
+                    .publish(
+                        publication,
+                        Method::POST,
+                        url.as_str(),
+                        &[
+                            ("If-Match", previous.replace_token.clone()),
+                            ("Content-Length", "0".into()),
+                        ],
+                        Body::Bytes(Vec::new()),
+                        false,
+                    )
+                    .await?;
+                return acknowledged(response, previous, 0, 0).await;
+            }
+            let mut offset = 0;
+            for part in bytes.chunks(ONEDRIVE_PART_SIZE) {
+                self.replacement_fragment(
+                    publication,
+                    previous,
+                    url.as_str(),
+                    offset,
+                    bytes.len() as u64,
+                    part,
+                )
+                .await?;
+                offset += part.len() as u64;
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_ok() {
+            return result;
+        }
+        with_cleanup(result, self.cancel_replacement(url.as_str()).await)
+    }
+}
+
+fn replacement_error(mut error: StorageError) -> StorageError {
+    if let StorageError::Provider {
+        failure: failure @ (StorageFailure::NotFound | StorageFailure::AlreadyExists),
+        ..
+    } = &mut error
+    {
+        // A changed item invalidates the old session. Never acquire a newer eTag.
+        *failure = StorageFailure::Conflict;
+    }
+    error
 }
 
 /// Accept only what the session protocol promises: before the last byte, a 202
@@ -119,21 +223,7 @@ async fn acknowledged(
 ) -> Result<(), StorageError> {
     let (value, receipt) = http::json_response(PROVIDER, response)
         .await
-        .map_err(|mut error| {
-            if let StorageError::Provider {
-                failure: failure @ (StorageFailure::NotFound | StorageFailure::AlreadyExists),
-                ..
-            } = &mut error
-            {
-                // Another write changing the item drops the session (404) or
-                // refuses its request (409 `resourceModified`). Either is a
-                // refused replacement, never a reason to write the floor
-                // another way. Mapped here so a failed cancellation cannot
-                // carry it out as a create conflict.
-                *failure = StorageFailure::Conflict;
-            }
-            error
-        })?;
+        .map_err(replacement_error)?;
     let invalid = || {
         http::invalid_response(
             PROVIDER,

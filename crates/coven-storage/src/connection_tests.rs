@@ -64,21 +64,21 @@ async fn floor_replacement_guards_preserve_the_previous_object() {
             limit: 16
         }
     );
-    assert!(matches!(
-        storage.begin_upload(&path, 4).await,
-        Err(error) if error.failure() == StorageFailure::InvalidPath
-    ));
     assert_eq!(storage.request_count(), before);
     assert_eq!(storage.read(&path).await.unwrap(), b"floor");
     let immutable = ObjectPath::slot(STORE_ID, std::num::NonZeroU64::MIN);
-    let session = storage.begin_upload(&immutable, 4).await.unwrap();
+    storage.create(&immutable, b"slot").await.unwrap();
+    let immutable = storage.status(&immutable).await.unwrap().unwrap();
+    assert!(matches!(storage.begin_replace(&immutable, 4).await,
+        Err(error) if error.failure() == StorageFailure::InvalidPath));
+    let session = storage.begin_replace(&previous, 4).await.unwrap();
     let mut recorded: serde_json::Value =
         serde_json::from_slice(session.encode().unwrap().as_bytes()).unwrap();
-    recorded["path"] = serde_json::Value::String(path.as_str().to_owned());
-    assert!(matches!(
-        UploadSession::decode(&serde_json::to_vec(&recorded).unwrap()),
-        Err(error) if error.failure() == StorageFailure::InvalidPath
-    ));
+    recorded["target"]["Replace"]["path"] = serde_json::json!(immutable.path);
+    assert!(
+        matches!(UploadSession::decode(&serde_json::to_vec(&recorded).unwrap()),
+        Err(error) if error.failure() == StorageFailure::InvalidPath)
+    );
     storage.abort_upload(&session).await.unwrap();
 }
 
@@ -169,7 +169,7 @@ async fn guards_and_completed_sessions_do_not_issue_provider_calls() {
             },
         ),
         (
-            storage.begin_upload(&floor, 4).await.err().unwrap(),
+            storage.begin_replace(&previous, 4).await.err().unwrap(),
             StorageFailure::InvalidPath,
         ),
         (

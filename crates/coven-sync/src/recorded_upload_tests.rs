@@ -1,5 +1,5 @@
 use super::*;
-use coven_storage::{ObjectPrefix, StorageConfig, StoredObject};
+use coven_storage::{ObjectPath, ObjectPrefix, StorageConfig, StoredObject};
 use serde_json::json;
 use std::sync::{Arc, Mutex};
 
@@ -65,7 +65,7 @@ impl Storage for PlannedStorage {
     ) -> Result<UploadSession, StorageError> {
         self.0.lock().unwrap().push("plan");
         UploadSession::decode(&serde_json::to_vec(&json!({
-            "location": self.config(), "path": path, "total": total, "confirmed": 0,
+            "location": self.config(), "target": {"Create": path}, "total": total, "confirmed": 0,
             "part_size": 24 * 320 * 1024,
             "state": {"OneDrive": {"temporary": "00000000-0000-0000-0000-000000000001", "upload": {"Planned": {}}}}
         })).unwrap())
@@ -120,6 +120,9 @@ impl Storage for PlannedStorage {
     async fn replace(&self, _: &StoredObject, _: &[u8]) -> Result<(), StorageError> {
         unreachable!()
     }
+    async fn begin_replace(&self, _: &StoredObject, _: u64) -> Result<UploadSession, StorageError> {
+        unreachable!()
+    }
     async fn status(&self, _: &ObjectPath) -> Result<Option<StoredObject>, StorageError> {
         unreachable!()
     }
@@ -161,7 +164,7 @@ async fn identity_and_native_capability_are_saved_before_their_first_use() {
             coven_storage::test_utils::STORE_ID,
             std::num::NonZeroU64::MIN,
         );
-        let result = upload(&storage, &path, 4, None, &mut source).await;
+        let result = upload(&storage, &UploadTarget::Create(path), 4, None, &mut source).await;
         let expected = match fail_save {
             None => {
                 assert!(matches!(result, Ok(Uploaded::Stored)));

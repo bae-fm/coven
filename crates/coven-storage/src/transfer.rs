@@ -25,14 +25,14 @@ pub(crate) async fn upload_bytes(
     bytes: &[u8],
     single_request: impl Future<Output = Result<Option<crate::StoredObject>, StorageError>> + Send,
 ) -> Result<Option<crate::StoredObject>, StorageError> {
-    if path.is_replaceable() {
-        check_single_request(bytes.len() as u64, storage.single_request_limit())?;
-    }
     if bytes.len() as u64 <= storage.single_request_limit() {
         return single_request.await;
     }
     let mut session = storage
-        .begin_upload_checked(path, bytes.len() as u64)
+        .begin_upload_checked(
+            &crate::UploadTarget::Create(path.clone()),
+            bytes.len() as u64,
+        )
         .await?;
     let upload = async {
         while session.confirmed_bytes() < session.total_bytes() {

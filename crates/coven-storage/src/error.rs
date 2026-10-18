@@ -81,7 +81,8 @@ pub enum StorageFailure {
     SessionIdentityUnknown,
     /// A part disagrees with the session's offset, size or alignment.
     InvalidPart,
-    /// A floor replacement exceeds this provider's single-request limit.
+    /// A buffered floor replacement exceeds this provider's single-request limit.
+    /// Recorded replacements use `Storage::begin_replace` instead.
     SingleRequestTooLarge {
         /// Encrypted body length in bytes.
         size: u64,

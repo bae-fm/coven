@@ -383,12 +383,17 @@ proofs() {
     fi
 
     if proof_selected storage || crate_selected coven-storage; then
+        runner=$(runner storage floorUploadRunner)
+        step "Rust / Lean conditional floor uploads"
+        COVEN_FLOOR_UPLOAD_LEAN="$runner" exact_ignored coven-storage --all-features -- \
+            test_utils::memory_upload::tests::conditional_floor_upload_matches_lean
         runner=$(runner storage createRunner)
         step "Rust / Lean provider create-once tests"
         COVEN_CREATE_LEAN="$runner" exact_ignored coven-storage --all-features -- \
             providers::s3::tests::bucket_claim_tests::bucket_claims_match_lean \
             providers::s3::tests::gcs::lean_differential_s3_create \
-            providers::onedrive::tests::upload_tests::lean_differential_onedrive_create
+            providers::onedrive::tests::upload_tests::lean_differential_onedrive_create \
+            providers::onedrive::tests::upload_tests::lean_differential_onedrive_records_before_initiation
     fi
 }
 

@@ -202,21 +202,17 @@ fn respond(
             );
         }
         if method == Method::POST {
-            // Copy publication assembles its temporary unconditionally.
-            if state.gcs || key.contains("/.coven-uploads/") {
-                assert!(!headers.contains_key("x-goog-if-generation-match"));
-                assert!(!headers.contains_key("if-none-match"));
-            } else {
-                assert_eq!(headers["if-none-match"], "*");
-            }
-            if !state.gcs && state.objects.contains_key(&key) {
+            if !key.contains("/.coven-uploads/") && !gcs::condition_holds(&state, &key, &headers) {
                 return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
             }
             let upload = state.uploads.remove(id).unwrap();
-            state.metadata.insert(key.clone(), upload.token);
+            state.metadata.insert(key.clone(), upload.token.clone());
             state.generation += 1;
             let generation = state.generation.to_string();
-            state.revisions.insert(key.clone(), generation);
+            let revision = if state.gcs { generation } else { upload.token };
+            state.revisions.insert(key.clone(), revision);
+            let etag = format!("etag-{}", state.generation);
+            state.etags.insert(key.clone(), etag);
             state
                 .objects
                 .insert(key, upload.parts.into_values().flatten().collect());
@@ -234,11 +230,6 @@ fn respond(
         .or(headers.get("x-amz-copy-source"))
     {
         assert_eq!(method, Method::PUT);
-        if state.gcs {
-            assert_eq!(headers["x-goog-if-generation-match"], "0");
-        } else {
-            assert_eq!(headers["if-none-match"], "*");
-        }
         state.copies += 1;
         if state.refuse_copy {
             return response(403, "<Error><Code>AccessDenied</Code></Error>");
@@ -247,7 +238,7 @@ fn respond(
         let Some(bytes) = state.objects.get(source).cloned() else {
             return response(404, "<Error><Code>NoSuchKey</Code></Error>");
         };
-        if state.objects.contains_key(&key) {
+        if !gcs::condition_holds(&state, &key, &headers) {
             return response(412, "<Error><Code>PreconditionFailed</Code></Error>");
         }
         let token = state.metadata[source].clone();

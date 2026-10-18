@@ -240,7 +240,7 @@ impl FilesInner {
                 .transpose()?;
             match crate::recorded_upload::upload(
                 storage.as_ref(),
-                &path,
+                &coven_storage::UploadTarget::Create(path.clone()),
                 total,
                 session,
                 &mut transfer,

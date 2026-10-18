@@ -746,6 +746,7 @@ pub(crate) const POLICY: Policy = Policy {
         "ReloadInputs",
         "ClaimSource",
         "SnapshotUploadSource",
+        "FloorUploadSource",
         "FileTransfer",
         "FileRangeStream",
         "FileWorker",

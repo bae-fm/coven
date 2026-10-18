@@ -431,6 +431,13 @@ impl coven_storage::Storage for StepStorage {
         let result = self.storage.begin_upload(path, total).await;
         self.record("begin", time, result)
     }
+    async fn begin_replace(
+        &self,
+        previous: &coven_storage::StoredObject,
+        total: u64,
+    ) -> Result<coven_storage::UploadSession, coven_storage::StorageError> {
+        self.storage.begin_replace(previous, total).await
+    }
     async fn resume_upload(
         &self,
         session: &mut coven_storage::UploadSession,
