@@ -576,7 +576,7 @@ fn crashing_writer() {
         return;
     };
     let path = std::path::Path::new(&path);
-    let layout = coven_foundation::files::StoreLayout::new(
+    let layout = coven_foundation::files::StoreDirectories::new(
         path.parent()
             .unwrap()
             .parent()
@@ -715,7 +715,7 @@ fn crashing_removal_writer() {
         return;
     };
     let path = std::path::Path::new(&path);
-    let layout = coven_foundation::files::StoreLayout::new(
+    let layout = coven_foundation::files::StoreDirectories::new(
         path.parent()
             .unwrap()
             .parent()

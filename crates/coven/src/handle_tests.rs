@@ -854,3 +854,101 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
         assert_eq!(record.retry(), expected, "{record:?}");
     }
 }
+
+mod store_rename {
+    use super::*;
+    use crate::tests::Network;
+    use std::time::Duration;
+
+    async fn name(query: &mut LiveQuery<String>) -> String {
+        tokio::time::timeout(Duration::from_secs(10), query.next())
+            .await
+            .unwrap()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn renames_follow_authority_and_publish_the_committed_name() {
+        let network = Network::new(2).await;
+        let owner = &network.devices[0].handle;
+        let member = &network.devices[1].handle;
+        let mut owner_names = owner.subscribe_store_name();
+        let mut member_names = member.subscribe_store_name();
+        assert_eq!(name(&mut owner_names).await, "Household");
+        assert_eq!(name(&mut member_names).await, "Household");
+        let restore = owner.restore_code().await.unwrap();
+        let keychain = network.devices[0].app.store_keychain(owner.store_id());
+        let synced = keychain.synced_restore_code().unwrap().unwrap();
+        assert!(matches!(
+            member.rename_store("Forbidden").await,
+            Err(SyncError::Rejected(OperationRejection::NotAllowed))
+        ));
+        assert_eq!(member.store_name().await.unwrap(), "Household");
+        owner.rename_store("家庭 recipes").await.unwrap();
+        assert_eq!(name(&mut owner_names).await, "家庭 recipes");
+        network.sync(1).await;
+        assert_eq!(name(&mut member_names).await, "家庭 recipes");
+        for device in &network.devices {
+            assert_eq!(device.handle.store_name().await.unwrap(), "家庭 recipes");
+            assert_eq!(
+                device.layout.stores().await.unwrap(),
+                vec![StoreInfo {
+                    id: device.store,
+                    name: "家庭 recipes".into(),
+                }]
+            );
+        }
+        assert_eq!(owner.restore_code().await.unwrap(), restore);
+        assert_eq!(
+            keychain.synced_restore_code().unwrap().unwrap().as_bytes(),
+            synced.as_bytes()
+        );
+        assert!(matches!(
+            decode_code_info(&restore).unwrap(),
+            CodeInfo::Restore(_)
+        ));
+        let reader = network
+            .reopen(&network.devices[0])
+            .open_read_only(owner.store_id())
+            .await
+            .unwrap();
+        assert_eq!(reader.store_name().await.unwrap(), "家庭 recipes");
+        reader.close().await.unwrap();
+
+        let member_id = member
+            .members()
+            .await
+            .unwrap()
+            .into_iter()
+            .find(|m| m.is_self)
+            .unwrap()
+            .id;
+        owner
+            .set_member_role(&member_id, MemberRole::Admin)
+            .await
+            .unwrap();
+        member.rename_store("Latest name").await.unwrap();
+        owner
+            .set_member_role(&member_id, MemberRole::Member)
+            .await
+            .unwrap();
+        assert!(matches!(
+            member.rename_store("After demotion").await,
+            Err(SyncError::Rejected(OperationRejection::NotAllowed))
+        ));
+        assert_eq!(owner.store_name().await.unwrap(), "Latest name");
+        owner.stop_sync();
+        owner
+            .subscribe_sync_status()
+            .wait_for(|s| matches!(s, SyncStatus::Stopped))
+            .await
+            .unwrap();
+        owner.unlock_store_key().await.unwrap();
+        let through = owner.applied_slot().await;
+        owner.rename_store("Latest name").await.unwrap();
+        assert_eq!(owner.applied_slot().await, through);
+        assert!(owner.rename_store("").await.is_err());
+        assert_eq!(owner.store_name().await.unwrap(), "Latest name");
+        network.close().await;
+    }
+}

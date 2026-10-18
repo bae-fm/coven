@@ -5,7 +5,7 @@ use coven_database::{
 };
 use coven_foundation::{
     clock::{ClockRef, ClosureClock},
-    files::StoreLayout,
+    files::StoreDirectories,
     id_source::{StoreId, UuidIds},
 };
 use coven_storage::test_utils::MemoryStorage;
@@ -42,9 +42,9 @@ impl Fixture {
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
-        let layout = StoreLayout::new(root.path().to_owned());
+        let layout = StoreDirectories::new(root.path().to_owned());
         let directory = layout
-            .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), "files", ids.as_ref())
+            .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), ids.as_ref())
             .unwrap();
         let declarations = vec![
             SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(

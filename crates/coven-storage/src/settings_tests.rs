@@ -1,20 +1,16 @@
 use super::*;
 use crate::StorageFailure;
 use coven_foundation::{
-    files::StoreLayout,
+    files::StoreDirectories,
     id_source::{SequentialIds, StoreId},
 };
 use std::error::Error;
 #[test]
 fn settings_use_the_reserved_atomic_file_and_refuse_corrupt_values() {
     let temp = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(temp.path().to_owned());
+    let layout = StoreDirectories::new(temp.path().to_owned());
     let directory = layout
-        .create_store_dir(
-            StoreId(uuid::Uuid::from_u128(1)),
-            "store",
-            &SequentialIds::new(),
-        )
+        .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new())
         .unwrap();
     let file = directory.owned_file(StoreFile::StorageSettings);
     let settings = StorageSettings::new(directory);

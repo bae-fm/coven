@@ -4,7 +4,7 @@ use coven_database::{
 };
 use coven_format::path::ObjectPath;
 use coven_foundation::{
-    files::StoreLayout,
+    files::StoreDirectories,
     id_source::{IdSource, SequentialIds, StoreId},
 };
 
@@ -28,8 +28,8 @@ async fn open() -> (
 ) {
     let temporary = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
-    let directory = StoreLayout::new(temporary.path().into())
-        .create_store_dir(StoreId(ids.new_id()), "claim tests", &ids)
+    let directory = StoreDirectories::new(temporary.path().into())
+        .create_store_dir(StoreId(ids.new_id()), &ids)
         .unwrap();
     let db = builder(directory.clone()).open().await.unwrap();
     (temporary, directory, db)

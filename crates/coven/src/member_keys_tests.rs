@@ -30,8 +30,14 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     let old_code = handle.restore_code().await.unwrap();
     let old = coven_sync::read_restore_code(&old_code).unwrap();
     assert_eq!(old.member, carol);
-    assert_eq!(decode_code_info(&old_code).unwrap().member, carol);
-    assert_eq!(decode_code_info(&invite.code).unwrap().member, carol);
+    assert_eq!(
+        decode_code_info(&old_code).unwrap().metadata().member,
+        carol
+    );
+    assert_eq!(
+        decode_code_info(&invite.code).unwrap().metadata().member,
+        carol
+    );
     assert_eq!(
         Some(old.member_keys.public_keys()),
         *requested.lock().unwrap()

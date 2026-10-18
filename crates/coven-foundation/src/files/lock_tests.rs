@@ -1,15 +1,15 @@
 use super::*;
 use crate::files::StoreDirAccess;
-use crate::files::StoreLayout;
+use crate::files::StoreDirectories;
 use crate::id_source::UuidIds;
 use uuid::Uuid;
 
 #[test]
 fn deletion_holds_only_a_sibling_lock_and_removes_it_after_the_directory() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    let store = layout.create_store_dir(id, "store", &UuidIds).unwrap();
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_for_deletion().unwrap().unwrap();
     let path = root.path().join("stores").join(format!(".{id}.lock"));
     assert!(path.is_file(), "the held lock must be beside the store");
@@ -34,9 +34,9 @@ fn deletion_holds_only_a_sibling_lock_and_removes_it_after_the_directory() {
 #[test]
 fn a_second_writer_is_refused_until_the_first_guard_drops() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(directory.path().to_owned());
+    let layout = StoreDirectories::new(directory.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    let store = layout.create_store_dir(id, "store", &UuidIds).unwrap();
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let guard = store.lock_exclusive().unwrap();
     let second = layout.store_dir(&id);
     assert!(
@@ -58,7 +58,7 @@ fn a_second_writer_is_refused_until_the_first_guard_drops() {
 #[test]
 fn a_missing_store_is_an_io_error_and_is_not_created_by_locking() {
     let directory = tempfile::tempdir().unwrap();
-    let store = StoreLayout::new(directory.path().to_owned()).store_dir(&StoreId(Uuid::nil()));
+    let store = StoreDirectories::new(directory.path().to_owned()).store_dir(&StoreId(Uuid::nil()));
     assert!(
         matches!(store.lock_exclusive(), Err(StoreLockError::File(FileError::Io { source, .. })) if source.downcast_ref::<std::io::Error>().unwrap().kind() == std::io::ErrorKind::NotFound)
     );
@@ -68,9 +68,9 @@ fn a_missing_store_is_an_io_error_and_is_not_created_by_locking() {
 #[test]
 fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(directory.path().to_owned());
+    let layout = StoreDirectories::new(directory.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    let store = layout.create_store_dir(id, "store", &UuidIds).unwrap();
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let guard = store.lock_exclusive().unwrap();
     // A fork before exec retains a reference to this same open file. Duplicating
     // it makes that descriptor lifetime deterministic without racing a process.
@@ -89,12 +89,12 @@ fn dropping_the_guard_unlocks_even_while_an_inherited_handle_survives() {
 #[test]
 fn only_the_matching_lock_can_authorize_open() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned());
     let first = layout
-        .create_store_dir(StoreId(Uuid::from_u128(1)), "first", &UuidIds)
+        .create_store_dir(StoreId(Uuid::from_u128(1)), &UuidIds)
         .unwrap();
     let second = layout
-        .create_store_dir(StoreId(Uuid::from_u128(2)), "second", &UuidIds)
+        .create_store_dir(StoreId(Uuid::from_u128(2)), &UuidIds)
         .unwrap();
     let lock = first.lock_exclusive().unwrap();
     first.verify_lock(&lock).unwrap();
@@ -107,9 +107,9 @@ fn only_the_matching_lock_can_authorize_open() {
 #[test]
 fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    let store = layout.create_store_dir(id, "first", &UuidIds).unwrap();
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_exclusive().unwrap();
     assert!(matches!(
         store.lock_for_deletion(),
@@ -123,7 +123,7 @@ fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
         Err(StoreLockError::AlreadyOpen(_))
     ));
     assert!(matches!(
-        layout.create_store_dir(id, "replacement", &UuidIds),
+        layout.create_store_dir(id, &UuidIds),
         Err(crate::files::DirectoryCreationError::AlreadyExists(_))
     ));
     drop(lock);
@@ -141,9 +141,9 @@ fn deletion_requires_the_lock_and_retries_an_unpublished_directory() {
 #[test]
 fn readers_coexist_with_the_writer_but_all_must_close_before_deletion() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    let store = layout.create_store_dir(id, "store", &UuidIds).unwrap();
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let first = store.lock_read_only().unwrap();
     let second = store.lock_read_only().unwrap();
     let writer = store.lock_exclusive().unwrap();
@@ -174,9 +174,9 @@ fn readers_coexist_with_the_writer_but_all_must_close_before_deletion() {
 fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
     for removed_locks in [0, 1] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().to_owned());
+        let layout = StoreDirectories::new(root.path().to_owned());
         let id = StoreId(Uuid::from_u128(1));
-        let store = layout.create_store_dir(id, "store", &UuidIds).unwrap();
+        let store = layout.create_store_dir(id, &UuidIds).unwrap();
         let deletion = store.lock_for_deletion().unwrap().unwrap();
         let path = deletion.store.directory.clone();
         let paths = lock_paths(&path, id);
@@ -187,7 +187,7 @@ fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
             std::fs::remove_file(path).unwrap();
         }
         assert!(matches!(
-            layout.create_store_dir(id, "replacement", &UuidIds),
+            layout.create_store_dir(id, &UuidIds),
             Err(crate::files::DirectoryCreationError::AlreadyExists(_))
         ));
         store
@@ -198,9 +198,7 @@ fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
             .unwrap();
         assert!(store.lock_for_deletion().unwrap().is_none());
         assert_eq!(store_entries(&root.path().join("stores")), 0);
-        let replacement = layout
-            .create_store_dir(id, "replacement", &UuidIds)
-            .unwrap();
+        let replacement = layout.create_store_dir(id, &UuidIds).unwrap();
         let writer = replacement.lock_exclusive().unwrap();
         assert!(matches!(
             store.lock_exclusive(),
@@ -213,9 +211,9 @@ fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
 #[test]
 fn failed_unpublication_keeps_the_store_and_its_locks_for_retry() {
     let root = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    let store = layout.create_store_dir(id, "store", &UuidIds).unwrap();
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let deletion = store.lock_for_deletion().unwrap().unwrap();
     let path = deletion.store.directory.clone();
     let destination = deletion_path(&path, id);
@@ -246,7 +244,7 @@ fn failed_unpublication_keeps_the_store_and_its_locks_for_retry() {
 fn deleting_a_store_link_never_removes_its_target() {
     let root = tempfile::tempdir().unwrap();
     let outside = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(root.path().to_owned());
+    let layout = StoreDirectories::new(root.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
     let stores = root.path().join("stores");
     std::fs::create_dir(&stores).unwrap();

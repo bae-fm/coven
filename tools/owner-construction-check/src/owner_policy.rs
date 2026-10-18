@@ -111,6 +111,17 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "discarded_operations",
         ),
+        // Name reads open temporary read-only connections at the database boundary.
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "<free>",
+            "read_store_name",
+        ),
+        (
+            "crates/coven-database/src/database_builder.rs",
+            "<free>",
+            "discarded_store_name",
+        ),
         (
             "crates/coven-database/src/file_database.rs",
             "CacheReservation",
@@ -154,8 +165,8 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         (
             "crates/coven-foundation/src/files/layout.rs",
-            "StoreLayout",
-            "stores",
+            "StoreDirectories",
+            "store_ids",
         ),
         (
             "crates/coven-foundation/src/files/lock_registry.rs",
@@ -459,6 +470,7 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder.rs", "OpeningStore", "open"),
         ("crates/coven/src/coven.rs", "<free>", "blocking"),
         ("crates/coven/src/coven.rs", "Coven", "builder"),
+        ("crates/coven/src/store_layout.rs", "StoreLayout", "new"),
         (
             "crates/coven/src/builder.rs",
             "CovenBuilder",
@@ -550,7 +562,7 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         (
             "crates/coven-foundation/src/files/layout.rs",
-            "StoreLayout",
+            "StoreDirectories",
             "begin_bootstrap",
             "BootstrapStore",
         ),
@@ -592,13 +604,13 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         (
             "crates/coven-foundation/src/files/layout.rs",
-            "StoreLayout",
+            "StoreDirectories",
             "store_dir",
             "StoreDir",
         ),
         (
             "crates/coven-foundation/src/files/layout.rs",
-            "StoreLayout",
+            "StoreDirectories",
             "create_store_dir",
             "StoreDir",
         ),
@@ -625,6 +637,7 @@ pub(crate) const POLICY: Policy = Policy {
         "IdSourceRef",
         "UuidIds",
         "StoreLayout",
+        "StoreDirectories",
         "BootstrapStore",
         "StoreDir",
         "AtomicFile",

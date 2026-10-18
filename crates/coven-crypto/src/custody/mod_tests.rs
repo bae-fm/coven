@@ -3,19 +3,15 @@ use crate::{CircleId, CircleKey, MemberIdentity, StoreKey};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::id_source::{IdSource, KeyId, MemberId};
 use coven_foundation::{
-    files::{StoreDir, StoreFile, StoreLayout},
+    files::{StoreDir, StoreDirectories, StoreFile},
     id_source::{SequentialIds, StoreId},
 };
 use uuid::Uuid;
 
 fn directory() -> (tempfile::TempDir, StoreDir) {
     let temp = tempfile::tempdir().unwrap();
-    let store = StoreLayout::new(temp.path().to_owned())
-        .create_store_dir(
-            StoreId(Uuid::from_u128(1)),
-            "Household",
-            &SequentialIds::new(),
-        )
+    let store = StoreDirectories::new(temp.path().to_owned())
+        .create_store_dir(StoreId(Uuid::from_u128(1)), &SequentialIds::new())
         .unwrap();
     (temp, store)
 }

@@ -254,7 +254,7 @@ async fn compare(
         }
     }
     let input = json!({"kind":"apply","member_count":3,
-        "initial":{"members":[{"member":1,"role":"admin","key_gen":0},{"member":2,"role":"admin","key_gen":0}],
+        "initial":{"name":"sequence tests","members":[{"member":1,"role":"admin","key_gen":0},{"member":2,"role":"admin","key_gen":0}],
             "devices":[{"device":1,"member":1},{"device":2,"member":2}]},
         "audiences":[{"audience":0,"version":1,"writers":[1,2]}],"slots":slots});
     let lean = run_lean(runner, &input);

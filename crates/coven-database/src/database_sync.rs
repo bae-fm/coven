@@ -111,12 +111,7 @@ impl Database {
             } = &incoming.content
             {
                 if let Some(store) = &effect.state.store {
-                    crate::store_state::check_creation(
-                        store.id,
-                        &store.name,
-                        inner.access.directory.id(),
-                        &inner.name,
-                    )?;
+                    crate::store_state::check_creation(store.id, inner.access.directory.id())?;
                 }
             }
             inner.inputs.prepare(|inputs| {

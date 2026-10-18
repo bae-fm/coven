@@ -70,6 +70,23 @@ impl CovenHandle {
         self.directory.id()
     }
 
+    /// The store's current name, from this device's committed state (E9).
+    pub async fn store_name(&self) -> CovenResult<String> {
+        self.database.store_name().await
+    }
+
+    /// The same name query, live (E4).
+    pub fn subscribe_store_name(&self) -> LiveQuery<String> {
+        self.database.subscribe_store_name()
+    }
+
+    /// Set the store's name as an admin, judged before the rename's slot (E9).
+    pub async fn rename_store(&self, name: &str) -> Result<(), SyncError> {
+        self.storage
+            .administer(coven_format::admin::StoreChange::RenameStore { name: name.into() })
+            .await
+    }
+
     /// Limits captured when each file upload drain or pin starts.
     pub fn transfer_limits(&self) -> TransferLimits {
         self.files.transfer_limits()

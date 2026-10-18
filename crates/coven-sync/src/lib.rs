@@ -41,6 +41,7 @@ pub use retry_waits::RetryWaits;
 
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
+    CodeMetadata,
 };
 pub use coven_database::WriteCutoff;
 pub use credential_custody::{commit_credentials, CredentialRollback};

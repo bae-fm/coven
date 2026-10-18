@@ -2,7 +2,6 @@
 
 use super::*;
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::StoreLayoutAccess;
 
 /// Replace this installation with a new device loaded from storage, whatever
 /// the app's reason: another copy using this device's id, a missing device
@@ -10,7 +9,8 @@ use coven_foundation::files::StoreLayoutAccess;
 /// connection and both key custodies are checked before anything moves; a
 /// failure leaves the files in place with its typed error. The new device
 /// names the old id as the one it replaces (§13.1). Only the old database's
-/// operation journal is read, for owed provider cleanup and open invites.
+/// operation journal is read for owed provider cleanup and open invites; an
+/// unconnected store also keeps its local creation name.
 pub(crate) async fn reset_device(
     mut builder: CovenBuilder,
     store: StoreId,
@@ -24,10 +24,15 @@ pub(crate) async fn reset_device(
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     let location = StorageSettings::new(directory.clone());
     if location.read().map_err(SyncError::from)?.is_none() {
+        let name = if recorded.is_some() {
+            None
+        } else {
+            Some(coven_database::read_store_name(directory.clone()).await?)
+        };
         if recorded.is_none() {
             record(&builder, &directory, &settings).await?;
         }
-        return reset_unconnected(builder, store, &settings.name, keychain).await;
+        return reset_unconnected(builder, store, name, keychain).await;
     }
     let data = coven_sync::read_connection(&location, &keychain)?.ok_or(SyncError::NoStorage)?;
     // The held sign-in refreshes in this session until the new device
@@ -90,7 +95,6 @@ pub(crate) async fn reset_device(
     }
     let code = RestoreCode {
         store,
-        name: settings.name,
         member: member.member(),
         member_keys: member.keys().clone(),
         storage: data.location.encode().map_err(SyncError::from)?,
@@ -151,20 +155,30 @@ pub(super) async fn carry_discarded_provider_work(
 async fn reset_unconnected(
     builder: CovenBuilder,
     store: StoreId,
-    name: &str,
+    name: Option<String>,
     keychain: Arc<StoreKeychain>,
 ) -> Result<CovenHandle, BootstrapError> {
     let pending = builder
         .layout
-        .begin_bootstrap(store, name, builder.ids.as_ref())
+        .begin_bootstrap(store, builder.ids.as_ref())
         .await?;
     let reset = pending
         .device_reset()
         .map_err(SyncError::from)?
         .ok_or(SyncError::NoStorage)?;
+    let name = match name {
+        Some(name) => name,
+        None => coven_database::discarded_store_name(pending.discarded_database_path(&reset))
+            .await
+            .map_err(CovenError::from)?,
+    };
     let directory = pending.directory();
     let database = builder.database(directory.clone())?.open().await?;
     let prepared = async {
+        database
+            .initialize_store_name(name)
+            .await
+            .map_err(CovenError::from)?;
         database
             .record_device_reset::<coven_sync::PendingRecord>(
                 reset,

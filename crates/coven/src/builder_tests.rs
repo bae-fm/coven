@@ -572,28 +572,23 @@ async fn creation_identity_matches_settings_before_and_after_reopening() {
 
     let reader = builder().open_read_only(directory.id()).await.unwrap();
     reader.close().await.unwrap();
-    let mut settings = directory.settings().unwrap();
-    settings.name = "Conflicting name".into();
-    let path = directory
-        .database_path()
-        .parent()
-        .unwrap()
-        .join("settings.json");
-    std::fs::write(&path, serde_json::to_vec(&settings).unwrap()).unwrap();
-    assert!(
-        matches!(
-            builder().open(directory.id()).await,
-            Err(CovenError::Database(DbError::StoreSettingsMismatch { .. }))
-        ),
-        "opening must reject a name that disagrees with checked creation"
-    );
-    assert!(
-        matches!(
-            builder().open_read_only(directory.id()).await,
-            Err(ReadOnlyOpenError::Local(CovenError::Database(
-                DbError::StoreSettingsMismatch { .. }
-            )))
-        ),
-        "read-only opening must check the same identity"
-    );
+    let handle = builder().open(directory.id()).await.unwrap();
+    handle.unlock_store_key().await.unwrap();
+    handle.rename_store("Renamed recipes").await.unwrap();
+    handle.close().await.unwrap();
+    let handle = builder().open(directory.id()).await.unwrap();
+    assert_eq!(handle.store_name().await.unwrap(), "Renamed recipes");
+    handle
+        .setup_s3_storage(
+            storage.config(),
+            "Phone",
+            "owner".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    handle.close().await.unwrap();
+    let reader = builder().open_read_only(directory.id()).await.unwrap();
+    assert_eq!(reader.store_name().await.unwrap(), "Renamed recipes");
+    reader.close().await.unwrap();
 }

@@ -8,7 +8,7 @@ async fn joining_refuses_an_invite_for_another_store_before_keeping_an_identity(
     let install = Installation::new();
     let pending = install
         .layout
-        .begin_bootstrap(owner.directory.id(), "Household", &UuidIds)
+        .begin_bootstrap(owner.directory.id(), &UuidIds)
         .await
         .unwrap();
     let directory = pending.directory();
@@ -36,7 +36,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     let install = Installation::new();
     let pending = install
         .layout
-        .begin_bootstrap(owner.directory.id(), "Household", &UuidIds)
+        .begin_bootstrap(owner.directory.id(), &UuidIds)
         .await
         .unwrap();
     let directory = pending.directory();
@@ -75,7 +75,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     }
     let pending = install
         .layout
-        .begin_bootstrap(owner.directory.id(), "Household", &UuidIds)
+        .begin_bootstrap(owner.directory.id(), &UuidIds)
         .await
         .unwrap();
     let directory = pending.directory();
@@ -268,5 +268,116 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
             BootstrapStatus::Loading,
         ]
     );
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let old_code = owner.code.to_text().unwrap();
+    owner.handle.rename_store("Snapshot name").await.unwrap();
+    let invite = owner.invite().await;
+    let code = coven_sync::read_invite_code(&invite.code).unwrap();
+    assert_eq!(code.name, "Snapshot name");
+    assert_eq!(
+        invite.expires_at.duration_since(owner.clock.now()).unwrap(),
+        Duration::from_secs(24 * 3600)
+    );
+    owner.handle.reset_store().await.unwrap();
+    owner.handle.reload_from_snapshot().await.unwrap();
+    assert_eq!(owner.handle.store_name().await.unwrap(), "Snapshot name");
+    owner.handle.rename_store("After snapshot").await.unwrap();
+    owner.handle.reload_from_snapshot().await.unwrap();
+    assert_eq!(owner.handle.store_name().await.unwrap(), "After snapshot");
+    assert_eq!(
+        owner.handle.restore_code().await.unwrap(),
+        old_code.as_str()
+    );
+
+    let install = Installation::new();
+    let restored = install.restore(&owner).await;
+    assert_eq!(restored.store_name().await.unwrap(), "After snapshot");
+    let saved = install.keychain.synced_restore_codes().unwrap();
+    assert_eq!(saved.len(), 1);
+    assert_eq!(
+        RestoreCode::from_bytes(saved[0].1.as_bytes())
+            .unwrap()
+            .to_text()
+            .unwrap()
+            .as_str(),
+        old_code.as_str()
+    );
+    restored.close().await.unwrap();
+    let reopened = install
+        .builder(&owner, owner.storage.clone())
+        .open(owner.directory.id())
+        .await
+        .unwrap();
+    assert_eq!(reopened.store_name().await.unwrap(), "After snapshot");
+    reopened.close().await.unwrap();
+    assert_eq!(
+        install.layout.stores().await.unwrap()[0].name,
+        "After snapshot"
+    );
+
+    // An unexpired invite's captured label cannot become the joined store's name.
+    let joined = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let joining = join_with_invite(
+        joined.builder(&owner, owner.recipient()),
+        &invite.code,
+        "Guest phone",
+        |_| {},
+        &cancel,
+    );
+    let (handle, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let handle = handle.unwrap().unwrap();
+    assert_eq!(handle.store_name().await.unwrap(), "After snapshot");
+    handle.close().await.unwrap();
+    let current = owner.invite().await;
+    assert_eq!(
+        coven_sync::read_invite_code(&current.code).unwrap().name,
+        "After snapshot"
+    );
+    owner.handle.cancel_invite(&current.id).await.unwrap();
+    owner.close().await;
+}
+
+#[tokio::test]
+async fn a_restore_learns_the_renamed_name_from_the_floor_snapshot() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.handle.rename_store("Retained name").await.unwrap();
+    owner
+        .handle
+        .write(|sql| {
+            sql.execute(
+                "INSERT INTO notes VALUES('snapshot',?1)",
+                coven_database::params![vec![9_u8; 1_100_000]],
+            )?;
+            Ok(())
+        })
+        .await
+        .unwrap();
+    owner.sync().await;
+    owner
+        .clock
+        .set(owner.clock.now() + Duration::from_secs(31 * 24 * 3600));
+    owner.sync().await;
+    owner.sync().await;
+    assert!(owner
+        .storage
+        .status(&ObjectPath::slot(
+            owner.directory.id(),
+            1.try_into().unwrap()
+        ))
+        .await
+        .unwrap()
+        .is_none());
+    let install = Installation::new();
+    let handle = install.restore(&owner).await;
+    assert_eq!(handle.store_name().await.unwrap(), "Retained name");
+    handle.reload_from_snapshot().await.unwrap();
+    assert_eq!(handle.store_name().await.unwrap(), "Retained name");
+    handle.close().await.unwrap();
     owner.close().await;
 }

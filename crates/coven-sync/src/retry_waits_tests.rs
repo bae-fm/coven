@@ -2,7 +2,7 @@ use super::*;
 use coven_foundation::clock::Clock;
 use coven_foundation::{
     clock::FixedClock,
-    files::{StoreDir, StoreLayout},
+    files::{StoreDir, StoreDirectories},
     id_source::{SequentialIds, StoreId},
 };
 use coven_storage::Cooldown;
@@ -18,12 +18,8 @@ struct Fixture {
 impl Fixture {
     fn new() -> Self {
         let temporary = tempfile::tempdir().unwrap();
-        let directory = StoreLayout::new(temporary.path().to_owned())
-            .create_store_dir(
-                StoreId(uuid::Uuid::from_u128(1)),
-                "Home",
-                &SequentialIds::new(),
-            )
+        let directory = StoreDirectories::new(temporary.path().to_owned())
+            .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new())
             .unwrap();
         Self {
             _temporary: temporary,

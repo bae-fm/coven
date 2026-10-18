@@ -11,6 +11,7 @@ pub use crate::error::{
 };
 pub use crate::handle::{CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
+pub use crate::store_layout::{StoreLayout, StoreLayoutError};
 pub use coven_crypto::custody::{
     set_keyring_service, IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError,
     MemberKeyCustody, Passphrase, StoreKeyCustody,
@@ -19,6 +20,7 @@ pub use coven_crypto::{
     CircleKey, CryptoError, MaterialError, MemberIdentity, MemberKeys, MemberPublicKeys,
     SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
+pub use coven_database::StoreIdentity as StoreInfo;
 pub use coven_database::{
     named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ChangeSource,
     ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, FileDecl, FileRef,
@@ -29,7 +31,7 @@ pub use coven_database::{
     SchemaError, SnapshotError, SqlContext, SqlReadContext, SyncedTable, ToSql, UnsentWork,
     UserFile, WriteBatch, WriteId, WriteWait,
 };
-pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind};
+pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata};
 pub use coven_sync::{
     DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStatus, FileStream,
     PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadQueue,
@@ -48,8 +50,7 @@ pub use coven_foundation::clock::{Clock, ClockRef, SystemClock};
 pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{
     BootstrapDirectoryError, DeviceReset, DirectoryCreationError, FileError, FileName,
-    FileNameError, SettingsError, StoreDir, StoreInfo, StoreLayout, StoreLayoutError,
-    StoreLockError,
+    FileNameError, SettingsError, StoreDir, StoreLockError,
 };
 pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{

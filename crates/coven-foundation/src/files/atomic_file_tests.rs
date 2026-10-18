@@ -223,10 +223,9 @@ fn a_published_file_is_not_marked_temporary() {
 #[tokio::test]
 async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
     let directory = tempfile::tempdir().unwrap();
-    let store = crate::files::StoreLayout::new(directory.path().to_owned())
+    let store = crate::files::StoreDirectories::new(directory.path().to_owned())
         .create_store_dir(
             crate::id_source::StoreId(uuid::Uuid::from_u128(123)),
-            "Files",
             &crate::id_source::UuidIds,
         )
         .unwrap();
@@ -256,10 +255,9 @@ async fn streamed_creation_syncs_bytes_and_refuses_to_overwrite_a_kept_file() {
 #[tokio::test]
 async fn a_dropped_writer_leaves_its_name_for_recorded_cleanup() {
     let directory = tempfile::tempdir().unwrap();
-    let store = crate::files::StoreLayout::new(directory.path().to_owned())
+    let store = crate::files::StoreDirectories::new(directory.path().to_owned())
         .create_store_dir(
             crate::id_source::StoreId(uuid::Uuid::from_u128(123)),
-            "Files",
             &crate::id_source::UuidIds,
         )
         .unwrap();

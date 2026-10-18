@@ -124,7 +124,6 @@ pub(super) fn is_pending(directory: &Path) -> Result<bool, FileError> {
 pub(super) async fn reserve_bootstrap_directory(
     root: &Path,
     id: StoreId,
-    name: &str,
     ids: &dyn IdSource,
 ) -> Result<BootstrapStore, BootstrapDirectoryError> {
     creation::create_directory_tree(root)
@@ -136,7 +135,7 @@ pub(super) async fn reserve_bootstrap_directory(
     let closing = lock.closing_guard();
     let lease = Arc::new(BootstrapLease(Mutex::new(Some(lock))));
     if !exists("inspect bootstrap path", &path)? {
-        creation::create(&root, id, name, ids, true)?;
+        creation::create(&root, id, ids, true)?;
     }
     let metadata = fs::symlink_metadata(&path)
         .map_err(|source| FileError::at("inspect unpublished store", &path, source))?;

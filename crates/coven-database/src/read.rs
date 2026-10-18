@@ -121,6 +121,10 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::device_reset::read(self.database)?)
     }
 
+    pub(crate) fn store_name(&self) -> CovenResult<String> {
+        Ok(crate::store_state_tables::name(self.database)?)
+    }
+
     pub(crate) fn members(
         &self,
         device: coven_foundation::id_source::DeviceId,

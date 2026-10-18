@@ -38,7 +38,9 @@ async fn restore_code_api_never_discloses_storage_credentials() {
             );
         }
         assert_eq!(code.store, owner.directory.id());
-        assert_eq!(code.name, "Household");
+        assert!(!bytes
+            .windows(b"Household".len())
+            .any(|part| part == b"Household"));
         assert_eq!(code.member, owner.member.member());
         assert_eq!(
             RestoreCode::from_bytes(&bytes).unwrap().storage.as_bytes(),
@@ -244,7 +246,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     drop(joining);
     let pending = install
         .layout
-        .begin_bootstrap(owner.directory.id(), "Household", &UuidIds)
+        .begin_bootstrap(owner.directory.id(), &UuidIds)
         .await
         .unwrap();
     drop(pending.directory().lock_exclusive().unwrap());

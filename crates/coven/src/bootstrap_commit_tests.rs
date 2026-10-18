@@ -5,7 +5,6 @@ use coven_storage::S3Credentials;
 fn code(store: StoreId) -> RestoreCode {
     RestoreCode {
         store,
-        name: "Household".into(),
         member: MemberId(uuid::Uuid::from_u128(0x4d)),
         member_keys: MemberKeys::generate().unwrap(),
         storage: StorageConfig::S3 {
@@ -68,10 +67,7 @@ async fn prepared(
     keys: KeyCustody,
     identity: IdentityCustody,
 ) -> (BootstrapStore, OpeningOwners, Database) {
-    let pending = layout
-        .begin_bootstrap(id, "Household", &UuidIds)
-        .await
-        .unwrap();
+    let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let builder = Coven::builder(layout.clone())
         .synced_tables(Vec::new())
         .migrations(Vec::new())
@@ -81,6 +77,10 @@ async fn prepared(
         .database(pending.directory())
         .unwrap()
         .open()
+        .await
+        .unwrap();
+    database
+        .initialize_store_name("Household".into())
         .await
         .unwrap();
     let owners = builder

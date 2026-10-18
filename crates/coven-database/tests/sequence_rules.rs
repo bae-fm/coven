@@ -6,7 +6,7 @@ use coven_format::{
     write::{RowChange as WireChange, WriteDisposition, WriteHeader, WritePart, WriteRecord},
 };
 use coven_foundation::{
-    files::StoreLayout,
+    files::StoreDirectories,
     id_source::{DeviceId, IdSource, MemberId, SequentialIds, StoreId},
 };
 use coven_merge::{Audience, Change, ColumnValue, Operation, Timestamp};
@@ -63,8 +63,8 @@ impl PendingValue for Pending {
 async fn open(owned: bool) -> (tempfile::TempDir, Database) {
     let dir = tempfile::tempdir().unwrap();
     let ids = SequentialIds::new();
-    let store = StoreLayout::new(dir.path().into())
-        .create_store_dir(StoreId(ids.new_id()), "sequence rules", &ids)
+    let store = StoreDirectories::new(dir.path().into())
+        .create_store_dir(StoreId(ids.new_id()), &ids)
         .unwrap();
     let table = SyncedTable::new("items", RowIdentity::SharedKey);
     let table = if owned { table.owner_only() } else { table };

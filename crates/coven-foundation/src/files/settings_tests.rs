@@ -6,12 +6,14 @@ fn settings_round_trip_all_fields_and_replace_as_one_file() {
     let directory = tempfile::tempdir().unwrap();
     let mut settings = StoreSettings {
         id: StoreId(Uuid::from_u128(42)),
-        name: "家庭\nnotes".into(),
         device_id: DeviceId(u64::MAX),
     };
     write(directory.path(), &settings).unwrap();
     assert_eq!(read(directory.path(), settings.id).unwrap(), settings);
-    settings.name = "Another name".into();
+    assert!(serde_json::to_value(&settings)
+        .unwrap()
+        .get("name")
+        .is_none());
     settings.device_id = DeviceId(12);
     write(directory.path(), &settings).unwrap();
     assert_eq!(read(directory.path(), settings.id).unwrap(), settings);
@@ -24,7 +26,12 @@ fn corruption_and_missing_fields_are_typed_errors() {
     assert!(
         matches!(read(directory.path(), id), Err(SettingsError::Missing(found)) if found == id)
     );
-    for invalid in [b"not json".as_slice(), b"{}", br#"{"id":"not-a-uuid","name":"x","device_id":3}"#, br#"{"id":"00000000-0000-0000-0000-00000000002a","name":"x","device_id":18446744073709551616}"#] {
+    for invalid in [
+        b"not json".as_slice(),
+        b"{}",
+        br#"{"id":"not-a-uuid","device_id":3}"#,
+        br#"{"id":"00000000-0000-0000-0000-00000000002a","device_id":18446744073709551616}"#,
+    ] {
         std::fs::write(directory.path().join(SETTINGS_FILE), invalid).unwrap();
         let SettingsError::Corrupt(source) = read(directory.path(), id).unwrap_err() else {
             panic!("malformed settings must keep their parse error")
@@ -42,7 +49,6 @@ fn settings_cannot_identify_another_store() {
         directory.path(),
         &StoreSettings {
             id: actual,
-            name: "one".into(),
             device_id: DeviceId(7),
         },
     )

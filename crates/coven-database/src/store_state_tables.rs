@@ -47,15 +47,30 @@ pub(crate) fn deleted_circles(
         .collect())
 }
 
+pub(crate) fn name(database: &DatabaseConnection) -> Result<String, DbError> {
+    database
+        .query(
+            "SELECT name FROM _coven_store WHERE singleton=1",
+            [],
+            |row| row.get(0),
+        )?
+        .pop()
+        .ok_or(DbError::DamagedDatabase)
+}
+
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError> {
     let mut state = StoreState::default();
     state.store = database
-        .query("SELECT store,name FROM _coven_store", [], |r| {
-            Ok(StoreIdentity {
-                id: StoreId(uuid::Uuid::from_bytes(r.get(0)?)),
-                name: r.get(1)?,
-            })
-        })?
+        .query(
+            "SELECT store,name FROM _coven_store WHERE singleton=1 AND created=1",
+            [],
+            |r| {
+                Ok(StoreIdentity {
+                    id: StoreId(uuid::Uuid::from_bytes(r.get(0)?)),
+                    name: r.get(1)?,
+                })
+            },
+        )?
         .pop();
     state.members = database
         .query(
@@ -144,7 +159,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
 }
 pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
-        database.internal_execute("INSERT INTO _coven_store(singleton,store,name) VALUES(1,?1,?2) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name",params![store.id.0.as_bytes().as_slice(),store.name])?;
+        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,created) VALUES(1,?1,?2,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,created=1",params![store.id.0.as_bytes().as_slice(),store.name])?;
     }
     for table in [
         "_coven_circle_deletions",

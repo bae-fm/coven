@@ -408,6 +408,7 @@ mod sequence_differential {
 
     #[derive(Clone, Debug)]
     enum Action {
+        Rename(&'static str),
         Add(u128, MemberRole),
         Remove(u128),
         Role(u128, MemberRole),
@@ -424,6 +425,7 @@ mod sequence_differential {
     impl Action {
         fn json(&self) -> Value {
             match self {
+                Self::Rename(name) => json!({"kind":"renameStore","name":name}),
                 Self::Add(m, r) => json!({"kind":"addMember","member":m,"role":role(*r)}),
                 Self::Remove(m) => json!({"kind":"removeMember","member":m}),
                 Self::Role(m, r) => json!({"kind":"changeRole","member":m,"role":role(*r)}),
@@ -434,6 +436,9 @@ mod sequence_differential {
         }
         fn change(&self, state: &StoreState, seed: u8) -> StoreChange {
             match self {
+                Self::Rename(name) => StoreChange::RenameStore {
+                    name: (*name).into(),
+                },
                 Self::Add(m, r) => StoreChange::AddMember {
                     member: id(*m),
                     keys: keys(seed),
@@ -512,7 +517,7 @@ mod sequence_differential {
 
     async fn compare(actions: &[(u64, Action)]) -> usize {
         let input = json!({"kind":"apply","member_count":4,
-            "initial":{"members":[{"member":1,"role":"admin","key_gen":0},{"member":2,"role":"admin","key_gen":0}],
+            "initial":{"name":"sequence tests","members":[{"member":1,"role":"admin","key_gen":0},{"member":2,"role":"admin","key_gen":0}],
                 "devices":[{"device":1,"member":1},{"device":2,"member":2}]},"audiences":[],
             "slots":actions.iter().enumerate().map(|(i,(d,a))|json!({"kind":"admin","device":d,"claim":i+1,"digest":format!("slot-{}",i+1),"entry":a.json()})).collect::<Vec<_>>()});
         let lean = crate::tests::run_lean("COVEN_SEQUENCE_LEAN", &input);
@@ -642,6 +647,7 @@ mod sequence_differential {
                 .map(|(d, _)| d.0)
                 .collect();
             for (field, rust) in [
+                ("name", json!(state.store.as_ref().unwrap().name)),
                 ("members", json!(members)),
                 ("retired", json!(retired)),
                 ("devices", json!(devices)),
@@ -678,6 +684,9 @@ mod sequence_differential {
     async fn sequence_admin_matches_lean() {
         use Action::*;
         let choices = [
+            (1, Rename("Family")),
+            (2, Rename("家")),
+            (3, Rename("Refused")),
             (1, Remove(1)),
             (1, Role(1, MemberRole::Member)),
             (2, Role(2, MemberRole::Member)),
@@ -707,6 +716,17 @@ mod sequence_differential {
         let exhaustive = histories;
         for history in [
             vec![
+                (1, Rename("First")),
+                (1, Role(2, MemberRole::Member)),
+                (2, Rename("Refused")),
+                (1, Role(2, MemberRole::Admin)),
+                (2, Rename("Second")),
+                (2, Rename("Second")),
+                (2, Role(1, MemberRole::Member)),
+                (1, Rename("Refused again")),
+                (2, Rename("Final")),
+            ],
+            vec![
                 (1, Role(2, MemberRole::Member)),
                 (3, Register(3, 2)),
                 (2, RemoveDevice(3)),
@@ -734,8 +754,8 @@ mod sequence_differential {
             histories += 1;
         }
         eprintln!(
-            "sequence apply admin: {exhaustive} exhaustive + 2 directed + {} seeded histories, {prefixes} prefixes",
-            histories - exhaustive - 2
+            "sequence apply admin: {exhaustive} exhaustive + 3 directed + {} seeded histories, {prefixes} prefixes",
+            histories - exhaustive - 3
         );
     }
 }

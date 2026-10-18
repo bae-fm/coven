@@ -42,7 +42,6 @@ pub enum DirectoryCreationError {
 pub(crate) fn create(
     root: &Path,
     id: StoreId,
-    name: &str,
     ids: &dyn IdSource,
     unpublished: bool,
 ) -> Result<StoreDir, DirectoryCreationError> {
@@ -68,7 +67,6 @@ pub(crate) fn create(
         .map_err(|source| FileError::at("create unpublished store directory", &root, source))?;
     let settings = StoreSettings {
         id,
-        name: name.to_owned(),
         device_id: ids.new_device_id(),
     };
     let prepare = directory::initialize(stage.path(), &settings)

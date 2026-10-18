@@ -179,7 +179,12 @@ async fn host_secrets_identity_and_failed_deletion_survive_reopen() {
         app.discard_store(&directory).await,
         Err(StoreDeletionError::Key(_))
     ));
-    assert_eq!(layout.stores().await.unwrap().len(), 1);
+    assert!(
+        matches!(layout.stores().await, Err(StoreLayoutError::Store {
+        store, source: CovenError::Database(DbError::DamagedDatabase),
+    }) if store == directory.id())
+    );
+    assert_eq!(directory.settings().unwrap().id, directory.id());
     app.discard_store(&directory).await.unwrap();
     assert!(layout.stores().await.unwrap().is_empty());
     // Recreate exactly this store id to prove deletion removed all its keychain entries.

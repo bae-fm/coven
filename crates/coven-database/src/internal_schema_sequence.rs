@@ -6,7 +6,8 @@ macro_rules! coven_sequence_tables {
             CREATE TABLE _coven_store (
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 store BLOB NOT NULL CHECK(length(store)=16),
-                name TEXT NOT NULL
+                name TEXT NOT NULL,
+                created INTEGER NOT NULL CHECK(created IN (0,1))
             ) STRICT;
         ");
         $visit!(_coven_migration_prefix, "

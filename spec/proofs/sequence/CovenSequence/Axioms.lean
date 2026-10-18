@@ -122,6 +122,10 @@ import SequenceApply
 
 #print axioms CovenSequence.Authority.every_prefix_has_admin
 #print axioms CovenSequence.Authority.applied_membership_authorized
+#print axioms CovenSequence.Authority.applied_rename_authorized
+#print axioms CovenSequence.Authority.non_admin_rename_refused
+#print axioms CovenSequence.Authority.name_is_latest_applied
+#print axioms CovenSequence.Authority.name_prefix
 #print axioms CovenSequence.Authority.last_admin_refused
 #print axioms CovenSequence.Preparations.ordinary_covers_boundary
 #print axioms CovenSequence.Preparations.preparation_announced

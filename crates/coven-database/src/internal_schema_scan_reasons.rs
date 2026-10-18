@@ -130,8 +130,6 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("snapshot coverage records each device's last consumed claim"),
 ("snapshot_write.rs", "SELECT timestamp,number,read_through,slot FROM _coven_writes WHERE slot<=?1 ORDER BY {WRITE_DEVICE_SQL},number", "_coven_writes") =>
     Some("the snapshot emits the counted write history in canonical identity order"),
-("store_state_tables.rs", "SELECT store,name FROM _coven_store", "_coven_store") =>
-    Some("store identity has at most one row"),
 ("write_boundary.rs", "SELECT b.kind,b.version,b.audience,b.snapshot_device,b.snapshot_number,b.slot,b.included,b.applied FROM _coven_boundaries b ORDER BY b.slot", "b") =>
     Some("boundary selection folds each retained raise and reset in slot order"),
 _ => None,

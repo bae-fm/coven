@@ -6,19 +6,19 @@ use crate::id_source::UuidIds;
 #[tokio::test]
 async fn an_absent_layout_lists_no_stores_without_creating_it() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(directory.path().join("not-created"));
-    assert!(layout.stores().await.unwrap().is_empty());
+    let layout = StoreDirectories::new(directory.path().join("not-created"));
+    assert!(layout.store_ids().await.unwrap().is_empty());
     assert_eq!(fs::read_dir(directory.path()).unwrap().count(), 0);
 }
 
 #[tokio::test]
 async fn discovery_lists_only_valid_store_directories_in_id_order() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(directory.path().to_owned());
+    let layout = StoreDirectories::new(directory.path().to_owned());
     let mut locks = Vec::new();
-    for (n, name) in [(2, "Second"), (1, "First")] {
+    for n in [2, 1] {
         let store = layout
-            .create_store_dir(StoreId(Uuid::from_u128(n)), name, &UuidIds)
+            .create_store_dir(StoreId(Uuid::from_u128(n)), &UuidIds)
             .unwrap();
         locks.push((
             store.lock_exclusive().unwrap(),
@@ -43,7 +43,6 @@ async fn discovery_lists_only_valid_store_directories_in_id_order() {
         &mismatch,
         &StoreSettings {
             id: StoreId(Uuid::from_u128(7)),
-            name: "wrong id".into(),
             device_id: crate::id_source::DeviceId(1),
         },
     )
@@ -56,23 +55,13 @@ async fn discovery_lists_only_valid_store_directories_in_id_order() {
         stage.path(),
         &StoreSettings {
             id: StoreId(Uuid::from_u128(8)),
-            name: "unpublished".into(),
             device_id: crate::id_source::DeviceId(1),
         },
     )
     .unwrap();
     assert_eq!(
-        layout.stores().await.unwrap(),
-        vec![
-            StoreInfo {
-                id: StoreId(Uuid::from_u128(1)),
-                name: "First".into()
-            },
-            StoreInfo {
-                id: StoreId(Uuid::from_u128(2)),
-                name: "Second".into()
-            },
-        ]
+        layout.store_ids().await.unwrap(),
+        vec![StoreId(Uuid::from_u128(1)), StoreId(Uuid::from_u128(2)),]
     );
 }
 
@@ -80,13 +69,13 @@ async fn discovery_lists_only_valid_store_directories_in_id_order() {
 async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
     let directory = tempfile::tempdir().unwrap();
     fs::write(directory.path().join("stores"), b"not a directory").unwrap();
-    let layout = StoreLayout::new(directory.path().to_owned());
+    let layout = StoreDirectories::new(directory.path().to_owned());
     assert!(matches!(
-        layout.stores().await,
-        Err(StoreLayoutError::File(_))
+        layout.store_ids().await,
+        Err(StoreDirectoriesError::File(_))
     ));
     assert!(matches!(
-        layout.create_store_dir(StoreId(Uuid::nil()), "Store", &UuidIds),
+        layout.create_store_dir(StoreId(Uuid::nil()), &UuidIds),
         Err(DirectoryCreationError::File(_))
     ));
 }
@@ -95,9 +84,9 @@ async fn directory_listing_errors_are_not_hidden_as_an_empty_layout() {
 #[tokio::test]
 async fn discovery_does_not_follow_directory_or_settings_symlinks() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(directory.path().to_owned());
+    let layout = StoreDirectories::new(directory.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
-    layout.create_store_dir(id, "Original", &UuidIds).unwrap();
+    layout.create_store_dir(id, &UuidIds).unwrap();
     let root = directory.path().join("stores");
     std::os::unix::fs::symlink(
         root.join(id.to_string()),
@@ -111,11 +100,5 @@ async fn discovery_does_not_follow_directory_or_settings_symlinks() {
         linked_settings.join(settings::SETTINGS_FILE),
     )
     .unwrap();
-    assert_eq!(
-        layout.stores().await.unwrap(),
-        vec![StoreInfo {
-            id,
-            name: "Original".into()
-        }]
-    );
+    assert_eq!(layout.store_ids().await.unwrap(), vec![id]);
 }

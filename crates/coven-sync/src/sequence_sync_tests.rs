@@ -9,7 +9,7 @@ use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTa
 use coven_format::admin::{MemberRole, StoreChange};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
-    files::{StoreFile, StoreLayout},
+    files::{StoreDirectories, StoreFile},
     id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId},
 };
 use coven_storage::{test_utils::MemoryStorage, ObjectPath, Storage, StorageSettings};
@@ -68,8 +68,8 @@ impl Group {
     }
     pub(crate) async fn device(&self, seed: u8) -> Device {
         let temp = tempfile::tempdir().unwrap();
-        StoreLayout::new(temp.path().into())
-            .create_store_dir(self.store, "sequence tests", self.ids.as_ref())
+        StoreDirectories::new(temp.path().into())
+            .create_store_dir(self.store, self.ids.as_ref())
             .unwrap();
         let identity = MemberIdentity::new(
             MemberId(self.ids.new_id()),
@@ -115,8 +115,8 @@ impl Group {
     /// A new installation's unpublished directory.
     pub(crate) fn directory(&self) -> (tempfile::TempDir, coven_foundation::files::StoreDir) {
         let temp = tempfile::tempdir().unwrap();
-        let directory = StoreLayout::new(temp.path().into())
-            .create_store_dir(self.store, "sequence tests", self.ids.as_ref())
+        let directory = StoreDirectories::new(temp.path().into())
+            .create_store_dir(self.store, self.ids.as_ref())
             .unwrap();
         (temp, directory)
     }
@@ -137,7 +137,7 @@ impl Group {
         ring: Option<StoreKeyring>,
         storage: MemoryStorage,
     ) -> Device {
-        let directory = StoreLayout::new(temp.path().into()).store_dir(&self.store);
+        let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
         let mut database = DatabaseBuilder::new(directory.clone());
         if self.raises.load(std::sync::atomic::Ordering::SeqCst) {
             database = database.migration_operation(SequenceSync::migration_operation);
@@ -181,7 +181,7 @@ impl Group {
         storage: MemoryStorage,
         database: Database,
     ) -> Device {
-        let directory = StoreLayout::new(temp.path().into()).store_dir(&self.store);
+        let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
         let work = coven_database::test_utils::WorkCounter::default();
         database.test_track_work(work.clone()).await.unwrap();
         let (store_keys, member_keys) = if self.passphrase_custody {

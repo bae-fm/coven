@@ -29,7 +29,6 @@ fn fixture(present: bool) -> (Arc<Keychain>, StoreKeychain, RestoreCode) {
     }
     let code = RestoreCode {
         store: id,
-        name: "Household".into(),
         member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)),
         member_keys: coven_crypto::MemberKeys::generate().unwrap(),
         storage: StorageConfig::S3 {

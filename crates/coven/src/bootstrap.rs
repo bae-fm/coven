@@ -5,8 +5,8 @@ use super::*;
 use coven_crypto::custody::{InMemoryCustody, Keychain, StoreKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
-use coven_foundation::files::{StoreDirAccess, StoreLayoutAccess};
 use coven_storage::{
     ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };
@@ -233,14 +233,14 @@ async fn bootstrap_device(
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
     let keychain = builder.keychain()?;
-    let (id, name) = match &request {
-        BootstrapRequest::Restore { code, .. } => (code.store, &code.name),
-        BootstrapRequest::Join { code, .. } => (code.store, &code.name),
+    let id = match &request {
+        BootstrapRequest::Restore { code, .. } => code.store,
+        BootstrapRequest::Join { code, .. } => code.store,
     };
     status(BootstrapStatus::Connecting);
     let pending = builder
         .layout
-        .begin_bootstrap(id, name, builder.ids.as_ref())
+        .begin_bootstrap(id, builder.ids.as_ref())
         .await?;
     let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
     match result {
@@ -491,7 +491,6 @@ async fn prepare_and_load(
         Ok(Some((
             RestoreCode {
                 store: settings.id,
-                name: settings.name,
                 member: member.member(),
                 member_keys: member.keys().clone(),
                 storage: data.location.encode().map_err(SyncError::from)?,

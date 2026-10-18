@@ -9,8 +9,8 @@ use coven_storage::{
 /// The two codes that can open a store on a new device.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum CodeKind {
-    /// This person's member id and current private pair, store id and name,
-    /// and storage location only.
+    /// This person's member id and current private pair, store id and
+    /// storage location only.
     Restore,
     /// A one-time request carrying the chosen member id, initial key,
     /// inviting writer and its published key-copy number; approval is required.
@@ -19,13 +19,32 @@ pub enum CodeKind {
 
 /// Code metadata safe for presentation before opening the store.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct CodeInfo {
-    /// The operation the code permits.
-    pub kind: CodeKind,
+pub enum CodeInfo {
+    /// A restore code reveals no store name before loading.
+    Restore(CodeMetadata),
+    /// An invite carries the name captured when the admin made it.
+    Invite {
+        /// The code's shared metadata.
+        metadata: CodeMetadata,
+        /// The store name at invitation creation.
+        store_name: String,
+    },
+}
+
+impl CodeInfo {
+    /// The store id, member and provider facts carried by either kind of code.
+    pub fn metadata(&self) -> &CodeMetadata {
+        match self {
+            Self::Restore(metadata) | Self::Invite { metadata, .. } => metadata,
+        }
+    }
+}
+
+/// Store, member and provider facts shared by both code kinds.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CodeMetadata {
     /// The shared store's identity.
     pub store_id: StoreId,
-    /// The shared store's name.
-    pub store_name: String,
     /// The stable member id either kind of code fixes: the restoring
     /// person's own, or the one the invite's admin chose (§13).
     pub member: MemberId,
@@ -54,17 +73,18 @@ pub enum CodeError {
 /// Decode and validate the complete code before returning public metadata.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError> {
     let (code, location) = decode(code)?;
-    let (kind, store_id, store_name, member) = match code {
-        DecodedCode::Restore(code) => (CodeKind::Restore, code.store, code.name, code.member),
-        DecodedCode::Invite(code) => (CodeKind::Invite, code.store, code.name, code.member),
-    };
-    Ok(CodeInfo {
-        kind,
+    let metadata = |store_id, member| CodeMetadata {
         store_id,
-        store_name,
         member,
         cloud_provider: location.provider(),
         oauth_access: location.oauth_access(),
+    };
+    Ok(match code {
+        DecodedCode::Restore(code) => CodeInfo::Restore(metadata(code.store, code.member)),
+        DecodedCode::Invite(code) => CodeInfo::Invite {
+            metadata: metadata(code.store, code.member),
+            store_name: code.name,
+        },
     })
 }
 

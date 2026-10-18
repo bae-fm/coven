@@ -1,7 +1,7 @@
 use super::*;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
-use coven_foundation::files::StoreLayoutAccess;
+use coven_foundation::files::StoreDirectoriesAccess;
 use coven_foundation::files::{SettingsError, StoreLockError};
 
 impl Database {
@@ -229,12 +229,9 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
         task::Poll,
     };
     let temp = tempfile::tempdir().unwrap();
-    let layout = coven_foundation::files::StoreLayout::new(temp.path().to_owned());
+    let layout = coven_foundation::files::StoreDirectories::new(temp.path().to_owned());
     let id = coven_foundation::id_source::StoreId(uuid::Uuid::from_u128(1));
-    let pending = layout
-        .begin_bootstrap(id, "Household", &UuidIds)
-        .await
-        .unwrap();
+    let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let database = DatabaseBuilder::new(pending.directory())
         .synced_tables(vec![])
         .migrations(vec![])
@@ -257,7 +254,7 @@ async fn dropped_bootstrap_reopen_waits_for_the_active_read_to_finish() {
     drop(read);
     drop(database);
     drop(pending);
-    let mut reopen = Box::pin(layout.begin_bootstrap(id, "Household", &UuidIds));
+    let mut reopen = Box::pin(layout.begin_bootstrap(id, &UuidIds));
     poll_fn(|cx| {
         assert!(
             reopen.as_mut().poll(cx).is_pending(),
@@ -505,7 +502,7 @@ fn read_only_process() {
         uuid::Uuid::parse_str(&std::env::var("COVEN_DATABASE_TEST_STORE").unwrap()).unwrap(),
     );
     let path = std::path::Path::new(&path);
-    let layout = coven_foundation::files::StoreLayout::new(
+    let layout = coven_foundation::files::StoreDirectories::new(
         path.parent()
             .unwrap()
             .parent()
@@ -522,7 +519,7 @@ fn read_only_process() {
         Err(CovenError::Lock(StoreLockError::AlreadyOpen(id))) if id == store_id
     ));
     assert!(matches!(
-        runtime.block_on(layout.begin_bootstrap(store_id, "Store", &UuidIds)),
+        runtime.block_on(layout.begin_bootstrap(store_id, &UuidIds)),
         Err(coven_foundation::files::BootstrapDirectoryError::Lock(
             StoreLockError::AlreadyOpen(id)
         )) if id == store_id

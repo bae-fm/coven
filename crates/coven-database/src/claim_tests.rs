@@ -14,7 +14,7 @@ use coven_format::{
     snapshot_stream::SnapshotChunkDecoder, test_utils::fixture_bytes as hex,
 };
 use coven_foundation::{
-    files::StoreLayout,
+    files::StoreDirectories,
     id_source::{DeviceId, IdSource, SequentialIds},
 };
 use serde_json::json;
@@ -204,10 +204,9 @@ async fn pinned_last_claims_settle_lost_replies_for_every_slot_kind() {
     }
     for (slot, number, object, snapshot, prefix) in cases {
         let temporary = tempfile::tempdir().unwrap();
-        let directory = StoreLayout::new(temporary.path().to_owned())
+        let directory = StoreDirectories::new(temporary.path().to_owned())
             .create_store_dir(
                 coven_format::test_utils::STORE_ID,
-                "claim fixtures",
                 &FixtureDevice(SequentialIds::new()),
             )
             .unwrap();

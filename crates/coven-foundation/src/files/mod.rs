@@ -23,7 +23,7 @@ pub use creation::DirectoryCreationError;
 pub use device_reset::DeviceReset;
 pub use directory::{FileArea, FileName, FileNameError, StoreDir, StoreDirAccess, StoreFile};
 pub use file_reader::FileReader;
-pub use layout::{StoreInfo, StoreLayout, StoreLayoutAccess, StoreLayoutError};
+pub use layout::{StoreDirectories, StoreDirectoriesAccess, StoreDirectoriesError};
 pub use lock::{
     CacheWriteLock, StoreClosingGuard, StoreDeletionLock, StoreLock, StoreLockError, StoreReadLock,
 };

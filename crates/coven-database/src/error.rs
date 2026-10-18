@@ -143,12 +143,10 @@ pub enum DbError {
         what: &'static str,
     },
     /// Directory settings disagree with a store's creation entry (§10).
-    #[error("store settings disagree with creation of {store} named {name:?}")]
+    #[error("store settings disagree with creation of {store}")]
     StoreSettingsMismatch {
         /// The id in the creation entry.
         store: coven_foundation::id_source::StoreId,
-        /// The name in the creation entry.
-        name: String,
     },
     /// A synced table declaration or schema is invalid.
     #[error(transparent)]

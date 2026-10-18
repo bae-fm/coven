@@ -274,7 +274,7 @@ impl Network {
         );
         let (handle, _) = join_and_approve(owner, joining, |_| async {}).await;
         let handle = handle.unwrap().unwrap();
-        let store = decode_code_info(&invite.code).unwrap().store_id;
+        let store = decode_code_info(&invite.code).unwrap().metadata().store_id;
         handle.start_sync().await.unwrap();
         self.devices.push(Device {
             app,

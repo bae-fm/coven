@@ -20,6 +20,7 @@ mod circles;
 
 mod authentication;
 mod storage;
+mod store_layout;
 
 #[cfg(test)]
 #[path = "lib_tests.rs"]

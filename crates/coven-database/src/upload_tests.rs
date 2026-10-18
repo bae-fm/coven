@@ -307,7 +307,7 @@ fn crashing_upload_attempt() {
         return;
     };
     let path = std::path::Path::new(&path);
-    let layout = coven_foundation::files::StoreLayout::new(
+    let layout = coven_foundation::files::StoreDirectories::new(
         path.parent()
             .unwrap()
             .parent()

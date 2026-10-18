@@ -433,7 +433,7 @@ async fn offline_circle_write(compare: bool) {
             "unique_claims":[],"owner_creations":[],"writes":[1],"rows":[]})
         };
         let input = json!({"kind":"apply","member_count":3,
-            "initial":{"members":[{"member":0,"role":"admin","key_gen":0},
+            "initial":{"name":"sequence tests","members":[{"member":0,"role":"admin","key_gen":0},
                 {"member":2,"role":"member","key_gen":0}],
                 "devices":[{"device":0,"member":0},{"device":2,"member":2}]},
             "audiences":[{"audience":1,"version":1,"writers":[0,2]}],

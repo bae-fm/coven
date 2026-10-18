@@ -106,7 +106,7 @@ pub(crate) fn checked_change(
     }
     let authorized = match change {
         CreateStore { .. } | AddDevice { .. } | CreateCircle { .. } => true,
-        AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => is_admin,
+        RenameStore { .. } | AddMember { .. } | RemoveMember { .. } | ChangeRole { .. } => is_admin,
         SetAccess { member, access } => {
             member == author
                 || (is_admin && matches!(access, coven_format::MemberAccess::S3AccessKey { .. }))
@@ -175,6 +175,13 @@ pub(crate) fn checked_change(
                     state: DeviceState::Active,
                 },
             );
+        }
+        RenameStore { name } => {
+            let store = next.store.as_mut().expect("authorized store");
+            if store.name == *name {
+                return Ok(None);
+            }
+            store.name = name.clone();
         }
         AddMember {
             member: id,

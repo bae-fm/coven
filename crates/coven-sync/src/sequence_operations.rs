@@ -912,6 +912,7 @@ fn operation_kind(change: &StoreChange) -> crate::OperationKind {
     use crate::OperationKind as K;
     match change {
         StoreChange::CreateStore { .. } => K::CreateStore,
+        StoreChange::RenameStore { .. } => K::RenameStore,
         StoreChange::AddMember { .. } => K::Invite,
         StoreChange::RemoveMember { .. } => K::RemoveMember,
         StoreChange::ChangeRole { .. } => K::SetRole,

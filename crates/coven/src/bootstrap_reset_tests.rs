@@ -431,3 +431,60 @@ async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys(
     assert_eq!(handle.device_reset().await.unwrap(), None);
     handle.close().await.unwrap();
 }
+
+#[tokio::test]
+async fn an_unconnected_reset_resumes_with_the_local_creation_name() {
+    for partial_move in [false, true] {
+        let f = Fixture::new().await;
+        f.handle.close().await.unwrap();
+        let reset = interrupted_reset(&f);
+        if partial_move {
+            let database = f.directory.database_path();
+            let archive = database
+                .parent()
+                .unwrap()
+                .join(format!("discarded-device-{}", reset.old_device.0));
+            std::fs::create_dir(&archive).unwrap();
+            std::fs::rename(&database, archive.join("store.db")).unwrap();
+            assert_eq!(f.directory.settings().unwrap().device_id, reset.old_device);
+        } else {
+            let layout = StoreLayout::new(f._root.path().into());
+            let pending = layout
+                .begin_bootstrap(f.directory.id(), &UuidIds)
+                .await
+                .unwrap();
+            assert_eq!(
+                pending.directory().settings().unwrap().device_id,
+                reset.new_device
+            );
+            drop(pending);
+        }
+        let handle = reopen(&f)
+            .reset_device(f.directory.id(), "Phone")
+            .await
+            .unwrap();
+        assert_eq!(handle.store_name().await.unwrap(), "Reset");
+        assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
+        handle.close().await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
+    let f = Fixture::new().await;
+    f.handle.close().await.unwrap();
+    let old = f.directory.settings().unwrap();
+    std::fs::write(f.directory.database_path(), b"damaged database").unwrap();
+    assert!(matches!(
+        reopen(&f).reset_device(f.directory.id(), "Phone").await,
+        Err(BootstrapError::Store(CovenError::Database(
+            DbError::DamagedDatabase
+        )))
+    ));
+    assert_eq!(
+        std::fs::read(f.directory.database_path()).unwrap(),
+        b"damaged database"
+    );
+    assert_eq!(f.directory.settings().unwrap(), old);
+    assert_eq!(f.directory.device_reset().unwrap(), None);
+}

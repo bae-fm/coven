@@ -18,43 +18,34 @@ use crate::id_source::{IdSource, StoreId};
     doc = r#"
 Directory-only creation is a test fixture.
 ```compile_fail
-use coven_foundation::{files::StoreLayout, id_source::{StoreId, UuidIds, IdSource}};
-let layout = StoreLayout::new("stores".into());
-let _ = layout.create_store_dir(StoreId(UuidIds.new_id()), "Store", &UuidIds);
+use coven_foundation::{files::StoreDirectories, id_source::{StoreId, UuidIds, IdSource}};
+let layout = StoreDirectories::new("stores".into());
+let _ = layout.create_store_dir(StoreId(UuidIds.new_id()), &UuidIds);
 ```"#
 )]
 #[derive(Clone, Debug)]
-pub struct StoreLayout {
+pub struct StoreDirectories {
     app_dir: PathBuf,
-}
-
-/// A store on this device, by id and name (E1).
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct StoreInfo {
-    /// The store's identity.
-    pub id: StoreId,
-    /// The store's name.
-    pub name: String,
 }
 
 /// A failure reading the app's store directories.
 #[derive(Debug, thiserror::Error)]
-pub enum StoreLayoutError {
+pub enum StoreDirectoriesError {
     /// The operating system refused a listing or a settings read.
     #[error("list stores: {0}")]
     File(#[from] FileError),
 }
 
-impl StoreLayout {
+impl StoreDirectories {
     /// The stores under `app_dir`, one directory each (E1).
     pub fn new(app_dir: PathBuf) -> Self {
         Self { app_dir }
     }
 
-    /// The stores on this device, by id and name, ordered by id (E1).
+    /// The stores on this device, ordered by id (E1).
     /// Only directories with a canonical UUID name and matching valid settings
     /// are stores. Invalid entries are logged; filesystem failures are errors.
-    pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError> {
+    pub async fn store_ids(&self) -> Result<Vec<StoreId>, StoreDirectoriesError> {
         let layout = self.clone();
         match tokio::task::spawn_blocking(move || layout.list_stores()).await {
             Ok(result) => result,
@@ -63,7 +54,7 @@ impl StoreLayout {
         }
     }
 
-    fn list_stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError> {
+    fn list_stores(&self) -> Result<Vec<StoreId>, StoreDirectoriesError> {
         let root = self.app_dir.join("stores");
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -101,17 +92,14 @@ impl StoreLayout {
                 continue;
             }
             match settings::read(&path, id) {
-                Ok(settings) => stores.push(StoreInfo {
-                    id,
-                    name: settings.name,
-                }),
+                Ok(_) => stores.push(id),
                 Err(SettingsError::File(error)) => return Err(error.into()),
                 Err(error) => {
                     tracing::warn!(path = %path.display(), error = %error, "directory has no valid store settings")
                 }
             }
         }
-        stores.sort_by_key(|store| store.id);
+        stores.sort();
         Ok(stores)
     }
 
@@ -126,15 +114,14 @@ impl StoreLayout {
     pub fn create_store_dir(
         &self,
         id: StoreId,
-        name: &str,
         ids: &dyn IdSource,
     ) -> Result<StoreDir, DirectoryCreationError> {
-        crate::files::creation::create(&self.app_dir.join("stores"), id, name, ids, false)
+        crate::files::creation::create(&self.app_dir.join("stores"), id, ids, false)
     }
 }
 
 /// Crate-to-crate operations for coven's owners; not re-exported by the app API.
-pub trait StoreLayoutAccess: Sized {
+pub trait StoreDirectoriesAccess: Sized {
     /// Reserve a hidden, restartable new-device store. A second attempt for the
     /// same id waits for a dropped bootstrap's remaining work to release its
     /// locks; a live bootstrap still refuses it. Ordinary store listings exclude
@@ -142,22 +129,19 @@ pub trait StoreLayoutAccess: Sized {
     fn begin_bootstrap(
         &self,
         id: StoreId,
-        name: &str,
         ids: &dyn IdSource,
     ) -> impl std::future::Future<
         Output = Result<super::BootstrapStore, super::BootstrapDirectoryError>,
     > + Send;
 }
 
-impl StoreLayoutAccess for StoreLayout {
+impl StoreDirectoriesAccess for StoreDirectories {
     async fn begin_bootstrap(
         &self,
         id: StoreId,
-        name: &str,
         ids: &dyn IdSource,
     ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
-        super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, name, ids)
-            .await
+        super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, ids).await
     }
 }
 

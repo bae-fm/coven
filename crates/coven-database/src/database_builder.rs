@@ -167,7 +167,6 @@ impl DatabaseBuilder {
                     device: settings.device_id,
                     lock,
                 },
-                name: settings.name,
                 migrations: outcomes,
                 clock,
                 ids,
@@ -227,6 +226,34 @@ pub async fn discarded_operations(
             let db = DatabaseConnection::open(&path, true, SqlAuthorization::new(&[]))?;
             db.check_integrity()?;
             crate::operation::read(&db)
+        })
+        .await,
+    )
+}
+
+/// Read the name for a local store listing without migrations or a writer.
+pub async fn read_store_name(directory: StoreDir) -> CovenResult<String> {
+    finish_blocking(
+        tokio::task::spawn_blocking(move || {
+            let _lock = directory.lock_read_only()?;
+            let database = DatabaseConnection::open(
+                &directory.database_path(),
+                true,
+                SqlAuthorization::new(&[]),
+            )?;
+            Ok(crate::store_state_tables::name(&database)?)
+        })
+        .await,
+    )
+}
+
+/// The local creation name in a reset's discarded database. The reset owner
+/// holds its directory lease while reading this setting.
+pub async fn discarded_store_name(path: std::path::PathBuf) -> Result<String, DbError> {
+    finish_blocking(
+        tokio::task::spawn_blocking(move || {
+            let database = DatabaseConnection::open(&path, true, SqlAuthorization::new(&[]))?;
+            crate::store_state_tables::name(&database)
         })
         .await,
     )

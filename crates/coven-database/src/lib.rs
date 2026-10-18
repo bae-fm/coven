@@ -108,7 +108,10 @@ pub use database::file_retention::FileCandidate;
 pub use database::input_database::{
     FileEvidence, InputBudget, RetainedBytes, RetainedInput, RetainedRange, UnprovenFiles,
 };
-pub use database::{discarded_operations, Database, DatabaseBuilder, DatabaseReadHandle};
+pub use database::{
+    discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder,
+    DatabaseReadHandle,
+};
 pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
 pub use download::{ApplyOutcome, WriteWait};
 #[cfg(test)]

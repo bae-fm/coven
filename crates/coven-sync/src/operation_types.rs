@@ -18,6 +18,8 @@ pub type OperationError = crate::SyncError;
 pub enum OperationKind {
     /// Create the store's first slot.
     CreateStore,
+    /// Set the store name.
+    RenameStore,
     /// Register this installation.
     AddDevice,
     /// Set a member's role.

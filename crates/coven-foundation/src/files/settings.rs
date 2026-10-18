@@ -1,4 +1,4 @@
-//! The store's id and name, and this device's id, in one atomic settings file.
+//! The store's id and this device's id in one atomic settings file.
 
 use std::path::Path;
 
@@ -16,8 +16,6 @@ pub(crate) const SETTINGS_FILE: &str = "settings.json";
 pub struct StoreSettings {
     /// The store's identity, shared by all of its devices.
     pub id: StoreId,
-    /// The store's name.
-    pub name: String,
     /// This install's identity; a restored copy receives a fresh one (§19.3).
     pub device_id: DeviceId,
 }

@@ -40,14 +40,16 @@ fn restore_metadata_retains_the_creation_access_choice() {
     ] {
         let code = RestoreCode {
             store: StoreId(uuid::Uuid::from_u128(1)),
-            name: "Personal".into(),
             member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)),
             member_keys: coven_crypto::MemberKeys::generate().unwrap(),
             storage: location.encode().unwrap(),
         }
         .to_text()
         .unwrap();
-        assert_eq!(decode_code_info(&code).unwrap().oauth_access, Some(access));
+        let CodeInfo::Restore(metadata) = decode_code_info(&code).unwrap() else {
+            panic!("restore metadata");
+        };
+        assert_eq!(metadata.oauth_access, Some(access));
         let decoded = read_restore_code(&code).unwrap();
         assert_eq!(
             StorageConfig::decode(decoded.storage.as_bytes()).unwrap(),
@@ -60,7 +62,6 @@ fn restore_metadata_retains_the_creation_access_choice() {
 fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     let restore = RestoreCode {
         store: StoreId(uuid::Uuid::from_u128(1)),
-        name: "Household".into(),
         member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(1)),
         member_keys: coven_crypto::MemberKeys::generate().unwrap(),
         storage: location().encode().unwrap(),
@@ -68,7 +69,7 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
     let restore_text = restore.to_text().unwrap();
     let invite = InviteCode {
         store: restore.store,
-        name: restore.name.clone(),
+        name: "Household".into(),
         invite: InviteId(uuid::Uuid::from_u128(2)),
         // The admin's chosen id for the invited person, not the inviter's.
         member: coven_foundation::id_source::MemberId(uuid::Uuid::from_u128(2)),
@@ -92,17 +93,21 @@ fn metadata_validates_kind_checksum_and_storage_without_exposing_secrets() {
         (&restore_text, CodeKind::Restore, restore.member),
         (&invite_text, CodeKind::Invite, invite.member),
     ] {
-        assert_eq!(
-            decode_code_info(text).unwrap(),
-            CodeInfo {
-                kind,
+        assert_eq!(decode_code_info(text).unwrap(), {
+            let metadata = CodeMetadata {
                 store_id: restore.store,
-                store_name: "Household".into(),
                 member,
                 cloud_provider: CloudProvider::S3,
-                oauth_access: None
+                oauth_access: None,
+            };
+            match kind {
+                CodeKind::Restore => CodeInfo::Restore(metadata),
+                CodeKind::Invite => CodeInfo::Invite {
+                    metadata,
+                    store_name: "Household".into(),
+                },
             }
-        );
+        });
         assert!(!format!("{:?}", decode_code_info(text).unwrap()).contains("secret"));
         let truncated = &text[..text.len() - 1];
         assert!(matches!(

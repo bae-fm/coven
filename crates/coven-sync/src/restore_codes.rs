@@ -72,7 +72,7 @@ impl RestoreCodes {
     }
 
     /// Encode this member's stable id and current private pair, store id and
-    /// name, and storage location only. The pair is the held one the applied
+    /// storage location only. The pair is the held one the applied
     /// history binds now; without it the call reports `MemberKeysReplaced` rather
     /// than exporting a retired pair (§13.1).
     pub async fn restore_code(&self) -> Result<String, SyncError> {
@@ -246,12 +246,10 @@ impl RestoreCodes {
         &self,
         data: ConnectionCredentials,
         sign_in: Option<Arc<SessionSignIn>>,
-        initial_name: String,
     ) -> Result<(crate::StorageCommit, SecretText), SyncError> {
         data.validate()?;
         let guard = self.inner.clone().lock_owned().await;
         let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-        let store = owner.database.store_state().await?.store;
         let identity = owner
             .identity
             .read()?
@@ -259,7 +257,6 @@ impl RestoreCodes {
         // The code names the stable id its unchanged private-pair blob belongs to (D13).
         let code = RestoreCode {
             store: owner.store,
-            name: store.map_or(initial_name, |store| store.name),
             member: identity.member(),
             member_keys: identity.keys().clone(),
             storage: data.location.encode()?,
@@ -317,7 +314,6 @@ impl RestoreCodesInner {
     ) -> Result<SecretText, SyncError> {
         let code = RestoreCode {
             store: store.id,
-            name: store.name.clone(),
             member: identity.member(),
             member_keys: identity.keys().clone(),
             storage: self
@@ -381,7 +377,6 @@ impl RestoreCodesInner {
             })?;
         Ok(RestoreCode {
             store: store.id,
-            name: store.name,
             member: identity.member(),
             member_keys: selected.keys().clone(),
             storage: location.encode()?,

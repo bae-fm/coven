@@ -43,11 +43,14 @@ use crate::{LiveQuery, LostValue, Read, ReconfigurableLiveQuery, SqlReadContext}
 
 #[path = "database_builder.rs"]
 mod builder;
+#[path = "database_store.rs"]
+mod store;
+
 #[path = "database_retry.rs"]
 mod retry;
 #[path = "database_sync.rs"]
 mod sync;
-pub use builder::{discarded_operations, DatabaseBuilder};
+pub use builder::{discarded_operations, discarded_store_name, read_store_name, DatabaseBuilder};
 
 /// Shared ownership of the database. Closing any clone closes them all.
 #[derive(Clone)]
@@ -60,9 +63,6 @@ pub struct Database {
 struct DatabaseInner {
     inputs: input_database::InputDatabase,
     access: DatabaseAccess<StoreLock>,
-    // The directory settings' store name, read under the writer lock. A creation
-    // entry is prepared and applied only with this name (§10).
-    name: String,
     migrations: Vec<MigrationOutcome>,
     clock: ClockRef,
     ids: IdSourceRef,

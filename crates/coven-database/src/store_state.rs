@@ -58,7 +58,7 @@ impl StoreState {
     }
 }
 
-/// The created store, as its kept creation entry names it (§10).
+/// A store's identity and current name (§10).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StoreIdentity {
     /// The store's id.
@@ -73,22 +73,14 @@ impl StoreIdentity {
         &self,
         settings: &coven_foundation::files::StoreSettings,
     ) -> Result<(), DbError> {
-        check_creation(self.id, &self.name, settings.id, &settings.name)
+        check_creation(self.id, settings.id)
     }
 }
 
-/// A creation's id and name must be the ones the directory settings name (§10).
-pub(crate) fn check_creation(
-    store: StoreId,
-    name: &str,
-    settings_store: StoreId,
-    settings_name: &str,
-) -> Result<(), DbError> {
-    if store != settings_store || name != settings_name {
-        return Err(DbError::StoreSettingsMismatch {
-            store,
-            name: name.into(),
-        });
+/// The sequence's store id must match the directory settings (§10).
+pub(crate) fn check_creation(store: StoreId, settings_store: StoreId) -> Result<(), DbError> {
+    if store != settings_store {
+        return Err(DbError::StoreSettingsMismatch { store });
     }
     Ok(())
 }
@@ -164,3 +156,7 @@ pub struct StoreVersion {
     /// The kept raise that selected it.
     pub entry: Slot,
 }
+
+#[cfg(test)]
+#[path = "store_state_tests.rs"]
+mod tests;

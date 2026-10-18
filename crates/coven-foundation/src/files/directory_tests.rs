@@ -1,5 +1,5 @@
 use super::*;
-use crate::files::StoreLayout;
+use crate::files::StoreDirectories;
 use crate::id_source::UuidIds;
 use uuid::Uuid;
 
@@ -13,9 +13,9 @@ fn cancelled_writes_retain_the_store_until_blocking_io_finishes() {
     runtime.block_on(async {
         for finish in [false, true] {
             let root = tempfile::tempdir().unwrap();
-            let layout = StoreLayout::new(root.path().to_owned());
+            let layout = StoreDirectories::new(root.path().to_owned());
             let store = layout
-                .create_store_dir(StoreId(Uuid::from_u128(123)), "Files", &UuidIds)
+                .create_store_dir(StoreId(Uuid::from_u128(123)), &UuidIds)
                 .unwrap();
             let name = FileName::new("cancelled").unwrap();
             let mut writer = store
@@ -82,9 +82,9 @@ fn cancelled_writes_retain_the_store_until_blocking_io_finishes() {
 async fn a_streaming_writer_prevents_store_deletion_until_it_closes() {
     for area in [FileArea::AppProvided, FileArea::Cache] {
         let root = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(root.path().to_owned());
+        let layout = StoreDirectories::new(root.path().to_owned());
         let id = StoreId(Uuid::from_u128(123));
-        let store = layout.create_store_dir(id, "Files", &UuidIds).unwrap();
+        let store = layout.create_store_dir(id, &UuidIds).unwrap();
         let name = FileName::new("streamed").unwrap();
         let mut writer = store
             .file(area, &name)
@@ -112,9 +112,9 @@ async fn a_streaming_writer_prevents_store_deletion_until_it_closes() {
 #[test]
 fn named_file_capabilities_stay_in_their_own_areas() {
     let directory = tempfile::tempdir().unwrap();
-    let layout = StoreLayout::new(directory.path().to_owned());
+    let layout = StoreDirectories::new(directory.path().to_owned());
     let id = StoreId(Uuid::from_u128(123));
-    let store = layout.create_store_dir(id, "Household", &UuidIds).unwrap();
+    let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let name = FileName::new("attachment.data").unwrap();
     store
         .file(FileArea::AppProvided, &name)
@@ -156,7 +156,7 @@ fn named_file_capabilities_stay_in_their_own_areas() {
             .unwrap(),
         b"cache"
     );
-    assert_eq!(store.settings().unwrap().name, "Household");
+    assert_eq!(store.settings().unwrap().id, id);
     assert_eq!(store.database_path().file_name().unwrap(), "store.db");
     assert_eq!(store.id(), id);
 }

@@ -146,7 +146,6 @@ pub(crate) struct StorageConnections {
     settings: coven_storage::StorageSettings,
     waits: Arc<coven_sync::RetryWaits>,
     transfers: Arc<coven_storage::TransferBudget>,
-    initial_name: String,
     keys: std::sync::Mutex<Option<Arc<KeySession<StoreKeyring>>>>,
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
@@ -184,7 +183,6 @@ impl StorageConnections {
         directory: StoreDir,
         waits: Arc<coven_sync::RetryWaits>,
         transfers: Arc<coven_storage::TransferBudget>,
-        initial_name: String,
         keys: Arc<KeySession<StoreKeyring>>,
         connector: Arc<dyn StorageConnector>,
         oauth: Option<OAuthFlow>,
@@ -215,7 +213,6 @@ impl StorageConnections {
             directory,
             waits,
             transfers,
-            initial_name,
             keys: std::sync::Mutex::new(Some(keys)),
             connector,
             oauth,
@@ -588,7 +585,6 @@ impl StorageConnections {
                         credentials,
                     },
                     sign_in,
-                    self.initial_name.clone(),
                 )
                 .await?;
             let sync = self.sequence(storage.clone(), &live).await?;
@@ -682,7 +678,7 @@ impl StorageConnections {
             let result = sync
                 .administer(coven_format::admin::StoreChange::CreateStore {
                     store: self.store(),
-                    name: self.initial_name.clone(),
+                    name: self.database.store_name().await.map_err(SyncError::from)?,
                     admin: member.keys().public_keys(),
                     access,
                     device_name: device_name.into(),

@@ -1,7 +1,6 @@
 //! Create identity custody while the store remains unpublished.
 
 use super::*;
-use coven_foundation::files::StoreLayoutAccess;
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
 
 pub(super) async fn create(
@@ -13,10 +12,10 @@ pub(super) async fn create(
     let pending = Arc::new(
         builder
             .layout
-            .begin_bootstrap(id, &name, builder.ids.as_ref())
+            .begin_bootstrap(id, builder.ids.as_ref())
             .await?,
     );
-    match prepare(builder, pending.clone(), publish).await {
+    match prepare(builder, pending.clone(), name, publish).await {
         Ok(handle) => Ok(handle),
         Err(error @ StoreCreationError::PublishedButNotSynced { .. }) => Err(error),
         Err(error) => Err(
@@ -31,10 +30,14 @@ pub(super) async fn create(
 async fn prepare(
     builder: CovenBuilder,
     pending: Arc<BootstrapStore>,
+    name: String,
     publish: impl FnOnce(&BootstrapStore) -> Result<(), BootstrapDirectoryError> + Send + 'static,
 ) -> Result<CovenHandle, StoreCreationError> {
     let directory = pending.directory();
     let database = builder.database(directory.clone())?.open().await?;
+    if let Err(error) = database.initialize_store_name(name).await {
+        return Err(close_failed(&database, CovenError::from(error).into()).await);
+    }
     let waits = match coven_sync::RetryWaits::open(database.clone(), builder.clock.clone()).await {
         Ok(waits) => Arc::new(waits),
         Err(error) => return Err(close_failed(&database, CovenError::from(error).into()).await),

@@ -1,6 +1,6 @@
 use super::*;
 use coven_foundation::{
-    files::{StoreDir, StoreLayout},
+    files::{StoreDir, StoreDirectories},
     id_source::{SequentialIds, StoreId},
 };
 use coven_storage::{
@@ -248,8 +248,8 @@ pub(crate) struct Fixture {
 impl Fixture {
     pub(crate) async fn new() -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let directory = StoreLayout::new(temp.path().into())
-            .create_store_dir(store(), "input", &SequentialIds::new())
+        let directory = StoreDirectories::new(temp.path().into())
+            .create_store_dir(store(), &SequentialIds::new())
             .unwrap();
         let db = coven_database::DatabaseBuilder::new(directory.clone())
             .synced_tables(vec![])

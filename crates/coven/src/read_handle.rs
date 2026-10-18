@@ -26,6 +26,11 @@ impl CovenReadHandle {
     pub(crate) fn new(database: DatabaseReadHandle, files: coven_sync::Files) -> Self {
         Self { database, files }
     }
+    /// The store's current name from this device's committed state (E9).
+    pub async fn store_name(&self) -> CovenResult<String> {
+        self.database.store_name().await
+    }
+
     /// A read of one consistent snapshot, run when awaited.
     pub fn read<F, R>(&self, read: F) -> Read<'_, F>
     where

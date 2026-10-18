@@ -369,7 +369,6 @@ impl CovenBuilder {
             authentication: self.authentication,
             transfers: self.transfers,
             device: settings.device_id,
-            initial_name: settings.name,
             keys,
             identity,
             publications: Arc::new(crate::storage::Publications::new(state.clone())),
@@ -443,7 +442,6 @@ struct OpeningStore {
 }
 
 struct OpeningOwners {
-    initial_name: String,
     transfers: Arc<coven_storage::TransferBudget>,
     keychain: Arc<StoreKeychain>,
     credentials: Arc<coven_sync::DeviceCredentials>,
@@ -524,7 +522,6 @@ impl OpeningOwners {
             self.directory.clone(),
             waits,
             self.transfers,
-            self.initial_name,
             self.keys,
             self.connector,
             self.oauth,

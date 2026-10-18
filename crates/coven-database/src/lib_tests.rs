@@ -1,7 +1,7 @@
 use crate::{CovenError, DatabaseBuilder, DbError, Migration, SyncedTable};
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
-    files::{StoreDir, StoreLayout},
+    files::{StoreDir, StoreDirectories},
     id_source::{IdSource, SequentialIds, StoreId},
 };
 
@@ -10,7 +10,7 @@ pub(crate) struct TestStore {
     _temporary: tempfile::TempDir,
 }
 
-/// The store name in every test store's settings; fixture creation entries use it.
+/// The store name chosen by fixture creation entries.
 pub(crate) const STORE_NAME: &str = "database tests";
 
 /// The id of [`TestStore::new`]'s store, which fixture creation entries name.
@@ -32,13 +32,11 @@ impl TestStore {
 
     pub(crate) fn with_ids(ids: &dyn IdSource) -> Self {
         let temporary = tempfile::tempdir().unwrap();
-        let layout = StoreLayout::new(temporary.path().to_owned());
+        let layout = StoreDirectories::new(temporary.path().to_owned());
         // Every test store is a device of the one fixture store that fixture
         // creation entries name. Drawing an id first keeps device ids unchanged.
         ids.new_id();
-        let directory = layout
-            .create_store_dir(store_id(), STORE_NAME, ids)
-            .unwrap();
+        let directory = layout.create_store_dir(store_id(), ids).unwrap();
         Self {
             directory,
             _temporary: temporary,

@@ -417,8 +417,8 @@ async fn open_migrated(
     identity: coven_crypto::MemberIdentity,
 ) -> Device {
     use coven_database::{DatabaseBuilder, Migration, RowIdentity, SyncedTable};
-    use coven_foundation::files::StoreLayout;
-    let directory = StoreLayout::new(temp.path().into()).store_dir(&group.store);
+    use coven_foundation::files::StoreDirectories;
+    let directory = StoreDirectories::new(temp.path().into()).store_dir(&group.store);
     let database = DatabaseBuilder::new(directory)
         .synced_tables(vec![
             SyncedTable::new("notes", RowIdentity::SharedKey),
