@@ -527,10 +527,13 @@ that slot it:
 
 - applies nothing after it;
 - reloads no audience from the floor;
-- sends nothing: no writes, no file parts, no operation retries, no provider
-  changes.
+- sends nothing derived from the sequence: no writes, no file parts, no
+  operation retries, no provider changes.
 
-It reports why: `KeyUnavailable`, `UpdateRequired`, the read failure, or a
+Bootstrap join requests (§13) remain allowed: they precede the device's applied
+sequence and are how it asks to join.
+
+The device reports why: `KeyUnavailable`, `UpdateRequired`, the read failure, or a
 `Refused` reason. The app can still read its data and commit the local writes it
 is allowed to.
 
@@ -4828,8 +4831,8 @@ What they don't cover:
 - **The composition.** The merge and conversion proofs cover their stated inputs;
   they don't establish the whole storage protocol built from them.
 - **What a stopped device sends.** The model proves a stopped device takes no
-  apply or reload step (§5.4). That it sends nothing, and how it recovers once the
-  cause clears, are outside the model.
+  apply or reload step (§5.4). The restriction on sending, its bootstrap
+  join-request exception, and recovery once the cause clears are outside the model.
 
 CI builds every proof from scratch, with no unfinished proof and no axiom beyond
 Lean's own (Appendix F.6).
