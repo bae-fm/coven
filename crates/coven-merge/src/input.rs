@@ -202,9 +202,9 @@ pub struct Write<V, P = BTreeSet<WriteId>> {
     pub id: WriteId,
     /// Unique total-order timestamp (§7.2).
     pub timestamp: Timestamp,
-    /// Every write position the author had consumed, including its own earlier
-    /// writes. Consuming a position does not imply retaining its row changes.
-    /// A position frontier can represent the same relation without expansion.
+    /// The writes in the author's `read_through` prefix and its own earlier
+    /// writes (§7.1). Consuming a write does not imply retaining its row changes.
+    /// The sequence resolves this relation from the prefix and own predecessors.
     pub had_read: P,
     /// At most one change for each table, key and audience.
     pub changes: BTreeMap<RowId, Change<V>>,
