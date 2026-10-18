@@ -360,7 +360,7 @@ pub struct StoreLayout { /* private fields */ }
 pub struct StoreInfo {
     /// The store's identity.
     pub id: StoreId,
-    /// The store's name.
+    /// The current name from this device's committed database state.
     pub name: String,
 }
 
@@ -752,10 +752,9 @@ pub enum DbError {
     /// or a step its state machine cannot reach: a bug, never stored damage.
     /// Sync reports it as `Failed(LocalFailure::Database)` (§19.1).
     Invariant { what: &'static str },
-    /// Directory settings disagree with the store's creation entry when it
-    /// is prepared, applied or read at opening (§10); these are the id and
-    /// name in that entry.
-    StoreSettingsMismatch { store: StoreId, name: String },
+    /// The directory's store id disagrees with the creation entry when it
+    /// is prepared, applied or read at opening (§10). Names are not compared.
+    StoreSettingsMismatch { store: StoreId },
     /// A synced table declaration or schema is invalid.
     Schema(SchemaError),
     /// App SQL read, changed or defined one of coven's internal objects (§4).
@@ -1133,6 +1132,8 @@ pub enum ReadOnlyOpenError {
 pub enum StoreLayoutError {
     /// Listing directories or reading settings failed.
     File(FileError),
+    /// Reading this store's current name failed; no older name is substituted.
+    Store { store: StoreId, source: CovenError },
 }
 
 /// A store creation failure, with publication and rollback failures explicit.
@@ -1318,18 +1319,18 @@ impl StoreLayout {
     /// The stores under `app_dir`, one directory each.
     pub fn new(app_dir: PathBuf) -> Self;
 
-    /// The stores on this device, by id and name.
+    /// The stores on this device, ordered by id, with their committed names.
+    /// Reads names from their databases; unreadable names return StoreLayoutError::Store.
     pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError>;
 
     /// The directory of the store with `id`.
     pub fn store_dir(&self, id: &StoreId) -> StoreDir;
 
-    /// Publish a directory fixture without initializing member custody.
+    /// Publish a directory fixture without a database or member custody.
     #[cfg(feature = "test-utils")]
     pub fn create_store_dir(
         &self,
         id: StoreId,
-        name: &str,
         ids: &dyn IdSource,
     ) -> Result<StoreDir, DirectoryCreationError>;
 }
@@ -2074,6 +2075,9 @@ pub enum RemovalRule {
 
 /// A handle that only reads, opened with `open_read_only`.
 impl CovenReadHandle {
+    /// The current name from this device's committed state (E9).
+    pub async fn store_name(&self) -> CovenResult<String>;
+
     /// Closes read and cache connections on all clones and releases their store lock.
     /// Reports connection-close failures; cancellation does not stop closing.
     pub async fn close(&self) -> Result<(), DbError>;
@@ -3225,6 +3229,7 @@ pub struct OperationId(pub i64);
 /// The app purpose of an unfinished operation (§11.5, §19.4).
 pub enum OperationKind {
     CreateStore,
+    RenameStore,
     AddDevice,
     SetRole,
     SetAccess,
@@ -3575,8 +3580,13 @@ match stream.read_at(resume_at, 256 * 1024).await {
 
 ### E9 Members and devices
 
-- Only admins add and remove members, and change roles; each member removes
-  their own devices, and admins any device ([§10](coven.md#10-members-roles-and-devices)).
+- Only admins rename the store, add and remove members, and change roles. Each
+  member removes their own devices, and admins any device
+  ([§10](coven.md#10-members-roles-and-devices)).
+- The handle reads the current store name from its committed database state;
+  `subscribe_store_name` publishes that query after commits (E4). Before
+  storage is set up, this is the name chosen at local creation. No directory
+  setting retains a second name that a rename could leave behind.
 - Administrative calls require an online sequence catch-up (§10, E6).
 - A member records their own new storage access; an admin may also record an
   S3 replacement for another member. Authority uses the author's role in the
@@ -3635,6 +3645,16 @@ match stream.read_at(resume_at, 256 * 1024).await {
 
 ```rust
 impl CovenHandle {
+    /// The current name from this device's committed state (§10).
+    pub async fn store_name(&self) -> CovenResult<String>;
+
+    /// The same internal query, live (E4).
+    pub fn subscribe_store_name(&self) -> LiveQuery<String>;
+
+    /// Sets the name as an admin in the state before its slot (§10, §11).
+    /// Returns once the slot commits, or without a slot if already satisfied.
+    pub async fn rename_store(&self, name: &str) -> Result<(), SyncError>;
+
     /// The members and their devices at this device's applied slot.
     pub async fn members(&self) -> CovenResult<Vec<MemberInfo>>;
 
@@ -3978,10 +3998,13 @@ pub enum ProviderSignOut {
   as a QR code, typed in, or read from iCloud Keychain
   ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
 - The restore code contains only the stable member id and current private
-  pair, store id and name, and
-  storage location. On S3, the person keeps their access key separately,
-  such as in a password manager, and supplies it on the new device. Dropbox
+  pair, store id and storage location. On S3, the person keeps their access key
+  separately, such as in a password manager, and supplies it on the new device. Dropbox
   and OneDrive likewise require the person's provider sign-in.
+- Restore codes and coven's iCloud Keychain entries carry no name. Before
+  connecting, a restoring device may show the id and provider, never a store
+  name; it learns the name only after loading. An invite carries the current
+  name copied when it was made and expires within a day (§13.2).
 - A QR scan from one of the person's own devices may supply both the code
   and the S3 key, because the person controls the showing device. The key
   accompanies the code; it is never part of the restore-code encoding.
@@ -4046,13 +4069,22 @@ pub struct InviteId(pub Uuid);
 pub struct FileId(pub Uuid);
 
 /// What the app may show before using a scanned or typed code (E10).
-pub struct CodeInfo {
-    /// Whether this is the person's restore code or an invite.
-    pub kind: CodeKind,
+pub enum CodeInfo {
+    /// A restore code reveals no name before loading.
+    Restore(CodeMetadata),
+    /// An invite carries the name captured when the admin made it.
+    Invite { metadata: CodeMetadata, store_name: String },
+}
+
+impl CodeInfo {
+    /// The store, member and provider facts shared by either kind.
+    pub fn metadata(&self) -> &CodeMetadata;
+}
+
+/// Facts that either code carries, without secrets or a display name.
+pub struct CodeMetadata {
     /// The store named by the code.
     pub store_id: StoreId,
-    /// The store's name.
-    pub store_name: String,
     /// Stable member id fixed by either kind of code.
     pub member: MemberId,
     /// The provider holding the store.
@@ -4064,7 +4096,7 @@ pub struct CodeInfo {
 
 /// The two codes used to open a store on a new device (§13).
 pub enum CodeKind {
-    /// Holds only the person's member id and private keys, store id/name and location.
+    /// Holds only the person's member id and private keys, store id and location.
     Restore,
     /// Holds an invite id, chosen member id, secret, initial key id, inviting writer and its
     /// applied slot at invite time; approval is required (§13.2).
@@ -4243,8 +4275,8 @@ pub struct JoinRequest {
     /* private authenticated request record; construct only by receiving a checked request */
 }
 
-/// What a restore code or invite is for: the store and member ids, store
-/// name, provider, and whether the provider needs a sign-in first.
+/// The store and member ids, provider, and sign-in requirement. Only an
+/// invite returns a store name, captured when the invite was made.
 pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 
 /// Bootstrap progress, using the same records before an open handle exists.

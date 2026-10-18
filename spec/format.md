@@ -824,6 +824,7 @@ An admin frame (kind 4) is `change:u8 | fields`.
 | 14 | Set access | `member:MemberId \| access:MemberAccess` |
 | 15 | Rotate key | `audience:Audience \| key:uuid \| key_hash:32 bytes` |
 | 16 | Replace member keys | `member:MemberId \| expected:MemberKeys \| keys:MemberKeys` |
+| 17 | Rename store | `name:name` |
 
 - Tag 12 is unused.
 - A role is `0` admin or `1` member.
@@ -842,6 +843,9 @@ what it needs to check itself.
 
 **Signing.** Every other entry uses the signing binding immediately before its
 slot.
+
+**Store name.** Rename-store requires an admin in the preceding state and
+replaces the current name. Creation supplies the initial name (§10.3).
 
 **Devices.** Add-device registers the slot's writing device. A replacement
 retires a distinct older device of the same member.
@@ -1955,11 +1959,10 @@ short enough to type or scan, and must catch typing mistakes.
 ### Restore code (kind 10)
 
 A restore code lets a member's new device stand in for them (§13.1). It is
-`store:uuid | name:name | member:MemberId | member_keys:bytes | storage:bytes`:
+`store:uuid | member:MemberId | member_keys:bytes | storage:bytes`:
 
 ```
 store        uuid
-name         name
 member       MemberId
 member_keys  bytes
 storage      bytes
@@ -1973,6 +1976,8 @@ storage      bytes
   treat them as opaque bytes, and this document doesn't define that JSON.
 - The private-pair blob is unchanged, and explicitly belongs to `member`.
   Restore requires that id's current pair; an old code can't rebind it.
+- No store name is encoded. A restoring device learns it after loading, so
+  saved codes cannot retain an earlier name.
 - A restore code never carries storage credentials: neither an S3 access key nor
   OAuth tokens. A device-to-device QR transfer or iCloud Keychain may carry the
   S3 key alongside the code (§13.1), outside this frame.
@@ -1997,6 +2002,7 @@ storage          bytes
 
 | Field | Rule |
 | --- | --- |
+| `name` | the current store name copied when the invite is made; loading the store supplies its current name (§13.2) |
 | `invite` | the join request's path |
 | `member` | fixed by the admin: a fresh id for an addition, or an existing active id for a replacement. The signed request must repeat that id. |
 | `secret` | the invite secret, which derives the join request's key (D11) |

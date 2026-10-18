@@ -49,19 +49,20 @@ Checked counterexamples explain the rules:
 
 ## The model
 
-[`Model`](sequence/CovenSequence/Model.lean) keeps every type abstract: devices,
+[`Model`](sequence/CovenSequence/Model.lean) abstracts devices,
 members, unique keys, paths, batches, rows, audiences, and admin operations
-other than membership and roles (renames, access, circle membership), whose state
-is `aux`. Authority for membership and store resets is concrete in `Authority`;
-other rules remain abstract: who may write to an audience,
+other than membership, roles and the store name. Circle renames, access and
+circle membership use `aux`. Authority for membership, store renames and
+store resets is concrete in `Authority`. Other rules remain abstract: who may write to an audience,
 the effect of other operations, the merge, the converter of old-version parts,
 and the database part of a migration.
 
 For each audience `A`, a device's state has three parts:
 
 - **The ledger** holds what admin slots and key copies decide, the same for
-  every audience. That is active members and roles, retired member ids, devices
-  and their removal, member key generations, `aux`, key copies and refused admin slots. It also holds, per
+  every audience. That is the current store name, active members and roles,
+  retired member ids, devices and their removal, member key generations, `aux`,
+  key copies and refused admin slots. It also holds, per
   device, the greatest included claim number and the SHA-256 of that slot's
   complete bytes. Later slots replace the digest on an equal number; lower
   numbers preserve the existing record. A device with no included claim has
@@ -334,6 +335,11 @@ without changing entry effects or the ordered ledger.
   leaving none is refused.
 - `applied_membership_authorized`: each applied add, remove or role change
   was authored by an active admin in the preceding slot state.
+- `applied_rename_authorized`, `non_admin_rename_refused`: a store rename
+  requires an admin in the preceding state; refusal leaves the name unchanged.
+- `name_is_latest_applied`: the ledger name equals the creation name followed
+  by applied renames in slot order. `name_prefix` proves equal prefixes give
+  equal names, including prefixes with refused renames.
 - `store_reset_authorized`: a store reset requires an admin in that state;
   circle resets and schema raises retain their own audience authority policy.
 
@@ -800,14 +806,15 @@ Answer: `6`. With the floor's announcement at slot 6 covering only 2, the answer
 is `null`.
 
 **`apply`** evaluates `ledgerAt`, `audAt` and `rowsAt` at every prefix, using
-`Authority.withRoles` and `LiveClaims.winner`. The initial membership must
-contain an admin; initial devices refer to active members. Each audience gives
-its starting `version` and the devices allowed to write to it. The runner uses
+`Authority.withRoles` and `LiveClaims.winner`. The initial state supplies the
+creation `name` and membership containing an admin; initial devices refer to
+active members. Each audience gives its starting `version` and the devices
+allowed to write to it. The runner uses
 §10's per-member authority: members register their own fresh devices, remove
 their own devices and replace their own keys. Admins may also remove another
 member's device or replace that member's keys; only admins add or remove members
-and change roles. Registration must be authored by the fresh device itself,
-including for admins. Other admin entries need an active author. Membership
+and change roles or the store name. Registration must be authored by the fresh
+device itself, including for admins. Other admin entries need an active author. Membership
 must retain an admin, and an added member id must never have been a member.
 Conversion is the identity; audience writer lists and
 conversion are fixture parameters, not additional store rules.
@@ -816,8 +823,9 @@ Slots occupy positions `1..slots.length`. Each has `device`, positive `claim`,
 and `digest`. Repeated or decreasing numbers are accepted because copies can
 share an id. An admin slot is
 `{"kind":"admin","device":0,"claim":1,"digest":"slot-1-hash","entry":{"kind":"removeDevice","device":1}}`.
-Entry kinds are `addMember` (`member`, `role`), `removeMember` (`member`),
-`changeRole` (`member`, `role`), `addDevice` (`device`, `member`), `removeDevice`
+Entry kinds are `renameStore` (`name`), `addMember` (`member`, `role`),
+`removeMember` (`member`), `changeRole` (`member`, `role`),
+`addDevice` (`device`, `member`), `removeDevice`
 (`device`), `replaceKey` (`member`), and `circleMember` (`audience`, `member`,
 `allowed`). Circle changes require an active audience member and an active
 target member. Roles are `"admin"` or `"member"`.
@@ -835,7 +843,8 @@ one part per declared audience; each part supplies its authored `read_through`:
 
 ```json
 {"kind":"apply","member_count":1,
- "initial":{"members":[{"member":0,"role":"admin","key_gen":0}],"devices":[{"device":0,"member":0}]},
+ "initial":{"name":"Household","members":[{"member":0,"role":"admin","key_gen":0}],
+            "devices":[{"device":0,"member":0}]},
  "audiences":[{"audience":0,"version":1,"writers":[0]}],
  "slots":[{"kind":"writes","device":0,"claim":1,"digest":"slot-1-hash","key_gen":0,"parts":[
    {"audience":0,"version":1,"read_through":0,"unique_claims":[7],"owner_creations":[[9,1]],"writes":[1],
@@ -859,8 +868,8 @@ live, and setting `live:false` releases the claim. No uniqueness pass deletes
 those rows from the model's merge input.
 
 The answer has `ledger`, `audiences`, and `slots`; each item of `slots` has
-`slot`, `ledger`, and `audiences` for that prefix. The ledger contains `members`
-(`[member, role]`), `retired` member ids, all registered `devices`
+`slot`, `ledger`, and `audiences` for that prefix. The ledger contains the
+current `name`, `members` (`[member, role]`), `retired` member ids, all registered `devices`
 (`[device, member]`, including removed devices), `removed` device ids, `key_generations` (`[member, generation]`
 for the whole member universe), included `last_claims` (`[device, number, digest]`), and
 `refused` admin slot numbers. Each audience contains `audience`, `version`,
@@ -971,10 +980,12 @@ and settlement comparisons also include deterministic seeded cases.
   cut-off refusals at every prefix.
   Histories include competing rows, deletion releasing a value, batches and all
   three cut-offs. `coven-sync` checks administrative admission and then applies
-  the result through the database, comparing member/device/key state after each
-  slot, including attempted reuse of a removed member id. Already-satisfied operations
-  have no effect in Rust; the corresponding structurally refused model slots
-  also leave state unchanged. Registration targets the slot author in Rust's
+  the result through the database, comparing the name and member/device/key
+  state after each slot. Cases include renames before and after demotion or
+  promotion, repeated names, and attempted reuse of a removed member id.
+  Already-satisfied operations have no name or membership effect in either
+  implementation; Rust avoids claiming a new slot for them.
+  Registration targets the slot author in Rust's
   format, so cross-device registrations are tested in the Lean JSON tests.
 - `coven-merge` calls `SlotPast::contains` for every pair of supplied writes,
   including batches and shuffled input order. Histories satisfy the model's
@@ -1040,8 +1051,8 @@ they do not replace the separate byte-format, merge or queue tests.
   `settle_from_floor`. Only the single-copy theorems assume `Own` or its
   equivalent journal facts; these are not derived from a device counter.
 - Not modelled:
-  - concrete authority policies beyond membership, role changes, the runner's
-    device/key actions, circle membership changes and store resets;
+  - concrete authority policies beyond membership, role changes, store renames,
+    the runner's device/key actions, circle membership changes and store resets;
   - orphaned batch objects and provider request timing;
   - joiners reading slots before they hold the store key;
   - the merge's internals, source-verdict calculation and converter callbacks,

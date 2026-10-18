@@ -1771,6 +1771,7 @@ notices a restored backup posing as the original (§19.3).
 | Action | Who may do it |
 |---|---|
 | Create the store | the first device, which becomes the first admin (§10.3) |
+| Rename the store | an admin |
 | Add or remove a member, change a role | an admin |
 | Add a device | the member it belongs to, from that new device itself |
 | Remove a device | its member, or an admin |
@@ -1852,9 +1853,18 @@ Ana sets up Household on Dropbox:
 If another creation already holds slot 1, setup fails with
 `StorageFailure::StoreExists`.
 
-Creation supplies the store's id and name. Settings supplied later when setting
-up from the store must match them; a mismatch fails with
-`DbError::StoreSettingsMismatch`.
+Creation supplies the store's id and initial name. Settings supplied later when
+setting up from the store must match its id; a mismatch fails with
+`DbError::StoreSettingsMismatch`. Names are read from the applied history, so
+an earlier name cannot prevent setup.
+
+Ana renames Household to Family at slot 41. Ben's device shows Household until
+it applies slot 41, then shows Family. A later applied rename replaces Family.
+`RenameStore { name }` requires an admin in the state immediately before its
+slot, like the other admin entries. The current name is the creation name
+followed by the applied renames in slot order; equal applied prefixes give
+equal names. Store snapshots retain the original admin slots, including
+renames, so loading one recovers the name at its covered prefix.
 
 #### 10.4 Edge cases
 
@@ -1871,9 +1881,11 @@ up from the store must match them; a mismatch fails with
 - **Old identities stay known.** Snapshots keep the history of which keys each
   member had, removed members and devices, and every public key ever used. Old
   writes are checked against them, and they stop an id or key being reused.
-- **What the proofs cover.** The model proves membership and role changes
-  authorised, and an admin always present. Other admin actions are checked against
-  the authority rules this section states, which the model takes as given.
+- **What the proofs cover.** The model proves membership changes, role changes
+  and store renames authorised, and an admin always present. It also proves
+  that the name follows the applied renames and agrees at equal prefixes. Other
+  admin actions are checked against the authority rules this section states,
+  which the model takes as given.
 
 ### 11. Admin operations
 
@@ -2233,12 +2245,17 @@ A *restore code* holds:
 
 - the member's id and current private signing and sealing keys, which get the
   device the store key (§12);
-- the store's id and name;
+- the store's id;
 - the storage location, but never storage credentials or sign-in tokens.
 
 Coven returns the code at setup and whenever the member's keys are replaced, and
 `restore_code()` shows it again. Keeping it safe, or asking the person to confirm
 they wrote it down, is up to the app; coven tracks no pending task for it.
+
+The code carries no name, and neither do coven's iCloud Keychain entries. A
+rename therefore cannot leave a saved recovery label behind. A restoring
+device learns the current name only after loading the store; before
+connecting, the app may show its id and provider, never a store name.
 
 A new device gets the code in one of three ways:
 
@@ -2289,7 +2306,10 @@ Ana adds Dan to Household on Dropbox:
 5. Dan's phone opens its keys, loads the store, registers itself with its own
    "add device" entry, and Dan writes down his own restore code.
 
-The invite only lets Dan ask; Ana's approval lets him in.
+The invite only lets Dan ask; Ana's approval lets him in. It carries the current
+name when Ana makes it. If Household is renamed before Dan joins, the invite
+still shows Household until it expires, within a day. Loading the store gives
+Dan its current name; the invite's label never becomes a local setting.
 
 On Dropbox, OneDrive and iCloud, only the account that holds the store can share
 it, so the inviting admin must be the member whose account holds it (§20.9).
@@ -2298,7 +2318,8 @@ it, so the inviting admin must be the member whose account holds it (§20.9).
 
 | Field | Used for |
 |---|---|
-| store id, name and location | finding the store |
+| store id and location | finding the store |
+| current store name, copied when the invite is made | showing which store the invite is for |
 | invite id | the join request's path |
 | the chosen member id | fixed by Ana before she shows the invite |
 | the invite secret | encrypting the request; only Ana's phone has it |
@@ -4041,8 +4062,10 @@ and tells the app what was discarded.
   unsent edits may have been lost, including after reopening. If the notice can't
   be stored, the reset fails: coven never hands back a working handle that hides
   the discarded installation.
-- A reset with no storage connected creates an empty database with a fresh id.
-  Competing first setups still contend for slot 1 (§10.3).
+- A reset with no storage connected creates an empty database with a fresh id,
+  preserving its local creation name. That name must be readable before
+  anything moves, like the other required settings. Competing first setups
+  still contend for slot 1 (§10.3).
 
 Ana's laptop has uploaded through write 12, but its damaged database may hold
 write 13. Resetting loads the stored history through 12 under a new device id.
@@ -5184,6 +5207,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 
 | Table | Holds |
 |---|---|
+| `_coven_store` | the store id and current name; before slot 1, the local creation name is marked as not yet applied (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
 | `_coven_user_files` | a user-provided original's path while a row or unpublished write can name it (§17.7) |
 | `_coven_pending` | one record per thing that can't proceed (§19.1) |
@@ -6416,6 +6440,8 @@ Write-ups explain each model and state its assumptions:
 |---|---|---|---|
 | *Body.* Whether a slot is valid depends only on the slots before it, so equal prefixes give equal decisions | `valid_prefix` | `proofs/sequence/CovenSequence/Converge.lean` | §10.2 |
 | Membership and role changes apply only from an active admin in the preceding state; leaving no admin is refused; every prefix after creation keeps an admin | `applied_membership_authorized`, `last_admin_refused`, `every_prefix_has_admin` | `proofs/sequence/CovenSequence/Authority.lean` | §10.2, §10.4 |
+| A store rename requires an admin in the preceding state; a non-admin rename is refused without changing the name | `applied_rename_authorized`, `non_admin_rename_refused` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
+| The current name is the creation name followed by applied renames; equal prefixes give equal names | `name_is_latest_applied`, `name_prefix` | `proofs/sequence/CovenSequence/Authority.lean` | §10.3 |
 | A member with no active device can still register a new one | `member_without_active_device_can_register` | `proofs/sequence/SequenceApply.lean` | §10.2 |
 | With validation depending only on preceding slots, every operation step keeps its recorded work and in-flight requests accounted for | `steps_inv`, `step_req` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
 | An operation's entry occupies at most one slot and passed validation against its preceding slots; confirmed undo leaves no entry bytes or deletable artifacts. Separate preparation claims are not modeled | `operation_outcome` | `proofs/sequence/CovenSequence/Operation.lean` | §11.6 |
@@ -6539,7 +6565,7 @@ maps them are with each provider in Appendix E.
 | `DbError::NotInCircle` (`NotInCircle`) | a write into a circle the member isn't in, or one absent from the membership this device has applied | §15.6, §15.8 |
 | `DeletedCircle` | a new local write into a deleted circle; also the cause named by its rows' lost values | §15.9 |
 | `InvalidAudience` | an audience bound in any spelling but the canonical one | §15.1 |
-| `DbError::StoreSettingsMismatch` | settings supplied when setting up from the store don't match its creation | §10.3 |
+| `DbError::StoreSettingsMismatch` | the supplied store id differs from the creation entry's id | §10.3 |
 | `DbError::PendingPersistence` | coven can't save pending state; sync and database calls stop | §19.1 |
 | `DbError::DamagedDatabase` | a damaged database fails to open | §19.3 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
