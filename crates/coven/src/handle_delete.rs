@@ -12,6 +12,19 @@ pub enum IfUnsent {
 }
 
 impl CovenHandle {
+    /// The writes and files this device committed and has not uploaded, from
+    /// one committed snapshot: what deleting the store would lose. With storage
+    /// set up, `delete_store(IfUnsent::Refuse)` refuses with these counts.
+    /// Available while disconnected.
+    pub async fn unsent_work(&self) -> CovenResult<UnsentWork> {
+        self.database.unsent().await
+    }
+
+    /// The same pre-built query, live (E4).
+    pub fn subscribe_unsent_work(&self) -> LiveQuery<UnsentWork> {
+        self.database.subscribe_unsent()
+    }
+
     /// Deletes this store from this device. With storage set up, it first
     /// refuses unsent writes and files unless `unsent` discards them, then
     /// publishes this device's removal (§14.1), which cuts off its later slots;
@@ -19,7 +32,7 @@ impl CovenHandle {
     /// as `Coven::discard_store`, which finishes a deletion failing after that.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError> {
         if self.storage.configured().await? {
-            let work = self.database.unsent().await.map_err(SyncError::from)?;
+            let work = self.unsent_work().await.map_err(SyncError::from)?;
             if unsent == IfUnsent::Refuse && !work.is_empty() {
                 return Err(StoreDeletionError::Unsent(work));
             }

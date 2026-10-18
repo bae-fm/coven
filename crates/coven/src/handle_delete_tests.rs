@@ -128,3 +128,170 @@ async fn a_store_never_connected_deletes_with_its_local_writes() {
         None
     );
 }
+
+/// A store on memory storage, synced once, then stopped with uploads paused,
+/// so committed writes and attached files stay unsent until the test sends them.
+async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandle) {
+    use coven_storage::{test_utils::MemoryStorage, Storage};
+    let root = tempfile::tempdir().unwrap();
+    let app = TestCoven::new();
+    let layout = StoreLayout::new(root.path().into());
+    let directory = app
+        .create_closed_store(&layout, "Files", std::sync::Arc::new(UuidIds))
+        .await
+        .unwrap();
+    let memory = std::sync::Arc::new(
+        MemoryStorage::builder()
+            .clock(std::sync::Arc::new(SystemClock))
+            .transfer_limits(65536, 65536)
+            .build()
+            .unwrap(),
+    );
+    let handle = app
+        .builder(layout)
+        .storage_connector(memory.clone())
+        .synced_tables(vec![
+            SyncedTable::new("parents", RowIdentity::SharedKey),
+            SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
+                "files",
+                1 << 30,
+                Provenance::AppProvided,
+                CacheFill::CacheLazy,
+            )),
+        ])
+        .migrations(vec![Migration::addition(
+            1,
+            "parents and files",
+            "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY,label TEXT NOT NULL,value INTEGER NOT NULL);
+             CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)",
+        )])
+        .open(directory.id())
+        .await
+        .unwrap();
+    handle
+        .setup_s3_storage(
+            memory.config(),
+            "Laptop",
+            "owner".into(),
+            SecretText::new("secret".into()),
+        )
+        .await
+        .unwrap();
+    let mut status = handle.subscribe_sync_status();
+    status
+        .wait_for(|s| matches!(s, SyncStatus::Synced { .. }))
+        .await
+        .unwrap();
+    stopped(&handle).await;
+    handle.unlock_store_key().await.unwrap();
+    handle.set_uploads_paused(true).await.unwrap();
+    (root, app, handle)
+}
+
+async fn attach(handle: &CovenHandle, id: &str) {
+    let (file, row) = (id.to_owned(), id.to_owned());
+    handle
+        .write_with_files(
+            move |batch| {
+                batch.put_file("files", file, vec![7; 2048]);
+                Ok(())
+            },
+            move |sql| {
+                sql.execute("INSERT INTO files(id) VALUES(?1)", [&row])?;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+}
+
+async fn until(work: &mut LiveQuery<UnsentWork>, expected: UnsentWork) {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        while work.next().await.unwrap() != expected {}
+    })
+    .await
+    .unwrap_or_else(|_| panic!("unsent work never reached {expected:?}"));
+}
+
+#[tokio::test]
+async fn unsent_work_is_what_deleting_refuses_until_uploads_confirm() {
+    let (_root, _app, handle) = stopped_store_with_files().await;
+    assert!(handle.unsent_work().await.unwrap().is_empty());
+    insert(&handle, "unsent").await;
+    attach(&handle, "photo").await;
+    // The attaching write is a write too: two writes, one file.
+    let work = handle.unsent_work().await.unwrap();
+    assert_eq!(
+        work,
+        UnsentWork {
+            writes: 2,
+            files: 1
+        }
+    );
+    match handle.delete_store(IfUnsent::Refuse).await {
+        Err(StoreDeletionError::Unsent(refused)) => assert_eq!(refused, work),
+        other => panic!("expected the unsent refusal, got {other:?}"),
+    }
+    // Confirmed file uploads leave the writes, which only a sync pass sends.
+    handle.set_uploads_paused(false).await.unwrap();
+    handle.retry_uploads_now().await.unwrap();
+    assert_eq!(
+        handle.unsent_work().await.unwrap(),
+        UnsentWork {
+            writes: 2,
+            files: 0
+        }
+    );
+    let mut live = handle.subscribe_unsent_work();
+    handle.start_sync().await.unwrap();
+    until(
+        &mut live,
+        UnsentWork {
+            writes: 0,
+            files: 0,
+        },
+    )
+    .await;
+    assert!(handle.unsent_work().await.unwrap().is_empty());
+    handle.delete_store(IfUnsent::Refuse).await.unwrap();
+}
+
+#[tokio::test]
+async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
+    let (_root, _app, handle) = stopped_store_with_files().await;
+    let mut live = handle.subscribe_unsent_work();
+    assert_eq!(
+        live.next().await.unwrap(),
+        UnsentWork {
+            writes: 0,
+            files: 0
+        }
+    );
+    insert(&handle, "first").await;
+    assert_eq!(
+        live.next().await.unwrap(),
+        UnsentWork {
+            writes: 1,
+            files: 0
+        }
+    );
+    attach(&handle, "photo").await;
+    assert_eq!(
+        live.next().await.unwrap(),
+        UnsentWork {
+            writes: 2,
+            files: 1
+        }
+    );
+    handle.set_uploads_paused(false).await.unwrap();
+    handle.start_sync().await.unwrap();
+    until(
+        &mut live,
+        UnsentWork {
+            writes: 0,
+            files: 0,
+        },
+    )
+    .await;
+    handle.close().await.unwrap();
+}

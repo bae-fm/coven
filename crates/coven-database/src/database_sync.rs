@@ -219,6 +219,11 @@ impl Database {
         self.read(|sql| sql.unsent()).await
     }
 
+    /// The same pre-built unsent-work query, observing committed changes.
+    pub fn subscribe_unsent(&self) -> crate::LiveQuery<crate::UnsentWork> {
+        self.subscribe(|sql| sql.unsent())
+    }
+
     /// The upload queue, its pause setting and each file's recorded provider
     /// session in one committed snapshot, available while disconnected (E7).
     pub async fn upload_queue(&self) -> CovenResult<crate::UploadQueueState> {

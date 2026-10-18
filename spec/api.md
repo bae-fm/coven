@@ -164,6 +164,12 @@ pub enum Audience {
 - Store lock files live beside each store directory. Deletion holds the writer
   and reader locks while removing the directory, then releases and removes the
   lock files. Creation and lock-file removal are serialized by the layout.
+- Deleting a store with storage set up loses whatever hasn't been uploaded.
+  So before Ana deletes the Household store from her phone, the app shows
+  her `unsent_work()`: say, 3 writes and 1 file still waiting. These are the
+  same counts `delete_store(IfUnsent::Refuse)` refuses with, read the same
+  way, so the warning and the refusal can't disagree, and the app needn't
+  attempt a deletion to learn them.
 - Directory-entry existence checks do not follow symlinks. Only not-found
   means absent; other failures retain their operation, path and OS cause.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
@@ -1285,7 +1291,8 @@ pub enum StoreCreationError {
 pub enum StoreDeletionError {
     /// The store is open or its lock could not be taken.
     Lock(StoreLockError),
-    /// Writes or files wait to upload; nothing was deleted.
+    /// Writes or files wait to upload, as `unsent_work` counts them;
+    /// nothing was deleted.
     Unsent(UnsentWork),
     /// Reading the queue or publishing this device's removal failed, deleting
     /// nothing; or closing failed after the removal.
@@ -1579,6 +1586,15 @@ impl CovenHandle {
     /// (§14.1); either failure deletes nothing. Then closes and deletes as
     /// `Coven::discard_store`, which finishes a deletion failing after that.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError>;
+
+    /// The writes and files this device committed and has not uploaded, from
+    /// one committed snapshot: what deleting the store would lose. With storage
+    /// set up, `delete_store(IfUnsent::Refuse)` refuses with these counts.
+    /// Available while disconnected.
+    pub async fn unsent_work(&self) -> CovenResult<UnsentWork>;
+
+    /// The same pre-built query, live (E4).
+    pub fn subscribe_unsent_work(&self) -> LiveQuery<UnsentWork>;
 
     /// Read committed plaintext records still awaiting upload in application tests.
     #[cfg(feature = "test-utils")]
