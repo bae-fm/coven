@@ -1599,10 +1599,12 @@ while let Ok(values) = lost.next().await {
   non-empty base prefix fails validation, before any request, with
   `StorageFailure::OwnBucketRequired { reason: OwnBucketReason::Prefix }`.
   A store's first setup lists the bucket's root before detection writes and
-  refuses a bucket holding anything outside the store's folder with
+  permits only that store's folder and the root `coven-bucket` marker. Setup
+  later checks that the marker names the same store (§20.7). Any other object causes
   `OwnBucketRequired { reason: OwnBucketReason::Occupied }`, wrapped in
-  `StorageSetupError::Storage`. Reconnecting checks no objects outside the
-  store's folder. AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway
+  `StorageSetupError::Storage`. Reconnecting, restoring and joining read that
+  exact marker to verify bucket ownership (§20.7); they do not list outside
+  the store's folder. AWS, GCS, RustFS, SeaweedFS, Ceph RGW and Versity Gateway
   keys can be limited to the store's prefix, so their stores share buckets and prefixes unchecked.
 - An endpoint matching no known host and naming no profile has no AWS
   fallback: setup detects its settings and returns and records the location

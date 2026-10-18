@@ -49,7 +49,7 @@ pub trait StorageConnector: Send + Sync {
     }
     /// Before a store's first setup at an S3 location whose member keys reach
     /// the whole bucket, refuse a bucket holding anything outside the store's
-    /// folder with `OwnBucketRequired { reason: Occupied }` (§20.7). Reads only.
+    /// folder or the `coven-bucket` marker (§20.7). Reads only.
     /// A connector without native S3 refuses this capability.
     async fn check_new_s3_store(
         &self,
