@@ -1432,7 +1432,8 @@ The rules in full:
 - A row's *claim* on its value is the greatest (slot, write number) among the
   writes that set the constraint's current inputs, at the point the complete value
   was established. The lowest claim keeps the value. Within one slot, the lower
-  write number wins; within one write, the lower primary key wins.
+  write number wins; within one write, the lower primary key wins, comparing the
+  encoded key's bytes (format.md D3). This order is independent of SQL sorting.
 - The other row is taken out, whether its write inserted it or edited it to claim
   the value. A change to its own value that ends the conflict clears that reason.
 - When the winner gives the value up, it goes to the earliest live claimant still
