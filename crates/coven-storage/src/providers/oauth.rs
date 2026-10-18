@@ -383,32 +383,7 @@ impl OAuthClients {
             .filter(|code| !code.as_str().is_empty())
             .ok_or(OAuthError::MissingCode)
     }
-    /// One refresh of `tokens` after the provider rejected them (§20.2), for its
-    /// custody to commit before any connection uses it. Tokens without a
-    /// refresh token need a new sign-in; a missing client is the app's
-    /// configuration. Token-endpoint failures keep their classification.
-    pub async fn refresh(&self, tokens: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
-        let provider = tokens.access.provider();
-        let refreshed = match &tokens.refresh_token {
-            Some(refresh_token) => {
-                self.refresh_grant(&tokens.client_id, tokens.access, refresh_token)
-                    .await
-            }
-            None => Err(OAuthError::Reauthorize(provider)),
-        };
-        refreshed.map_err(|error| match error {
-            OAuthError::Storage(error) => error,
-            error => StorageError::Provider {
-                provider,
-                failure: if matches!(error, OAuthError::Unavailable(_)) {
-                    StorageFailure::InvalidConfiguration
-                } else {
-                    StorageFailure::Authentication
-                },
-                source: Box::new(error),
-            },
-        })
-    }
+
     /// Obtain replacement tokens. Omitted refresh tokens retain the previous
     /// token as specified by OAuth.
     async fn refresh_grant(
@@ -520,6 +495,43 @@ impl OAuthClients {
 
 #[path = "oauth_admin.rs"]
 mod admin;
+
+/// Crate-to-crate operations for coven's owners; not re-exported by the app API.
+pub trait OAuthTokenRefresh: Sized {
+    /// One refresh of `tokens` after the provider rejected them (§20.2), for its
+    /// custody to commit before any connection uses it. Tokens without a
+    /// refresh token need a new sign-in; a missing client is the app's
+    /// configuration. Token-endpoint failures keep their classification.
+    fn refresh(
+        &self,
+        tokens: &OAuthTokens,
+    ) -> impl std::future::Future<Output = Result<OAuthTokens, StorageError>> + Send;
+}
+
+impl OAuthTokenRefresh for OAuthClients {
+    async fn refresh(&self, tokens: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
+        let provider = tokens.access.provider();
+        let refreshed = match &tokens.refresh_token {
+            Some(refresh_token) => {
+                self.refresh_grant(&tokens.client_id, tokens.access, refresh_token)
+                    .await
+            }
+            None => Err(OAuthError::Reauthorize(provider)),
+        };
+        refreshed.map_err(|error| match error {
+            OAuthError::Storage(error) => error,
+            error => StorageError::Provider {
+                provider,
+                failure: if matches!(error, OAuthError::Unavailable(_)) {
+                    StorageFailure::InvalidConfiguration
+                } else {
+                    StorageFailure::Authentication
+                },
+                source: Box::new(error),
+            },
+        })
+    }
+}
 
 #[cfg(test)]
 #[path = "oauth_tests.rs"]

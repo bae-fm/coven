@@ -1,4 +1,5 @@
 use crate::*;
+use coven_foundation::files::StoreDirAccess;
 use std::sync::Arc;
 
 #[tokio::test]

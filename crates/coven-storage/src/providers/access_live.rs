@@ -4,6 +4,7 @@ use super::{
     http::{self, Body},
     DropboxClients, OAuthClients, OAuthSession, ProviderConnector, StorageConnector,
 };
+use crate::providers::OAuthTokenRefresh;
 use crate::*;
 use coven_foundation::{
     clock::{ClockRef, SystemClock},

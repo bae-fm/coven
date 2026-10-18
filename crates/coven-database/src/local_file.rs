@@ -2,6 +2,7 @@
 
 use super::FileRef;
 use crate::{sqlite::DatabaseConnection, write_schema::WriteSchema, DbError};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{
         FileArea, FileError, FileName, FileReader, ObservationError, StoreDir, StoreLockError,

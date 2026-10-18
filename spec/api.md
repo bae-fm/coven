@@ -3,8 +3,11 @@
 - The API is what apps call, listed as Rust declarations with their doc
   comments. What one coven crate offers another is documented in its code,
   not here.
-- Long parameter lists are abbreviated: `/* … */` marks parameters left out,
-  and the comment beside it names them.
+- The declarations include every public root item, inherent method, field and enum variant. Private
+  fields are marked `/* private */`; `cfg` attributes show platform and feature availability. Types
+  from dependencies keep their qualified names. Standard trait implementations retain their Rust
+  meanings; conversions and operational traits are shown where callers use them. Feature gates
+  belong to the defining crate; the two dependency-only gates below name it.
 - Calls on `handle` are on the `CovenHandle` that opening a store returns.
 - App-facing calls reaching storage or the database are `async`;
   transaction callbacks (`SqlContext`, `MigrationContext`) are synchronous.
@@ -13,16 +16,22 @@
 
 ```rust
 // External types used by the declarations below.
-use std::{collections::HashMap, future::Future, num::NonZeroUsize,
-          path::{Path, PathBuf}, pin::Pin, sync::Arc, time::SystemTime};
+use std::{collections::HashMap, future::Future, num::{NonZeroU64, NonZeroUsize},
+          path::{Path, PathBuf}, pin::Pin, sync::Arc, time::{Duration, SystemTime}};
 use async_trait::async_trait;
-use rusqlite::{Params, ToSql};
+// These SQL items are also exported from coven at its root.
+pub use coven_database::{named_params, params, types, Params, Row, ToSql};
 use tokio::{io::AsyncRead, sync::watch};
 use url::Url;
 use uuid::Uuid;
 
 /// Primary-key values in declaration order (§9.2).
 pub struct RowKey(/* private */);
+
+impl RowKey {
+    /// The SQL values identifying the row.
+    pub fn values(&self) -> &[rusqlite::types::Value];
+}
 
 impl From<&str> for RowKey { /* one text key */ }
 impl From<UuidText> for RowKey { /* one UUID text key */ }
@@ -38,8 +47,60 @@ pub struct MemberId(pub Uuid);
 /// A validated Ed25519 public key; invalid and weak points are refused.
 pub struct SigningKey(/* private */);
 
+impl SigningKey {
+    /// Validate a public signing key, refusing invalid and weak Ed25519 points.
+    pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError>;
+
+    /// The validated Ed25519 public key's 32 bytes.
+    pub fn as_bytes(&self) -> &[u8; 32];
+
+    /// Verify a detached signature against this public key (§12).
+    pub fn verify(&self, message: &[u8], signature: &coven_crypto::Signature) -> Result<(), CryptoError>;
+
+    /// Verify an object's signature after hashing all bytes before it (Appendix D.3).
+    /// The domain and path are authenticated along with the SHA-256 digest.
+    /// Panics if the storage path is empty.
+    pub fn verify_object(
+        &self,
+        path: &str,
+        digest: &coven_crypto::ObjectDigest,
+        signature: &coven_crypto::Signature,
+    ) -> Result<(), CryptoError>;
+
+    /// Verify a snapshot prefix independently of its encrypted data (D9).
+    /// `prefix` is exactly kind, version and routing fields, without signatures.
+    /// Panics if the storage path is empty.
+    pub fn verify_prefix(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        signature: &coven_crypto::Signature,
+    ) -> Result<(), CryptoError>;
+
+    /// Verify a write's header signature without its part chunks (D9): the
+    /// exact cleartext prefix, the complete sealed header chunk and the part
+    /// roots. Snapshots carry these to authenticate another member's leaves.
+    /// Panics if the storage path is empty.
+    pub fn verify_write_header(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        header: &[u8],
+        roots: &[[u8; 32]],
+        signature: &coven_crypto::Signature,
+    ) -> Result<(), CryptoError>;
+}
+
 /// An X25519 public key (Appendix D).
 pub struct SealingKey(/* private */);
+
+impl SealingKey {
+    /// Read a public sealing key. Low-order keys are refused when sealing.
+    pub fn from_bytes(bytes: [u8; 32]) -> Self;
+
+    /// The public bytes carried with the member's join request (§13.2).
+    pub fn as_bytes(&self) -> &[u8; 32];
+}
 
 /// The public pair from D2, re-exported without duplicating its type:
 /// `signing: SigningKey`, `sealing: SealingKey`.
@@ -87,11 +148,11 @@ pub enum Audience {
   means absent; other failures retain their operation, path and OS cause.
 - Opening a store needs its declared tables ([E2](#e2-declaring-synced-tables))
   and its migrations ([E13](#e13-migrations)).
-- Writable opens always migrate coven's own local tables in place
-  ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse tables that
-  need migrating; any open refuses an internal schema newer than it supports.
-- *Key custody* is where this device keeps the store keys and circle keys
-  it has opened ([§12.2](coven.md#122-exposure-and-which-key-new-data-uses)): every key it has used, so it reads
+- Writable opens always migrate coven's own local tables in place ([Appendix
+  C.1](coven.md#c1-covens-tables-in-the-apps-database)). Read-only opens refuse tables that need
+  migrating; any open refuses an internal schema newer than it supports.
+- *Key custody* is where this device keeps the store keys and circle keys it has opened
+  ([§12.2](coven.md#122-exposure-and-which-key-new-data-uses)): every key it has used, so it reads
   writes made under older ones.
 - *Identity custody* keeps the stable member id and held private pairs,
   including historical credentials and a pending replacement candidate
@@ -133,6 +194,137 @@ pub struct SystemClock;
 
 impl Clock for SystemClock {
     fn now(&self) -> SystemTime;
+    fn elapsed(&self) -> Duration;
+}
+
+/// An installation with an isolated in-memory keychain for application tests.
+#[cfg(feature = "test-utils")]
+pub struct TestCoven { /* private */ }
+
+#[cfg(feature = "test-utils")]
+impl TestCoven {
+    /// Make an installation with an empty device-only and synced keychain.
+    pub fn new() -> Self;
+
+    /// Create through the production builder, then close for a reopening fixture.
+    pub async fn create_closed_store(
+        &self,
+        layout: &StoreLayout,
+        name: &str,
+        ids: IdSourceRef,
+    ) -> Result<StoreDir, StoreCreationError>;
+
+    /// Build the production graph with this installation's keychain.
+    pub fn builder(&self, layout: StoreLayout) -> CovenBuilder;
+
+    /// Discard through the same locked directory and keychain path as `Coven`.
+    pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError>;
+
+    /// Seed the simulated OS custody as if this installation had opened keys.
+    pub fn keep_store_keys(
+        &self,
+        directory: &StoreDir,
+        keys: &StoreKeyring,
+    ) -> Result<(), KeyError>;
+
+    /// Refuse the next keychain operation before changing any stored value.
+    pub fn fail_next_keychain_operation(&self);
+}
+
+/// A controlled clock; forward settings advance elapsed time and wake sleepers.
+#[cfg(feature = "test-utils")]
+pub struct FixedClock(/* private */);
+
+#[cfg(feature = "test-utils")]
+impl FixedClock {
+    /// A clock initially set to `now`.
+    pub fn new(now: SystemTime) -> Self;
+
+    /// Set the time every subsequent read returns, including a backward jump.
+    pub fn set(&self, now: SystemTime);
+}
+
+/// Deterministic test ids, starting at one.
+#[cfg(feature = "test-utils")]
+pub struct SequentialIds(/* private */);
+
+#[cfg(feature = "test-utils")]
+impl SequentialIds {
+    /// A sequence whose first UUID's payload and first device id are one.
+    pub fn new() -> Self;
+}
+
+#[cfg(feature = "test-utils")]
+impl Clock for FixedClock {
+    fn now(&self) -> SystemTime;
+    fn elapsed(&self) -> Duration;
+    fn sleep(&self, duration: Duration) -> Pin<Box<dyn Future<Output = ()> + Send>>;
+}
+
+#[cfg(feature = "test-utils")]
+impl IdSource for SequentialIds {
+    fn new_id(&self) -> Uuid;
+}
+
+#[cfg(feature = "test-utils")]
+/// Constructs provider connections without committing settings or credentials.
+/// Tests replace the connection boundary with in-memory storage.
+#[async_trait]
+pub trait StorageConnector: Send + Sync {
+    /// Create the owner's CloudKit location from the entitled container.
+    /// A connector without native CloudKit support refuses this capability.
+    async fn prepare_cloudkit(
+        &self,
+        _container: &str,
+        _store: StoreId,
+    ) -> Result<StorageConfig, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+    /// Validate settings and wrap the selected native provider once. The caller
+    /// verifies the connection before publication. Every request waits for
+    /// the store's shared `cooldown`; a rejected OAuth token is refreshed in
+    /// the sign-in's custody (§20.2).
+    async fn connect(
+        &self,
+        config: StorageConfig,
+        auth: coven_storage::ProviderAuth,
+        publications: Arc<dyn coven_storage::PublicationGate>,
+        cooldown: Arc<dyn coven_storage::Cooldown>,
+        transfers: Arc<coven_storage::TransferBudget>,
+    ) -> Result<Arc<coven_storage::StorageConnection>, StorageError>;
+    /// Probe an S3 location's service (§20.7), writing only fresh objects under
+    /// the store's `.coven-check` prefix and deleting them, also on failure.
+    /// A connector without native S3 refuses this capability.
+    async fn detect_s3(
+        &self,
+        _config: StorageConfig,
+        _credentials: S3Credentials,
+        _store: StoreId,
+    ) -> Result<S3Detection, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+    /// Before a store's first setup at an S3 location whose member keys reach
+    /// the whole bucket, refuse a bucket holding anything outside the store's
+    /// folder or the `coven-bucket` marker (§20.7). Reads only.
+    /// A connector without native S3 refuses this capability.
+    async fn check_new_s3_store(
+        &self,
+        _config: StorageConfig,
+        _credentials: S3Credentials,
+        _store: StoreId,
+    ) -> Result<(), StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
+    /// Key administration for an S3 location's service, holding this admin
+    /// access for one operation (§20.10). A custom profile, or a service without
+    /// a minter, is refused: its keys are made in the console.
+    fn s3_key_admin(
+        &self,
+        _config: StorageConfig,
+        _admin: AdminCredential,
+    ) -> Result<Arc<dyn AccessKeyAdmin>, StorageError> {
+        Err(StorageFailure::ProviderUnavailable.into())
+    }
 }
 
 /// Test-injected ids; production uses OS randomness (Appendix F.2).
@@ -198,6 +390,57 @@ pub struct MemberKeys { /* private fields */ }
 /// Private material is erased when dropped.
 pub struct MemberIdentity { /* private fields */ }
 
+/// A store's identified 32-byte key (§12), erased on drop.
+/// Cloning supplies an independent unlocked snapshot to in-memory custody.
+pub struct StoreKey { /* private */ }
+
+impl StoreKey {
+    /// Make random key material for an identity supplied by the id source.
+    pub fn generate(id: KeyId) -> Result<Self, CryptoError>;
+
+    /// Import a store key opened from custody or a member's sealed copy (§12.1).
+    pub fn from_bytes(id: KeyId, bytes: [u8; 32]) -> Self;
+
+    /// The random identity named by the entry introducing this key (§12.1).
+    pub fn id(&self) -> KeyId;
+
+    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§12.1).
+    pub fn hash(&self) -> [u8; 32];
+
+    /// Check the hash committed by an authorized introduction before accepting this key.
+    pub fn check_hash(&self, expected: &[u8; 32]) -> Result<(), MaterialError>;
+
+    /// Derive separate encryption and authorship keys.
+    pub fn derive(&self) -> coven_crypto::DerivedKeys;
+}
+
+/// One circle's identified 32-byte key, introduced by creation or rotation (§12.1).
+/// Cloning supplies an independent unlocked snapshot to in-memory custody.
+pub struct CircleKey { /* private */ }
+
+impl CircleKey {
+    /// Make a circle key using the operating system's randomness.
+    pub fn generate(circle: CircleId, id: KeyId) -> Result<Self, CryptoError>;
+
+    /// Import a circle key opened from custody or a member's sealed copy.
+    pub fn from_bytes(circle: CircleId, id: KeyId, bytes: [u8; 32]) -> Self;
+
+    /// The circle whose rows this key protects; file keys travel inside those rows.
+    pub fn circle(&self) -> CircleId;
+
+    /// The random identity named by the entry introducing this key.
+    pub fn id(&self) -> KeyId;
+
+    /// SHA-256 of the exact key bytes, committed inside its introducing entry (§12.1).
+    pub fn hash(&self) -> [u8; 32];
+
+    /// Check the hash committed by an authorized introduction before accepting this key.
+    pub fn check_hash(&self, expected: &[u8; 32]) -> Result<(), MaterialError>;
+
+    /// Derive separate encryption and authorship keys.
+    pub fn derive(&self) -> coven_crypto::DerivedKeys;
+}
+
 /// Every opened store and circle key, including older keys (§12.2, §15.5).
 pub struct StoreKeyring { /* private fields */ }
 
@@ -214,6 +457,66 @@ impl ObjectPath {
     pub fn as_str(&self) -> &str;
     /// Whether this is the floor path, which permits conditional replacement.
     pub fn is_replaceable(&self) -> bool;
+
+    /// One create-once slot in the store's shared sequence (§5).
+    pub fn slot(store: StoreId, number: NonZeroU64) -> Self;
+
+    /// The positive number of a sequence slot.
+    pub fn slot_number(&self) -> Option<Slot>;
+
+    /// The store's conditionally replaced floor (§16.4).
+    pub fn floor(store: StoreId) -> Self;
+
+    /// The identity carried by a snapshot path.
+    pub fn snapshot_id(&self) -> Option<SnapshotId>;
+
+    /// A snapshot written by a device (§16).
+    pub fn snapshot(
+        store: StoreId,
+        audience: Audience,
+        device: DeviceId,
+        number: NonZeroU64,
+    ) -> Self;
+
+    /// Encrypted file bytes named by a random UUID (§17.3).
+    pub fn file(store: StoreId, device: DeviceId, name: FileId) -> Self;
+
+    /// An encrypted join request under its invite id (§13.2).
+    pub fn join_request(store: StoreId, invite: InviteId) -> Self;
+
+    /// The invite named by a join request's path.
+    pub fn join_request_invite(&self) -> Option<InviteId>;
+
+    /// A member's new S3 key, sealed to them, named by its mint attempt (§14.3).
+    pub fn access_key(
+        store: StoreId,
+        member: &MemberId,
+        attempt: Uuid,
+    ) -> Self;
+
+    /// The store whose objects this path names.
+    pub fn store(&self) -> StoreId;
+
+    /// The device named by a snapshot or uploaded file path.
+    pub fn device(&self) -> Option<DeviceId>;
+
+    /// The fixed id of a stored file's path.
+    pub fn file_id(&self) -> Option<FileId>;
+
+    /// The canonical path components, for providers with folder objects.
+    pub fn components(&self) -> Vec<&str>;
+
+    /// The last path component.
+    pub fn file_name(&self) -> &str;
+
+    /// Validate a provider listing’s parent components and final name.
+    pub fn from_components(parent: &[String], name: &str) -> Result<Self, PathError>;
+
+    /// The provider path with a leading slash.
+    pub fn absolute(&self) -> String;
+
+    /// The provider path beneath a configured location prefix.
+    pub fn under(&self, root: &str) -> String;
 }
 
 /// A path outside the canonical object layout.
@@ -225,6 +528,30 @@ pub struct ObjectPrefix { /* private fields */ }
 impl ObjectPrefix {
     /// The prefix supplied to the provider.
     pub fn as_str(&self) -> &str;
+
+    /// All objects belonging to this store.
+    pub fn all(store: StoreId) -> Self;
+
+    /// Every stored file.
+    pub fn files(store: StoreId) -> Self;
+
+    /// The files one device uploaded (§17.3).
+    pub fn device_files(store: StoreId, device: DeviceId) -> Self;
+
+    /// Every waiting join request.
+    pub fn join_requests(store: StoreId) -> Self;
+
+    /// The S3 keys delivered to one member (§14.3).
+    pub fn access_keys(store: StoreId, member: &MemberId) -> Self;
+
+    /// The store whose objects this prefix selects.
+    pub fn store(&self) -> StoreId;
+
+    /// Whether a validated path is under this prefix.
+    pub fn contains(&self, path: &ObjectPath) -> bool;
+
+    /// The provider path beneath a configured location prefix.
+    pub fn under(&self, root: &str) -> String;
 }
 
 /// A nonempty byte range, including its start and excluding its end (§17.5).
@@ -249,10 +576,31 @@ impl ByteRange {
 pub struct StorageTime(/* seconds: u64, nanos: u32 */);
 
 impl StorageTime {
+    /// The Unix epoch, the earliest storage time.
+    pub const UNIX_EPOCH: Self;
+
     /// Validates the nanosecond fraction.
     pub fn new(seconds: u64, nanos: u32) -> Result<Self, coven_format::Error>;
     pub fn seconds(self) -> u64;
     pub fn nanos(self) -> u32;
+
+    /// The exact provider time, refusing one before the Unix epoch.
+    pub fn from_system_time(time: std::time::SystemTime) -> Result<Self, coven_format::Error>;
+
+    /// The time `since` the Unix epoch.
+    pub fn since_epoch(since: std::time::Duration) -> Self;
+
+    /// The exact time elapsed since the Unix epoch.
+    pub fn elapsed_since_epoch(self) -> std::time::Duration;
+
+    /// This time plus `duration`, or `None` past the representable range.
+    pub fn checked_add(self, duration: std::time::Duration) -> Option<Self>;
+
+    /// This time minus `duration`, or `None` before the Unix epoch.
+    pub fn checked_sub(self, duration: std::time::Duration) -> Option<Self>;
+
+    /// The exact time from `earlier` to this time, or `None` if `earlier` is later.
+    pub fn duration_since(self, earlier: Self) -> Option<std::time::Duration>;
 }
 
 /// Metadata of a complete object returned by a provider read, listing or status (§20.5).
@@ -327,6 +675,64 @@ pub enum CovenError {
     DeviceKeyMissing { store: StoreId },
     /// A connected store's member keys are missing too; only restore continues.
     MemberKeysMissing { store: StoreId },
+}
+
+/// Invalid input to the pure merge; no partially changed state is returned.
+pub enum MergeError {
+    /// Milliseconds do not fit in the timestamp's 48 bits.
+    MillisecondsOutOfRange(u64),
+    /// The final millisecond and counter have both been used.
+    TimestampExhausted,
+    /// Advancing a generation would exceed its representation.
+    GenerationExhausted,
+    /// An insert was not made at an even generation, or an edit/delete at an odd one.
+    GenerationParity(u64),
+    /// No write the author had read moved this row to the specified generation.
+    GenerationNotSeen {
+        /// The row, including its audience.
+        row: coven_merge::RowId,
+        /// The generation the change was made at.
+        generation: u64,
+    },
+    /// Causality has not brought the receiving row to this generation.
+    GenerationAhead {
+        /// The receiving row.
+        row: coven_merge::RowId,
+    },
+    /// A required write is missing from the applied set.
+    MissingWrite(WriteId),
+    /// A write occurs twice in the input or has already been applied.
+    DuplicateWrite(WriteId),
+    /// Two different writes have equal timestamps.
+    DuplicateTimestamp(WriteId, WriteId),
+    /// A timestamp is not larger than that of a write its author had read.
+    CausalTimestamp(WriteId),
+    /// A write's recorded past omits a predecessor of a write it had read.
+    CausalClosure(WriteId),
+    /// The timestamp's device is different from the write's device.
+    TimestampDevice(WriteId),
+    /// A write's row changes do not include the row passed to `apply`.
+    MissingChange(coven_merge::RowId),
+    /// A parent generation must name an existing incarnation, an odd generation.
+    ParentGeneration(u64),
+    /// A reference reaches an audience some readers of the child cannot read.
+    ReferenceAudience(coven_merge::RowId),
+    /// A removal view omitted a parent from the region it declared closed.
+    RegionNotClosed(coven_merge::RowId),
+    /// The removal view listed a row more than once.
+    // Requires coven-merge/test-utils; coven/test-utils does not enable it.
+    #[cfg(feature = "test-utils")]
+    DuplicateRow(coven_merge::RowId),
+    /// Stored generations must be contiguous from one through the current one.
+    GenerationGap(u64),
+    /// Each generation must be stamped after the preceding generation.
+    GenerationTimestamp(u64),
+    /// A deleted row cannot retain winning cells.
+    DeletedRowHasCells,
+    /// A cell's setter cannot precede the start of its incarnation.
+    CellBeforeIncarnation(String),
+    /// A lost record has an invalid incarnation or canonical replacer.
+    InvalidLostValue(coven_merge::LostKey),
 }
 
 /// A failed database call or a write the database refuses (§4, §9, §15, §17).
@@ -492,6 +898,64 @@ pub enum DbError {
     SyncStream(Box<dyn std::error::Error + Send + Sync>),
     /// Closing failed for these connections, after every one was tried (E1).
     Closing { failures: Vec<DbError> },
+
+    /// Another claim must settle before this device reserves a new number.
+    ClaimPending,
+
+    /// No current claim exists for this operation.
+    NoClaim,
+
+    /// Uncertain publication cannot be abandoned or resealed; a landed writes
+    /// batch cannot finish until its consumed state has committed.
+    ClaimUnsettled,
+
+    /// The installation has exhausted its claim-number representation.
+    ClaimNumberExhausted,
+
+    /// The supplied floor evidence does not cover the attempted slot.
+    InvalidClaimCoverage,
+
+    /// Slot application must extend the previously committed prefix.
+    SequenceGap {
+        /// Previously committed coverage.
+        applied: u64,
+        /// The received slot.
+        received: coven_merge::Slot,
+    },
+
+    /// A slot's readable original awaits an external prerequisite.
+    WriteWaiting(WriteWait),
+
+    /// Protected remote input fills the configured disk budget. No input or
+    /// budget change was committed; increase the budget or finish pending work.
+    InputBudgetExceeded {
+        /// Bytes required after evicting every eligible range.
+        required: u64,
+        /// Configured encrypted-input limit.
+        maximum: u64,
+    },
+
+    /// Upload attempts must follow this device's queue order (§6.3).
+    UploadNotOldest {
+        /// The write whose upload was requested.
+        write: coven_merge::WriteId,
+    },
+
+    /// An upload cannot succeed before its sealing keys have been fixed (§6.3).
+    UploadNotAttempted {
+        /// The write whose success was reported.
+        write: coven_merge::WriteId,
+    },
+
+    /// Original row-change evidence is unavailable. Receipt waits without
+    /// consuming the write; local authoring rolls back instead of guessing.
+    MissingWriteSources(Vec<coven_format::write_sources::ChangeId>),
+
+    /// An operation no longer has the state expected by its caller.
+    OperationChanged(OperationId),
+
+    /// The prepared raise no longer names the current counted prefix.
+    CaptureChanged,
 }
 
 /// Why snapshots or their gap writes could not be checked or loaded (§16.5, §19.2).
@@ -614,8 +1078,13 @@ pub enum FileError {
     Cleanup { operation: Box<FileError>, cleanup: Box<dyn std::error::Error + Send + Sync> },
 }
 
+impl FileError {
+    /// Whether readers already see the replacement despite a durability error.
+    pub fn installed_new_bytes(&self) -> bool;
+}
+
 /// File reads and custody report the same filesystem failures (§17, E1).
-pub type DiskError = FileError;
+pub use coven_foundation::files::FileError as DiskError;
 
 /// The store's directory settings could not be read or written (E1).
 pub enum SettingsError {
@@ -660,6 +1129,30 @@ pub enum ReadOnlyOpenError {
 pub enum StoreLayoutError {
     /// Listing directories or reading settings failed.
     File(FileError),
+}
+
+/// A store creation failure, with publication and rollback failures explicit.
+pub enum DirectoryCreationError {
+    /// A directory or file already occupies this store's id. It is untouched.
+    AlreadyExists(StoreId),
+    /// An operation failed before publication.
+    File(FileError),
+    /// Writing the new device's settings failed before publication.
+    Settings(SettingsError),
+    /// The entire store is visible, but syncing its parent failed.
+    Published {
+        /// The store that is already visible.
+        id: StoreId,
+        /// The durability error.
+        source: std::io::Error,
+    },
+    /// Removing the unpublished directory also failed.
+    Rollback {
+        /// The original creation failure.
+        operation: Box<DirectoryCreationError>,
+        /// The error removing the directory.
+        cleanup: std::io::Error,
+    },
 }
 
 /// Creating a store failed, with publication and rollback made explicit (E1).
@@ -723,6 +1216,15 @@ pub enum KeyError {
     InvalidServiceName,
     /// This platform has no native credential store.
     UnsupportedKeyringPlatform,
+
+    /// Synced entries require an Apple keychain.
+    Unsupported,
+
+    /// A synced restore-code account contains an invalid store id.
+    RestoreCodeStoreId,
+
+    /// Multiple accessible keychain groups contain a restore code for one store.
+    AmbiguousRestoreCode(coven_foundation::id_source::StoreId),
 }
 
 /// Secret bytes crossing custody or code boundaries, erased when dropped (§12.4, §13).
@@ -733,6 +1235,10 @@ impl SecretBytes {
     pub fn new(bytes: Vec<u8>) -> Self;
     /// Borrows bytes for custody or a restore code.
     pub fn as_bytes(&self) -> &[u8];
+
+    /// Allocation capacity for tests checking that secret encoders never grow it.
+    #[cfg(feature = "test-utils")]
+    pub fn capacity(&self) -> usize;
 }
 
 /// Secret text, erased when dropped and redacted in diagnostics (§12.4, E10).
@@ -793,6 +1299,10 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError>;
 impl StoreDir {
     /// The store identified by this directory.
     pub fn id(&self) -> StoreId;
+
+    /// The recorded replacement of this installation, if one is unfinished
+    /// or its record outlived publication (§19.3).
+    pub fn device_reset(&self) -> Result<Option<DeviceReset>, FileError>;
 }
 
 impl StoreLayout {
@@ -804,6 +1314,15 @@ impl StoreLayout {
 
     /// The directory of the store with `id`.
     pub fn store_dir(&self, id: &StoreId) -> StoreDir;
+
+    /// Publish a directory fixture without initializing member custody.
+    #[cfg(feature = "test-utils")]
+    pub fn create_store_dir(
+        &self,
+        id: StoreId,
+        name: &str,
+        ids: &dyn IdSource,
+    ) -> Result<StoreDir, DirectoryCreationError>;
 }
 
 pub struct Coven;
@@ -895,6 +1414,12 @@ impl CovenBuilder {
     /// its migrations or whose coven tables need migrating.
     /// File reads use saved storage settings and custody credentials when present.
     pub async fn open_read_only(self, store: StoreId) -> Result<CovenReadHandle, ReadOnlyOpenError>;
+
+    /// Replace provider construction in tests while exercising setup, credential
+    /// custody, reconnect, restore and recovery through the production graph.
+    /// `coven_storage::test_utils::MemoryStorage` implements this connector.
+    #[cfg(feature = "test-utils")]
+    pub fn storage_connector(mut self, connector: Arc<dyn StorageConnector>) -> Self;
 }
 
 pub enum KeyCustody {
@@ -932,12 +1457,23 @@ impl CovenHandle {
     /// (§14.1); either failure deletes nothing. Then closes and deletes as
     /// `Coven::discard_store`, which finishes a deletion failing after that.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError>;
+
+    /// Read committed plaintext records still awaiting upload in application tests.
+    #[cfg(feature = "test-utils")]
+    pub async fn test_queued_writes(
+        &self,
+    ) -> Result<Vec<coven_format::write::WriteRecord>, DbError>;
 }
 
 pub enum IfUnsent { Refuse, Discard }
 
 /// Committed writes and attached files not yet uploaded.
 pub struct UnsentWork { pub writes: u64, pub files: u64 }
+
+impl UnsentWork {
+    /// Whether anything waits to upload.
+    pub fn is_empty(&self) -> bool;
+}
 ```
 
 Example:
@@ -1105,10 +1641,10 @@ fn tables() -> Vec<SyncedTable> {
 
 - App SQL runs in one transaction; errors roll back rows and files
   ([§4](coven.md#4-writing-locally)).
-- Ordinary reload queues app writes with their original authored view.
-  Required audience reloads return `AudienceReloading`; self-replacement returns
-  `MemberKeysChanging`. Retry after installation to author against its state
-  ([§12.3](coven.md#123-replacing-a-members-keys), [§16.5](coven.md#165-coming-back-after-a-long-absence)).
+- Ordinary reload queues app writes with their original authored view. Required audience reloads
+  return `AudienceReloading`; self-replacement returns `MemberKeysChanging`. Retry after
+  installation to author against its state ([§12.3](coven.md#123-replacing-a-members-keys),
+  [§16.5](coven.md#165-coming-back-after-a-long-absence)).
 
 ```rust
 /// App-provided files staged for one write; a failure discards them (E3).
@@ -1166,6 +1702,28 @@ impl WriteBatch {
         id: impl Into<String>,
         bytes: impl Into<FileSource>,
     );
+}
+
+/// A portable single filename: ASCII letters, digits, `-`, `_` and interior
+/// dots, up to 255 bytes. Windows device names are refused on every platform.
+pub struct FileName(/* private */);
+
+impl FileName {
+    /// The validated filename, for recording an owned file in local metadata.
+    pub fn as_str(&self) -> &str;
+
+    /// Validate a single filename before it is joined to an owned directory.
+    pub fn new(name: impl Into<String>) -> Result<Self, FileNameError>;
+}
+
+/// A name that could escape its directory or alias a Windows device.
+pub enum FileNameError {
+    /// The name is empty or exceeds a filesystem component's length.
+    Length,
+    /// The name contains a forbidden byte, starts with a dot or ends with one.
+    Character,
+    /// The name names a Windows device, even with an extension.
+    Reserved,
 }
 
 pub enum FileSource {
@@ -1653,8 +2211,8 @@ while let Ok(values) = lost.next().await {
   active pass first.
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
-  - A missing slot below the floor reloads its snapshots.
-    Returning devices retain eligible queued writes ([§16.5](coven.md#165-coming-back-after-a-long-absence)).
+  - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued
+    writes ([§16.5](coven.md#165-coming-back-after-a-long-absence)).
   - `Blocked` names a slot that cannot apply and its cause.
     [§5.4's stuck-device rule](coven.md#54-a-stuck-device-stops) applies;
     local reads and eligible app writes continue.
@@ -1662,8 +2220,8 @@ while let Ok(values) = lost.next().await {
     without blocking sequence application.
   - `Synced` means the pass reached its read end. Files, provider effects or
     retention may still be pending, but an unapplied discovered slot prevents this status.
-  - Each pending record names this device's first unmet condition for that subject.
-    Cut-off writes record `WritesRefused`; [§19.1](coven.md#191-what-the-app-sees) specifies retries.
+  - Each pending record names this device's first unmet condition for that subject. Cut-off writes
+    record `WritesRefused`; [§19.1](coven.md#191-what-the-app-sees) specifies retries.
 
 - `Offline` describes the last failed attempt, not the connection's history.
   `Failed`: storage refused the whole pass, or coven's own operation failed;
@@ -1714,6 +2272,12 @@ pub enum CloudProvider {
     OneDrive,
     /// iCloud through coven-storage's native Apple-platform adapter.
     CloudKit,
+}
+
+impl CloudProvider {
+    /// Instructions for cutting off a removed device's provider access (§14.2).
+    /// This depends on the provider kind, not on a connected account or request.
+    pub fn sign_out(self) -> ProviderSignOut;
 }
 
 /// A store's location, with credentials kept separately (§20.3, E5).
@@ -1914,6 +2478,11 @@ pub enum DropboxLocation {
     SharedFolder { namespace_id: String },
 }
 
+impl DropboxLocation {
+    /// The app registration required to reach this location.
+    pub fn access(&self) -> DropboxAccess;
+}
+
 impl StorageConfig {
     /// The provider of this location.
     pub fn provider(&self) -> CloudProvider;
@@ -1921,6 +2490,12 @@ impl StorageConfig {
     pub fn oauth_access(&self) -> Option<OAuthAccess>;
     /// Refuses missing or invalid location information before making a request.
     pub fn validate(&self) -> Result<(), StorageError>;
+
+    /// Encode the validated location, without any storage credentials.
+    pub fn encode(&self) -> Result<SecretBytes, StorageError>;
+
+    /// Decode only a provider location; unknown fields and credential payloads fail.
+    pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
 }
 
 /// Limits for concurrent transfers (E1, E5).
@@ -2021,6 +2596,9 @@ pub enum StorageFailure {
     File,
     /// This installation has no member keys in custody.
     MemberKeysMissing,
+
+    /// The installation must complete membership and key-copy catch-up before sending.
+    CatchUpRequired,
 }
 
 /// Why an S3 location cannot hold a store that needs its own bucket (§20.7).
@@ -2057,6 +2635,18 @@ impl StorageError {
     pub fn failure(&self) -> StorageFailure;
     /// True only for network interruptions and provider throttling.
     pub fn retryable(&self) -> bool;
+
+    /// Whether the provider answered the request behind this failure, even
+    /// with an error (E5). `Network` alone cannot say: a server's error
+    /// response is an answer; a refused connection or a timeout is not.
+    pub fn answered(&self) -> bool;
+
+    /// Whether the provider answered this request with a refusal, so it
+    /// stored nothing. A timeout, or a lost, malformed or server-failure
+    /// reply, leaves the outcome unknown. The clients resend a request only
+    /// after a refusal (a rejected token, a skewed clock), so no earlier
+    /// attempt of it stored anything either.
+    pub fn refused(&self) -> bool;
 }
 
 /// An HTTP provider's original response, retained as a StorageError cause.
@@ -2129,6 +2719,9 @@ pub enum StoreKeyUnlockError {
     Crypto(CryptoError),
     /// Unlocking or keeping keys in custody failed.
     SecureStorage(KeyError),
+
+    /// Sequence validation or local work failed, preserving its cause.
+    Other(Box<dyn std::error::Error + Send + Sync>),
 }
 
 /// Sync or an administrative operation failed (§10, §14, §18, E5).
@@ -2195,6 +2788,23 @@ pub enum SyncError {
     /// Deleting an S3 key with admin access did not establish its absence;
     /// the key stays pending (§14.3).
     AccessKeyNotDeleted(DeleteAccessKeyError),
+
+    /// Administrative and snapshot publication wait for the retained reload (§11).
+    ReloadPending(OperationId),
+}
+
+impl SyncError {
+    /// The durable reason for a failed request, without losing its typed cause here.
+    pub fn pending_reason(&self, provider: coven_storage::CloudProvider) -> PendingReason;
+
+    /// The local category and one shared cause, for a status and a waiting
+    /// caller failed by the same error.
+    pub fn into_shared(
+        self,
+    ) -> (
+        LocalFailure,
+        Arc<dyn std::error::Error + Send + Sync>,
+    );
 }
 
 /// What showed that another copy uses this device's id (§19.3).
@@ -2379,6 +2989,9 @@ pub enum OperationRejection {
     /// The expected member binding changed while this call was preparing.
     MemberKeysChanged(MemberId),
     NotAllowed,
+
+    /// The provider account owns the store and cannot be removed.
+    StoreOwner,
 }
 
 /// The lower-slot event that permanently excluded a writes slot (§14.1).
@@ -2489,6 +3102,23 @@ impl CovenHandle {
 pub struct DeviceReset {
     pub old_device: DeviceId,
     pub new_device: DeviceId,
+}
+
+/// A sync step stopped as a whole (E5).
+pub enum SyncFailure {
+    /// A schema or stored object format is newer than this implementation.
+    UpdateRequired(RequiredUpdate),
+    /// This device or its member has been removed.
+    Removed,
+    /// Another copy uses this device's id; this copy sends nothing more (§19.3).
+    DeviceIdInUse(DeviceIdEvidence),
+    /// The provider refused or failed a request.
+    Storage(Arc<StorageError>),
+    /// The pass finished, but this work of coven's own failed its last
+    /// attempt; it retries under backoff (E5).
+    Operation(Box<PendingRecord>),
+    /// Any other failure, retaining its typed cause.
+    Other(Arc<dyn std::error::Error + Send + Sync>),
 }
 
 pub enum SyncStatus {
@@ -2842,6 +3472,12 @@ impl FileRef {
     pub fn audience(&self) -> Audience;
     pub fn id(&self) -> FileId;
     pub fn uploader(&self) -> DeviceId;
+
+    /// The cache namespace declared for this file.
+    pub fn namespace(&self) -> &str;
+
+    /// The row's content hash, for checking a complete download.
+    pub fn content_hash(&self) -> coven_crypto::ContentHash;
 }
 
 /// Current remote availability; never persisted in the app row (§17.4).
@@ -2873,6 +3509,9 @@ impl FileStream {
     /// sequential read checks the row's content hash before the final buffer.
     pub fn read_range(&self, offset: u64, len: u64) -> Result<FileRangeStream<'_>, FileReadError>;
 }
+
+/// A borrowed stream of bounded authenticated plaintext buffers.
+pub struct FileRangeStream<'a> { /* private */ }
 
 impl FileRangeStream<'_> {
     pub async fn next(&mut self) -> Result<Option<Vec<u8>>, FileReadError>;
@@ -2950,7 +3589,8 @@ match stream.read_at(resume_at, 256 * 1024).await {
   Historical public bindings remain available for signature checks. Old
   sealing credentials expose their audience keys (§12.2); storage access is
   a separate operation. Neither a restore code nor a key copy proves approval.
-- Removing a member publishes one entry. It returns `()` once its slot commits; applying entries is the single path that records provider access work.
+- Removing a member publishes one entry. It returns `()` once its slot commits; applying entries is
+  the single path that records provider access work.
 - The pending list describes unresolved access work. Each owner's device
   serializes grant and revoke requests, and performs the opposite request
   when a later slot changes the required access (§20.9, §14.2).
@@ -3163,9 +3803,13 @@ pub trait AccessKeyAdmin: Send + Sync {
 /// Where admin access comes from (§20.10). The CLI and browser sources exist on
 /// desktops only; coven runs or reads nothing before the person chooses one.
 pub enum AdminAccessSource {
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     AwsCli { profile: Option<String> },
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     GcloudCli { account: Option<String> },
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     GoogleSignIn,
+    #[cfg(not(any(target_os = "ios", target_os = "android")))]
     AwsIdentityCenter {
         start_url: String,
         region: String,
@@ -3187,6 +3831,16 @@ pub enum AdminCredential {
         iam_endpoint: Option<Url>,
     },
     BearerToken(SecretText),
+}
+
+/// Opens the device sign-in page in the system browser. Desktop only.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+pub struct DesktopDeviceSignIn;
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[async_trait]
+impl DeviceSignInPresenter for DesktopDeviceSignIn {
+    async fn show(&self, verification_url: &str, user_code: &str) -> Result<(), StorageError>;
 }
 
 /// Shows a device sign-in page and code. `DesktopDeviceSignIn` opens the browser.
@@ -3211,6 +3865,20 @@ pub struct MintScope {
     pub name: String,
     pub key_name: String,
     pub member: String,
+}
+
+impl MintScope {
+    /// Name the principal from a fresh id drawn for one mint call. The short
+    /// name is `coven-` and 24 hex digits, within every service's limit (GCS
+    /// service accounts take 6 to 30 lowercase letters, digits and hyphens,
+    /// starting with a letter). The key name is `coven-<store>-<device>-<call>`:
+    /// 24 hex digits of the store id, the device's 16 and 16 of the call's,
+    /// 64 characters, an IAM user name's limit.
+    pub fn new(store: StoreId, member: &str, device: DeviceId, call: Uuid) -> Self;
+
+    /// The key name followed by the member tag: an R2 token's name, and a GCS
+    /// or RustFS service account's description.
+    pub fn label(&self) -> String;
 }
 
 /// A key a store's listing found, with the device whose name it carries.
@@ -3338,8 +4006,8 @@ pub enum ProviderSignOut {
     bootstrap uses that held sign-in and never opens UI. Session-only `InMemory`
     custody lives with the returned handle. OAuth sign-in tokens move from
     session custody into the device keychain on successful publication.
-  - Every call migrates coven's own local tables in place before applying
-    the app's migrations, as a writable open does ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
+  - Every call migrates coven's own local tables in place before applying the app's migrations, as a
+    writable open does ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
   - An unfinished store is created at its permanent path with a durable
     `.coven-bootstrap` marker. Listings hide it and ordinary opens refuse it.
     Bootstrap holds its own directory capability and opens the database once;
@@ -3401,6 +4069,16 @@ pub enum CodeError {
     WrongKind { expected: CodeKind, actual: CodeKind },
 }
 
+/// Filesystem failures while reserving, publishing or cancelling a new device.
+pub enum BootstrapDirectoryError {
+    /// A store already exists or preparing its directory failed.
+    Create(DirectoryCreationError),
+    /// Another bootstrap or an open database prevents this operation.
+    Lock(StoreLockError),
+    /// A filesystem operation failed.
+    File(FileError),
+}
+
 /// Opening a store on a new device failed (§13, E10).
 pub enum BootstrapError {
     /// The person cancelled the call.
@@ -3440,7 +4118,15 @@ pub trait OAuthPresenter: Send + Sync {
 
 /// The desktop presenter: opens the system browser and listens locally at
 /// `http://localhost:19284/callback`. Not shipped on iOS or Android.
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub struct DesktopOAuthPresenter;
+
+#[cfg(not(any(target_os = "ios", target_os = "android")))]
+#[async_trait]
+impl OAuthPresenter for DesktopOAuthPresenter {
+    fn redirect_uri(&self, provider: CloudProvider) -> &str;
+    async fn present(&self, authorization_url: &str) -> Result<SecretText, OAuthError>;
+}
 
 /// Provider sign-in could not finish (E5, E10).
 pub enum OAuthError {
@@ -3565,6 +4251,14 @@ pub struct S3Credentials {
     pub secret_access_key: SecretText,
 }
 
+impl S3Credentials {
+    /// Encode the separately held or transferred S3 key, never a restore code.
+    pub fn encode(&self) -> Result<SecretBytes, StorageError>;
+
+    /// Read a key supplied separately from a restore code.
+    pub fn decode(bytes: &[u8]) -> Result<Self, StorageError>;
+}
+
 /// Opens the store on a new device from the person's restore code, scanned
 /// or typed. S3 requires Some(s3_credentials), entered separately or received
 /// alongside the code from one of the person's own devices. Other providers
@@ -3627,6 +4321,11 @@ impl OAuthClients {
     /// exchange. It is sent only to Google's token endpoint. Refused when no
     /// Google client id is set or the secret is empty.
     pub fn with_google_client_secret(self, secret: SecretText) -> Result<Self, OAuthError>;
+
+    /// Redirect token requests to an HTTP fake while retaining the real protocol.
+    // Requires coven-storage/test-utils; coven/test-utils does not enable it.
+    #[cfg(feature = "test-utils")]
+    pub fn with_token_endpoint(mut self, endpoint: String) -> Self;
 }
 
 /// Dropbox access is fixed by the app registration, not an incremental scope.
@@ -3644,6 +4343,11 @@ pub enum DropboxClients {
 pub enum OAuthAccess {
     Dropbox(DropboxAccess),
     OneDrive,
+}
+
+impl OAuthAccess {
+    /// The provider receiving this authorization request.
+    pub fn provider(self) -> CloudProvider;
 }
 ```
 
@@ -3781,6 +4485,64 @@ impl MemberKeys {
     pub fn to_secret_bytes(&self) -> SecretBytes;
     /// Restores both pairs from custody or a restore code.
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
+
+    /// Make both member key pairs using the operating system's randomness.
+    pub fn generate() -> Result<Self, CryptoError>;
+
+    /// Sign bytes with the member's Ed25519 pair (§12).
+    pub fn sign(&self, bytes: &[u8]) -> coven_crypto::Signature;
+
+    /// Sign the digest of every object byte before the signature (Appendix D.3).
+    /// Panics if the storage path is empty.
+    pub fn sign_object(&self, path: &str, digest: &coven_crypto::ObjectDigest) -> coven_crypto::Signature;
+
+    /// Sign a snapshot's exact kind, version and routing fields (D9).
+    /// The prefix domain and path are bound separately from whole-object signing.
+    /// Panics if the storage path is empty.
+    pub fn sign_prefix(&self, path: &str, prefix: &[u8]) -> coven_crypto::Signature;
+
+    /// Sign a write's cleartext prefix, sealed header chunk and part roots
+    /// (D9), separately from the whole-object signature.
+    /// Panics if the storage path is empty.
+    pub fn sign_write_header(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        header: &[u8],
+        roots: &[[u8; 32]],
+    ) -> coven_crypto::Signature;
+
+    /// Open a store-key box, authenticating the exact path and opaque clear prefix.
+    /// Format checks the recipient and opened identity; the caller checks the
+    /// introduction commitment before accepting the candidate key.
+    /// Panics if the storage path is empty.
+    pub fn open_store_key(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        sealed: &[u8],
+    ) -> Result<StoreKey, CryptoError>;
+
+    /// Open a circle-key box, authenticating the exact path and opaque clear prefix.
+    /// Format checks the recipient and opened identity; the caller checks the
+    /// introduction commitment before accepting the candidate key.
+    /// Panics if the storage path is empty.
+    pub fn open_circle_key(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        sealed: &[u8],
+    ) -> Result<CircleKey, CryptoError>;
+
+    /// Open a member's delivered S3 key box, authenticating the exact path and
+    /// clear prefix (§14.3). Its plaintext is at most 8,192
+    /// bytes; format decodes it. Panics if the storage path is empty.
+    pub fn open_access_key(
+        &self,
+        path: &str,
+        prefix: &[u8],
+        sealed: &[u8],
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, CryptoError>;
 }
 
 impl MemberIdentity {
@@ -3789,6 +4551,45 @@ impl MemberIdentity {
     /// historical credentials. This custody encoding is not a restore code.
     pub fn to_secret_bytes(&self) -> SecretBytes;
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
+
+    /// Bind a private pair to the stable id its admin entry names.
+    pub fn new(member: MemberId, keys: MemberKeys) -> Self;
+
+    /// Make both key pairs for an independently generated id (§10).
+    pub fn generate(member: MemberId) -> Result<Self, CryptoError>;
+
+    /// The active private pair: the one this device signs with and a
+    /// restore code exports.
+    pub fn keys(&self) -> &MemberKeys;
+
+    /// A self-replacement's fresh pair, kept before its binding is published.
+    pub fn candidate(&self) -> Option<&MemberKeys>;
+
+    /// The held private pair whose sealing key is `sealing`. A copy names the
+    /// exact credential it is sealed to, and opens only with that one, never
+    /// with whichever pair is latest (§12.1).
+    pub fn credential(&self, sealing: &SealingKey) -> Option<&MemberKeys>;
+
+    /// Whether some held pair is exactly `keys`.
+    pub fn holds(&self, keys: &MemberPublicKeys) -> bool;
+
+    /// This identity keeping `candidate` for a self-replacement. A candidate
+    /// already held stays held as a retired credential: its copies may exist.
+    pub fn with_candidate(&self, candidate: MemberKeys) -> Self;
+
+    /// This identity with the held pair `current` active, as replay's current
+    /// binding selects it (§12.3). The previously active pair and any other
+    /// candidate stay held as retired credentials. `None` when no held pair
+    /// is `current`.
+    pub fn activate(&self, current: &MemberPublicKeys) -> Option<Self>;
+
+    /// This identity with its candidate retired: a replacement that never
+    /// became current leaves its copies, so its pair stays held (§12.4).
+    pub fn retire_candidate(&self) -> Self;
+
+    /// This identity without its candidate: a self-replacement cancelled
+    /// before reserving anything never sent a copy to it.
+    pub fn without_candidate(&self) -> Self;
 }
 
 impl StoreKeyring {
@@ -3796,6 +4597,27 @@ impl StoreKeyring {
     pub fn to_secret_bytes(&self) -> SecretBytes;
     /// Reads custody bytes, rejecting malformed, duplicate or empty keyrings.
     pub fn from_secret_bytes(bytes: &[u8]) -> Result<Self, MaterialError>;
+
+    /// Start with one opened store key. A keyring always holds a store key.
+    pub fn new(key: StoreKey) -> Self;
+
+    /// Keep an opened store key; a different key at the same id is an error.
+    pub fn insert_store_key(&mut self, key: StoreKey) -> Result<(), MaterialError>;
+
+    /// Keep an opened circle key, retaining its earlier keys too (§15.5).
+    pub fn insert_circle_key(&mut self, key: CircleKey) -> Result<(), MaterialError>;
+
+    /// An opened store key by identity, so older writes still open (§12.2).
+    pub fn store_key(&self, key: KeyId) -> Result<&StoreKey, MaterialError>;
+
+    /// All held store-key identities, including keys preceding a member's join.
+    pub fn store_key_ids(&self) -> impl Iterator<Item = KeyId> + '_;
+
+    /// All held keys for a circle, including concurrent and historical rotations.
+    pub fn circle_key_ids(&self, circle: CircleId) -> impl Iterator<Item = KeyId> + '_;
+
+    /// An opened circle key by its circle and identity (§15.5).
+    pub fn circle_key(&self, circle: CircleId, key: KeyId) -> Result<&CircleKey, MaterialError>;
 }
 
 impl CovenHandle {
@@ -3924,8 +4746,8 @@ pub struct CircleMemberInfo {
 
 ### E13 Migrations
 
-- Coven migrates its own local tables automatically before the app's
-  migrations; each internal migration is atomic ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
+- Coven migrates its own local tables automatically before the app's migrations; each internal
+  migration is atomic ([Appendix C.1](coven.md#c1-covens-tables-in-the-apps-database)).
 - The app's schema is a list of migrations numbered from 1 with no gaps.
 - Opening runs every migration above the database's version in one
   transaction, so a failure leaves the schema as it was.
@@ -3935,29 +4757,27 @@ pub struct CircleMemberInfo {
   `Convert` handles eligible received late ordinary changes in version and
   causal order (§18.6;
   [`receive_matches_evaluation`](proofs/queue/CovenQueue/Conversion.lean)).
-  - Local migration preserves every queued original record, including
-    untried writes; tried uploads also retain their format and sealing keys
-    ([`conversions_preserve_uploads`, `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Local migration preserves every queued original record, including untried writes; tried uploads
+    also retain their format and sealing keys ([`conversions_preserve_uploads`,
+    `conversions_preserve_attempt`](proofs/queue/CovenQueue/Conversion.lean)).
   - Member-key slot cut-offs use the same data rule (§14.1).
-  - Before invoking a callback, coven determines candidate schema admission
-    and resolves each change's original generation source and replaced
-    setters under §9.5. A dependent change never reaches the callback: retain
-    its original write/row identity, generation, operation, names, scalar
-    values and failed source identities as a frozen loss. A delete keeps
-    its identity even without scalars. Recorded reads only govern readiness
-    ([`dependent_change_not_converted`, `converted_change_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
-  - One received interpretation, including one audience part, can contain
-    converted changes and frozen originals. Conversion is independent of
-    attempt status and preserves device, number, timestamp, authored read-through slot,
-    row identity, generation, operation and original source identities.
-    Renamed tables and columns retain their sources under the new names;
-    frozen changes keep their old names and original cause
-    ([`conversion_preserves_identity`, `convertChange_metadata`](proofs/queue/CovenQueue/Conversion.lean);
-    reference and rename validation remain implementation obligations).
-  - With `Drop`, keep each original change as a schema loss naming
-    the breaking version and consume the write. No callback changes any
-    upload record. Already frozen values and causes survive later raises
-    ([`explicit_drop_preserves_values`, `conversions_preserve_frozen`, `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
+  - Before invoking a callback, coven determines candidate schema admission and resolves each
+    change's original generation source and replaced setters under §9.5. A dependent change never
+    reaches the callback: retain its original write/row identity, generation, operation, names,
+    scalar values and failed source identities as a frozen loss. A delete keeps its identity even
+    without scalars. Recorded reads only govern readiness ([`dependent_change_not_converted`,
+    `converted_change_matches_receiver`](proofs/queue/CovenQueue/Conversion.lean)).
+  - One received interpretation, including one audience part, can contain converted changes and
+    frozen originals. Conversion is independent of attempt status and preserves device, number,
+    timestamp, authored read-through slot, row identity, generation, operation and original source
+    identities. Renamed tables and columns retain their sources under the new names; frozen changes
+    keep their old names and original cause ([`conversion_preserves_identity`,
+    `convertChange_metadata`](proofs/queue/CovenQueue/Conversion.lean); reference and rename
+    validation remain implementation obligations).
+  - With `Drop`, keep each original change as a schema loss naming the breaking version and consume
+    the write. No callback changes any upload record. Already frozen values and causes survive later
+    raises ([`explicit_drop_preserves_values`, `conversions_preserve_frozen`,
+    `lost_never_reconverted`](proofs/queue/CovenQueue/Conversion.lean)).
   - The author reloading after a competing raise uses the same per-change
     rule as peers. New writes use the atomically reloaded state; an implicit
     own read of an excluded original write creates no data dependence. Only

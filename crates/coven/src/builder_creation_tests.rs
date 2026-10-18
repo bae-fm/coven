@@ -1,5 +1,6 @@
 use crate::*;
 use coven_crypto::custody::Keychain;
+use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::{Arc, Mutex};
 

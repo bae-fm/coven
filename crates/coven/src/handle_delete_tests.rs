@@ -3,6 +3,7 @@
 
 use crate::tests::Network;
 use crate::*;
+use coven_foundation::files::StoreDirAccess;
 use std::time::Duration;
 
 async fn insert(handle: &CovenHandle, id: &str) {

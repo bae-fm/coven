@@ -212,12 +212,12 @@ impl Fixture {
     }
     /// The committed queue as the app reads it (E7).
     async fn queue(&self) -> UploadQueue {
-        UploadQueue::from_state(self.database.upload_queue().await.unwrap()).unwrap()
+        upload_queue_from_state(self.database.upload_queue().await.unwrap()).unwrap()
     }
     fn subscribe_queue(&self) -> coven_database::LiveQuery<UploadQueue> {
         self.database
             .subscribe_upload_queue()
-            .process(UploadQueue::from_state)
+            .process(upload_queue_from_state)
     }
     /// This device's pending reason about one of its queued files.
     async fn upload_reason(&self, file: &FileRef) -> Option<crate::PendingReason> {

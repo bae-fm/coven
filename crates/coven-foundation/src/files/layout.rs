@@ -121,20 +121,6 @@ impl StoreLayout {
         StoreDir::new(self.app_dir.join("stores").join(id.to_string()), *id)
     }
 
-    /// Reserve a hidden, restartable new-device store. A second attempt for the
-    /// same id waits for a dropped bootstrap's remaining work to release its
-    /// locks; a live bootstrap still refuses it. Ordinary store listings exclude
-    /// it until `BootstrapStore::publish` succeeds.
-    pub async fn begin_bootstrap(
-        &self,
-        id: StoreId,
-        name: &str,
-        ids: &dyn IdSource,
-    ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
-        super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, name, ids)
-            .await
-    }
-
     /// Publish a directory fixture without initializing member custody.
     #[cfg(any(test, feature = "test-utils"))]
     pub fn create_store_dir(
@@ -144,6 +130,34 @@ impl StoreLayout {
         ids: &dyn IdSource,
     ) -> Result<StoreDir, DirectoryCreationError> {
         crate::files::creation::create(&self.app_dir.join("stores"), id, name, ids, false)
+    }
+}
+
+/// Crate-to-crate operations for coven's owners; not re-exported by the app API.
+pub trait StoreLayoutAccess: Sized {
+    /// Reserve a hidden, restartable new-device store. A second attempt for the
+    /// same id waits for a dropped bootstrap's remaining work to release its
+    /// locks; a live bootstrap still refuses it. Ordinary store listings exclude
+    /// it until `BootstrapStore::publish` succeeds.
+    fn begin_bootstrap(
+        &self,
+        id: StoreId,
+        name: &str,
+        ids: &dyn IdSource,
+    ) -> impl std::future::Future<
+        Output = Result<super::BootstrapStore, super::BootstrapDirectoryError>,
+    > + Send;
+}
+
+impl StoreLayoutAccess for StoreLayout {
+    async fn begin_bootstrap(
+        &self,
+        id: StoreId,
+        name: &str,
+        ids: &dyn IdSource,
+    ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
+        super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, name, ids)
+            .await
     }
 }
 

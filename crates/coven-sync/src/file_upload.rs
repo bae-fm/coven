@@ -2,6 +2,7 @@
 
 use crate::{files::file_error::*, files::FilesInner, PendingRecord, PendingSubject, SyncError};
 use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
+use coven_database::FileRefJournal;
 use coven_database::{
     CovenResult, DbError, FileRef, FileUpload, LocalFileStream, RetrySubject, UploadQueueState,
 };
@@ -59,38 +60,37 @@ pub enum DrainOutcome {
     /// Uploads were paused.
     Paused,
 }
-impl UploadQueue {
-    /// Project the committed queue: a recorded provider session's confirmed
-    /// bytes are progress, and a file without one is waiting (E7).
-    pub fn from_state(state: UploadQueueState) -> CovenResult<Self> {
-        let files = state
-            .uploads
-            .into_iter()
-            .map(|upload| {
-                let phase = match &upload.session {
-                    None => UploadPhase::Waiting,
-                    Some(bytes) => {
-                        let session = UploadSession::decode(bytes.as_bytes())
-                            .map_err(|_| DbError::DamagedDatabase)?;
-                        UploadPhase::Uploading {
-                            bytes_confirmed: session.confirmed_bytes(),
-                            bytes_total: session.total_bytes(),
-                        }
+/// Project the committed queue: a recorded provider session's confirmed
+/// bytes are progress, and a file without one is waiting (E7).
+pub fn upload_queue_from_state(state: UploadQueueState) -> CovenResult<UploadQueue> {
+    let files = state
+        .uploads
+        .into_iter()
+        .map(|upload| {
+            let phase = match &upload.session {
+                None => UploadPhase::Waiting,
+                Some(bytes) => {
+                    let session = UploadSession::decode(bytes.as_bytes())
+                        .map_err(|_| DbError::DamagedDatabase)?;
+                    UploadPhase::Uploading {
+                        bytes_confirmed: session.confirmed_bytes(),
+                        bytes_total: session.total_bytes(),
                     }
-                };
-                Ok(QueuedUpload {
-                    file: upload.file,
-                    phase,
-                    queued_at: upload.queued_at,
-                })
+                }
+            };
+            Ok(QueuedUpload {
+                file: upload.file,
+                phase,
+                queued_at: upload.queued_at,
             })
-            .collect::<CovenResult<_>>()?;
-        Ok(Self {
-            paused: state.paused,
-            files,
         })
-    }
+        .collect::<CovenResult<_>>()?;
+    Ok(UploadQueue {
+        paused: state.paused,
+        files,
+    })
 }
+
 fn file_subject(file: &FileRef) -> PendingSubject {
     PendingSubject::File {
         device: file.uploader(),

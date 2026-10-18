@@ -5,6 +5,7 @@
 
 use crate::{commit_credentials, SyncError};
 use coven_crypto::custody::StoreKeychain;
+use coven_storage::providers::OAuthTokenRefresh;
 use coven_storage::{
     providers::OAuthClients, ConnectionCredentials, OAuthTokens, StorageCredentials, StorageError,
     StorageFailure, StorageSettings, TokenCustody,

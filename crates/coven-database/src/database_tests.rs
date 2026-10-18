@@ -1,6 +1,7 @@
 use super::*;
 use crate::test_utils::{notes_migrations, notes_tables};
 use crate::tests::TestStore;
+use coven_foundation::files::StoreLayoutAccess;
 use coven_foundation::files::{SettingsError, StoreLockError};
 
 impl Database {

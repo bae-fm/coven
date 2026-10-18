@@ -4,6 +4,7 @@ use super::{
     atomic_file::exists, creation, device_reset, lock, DeviceReset, DirectoryCreationError,
     FileError, StoreDir, StoreLockError,
 };
+use crate::files::StoreDirAccess;
 use crate::id_source::{IdSource, StoreId};
 use std::{
     fs, io,

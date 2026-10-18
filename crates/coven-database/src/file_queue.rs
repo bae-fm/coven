@@ -1,5 +1,6 @@
 //! Durable file upload facts; provider session bytes remain opaque to SQLite.
 
+use crate::FileRefJournal;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
 use coven_crypto::{ContentHash, SecretBytes};
 use coven_format::file::FileHeader;

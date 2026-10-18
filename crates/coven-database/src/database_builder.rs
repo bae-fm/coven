@@ -1,6 +1,7 @@
 //! Compose locked writers and read-only connections at the database boundary.
 
 use super::*;
+use coven_foundation::files::StoreDirAccess;
 
 use crate::{migration::MigrationOperation, NewOperation};
 

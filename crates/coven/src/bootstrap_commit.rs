@@ -1,6 +1,7 @@
 //! Publish settings, custody and the loaded directory as the final bootstrap step.
 
 use super::*;
+use coven_foundation::files::StoreDirAccess;
 
 /// An OAuth store commits `sign_in`'s current tokens, which then refresh in
 /// the handle's device custody; a rollback holds them in the session again.

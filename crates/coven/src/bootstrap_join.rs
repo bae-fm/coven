@@ -2,6 +2,7 @@
 //! approval, before the shared new-device loading (§13.2).
 
 use super::*;
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_sync::{JoinOutcome, JoiningIdentity};
 

@@ -13,7 +13,7 @@
 use super::{DropboxStorage, PROVIDER};
 use crate::providers::http::{self, Body, OAuthSession};
 use crate::providers::tests::read_live_settings;
-use crate::providers::{DropboxClients, OAuthClients};
+use crate::providers::{DropboxClients, OAuthClients, OAuthTokenRefresh};
 use crate::*;
 use coven_format::value::StorageTime;
 use coven_foundation::{

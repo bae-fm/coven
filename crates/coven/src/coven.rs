@@ -2,6 +2,7 @@
 
 use crate::{CovenBuilder, StoreDeletionError, StoreDir, StoreLayout};
 use coven_crypto::custody::{Keychain, StoreKeychain};
+use coven_foundation::files::StoreDirAccess;
 
 /// Creating, opening and deleting stores on this device (E1).
 pub struct Coven;

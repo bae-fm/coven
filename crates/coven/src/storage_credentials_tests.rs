@@ -1,4 +1,5 @@
 use super::*;
+use coven_foundation::files::StoreDirAccess;
 
 async fn assert_original_connection_uploads(f: &Fixture) {
     assert!(f.connector.clients.lock().unwrap()[0].upgrade().is_some());

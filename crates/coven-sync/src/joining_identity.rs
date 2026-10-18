@@ -8,6 +8,7 @@ use coven_format::{
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
 };
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
 use coven_storage::{ObjectPath, Storage, StorageFailure};
 use zeroize::Zeroizing;

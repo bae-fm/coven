@@ -2,6 +2,7 @@
 //! it, deleting that key on evidence, and guided console steps (§20.10, §14.3).
 use crate::tests::Network;
 use crate::*;
+use coven_foundation::files::StoreDirAccess;
 use coven_storage::Storage;
 
 fn pending_keys(records: &[PendingRecord]) -> Vec<(OperationId, AccessKeyToDelete)> {

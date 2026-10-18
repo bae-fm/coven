@@ -8,6 +8,7 @@
 //! A cache range being written is recorded in `_coven_cache_writes` instead,
 //! which no removal here reads until opening finds it abandoned.
 
+use coven_foundation::files::StoreDirAccess;
 use std::collections::BTreeSet;
 
 use crate::{sqlite::DatabaseConnection, DbError};

@@ -1,4 +1,5 @@
 use super::*;
+use crate::files::StoreDirAccess;
 use crate::files::StoreLayout;
 use crate::id_source::UuidIds;
 use uuid::Uuid;

@@ -1,6 +1,7 @@
 //! Eager-fill work from changed file references, kept in the transaction
 //! that changes them, so no pass rescans every eager row (§17.6, §6.7).
 
+use crate::FileRefJournal;
 use crate::{
     file_queue, file_ref, sqlite::DatabaseConnection, write_rows::AppKey,
     write_schema::WriteSchema, CacheFill, DbError, FileRef,

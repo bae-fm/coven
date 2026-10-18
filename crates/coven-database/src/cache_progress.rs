@@ -1,6 +1,7 @@
 //! Pin and eager-fill progress as queries over committed cache coverage and
 //! eager reservations (§17.6, E8). Nothing here counts bytes in flight.
 
+use crate::FileRefJournal;
 use crate::{
     file_queue, sqlite::DatabaseConnection, write_schema::WriteSchema, CovenResult, Database,
     DbError, FileRef, LiveQuery, RowKey,

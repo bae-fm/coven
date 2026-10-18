@@ -135,127 +135,10 @@ impl StoreDir {
         self.id
     }
 
-    /// The database file's exact path for coven-database to open with SQLite.
-    /// Callers never append path components to it.
-    pub fn database_path(&self) -> PathBuf {
-        self.path.join(DATABASE)
-    }
-
-    /// Retained remote input has its own SQLite owner: receiving bytes must not
-    /// wait for a transaction applying those bytes to the application database.
-    pub fn input_database_path(&self) -> PathBuf {
-        self.path.join("inputs.db")
-    }
-
     /// The recorded replacement of this installation, if one is unfinished
     /// or its record outlived publication (§19.3).
     pub fn device_reset(&self) -> Result<Option<super::DeviceReset>, super::FileError> {
         super::device_reset::read(&self.path)
-    }
-
-    /// Durably record `reset_device`'s decision to replace this installation;
-    /// the first decision wins. The next bootstrap moves the old copy aside.
-    pub fn record_device_reset(
-        &self,
-        reset: &super::DeviceReset,
-    ) -> Result<super::DeviceReset, super::FileError> {
-        super::device_reset::record(&self.path, reset)
-    }
-
-    /// Whether a reset record remains only because publication was interrupted
-    /// after removing the bootstrap marker: settings already name the new device.
-    /// Such a record is removed; an unfinished one is returned.
-    pub fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError> {
-        let Some(reset) = self.device_reset()? else {
-            return Ok(None);
-        };
-        if self.settings()?.device_id == reset.new_device
-            && !super::bootstrap::is_pending(&self.path)?
-        {
-            super::device_reset::finish(&self.path)?;
-            return Ok(None);
-        }
-        Ok(Some(reset))
-    }
-
-    /// The settings written when this store was created, restored or joined.
-    /// Reading takes no lock; a read-only open uses it alongside a writer.
-    pub fn settings(&self) -> Result<StoreSettings, SettingsError> {
-        settings::read(&self.path, self.id)
-    }
-
-    /// Probe the OS writer lock without waiting, for lifetime assertions in tests.
-    #[cfg(any(test, feature = "test-utils"))]
-    pub fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
-        let guard = lock::acquire(&self.path, self.id)?;
-        self.check_published()?;
-        Ok(guard)
-    }
-
-    /// Take the writer lock, awaiting release by a closing instance in this
-    /// process. A live instance or another process still refuses immediately.
-    pub async fn lock_for_open(&self) -> Result<StoreLock, StoreLockError> {
-        let guard = lock::acquire_for_open(&self.path, self.id).await?;
-        self.check_published()?;
-        Ok(guard)
-    }
-
-    /// Prevent deletion while reading, alongside other readers and the writer.
-    /// The guard must outlive every open file and database connection it protects.
-    pub fn lock_read_only(&self) -> Result<StoreReadLock, StoreLockError> {
-        let guard = lock::acquire_reader(&self.path, self.id)?;
-        self.check_published()?;
-        Ok(guard)
-    }
-
-    /// Hold while a cache range recorded as being written gets its bytes
-    /// with no database writer held. Shared by such writes in every process;
-    /// `exclude_cache_writes` waits for all of them (Appendix C.3).
-    pub fn lock_cache_write(&self) -> Result<CacheWriteLock, FileError> {
-        lock::cache_writes(&self.path, true)
-    }
-
-    /// Wait until no cache range is being written in any process and keep new
-    /// writes waiting, so a range still recorded as being written has no
-    /// live writer (Appendix C.3).
-    pub fn exclude_cache_writes(&self) -> Result<CacheWriteLock, FileError> {
-        lock::cache_writes(&self.path, false)
-    }
-
-    /// Lock an existing store or a directory left by an interrupted deletion.
-    /// An absent store with leftover locks can finish their removal on retry.
-    /// No directory is created by this call.
-    pub fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError> {
-        let guard = lock::for_deletion(&self.path, self.id)?;
-        self.check_published()?;
-        Ok(guard)
-    }
-
-    /// Check that a supplied lock protects this exact store directory.
-    pub fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError> {
-        lock.verify(&self.path, self.id)
-    }
-
-    /// Give a crate the capability for its reserved file, without exposing
-    /// the store path or letting it name any other top-level file.
-    pub fn owned_file(&self, file: StoreFile) -> AtomicFile {
-        let name = match file {
-            StoreFile::StorageSettings => "storage.json",
-            StoreFile::StoreKeys => "store-keys.sealed",
-            StoreFile::MemberKeys => "member-keys.sealed",
-            StoreFile::Bootstrap => "bootstrap.sealed",
-        };
-        AtomicFile::new(self.path.join(name))
-    }
-
-    /// The capability for one app-provided copy or cache entry. All path
-    /// construction stays here; the name cannot traverse directories.
-    pub fn file(&self, area: FileArea, name: &FileName) -> AtomicFile {
-        let area = match area {
-            FileArea::AppProvided => APP_FILES,
-            FileArea::Cache => CACHE,
-        };
-        AtomicFile::new(self.path.join(area).join(&name.0))
     }
 }
 
@@ -274,6 +157,136 @@ pub(crate) fn initialize(
         })?;
     }
     settings::write(path, settings)
+}
+
+/// Crate-to-crate operations for coven's owners; not re-exported by the app API.
+pub trait StoreDirAccess: Sized {
+    /// The database file's exact path for coven-database to open with SQLite.
+    /// Callers never append path components to it.
+    fn database_path(&self) -> PathBuf;
+    /// Retained remote input has its own SQLite owner: receiving bytes must not
+    /// wait for a transaction applying those bytes to the application database.
+    fn input_database_path(&self) -> PathBuf;
+    /// Durably record `reset_device`'s decision to replace this installation;
+    /// the first decision wins. The next bootstrap moves the old copy aside.
+    fn record_device_reset(
+        &self,
+        reset: &super::DeviceReset,
+    ) -> Result<super::DeviceReset, super::FileError>;
+    /// Whether a reset record remains only because publication was interrupted
+    /// after removing the bootstrap marker: settings already name the new device.
+    /// Such a record is removed; an unfinished one is returned.
+    fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError>;
+    /// The settings written when this store was created, restored or joined.
+    /// Reading takes no lock; a read-only open uses it alongside a writer.
+    fn settings(&self) -> Result<StoreSettings, SettingsError>;
+    /// Probe the OS writer lock without waiting, for lifetime assertions in tests.
+    #[cfg(any(test, feature = "test-utils"))]
+    fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError>;
+    /// Take the writer lock, awaiting release by a closing instance in this
+    /// process. A live instance or another process still refuses immediately.
+    fn lock_for_open(
+        &self,
+    ) -> impl std::future::Future<Output = Result<StoreLock, StoreLockError>> + Send;
+    /// Prevent deletion while reading, alongside other readers and the writer.
+    /// The guard must outlive every open file and database connection it protects.
+    fn lock_read_only(&self) -> Result<StoreReadLock, StoreLockError>;
+    /// Hold while a cache range recorded as being written gets its bytes
+    /// with no database writer held. Shared by such writes in every process;
+    /// `exclude_cache_writes` waits for all of them (Appendix C.3).
+    fn lock_cache_write(&self) -> Result<CacheWriteLock, FileError>;
+    /// Wait until no cache range is being written in any process and keep new
+    /// writes waiting, so a range still recorded as being written has no
+    /// live writer (Appendix C.3).
+    fn exclude_cache_writes(&self) -> Result<CacheWriteLock, FileError>;
+    /// Lock an existing store or a directory left by an interrupted deletion.
+    /// An absent store with leftover locks can finish their removal on retry.
+    /// No directory is created by this call.
+    fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError>;
+    /// Check that a supplied lock protects this exact store directory.
+    fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError>;
+    /// Give a crate the capability for its reserved file, without exposing
+    /// the store path or letting it name any other top-level file.
+    fn owned_file(&self, file: StoreFile) -> AtomicFile;
+    /// The capability for one app-provided copy or cache entry. All path
+    /// construction stays here; the name cannot traverse directories.
+    fn file(&self, area: FileArea, name: &FileName) -> AtomicFile;
+}
+
+impl StoreDirAccess for StoreDir {
+    fn database_path(&self) -> PathBuf {
+        self.path.join(DATABASE)
+    }
+    fn input_database_path(&self) -> PathBuf {
+        self.path.join("inputs.db")
+    }
+    fn record_device_reset(
+        &self,
+        reset: &super::DeviceReset,
+    ) -> Result<super::DeviceReset, super::FileError> {
+        super::device_reset::record(&self.path, reset)
+    }
+    fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError> {
+        let Some(reset) = self.device_reset()? else {
+            return Ok(None);
+        };
+        if self.settings()?.device_id == reset.new_device
+            && !super::bootstrap::is_pending(&self.path)?
+        {
+            super::device_reset::finish(&self.path)?;
+            return Ok(None);
+        }
+        Ok(Some(reset))
+    }
+    fn settings(&self) -> Result<StoreSettings, SettingsError> {
+        settings::read(&self.path, self.id)
+    }
+    #[cfg(any(test, feature = "test-utils"))]
+    fn lock_exclusive(&self) -> Result<StoreLock, StoreLockError> {
+        let guard = lock::acquire(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
+    }
+    async fn lock_for_open(&self) -> Result<StoreLock, StoreLockError> {
+        let guard = lock::acquire_for_open(&self.path, self.id).await?;
+        self.check_published()?;
+        Ok(guard)
+    }
+    fn lock_read_only(&self) -> Result<StoreReadLock, StoreLockError> {
+        let guard = lock::acquire_reader(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
+    }
+    fn lock_cache_write(&self) -> Result<CacheWriteLock, FileError> {
+        lock::cache_writes(&self.path, true)
+    }
+    fn exclude_cache_writes(&self) -> Result<CacheWriteLock, FileError> {
+        lock::cache_writes(&self.path, false)
+    }
+    fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError> {
+        let guard = lock::for_deletion(&self.path, self.id)?;
+        self.check_published()?;
+        Ok(guard)
+    }
+    fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError> {
+        lock.verify(&self.path, self.id)
+    }
+    fn owned_file(&self, file: StoreFile) -> AtomicFile {
+        let name = match file {
+            StoreFile::StorageSettings => "storage.json",
+            StoreFile::StoreKeys => "store-keys.sealed",
+            StoreFile::MemberKeys => "member-keys.sealed",
+            StoreFile::Bootstrap => "bootstrap.sealed",
+        };
+        AtomicFile::new(self.path.join(name))
+    }
+    fn file(&self, area: FileArea, name: &FileName) -> AtomicFile {
+        let area = match area {
+            FileArea::AppProvided => APP_FILES,
+            FileArea::Cache => CACHE,
+        };
+        AtomicFile::new(self.path.join(area).join(&name.0))
+    }
 }
 
 #[cfg(test)]

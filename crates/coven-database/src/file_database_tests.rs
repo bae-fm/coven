@@ -1,4 +1,5 @@
 use super::*;
+use crate::FileRefJournal;
 use crate::{
     file_write::tests::{attach, tables},
     tests::TestStore,

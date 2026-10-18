@@ -1,5 +1,6 @@
 use super::*;
 use crate::custody::{KeySession, MemberKeyCustody, StoreKeyCustody};
+use coven_foundation::files::StoreDirAccess;
 use std::sync::Arc;
 
 use crate::{MemberIdentity, StoreKey, StoreKeyring};

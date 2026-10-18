@@ -7,6 +7,7 @@ use coven_crypto::{
 };
 use coven_database::{Database, DatabaseBuilder, Migration, RowIdentity, SyncedTable};
 use coven_format::admin::{MemberRole, StoreChange};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{StoreFile, StoreLayout},
     id_source::{IdSource, KeyId, MemberId, SequentialIds, StoreId},

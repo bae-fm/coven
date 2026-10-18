@@ -1,5 +1,6 @@
 use super::*;
 use crate::{CircleId, CircleKey, MemberIdentity, StoreKey};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::id_source::{IdSource, KeyId, MemberId};
 use coven_foundation::{
     files::{StoreDir, StoreFile, StoreLayout},

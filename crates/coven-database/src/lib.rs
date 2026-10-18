@@ -118,7 +118,7 @@ pub use error::{
     CovenError, CovenMigrationError, CovenResult, DbError, MigrationError, SchemaError,
 };
 pub use file_queue::{FileUpload, UnsentWork, UploadQueueState};
-pub use file_ref::{FileRef, LocalFileError, LocalFileStream};
+pub use file_ref::{FileRef, FileRefJournal, LocalFileError, LocalFileStream};
 pub use live_query::{
     LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision,
     ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,

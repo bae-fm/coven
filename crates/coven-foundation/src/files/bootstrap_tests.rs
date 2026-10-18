@@ -1,4 +1,5 @@
 use super::*;
+use crate::files::StoreLayoutAccess;
 use crate::{
     files::{StoreFile, StoreLayout},
     id_source::UuidIds,

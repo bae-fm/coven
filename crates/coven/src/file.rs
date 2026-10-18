@@ -11,13 +11,13 @@ impl CovenHandle {
     /// Queue, pause setting and provider-confirmed session progress in one
     /// committed database snapshot, available while disconnected (E7).
     pub async fn uploads(&self) -> CovenResult<UploadQueue> {
-        UploadQueue::from_state(self.database.upload_queue().await?)
+        coven_sync::upload_queue_from_state(self.database.upload_queue().await?)
     }
     /// The same pre-built query, through the app's live-query mechanism.
     pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue> {
         self.database
             .subscribe_upload_queue()
-            .process(UploadQueue::from_state)
+            .process(coven_sync::upload_queue_from_state)
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.7).

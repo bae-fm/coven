@@ -1,6 +1,7 @@
 //! Create identity custody while the store remains unpublished.
 
 use super::*;
+use coven_foundation::files::StoreLayoutAccess;
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
 
 pub(super) async fn create(

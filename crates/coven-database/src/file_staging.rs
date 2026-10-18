@@ -3,6 +3,7 @@
 use super::{finish_blocking, DatabaseInner};
 use crate::file_hashes::FileHasher;
 use crate::{file_write::StagedFile, DbError, FileSource, Provenance, WriteBatch};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName};
 use std::collections::{BTreeSet, VecDeque};
 use std::sync::{Arc, RwLock};

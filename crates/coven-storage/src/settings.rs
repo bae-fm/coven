@@ -1,4 +1,5 @@
 use crate::{StorageConfig, StorageError};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{StoreDir, StoreFile};
 
 /// Storage settings owned by the store directory; credentials never enter this file.

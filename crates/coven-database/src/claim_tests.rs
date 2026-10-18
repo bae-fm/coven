@@ -2,6 +2,7 @@ use crate::test_utils::tests::{run_lean, Generator};
 use crate::tests::TestStore;
 use crate::{ClaimAttempt, ClaimRead, ClaimSettlement, ClaimWork, DatabaseBuilder, Migration};
 use coven_crypto::{ObjectDigest, ObjectHasher};
+use coven_foundation::files::StoreDirAccess;
 
 fn digest(bytes: &[u8]) -> ObjectDigest {
     let mut hash = ObjectHasher::new();

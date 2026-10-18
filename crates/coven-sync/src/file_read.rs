@@ -5,11 +5,13 @@ use crate::{
     FileReadError,
 };
 use coven_crypto::{ContentHasher, FileKey};
+use coven_database::FileRefJournal;
 use coven_database::{DbError, FileRef, LocalFileStream};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
 };
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{FileArea, FileName, StoreReadLock};
 use coven_storage::{ByteRange, ObjectPath};
 use std::sync::Arc;

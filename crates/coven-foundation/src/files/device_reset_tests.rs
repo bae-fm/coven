@@ -1,5 +1,6 @@
 use super::*;
 use crate::files::{FileArea, FileName, StoreFile, StoreLayout};
+use crate::files::{StoreDirAccess, StoreLayoutAccess};
 use crate::id_source::UuidIds;
 
 fn reset(old: u64, new: u64) -> DeviceReset {

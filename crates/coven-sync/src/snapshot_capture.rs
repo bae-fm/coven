@@ -7,6 +7,7 @@ use coven_format::{
     sealed_snapshot::SnapshotObjectPrefix,
     sequence::{Purpose, SnapshotAnnouncement},
 };
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{FileArea, FileName},
     id_source::KeyId,

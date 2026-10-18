@@ -12,6 +12,7 @@ mod pagination;
 pub use http::{OAuthSession, ProviderResponse};
 pub use oauth::{
     DropboxClients, OAuthClients, OAuthError, OAuthFlow, OAuthPresenter, OAuthRedirectError,
+    OAuthTokenRefresh,
 };
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 mod desktop_oauth;

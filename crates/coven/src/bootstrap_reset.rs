@@ -1,6 +1,8 @@
 //! Reset this installation as a new device, at the app's call (§19.3).
 
 use super::*;
+use coven_foundation::files::StoreDirAccess;
+use coven_foundation::files::StoreLayoutAccess;
 
 /// Replace this installation with a new device loaded from storage, whatever
 /// the app's reason: another copy using this device's id, a missing device

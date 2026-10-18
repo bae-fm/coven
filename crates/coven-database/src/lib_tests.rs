@@ -1,4 +1,5 @@
 use crate::{CovenError, DatabaseBuilder, DbError, Migration, SyncedTable};
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::{
     files::{StoreDir, StoreLayout},
     id_source::{IdSource, SequentialIds, StoreId},

@@ -6,6 +6,7 @@ use coven_crypto::custody::{InMemoryCustody, Keychain, StoreKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
+use coven_foundation::files::{StoreDirAccess, StoreLayoutAccess};
 use coven_storage::{
     ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };

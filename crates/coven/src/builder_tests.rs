@@ -1,6 +1,7 @@
 use crate::*;
 use coven_crypto::custody::{KeyringCustody, StoreKeychain};
 use coven_database::DatabaseBuilder;
+use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::MemoryStorage, Storage};
 use std::sync::Arc;
 use std::{future::Future, task::Poll, time::UNIX_EPOCH};

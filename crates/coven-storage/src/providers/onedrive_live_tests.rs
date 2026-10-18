@@ -5,7 +5,7 @@
 use super::*;
 use crate::providers::{
     tests::listing_lag::{observe, report, TRIALS},
-    OAuthClients,
+    OAuthClients, OAuthTokenRefresh,
 };
 use coven_foundation::{
     clock::SystemClock,

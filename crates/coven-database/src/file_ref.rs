@@ -67,80 +67,7 @@ impl FileRef {
     pub fn uploader(&self) -> DeviceId {
         self.version.location.uploader
     }
-    /// The fixed uploader, object id and key carried inside the row, the same
-    /// before and after upload. This never consults key custody.
-    pub fn reference(&self) -> Result<coven_format::file_reference::FileReference, DbError> {
-        self.version.location.reference()
-    }
-    /// Encode captured facts for a device-local journal. Contains the uploaded
-    /// file key; callers must keep these bytes private, like the database itself.
-    pub fn encode(&self) -> Result<Vec<u8>, DbError> {
-        let mut fields = vec![
-            Value::Text(self.row.table.clone()),
-            Value::Blob(self.row.key.clone()),
-            Value::Text(crate::write_encoding::audience_text(&self.row.audience)),
-            Value::Text(self.column.clone()),
-            Value::Text(self.namespace.clone()),
-            Value::Blob(self.version.generation.to_be_bytes().to_vec()),
-            self.version.id.clone(),
-            Value::Integer(self.version.size as i64),
-            Value::Blob(self.version.hash.as_bytes().to_vec()),
-            self.version.location.value(),
-        ];
-        for setter in &self.version.setters {
-            fields.push(Value::Blob(coven_format::merge_fields::encode_write_id(
-                setter,
-            )?));
-        }
-        Ok(coven_format::key::encode_key(&fields)?)
-    }
-    /// Read a captured reference from the local journal without consulting the
-    /// current row. Validate it before reading or changing that row.
-    pub fn decode(bytes: &[u8]) -> Result<Self, DbError> {
-        let fields = coven_format::key::decode_key(bytes)?;
-        let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location, setters @ ..] =
-            fields.as_slice()
-        else {
-            return Err(DbError::DamagedDatabase);
-        };
-        if setters.len() != 4 || *size < 0 {
-            return Err(DbError::DamagedDatabase);
-        }
-        let setters = setters
-            .iter()
-            .map(|v| match v {
-                Value::Blob(b) => Ok(coven_format::merge_fields::decode_write_id(b)?),
-                _ => Err(DbError::DamagedDatabase),
-            })
-            .collect::<Result<Vec<_>, DbError>>()?;
-        Ok(Self {
-            row: RowId {
-                table: table.clone(),
-                key: key.clone(),
-                audience: crate::write_encoding::audience(audience)?,
-            },
-            key: crate::file_row::key(&(table.clone(), key.clone()))?,
-            column: column.clone(),
-            namespace: namespace.clone(),
-            version: FileVersion {
-                generation: u64::from_be_bytes(
-                    generation
-                        .as_slice()
-                        .try_into()
-                        .map_err(|_| DbError::DamagedDatabase)?,
-                ),
-                setters: setters.try_into().map_err(|_| DbError::DamagedDatabase)?,
-                id: id.clone(),
-                size: *size as u64,
-                hash: ContentHash::from_bytes(
-                    hash.as_slice()
-                        .try_into()
-                        .map_err(|_| DbError::DamagedDatabase)?,
-                ),
-                location: FixedReference::decode(location)?,
-            },
-        })
-    }
+
     /// The declared table.
     pub fn table(&self) -> &str {
         &self.row.table
@@ -244,6 +171,90 @@ fn current(
             location,
         },
     }))
+}
+
+/// Crate-to-crate operations for coven's owners; not re-exported by the app API.
+pub trait FileRefJournal: Sized {
+    /// The fixed uploader, object id and key carried inside the row, the same
+    /// before and after upload. This never consults key custody.
+    fn reference(&self) -> Result<coven_format::file_reference::FileReference, DbError>;
+    /// Encode captured facts for a device-local journal. Contains the uploaded
+    /// file key; callers must keep these bytes private, like the database itself.
+    fn encode(&self) -> Result<Vec<u8>, DbError>;
+    /// Read a captured reference from the local journal without consulting the
+    /// current row. Validate it before reading or changing that row.
+    fn decode(bytes: &[u8]) -> Result<Self, DbError>;
+}
+
+impl FileRefJournal for FileRef {
+    fn reference(&self) -> Result<coven_format::file_reference::FileReference, DbError> {
+        self.version.location.reference()
+    }
+    fn encode(&self) -> Result<Vec<u8>, DbError> {
+        let mut fields = vec![
+            Value::Text(self.row.table.clone()),
+            Value::Blob(self.row.key.clone()),
+            Value::Text(crate::write_encoding::audience_text(&self.row.audience)),
+            Value::Text(self.column.clone()),
+            Value::Text(self.namespace.clone()),
+            Value::Blob(self.version.generation.to_be_bytes().to_vec()),
+            self.version.id.clone(),
+            Value::Integer(self.version.size as i64),
+            Value::Blob(self.version.hash.as_bytes().to_vec()),
+            self.version.location.value(),
+        ];
+        for setter in &self.version.setters {
+            fields.push(Value::Blob(coven_format::merge_fields::encode_write_id(
+                setter,
+            )?));
+        }
+        Ok(coven_format::key::encode_key(&fields)?)
+    }
+    fn decode(bytes: &[u8]) -> Result<Self, DbError> {
+        let fields = coven_format::key::decode_key(bytes)?;
+        let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location, setters @ ..] =
+            fields.as_slice()
+        else {
+            return Err(DbError::DamagedDatabase);
+        };
+        if setters.len() != 4 || *size < 0 {
+            return Err(DbError::DamagedDatabase);
+        }
+        let setters = setters
+            .iter()
+            .map(|v| match v {
+                Value::Blob(b) => Ok(coven_format::merge_fields::decode_write_id(b)?),
+                _ => Err(DbError::DamagedDatabase),
+            })
+            .collect::<Result<Vec<_>, DbError>>()?;
+        Ok(Self {
+            row: RowId {
+                table: table.clone(),
+                key: key.clone(),
+                audience: crate::write_encoding::audience(audience)?,
+            },
+            key: crate::file_row::key(&(table.clone(), key.clone()))?,
+            column: column.clone(),
+            namespace: namespace.clone(),
+            version: FileVersion {
+                generation: u64::from_be_bytes(
+                    generation
+                        .as_slice()
+                        .try_into()
+                        .map_err(|_| DbError::DamagedDatabase)?,
+                ),
+                setters: setters.try_into().map_err(|_| DbError::DamagedDatabase)?,
+                id: id.clone(),
+                size: *size as u64,
+                hash: ContentHash::from_bytes(
+                    hash.as_slice()
+                        .try_into()
+                        .map_err(|_| DbError::DamagedDatabase)?,
+                ),
+                location: FixedReference::decode(location)?,
+            },
+        })
+    }
 }
 
 #[cfg(test)]

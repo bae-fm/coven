@@ -2,8 +2,10 @@
 //! attachments. Cache bytes are written and read with no writer held (§21.2).
 
 use super::DatabaseAccess;
+use crate::FileRefJournal;
 use crate::{sqlite::DatabaseConnection, DbError, FileRef};
 use coven_crypto::FILE_CHUNK_TAG_LEN;
+use coven_foundation::files::StoreDirAccess;
 
 pub(super) use crate::internal_schema::{
     CACHE_COMPLETE_FILE as COMPLETE_FILE, CACHE_HEADER as HEADER,

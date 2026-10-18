@@ -6,6 +6,7 @@ use coven_crypto::custody::{
     StoreKeychain,
 };
 use coven_database::DatabaseBuilder;
+use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::StoreFile;
 use coven_storage::{
     providers::{OAuthFlow, StorageConnector},

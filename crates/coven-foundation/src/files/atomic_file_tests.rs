@@ -1,4 +1,5 @@
 use super::*;
+use crate::files::StoreDirAccess;
 
 #[test]
 fn existence_checks_directory_entries_and_preserves_inspection_errors() {

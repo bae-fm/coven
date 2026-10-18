@@ -24,7 +24,9 @@ use coven_storage::Storage;
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
-pub use file_upload::{DrainOutcome, QueuedUpload, UploadPhase, UploadQueue};
+pub use file_upload::{
+    upload_queue_from_state, DrainOutcome, QueuedUpload, UploadPhase, UploadQueue,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{

@@ -8,6 +8,7 @@ use crate::{
     SyncError,
 };
 use coven_database::OperationRecord;
+use coven_foundation::files::StoreDirAccess;
 use coven_storage::{StorageFailure, UploadSession};
 
 struct SnapshotUploadSource<'a> {
