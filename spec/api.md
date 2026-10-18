@@ -1177,8 +1177,14 @@ impl SqlContext<'_, '_> {
     /// Ordinary SQL inside the write.
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>;
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>;
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 
     /// Runs the app's INSERT of a row that carries a user-provided file, and
     /// records the prepared file on it.
@@ -1361,37 +1367,59 @@ impl CovenHandle {
 
 impl SqlReadContext<'_> {
     /// Ordinary SQL reads. A read context can't write.
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>;
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>;
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
-impl<'a, F, R> Read<'a, F> {
+impl<'a, F, R> Read<'a, F>
+where
+    F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+    R: Send + 'static,
+{
     /// Runs `process` on the read's result on a separate worker, after the
-    /// read has released its connection.
+    /// read has released its connection. The closure and result cross workers,
+    /// so both must be Send and own any borrowed data.
     pub async fn process<P, T>(self, process: P) -> CovenResult<T>
     where
-        P: FnOnce(R) -> CovenResult<T> + Send + 'static;
+        P: FnOnce(R) -> CovenResult<T> + Send + 'static,
+        T: Send + 'static;
 }
 
-impl<T: Clone + PartialEq> LiveQuery<T> {
+impl<T: Send + 'static> LiveQuery<T> {
     /// The first result at once; after that, waits for a write that changes
     /// the result and returns the new one. An error is a result too, and
     /// doesn't end the query.
-    pub async fn next(&mut self) -> CovenResult<T>;
+    pub async fn next(&mut self) -> CovenResult<T>
+    where
+        T: Clone + PartialEq;
 
     /// Runs `process` on each result after the connection is released.
     pub fn process<P, U>(self, process: P) -> LiveQuery<U>
     where
-        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static;
+        T: Clone + PartialEq,
+        P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
+        U: Send + 'static;
 }
 
-impl<Q, T: Clone + PartialEq> ReconfigurableLiveQuery<Q, T> {
+impl<Q, T> ReconfigurableLiveQuery<Q, T>
+where
+    Q: Clone + PartialEq + Send + Sync + 'static,
+    T: Send + 'static,
+{
     /// A handle that replaces the request.
     pub fn requests(&self) -> LiveQueryRequests<Q>;
 
     /// The next result, with the request and revision that produced it, and
     /// whether a new request, a write, or both caused it.
-    pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Q, T>;
+    pub async fn next(&mut self) -> ReconfigurableLiveQueryEvent<Q, T>
+    where
+        T: Clone + PartialEq;
 }
 
 impl<Q: Clone + PartialEq> LiveQueryRequests<Q> {
@@ -1482,7 +1510,10 @@ impl CovenReadHandle {
     /// Reports connection-close failures; cancellation does not stop closing.
     pub async fn close(&self) -> Result<(), DbError>;
 
-    pub fn read<F, R>(&self, read: F) -> Read<'_, F>;
+    pub fn read<F, R>(&self, read: F) -> Read<'_, F>
+    where
+        F: FnOnce(SqlReadContext<'_>) -> CovenResult<R> + Send + 'static,
+        R: Send + 'static;
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
     pub async fn user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<Option<UserFile>, DbError>;
     pub async fn read_file(&self, file: &FileRef) -> Result<Vec<u8>, FileReadError>;
@@ -3976,8 +4007,14 @@ pub enum ChangeOp {
 impl MigrationContext<'_> {
     pub fn execute<P: Params>(&self, sql: &str, params: P) -> rusqlite::Result<usize>;
     pub fn execute_batch(&self, sql: &str) -> rusqlite::Result<()>;
-    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>;
-    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>;
+    pub fn query_row<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<T>
+    where
+        P: Params,
+        F: FnOnce(&Row<'_>) -> rusqlite::Result<T>;
+    pub fn query<T, P, F>(&self, sql: &str, params: P, map: F) -> rusqlite::Result<Vec<T>>
+    where
+        P: Params,
+        F: FnMut(&Row<'_>) -> rusqlite::Result<T>;
 }
 
 /// One row change of a write record (§4).
