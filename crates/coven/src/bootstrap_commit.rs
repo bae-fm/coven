@@ -3,8 +3,133 @@
 use super::*;
 use coven_foundation::files::StoreDirAccess;
 
-/// An OAuth store commits `sign_in`'s current tokens, which then refresh in
-/// the handle's device custody; a rollback holds them in the session again.
+/// Committing a loaded installation's custody failed before publication.
+pub(super) enum Uncommitted {
+    /// Every value the commit changed holds its prior value again.
+    Restored(BootstrapError),
+    /// Restoring a prior value failed too; the error keeps both causes.
+    Partly(BootstrapError),
+}
+
+impl Uncommitted {
+    pub(super) fn into_error(self) -> BootstrapError {
+        match self {
+            Self::Restored(error) | Self::Partly(error) => error,
+        }
+    }
+}
+
+/// Commit the installation's storage settings, store keys, member identity,
+/// device id and credentials, then `publish` it. An OAuth store commits
+/// `sign_in`'s current tokens, which then refresh in device custody; a
+/// rollback holds them in the session again. A failure before publication
+/// restores every prior value. `Ok(Some(_))` is a failure after publication,
+/// which keeps custody committed.
+pub(super) fn commit(
+    directory: &StoreDir,
+    code: &RestoreCode,
+    credentials: &StorageCredentials,
+    sign_in: Option<&Arc<coven_sync::SessionSignIn>>,
+    ring: &StoreKeyring,
+    owners: &OpeningOwners,
+    publish: impl FnOnce() -> Result<(), BootstrapDirectoryError>,
+) -> Result<Option<BootstrapError>, Uncommitted> {
+    let unchanged = Uncommitted::Restored;
+    let keys = &owners.keys;
+    let identity = &owners.identity;
+    let keychain = &owners.keychain;
+    let old_keys = keys.read().map_err(|error| unchanged(error.into()))?;
+    let old_identity = identity.read().map_err(|error| unchanged(error.into()))?;
+    let old_device = keychain
+        .device_id()
+        .map_err(|error| unchanged(error.into()))?;
+    let location = StorageConfig::decode(code.storage.as_bytes())
+        .map_err(|error| unchanged(SyncError::from(error).into()))?;
+    let settings = StorageSettings::new(directory.clone());
+    let old_settings = settings
+        .read()
+        .map_err(|error| unchanged(SyncError::from(error).into()))?;
+    let mut credential_rollback = None;
+    let commit = || -> Result<(), BootstrapError> {
+        settings.commit(&location).map_err(SyncError::from)?;
+        keys.persist(ring)?;
+        identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
+        keychain.set_device_id(owners.device)?;
+        credential_rollback = Some(match sign_in {
+            Some(session) => session.publish(&owners.credentials, |keychain, tokens| {
+                coven_sync::commit_credentials(
+                    keychain,
+                    &StorageCredentials::OAuth(tokens.clone()),
+                    Some(code),
+                )
+            })?,
+            None => owners.credentials.write(|keychain| {
+                coven_sync::commit_credentials(keychain, credentials, Some(code))
+            })?,
+        });
+        Ok(publish()?)
+    };
+    let mut error = match commit() {
+        Ok(()) => return Ok(None),
+        Err(
+            error @ BootstrapError::Directory(BootstrapDirectoryError::Create(
+                coven_foundation::files::DirectoryCreationError::Published { .. },
+            )),
+        ) => return Ok(Some(error)),
+        Err(error) => error,
+    };
+    // Attempt every rollback even if an earlier one fails. A failure is
+    // returned to this initiator; no background repair is installed.
+    let mut restored = true;
+    let mut failed = |error: BootstrapError, cleanup: BootstrapError| {
+        restored = false;
+        combine::<()>(Err(error), Err(cleanup)).expect_err("failed commit")
+    };
+    for rollback in [
+        match old_keys {
+            Some(keys_before) => keys.persist(&keys_before),
+            None => keys.forget(),
+        },
+        match old_identity {
+            Some(identity_before) => identity.persist(&identity_before),
+            None => identity.forget(),
+        },
+        match old_device {
+            Some(device) => keychain.set_device_id(device),
+            None => keychain.delete_device_id(),
+        },
+    ] {
+        if let Err(cleanup) = rollback {
+            error = failed(error, cleanup.into());
+        }
+    }
+    if let Some(previous) = credential_rollback {
+        if let Err(cleanup) = owners
+            .credentials
+            .write(|keychain| previous.restore(keychain))
+        {
+            error = failed(error, cleanup.into());
+        }
+        if let Some(session) = sign_in {
+            session.unpublish();
+        }
+    }
+    let rollback = match old_settings {
+        Some(location) => settings.commit(&location),
+        None => settings.remove(),
+    };
+    if let Err(cleanup) = rollback {
+        error = failed(error, SyncError::from(cleanup).into());
+    }
+    Err(if restored {
+        Uncommitted::Restored(error)
+    } else {
+        Uncommitted::Partly(error)
+    })
+}
+
+/// Commit custody and publish a new device's loaded store, returning its
+/// handle. Publication removes the store's marker, the final step.
 pub(super) async fn publish_bootstrap(
     pending: &BootstrapStore,
     code: RestoreCode,
@@ -16,87 +141,16 @@ pub(super) async fn publish_bootstrap(
     waits: Arc<coven_sync::RetryWaits>,
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = pending.directory();
-    let keys = &owners.keys;
-    let identity = &owners.identity;
-    let keychain = &owners.keychain;
-    let old_keys = keys.read()?;
-    let old_identity = identity.read()?;
-    let old_device = keychain.device_id()?;
-    let mut credential_rollback = None;
-    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
-    let settings = StorageSettings::new(directory.clone());
-    let old_settings = settings.read().map_err(SyncError::from)?;
-    let mut commit = || -> Result<(), BootstrapError> {
-        settings.commit(&location).map_err(SyncError::from)?;
-        keys.persist(&ring)?;
-        identity.persist(&MemberIdentity::new(code.member, code.member_keys.clone()))?;
-        keychain.set_device_id(owners.device)?;
-        credential_rollback = Some(match &sign_in {
-            Some(session) => session.publish(&owners.credentials, |keychain, tokens| {
-                coven_sync::commit_credentials(
-                    keychain,
-                    &StorageCredentials::OAuth(tokens.clone()),
-                    Some(&code),
-                )
-            })?,
-            None => owners.credentials.write(|keychain| {
-                coven_sync::commit_credentials(keychain, &credentials, Some(&code))
-            })?,
-        });
-        Ok(pending.publish()?)
-    };
-    let publication_error = match commit() {
-        Ok(()) => None,
-        Err(
-            error @ BootstrapError::Directory(BootstrapDirectoryError::Create(
-                coven_foundation::files::DirectoryCreationError::Published { .. },
-            )),
-        ) => Some(error),
-        Err(mut error) => {
-            // Attempt every rollback even if an earlier one fails. A failure is
-            // returned to this initiator; no background repair is installed.
-            for rollback in [
-                match old_keys {
-                    Some(keys_before) => keys.persist(&keys_before),
-                    None => keys.forget(),
-                },
-                match old_identity {
-                    Some(identity_before) => identity.persist(&identity_before),
-                    None => identity.forget(),
-                },
-                match old_device {
-                    Some(device) => keychain.set_device_id(device),
-                    None => keychain.delete_device_id(),
-                },
-            ] {
-                if let Err(cleanup) = rollback {
-                    error =
-                        combine::<()>(Err(error), Err(cleanup.into())).expect_err("failed commit");
-                }
-            }
-            if let Some(previous) = credential_rollback {
-                if let Err(cleanup) = owners
-                    .credentials
-                    .write(|keychain| previous.restore(keychain))
-                {
-                    error =
-                        combine::<()>(Err(error), Err(cleanup.into())).expect_err("failed commit");
-                }
-                if let Some(session) = &sign_in {
-                    session.unpublish();
-                }
-            }
-            let rollback = match old_settings {
-                Some(location) => settings.commit(&location),
-                None => settings.remove(),
-            };
-            if let Err(cleanup) = rollback {
-                error = combine::<()>(Err(error), Err(SyncError::from(cleanup).into()))
-                    .expect_err("failed commit");
-            }
-            return Err(error);
-        }
-    };
+    let publication_error = commit(
+        &directory,
+        &code,
+        &credentials,
+        sign_in.as_ref(),
+        &ring,
+        &owners,
+        || pending.publish(),
+    )
+    .map_err(Uncommitted::into_error)?;
     let handle = owners.into_handle(database, waits, true);
     let cleanup = directory
         .owned_file(StoreFile::Bootstrap)

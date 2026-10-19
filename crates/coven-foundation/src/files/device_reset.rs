@@ -1,30 +1,29 @@
-//! The app's `reset_device` replaces this installation with a new device in
-//! its own directory (§19.3).
+//! Swapping a loaded replacement into a store's directory (§19.3).
 //!
-//! The durable record is that call's decision: once written, ordinary opens
-//! refuse the store and every retry uses the same fresh id. Turning the
-//! directory into an unpublished bootstrap moves the discarded local state
-//! aside as a whole, under the writer, bootstrap and reader locks. It stays
-//! for inspection only.
+//! `reset_device` loads the new installation in its own directory inside the
+//! store's, then moves it into place. The durable record names the old and
+//! new device ids: written before anything moves, it makes ordinary opens
+//! refuse the store, and every retry finishes the same swap.
+//! The bootstrap marker separates the two moves. Without it, the old local
+//! state is still moving into its archive; with it, the new installation is
+//! moving in. The settings change last. Each step is idempotent, so a retry
+//! after any interruption continues where it stopped, in either direction.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{atomic_file, settings, DirectoryCreationError, FileError};
+use super::{atomic_file, bootstrap, settings, DirectoryCreationError, FileError};
 use crate::id_source::{DeviceId, StoreId};
 
 pub(crate) const RECORD: &str = "device-reset.json";
 const ARCHIVE_PREFIX: &str = "discarded-device-";
-/// Files describing the store, its location and this installation's custody,
-/// which the replacement installation keeps. Everything else is local state.
-const KEPT: [&str; 4] = [
-    settings::SETTINGS_FILE,
-    "storage.json",
-    "store-keys.sealed",
-    "member-keys.sealed",
-];
+/// The directory inside a store's directory where its replacement loads.
+pub(super) const AREA: &str = ".coven-replacement";
+/// Files describing the store's location and this installation's custody,
+/// which the replacement keeps in place. Everything else is local state.
+const KEPT: [&str; 3] = ["storage.json", "store-keys.sealed", "member-keys.sealed"];
 
 /// A replacement of this installation, not a membership removal (E5).
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -50,7 +49,7 @@ pub(super) fn read(directory: &Path) -> Result<Option<DeviceReset>, FileError> {
         .transpose()
 }
 
-/// Keep the first decision: a retried reset never changes the chosen fresh id.
+/// Keep the first decision: a retried swap never changes the chosen fresh id.
 pub(super) fn record(directory: &Path, reset: &DeviceReset) -> Result<DeviceReset, FileError> {
     if let Some(recorded) = read(directory)? {
         return Ok(recorded);
@@ -70,84 +69,119 @@ pub(super) fn record(directory: &Path, reset: &DeviceReset) -> Result<DeviceRese
     Ok(*reset)
 }
 
-/// Under the writer and bootstrap locks, finish turning a recorded reset into
-/// an unpublished bootstrap. Each step is idempotent, so an interrupted call
-/// resumes: moving local state aside completes before the bootstrap marker is
-/// written, and the settings change last. A directory naming the new id has
-/// therefore finished the move, and without its marker it is published.
-pub(super) fn begin(
+/// The directory where the replacement of the store at `directory` loads.
+pub(super) fn loading(directory: &Path, id: StoreId) -> PathBuf {
+    directory.join(AREA).join(id.to_string())
+}
+
+/// The discarded installation's local state, kept for inspection after a reset.
+fn archive(directory: &Path, old_device: DeviceId) -> PathBuf {
+    directory.join(format!("{ARCHIVE_PREFIX}{}", old_device.0))
+}
+
+/// Under the writer, bootstrap and excluded reader locks, move the old local
+/// state into its archive and the loaded installation into its place, then
+/// name the new device in the settings. Resumes any interrupted swap or undo.
+pub(super) fn forward(
     directory: &Path,
     id: StoreId,
-) -> Result<DeviceReset, super::BootstrapDirectoryError> {
-    let reset = read(directory)?.ok_or_else(|| {
-        FileError::at(
-            "begin device reset",
-            &directory.join(RECORD),
-            std::io::Error::new(std::io::ErrorKind::NotFound, "no device reset is recorded"),
-        )
-    })?;
-    let mut current = settings::read(directory, id).map_err(DirectoryCreationError::Settings)?;
-    if current.device_id == reset.new_device {
-        return Ok(reset);
-    }
-    let marker = super::bootstrap::marker(directory);
+    reset: DeviceReset,
+) -> Result<(), DirectoryCreationError> {
+    let marker = bootstrap::marker(directory);
     if !atomic_file::exists("inspect bootstrap marker", &marker)? {
-        // No reader may hold the discarded files open while they move.
-        let _readers = super::lock::exclude_readers(directory, id)?;
-        let archive = directory.join(format!("{ARCHIVE_PREFIX}{}", reset.old_device.0));
+        let archive = archive(directory, reset.old_device);
         if !atomic_file::exists("inspect discarded device archive", &archive)? {
             fs::create_dir(&archive).map_err(|source| {
                 FileError::at("create discarded device archive", &archive, source)
             })?;
         }
-        let entries = fs::read_dir(directory)
-            .map_err(|source| FileError::at("list discarded installation", directory, source))?;
-        for entry in entries {
-            let entry = entry.map_err(|source| {
-                FileError::at("list discarded installation", directory, source)
-            })?;
-            let name = entry.file_name();
-            if name.to_str().is_some_and(|name| {
-                KEPT.contains(&name) || name == RECORD || name.starts_with(ARCHIVE_PREFIX)
-            }) {
-                continue;
-            }
-            let from = entry.path();
-            atomic_file::rename_new(&from, &archive.join(&name))
-                .map_err(|source| FileError::at("archive discarded installation", &from, source))?;
-        }
-        #[cfg(unix)]
-        for path in [archive.as_path(), directory] {
-            atomic_file::sync_directory(path)
-                .map_err(|source| FileError::at("sync discarded installation", path, source))?;
-        }
+        move_local_state(directory, &archive)?;
         atomic_file::replace(&marker, b"")?;
     }
-    for area in [super::directory::APP_FILES, super::directory::CACHE] {
-        let path = directory.join(area);
-        if !atomic_file::exists("inspect store files directory", &path)? {
-            fs::create_dir(&path)
-                .map_err(|source| FileError::at("create store files directory", &path, source))?;
-            atomic_file::sync_publication(&path)?;
-        }
+    let loaded = loading(directory, id);
+    if atomic_file::exists("inspect loaded replacement", &loaded)? {
+        move_local_state(&loaded, directory)?;
     }
-    current.device_id = reset.new_device;
-    settings::write(directory, &current).map_err(DirectoryCreationError::Settings)?;
-    Ok(reset)
+    name_device(directory, id, reset.new_device)
 }
 
-/// The database a reset moved aside, in its discarded-device archive.
-pub(super) fn discarded_database(directory: &Path, old_device: DeviceId) -> std::path::PathBuf {
-    directory
-        .join(format!("{ARCHIVE_PREFIX}{}", old_device.0))
-        .join(super::directory::DATABASE)
+/// Undo `forward`, step by step in reverse, after a later step failed: the
+/// old installation is back in place and its settings name it again.
+pub(super) fn backward(
+    directory: &Path,
+    id: StoreId,
+    reset: DeviceReset,
+) -> Result<(), DirectoryCreationError> {
+    name_device(directory, id, reset.old_device)?;
+    let marker = bootstrap::marker(directory);
+    if atomic_file::exists("inspect bootstrap marker", &marker)? {
+        move_local_state(directory, &loading(directory, id))?;
+        atomic_file::remove(&marker)?;
+    }
+    let archive = archive(directory, reset.old_device);
+    if atomic_file::exists("inspect discarded device archive", &archive)? {
+        move_local_state(&archive, directory)?;
+        fs::remove_dir(&archive)
+            .map_err(|source| FileError::at("remove discarded device archive", &archive, source))?;
+        atomic_file::sync_publication(&archive)?;
+    }
+    Ok(atomic_file::remove(&directory.join(RECORD))?)
+}
+
+/// Whether an entry stays where it is while installations swap: the custody
+/// files the replacement keeps, the settings, which change last, the swap's
+/// own record and marker, the replacement's area and earlier archives.
+fn stays(name: &str) -> bool {
+    KEPT.contains(&name)
+        || name == settings::SETTINGS_FILE
+        || name == RECORD
+        || name == bootstrap::MARKER
+        || name == AREA
+        || name.starts_with(ARCHIVE_PREFIX)
+}
+
+/// Move every local entry of `from` into `to`, then sync both directories.
+fn move_local_state(from: &Path, to: &Path) -> Result<(), FileError> {
+    let entries = fs::read_dir(from)
+        .map_err(|source| FileError::at("list installation files", from, source))?;
+    for entry in entries {
+        let entry =
+            entry.map_err(|source| FileError::at("list installation files", from, source))?;
+        let name = entry.file_name();
+        if name.to_str().is_some_and(stays) {
+            continue;
+        }
+        let source = entry.path();
+        atomic_file::rename_new(&source, &to.join(&name))
+            .map_err(|error| FileError::at("move installation file", &source, error))?;
+    }
+    #[cfg(unix)]
+    for path in [from, to] {
+        atomic_file::sync_directory(path)
+            .map_err(|source| FileError::at("sync installation files", path, source))?;
+    }
+    Ok(())
+}
+
+fn name_device(
+    directory: &Path,
+    id: StoreId,
+    device: DeviceId,
+) -> Result<(), DirectoryCreationError> {
+    let mut current = settings::read(directory, id)?;
+    if current.device_id != device {
+        current.device_id = device;
+        settings::write(directory, &current)?;
+    }
+    Ok(())
+}
+
+/// The database a swap moved aside, in its discarded-device archive.
+pub(super) fn discarded_database(directory: &Path, old_device: DeviceId) -> PathBuf {
+    archive(directory, old_device).join(super::directory::DATABASE)
 }
 
 /// Remove the record once the replacement is published; its database keeps the notice.
 pub(super) fn finish(directory: &Path) -> Result<(), FileError> {
     atomic_file::remove(&directory.join(RECORD))
 }
-
-#[cfg(test)]
-#[path = "device_reset_tests.rs"]
-mod tests;

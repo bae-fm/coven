@@ -17,6 +17,7 @@ mod lock_registry;
 mod observed_file;
 #[cfg(any(test, feature = "test-utils"))]
 mod open_files;
+mod replacement;
 mod settings;
 
 pub use atomic_file::{replace as write_atomic, AtomicFile, FileError, FileWriter};
@@ -32,4 +33,5 @@ pub use lock::{
 pub use observed_file::{observe_file, ObservationError, ObservedFile};
 #[cfg(any(test, feature = "test-utils"))]
 pub use open_files::{assert_no_open_files_under, open_files_under};
+pub use replacement::ReplacementStore;
 pub use settings::{SettingsError, StoreSettings};

@@ -1530,10 +1530,12 @@ impl CovenBuilder {
     /// Replaces this copy with a new device loaded from storage when the app
     /// chooses: a damaged database (§19.3), a missing device entry, or another
     /// copy using this id (§19.3). Uses saved settings and custody; no salvage.
-    /// Checks storage and keys before moving the old directory aside.
-    /// Uses the existing bootstrap state and errors; an interrupted call
-    /// resumes with the same fresh id. The returned handle holds a device-reset
-    /// notice that unsent edits may have been lost (E5).
+    /// Checks storage and keys, then loads beside the old copy, which moves
+    /// aside only once loading is complete. Saved member keys that history
+    /// has replaced fail with MemberKeysReplaced and change nothing. Uses the
+    /// existing bootstrap errors; an interrupted call resumes with the same
+    /// fresh id. The returned handle holds a device-reset notice that unsent
+    /// edits may have been lost (E5).
     pub async fn reset_device(self, store: StoreId, device_name: &str) -> Result<CovenHandle, BootstrapError>;
 
     /// Opens the store for reading only, alongside a handle that has it open,

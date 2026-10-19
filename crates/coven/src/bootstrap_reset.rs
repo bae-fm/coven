@@ -1,38 +1,26 @@
 //! Reset this installation as a new device, at the app's call (§19.3).
 
 use super::*;
-use coven_foundation::files::StoreDirAccess;
 
 /// Replace this installation with a new device loaded from storage, whatever
 /// the app's reason: another copy using this device's id, a missing device
 /// entry, or a damaged database (§19.3). Settings, credentials, the
-/// connection and both key custodies are checked before anything moves; a
-/// failure leaves the files in place with its typed error. The new device
-/// names the old id as the one it replaces (§13.1). Only the old database's
-/// operation journal is read for owed provider cleanup and open invites; an
-/// unconnected store also keeps its local creation name.
+/// connection and both key custodies are checked first; the new device then
+/// loads beside the old one, which stays in place until the member's keys
+/// have been checked and the load is complete. The new device names the old
+/// id as the one it replaces (§13.1). Only the old database's operation
+/// journal is read for owed provider cleanup and open invites; an unconnected
+/// store also keeps its local creation name.
 pub(crate) async fn reset_device(
     mut builder: CovenBuilder,
     store: StoreId,
     device_name: &str,
 ) -> Result<CovenHandle, BootstrapError> {
     let directory = builder.layout.store_dir(&store);
-    let recorded = directory
-        .unfinished_device_reset()
-        .map_err(CovenError::from)?;
-    let settings = directory.settings().map_err(CovenError::from)?;
     let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
     let location = StorageSettings::new(directory.clone());
     if location.read().map_err(SyncError::from)?.is_none() {
-        let name = if recorded.is_some() {
-            None
-        } else {
-            Some(coven_database::read_store_name(directory.clone()).await?)
-        };
-        if recorded.is_none() {
-            record(&builder, &directory, &settings).await?;
-        }
-        return reset_unconnected(builder, store, name, keychain).await;
+        return reset_unconnected(builder, store, keychain).await;
     }
     let data = coven_sync::read_connection(&location, &keychain)?.ok_or(SyncError::NoStorage)?;
     // The held sign-in refreshes in this session until the new device
@@ -69,7 +57,7 @@ pub(crate) async fn reset_device(
     )?;
     // Unlocking must succeed; loading acquires any store key it lacks.
     builder.keys = CustodyChoice::Session(keys);
-    // Check bucket ownership and slot 1 before the damaged files move.
+    // Check bucket ownership and slot 1 before anything is loaded.
     let storage = builder
         .connector()
         .connect(
@@ -90,9 +78,6 @@ pub(crate) async fn reset_device(
         ))
         .await
         .map_err(SyncError::from)?;
-    if recorded.is_none() {
-        record(&builder, &directory, &settings).await?;
-    }
     let code = RestoreCode {
         store,
         member: member.member(),
@@ -100,8 +85,10 @@ pub(crate) async fn reset_device(
         storage: data.location.encode().map_err(SyncError::from)?,
     };
     let (_, never) = watch::channel(false);
-    bootstrap_device(
+    // Saved keys that history has replaced are refused before the swap.
+    replace::replace_installation(
         builder,
+        store,
         BootstrapRequest::Restore {
             code,
             data,
@@ -111,96 +98,66 @@ pub(crate) async fn reset_device(
         |_| {},
         &never,
     )
-    .await?
-    .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
+    .await
 }
 
-/// Record the reset under the writer lock, which excludes a live handle.
-async fn record(
-    builder: &CovenBuilder,
-    directory: &StoreDir,
-    settings: &coven_foundation::files::StoreSettings,
-) -> Result<(), BootstrapError> {
-    let lock = directory.lock_for_open().await.map_err(CovenError::from)?;
-    directory
-        .record_device_reset(&DeviceReset {
-            old_device: settings.device_id,
-            new_device: builder.ids.new_device_id(),
-        })
-        .map_err(SyncError::from)?;
-    drop(lock);
-    Ok(())
-}
-
-/// Carry provider cleanup from the discarded journal and commit the reset
-/// notice together (§19.3). A database too damaged to read carries nothing;
-/// any other failure fails the reset, which retries.
+/// Carry provider cleanup from the replaced installation's journal and
+/// commit the reset notice together (§19.3). A database too damaged to read
+/// carries nothing; any other failure fails the replacement, which retries.
 pub(super) async fn carry_discarded_provider_work(
     sync: &SequenceSync,
-    pending: &BootstrapStore,
-    reset: DeviceReset,
+    replacement: &ReplacementStore,
 ) -> Result<(), BootstrapError> {
-    let path = pending.discarded_database_path(&reset);
+    let path = replacement.discarded_database_path();
     let records = match coven_database::discarded_operations(path).await {
         Ok(records) => records,
         Err(coven_database::DbError::DamagedDatabase) => Vec::new(),
         Err(error) => return Err(SyncError::from(error).into()),
     };
-    Ok(sync.record_device_reset(reset, &records).await?)
+    Ok(sync
+        .record_device_reset(replacement.device_reset(), &records)
+        .await?)
 }
 
 /// A store that never set up storage has no stored history and no published
-/// device. Its replacement is an empty database under the fresh id, with the
-/// notice that unsent local work was discarded (§19.3).
+/// device. Its replacement is an empty database under the fresh id, with its
+/// local creation name and the notice that unsent local work was discarded
+/// (§19.3).
 async fn reset_unconnected(
     builder: CovenBuilder,
     store: StoreId,
-    name: Option<String>,
     keychain: Arc<StoreKeychain>,
 ) -> Result<CovenHandle, BootstrapError> {
-    let pending = builder
+    let replacement = builder
         .layout
-        .begin_bootstrap(store, builder.ids.as_ref())
+        .begin_replacement(store, builder.ids.as_ref())
         .await?;
-    let reset = pending
-        .device_reset()
-        .map_err(SyncError::from)?
-        .ok_or(SyncError::NoStorage)?;
-    let name = match name {
-        Some(name) => name,
-        None => coven_database::discarded_store_name(pending.discarded_database_path(&reset))
-            .await
-            .map_err(CovenError::from)?,
-    };
-    let directory = pending.directory();
-    let database = builder.database(directory.clone())?.open().await?;
-    let prepared = async {
-        database
-            .initialize_store_name(name)
-            .await
-            .map_err(CovenError::from)?;
-        database
-            .record_device_reset::<coven_sync::PendingRecord>(
-                reset,
-                Vec::new(),
-                coven_database::ProviderChanges::default(),
-            )
-            .await
-            .map_err(CovenError::from)?;
-        let waits = Arc::new(
-            coven_sync::RetryWaits::open(database.clone(), builder.clock.clone())
+    let reset = replacement.device_reset();
+    let swapping = !replacement.is_swapped();
+    let (database, waits) = if swapping {
+        let prepared = async {
+            let name = coven_database::discarded_store_name(replacement.discarded_database_path())
                 .await
-                .map_err(CovenError::from)?,
-        );
-        let owners = builder.owners(directory, keychain.clone())?;
-        Ok::<_, BootstrapError>((owners, waits))
-    }
-    .await;
-    let (owners, waits) = match prepared {
-        Ok(prepared) => prepared,
-        Err(error) => {
-            return combine(
-                Err(error),
+                .map_err(CovenError::from)?;
+            let database = builder.database(replacement.directory())?.open().await?;
+            let recorded = async {
+                database
+                    .initialize_store_name(name)
+                    .await
+                    .map_err(CovenError::from)?;
+                database
+                    .record_device_reset::<coven_sync::PendingRecord>(
+                        reset,
+                        Vec::new(),
+                        coven_database::ProviderChanges::default(),
+                    )
+                    .await
+                    .map_err(CovenError::from)?;
+                Ok::<_, BootstrapError>(())
+            }
+            .await;
+            combine(
+                recorded,
                 database
                     .close()
                     .await
@@ -208,31 +165,35 @@ async fn reset_unconnected(
                     .map_err(BootstrapError::from),
             )
         }
+        .await;
+        if let Err(error) = prepared {
+            return combine(Err(error), replacement.cancel().map_err(Into::into));
+        }
+        replacement.swap()?;
+        #[cfg(test)]
+        if builder.interrupt_after_swap {
+            // As if the process stopped here: nothing is undone.
+            return Err(BootstrapError::Cancelled);
+        }
+        match replace::open_swapped(&builder, &replacement).await {
+            Ok(opened) => opened,
+            Err(error) => {
+                return combine(Err(error), replacement.unswap().await.map_err(Into::into))
+            }
+        }
+    } else {
+        replace::open_swapped(&builder, &replacement).await?
     };
-    let published = (|| {
-        keychain.set_device_id(reset.new_device)?;
-        pending.publish()?;
-        Ok::<_, BootstrapError>(())
-    })();
-    match published {
-        Ok(()) => Ok(owners.into_handle(database, waits, false)),
-        Err(
-            source @ BootstrapError::Directory(BootstrapDirectoryError::Create(
-                coven_foundation::files::DirectoryCreationError::Published { .. },
-            )),
-        ) => Err(BootstrapError::Published {
-            handle: owners.into_handle(database, waits, false),
-            source: Box::new(source),
-        }),
-        Err(error) => combine(
-            Err(error),
-            database
-                .close()
-                .await
-                .map_err(CovenError::from)
-                .map_err(BootstrapError::from),
-        ),
+    let owners = match builder.owners(replacement.directory(), keychain.clone()) {
+        Ok(owners) => owners,
+        Err(error) => {
+            return replace::undo(error.into(), database, swapping.then_some(replacement)).await
+        }
+    };
+    if let Err(error) = keychain.set_device_id(reset.new_device) {
+        return replace::undo(error.into(), database, swapping.then_some(replacement)).await;
     }
+    replace::publish(&replacement, owners, database, waits, false).await
 }
 
 #[cfg(test)]

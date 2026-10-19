@@ -35,6 +35,9 @@ pub struct CovenBuilder {
     identity: CustodyChoice<IdentityCustody, MemberIdentity>,
     #[cfg(any(test, feature = "test-utils"))]
     keychain: Option<Arc<Keychain>>,
+    /// Stop a replacement right after its swap, as if the process ended there.
+    #[cfg(test)]
+    interrupt_after_swap: bool,
 }
 
 /// Reset transfers its unlocked sessions into the replacement installation.
@@ -65,6 +68,8 @@ impl CovenBuilder {
             identity: CustodyChoice::Configured(IdentityCustody::Keyring),
             #[cfg(any(test, feature = "test-utils"))]
             keychain: None,
+            #[cfg(test)]
+            interrupt_after_swap: false,
         }
     }
 
@@ -191,7 +196,9 @@ impl CovenBuilder {
     /// (§19.3), whenever the app chooses: after sync found another copy using
     /// this device's id, a damaged database, or a device entry `open` found
     /// missing. Uses saved settings, credentials and member keys; nothing
-    /// unsent is salvaged.
+    /// unsent is salvaged. The new device loads beside the old copy, which
+    /// moves aside only once loading is complete; saved member keys that
+    /// history has replaced fail with `MemberKeysReplaced` and change nothing.
     /// An interrupted call resumes with the same fresh id. The returned
     /// handle's `device_reset()` names the old and new ids.
     pub async fn reset_device(
@@ -435,6 +442,13 @@ impl CovenBuilder {
     #[cfg(any(test, feature = "test-utils"))]
     pub(crate) fn with_keychain(mut self, keychain: Arc<Keychain>) -> Self {
         self.keychain = Some(keychain);
+        self
+    }
+
+    /// Make the next replacement stop right after its swap, undoing nothing.
+    #[cfg(test)]
+    pub(crate) fn interrupt_after_swap(mut self) -> Self {
+        self.interrupt_after_swap = true;
         self
     }
 }

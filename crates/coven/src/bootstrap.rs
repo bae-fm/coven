@@ -8,7 +8,7 @@ use coven_crypto::custody::{InMemoryCustody, StoreKeychain, SyncedKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore};
+use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, ReplacementStore};
 use coven_storage::{
     ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };
@@ -26,6 +26,9 @@ mod commit;
 
 #[path = "bootstrap_join.rs"]
 mod join;
+
+#[path = "bootstrap_replace.rs"]
+mod replace;
 
 #[path = "bootstrap_reset.rs"]
 mod reset;
@@ -234,7 +237,14 @@ async fn bootstrap_device(
         .layout
         .begin_bootstrap(id, builder.ids.as_ref())
         .await?;
-    let result = prepare_and_load(&mut builder, &pending, &request, &status, cancel).await;
+    let result = prepare_and_load(
+        &mut builder,
+        Installing::New(&pending),
+        &request,
+        &status,
+        cancel,
+    )
+    .await;
     match result {
         Ok(Some(Loaded {
             code,
@@ -302,6 +312,23 @@ async fn bootstrap_device(
     }
 }
 
+/// Where a new installation loads: a new device's unpublished store, or the
+/// replacement of this device's installation (§19.3).
+#[derive(Clone, Copy)]
+enum Installing<'a> {
+    New(&'a BootstrapStore),
+    Replacing(&'a ReplacementStore),
+}
+
+impl Installing<'_> {
+    fn directory(&self) -> StoreDir {
+        match self {
+            Self::New(pending) => pending.directory(),
+            Self::Replacing(replacement) => replacement.directory(),
+        }
+    }
+}
+
 enum Admission<'a> {
     Restoring,
     Joining(join::Joining<'a>),
@@ -323,7 +350,7 @@ struct Loaded {
 
 async fn prepare_and_load(
     builder: &mut CovenBuilder,
-    pending: &BootstrapStore,
+    pending: Installing<'_>,
     request: &BootstrapRequest,
     status: &impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
@@ -363,8 +390,11 @@ async fn prepare_and_load(
     let identity = Arc::new(KeySession::member(Arc::new(InMemoryCustody::new(
         member.clone(),
     )))?);
-    // Completing a reset registers the fresh id as the old one's replacement.
-    let reset = pending.device_reset().map_err(SyncError::from)?;
+    // A replacement registers the fresh id as the old one's replacement.
+    let replacement = match pending {
+        Installing::Replacing(replacement) => Some(replacement),
+        Installing::New(_) => None,
+    };
     // The database opens before connecting: its persisted waits and provider
     // cooldown hold the joiner's polls and every request across restarts (§6.7).
     let database = builder.database(directory.clone())?.open().await?;
@@ -465,12 +495,12 @@ async fn prepare_and_load(
             .get(&settings.device_id)
             .is_some_and(|device| device.member == member.member());
         if !registered {
-            sync.register_device(device_name.into(), reset.map(|reset| reset.old_device))
-                .await?;
+            let replaces = replacement.map(|replacement| replacement.device_reset().old_device);
+            sync.register_device(device_name.into(), replaces).await?;
         }
         // The notice commits before any handle is published (E5).
-        if let Some(reset) = reset {
-            reset::carry_discarded_provider_work(&sync, pending, reset).await?;
+        if let Some(replacement) = replacement {
+            reset::carry_discarded_provider_work(&sync, replacement).await?;
         }
         Ok::<_, BootstrapError>(true)
     };

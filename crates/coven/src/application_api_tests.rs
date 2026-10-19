@@ -11,11 +11,6 @@
 //! let _ = coven::StoreDir::input_database_path;
 //! ```
 //!
-//! `StoreDir::record_device_reset` is a crate-to-crate operation.
-//! ```compile_fail
-//! let _ = coven::StoreDir::record_device_reset;
-//! ```
-//!
 //! `StoreDir::unfinished_device_reset` is a crate-to-crate operation.
 //! ```compile_fail
 //! let _ = coven::StoreDir::unfinished_device_reset;

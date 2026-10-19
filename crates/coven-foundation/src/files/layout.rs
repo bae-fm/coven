@@ -133,6 +133,17 @@ pub trait StoreDirectoriesAccess: Sized {
     ) -> impl std::future::Future<
         Output = Result<super::BootstrapStore, super::BootstrapDirectoryError>,
     > + Send;
+    /// Replace the installation of a published store, or continue a
+    /// replacement under way: hold the store's bootstrap and writer locks, so
+    /// no handle opens it meanwhile, and load the new installation in a
+    /// hidden directory inside the store's directory (§19.3).
+    fn begin_replacement(
+        &self,
+        id: StoreId,
+        ids: &dyn IdSource,
+    ) -> impl std::future::Future<
+        Output = Result<super::ReplacementStore, super::BootstrapDirectoryError>,
+    > + Send;
 }
 
 impl StoreDirectoriesAccess for StoreDirectories {
@@ -142,6 +153,13 @@ impl StoreDirectoriesAccess for StoreDirectories {
         ids: &dyn IdSource,
     ) -> Result<super::BootstrapStore, super::BootstrapDirectoryError> {
         super::bootstrap::reserve_bootstrap_directory(&self.app_dir.join("stores"), id, ids).await
+    }
+    async fn begin_replacement(
+        &self,
+        id: StoreId,
+        ids: &dyn IdSource,
+    ) -> Result<super::ReplacementStore, super::BootstrapDirectoryError> {
+        super::replacement::begin(&self.app_dir.join("stores"), id, ids).await
     }
 }
 

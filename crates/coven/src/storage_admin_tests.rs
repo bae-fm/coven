@@ -212,15 +212,16 @@ async fn a_reset_of_an_unreadable_database_leaves_key_reclamation_to_admins() {
             }
             std::fs::write(&database, b"not a database").unwrap();
         }
-        // An interrupted reset already recorded its decision; otherwise the
-        // reset records it itself.
+        // A reset interrupted after its swap is finished by the next one.
         if recorded {
-            directory
-                .record_device_reset(&coven_foundation::files::DeviceReset {
-                    old_device: directory.settings().unwrap().device_id,
-                    new_device: DeviceId(9000),
-                })
-                .unwrap();
+            assert!(matches!(
+                network
+                    .reopen(&device)
+                    .interrupt_after_swap()
+                    .reset_device(device.store, "Reset desktop")
+                    .await,
+                Err(BootstrapError::Cancelled)
+            ));
         }
         let handle = network
             .reopen(&device)

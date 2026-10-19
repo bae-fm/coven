@@ -1,7 +1,9 @@
 //! Store listings read names from the same database as the open handle.
 
 use crate::{CovenError, FileError, StoreDir, StoreId, StoreInfo};
-use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, StoreDirectoriesAccess};
+use coven_foundation::files::{
+    BootstrapDirectoryError, BootstrapStore, ReplacementStore, StoreDirectoriesAccess,
+};
 use coven_foundation::id_source::IdSource;
 use std::path::PathBuf;
 
@@ -77,5 +79,13 @@ impl StoreLayout {
         ids: &dyn IdSource,
     ) -> Result<BootstrapStore, BootstrapDirectoryError> {
         self.directories.begin_bootstrap(id, ids).await
+    }
+
+    pub(crate) async fn begin_replacement(
+        &self,
+        id: StoreId,
+        ids: &dyn IdSource,
+    ) -> Result<ReplacementStore, BootstrapDirectoryError> {
+        self.directories.begin_replacement(id, ids).await
     }
 }

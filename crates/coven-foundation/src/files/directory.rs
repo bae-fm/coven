@@ -167,15 +167,10 @@ pub trait StoreDirAccess: Sized {
     /// Retained remote input has its own SQLite owner: receiving bytes must not
     /// wait for a transaction applying those bytes to the application database.
     fn input_database_path(&self) -> PathBuf;
-    /// Durably record `reset_device`'s decision to replace this installation;
-    /// the first decision wins. The next bootstrap moves the old copy aside.
-    fn record_device_reset(
-        &self,
-        reset: &super::DeviceReset,
-    ) -> Result<super::DeviceReset, super::FileError>;
-    /// Whether a reset record remains only because publication was interrupted
-    /// after removing the bootstrap marker: settings already name the new device.
-    /// Such a record is removed; an unfinished one is returned.
+    /// Whether a replacement's swap is under way (§19.3). A record that
+    /// remains only because publication was interrupted after removing the
+    /// bootstrap marker, with settings already naming the new device, is
+    /// removed; an unfinished one is returned.
     fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError>;
     /// The settings written when this store was created, restored or joined.
     /// Reading takes no lock; a read-only open uses it alongside a writer.
@@ -219,12 +214,6 @@ impl StoreDirAccess for StoreDir {
     }
     fn input_database_path(&self) -> PathBuf {
         self.path.join("inputs.db")
-    }
-    fn record_device_reset(
-        &self,
-        reset: &super::DeviceReset,
-    ) -> Result<super::DeviceReset, super::FileError> {
-        super::device_reset::record(&self.path, reset)
     }
     fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError> {
         let Some(reset) = self.device_reset()? else {

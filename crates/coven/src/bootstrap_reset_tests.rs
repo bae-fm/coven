@@ -115,14 +115,13 @@ fn reopen(f: &Fixture) -> CovenBuilder {
     builder(&f.app, &f._root, &f.clock, &f.storage)
 }
 
-/// What an approved reset records before loading, as if it stopped there.
-fn interrupted_reset(f: &Fixture) -> DeviceReset {
+/// The hidden directory a replacement loads in, inside the store's (§19.3).
+fn loading_area(f: &Fixture) -> std::path::PathBuf {
     f.directory
-        .record_device_reset(&DeviceReset {
-            old_device: f.directory.settings().unwrap().device_id,
-            new_device: UuidIds.new_device_id(),
-        })
+        .database_path()
+        .parent()
         .unwrap()
+        .join(".coven-replacement")
 }
 
 /// The installation's id in device-only custody, which backups do not copy.
@@ -347,32 +346,75 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     handle.close().await.unwrap();
 }
 
+/// A reset stopped right after its swap names its decision and the store
+/// waits for it; the next reset finishes it with the same fresh id (§19.3).
 #[tokio::test]
-async fn an_interrupted_reset_keeps_its_fresh_id_and_stays_unavailable() {
+async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     uploaded(&f, "kept").await;
     f.handle.close().await.unwrap();
     custody(&f).delete_device_id().unwrap();
-    // An approved reset recorded its decision, then stopped.
-    let decided = interrupted_reset(&f);
-    f.storage.set_online(false);
-    assert!(reopen(&f)
-        .reset_device(f.directory.id(), "Restored phone")
-        .await
-        .is_err());
+    assert!(matches!(
+        reopen(&f)
+            .interrupt_after_swap()
+            .reset_device(f.directory.id(), "Restored phone")
+            .await,
+        Err(BootstrapError::Cancelled)
+    ));
+    let decided = f.directory.device_reset().unwrap().unwrap();
     assert!(matches!(
         reopen(&f).open(f.directory.id()).await,
         Err(CovenError::Lock(StoreLockError::BootstrapPending(_)))
     ));
-    f.storage.set_online(true);
     let handle = reopen(&f)
         .reset_device(f.directory.id(), "Restored phone")
         .await
         .unwrap();
     assert_eq!(handle.device_reset().await.unwrap(), Some(decided));
     assert_eq!(notes(&handle).await, ["kept"]);
+    assert!(!loading_area(&f).exists());
+    handle.close().await.unwrap();
+}
+
+/// A reset that fails while its new device loads changes nothing: the store
+/// opens as before, and the next reset continues the load (§19.3).
+#[tokio::test]
+async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    uploaded(&f, "kept").await;
+    f.handle.close().await.unwrap();
+    let old = f.directory.settings().unwrap().device_id;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage
+        .hold_next_read(ObjectPath::floor(f.directory.id()), entered, resumed)
+        .await;
+    let reset = tokio::spawn(reopen(&f).reset_device(f.directory.id(), "Phone"));
+    entering.await.unwrap();
+    f.storage.set_online(false);
+    resume.send(()).unwrap();
+    assert!(reset.await.unwrap().is_err());
+    f.storage.set_online(true);
+    assert!(loading_area(&f).exists());
+    assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert_eq!(f.directory.settings().unwrap().device_id, old);
+    assert_eq!(custody(&f).device_id().unwrap(), Some(old));
+    let handle = reopen(&f).open(f.directory.id()).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap(), None);
+    assert_eq!(notes(&handle).await, ["kept"]);
+    handle.close().await.unwrap();
+    let handle = reopen(&f)
+        .reset_device(f.directory.id(), "Phone")
+        .await
+        .unwrap();
+    let reset = handle.device_reset().await.unwrap().unwrap();
+    assert_eq!(reset.old_device, old);
+    assert_eq!(notes(&handle).await, ["kept"]);
+    assert!(!loading_area(&f).exists());
     handle.close().await.unwrap();
 }
 
@@ -434,39 +476,24 @@ async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys(
 
 #[tokio::test]
 async fn an_unconnected_reset_resumes_with_the_local_creation_name() {
-    for partial_move in [false, true] {
-        let f = Fixture::new().await;
-        f.handle.close().await.unwrap();
-        let reset = interrupted_reset(&f);
-        if partial_move {
-            let database = f.directory.database_path();
-            let archive = database
-                .parent()
-                .unwrap()
-                .join(format!("discarded-device-{}", reset.old_device.0));
-            std::fs::create_dir(&archive).unwrap();
-            std::fs::rename(&database, archive.join("store.db")).unwrap();
-            assert_eq!(f.directory.settings().unwrap().device_id, reset.old_device);
-        } else {
-            let layout = StoreLayout::new(f._root.path().into());
-            let pending = layout
-                .begin_bootstrap(f.directory.id(), &UuidIds)
-                .await
-                .unwrap();
-            assert_eq!(
-                pending.directory().settings().unwrap().device_id,
-                reset.new_device
-            );
-            drop(pending);
-        }
-        let handle = reopen(&f)
+    let f = Fixture::new().await;
+    f.handle.close().await.unwrap();
+    assert!(matches!(
+        reopen(&f)
+            .interrupt_after_swap()
             .reset_device(f.directory.id(), "Phone")
-            .await
-            .unwrap();
-        assert_eq!(handle.store_name().await.unwrap(), "Reset");
-        assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
-        handle.close().await.unwrap();
-    }
+            .await,
+        Err(BootstrapError::Cancelled)
+    ));
+    let reset = f.directory.device_reset().unwrap().unwrap();
+    assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
+    let handle = reopen(&f)
+        .reset_device(f.directory.id(), "Phone")
+        .await
+        .unwrap();
+    assert_eq!(handle.store_name().await.unwrap(), "Reset");
+    assert_eq!(handle.device_reset().await.unwrap(), Some(reset));
+    handle.close().await.unwrap();
 }
 
 #[tokio::test]
@@ -487,4 +514,100 @@ async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
     );
     assert_eq!(f.directory.settings().unwrap(), old);
     assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert!(!loading_area(&f).exists());
+}
+
+/// What this installation's keychain holds for a store.
+#[derive(Debug, PartialEq)]
+struct Held {
+    device: Option<DeviceId>,
+    keys: MemberPublicKeys,
+    code: Option<Vec<u8>>,
+    credentials: Option<Vec<u8>>,
+}
+
+fn held(app: &TestCoven, store: StoreId) -> Held {
+    use coven_crypto::custody::KeyringCustody;
+    let keychain = Arc::new(app.store_keychain(store));
+    let identity = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone()))
+        .unwrap()
+        .unwrap();
+    let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
+    Held {
+        device: keychain.device_id().unwrap(),
+        keys: identity.keys().public_keys(),
+        code: bytes(keychain.synced_restore_code().unwrap()),
+        credentials: bytes(keychain.storage_credentials().unwrap()),
+    }
+}
+
+/// Ana replaces Carol's member keys with a pair Carol prepared elsewhere.
+/// Carol's laptop still holds the old pair, so resetting it would register a
+/// device with keys history no longer binds: the reset refuses before
+/// anything moves, every retry refuses the same way, and the store still
+/// opens with its keychain unchanged (§19.3).
+#[tokio::test]
+async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
+    let mut network = crate::tests::Network::new(2).await;
+    let carol = network.devices.remove(1);
+    let member = carol
+        .handle
+        .members()
+        .await
+        .unwrap()
+        .into_iter()
+        .find(|member| member.is_self)
+        .unwrap()
+        .id;
+    let prepared = MemberKeys::generate().unwrap();
+    network.devices[0]
+        .handle
+        .replace_member_keys_for(&member, prepared.public_keys())
+        .await
+        .unwrap();
+    tokio::time::timeout(Duration::from_secs(10), async {
+        let mut status = carol.handle.subscribe_sync_status();
+        while !matches!(
+            carol.handle.restore_code().await,
+            Err(SyncError::MemberKeysReplaced { .. })
+        ) {
+            carol.handle.sync_now();
+            status.changed().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    carol.handle.close().await.unwrap();
+    let directory = carol.layout.store_dir(&carol.store);
+    let settings = directory.settings().unwrap();
+    let before = held(&carol.app, carol.store);
+    let devices = network.devices[0].handle.members().await.unwrap();
+    for _ in 0..2 {
+        let reset = network
+            .reopen(&carol)
+            .reset_device(carol.store, "Carol's laptop")
+            .await;
+        assert!(
+            matches!(&reset, Err(BootstrapError::Sync(SyncError::MemberKeysReplaced { member: found })) if *found == member),
+            "{:?}",
+            reset.as_ref().err()
+        );
+        assert_eq!(directory.device_reset().unwrap(), None);
+        assert_eq!(directory.settings().unwrap(), settings);
+        assert!(!directory
+            .database_path()
+            .parent()
+            .unwrap()
+            .join(".coven-replacement")
+            .exists());
+        assert_eq!(held(&carol.app, carol.store), before);
+    }
+    // Nothing was registered for a device that cannot count.
+    network.sync(0).await;
+    assert_eq!(network.devices[0].handle.members().await.unwrap(), devices);
+    let handle = network.reopen(&carol).open(carol.store).await.unwrap();
+    assert_eq!(handle.device_reset().await.unwrap(), None);
+    assert_eq!(handle.device_id(), settings.device_id);
+    handle.close().await.unwrap();
+    network.close().await;
 }

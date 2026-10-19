@@ -4115,24 +4115,44 @@ and tells the app what was discarded.
   replace the same old id; each keeps its own fresh identity.
 - **A damaged database** fails to open with `DbError::DamagedDatabase` and is
   reset the same way, from saved settings and custody.
-- Before moving anything, coven checks storage and unlocks the member and store
+- Before loading anything, coven checks storage and unlocks the member and store
   keys. A missing setting, an unavailable key or a failed connection leaves the
   damaged files in place and returns its typed error.
-- Coven stops all local database use and holds the store's writer and reader
-  locks. It moves the old directory aside whole, including SQLite's journals and
-  local file sources, and keeps it for inspection, not as live state.
-- Before moving it, coven records the new id, the replacement entry and the old
-  directory's identity in the installation's setup state (§13.4). After a failure,
-  the reset resumes with that recorded new id, and ordinary opening refuses the
-  installation until it finishes. There is no separate recovery journal or
-  marker.
+
+**The new device loads beside the old one.** Coven keeps every handle out of the
+store for the whole reset. It loads storage under the fresh id in a hidden
+directory inside the store's directory, and the old installation stays in place,
+unchanged. Only a complete load replaces it: a
+reset refused after moving the old installation aside would leave a store the
+device can't open, refused again by every retry.
+
+Ana replaced Carol's member keys with a pair Carol prepared on her phone, and
+Carol's laptop still holds the old pair. A new device registered with that pair
+would sign writes that no longer count. Loading reads the history that replaced
+the pair, so the reset fails with `MemberKeysReplaced` before registering
+anything, removes the hidden directory and leaves the laptop's store and
+keychain as they were. Every retry refuses the same way. Only Carol's current
+restore code can install the new pair.
+
+- A load that fails for another reason, such as a lost connection, keeps its
+  work in the hidden directory. The store opens as before, and the next reset
+  continues the load with the same fresh id.
+- **The swap.** Once loading has finished, coven records the old and new ids in
+  the store's directory. It moves the old local state aside whole, including
+  SQLite's journals and local file sources, and keeps it for inspection, not as
+  live state. Then it moves the new installation into place and commits its keys
+  and credentials. The store's location and passphrase-sealed custody files stay
+  where they are.
+- From the record on, ordinary opening refuses the installation until the reset
+  finishes. If committing the keys fails and every prior value is restored, the
+  reset moves the old installation back. Otherwise the next reset finishes the
+  swap with the recorded new id. There is no separate recovery journal.
 - Only owed provider cleanup carries over: readable `DeleteAccessKey` work, owed
   revocations of account sharing, and the old installation's open invites, which
   become owed cleanup. They are copied into the new database, with its reset
   notice, before it opens. A database too damaged to read supplies none; its
   orphaned S3 keys are found as §14.3 describes.
-- Coven loads storage under the fresh id, then returns the new handle. It never
-  imports unsent rows or files from the damaged directory.
+- Coven never imports unsent rows or files from the damaged directory.
 - Before returning the handle, coven commits a `_coven_device_reset` record, the
   `DeviceReset` notice, with the old and new ids
   ([api.md E5](api.md#e5-storage-and-sync)). Both ways of reading it report that

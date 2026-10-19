@@ -1,8 +1,8 @@
 //! Hidden stores retain interrupted bootstrap work until explicit retry or cancellation.
 
 use super::{
-    atomic_file::exists, creation, device_reset, lock, DeviceReset, DirectoryCreationError,
-    FileError, StoreDir, StoreLockError,
+    atomic_file::exists, creation, device_reset, lock, DirectoryCreationError, FileError, StoreDir,
+    StoreLockError,
 };
 use crate::files::StoreDirAccess;
 use crate::id_source::{IdSource, StoreId};
@@ -42,6 +42,10 @@ pub struct BootstrapStore {
 pub(super) struct BootstrapLease(Mutex<Option<lock::RegisteredLock>>);
 
 impl BootstrapLease {
+    pub(super) fn new(lock: lock::RegisteredLock) -> Self {
+        Self(Mutex::new(Some(lock)))
+    }
+
     pub(super) fn is_held(&self) -> bool {
         self.0
             .lock()
@@ -49,7 +53,7 @@ impl BootstrapLease {
             .is_some()
     }
 
-    fn release(&self) {
+    pub(super) fn release(&self) {
         self.0.lock().expect("bootstrap lease lock poisoned").take();
     }
 }
@@ -60,19 +64,7 @@ impl BootstrapStore {
         StoreDir::bootstrapping(self.path.clone(), self.id, self.lease.clone())
     }
 
-    /// The replacement this bootstrap completes, if it resets an installation.
-    pub fn device_reset(&self) -> Result<Option<DeviceReset>, FileError> {
-        device_reset::read(&self.path)
-    }
-
-    /// The discarded installation's database, which beginning this reset moved
-    /// aside unchanged (§19.3). Only its operation journal is read, in place.
-    pub fn discarded_database_path(&self, reset: &DeviceReset) -> std::path::PathBuf {
-        device_reset::discarded_database(&self.path, reset.old_device)
-    }
-
-    /// Publish the loaded, open store by removing its durable marker, then any
-    /// reset record: the replacement database already holds its notice.
+    /// Publish the loaded, open store by removing its durable marker.
     /// After a `Create(Published { .. })` error it is already visible.
     pub fn publish(&self) -> Result<(), BootstrapDirectoryError> {
         let _reader = self.directory().lock_read_only()?;
@@ -83,19 +75,9 @@ impl BootstrapStore {
             }
             .into()
         };
-        let result = match super::atomic_file::remove(&marker(&self.path)) {
-            // Directory removal retains the IO error from syncing its parent.
-            Ok(()) => Ok(()),
-            Err(FileError::AfterRemove { source, .. }) => Err(published(
-                *source
-                    .downcast::<io::Error>()
-                    .expect("directory removal retains its IO cause"),
-            )),
-            Err(error) => return Err(error.into()),
-        };
+        let result = remove_marker(&self.path, published);
         self.lease.release();
-        result?;
-        device_reset::finish(&self.path).map_err(|error| published(io::Error::other(error)))
+        result
     }
 
     /// Remove unpublished data and locks after all database work has closed.
@@ -113,8 +95,29 @@ impl BootstrapStore {
     }
 }
 
+/// The file whose presence keeps a store unpublished.
+pub(super) const MARKER: &str = ".coven-bootstrap";
+
 pub(super) fn marker(directory: &Path) -> PathBuf {
-    directory.join(".coven-bootstrap")
+    directory.join(MARKER)
+}
+
+/// Remove the marker; only a failure syncing its directory leaves the store
+/// visible, which `published` reports.
+pub(super) fn remove_marker(
+    directory: &Path,
+    published: impl Fn(io::Error) -> BootstrapDirectoryError,
+) -> Result<(), BootstrapDirectoryError> {
+    match super::atomic_file::remove(&marker(directory)) {
+        // Directory removal retains the IO error from syncing its parent.
+        Ok(()) => Ok(()),
+        Err(FileError::AfterRemove { source, .. }) => Err(published(
+            *source
+                .downcast::<io::Error>()
+                .expect("directory removal retains its IO cause"),
+        )),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub(super) fn is_pending(directory: &Path) -> Result<bool, FileError> {
@@ -133,7 +136,7 @@ pub(super) async fn reserve_bootstrap_directory(
     let path = root.join(id.to_string());
     let lock = lock::acquire_bootstrap(&path, id).await?;
     let closing = lock.closing_guard();
-    let lease = Arc::new(BootstrapLease(Mutex::new(Some(lock))));
+    let lease = Arc::new(BootstrapLease::new(lock));
     if !exists("inspect bootstrap path", &path)? {
         creation::create(&root, id, ids, true)?;
     }
@@ -153,9 +156,9 @@ pub(super) async fn reserve_bootstrap_directory(
     // A published or interrupted installation may still have a live writer,
     // including one in another process. Refuse it before inspecting its data.
     let _writer = lock::acquire_for_open(&path, id).await?;
-    // A recorded reset continues by moving the discarded copy aside (§19.3).
+    // A store in the middle of a swap is finished by the call that began it.
     if device_reset::read(&path)?.is_some() {
-        device_reset::begin(&path, id)?;
+        return Err(StoreLockError::BootstrapPending(id).into());
     }
     if !is_pending(&path)? {
         return Err(DirectoryCreationError::AlreadyExists(id).into());
