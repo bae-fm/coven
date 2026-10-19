@@ -154,9 +154,15 @@ code_checks() {
     # shellcheck disable=SC2086
     cargo check $packages
 
-    step "cargo test --all-features"
+    # nextest runs every test binary's tests side by side, each in its own
+    # process; its set is cargo test's, less the doctests run after it.
+    step "cargo nextest run --all-features"
     # shellcheck disable=SC2086
-    cargo test $packages --all-features
+    cargo nextest run $packages --all-features --no-fail-fast
+
+    step "cargo test --doc --all-features"
+    # shellcheck disable=SC2086
+    cargo test $packages --all-features --doc
 
     # A crate's features only ever add code, so the pass above already runs
     # everything its build without them would, except what that build alone
@@ -167,12 +173,11 @@ code_checks() {
     while read -r crate tests; do
         [ -n "$crate" ] && crate_selected "$crate" || continue
         if [ "$tests" = all ]; then
-            step "cargo test -p $crate --no-default-features"
-            cargo test -p "$crate" --no-default-features
-        else
-            step "cargo test -p $crate --no-default-features --doc"
-            cargo test -p "$crate" --no-default-features --doc
+            step "cargo nextest run -p $crate --no-default-features"
+            cargo nextest run -p "$crate" --no-default-features --no-fail-fast
         fi
+        step "cargo test -p $crate --no-default-features --doc"
+        cargo test -p "$crate" --no-default-features --doc
     done <<< "$passes"
 }
 

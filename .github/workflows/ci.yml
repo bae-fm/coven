@@ -52,6 +52,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           shared-key: coven-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
       - name: scripts/check.sh code
         run: scripts/check.sh code
 
