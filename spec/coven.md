@@ -2285,6 +2285,14 @@ saved beside it. There is no store name to become stale after a rename. Ana
 chooses an entry and the app passes it to `restore_from_keychain` (api.md
 [E10](api.md#e10-joining-and-restore)).
 
+These two Keychain entries belong to Ana, not to one device: every device on
+her Apple account sees them. So when Ana deletes Household from her phone, the
+phone removes only the entries it keeps for itself: its device id, its keys,
+its provider sign-in and the app's secrets (api.md [E1](api.md#e1-opening)).
+The restore code and S3 key stay, and her laptop still offers Household.
+Deleting them there would take the store from every device she has. They are
+deleted only when Ana leaves the store, when her membership ends (§14.1).
+
 Storage access is separate. On S3 the person keeps their access key apart, in a
 password manager say, and enters it, unless the QR transfer or Keychain supplied
 it. On Dropbox and OneDrive, the new device asks coven to sign in to the person's
@@ -2524,6 +2532,17 @@ When a device applies its own removal, or its member's, it stops syncing and tel
 the app. A device whose id was replaced by a reset (§19.3) reports
 `DeviceIdInUse`; one whose member's keys were replaced reports
 `MemberKeysReplaced`.
+
+A member's removal also ends the person's use of their restore code. Ana removes
+Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
+code and S3 key from iCloud Keychain (§13.1), then applies the slot. His laptop
+no longer offers Household. The order matters: the removal never applies while
+the code is still offered. If the deletion fails, the pass fails with that
+error and applies nothing; the app's retry (api.md
+[E5](api.md#e5-storage-and-sync)) reads slot 52 again and repeats it. The same
+holds when Ben, as an admin, removes himself: `remove_member` returns the
+failure, and calling it again finishes. Removing only one of Ben's devices
+deletes neither entry, because Ben is still a member with other devices.
 
 Removing a member also removes their devices and their circle memberships. A
 circle left empty is deleted at that slot. The removal entry lists no keys or
@@ -5427,8 +5446,16 @@ The floor also carries key copies with their routing in the clear (§16.4).
 
 ### D.6 Where secrets live
 
-§12.4 says what custody holds. This is how the app's own secrets, such as an API
-token, are kept beside coven's keys (api.md [E11](api.md#e11-keys-and-secrets)):
+§12.4 says what custody holds. Each store has keychain entries in two scopes,
+each named `<entry>:<store>`:
+
+| Scope | Entries | Deleted when |
+|---|---|---|
+| Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
+| Synced by iCloud Keychain to the person's Apple devices | restore code, and the S3 key beside it | the person's membership ends (§14.1) |
+
+This is how the app's own secrets, such as an API token, are kept beside coven's
+keys (api.md [E11](api.md#e11-keys-and-secrets)):
 
 - **Separate entries.** Each secret is its own keychain entry, under the same
   access policy as coven's keys and the platform's per-secret size limit.
@@ -5440,8 +5467,9 @@ token, are kept beside coven's keys (api.md [E11](api.md#e11-keys-and-secrets)):
   removes the secret before the name. So the list always covers every secret that
   exists. A failure or crash between steps can leave only a harmless extra name.
 - **Deleting the local store** removes every listed secret, then the list, then
-  coven's other entries (api.md [E1](api.md#e1-opening)). This works even when the
-  database is damaged, and the app needn't supply names.
+  coven's other device-only entries (api.md [E1](api.md#e1-opening)). This works
+  even when the database is damaged, and the app needn't supply names. The synced
+  entries stay for the person's other devices (§13.1).
 - **Retries are safe.** Removing an entry that's already absent succeeds.
 
 ---

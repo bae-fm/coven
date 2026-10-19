@@ -1,5 +1,6 @@
 use super::*;
-use crate::custody::{KeychainError, MemberKeyCustody, StoreKeyCustody};
+use crate::custody::synced_keychain::{RESTORE_CODE_ENTRY, S3_CREDENTIALS_ENTRY};
+use crate::custody::{KeychainError, MemberKeyCustody, StoreKeyCustody, SyncedKeychain};
 use crate::{MemberIdentity, StoreKey, StoreKeyring};
 use coven_foundation::id_source::KeyId;
 use uuid::Uuid;
@@ -35,7 +36,8 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     let a_id = StoreId(Uuid::from_u128(1));
     let b_id = StoreId(Uuid::from_u128(2));
     let a = Arc::new(StoreKeychain::new(fake.clone(), a_id));
-    let b = StoreKeychain::new(fake.clone(), b_id);
+    let a_synced = SyncedKeychain::new(fake.clone(), a_id);
+    let b_synced = SyncedKeychain::new(fake.clone(), b_id);
     let keys = StoreKeyring::new(StoreKey::from_bytes(
         KeyId(uuid::Uuid::from_bytes([1; 16])),
         [17; 32],
@@ -68,34 +70,37 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
             .unwrap()
             .is_none());
     }
-    assert!(a.synced_restore_code().unwrap().is_none());
-    a.delete_synced_restore_code().unwrap();
+    assert!(a_synced.restore_code().unwrap().is_none());
+    a_synced.delete_restore_code().unwrap();
     // Include non-UTF-8 bytes: custody keeps the complete opaque code unchanged.
     let first = SecretBytes::new(vec![0, 0xff, 42]);
-    a.set_synced_restore_code(&first).unwrap();
-    a.set_synced_s3_credentials(&SecretBytes::new(b"separate S3 key".to_vec()))
+    a_synced.set_restore_code(&first).unwrap();
+    a_synced
+        .set_s3_credentials(&SecretBytes::new(b"separate S3 key".to_vec()))
         .unwrap();
     assert!(fake
         .read(EntryScope::DeviceOnly, &a.account(S3_CREDENTIALS_ENTRY))
         .unwrap()
         .is_none());
     assert_eq!(
-        a.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+        a_synced.s3_credentials().unwrap().unwrap().as_bytes(),
         b"separate S3 key"
     );
-    assert!(b.synced_s3_credentials().unwrap().is_none());
+    assert!(b_synced.s3_credentials().unwrap().is_none());
     assert!(fake
         .read(EntryScope::DeviceOnly, &a.account(RESTORE_CODE_ENTRY))
         .unwrap()
         .is_none());
     assert_eq!(
-        a.synced_restore_code().unwrap().unwrap().as_bytes(),
+        a_synced.restore_code().unwrap().unwrap().as_bytes(),
         first.as_bytes()
     );
-    assert!(b.synced_restore_code().unwrap().is_none());
-    b.set_synced_restore_code(&SecretBytes::new(b"code-b".to_vec()))
+    assert!(b_synced.restore_code().unwrap().is_none());
+    b_synced
+        .set_restore_code(&SecretBytes::new(b"code-b".to_vec()))
         .unwrap();
-    a.set_synced_restore_code(&SecretBytes::new(b"replacement".to_vec()))
+    a_synced
+        .set_restore_code(&SecretBytes::new(b"replacement".to_vec()))
         .unwrap();
     let codes = fake.synced_restore_codes().unwrap();
     assert_eq!(
@@ -104,9 +109,9 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
     );
     assert_eq!(codes[0].1.as_bytes(), b"replacement");
     assert_eq!(codes[1].1.as_bytes(), b"code-b");
-    a.delete_synced_restore_code().unwrap();
-    a.delete_synced_restore_code().unwrap();
-    assert!(a.synced_restore_code().unwrap().is_none());
+    a_synced.delete_restore_code().unwrap();
+    a_synced.delete_restore_code().unwrap();
+    assert!(a_synced.restore_code().unwrap().is_none());
     assert_eq!(fake.synced_restore_codes().unwrap()[0].0, b_id);
     assert_eq!(
         store_custody
@@ -125,53 +130,13 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
         a.host_secret("api-token").unwrap().as_deref(),
         Some("local secret")
     );
-    a.set_synced_restore_code(&first).unwrap();
+    a_synced.set_restore_code(&first).unwrap();
     store_custody.forget().unwrap();
     member_custody.forget().unwrap();
     a.delete_host_secret("api-token").unwrap();
     assert_eq!(
-        a.synced_restore_code().unwrap().unwrap().as_bytes(),
+        a_synced.restore_code().unwrap().unwrap().as_bytes(),
         first.as_bytes()
-    );
-}
-
-#[test]
-fn synced_restore_code_failures_preserve_the_previous_code() {
-    let fake = Keychain::in_memory("restore-failures").unwrap();
-    let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
-    let original = SecretBytes::new(b"original".to_vec());
-    store.set_synced_restore_code(&original).unwrap();
-    fake.fail_next_operation();
-    assert!(matches!(
-        store.set_synced_restore_code(&SecretBytes::new(b"replacement".to_vec())),
-        Err(KeyError::KeychainTemporarilyUnavailable(_))
-    ));
-    assert_eq!(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
-        original.as_bytes()
-    );
-    fake.fail_next_operation();
-    assert!(matches!(
-        store.delete_synced_restore_code(),
-        Err(KeyError::KeychainTemporarilyUnavailable(_))
-    ));
-    assert_eq!(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
-        original.as_bytes()
-    );
-    fake.fail_next_operation();
-    assert!(matches!(
-        store.synced_restore_code(),
-        Err(KeyError::KeychainTemporarilyUnavailable(_))
-    ));
-    fake.fail_next_operation();
-    assert!(matches!(
-        fake.synced_restore_codes(),
-        Err(KeyError::KeychainTemporarilyUnavailable(_))
-    ));
-    assert_eq!(
-        fake.synced_restore_codes().unwrap()[0].1.as_bytes(),
-        original.as_bytes()
     );
 }
 
@@ -358,17 +323,18 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store
             .set_host_secret("another-token", "another secret")
             .unwrap();
-        store
-            .set_synced_restore_code(&SecretBytes::new(b"restore".to_vec()))
+        let synced = SyncedKeychain::new(fake.clone(), store.store);
+        synced
+            .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
             .unwrap();
-        store
-            .set_synced_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
+        synced
+            .set_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
             .unwrap();
     }
     // A new capability must discover everything from custody alone.
-    let first = StoreKeychain::new(fake, first.store);
-    first.delete_store_entries().unwrap();
-    first.delete_store_entries().unwrap();
+    let first = StoreKeychain::new(fake.clone(), first.store);
+    first.delete_device_entries().unwrap();
+    first.delete_device_entries().unwrap();
     for name in [
         DEVICE_ID_ENTRY,
         STORE_KEYS_ENTRY,
@@ -381,10 +347,12 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         assert!(first.read(name).unwrap().is_none());
         assert!(second.read(name).unwrap().is_some());
     }
-    assert!(first.synced_restore_code().unwrap().is_none());
-    assert!(second.synced_restore_code().unwrap().is_some());
-    assert!(first.synced_s3_credentials().unwrap().is_none());
-    assert!(second.synced_s3_credentials().unwrap().is_some());
+    // The person's synced entries serve their other devices, for either store.
+    for store in [&first, &second] {
+        let synced = SyncedKeychain::new(fake.clone(), store.store);
+        assert!(synced.restore_code().unwrap().is_some());
+        assert!(synced.s3_credentials().unwrap().is_some());
+    }
     assert_eq!(second.device_id().unwrap(), Some(DeviceId(42)));
     second.write(DEVICE_ID_ENTRY, &[1]).unwrap();
     assert!(matches!(
@@ -404,17 +372,17 @@ fn each_host_value_keeps_the_native_entry_size_limit() {
     }
     let memory = fake.memory_backend();
     let memory = memory.lock().unwrap();
-    for bytes in memory.entries.values() {
+    for bytes in memory.device.values() {
         assert!(
             bytes.as_bytes().len() <= 2560,
             "native entry exceeds 2,560 bytes"
         );
     }
-    assert_eq!(memory.entries.len(), 3);
+    assert_eq!(memory.device.len(), 3);
     for value in &values {
         assert_eq!(
             memory
-                .entries
+                .device
                 .values()
                 .filter(|bytes| bytes.as_bytes() == value.as_bytes())
                 .count(),
@@ -506,11 +474,11 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
             Err(KeyError::KeychainTemporarilyUnavailable(_))
         ));
         drop(store);
-        let entries = std::mem::take(&mut fake.memory_backend().lock().unwrap().entries);
+        let entries = std::mem::take(&mut fake.memory_backend().lock().unwrap().device);
         drop(fake);
         let reopened = Keychain::in_memory("interrupted-host-update").unwrap();
         let memory = reopened.memory_backend();
-        memory.lock().unwrap().entries = entries;
+        memory.lock().unwrap().device = entries;
         let store = StoreKeychain::new(reopened.clone(), id);
         assert_eq!(
             recorded_names(&store),
@@ -521,8 +489,8 @@ fn crash_between_host_updates_leaves_only_a_harmless_extra_name() {
             store.host_secret("other").unwrap().as_deref(),
             Some("preserved")
         );
-        store.delete_store_entries().unwrap();
-        assert!(memory.lock().unwrap().entries.is_empty());
+        store.delete_device_entries().unwrap();
+        assert!(memory.lock().unwrap().device.is_empty());
     }
 }
 
@@ -576,7 +544,7 @@ fn damaged_name_lists_refuse_mutations_without_losing_secrets() {
         for result in [
             store.set_host_secret("new", "value"),
             store.delete_host_secret("token"),
-            store.delete_store_entries(),
+            store.delete_device_entries(),
         ] {
             assert!(matches!(
                 result,
@@ -615,9 +583,9 @@ fn malformed_host_values_do_not_prevent_deletion() {
         store.host_secret("other").unwrap().as_deref(),
         Some("preserved")
     );
-    store.delete_store_entries().unwrap();
+    store.delete_device_entries().unwrap();
     let memory = fake.memory_backend();
-    assert!(memory.lock().unwrap().entries.is_empty());
+    assert!(memory.lock().unwrap().device.is_empty());
 }
 
 #[test]
@@ -646,15 +614,15 @@ fn concurrent_host_secret_updates_keep_every_name() {
             Some("value")
         );
     }
-    store.delete_store_entries().unwrap();
+    store.delete_device_entries().unwrap();
     let memory = fake.memory_backend();
-    assert!(memory.lock().unwrap().entries.is_empty());
+    assert!(memory.lock().unwrap().device.is_empty());
 }
 
 #[test]
 fn deletion_can_retry_after_each_keychain_failure() {
-    // Read names, remove two values, remove the list, four coven entries, restore code and separate S3 key.
-    for after in 0..10 {
+    // Read names, remove two values, remove the list, then four coven entries.
+    for after in 0..8 {
         let fake = Keychain::in_memory("delete-failures").unwrap();
         let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
         store.set_host_secret("token", "secret").unwrap();
@@ -667,15 +635,9 @@ fn deletion_can_retry_after_each_keychain_failure() {
         ] {
             store.write(name, b"entry").unwrap();
         }
-        store
-            .set_synced_restore_code(&SecretBytes::new(b"restore".to_vec()))
-            .unwrap();
-        store
-            .set_synced_s3_credentials(&SecretBytes::new(b"S3 key".to_vec()))
-            .unwrap();
         fail_operation(&fake, after);
         assert!(matches!(
-            store.delete_store_entries(),
+            store.delete_device_entries(),
             Err(KeyError::KeychainTemporarilyUnavailable(_))
         ));
         assert_host_names_cover_values(&store, &["token", "other"]);
@@ -686,8 +648,8 @@ fn deletion_can_retry_after_each_keychain_failure() {
             );
             assert!(store.read(STORE_KEYS_ENTRY).unwrap().is_some());
         }
-        store.delete_store_entries().unwrap();
+        store.delete_device_entries().unwrap();
         let memory = fake.memory_backend();
-        assert!(memory.lock().unwrap().entries.is_empty());
+        assert!(memory.lock().unwrap().device.is_empty());
     }
 }

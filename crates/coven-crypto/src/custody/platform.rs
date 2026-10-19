@@ -1,8 +1,8 @@
 //! Device-only custody and Apple's synced restore-code and S3-key entries.
 
-#[cfg(any(target_os = "macos", target_os = "ios"))]
-use super::keychain::restore_code_store;
 use super::keychain::{EntryScope, KeychainBackend};
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+use super::synced_keychain::restore_code_store;
 use super::{KeyError, KeychainError};
 use crate::SecretBytes;
 use coven_foundation::id_source::StoreId;

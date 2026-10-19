@@ -234,7 +234,7 @@ impl RestoreCodes {
             .as_ref()
             .ok_or(DbError::StoreClosed)?
             .credentials
-            .write(|keychain| Ok(keychain.delete_storage_credentials()?))
+            .write(|keychains| keychains.delete_storage_credentials())
     }
 
     /// Reserve the credential owner until remote setup either commits or fails.
@@ -330,14 +330,8 @@ impl RestoreCodesInner {
                 .encode()?,
         };
         let text = SecretText::new(code.to_text()?.to_string());
-        self.credentials.write(|keychain| {
-            if keychain.supports_synced_entries() {
-                keychain.set_synced_restore_code(&coven_crypto::SecretBytes::new(
-                    code.to_bytes()?.to_vec(),
-                ))?;
-            }
-            Ok(())
-        })?;
+        self.credentials
+            .write(|keychains| keychains.refresh_restore_code(&code))?;
         Ok(text)
     }
 

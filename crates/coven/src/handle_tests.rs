@@ -878,8 +878,8 @@ mod store_rename {
         assert_eq!(name(&mut owner_names).await, "Household");
         assert_eq!(name(&mut member_names).await, "Household");
         let restore = owner.restore_code().await.unwrap();
-        let keychain = network.devices[0].app.store_keychain(owner.store_id());
-        let synced = keychain.synced_restore_code().unwrap().unwrap();
+        let keychain = network.devices[0].app.synced_keychain(owner.store_id());
+        let synced = keychain.restore_code().unwrap().unwrap();
         assert!(matches!(
             member.rename_store("Forbidden").await,
             Err(SyncError::Rejected(OperationRejection::NotAllowed))
@@ -901,7 +901,7 @@ mod store_rename {
         }
         assert_eq!(owner.restore_code().await.unwrap(), restore);
         assert_eq!(
-            keychain.synced_restore_code().unwrap().unwrap().as_bytes(),
+            keychain.restore_code().unwrap().unwrap().as_bytes(),
             synced.as_bytes()
         );
         assert!(matches!(

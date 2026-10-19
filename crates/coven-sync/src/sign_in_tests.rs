@@ -80,10 +80,8 @@ fn custody(
     held: Option<&str>,
 ) -> (Arc<Keychain>, Arc<StoreKeychain>, Arc<DeviceCredentials>) {
     let keychain = Keychain::in_memory("sign-in").unwrap();
-    let store = Arc::new(StoreKeychain::new(
-        keychain.clone(),
-        StoreId(uuid::Uuid::from_u128(7)),
-    ));
+    let id = store_id();
+    let store = Arc::new(StoreKeychain::new(keychain.clone(), id));
     if let Some(token) = held {
         store
             .set_storage_credentials(&StorageCredentials::OAuth(tokens(token)).encode().unwrap())
@@ -91,9 +89,14 @@ fn custody(
     }
     let device = Arc::new(DeviceCredentials::new(
         store.clone(),
+        Arc::new(SyncedKeychain::new(keychain.clone(), id)),
         Some(server.clients()),
     ));
     (keychain, store, device)
+}
+
+fn store_id() -> StoreId {
+    StoreId(uuid::Uuid::from_u128(7))
 }
 
 fn held(store: &StoreKeychain) -> String {
@@ -105,16 +108,17 @@ fn held(store: &StoreKeychain) -> String {
     tokens.access_token.as_str().to_owned()
 }
 
-fn commit(keychain: &StoreKeychain, tokens: &OAuthTokens) -> Result<(), SyncError> {
+fn commit(keychain: &CredentialKeychains, tokens: &OAuthTokens) -> Result<(), SyncError> {
     commit_credentials(keychain, &StorageCredentials::OAuth(tokens.clone()), None).map(drop)
 }
 
 #[tokio::test]
 async fn device_refresh_commits_before_returning_and_touches_neither_synced_entry() {
     let server = TokenServer::new(false).await;
-    let (_, store, device) = custody(&server, Some("token"));
+    let (keychain, store, device) = custody(&server, Some("token"));
+    let synced = SyncedKeychain::new(keychain, store_id());
     let code = SecretBytes::new(b"restore code".to_vec());
-    store.set_synced_restore_code(&code).unwrap();
+    synced.set_restore_code(&code).unwrap();
     let replacement = device.replace(&tokens("token")).await.unwrap();
     assert_eq!(replacement.access_token.as_str(), "access-0");
     assert_eq!(
@@ -124,7 +128,7 @@ async fn device_refresh_commits_before_returning_and_touches_neither_synced_entr
     );
     assert_eq!(held(&store), "access-0");
     assert_eq!(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+        synced.restore_code().unwrap().unwrap().as_bytes(),
         code.as_bytes()
     );
     // Another connection rejected the same token: custody already moved on.

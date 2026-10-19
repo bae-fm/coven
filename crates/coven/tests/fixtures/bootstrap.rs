@@ -241,6 +241,7 @@ impl Installation {
     pub(super) async fn absent(&self, id: StoreId) {
         assert!(self.layout.stores().await.unwrap().is_empty());
         let scoped = Arc::new(StoreKeychain::new(self.keychain.clone(), id));
+        let synced = SyncedKeychain::new(self.keychain.clone(), id);
         assert!(
             StoreKeyCustody::unlock(&KeyringCustody::new(scoped.clone()))
                 .unwrap()
@@ -253,8 +254,8 @@ impl Installation {
         );
         assert!(scoped.device_id().unwrap().is_none());
         assert!(scoped.storage_credentials().unwrap().is_none());
-        assert!(scoped.synced_restore_code().unwrap().is_none());
-        assert!(scoped.synced_s3_credentials().unwrap().is_none());
+        assert!(synced.restore_code().unwrap().is_none());
+        assert!(synced.s3_credentials().unwrap().is_none());
     }
 
     pub(super) async fn handle(&self, directory: StoreDir, owner: &Owner) -> CovenHandle {

@@ -4,7 +4,7 @@
 use crate::CloudProvider;
 use crate::{BootstrapError, CodeError, StorageConfig, StoreId};
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
-use coven_crypto::custody::{Keychain, StoreKeychain};
+use coven_crypto::custody::{Keychain, SyncedKeychain};
 use coven_format::codes::RestoreCode;
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 use std::sync::Arc;
@@ -45,8 +45,8 @@ pub(crate) fn list(keychain: Arc<Keychain>) -> Result<Vec<SavedRestoreCode>, Boo
         .map(|(store_id, bytes)| {
             let (_, location) = decode(store_id, bytes.as_bytes())?;
             let has_s3_credentials = location.provider() == CloudProvider::S3
-                && StoreKeychain::new(keychain.clone(), store_id)
-                    .synced_s3_credentials()?
+                && SyncedKeychain::new(keychain.clone(), store_id)
+                    .s3_credentials()?
                     .is_some();
             Ok(SavedRestoreCode {
                 store_id,

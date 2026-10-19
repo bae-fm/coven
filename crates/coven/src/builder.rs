@@ -3,7 +3,7 @@
 use crate::*;
 use coven_crypto::custody::{
     InMemoryCustody, KeySession, Keychain, KeyringCustody, PassphraseCustody, StoreCustody,
-    StoreKeychain,
+    StoreKeychain, SyncedKeychain,
 };
 use coven_database::DatabaseBuilder;
 use coven_foundation::files::StoreDirAccess;
@@ -228,8 +228,12 @@ impl CovenBuilder {
         let settings = coven_storage::StorageSettings::new(directory.clone());
         let oauth = self.oauth.clone();
         let (credentials, data) = crate::coven::blocking(move || {
-            let keychain = Arc::new(StoreKeychain::new(self.keychain()?, store));
-            let credentials = Arc::new(coven_sync::DeviceCredentials::new(keychain, oauth));
+            let keychain = self.keychain()?;
+            let credentials = Arc::new(coven_sync::DeviceCredentials::new(
+                Arc::new(StoreKeychain::new(keychain.clone(), store)),
+                Arc::new(SyncedKeychain::new(keychain, store)),
+                oauth,
+            ));
             let data = credentials.connection(&settings)?;
             Ok::<_, SyncError>((credentials, data))
         })
@@ -348,12 +352,14 @@ impl CovenBuilder {
         keychain: Arc<StoreKeychain>,
     ) -> CovenResult<OpeningOwners> {
         let oauth = self.oauth_flow();
+        let settings = directory.settings()?;
+        let synced = Arc::new(SyncedKeychain::new(self.keychain()?, settings.id));
         let credentials = Arc::new(coven_sync::DeviceCredentials::new(
             keychain.clone(),
+            synced.clone(),
             self.oauth.clone(),
         ));
         let connector = self.connector();
-        let settings = directory.settings()?;
         let keys = Self::make_keys(self.keys, &directory, settings.id, keychain.clone())?;
         let identity =
             Self::make_identity(self.identity, &directory, settings.id, keychain.clone())?;
@@ -362,6 +368,7 @@ impl CovenBuilder {
             directory,
             custody: StoreCustody::new(keys.clone(), identity.clone(), keychain.clone()),
             keychain,
+            synced,
             credentials,
             connector,
             oauth,
@@ -444,6 +451,8 @@ struct OpeningStore {
 struct OpeningOwners {
     transfers: Arc<coven_storage::TransferBudget>,
     keychain: Arc<StoreKeychain>,
+    /// The person's synced entries, deleted when they leave the store (§14.1).
+    synced: Arc<SyncedKeychain>,
     credentials: Arc<coven_sync::DeviceCredentials>,
     connector: Arc<dyn StorageConnector>,
     oauth: Option<OAuthFlow>,
@@ -517,6 +526,7 @@ impl OpeningOwners {
             database.clone(),
             files.clone(),
             self.identity,
+            self.synced,
             self.credentials,
             self.publications,
             self.directory.clone(),

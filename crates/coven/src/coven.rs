@@ -22,10 +22,12 @@ impl Coven {
         CovenBuilder::new(layout)
     }
 
-    /// Deletes a closed store from this device without opening it: every
-    /// keychain entry coven holds for it, including every saved host secret,
-    /// then its directory. Unsent writes and files are lost, and this device
-    /// stays registered with the store until it is removed; prefer
+    /// Deletes a closed store from this device without opening it: this
+    /// device's own keychain entries for it, including every saved host
+    /// secret, then its directory. The person's restore code and S3 key in
+    /// iCloud Keychain stay for their other devices; they go only when the
+    /// person leaves the store (§13.1). Unsent writes and files are lost, and
+    /// this device stays registered with the store until it is removed; prefer
     /// `CovenHandle::delete_store`. Use this for a store that cannot open, or
     /// to finish a handle's deletion that failed after closing.
     /// Refused while a writer, read-only handle or file stream remains open;
@@ -44,7 +46,7 @@ impl Coven {
 
 pub(crate) fn delete(directory: &StoreDir, keys: &StoreKeychain) -> Result<(), StoreDeletionError> {
     let lock = directory.lock_for_deletion()?;
-    keys.delete_store_entries()?;
+    keys.delete_device_entries()?;
     if let Some(lock) = lock {
         lock.remove_directory()?;
     }

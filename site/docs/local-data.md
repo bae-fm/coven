@@ -48,7 +48,9 @@ than its own; while it is open, the store can't be deleted.
 `handle.close()` stops syncing, closes every connection and releases the lock.
 `handle.delete_store(IfUnsent::Refuse)` removes the store from this device: it
 refuses while writes or files wait to upload, publishes this device's removal,
-then deletes its keychain entries and directory. `IfUnsent::Discard` drops the
+then deletes this device's own keychain entries and its directory. The
+restore code and S3 key in iCloud Keychain stay for the person's other devices
+([Keys](/docs/keys)). `IfUnsent::Discard` drops the
 unsent work instead. For a store that no longer opens,
 `Coven::discard_store(&store_dir)` deletes it without opening it. The copy in
 storage is never touched.

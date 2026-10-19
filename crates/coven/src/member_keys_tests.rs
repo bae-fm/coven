@@ -48,8 +48,8 @@ async fn member_keys_are_replaced_through_the_public_calls() {
     assert_eq!(mine(&initial).keys, old.member_keys.public_keys());
     // The keychain syncs Carol's code to her other Apple devices.
     let synced = || {
-        let bytes = StoreKeychain::new(first.keychain.clone(), owner.directory.id())
-            .synced_restore_code()
+        let bytes = SyncedKeychain::new(first.keychain.clone(), owner.directory.id())
+            .restore_code()
             .unwrap()
             .unwrap();
         RestoreCode::from_bytes(bytes.as_bytes())

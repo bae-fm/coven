@@ -11,7 +11,14 @@ fn scoped(install: &Installation, owner: &Owner) -> StoreKeychain {
     StoreKeychain::new(install.keychain.clone(), owner.directory.id())
 }
 
-pub(super) fn assert_key(store: &StoreKeychain, expected: &S3Credentials) {
+fn synced_entries(install: &Installation, owner: &Owner) -> SyncedKeychain {
+    SyncedKeychain::new(install.keychain.clone(), owner.directory.id())
+}
+
+/// This device's key and the person's synced key are both `expected`.
+pub(super) fn assert_key(install: &Installation, id: StoreId, expected: &S3Credentials) {
+    let store = StoreKeychain::new(install.keychain.clone(), id);
+    let person = SyncedKeychain::new(install.keychain.clone(), id);
     let StorageCredentials::S3(device) =
         StorageCredentials::decode(store.storage_credentials().unwrap().unwrap().as_bytes())
             .unwrap()
@@ -19,7 +26,7 @@ pub(super) fn assert_key(store: &StoreKeychain, expected: &S3Credentials) {
         panic!("S3 device key")
     };
     let synced =
-        S3Credentials::decode(store.synced_s3_credentials().unwrap().unwrap().as_bytes()).unwrap();
+        S3Credentials::decode(person.s3_credentials().unwrap().unwrap().as_bytes()).unwrap();
     for key in [device, synced] {
         assert_eq!(key.access_key_id, expected.access_key_id);
         assert_eq!(
@@ -54,7 +61,7 @@ async fn entered_and_own_device_transferred_keys_are_separate_from_the_code() {
         .await
         .unwrap();
         assert_eq!(handle.restore_code().await.unwrap(), text.as_str());
-        assert_key(&scoped(&install, &owner), &key);
+        assert_key(&install, owner.directory.id(), &key);
         handle.close().await.unwrap();
     }
     owner.close().await;
@@ -65,13 +72,13 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     for explicit in [false, true] {
         let install = Installation::new();
-        let store = scoped(&install, &owner);
-        store
-            .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+        let synced = synced_entries(&install, &owner);
+        synced
+            .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
             .unwrap();
         let key = supplied_key("held-separately");
-        store
-            .set_synced_s3_credentials(&if explicit {
+        synced
+            .set_s3_credentials(&if explicit {
                 // Explicit input must not try to decode a held key.
                 SecretBytes::new(b"unreadable held key".to_vec())
             } else {
@@ -90,7 +97,7 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
         .await
         .unwrap()
         .unwrap();
-        assert_key(&store, &key);
+        assert_key(&install, owner.directory.id(), &key);
         assert_eq!(
             handle.restore_code().await.unwrap(),
             owner.code.to_text().unwrap().as_str()
@@ -114,10 +121,8 @@ async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
             let store = scoped(&install, &owner);
             let text = owner.code.to_text().unwrap();
             if from_keychain {
-                store
-                    .set_synced_restore_code(&SecretBytes::new(
-                        owner.code.to_bytes().unwrap().to_vec(),
-                    ))
+                synced_entries(&install, &owner)
+                    .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
                     .unwrap();
             }
             let supplied = (provider != CloudProvider::S3).then(|| supplied_key("wrong-provider"));
@@ -183,11 +188,12 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
     for refused_read in [false, true] {
         let install = Installation::new();
         let store = scoped(&install, &owner);
-        store
-            .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+        let synced = synced_entries(&install, &owner);
+        synced
+            .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
             .unwrap();
-        store
-            .set_synced_s3_credentials(&SecretBytes::new(b"bad key encoding".to_vec()))
+        synced
+            .set_s3_credentials(&SecretBytes::new(b"bad key encoding".to_vec()))
             .unwrap();
         let saved = crate::saved_restore::list(install.keychain.clone())
             .unwrap()
@@ -256,7 +262,6 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
-    let store = scoped(&install, &owner);
     let original = owner.s3_credentials().unwrap();
     let before = handle.restore_code().await.unwrap();
     for after in 0..5 {
@@ -270,7 +275,7 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
             ),
             "operation {after}"
         );
-        assert_key(&store, &original);
+        assert_key(&install, owner.directory.id(), &original);
         assert_eq!(handle.restore_code().await.unwrap(), before);
     }
     for cleanup in 0..2 {
@@ -287,7 +292,7 @@ async fn failed_keychain_updates_restore_both_keys_and_keep_the_code() {
             )
             .await
             .unwrap();
-        assert_key(&store, &original);
+        assert_key(&install, owner.directory.id(), &original);
     }
     handle.close().await.unwrap();
     owner.close().await;
@@ -304,10 +309,11 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
     ] {
         let install = Installation::new();
         let store = scoped(&install, &owner);
+        let synced = synced_entries(&install, &owner);
         let code = SecretBytes::new(owner.code.to_bytes().unwrap().to_vec());
         let key = owner.s3_credentials().unwrap().encode().unwrap();
-        store.set_synced_restore_code(&code).unwrap();
-        store.set_synced_s3_credentials(&key).unwrap();
+        synced.set_restore_code(&code).unwrap();
+        synced.set_s3_credentials(&key).unwrap();
         let saved = crate::saved_restore::list(install.keychain.clone())
             .unwrap()
             .remove(0);
@@ -326,11 +332,11 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
             "{phase:?}: {result:?}"
         );
         assert_eq!(
-            store.synced_restore_code().unwrap().unwrap().as_bytes(),
+            synced.restore_code().unwrap().unwrap().as_bytes(),
             code.as_bytes()
         );
         assert_eq!(
-            store.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+            synced.s3_credentials().unwrap().unwrap().as_bytes(),
             key.as_bytes()
         );
         assert!(store.storage_credentials().unwrap().is_none());
@@ -340,17 +346,35 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
 }
 
 #[tokio::test]
-async fn deleting_a_restored_store_removes_the_code_and_separate_key() {
+async fn deleting_a_restored_store_keeps_the_code_and_separate_key() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let install = Installation::new();
     let handle = install.restore(&owner).await;
     let directory = install.layout.store_dir(&owner.directory.id());
     let store = scoped(&install, &owner);
-    assert_key(&store, &owner.s3_credentials().unwrap());
-    assert!(store.synced_restore_code().unwrap().is_some());
+    let synced = synced_entries(&install, &owner);
+    assert_key(
+        &install,
+        owner.directory.id(),
+        &owner.s3_credentials().unwrap(),
+    );
+    let code = synced.restore_code().unwrap().unwrap();
     handle.close().await.unwrap();
     crate::coven::delete(&directory, &store).unwrap();
-    install.absent(owner.directory.id()).await;
+    assert!(install.layout.stores().await.unwrap().is_empty());
+    assert!(store.device_id().unwrap().is_none());
+    assert!(store.storage_credentials().unwrap().is_none());
+    // The person's other devices still restore from these.
+    assert_eq!(
+        synced.restore_code().unwrap().unwrap().as_bytes(),
+        code.as_bytes()
+    );
+    assert_eq!(
+        S3Credentials::decode(synced.s3_credentials().unwrap().unwrap().as_bytes())
+            .unwrap()
+            .access_key_id,
+        owner.s3_credentials().unwrap().access_key_id
+    );
     owner.close().await;
 }
 
@@ -418,7 +442,7 @@ async fn the_key_shown_beside_the_code_is_the_one_this_device_uses_now() {
     )
     .await
     .unwrap();
-    assert_key(&scoped(&laptop, &owner), &updated);
+    assert_key(&laptop, owner.directory.id(), &updated);
     restored.close().await.unwrap();
     handle.close().await.unwrap();
     owner.close().await;

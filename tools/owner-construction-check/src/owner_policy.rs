@@ -10,6 +10,8 @@ const MEMORY_STORAGE: &str = "crates/coven-storage/src/test_utils.rs";
 const MEMORY_CONNECTOR: &str = "crates/coven-storage/src/memory_connector.rs";
 const CONNECTION_CONTROL: &str = "crates/coven/src/storage_control.rs";
 const SAVED_RESTORE: &str = "crates/coven/src/saved_restore.rs";
+const TEST_COVEN: &str = "crates/coven/src/test_utils.rs";
+const TEST_KEYCHAIN: &str = "crates/coven-crypto/src/custody/keychain_test_utils.rs";
 pub(crate) const POLICY: Policy = Policy {
     crate_order: &[
         "coven-foundation",
@@ -338,6 +340,11 @@ pub(crate) const POLICY: Policy = Policy {
             "new",
         ),
         ("crates/coven-sync/src/sign_in.rs", "SessionSignIn", "new"),
+        (
+            "crates/coven-sync/src/credential_custody.rs",
+            "CredentialKeychains",
+            "new",
+        ),
         // The sequence owner composes its file transfers and pass state.
         (
             "crates/coven-sync/src/sequence_sync.rs",
@@ -507,23 +514,14 @@ pub(crate) const POLICY: Policy = Policy {
         // stops and awaits them. Stopping releases the client after the pass.
         (CONNECTION_CONTROL, "StorageConnections", "start"),
         (CONNECTION_CONTROL, "StorageConnections", "stop"),
-        ("crates/coven/src/test_utils.rs", "TestCoven", "builder"),
-        (
-            "crates/coven/src/test_utils.rs",
-            "TestCoven",
-            "create_closed_store",
-        ),
-        (
-            "crates/coven/src/test_utils.rs",
-            "TestCoven",
-            "discard_store",
-        ),
-        (
-            "crates/coven/src/test_utils.rs",
-            "TestCoven",
-            "keep_store_keys",
-        ),
-        ("crates/coven/src/test_utils.rs", "TestCoven", "new"),
+        (TEST_COVEN, "TestCoven", "builder"),
+        (TEST_COVEN, "TestCoven", "create_closed_store"),
+        (TEST_COVEN, "TestCoven", "discard_store"),
+        (TEST_COVEN, "TestCoven", "keep_store_keys"),
+        (TEST_COVEN, "TestCoven", "new"),
+        // Another of the person's devices shares only the synced entries.
+        (TEST_COVEN, "TestCoven", "another_device"),
+        (TEST_KEYCHAIN, "Keychain", "another_device"),
     ],
     task_starts: &[
         Gate {
@@ -654,6 +652,7 @@ pub(crate) const POLICY: Policy = Policy {
         "StoreDeletionLock",
         "Keychain",
         "StoreKeychain",
+        "SyncedKeychain",
         "KeyringCustody",
         "StoreKeyCustody",
         "MemberKeyCustody",
@@ -691,6 +690,7 @@ pub(crate) const POLICY: Policy = Policy {
         "IdSourceRef",
         "Keychain",
         "StoreKeychain",
+        "SyncedKeychain",
         "OAuthClients",
         "OAuthSession",
         "DatabaseConnection",

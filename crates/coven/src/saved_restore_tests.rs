@@ -1,6 +1,6 @@
 use super::*;
 use crate::*;
-use coven_crypto::custody::StoreKeychain;
+use coven_crypto::custody::SyncedKeychain;
 use coven_storage::Storage;
 use uuid::Uuid;
 
@@ -23,10 +23,10 @@ fn code(store: u128, location: &StorageConfig) -> RestoreCode {
     }
 }
 
-fn save(app: &TestCoven, code: &RestoreCode) -> StoreKeychain {
-    let store = app.store_keychain(code.store);
+fn save(app: &TestCoven, code: &RestoreCode) -> SyncedKeychain {
+    let store = app.synced_keychain(code.store);
     store
-        .set_synced_restore_code(&SecretBytes::new(code.to_bytes().unwrap().to_vec()))
+        .set_restore_code(&SecretBytes::new(code.to_bytes().unwrap().to_vec()))
         .unwrap();
     store
 }
@@ -70,7 +70,7 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
         let has_s3_credentials = index == 0;
         if has_s3_credentials {
             store
-                .set_synced_s3_credentials(
+                .set_s3_credentials(
                     &S3Credentials {
                         access_key_id: "ana-key".into(),
                         secret_access_key: SecretText::new("never-in-the-list".into()),
@@ -91,8 +91,8 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
     let orphan = app.store_keychain(StoreId(Uuid::from_u128(99)));
     orphan.set_device_id(DeviceId(7)).unwrap();
     orphan.set_host_secret("token", "device secret").unwrap();
-    orphan
-        .set_synced_s3_credentials(&SecretBytes::new(b"orphan key".to_vec()))
+    app.synced_keychain(StoreId(Uuid::from_u128(99)))
+        .set_s3_credentials(&SecretBytes::new(b"orphan key".to_vec()))
         .unwrap();
     let saved = app.saved_restore_codes().await.unwrap();
     assert_eq!(saved, expected);
@@ -171,7 +171,7 @@ async fn listing_rejects_malformed_codes_locations_and_mismatched_store_ids() {
     let app = TestCoven::new();
     let valid = code(1, &s3_location());
     save(&app, &valid);
-    let other = app.store_keychain(StoreId(Uuid::from_u128(2)));
+    let other = app.synced_keychain(StoreId(Uuid::from_u128(2)));
     let malformed_location = RestoreCode {
         storage: SecretBytes::new(b"invalid location".to_vec()),
         ..code(2, &s3_location())
@@ -181,13 +181,13 @@ async fn listing_rejects_malformed_codes_locations_and_mismatched_store_ids() {
         SecretBytes::new(malformed_location.to_bytes().unwrap().to_vec()),
         SecretBytes::new(valid.to_bytes().unwrap().to_vec()),
     ] {
-        other.set_synced_restore_code(&bytes).unwrap();
+        other.set_restore_code(&bytes).unwrap();
         assert!(matches!(
             app.saved_restore_codes().await,
             Err(BootstrapError::Code(CodeError::Invalid))
         ));
     }
-    other.delete_synced_restore_code().unwrap();
+    other.delete_restore_code().unwrap();
     assert_eq!(app.saved_restore_codes().await.unwrap().len(), 1);
 }
 
@@ -196,15 +196,15 @@ async fn listing_reports_presence_without_decoding_the_separately_saved_key() {
     let app = TestCoven::new();
     let store = save(&app, &code(1, &s3_location()));
     store
-        .set_synced_s3_credentials(&SecretBytes::new(b"damaged key".to_vec()))
+        .set_s3_credentials(&SecretBytes::new(b"damaged key".to_vec()))
         .unwrap();
     assert!(app.saved_restore_codes().await.unwrap()[0].has_s3_credentials);
-    store.delete_synced_s3_credentials().unwrap();
+    store.delete_s3_credentials().unwrap();
     assert!(!app.saved_restore_codes().await.unwrap()[0].has_s3_credentials);
 }
 
 #[tokio::test]
-async fn setup_refresh_selected_restore_and_delete_share_one_entry_per_store() {
+async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store() {
     let network =
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let device = &network.devices[0];
@@ -237,12 +237,15 @@ async fn setup_refresh_selected_restore_and_delete_share_one_entry_per_store() {
         current = refreshed.as_str().to_owned();
         assert_eq!(app.saved_restore_codes().await.unwrap(), expected);
     }
-    // A selection made before replacement reads the current pair and separate key.
+    // A selection made before replacement reads the current pair and separate
+    // key, on Ana's laptop, which iCloud Keychain gave the same entries.
+    let laptop = app.another_device();
     let root = tempfile::tempdir().unwrap();
     let layout = StoreLayout::new(root.path().into());
     let (_, cancel) = tokio::sync::watch::channel(false);
     let restored = restore_from_keychain(
-        app.builder(layout.clone())
+        laptop
+            .builder(layout.clone())
             .synced_tables(Vec::new())
             .migrations(Vec::new())
             .clock(Arc::new(crate::tests::PollingClock(network.clock.clone())))
@@ -259,26 +262,8 @@ async fn setup_refresh_selected_restore_and_delete_share_one_entry_per_store() {
     assert_eq!(restored.restore_code().await.unwrap(), current);
     assert_eq!(restored.store_name().await.unwrap(), "Renamed library");
     assert_eq!(app.saved_restore_codes().await.unwrap(), expected);
-    restored.delete_store(IfUnsent::Refuse).await.unwrap();
-    let remaining = app.saved_restore_codes().await.unwrap();
-    assert_eq!(remaining.len(), 1);
-    assert_eq!(remaining[0].store_id, unrelated.store);
-    assert!(app
-        .store_keychain(saved.store_id)
-        .synced_s3_credentials()
-        .unwrap()
-        .is_none());
-    assert!(restore_from_keychain(
-        app.builder(layout),
-        &saved,
-        None,
-        "Missing selection",
-        |_| panic!("bootstrap began"),
-        &cancel,
-    )
-    .await
-    .unwrap()
-    .is_none());
+    assert_eq!(laptop.saved_restore_codes().await.unwrap(), expected);
+    restored.close().await.unwrap();
     network.close().await;
 }
 

@@ -4,7 +4,7 @@
 use super::*;
 #[cfg(test)]
 use coven_crypto::custody::Keychain;
-use coven_crypto::custody::{InMemoryCustody, StoreKeychain};
+use coven_crypto::custody::{InMemoryCustody, StoreKeychain, SyncedKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::StoreDirAccess;
@@ -142,14 +142,13 @@ pub async fn restore_from_keychain(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
-    let keychain = builder.keychain()?;
-    let scoped = StoreKeychain::new(keychain, saved.store_id);
-    let Some((code, location)) = keychain_code(&scoped, saved.store_id)? else {
+    let synced = SyncedKeychain::new(builder.keychain()?, saved.store_id);
+    let Some((code, location)) = keychain_code(&synced, saved.store_id)? else {
         return Ok(None);
     };
     let s3_credentials = if location.provider() == CloudProvider::S3 && s3_credentials.is_none() {
-        scoped
-            .synced_s3_credentials()?
+        synced
+            .s3_credentials()?
             .map(|bytes| S3Credentials::decode(bytes.as_bytes()).map_err(SyncError::from))
             .transpose()?
     } else {
@@ -195,11 +194,11 @@ pub async fn join_with_invite(
 }
 
 fn keychain_code(
-    keychain: &StoreKeychain,
+    keychain: &SyncedKeychain,
     store: StoreId,
 ) -> Result<Option<(RestoreCode, StorageConfig)>, BootstrapError> {
     keychain
-        .synced_restore_code()?
+        .restore_code()?
         .map(|bytes| crate::saved_restore::decode(store, bytes.as_bytes()).map_err(Into::into))
         .transpose()
 }
@@ -418,6 +417,7 @@ async fn prepare_and_load(
             settings.device_id,
             ring.clone(),
             identity,
+            Arc::new(SyncedKeychain::new(builder.keychain()?, settings.id)),
             state.clone(),
             builder.clock.clone(),
             builder.ids.clone(),

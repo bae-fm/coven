@@ -4,7 +4,7 @@ use crate::{
     error::{setup_error, unlock_error},
     *,
 };
-use coven_crypto::custody::KeySession;
+use coven_crypto::custody::{KeySession, SyncedKeychain};
 use coven_storage::{
     providers::{OAuthClients, OAuthFlow, StorageConnector},
     ConnectionCredentials, ProviderAuth, PublicationGate, Storage, StorageConnection,
@@ -139,6 +139,8 @@ pub(crate) struct StorageConnections {
     database: coven_database::Database,
     files: coven_sync::Files,
     identity: Arc<KeySession<MemberIdentity>>,
+    /// The person's synced entries, for each connection's sequence owner.
+    synced: Arc<SyncedKeychain>,
     credentials: Arc<DeviceCredentials>,
     publications: Arc<Publications>,
     directory: StoreDir,
@@ -178,6 +180,7 @@ impl StorageConnections {
         database: coven_database::Database,
         files: coven_sync::Files,
         identity: Arc<KeySession<MemberIdentity>>,
+        synced: Arc<SyncedKeychain>,
         credentials: Arc<DeviceCredentials>,
         publications: Arc<Publications>,
         directory: StoreDir,
@@ -207,6 +210,7 @@ impl StorageConnections {
             database,
             files,
             identity,
+            synced,
             credentials,
             publications,
             settings: coven_storage::StorageSettings::new(directory.clone()),
@@ -339,6 +343,7 @@ impl StorageConnections {
                 self.device,
                 keys,
                 self.identity.clone(),
+                self.synced.clone(),
                 self.publications.state.clone(),
                 self.clock.clone(),
                 self.ids.clone(),

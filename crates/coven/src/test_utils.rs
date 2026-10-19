@@ -41,6 +41,15 @@ impl TestCoven {
         Ok(directory)
     }
 
+    /// Another device of the same person: an installation with its own empty
+    /// device-only keychain, sharing this one's synced entries the way iCloud
+    /// Keychain carries a restore code and S3 key between the person's devices.
+    pub fn another_device(&self) -> Self {
+        Self {
+            keychain: self.keychain.another_device(),
+        }
+    }
+
     /// Build the production graph with this installation's keychain.
     pub fn builder(&self, layout: StoreLayout) -> CovenBuilder {
         Coven::builder(layout).with_keychain(self.keychain.clone())
@@ -76,6 +85,18 @@ impl TestCoven {
     #[cfg(test)]
     pub(crate) fn store_keychain(&self, store: StoreId) -> StoreKeychain {
         StoreKeychain::new(self.keychain.clone(), store)
+    }
+
+    /// The person's synced entries for one store, as this installation sees them.
+    #[cfg(test)]
+    pub(crate) fn synced_keychain(&self, store: StoreId) -> coven_crypto::custody::SyncedKeychain {
+        coven_crypto::custody::SyncedKeychain::new(self.keychain.clone(), store)
+    }
+
+    /// While `refuse` holds, refuse this installation's calls on synced entries only.
+    #[cfg(test)]
+    pub(crate) fn refuse_synced_keychain_operations(&self, refuse: bool) {
+        self.keychain.refuse_synced_operations(refuse);
     }
 
     /// Refuse the next keychain operation before changing any stored value.

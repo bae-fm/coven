@@ -232,6 +232,10 @@ impl TestCoven {
     /// Make an installation with an empty device-only and synced keychain.
     pub fn new() -> Self;
 
+    /// Another device of the same person: its own empty device-only keychain,
+    /// sharing this one's synced entries as iCloud Keychain would (§13.1).
+    pub fn another_device(&self) -> Self;
+
     /// Create through the production builder, then close for a reopening fixture.
     pub async fn create_closed_store(
         &self,
@@ -1453,12 +1457,14 @@ impl Coven {
     /// Configure creating, opening, restoring or joining a store.
     pub fn builder(layout: StoreLayout) -> CovenBuilder;
 
-    /// Deletes a closed store without opening it: every keychain entry coven
-    /// holds for it, then its directory. Unsent work is lost; membership stays
-    /// until this device is removed. For a store that cannot open,
-    /// or to finish `CovenHandle::delete_store`. Refused while a writer,
-    /// read-only handle, file stream or file I/O holds its lock; storage is
-    /// untouched. Retrying finishes a deletion that failed partway.
+    /// Deletes a closed store without opening it: this device's own keychain
+    /// entries for it, then its directory. The person's restore code and S3
+    /// key in iCloud Keychain stay for their other devices (§13.1). Unsent
+    /// work is lost; membership stays until this device is removed. For a
+    /// store that cannot open, or to finish `CovenHandle::delete_store`.
+    /// Refused while a writer, read-only handle, file stream or file I/O holds
+    /// its lock; storage is untouched. Retrying finishes a deletion that failed
+    /// partway.
     pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
 }
 
@@ -1585,6 +1591,7 @@ impl CovenHandle {
     /// unsent work unless discarding it, then publishes this device's removal
     /// (§14.1); either failure deletes nothing. Then closes and deletes as
     /// `Coven::discard_store`, which finishes a deletion failing after that.
+    /// Only this device leaves: the person's restore code and S3 key stay.
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError>;
 
     /// The writes and files this device committed and has not uploaded, from
@@ -4005,6 +4012,9 @@ impl CovenHandle {
     /// Publishes the removal of this member and all their devices (§14.1).
     /// Returns once the slot commits. Provider work appears only in pending(),
     /// including owner waits, retained grants and S3 keys until confirmed deleted.
+    /// An admin removing themselves leaves: this device deletes their restore
+    /// code and S3 key from iCloud Keychain before applying the slot, then
+    /// stops. A failed deletion is returned; calling again finishes.
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError>;
 
     /// Removes a device. The provider can't cut off one device alone, so the
@@ -4277,6 +4287,9 @@ pub enum ProviderSignOut {
   presence, with no secrets or store name.
   The app passes its selection to `restore_from_keychain`; no local store or
   provider connection is needed to list it.
+- Both synced entries belong to the person. Deleting the store from one device
+  keeps them; a device deletes them when it applies the person's removal from
+  the store, before the slot applies (§14.1).
 - An admin adds a person with an invite, and approves their join request
   ([§13.2](coven.md#132-adding-a-person-invites)).
 - Before `create_invite` makes any provider change, an App-folder Dropbox

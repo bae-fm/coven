@@ -161,7 +161,7 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
     let (owner, store) = codes(&ana, keychain.clone());
     let old = owner.restore_code().await.unwrap();
     store
-        .set_synced_restore_code(&SecretBytes::new(b"old code".to_vec()))
+        .set_restore_code(&SecretBytes::new(b"old code".to_vec()))
         .unwrap();
     keychain.fail_operations_after(&[0]);
     let result = owner.replace_member_keys().await;
@@ -198,7 +198,7 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
         Err(coven_database::DbError::MemberKeysChanging)
     ));
     assert_eq!(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+        store.restore_code().unwrap().unwrap().as_bytes(),
         b"old code"
     );
     owner.close().await;
@@ -212,7 +212,7 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
     ana.sync.retry_pending_operation(operation).await.unwrap();
     run_background(&ana, owner.clone()).await;
     let code = coven_format::codes::RestoreCode::from_bytes(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+        store.restore_code().unwrap().unwrap().as_bytes(),
     )
     .unwrap();
     assert_eq!(
@@ -235,7 +235,7 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
     let keychain = Keychain::in_memory("background-replacement-code").unwrap();
     let (owner, store) = codes(&ana, keychain.clone());
     store
-        .set_synced_restore_code(&SecretBytes::new(b"old code".to_vec()))
+        .set_restore_code(&SecretBytes::new(b"old code".to_vec()))
         .unwrap();
     let next = ana.database().applied_slot().await.unwrap() + 1;
     ana.storage
@@ -264,7 +264,7 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
         .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
     run_background(&ana, owner.clone()).await;
     let code = coven_format::codes::RestoreCode::from_bytes(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+        store.restore_code().unwrap().unwrap().as_bytes(),
     )
     .unwrap();
     assert_eq!(

@@ -69,6 +69,7 @@ async fn prepared(
 ) -> (BootstrapStore, OpeningOwners, Database) {
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     let builder = Coven::builder(layout.clone())
+        .with_keychain(keychain.clone())
         .synced_tables(Vec::new())
         .migrations(Vec::new())
         .key_custody(keys)
@@ -99,6 +100,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
+    let synced = SyncedKeychain::new(keychain.clone(), id);
     let old = StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap());
     let custody = Arc::new(KeyringCustody::<StoreKeyring>::new(scoped.clone()));
     custody.persist(&old).unwrap();
@@ -138,8 +140,8 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     );
     assert!(scoped.device_id().unwrap().is_none());
     assert!(scoped.storage_credentials().unwrap().is_none());
-    assert!(scoped.synced_restore_code().unwrap().is_none());
-    assert!(scoped.synced_s3_credentials().unwrap().is_none());
+    assert!(synced.restore_code().unwrap().is_none());
+    assert!(synced.s3_credentials().unwrap().is_none());
     assert!(StorageSettings::new(pending.directory())
         .read()
         .unwrap()
@@ -204,6 +206,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let scoped = Arc::new(StoreKeychain::new(keychain.clone(), id));
+    let synced = SyncedKeychain::new(keychain.clone(), id);
     let (pending, owners, database) = prepared(
         &layout,
         id,
@@ -217,8 +220,8 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     let old_s3_key = SecretBytes::new(b"synced S3 key before restore".to_vec());
     let old_code = SecretBytes::new(b"code before restore".to_vec());
     scoped.set_storage_credentials(&old_credentials).unwrap();
-    scoped.set_synced_s3_credentials(&old_s3_key).unwrap();
-    scoped.set_synced_restore_code(&old_code).unwrap();
+    synced.set_s3_credentials(&old_s3_key).unwrap();
+    synced.set_restore_code(&old_code).unwrap();
     let old_location = StorageConfig::Dropbox {
         account_label: None,
         location: coven_storage::DropboxLocation::SharedFolder {
@@ -265,11 +268,11 @@ async fn publication_failure_rolls_back_settings_and_custody() {
         old_credentials.as_bytes()
     );
     assert_eq!(
-        scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
+        synced.restore_code().unwrap().unwrap().as_bytes(),
         old_code.as_bytes()
     );
     assert_eq!(
-        scoped.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+        synced.s3_credentials().unwrap().unwrap().as_bytes(),
         old_s3_key.as_bytes()
     );
     assert!(scoped.device_id().unwrap().is_none());
@@ -286,12 +289,13 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
         let id = StoreId(UuidIds.new_id());
         let keychain = Keychain::in_memory("commit-test").unwrap();
         let scoped = StoreKeychain::new(keychain.clone(), id);
+        let synced_entries = SyncedKeychain::new(keychain.clone(), id);
         let old_device = SecretBytes::new(b"old device credentials".to_vec());
         let old_key = SecretBytes::new(b"old synced S3 key".to_vec());
         let old_code = SecretBytes::new(b"old synced code".to_vec());
         scoped.set_storage_credentials(&old_device).unwrap();
-        scoped.set_synced_s3_credentials(&old_key).unwrap();
-        scoped.set_synced_restore_code(&old_code).unwrap();
+        synced_entries.set_s3_credentials(&old_key).unwrap();
+        synced_entries.set_restore_code(&old_code).unwrap();
         let (pending, owners, database) = prepared(
             &layout,
             id,
@@ -328,11 +332,11 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
             old_device.as_bytes()
         );
         assert_eq!(
-            scoped.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+            synced_entries.s3_credentials().unwrap().unwrap().as_bytes(),
             old_key.as_bytes()
         );
         assert_eq!(
-            scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
+            synced_entries.restore_code().unwrap().unwrap().as_bytes(),
             old_code.as_bytes()
         );
         assert!(scoped.device_id().unwrap().is_none());
@@ -352,6 +356,7 @@ async fn bootstrap_reports_synced_key_rollback_failure_with_the_publication_fail
     let id = StoreId(UuidIds.new_id());
     let keychain = Keychain::in_memory("commit-test").unwrap();
     let scoped = StoreKeychain::new(keychain.clone(), id);
+    let synced = SyncedKeychain::new(keychain.clone(), id);
     let (pending, owners, database) = prepared(
         &layout,
         id,
@@ -379,9 +384,9 @@ async fn bootstrap_reports_synced_key_rollback_failure_with_the_publication_fail
         matches!(error, BootstrapError::Sync(SyncError::Cleanup { operation, cleanup })
         if matches!(*operation, SyncError::SecureStorage(_)) && matches!(*cleanup, SyncError::SecureStorage(_)))
     );
-    assert!(scoped.synced_s3_credentials().unwrap().is_some());
+    assert!(synced.s3_credentials().unwrap().is_some());
     assert!(scoped.storage_credentials().unwrap().is_none());
-    assert!(scoped.synced_restore_code().unwrap().is_none());
+    assert!(synced.restore_code().unwrap().is_none());
     assert!(scoped.device_id().unwrap().is_none());
     assert!(StorageSettings::new(pending.directory())
         .read()

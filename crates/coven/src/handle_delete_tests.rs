@@ -3,8 +3,9 @@
 
 use crate::tests::Network;
 use crate::*;
+use coven_crypto::custody::{KeyringCustody, MemberKeyCustody, StoreKeyCustody};
 use coven_foundation::files::StoreDirAccess;
-use std::time::Duration;
+use std::{sync::Arc, time::Duration};
 
 async fn insert(handle: &CovenHandle, id: &str) {
     let id = id.to_owned();
@@ -294,4 +295,76 @@ async fn subscribed_unsent_work_follows_each_commit_and_confirmation() {
     )
     .await;
     handle.close().await.unwrap();
+}
+
+/// Every entry this device kept for the store is gone.
+fn device_entries_gone(app: &TestCoven, store: StoreId) {
+    let keychain = Arc::new(app.store_keychain(store));
+    assert!(keychain.device_id().unwrap().is_none());
+    assert!(keychain.storage_credentials().unwrap().is_none());
+    assert!(keychain.host_secret("api-token").unwrap().is_none());
+    assert!(
+        StoreKeyCustody::unlock(&KeyringCustody::<StoreKeyring>::new(keychain.clone()))
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        MemberKeyCustody::unlock(&KeyringCustody::<MemberIdentity>::new(keychain))
+            .unwrap()
+            .is_none()
+    );
+}
+
+/// Ana deletes Household from her phone, or discards it there. The phone's
+/// own entries go. Her restore code and S3 key stay in iCloud Keychain, so her
+/// laptop still offers the store and restores from them (§13.1).
+#[tokio::test]
+async fn removing_a_store_from_one_device_keeps_the_persons_synced_entries() {
+    for discard in [false, true] {
+        let mut network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
+        let phone = network.devices.remove(0);
+        let laptop = phone.app.another_device();
+        let saved = laptop.saved_restore_codes().await.unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].has_s3_credentials);
+        phone
+            .handle
+            .set_host_secret("api-token", "phone token")
+            .unwrap();
+        if discard {
+            phone.handle.close().await.unwrap();
+            phone
+                .app
+                .discard_store(&phone.layout.store_dir(&phone.store))
+                .await
+                .unwrap();
+        } else {
+            phone.handle.delete_store(IfUnsent::Refuse).await.unwrap();
+        }
+        assert!(phone.layout.stores().await.unwrap().is_empty());
+        device_entries_gone(&phone.app, phone.store);
+        assert_eq!(laptop.saved_restore_codes().await.unwrap(), saved);
+        assert_eq!(phone.app.saved_restore_codes().await.unwrap(), saved);
+        let root = tempfile::tempdir().unwrap();
+        let (_, cancel) = tokio::sync::watch::channel(false);
+        let restored = restore_from_keychain(
+            laptop
+                .builder(StoreLayout::new(root.path().into()))
+                .synced_tables(Vec::new())
+                .migrations(Vec::new())
+                .clock(Arc::new(crate::tests::PollingClock(network.clock.clone())))
+                .storage_connector(Arc::new(phone.storage.for_device())),
+            &saved[0],
+            None,
+            "Ana's laptop",
+            |_| {},
+            &cancel,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(restored.store_id(), phone.store);
+        restored.close().await.unwrap();
+        network.close().await;
+    }
 }

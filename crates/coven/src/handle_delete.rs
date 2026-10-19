@@ -30,6 +30,8 @@ impl CovenHandle {
     /// publishes this device's removal (§14.1), which cuts off its later slots;
     /// either failure deletes nothing. It then closes this handle and deletes
     /// as `Coven::discard_store`, which finishes a deletion failing after that.
+    /// Only this device leaves: the person's restore code and S3 key in iCloud
+    /// Keychain stay for their other devices (§13.1).
     pub async fn delete_store(&self, unsent: IfUnsent) -> Result<(), StoreDeletionError> {
         if self.storage.configured().await? {
             let work = self.unsent_work().await.map_err(SyncError::from)?;

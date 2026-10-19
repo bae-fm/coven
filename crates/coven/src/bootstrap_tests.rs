@@ -92,7 +92,7 @@ async fn restore_loads_snapshots_and_later_writes_and_registers_the_device() {
         owner.code.to_text().unwrap().as_str()
     );
     let (synced, _) = keychain_code(
-        &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+        &SyncedKeychain::new(install.keychain.clone(), owner.directory.id()),
         owner.directory.id(),
     )
     .unwrap()
@@ -155,7 +155,8 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
         let handle = result.unwrap().unwrap();
         if provider == CloudProvider::S3 {
             restore_credentials::assert_key(
-                &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+                &install,
+                owner.directory.id(),
                 &S3Credentials {
                     access_key_id: "invited-key".into(),
                     secret_access_key: SecretText::new("invited-secret".into()),
@@ -298,7 +299,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(
         keychain_code(
-            &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+            &SyncedKeychain::new(install.keychain.clone(), owner.directory.id()),
             owner.directory.id(),
         )
         .unwrap()
@@ -488,7 +489,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
     let directory = install.layout.store_dir(&owner.directory.id());
     let before = handle.restore_code().await.unwrap();
     let code = coven_sync::read_restore_code(&before).unwrap();
-    let scoped = StoreKeychain::new(install.keychain.clone(), directory.id());
+    let synced = SyncedKeychain::new(install.keychain.clone(), directory.id());
     let replacement = S3Credentials {
         access_key_id: "replacement".into(),
         secret_access_key: SecretText::new("new-secret".into()),
@@ -502,10 +503,10 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(
-        scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
+        synced.restore_code().unwrap().unwrap().as_bytes(),
         code.to_bytes().unwrap().as_slice()
     );
-    restore_credentials::assert_key(&scoped, &replacement);
+    restore_credentials::assert_key(&install, directory.id(), &replacement);
     handle
         .update_credentials(
             "retained-device".into(),
@@ -515,7 +516,8 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
     restore_credentials::assert_key(
-        &scoped,
+        &install,
+        directory.id(),
         &S3Credentials {
             access_key_id: "retained-device".into(),
             secret_access_key: SecretText::new("retained-secret".into()),
@@ -539,7 +541,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         )
         .await
         .unwrap();
-    restore_credentials::assert_key(&scoped, &original);
+    restore_credentials::assert_key(&install, directory.id(), &original);
     assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(
         coven_storage::StorageSettings::new(directory)
@@ -754,9 +756,9 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
     ));
     let retained = handle.restore_code().await.unwrap();
     assert_eq!(retained, before);
-    let scoped = StoreKeychain::new(install.keychain.clone(), directory.id());
     restore_credentials::assert_key(
-        &scoped,
+        &install,
+        directory.id(),
         &S3Credentials {
             access_key_id: "replacement".into(),
             secret_access_key: SecretText::new("secret".into()),
@@ -765,7 +767,7 @@ async fn failed_access_publication_retains_credentials_and_retry_finishes_once()
 
     assert_eq!(
         keychain_code(
-            &StoreKeychain::new(install.keychain.clone(), owner.directory.id()),
+            &SyncedKeychain::new(install.keychain.clone(), owner.directory.id()),
             owner.directory.id(),
         )
         .unwrap()
@@ -828,11 +830,8 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                     IdentityCustody::InMemory
                 });
             let handle = if from_keychain {
-                let scoped = StoreKeychain::new(install.keychain.clone(), owner.directory.id());
-                scoped
-                    .set_synced_restore_code(&SecretBytes::new(
-                        owner.code.to_bytes().unwrap().to_vec(),
-                    ))
+                SyncedKeychain::new(install.keychain.clone(), owner.directory.id())
+                    .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
                     .unwrap();
                 restore_from_keychain(
                     builder,
@@ -940,14 +939,14 @@ async fn joining_retains_the_approved_member_in_session_custody() {
 async fn missing_keychain_code_returns_none_without_creating_a_store() {
     let owner = Owner::new(CloudProvider::CloudKit, false).await;
     let install = Installation::new();
-    let scoped = StoreKeychain::new(install.keychain.clone(), owner.directory.id());
-    scoped
-        .set_synced_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+    let synced = SyncedKeychain::new(install.keychain.clone(), owner.directory.id());
+    synced
+        .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
         .unwrap();
     let saved = crate::saved_restore::list(install.keychain.clone())
         .unwrap()
         .remove(0);
-    scoped.delete_synced_restore_code().unwrap();
+    synced.delete_restore_code().unwrap();
     let (_, cancel) = watch::channel(false);
     let result = restore_from_keychain(
         Coven::builder(install.layout.clone()).with_keychain(install.keychain.clone()),

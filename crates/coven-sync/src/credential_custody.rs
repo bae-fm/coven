@@ -1,9 +1,57 @@
 //! Device credentials and separately synced recovery values commit together.
 
 use crate::SyncError;
-use coven_crypto::{custody::StoreKeychain, SecretBytes};
+use coven_crypto::{
+    custody::{StoreKeychain, SyncedKeychain},
+    SecretBytes,
+};
 use coven_format::codes::RestoreCode;
 use coven_storage::StorageCredentials;
+use std::sync::Arc;
+
+/// The keychain entries a credential change commits: this device's provider
+/// credentials, and the person's restore code and S3 key that iCloud Keychain
+/// carries to all their devices (§13.1).
+pub struct CredentialKeychains {
+    /// This device's own entries for the store.
+    device: Arc<StoreKeychain>,
+    /// The person's entries for the store, shared by all their devices.
+    synced: Arc<SyncedKeychain>,
+}
+
+impl CredentialKeychains {
+    /// Pair one store's device-only and synced entries.
+    pub fn new(device: Arc<StoreKeychain>, synced: Arc<SyncedKeychain>) -> Self {
+        Self { device, synced }
+    }
+
+    /// This device's committed provider credentials, if any.
+    pub fn storage_credentials(&self) -> Result<Option<SecretBytes>, SyncError> {
+        Ok(self.device.storage_credentials()?)
+    }
+
+    /// Remove this device's provider credentials; an absent entry succeeds.
+    pub fn delete_storage_credentials(&self) -> Result<(), SyncError> {
+        Ok(self.device.delete_storage_credentials()?)
+    }
+
+    /// Replace the synced restore code, where the keychain keeps synced entries.
+    pub fn refresh_restore_code(&self, code: &RestoreCode) -> Result<(), SyncError> {
+        if self.synced.supported() {
+            self.synced
+                .set_restore_code(&SecretBytes::new(code.to_bytes()?.to_vec()))?;
+        }
+        Ok(())
+    }
+
+    /// The saved location with this device's credentials; None when either is absent.
+    pub fn connection(
+        &self,
+        settings: &coven_storage::StorageSettings,
+    ) -> Result<Option<coven_storage::ConnectionCredentials>, SyncError> {
+        crate::read_connection(settings, &self.device)
+    }
+}
 
 #[derive(Clone, Copy)]
 enum CredentialEntry {
@@ -13,35 +61,35 @@ enum CredentialEntry {
 }
 
 impl CredentialEntry {
-    fn read(&self, keychain: &StoreKeychain) -> Result<Option<SecretBytes>, SyncError> {
+    fn read(&self, keychains: &CredentialKeychains) -> Result<Option<SecretBytes>, SyncError> {
         Ok(match self {
-            Self::DeviceCredentials => keychain.storage_credentials()?,
-            Self::RestoreCode => keychain.synced_restore_code()?,
-            Self::S3Credentials => keychain.synced_s3_credentials()?,
+            Self::DeviceCredentials => keychains.device.storage_credentials()?,
+            Self::RestoreCode => keychains.synced.restore_code()?,
+            Self::S3Credentials => keychains.synced.s3_credentials()?,
         })
     }
 
-    fn write(&self, keychain: &StoreKeychain, bytes: &SecretBytes) -> Result<(), SyncError> {
+    fn write(&self, keychains: &CredentialKeychains, bytes: &SecretBytes) -> Result<(), SyncError> {
         match self {
-            Self::DeviceCredentials => keychain.set_storage_credentials(bytes),
-            Self::RestoreCode => keychain.set_synced_restore_code(bytes),
-            Self::S3Credentials => keychain.set_synced_s3_credentials(bytes),
+            Self::DeviceCredentials => keychains.device.set_storage_credentials(bytes),
+            Self::RestoreCode => keychains.synced.set_restore_code(bytes),
+            Self::S3Credentials => keychains.synced.set_s3_credentials(bytes),
         }
         .map_err(SyncError::from)
     }
 
-    fn delete(&self, keychain: &StoreKeychain) -> Result<(), SyncError> {
+    fn delete(&self, keychains: &CredentialKeychains) -> Result<(), SyncError> {
         match self {
-            Self::DeviceCredentials => keychain.delete_storage_credentials(),
-            Self::RestoreCode => keychain.delete_synced_restore_code(),
-            Self::S3Credentials => keychain.delete_synced_s3_credentials(),
+            Self::DeviceCredentials => keychains.device.delete_storage_credentials(),
+            Self::RestoreCode => keychains.synced.delete_restore_code(),
+            Self::S3Credentials => keychains.synced.delete_s3_credentials(),
         }
         .map_err(SyncError::from)
     }
 
     fn replace(
         &self,
-        keychain: &StoreKeychain,
+        keychain: &CredentialKeychains,
         value: Option<&SecretBytes>,
     ) -> Result<(), SyncError> {
         match value {
@@ -59,7 +107,7 @@ pub struct CredentialRollback {
 
 impl CredentialRollback {
     /// Restore every captured value, retaining all failures for the initiator.
-    pub fn restore(self, keychain: &StoreKeychain) -> Result<(), SyncError> {
+    pub fn restore(self, keychain: &CredentialKeychains) -> Result<(), SyncError> {
         let mut failure = None;
         for (entry, bytes) in self.entries.into_iter().rev() {
             let result = entry.replace(keychain, bytes.as_ref());
@@ -83,7 +131,7 @@ impl CredentialRollback {
 /// code; OAuth refresh touches neither synced entry. A failed write restores
 /// every prior value and returns any rollback failures with the original cause.
 pub fn commit_credentials(
-    keychain: &StoreKeychain,
+    keychain: &CredentialKeychains,
     credentials: &StorageCredentials,
     code: Option<&RestoreCode>,
 ) -> Result<CredentialRollback, SyncError> {
@@ -91,7 +139,7 @@ pub fn commit_credentials(
         CredentialEntry::DeviceCredentials,
         Some(credentials.encode()?),
     )];
-    if keychain.supports_synced_entries() {
+    if keychain.synced.supported() {
         if let StorageCredentials::S3(keys) = credentials {
             updates.push((CredentialEntry::S3Credentials, Some(keys.encode()?)));
         } else if code.is_some() {

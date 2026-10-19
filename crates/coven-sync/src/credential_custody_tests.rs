@@ -11,20 +11,26 @@ fn key() -> StorageCredentials {
     })
 }
 
-fn fixture(present: bool) -> (Arc<Keychain>, StoreKeychain, RestoreCode) {
+fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {
     let keychain = Keychain::in_memory("credential-commit").unwrap();
     let id = StoreId(uuid::Uuid::from_u128(1));
-    let store = StoreKeychain::new(keychain.clone(), id);
+    let store = CredentialKeychains {
+        device: Arc::new(StoreKeychain::new(keychain.clone(), id)),
+        synced: Arc::new(SyncedKeychain::new(keychain.clone(), id)),
+    };
     if present {
         // Synced and local values may differ; compensation must preserve each.
         store
+            .device
             .set_storage_credentials(&SecretBytes::new(b"prior-device".to_vec()))
             .unwrap();
         store
-            .set_synced_s3_credentials(&SecretBytes::new(b"prior-synced-key".to_vec()))
+            .synced
+            .set_s3_credentials(&SecretBytes::new(b"prior-synced-key".to_vec()))
             .unwrap();
         store
-            .set_synced_restore_code(&SecretBytes::new(b"prior-code".to_vec()))
+            .synced
+            .set_restore_code(&SecretBytes::new(b"prior-code".to_vec()))
             .unwrap();
     }
     let code = RestoreCode {
@@ -44,18 +50,18 @@ fn fixture(present: bool) -> (Arc<Keychain>, StoreKeychain, RestoreCode) {
     (keychain, store, code)
 }
 
-fn assert_prior(store: &StoreKeychain, present: bool) {
+fn assert_prior(store: &CredentialKeychains, present: bool) {
     for (actual, expected) in [
         (
-            store.storage_credentials().unwrap(),
+            store.device.storage_credentials().unwrap(),
             b"prior-device".as_slice(),
         ),
         (
-            store.synced_s3_credentials().unwrap(),
+            store.synced.s3_credentials().unwrap(),
             b"prior-synced-key".as_slice(),
         ),
         (
-            store.synced_restore_code().unwrap(),
+            store.synced.restore_code().unwrap(),
             b"prior-code".as_slice(),
         ),
     ] {
@@ -85,13 +91,18 @@ fn every_custody_read_and_write_failure_preserves_the_exact_prior_values() {
                 let rollback =
                     commit_credentials(&store, &key(), with_code.then_some(&code)).unwrap();
                 let StorageCredentials::S3(device) = StorageCredentials::decode(
-                    store.storage_credentials().unwrap().unwrap().as_bytes(),
+                    store
+                        .device
+                        .storage_credentials()
+                        .unwrap()
+                        .unwrap()
+                        .as_bytes(),
                 )
                 .unwrap() else {
                     panic!("S3 device credentials")
                 };
                 let synced = S3Credentials::decode(
-                    store.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+                    store.synced.s3_credentials().unwrap().unwrap().as_bytes(),
                 )
                 .unwrap();
                 assert_eq!(device.access_key_id, "replacement-id");
@@ -103,7 +114,7 @@ fn every_custody_read_and_write_failure_preserves_the_exact_prior_values() {
                 );
                 if with_code {
                     assert_eq!(
-                        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+                        store.synced.restore_code().unwrap().unwrap().as_bytes(),
                         code.to_bytes().unwrap().as_slice()
                     );
                 }
@@ -129,9 +140,9 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
                         && matches!(*cleanup, SyncError::SecureStorage(_))
             ));
             let restored = [
-                store.synced_restore_code().unwrap(),
-                store.synced_s3_credentials().unwrap(),
-                store.storage_credentials().unwrap(),
+                store.synced.restore_code().unwrap(),
+                store.synced.s3_credentials().unwrap(),
+                store.device.storage_credentials().unwrap(),
             ];
             for (index, (actual, expected)) in restored
                 .iter()
@@ -151,18 +162,23 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
             }
             commit_credentials(&store, &key(), Some(&code)).unwrap();
             assert_eq!(
-                store.storage_credentials().unwrap().unwrap().as_bytes(),
+                store
+                    .device
+                    .storage_credentials()
+                    .unwrap()
+                    .unwrap()
+                    .as_bytes(),
                 key().encode().unwrap().as_bytes()
             );
             assert_eq!(
-                store.synced_restore_code().unwrap().unwrap().as_bytes(),
+                store.synced.restore_code().unwrap().unwrap().as_bytes(),
                 code.to_bytes().unwrap().as_slice()
             );
             let StorageCredentials::S3(keys) = key() else {
                 unreachable!()
             };
             assert_eq!(
-                store.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+                store.synced.s3_credentials().unwrap().unwrap().as_bytes(),
                 keys.encode().unwrap().as_bytes()
             );
         }
@@ -187,7 +203,7 @@ fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() 
         refresh_token: None,
     });
     let rollback = commit_credentials(&store, &oauth, Some(&code)).unwrap();
-    assert!(store.synced_s3_credentials().unwrap().is_none());
+    assert!(store.synced.s3_credentials().unwrap().is_none());
     rollback.restore(&store).unwrap();
     assert_prior(&store, true);
     for after in 0..6 {
@@ -212,18 +228,18 @@ fn oauth_commit_and_compensation_touch_only_device_credentials() {
     // Exactly one read and one write: a third operation would fail.
     keychain.fail_operations_after(&[2]);
     let rollback = commit_credentials(&store, &oauth, None).unwrap();
-    assert!(store.storage_credentials().is_err());
+    assert!(store.device.storage_credentials().is_err());
     assert_eq!(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+        store.synced.restore_code().unwrap().unwrap().as_bytes(),
         b"prior-code"
     );
     assert_eq!(
-        store.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+        store.synced.s3_credentials().unwrap().unwrap().as_bytes(),
         b"prior-synced-key"
     );
     keychain.fail_operations_after(&[1]);
     rollback.restore(&store).unwrap();
-    assert!(store.storage_credentials().is_err());
+    assert!(store.device.storage_credentials().is_err());
     assert_prior(&store, true);
 }
 
@@ -233,9 +249,9 @@ fn replacing_s3_credentials_never_reads_or_rewrites_the_code() {
     // Two reads and two writes, independent of the code's validity or presence.
     keychain.fail_operations_after(&[4]);
     let rollback = commit_credentials(&store, &key(), None).unwrap();
-    assert!(store.storage_credentials().is_err());
+    assert!(store.device.storage_credentials().is_err());
     assert_eq!(
-        store.synced_restore_code().unwrap().unwrap().as_bytes(),
+        store.synced.restore_code().unwrap().unwrap().as_bytes(),
         b"prior-code"
     );
     rollback.restore(&store).unwrap();

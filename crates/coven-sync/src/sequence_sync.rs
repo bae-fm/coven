@@ -9,7 +9,10 @@ use crate::{
     snapshot_object, PendingReason, PendingRecord, PendingSubject, Prerequisite, Refusal,
     SequenceStatus, SyncError, SyncState,
 };
-use coven_crypto::{custody::KeySession, MemberIdentity, StoreKeyring};
+use coven_crypto::{
+    custody::{KeySession, SyncedKeychain},
+    MemberIdentity, StoreKeyring,
+};
 use coven_database::{Database, IncomingSlot, SlotContent};
 use coven_format::{floor::OriginalSlot, sequence::SlotFrame};
 use coven_foundation::{
@@ -43,6 +46,8 @@ pub struct SequenceSync {
     storage: Arc<dyn Storage>,
     keys: Arc<KeySession<StoreKeyring>>,
     member: Arc<KeySession<MemberIdentity>>,
+    /// The person's restore code and S3 key, deleted when they leave (§14.1).
+    synced: Arc<SyncedKeychain>,
     directory: StoreDir,
     device: DeviceId,
     state: Arc<SyncState>,
@@ -72,6 +77,7 @@ impl SequenceSync {
         device: DeviceId,
         keys: Arc<KeySession<StoreKeyring>>,
         member: Arc<KeySession<MemberIdentity>>,
+        synced: Arc<SyncedKeychain>,
         state: Arc<SyncState>,
         clock: coven_foundation::clock::ClockRef,
         ids: coven_foundation::id_source::IdSourceRef,
@@ -109,6 +115,7 @@ impl SequenceSync {
             storage,
             keys,
             member,
+            synced,
             directory,
             device,
             state,
@@ -410,6 +417,9 @@ impl SequenceSync {
                     .await?;
                 continue;
             }
+            // A failed deletion fails this pass before any of its slots
+            // applies; it is not a fault of the slot, so nothing blocks.
+            self.leave(&session.history, &virtual_history, member)?;
             session.floor = floor;
             for (incoming, history, input) in slots {
                 let at = incoming.slot;
@@ -507,6 +517,33 @@ impl SequenceSync {
                 .get(&self.device)
                 .is_some_and(|device| device.active()),
         );
+        Ok(())
+    }
+
+    /// The person leaves the store when their member's removal applies, by
+    /// any admin including themselves. Their restore code and S3 key in
+    /// iCloud Keychain then serve no device of theirs, so this device deletes
+    /// them before it commits the slots or snapshot that remove the member
+    /// (§14.1). A failed deletion returns to the caller with nothing
+    /// committed; the retried pass or call reads the removal again and
+    /// repeats it. Removing only a device leaves them: the person keeps
+    /// their other devices.
+    pub(crate) fn leave(
+        &self,
+        applied: &History,
+        next: &History,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
+        let removed = |history: &History| {
+            history
+                .state
+                .members
+                .get(&member.member())
+                .is_some_and(|member| member.removed)
+        };
+        if removed(next) && !removed(applied) {
+            self.synced.delete_entries()?;
+        }
         Ok(())
     }
 

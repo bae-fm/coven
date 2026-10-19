@@ -3,8 +3,8 @@
 //! it (§20.2, E5, E10). A token is used until the provider rejects it; its one
 //! refresh is committed here before any connection uses it.
 
-use crate::{commit_credentials, SyncError};
-use coven_crypto::custody::StoreKeychain;
+use crate::{commit_credentials, CredentialKeychains, SyncError};
+use coven_crypto::custody::{StoreKeychain, SyncedKeychain};
 use coven_storage::providers::OAuthTokenRefresh;
 use coven_storage::{
     providers::OAuthClients, ConnectionCredentials, OAuthTokens, StorageCredentials, StorageError,
@@ -16,17 +16,21 @@ use std::sync::{Arc, Mutex};
 /// goes through [`Self::write`], so a refresh commits its replacement only
 /// while custody still holds the tokens the provider rejected.
 pub struct DeviceCredentials {
-    keychain: Arc<StoreKeychain>,
+    keychains: CredentialKeychains,
     oauth: Option<OAuthClients>,
     writes: Mutex<()>,
     refreshing: tokio::sync::Mutex<()>,
 }
 
 impl DeviceCredentials {
-    /// Compose once per open store, beside its keychain.
-    pub fn new(keychain: Arc<StoreKeychain>, oauth: Option<OAuthClients>) -> Self {
+    /// Compose once per open store, beside its device-only and synced keychains.
+    pub fn new(
+        keychain: Arc<StoreKeychain>,
+        synced: Arc<SyncedKeychain>,
+        oauth: Option<OAuthClients>,
+    ) -> Self {
         Self {
-            keychain,
+            keychains: CredentialKeychains::new(keychain, synced),
             oauth,
             writes: Mutex::new(()),
             refreshing: tokio::sync::Mutex::new(()),
@@ -36,10 +40,10 @@ impl DeviceCredentials {
     /// Change committed credentials, serialized with every refresh's commit.
     pub fn write<T>(
         &self,
-        change: impl FnOnce(&StoreKeychain) -> Result<T, SyncError>,
+        change: impl FnOnce(&CredentialKeychains) -> Result<T, SyncError>,
     ) -> Result<T, SyncError> {
         let _write = self.writes.lock().expect("credential writes poisoned");
-        change(&self.keychain)
+        change(&self.keychains)
     }
 
     /// The saved location with these credentials; None when either is absent.
@@ -47,12 +51,12 @@ impl DeviceCredentials {
         &self,
         settings: &StorageSettings,
     ) -> Result<Option<ConnectionCredentials>, SyncError> {
-        crate::read_connection(settings, &self.keychain)
+        self.keychains.connection(settings)
     }
 }
 
-pub(crate) fn held_tokens(keychain: &StoreKeychain) -> Result<OAuthTokens, SyncError> {
-    let bytes = keychain
+pub(crate) fn held_tokens(keychains: &CredentialKeychains) -> Result<OAuthTokens, SyncError> {
+    let bytes = keychains
         .storage_credentials()?
         .ok_or(StorageFailure::Authentication.with_source("no sign-in is in device custody"))?;
     match StorageCredentials::decode(bytes.as_bytes())? {
@@ -67,7 +71,7 @@ pub(crate) fn held_tokens(keychain: &StoreKeychain) -> Result<OAuthTokens, SyncE
 impl TokenCustody for DeviceCredentials {
     async fn replace(&self, rejected: &OAuthTokens) -> Result<OAuthTokens, StorageError> {
         let _one = self.refreshing.lock().await;
-        let held = held_tokens(&self.keychain).map_err(storage_error)?;
+        let held = held_tokens(&self.keychains).map_err(storage_error)?;
         if held.access_token.as_str() != rejected.access_token.as_str() {
             return Ok(held);
         }
@@ -144,7 +148,7 @@ impl SessionSignIn {
     pub fn publish<T>(
         &self,
         device: &Arc<DeviceCredentials>,
-        commit: impl FnOnce(&StoreKeychain, &OAuthTokens) -> Result<T, SyncError>,
+        commit: impl FnOnce(&CredentialKeychains, &OAuthTokens) -> Result<T, SyncError>,
     ) -> Result<T, SyncError> {
         let mut state = self.state.lock().expect("sign-in poisoned");
         let (tokens, published) = &mut *state;

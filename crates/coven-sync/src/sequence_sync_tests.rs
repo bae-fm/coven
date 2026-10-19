@@ -2,6 +2,7 @@ use crate::*;
 use coven_crypto::{
     custody::{
         InMemoryCustody, KeySession, Keychain, Passphrase, PassphraseCustody, StoreKeychain,
+        SyncedKeychain,
     },
     MemberIdentity, StoreKey, StoreKeyring,
 };
@@ -249,6 +250,10 @@ impl Group {
                 device,
                 Arc::new(store_keys),
                 Arc::new(member_keys),
+                Arc::new(SyncedKeychain::new(
+                    Keychain::in_memory("sequence-test").unwrap(),
+                    self.store,
+                )),
                 state,
                 clock,
                 self.ids.clone(),
@@ -357,8 +362,9 @@ pub(super) async fn invite(ana: &Device) -> Invite {
 pub(crate) fn codes(
     device: &Device,
     keychain: Arc<Keychain>,
-) -> (RestoreCodes, Arc<StoreKeychain>) {
-    let store = Arc::new(StoreKeychain::new(keychain, device.sync.store()));
+) -> (RestoreCodes, Arc<SyncedKeychain>) {
+    let store = Arc::new(StoreKeychain::new(keychain.clone(), device.sync.store()));
+    let synced = Arc::new(SyncedKeychain::new(keychain, device.sync.store()));
     let settings = StorageSettings::new(device.sync.directory.clone());
     settings.commit(&device.storage.config()).unwrap();
     (
@@ -366,11 +372,11 @@ pub(crate) fn codes(
             device.sync.store(),
             device.sync.database.clone(),
             device.sync.member.clone(),
-            Arc::new(DeviceCredentials::new(store.clone(), None)),
+            Arc::new(DeviceCredentials::new(store, synced.clone(), None)),
             settings,
             Some(device.sync.clone()),
         ),
-        store,
+        synced,
     )
 }
 

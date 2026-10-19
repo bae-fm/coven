@@ -221,10 +221,10 @@ impl CovenHandle {
     }
     /// Publish removal and return once its slot commits. Provider work is
     /// reported through pending(), independently of the removal call (§14.2).
+    /// An admin removing themselves leaves the store: this device deletes
+    /// their restore code and S3 key from iCloud Keychain and stops (§14.1).
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
-        self.storage
-            .administer(coven_format::admin::StoreChange::RemoveMember { member: *member })
-            .await
+        self.storage.remove_member(*member).await
     }
     /// Remove a device and return instructions for its provider sign-out.
     pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {

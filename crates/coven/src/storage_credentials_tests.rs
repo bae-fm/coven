@@ -1,4 +1,5 @@
 use super::*;
+use coven_crypto::custody::SyncedKeychain;
 use coven_foundation::files::StoreDirAccess;
 
 async fn assert_original_connection_uploads(f: &Fixture) {
@@ -111,13 +112,14 @@ async fn setup_key_failure_restores_the_separate_synced_values() {
     f.handle.close().await.unwrap();
     let keychain = Keychain::in_memory("setup-rollback").unwrap();
     let scoped = StoreKeychain::new(keychain.clone(), f.directory.id());
+    let synced = SyncedKeychain::new(keychain.clone(), f.directory.id());
     scoped
         .set_device_id(f.directory.settings().unwrap().device_id)
         .unwrap();
     let old_code = SecretBytes::new(b"previous synced code".to_vec());
     let old_key = SecretBytes::new(b"previous synced S3 key".to_vec());
-    scoped.set_synced_restore_code(&old_code).unwrap();
-    scoped.set_synced_s3_credentials(&old_key).unwrap();
+    synced.set_restore_code(&old_code).unwrap();
+    synced.set_s3_credentials(&old_key).unwrap();
     let handle = builder(
         &f.app,
         StoreLayout::new(f._root.path().into()),
@@ -151,11 +153,11 @@ async fn setup_key_failure_restores_the_separate_synced_values() {
         ))
     ));
     assert_eq!(
-        scoped.synced_restore_code().unwrap().unwrap().as_bytes(),
+        synced.restore_code().unwrap().unwrap().as_bytes(),
         old_code.as_bytes()
     );
     assert_eq!(
-        scoped.synced_s3_credentials().unwrap().unwrap().as_bytes(),
+        synced.s3_credentials().unwrap().unwrap().as_bytes(),
         old_key.as_bytes()
     );
     assert!(scoped.storage_credentials().unwrap().is_none());

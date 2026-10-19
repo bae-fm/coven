@@ -44,7 +44,7 @@ pub use codes::{
     CodeMetadata,
 };
 pub use coven_database::WriteCutoff;
-pub use credential_custody::{commit_credentials, CredentialRollback};
+pub use credential_custody::{commit_credentials, CredentialKeychains, CredentialRollback};
 pub use error::{DamagedObject, SyncError, SyncFailure};
 pub use identity::DeviceIdEvidence;
 pub use joining_identity::JoiningIdentity;

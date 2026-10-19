@@ -93,6 +93,12 @@ beside it. Replacing the S3 key updates that entry without changing the code.
 including whether an S3 key is saved beside each code. Pass the selected entry
 to `restore_from_keychain` to read its current code and key on a new device.
 
+Those two synced entries belong to the person, not to one device. Deleting a
+store from one device removes only that device's own entries, so the person's
+other devices still offer it. A device deletes the synced entries when it
+applies the person's removal from the store, including an admin removing
+themselves.
+
 ## Host secrets
 
 An app can keep its own secrets, such as an API token for a service it

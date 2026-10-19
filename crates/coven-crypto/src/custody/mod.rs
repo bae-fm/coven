@@ -10,6 +10,7 @@ mod memory;
 mod passphrase;
 mod platform;
 mod store_custody;
+mod synced_keychain;
 
 pub use error::{KeyError, KeychainError};
 pub use key_session::KeySession;
@@ -17,6 +18,7 @@ pub use keychain::{set_keyring_service, Keychain, KeyringCustody, StoreKeychain}
 pub use memory::InMemoryCustody;
 pub use passphrase::{Passphrase, PassphraseCustody};
 pub use store_custody::{IdentityError, StoreCustody};
+pub use synced_keychain::SyncedKeychain;
 
 const STORE_KEYS_ENTRY: &str = "store-keys";
 const MEMBER_KEYS_ENTRY: &str = "member-keys";
