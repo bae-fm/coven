@@ -29,9 +29,13 @@ impl Coven {
     /// person leaves the store (§13.1). Unsent writes and files are lost, and
     /// this device stays registered with the store until it is removed; prefer
     /// `CovenHandle::delete_store`. Use this for a store that cannot open, or
-    /// to finish a handle's deletion that failed after closing.
-    /// Refused while a writer, read-only handle or file stream remains open;
-    /// storage is untouched. Retrying finishes a deletion that failed partway.
+    /// to finish a handle's deletion that failed after closing. A store whose
+    /// `reset_device` or `restore_device` stopped after its swap is deleted
+    /// whole: both installations, the replacement's directory and record,
+    /// and this device's entries, which by then may name either device.
+    /// Refused while a writer, read-only handle, file stream or a running
+    /// replacement remains; storage is untouched. Retrying finishes a
+    /// deletion that failed partway.
     pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = store_dir.clone();
         blocking(move || {

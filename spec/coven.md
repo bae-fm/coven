@@ -2356,6 +2356,9 @@ failed. Instead the app passes Carol's current code to
   the app's list of stores still shows it in that state. A `reset_device` call
   is refused before anything changes: it would load under the pair history
   replaced, fail, and leave the store waiting (§19.3).
+- Carol can give up on the laptop's copy instead. `discard_store` deletes the
+  store from the laptop, both copies with it, and the laptop's own keychain
+  entries. Her restore code and S3 key stay, so she can restore from scratch.
 - As in a reset, the new device registers as replacing the old one, carries the
   old copy's owed provider cleanup, and reports the reset notice (§19.3).
 
@@ -4204,6 +4207,13 @@ laptop in place from her current restore code instead (§13.1).
   restore: it would load under the pair the restore replaces and fail every
   time. A restore can't finish a reset: it would remove the old copy the reset
   keeps for inspection.
+- Deleting the store from the device is the other way out. `discard_store`
+  ([api.md E1](api.md#e1-opening)) removes both installations, the hidden
+  directory and the record. It removes this device's keychain entries too,
+  whichever device they name by then. Without this, a store whose call can't
+  finish, say because its storage is gone, could neither open nor leave the
+  device. Deleting is refused while the call that swapped is still running,
+  and an interrupted deletion finishes when retried.
 - Only owed provider cleanup carries over: readable `DeleteAccessKey` work, owed
   revocations of account sharing, and the old installation's open invites, which
   become owed cleanup. They are copied into the new database, with its reset

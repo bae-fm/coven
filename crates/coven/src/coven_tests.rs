@@ -411,3 +411,119 @@ async fn device_id_is_available_before_setup_and_survives_reopen() {
     assert_eq!(handle.device_id(), device);
     handle.close().await.unwrap();
 }
+
+/// Whether this device still keeps any entry of its own for `store`: its
+/// device id, member keys, store keys or provider credentials.
+fn device_entries_remain(app: &TestCoven, store: StoreId) -> bool {
+    use coven_crypto::custody::KeyringCustody;
+    let keychain = Arc::new(app.store_keychain(store));
+    keychain.device_id().unwrap().is_some()
+        || keychain.storage_credentials().unwrap().is_some()
+        || MemberKeyCustody::unlock(&KeyringCustody::<MemberIdentity>::new(keychain.clone()))
+            .unwrap()
+            .is_some()
+        || StoreKeyCustody::unlock(&KeyringCustody::<StoreKeyring>::new(keychain))
+            .unwrap()
+            .is_some()
+}
+
+/// The person's synced restore code and S3 key for `store`.
+fn synced_entries(app: &TestCoven, store: StoreId) -> (Option<Vec<u8>>, Option<Vec<u8>>) {
+    let synced = app.synced_keychain(store);
+    let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
+    (
+        bytes(synced.restore_code().unwrap()),
+        bytes(synced.s3_credentials().unwrap()),
+    )
+}
+
+/// Carol's laptop stopped right after the swap of a reset or restore, and
+/// the app discards the store instead of finishing it. A first attempt fails
+/// partway through the keychain and leaves the store listed as it was; the
+/// retry removes both installations, the record, the hidden directory and
+/// every device-only entry, which may already name the new device. It never
+/// touches the person's synced restore code and S3 key (§13.1, §19.3).
+#[tokio::test]
+async fn discarding_a_store_whose_replacement_stopped_after_its_swap_removes_both_copies() {
+    for by in [ReplacedBy::Reset, ReplacedBy::Restore] {
+        let mut network = crate::tests::Network::new(2).await;
+        let (carol, interrupted) = match by {
+            ReplacedBy::Reset => {
+                let carol = network.devices.remove(1);
+                carol.handle.close().await.unwrap();
+                let interrupted = network
+                    .reopen(&carol)
+                    .interrupt_after_swap()
+                    .reset_device(carol.store, "Carol's laptop")
+                    .await;
+                (carol, interrupted)
+            }
+            ReplacedBy::Restore => {
+                let replaced = network.replace_keys_elsewhere().await;
+                let (_, cancel) = tokio::sync::watch::channel(false);
+                let interrupted = network
+                    .reopen(&replaced.carol)
+                    .interrupt_after_swap()
+                    .restore_device(
+                        replaced.carol.store,
+                        &replaced.code,
+                        Some(S3Credentials {
+                            access_key_id: "member-1".into(),
+                            secret_access_key: SecretText::new("secret".into()),
+                        }),
+                        "Carol's laptop",
+                        |_| {},
+                        &cancel,
+                    )
+                    .await;
+                (replaced.carol, interrupted)
+            }
+        };
+        assert!(matches!(interrupted, Err(BootstrapError::Cancelled)));
+        let store = carol.store;
+        let directory = carol.layout.store_dir(&store);
+        let record = directory.unfinished_replacement().unwrap().unwrap();
+        assert_eq!(record.by, by);
+        // As if the keychain already named the new device when it stopped.
+        carol
+            .app
+            .store_keychain(store)
+            .set_device_id(record.reset.new_device)
+            .unwrap();
+        carol
+            .app
+            .synced_keychain(store)
+            .set_s3_credentials(&SecretBytes::new(b"Carol's S3 key".to_vec()))
+            .unwrap();
+        let synced = synced_entries(&carol.app, store);
+        assert!(synced.0.is_some());
+        let path = directory.database_path().parent().unwrap().to_owned();
+        // The old installation waits in its archive beside the new one.
+        assert!(path.join(".coven-replacement").exists());
+        assert!(path
+            .join(format!("discarded-device-{}", record.reset.old_device.0))
+            .exists());
+        // Stopped after removing the store keys, before the member keys.
+        carol.app.fail_keychain_operations_after(&[3]);
+        assert!(matches!(
+            carol.app.discard_store(&directory).await,
+            Err(StoreDeletionError::Key(_))
+        ));
+        assert_eq!(
+            carol.layout.stores().await.unwrap()[0].unfinished_replacement,
+            Some(by)
+        );
+        assert_eq!(directory.unfinished_replacement().unwrap(), Some(record));
+        assert!(device_entries_remain(&carol.app, store));
+        // Discarding reaches no synced entry: refusing them changes nothing.
+        carol.app.refuse_synced_keychain_operations(true);
+        carol.app.discard_store(&directory).await.unwrap();
+        carol.app.refuse_synced_keychain_operations(false);
+        assert!(!path.exists());
+        assert!(carol.layout.stores().await.unwrap().is_empty());
+        assert!(!device_entries_remain(&carol.app, store));
+        assert_eq!(synced_entries(&carol.app, store), synced);
+        carol.app.discard_store(&directory).await.unwrap();
+        network.close().await;
+    }
+}

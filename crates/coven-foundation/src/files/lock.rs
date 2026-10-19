@@ -81,13 +81,24 @@ pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock,
 }
 
 /// Exclusive access to both the writer and readers, authorizing deletion.
+/// For a store whose replacement is unfinished, also the bootstrap lock a
+/// running `reset_device` or `restore_device` holds (§19.3).
 #[derive(Debug)]
 pub struct StoreDeletionLock {
     store: LockedStore<LockedFile>,
     _readers: LockedFile,
+    _replacement: Option<LockedFile>,
 }
 
 impl StoreDeletionLock {
+    /// Also hold the bootstrap lock: between its own steps, a replacement's
+    /// call can hold only that lock while its swap is unfinished.
+    pub(super) fn exclude_replacement(mut self) -> Result<Self, StoreLockError> {
+        let path = bootstrap_lock_path(&self.store.directory, self.store.id);
+        self._replacement = Some(try_lock(&path, self.store.id, false)?);
+        Ok(self)
+    }
+
     /// Unpublish the directory and remove its contents before releasing and
     /// removing its sibling locks. Retry failures through `lock_for_deletion`,
     /// including a failure after only the lock files remain.
@@ -146,7 +157,7 @@ pub enum StoreLockError {
     BootstrapPending(StoreId),
     /// A replacement of this device's installation swapped in but did not
     /// finish. Only the call it names finishes it; the other is refused
-    /// before anything changes (§19.3).
+    /// before anything changes. Deletion removes it instead (§19.3).
     #[error("store {store} requires {by} to finish replacing this device's installation")]
     ReplacementUnfinished {
         /// The store whose installation is being replaced.
@@ -298,6 +309,12 @@ pub(crate) fn lock_paths(directory: &Path, id: StoreId) -> [PathBuf; 2] {
     ]
 }
 
+/// The lock a bootstrap or replacement holds for its whole call, beside the
+/// store's directory.
+pub(super) fn bootstrap_lock_path(directory: &Path, id: StoreId) -> PathBuf {
+    directory.with_file_name(format!(".coven-bootstrap-{id}.lock"))
+}
+
 pub(crate) fn deletion_path(directory: &Path, id: StoreId) -> PathBuf {
     directory.with_file_name(format!(".coven-delete-{id}"))
 }
@@ -361,6 +378,7 @@ pub(crate) fn for_deletion(
             id,
         },
         _readers: try_lock(&readers, id, false)?,
+        _replacement: None,
     }))
 }
 

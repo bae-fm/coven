@@ -122,11 +122,14 @@ impl StoreDir {
         }
     }
 
+    fn is_bootstrapping(&self) -> bool {
+        self.bootstrap.as_ref().is_some_and(|lease| lease.is_held())
+    }
+
     /// A marker beside a replacement record belongs to a swap under way;
     /// alone, it belongs to a first installation.
     fn check_published(&self) -> Result<(), StoreLockError> {
-        let bootstrapping = self.bootstrap.as_ref().is_some_and(|lease| lease.is_held());
-        if !bootstrapping && super::bootstrap::is_pending(&self.path)? {
+        if !self.is_bootstrapping() && super::bootstrap::is_pending(&self.path)? {
             return Err(match super::device_reset::read(&self.path)? {
                 Some(record) => StoreLockError::ReplacementUnfinished {
                     store: self.id,
@@ -198,6 +201,9 @@ pub trait StoreDirAccess: Sized {
     fn exclude_cache_writes(&self) -> Result<CacheWriteLock, FileError>;
     /// Lock an existing store or a directory left by an interrupted deletion.
     /// An absent store with leftover locks can finish their removal on retry.
+    /// A store whose replacement is unfinished is locked for deletion too,
+    /// unless the call replacing it still runs; an unfinished first
+    /// installation is refused with `StoreLockError::BootstrapPending`.
     /// No directory is created by this call.
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError>;
     /// Check that a supplied lock protects this exact store directory.
@@ -246,9 +252,21 @@ impl StoreDirAccess for StoreDir {
         lock::cache_writes(&self.path, false)
     }
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError> {
-        let guard = lock::for_deletion(&self.path, self.id)?;
-        self.check_published()?;
-        Ok(guard)
+        let Some(guard) = lock::for_deletion(&self.path, self.id)? else {
+            return Ok(None);
+        };
+        if self.is_bootstrapping() {
+            return Ok(Some(guard));
+        }
+        match super::device_reset::read(&self.path)? {
+            // Deleting removes both installations, the record and the
+            // replacement's directory, unless its call is still running.
+            Some(_) => Ok(Some(guard.exclude_replacement()?)),
+            None if super::bootstrap::is_pending(&self.path)? => {
+                Err(StoreLockError::BootstrapPending(self.id))
+            }
+            None => Ok(Some(guard)),
+        }
     }
     fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError> {
         lock.verify(&self.path, self.id)

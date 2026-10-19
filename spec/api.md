@@ -164,6 +164,9 @@ pub enum Audience {
 - Store lock files live beside each store directory. Deletion holds the writer
   and reader locks while removing the directory, then releases and removes the
   lock files. Creation and lock-file removal are serialized by the layout.
+  Deleting a store whose replacement is unfinished also holds the bootstrap
+  lock: after its swap, a running `reset_device` or `restore_device` holds
+  only that lock between steps, and deletion must not remove files under it.
 - Deleting a store with storage set up loses whatever hasn't been uploaded.
   So before Ana deletes the Household store from her phone, the app shows
   her `unsent_work()`: say, 3 writes and 1 file still waiting. These are the
@@ -1240,7 +1243,8 @@ pub enum StoreLockError {
     BootstrapPending(StoreId),
     /// A replacement of this device's installation swapped in but did not
     /// finish. Opening, and the other of `reset_device` and `restore_device`,
-    /// are refused before anything changes; only `by` finishes it (§19.3).
+    /// are refused before anything changes; only `by` finishes it, or
+    /// `Coven::discard_store` deletes the store from this device (§19.3).
     ReplacementUnfinished { store: StoreId, by: ReplacedBy },
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
@@ -1480,10 +1484,13 @@ impl Coven {
     /// entries for it, then its directory. The person's restore code and S3
     /// key in iCloud Keychain stay for their other devices (§13.1). Unsent
     /// work is lost; membership stays until this device is removed. For a
-    /// store that cannot open, or to finish `CovenHandle::delete_store`.
-    /// Refused while a writer, read-only handle, file stream or file I/O holds
-    /// its lock; storage is untouched. Retrying finishes a deletion that failed
-    /// partway.
+    /// store that cannot open, or to finish `CovenHandle::delete_store`. A
+    /// store whose `reset_device` or `restore_device` stopped after its swap
+    /// is deleted whole: both installations, the replacement's directory and
+    /// record, and this device's entries, whichever device they name by then.
+    /// Refused while a writer, read-only handle, file stream, file I/O or a
+    /// running replacement holds its lock; storage is untouched. Retrying
+    /// finishes a deletion that failed partway.
     pub async fn discard_store(store_dir: &StoreDir) -> Result<(), StoreDeletionError>;
 }
 
@@ -4329,6 +4336,8 @@ pub enum ProviderSignOut {
   `StoreLockError::ReplacementUnfinished { by: Restore }`, `StoreLayout::stores`
   lists the store in that state, and `reset_device` is refused with that error,
   changing nothing ([§19.3](coven.md#193-another-copy-of-the-same-device)).
+  `Coven::discard_store` can delete the store from the device instead, both
+  copies with it. The person's restore code and S3 key stay.
 - An admin adds a person with an invite, and approves their join request
   ([§13.2](coven.md#132-adding-a-person-invites)).
 - Before `create_invite` makes any provider change, an App-folder Dropbox

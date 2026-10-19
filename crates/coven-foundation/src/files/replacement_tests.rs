@@ -396,6 +396,40 @@ async fn the_other_call_is_refused_by_a_swap_under_way() {
     }
 }
 
+/// A store whose swap is unfinished can be deleted, but not while the call
+/// that swapped still runs: after the swap that call holds only its
+/// bootstrap lock. Deleting holds that lock too, so no replacement begins
+/// while the directory goes (§19.3).
+#[tokio::test]
+async fn deletion_removes_an_unfinished_swap_once_its_call_stops() {
+    for by in [ReplacedBy::Reset, ReplacedBy::Restore] {
+        let f = store(8);
+        let replacement = f
+            .layout
+            .begin_replacement(f.store.id(), by, &UuidIds)
+            .await
+            .unwrap();
+        load(&replacement);
+        replacement.swap("Household".into()).unwrap();
+        assert!(matches!(
+            f.store.lock_for_deletion(),
+            Err(StoreLockError::AlreadyOpen(store)) if store == f.store.id()
+        ));
+        drop(replacement);
+        let deletion = f.store.lock_for_deletion().unwrap().unwrap();
+        assert!(matches!(
+            f.layout.begin_replacement(f.store.id(), by, &UuidIds).await,
+            Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(
+                _
+            )))
+        ));
+        deletion.remove_directory().unwrap();
+        assert!(!f.path.exists());
+        assert!(f.layout.store_ids().await.unwrap().is_empty());
+        assert!(f.store.lock_for_deletion().unwrap().is_none());
+    }
+}
+
 /// Every entry under `path` with its contents, relative to it and sorted,
 /// for comparing a tree before and after.
 fn walk(path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
