@@ -2568,6 +2568,13 @@ admin, removes himself, `remove_member` returns the failure instead, and
 calling it again finishes. Removing only one of Ben's devices
 deletes neither entry, because Ben is still a member with other devices.
 
+Once slot 52 applies, Ben's phone refuses to change his storage credentials:
+`update_credentials` returns `Removed`, connected or not, and so does
+`replace_access_key`. Ben has no storage access left to change, and saving a
+new S3 key would put it back in the iCloud Keychain his removal emptied. From
+the moment the phone deletes the entries, it refuses to write them again, so a
+change already under way can't put the key back either.
+
 Removing a member also removes their devices and their circle memberships. A
 circle left empty is deleted at that slot. The removal entry lists no keys or
 circles: the state before its slot supplies them.

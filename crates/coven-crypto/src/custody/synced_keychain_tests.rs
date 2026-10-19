@@ -170,3 +170,27 @@ fn a_synced_refusal_lets_device_only_calls_through() {
     synced.delete_entries().unwrap();
     assert_eq!(device.device_id().unwrap(), Some(DeviceId(1)));
 }
+
+/// Once Ben leaves, nothing sharing his phone's synced keychain can put his
+/// S3 key or restore code back, even after a deletion that failed part way
+/// (§14.1).
+#[test]
+fn after_leaving_the_synced_entries_are_never_written_again() {
+    let phone = Keychain::in_memory("leaving").unwrap();
+    let synced = saved(&phone, StoreId(Uuid::from_u128(1)));
+    phone.fail_next_operation();
+    assert!(synced.delete_entries().is_err());
+    let key = SecretBytes::new(b"new S3 key".to_vec());
+    assert!(matches!(
+        synced.set_s3_credentials(&key),
+        Err(KeyError::Left)
+    ));
+    assert!(matches!(synced.set_restore_code(&key), Err(KeyError::Left)));
+    synced.delete_entries().unwrap();
+    assert!(matches!(
+        synced.set_s3_credentials(&key),
+        Err(KeyError::Left)
+    ));
+    assert!(synced.s3_credentials().unwrap().is_none());
+    assert!(synced.restore_code().unwrap().is_none());
+}

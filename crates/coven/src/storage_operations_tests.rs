@@ -95,6 +95,54 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     network.close().await;
 }
 
+/// Once Ben's phone applies his removal, it refuses a new S3 key with
+/// `Removed`, connected or not. Ben has no storage access left to change, and
+/// saving the key would put it back in the iCloud Keychain his removal emptied.
+#[tokio::test]
+async fn a_removed_member_cannot_save_storage_credentials() {
+    let network = Network::new(2).await;
+    let ana = &network.devices[0];
+    let ben = &network.devices[1];
+    let laptop = ben.app.another_device();
+    ana.handle
+        .remove_member(&own_member(&ben.handle).await)
+        .await
+        .unwrap();
+    ben.handle.sync_now();
+    wait_for(&ben.handle, removed).await;
+    let held = |app: &TestCoven| {
+        app.store_keychain(ben.store)
+            .storage_credentials()
+            .unwrap()
+            .map(|bytes| bytes.as_bytes().to_vec())
+    };
+    let before = held(&ben.app);
+    assert!(before.is_some());
+    let key = || ("ben-new".to_owned(), SecretText::new("new secret".into()));
+    let (id, secret) = key();
+    let replaced = ben.handle.replace_access_key(id, secret).await;
+    assert!(matches!(replaced, Err(SyncError::Removed)), "{replaced:?}");
+    assert_eq!(held(&ben.app), before);
+    for connected in [true, false] {
+        if !connected {
+            ben.handle.disconnect_storage().await.unwrap();
+        }
+        let (id, secret) = key();
+        let result = ben.handle.update_credentials(id, secret).await;
+        assert!(matches!(result, Err(SyncError::Removed)), "{result:?}");
+        assert!(ben
+            .app
+            .synced_keychain(ben.store)
+            .s3_credentials()
+            .unwrap()
+            .is_none());
+        assert!(laptop.saved_restore_codes().await.unwrap().is_empty());
+        // Disconnecting removed this device's own credentials; none return.
+        assert_eq!(held(&ben.app), before.clone().filter(|_| connected));
+    }
+    network.close().await;
+}
+
 /// Ben, an admin, removes himself. His restore code and S3 key go with his
 /// membership; Ana's stay.
 #[tokio::test]

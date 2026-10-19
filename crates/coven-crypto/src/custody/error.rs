@@ -54,6 +54,9 @@ pub enum KeyError {
     /// Synced entries require an Apple keychain.
     #[error("synced entries are unsupported on this platform")]
     Unsupported,
+    /// The person left the store, so their synced entries stay deleted (§14.1).
+    #[error("the person left the store; their synced entries stay deleted")]
+    Left,
     /// A synced restore-code account contains an invalid store id.
     #[error("invalid store id in synced restore-code entry")]
     RestoreCodeStoreId,

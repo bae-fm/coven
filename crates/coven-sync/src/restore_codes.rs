@@ -146,6 +146,7 @@ impl RestoreCodes {
 
     /// Keep this member's separately supplied S3 key without changing identity,
     /// location or code. Disconnected handles retain it for their next connection.
+    /// A member whose removal applied gets `Removed` (§14.1).
     pub async fn update_credentials(
         &self,
         access_key_id: String,
@@ -419,9 +420,30 @@ impl RestoreCodesInner {
         match &self.sync {
             Some(sync) => sync.install_credentials(previous, next, commit).await,
             None if require_connected => Err(SyncError::NoStorage),
-            None => commit().map(drop),
+            // Without a connection, no pass can apply a removal meanwhile.
+            None => {
+                refuse_after_leaving(&self.database, &self.identity).await?;
+                commit().map(drop)
+            }
         }
     }
+}
+
+/// Refuse a credential change once this member's removal has applied. The
+/// person has no storage access left to change, and saving an S3 key would
+/// write it back into the synced keychain their removal emptied (§14.1).
+pub(crate) async fn refuse_after_leaving(
+    database: &Database,
+    identity: &KeySession<MemberIdentity>,
+) -> Result<(), SyncError> {
+    let member = identity
+        .read()?
+        .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?
+        .member();
+    if crate::effects::left(&database.store_state().await?, &member) {
+        return Err(SyncError::Removed);
+    }
+    Ok(())
 }
 
 pub(crate) async fn install_session(

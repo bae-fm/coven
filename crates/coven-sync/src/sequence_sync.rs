@@ -532,24 +532,18 @@ impl SequenceSync {
     /// any admin including themselves. Their restore code and S3 key in
     /// iCloud Keychain then serve no device of theirs, so this device deletes
     /// them before it commits the slots or snapshot that remove the member
-    /// (§14.1). A failed deletion returns to the caller with nothing
-    /// committed; the retried pass or call reads the removal again and
-    /// repeats it. Removing only a device leaves them: the person keeps
-    /// their other devices.
+    /// (§14.1). From then on the keychain refuses to write them again. A
+    /// failed deletion returns to the caller with nothing committed; the
+    /// retried pass or call reads the removal again and repeats it. Removing
+    /// only a device leaves them: the person keeps their other devices.
     pub(crate) fn leave(
         &self,
         applied: &History,
         next: &History,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
-        let removed = |history: &History| {
-            history
-                .state
-                .members
-                .get(&member.member())
-                .is_some_and(|member| member.removed)
-        };
-        if removed(next) && !removed(applied) {
+        let left = |history: &History| crate::effects::left(&history.state, &member.member());
+        if left(next) && !left(applied) {
             self.synced.delete_entries()?;
         }
         Ok(())

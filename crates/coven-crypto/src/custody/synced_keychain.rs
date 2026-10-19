@@ -5,7 +5,7 @@ use super::keychain::{EntryScope, Keychain};
 use super::KeyError;
 use crate::SecretBytes;
 use coven_foundation::id_source::StoreId;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 pub(super) const RESTORE_CODE_ENTRY: &str = "restore-code";
 pub(super) const S3_CREDENTIALS_ENTRY: &str = "s3-credentials";
@@ -19,12 +19,19 @@ pub(super) const S3_CREDENTIALS_ENTRY: &str = "s3-credentials";
 pub struct SyncedKeychain {
     keychain: Arc<Keychain>,
     store: StoreId,
+    /// Set once the person leaves; every later write is refused, so nothing
+    /// sharing this keychain puts an entry back (§14.1).
+    left: Mutex<bool>,
 }
 
 impl SyncedKeychain {
     /// Bind the injected keychain to one store without reading an entry (E1).
     pub fn new(keychain: Arc<Keychain>, store: StoreId) -> Self {
-        Self { keychain, store }
+        Self {
+            keychain,
+            store,
+            left: Mutex::new(false),
+        }
     }
 
     fn account(&self, name: &str) -> String {
@@ -34,6 +41,11 @@ impl SyncedKeychain {
         self.keychain.read(EntryScope::Synced, &self.account(name))
     }
     fn write(&self, name: &str, bytes: &[u8]) -> Result<(), KeyError> {
+        // Held through the write, so leaving can't run in between.
+        let left = self.left.lock().expect("synced keychain lock poisoned");
+        if *left {
+            return Err(KeyError::Left);
+        }
         self.keychain
             .write(EntryScope::Synced, &self.account(name), bytes)
     }
@@ -90,8 +102,11 @@ impl SyncedKeychain {
     /// is what `saved_restore_codes` lists: a failure part way leaves the
     /// store listed, never an unlisted key. Absent entries succeed, so
     /// repeating after a failure is safe. A keychain without synced entries
-    /// holds neither, and nothing is deleted.
+    /// holds neither, and nothing is deleted. From the first call on, writes
+    /// return `KeyError::Left`, even if this deletion fails part way.
     pub fn delete_entries(&self) -> Result<(), KeyError> {
+        let mut left = self.left.lock().expect("synced keychain lock poisoned");
+        *left = true;
         if !self.supported() {
             return Ok(());
         }

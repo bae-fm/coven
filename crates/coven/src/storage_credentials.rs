@@ -19,6 +19,7 @@ impl CovenHandle {
     /// Commit a replacement S3 key and publish its id; the restore code is unchanged (E9).
     /// A publication failure retains the credentials; retry with the same key.
     /// Removal lists this key for deletion even if its access entry is refused.
+    /// Once this member's removal applies, returns Removed and saves nothing.
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -31,6 +32,8 @@ impl CovenHandle {
 
     /// Install this member's separately supplied S3 key (E9). Identity, location
     /// and restore code stay unchanged; disconnected handles keep it for connecting.
+    /// Once this member's removal applies, returns Removed and saves nothing:
+    /// the key would return to the synced keychain the removal emptied (§14.1).
     pub async fn update_credentials(
         &self,
         access_key_id: String,

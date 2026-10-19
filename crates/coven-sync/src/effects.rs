@@ -17,6 +17,11 @@ pub(crate) fn member<'a>(state: &'a StoreState, id: &MemberId) -> Option<&'a Sto
     state.members.get(id).filter(|member| !member.removed)
 }
 
+/// Whether this member's removal has applied: the person left the store (§14.1).
+pub(crate) fn left(state: &StoreState, id: &MemberId) -> bool {
+    state.members.get(id).is_some_and(|member| member.removed)
+}
+
 pub(crate) fn belongs(state: &StoreState, audience: &Audience, id: &MemberId) -> bool {
     member(state, id).is_some()
         && match audience {

@@ -1343,6 +1343,9 @@ pub enum KeyError {
 
     /// Synced entries require an Apple keychain.
     Unsupported,
+    /// The person left the store: their synced entries were deleted, and
+    /// this installation refuses to write them again (§14.1).
+    Left,
 
     /// A synced restore-code account contains an invalid store id.
     RestoreCodeStoreId,
@@ -3958,8 +3961,9 @@ impl CovenHandle {
     /// becomes pending deletion under §14.3. Requires connected storage.
     /// An uncertain claim retains the new credentials and attempted bytes.
     /// Retry with the same key to settle it before completing or undoing (§11).
-    /// Member removal lists every recorded key until confirmed deleted,
+    /// Member removal lists every recorded key until confirmed deleted.
     /// An invalidated operation settles any uncertain claim before undo (§11).
+    /// Once this member's removal applies, returns Removed and saves nothing.
     pub async fn replace_access_key(
         &self,
         access_key_id: String,
@@ -3970,6 +3974,8 @@ impl CovenHandle {
     /// key directly. The member identity, location and restore code do not
     /// change. A disconnected handle keeps the credentials for its next
     /// connection; a connected handle also replaces its provider's credentials.
+    /// Once this member's removal applies, returns Removed and saves nothing:
+    /// the key would return to the synced keychain the removal emptied (§14.1).
     pub async fn update_credentials(
         &self,
         access_key_id: String,
