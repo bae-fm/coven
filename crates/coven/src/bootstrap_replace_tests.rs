@@ -234,7 +234,7 @@ async fn failures_while_loading_or_swapping_leave_the_old_installation() {
             .carol
             .layout
             .store_dir(&store)
-            .device_reset()
+            .unfinished_replacement()
             .unwrap(),
         None
     );
@@ -312,15 +312,21 @@ async fn a_failed_key_commit_moves_the_old_installation_back() {
 }
 
 /// A restore stopped right after its swap leaves the store waiting for it,
-/// with the keychain untouched; retrying the same call finishes it with the
-/// fresh device the swap recorded.
+/// with the keychain untouched. Opening names the call that finishes it, and
+/// the store still lists with its name and that state. A reset is refused
+/// and changes nothing; retrying the restore finishes it with the fresh
+/// device the swap recorded.
 #[tokio::test]
 async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
     let mut network = Network::new(2).await;
     let replaced = network.replace_keys_elsewhere().await;
     let store = replaced.carol.store;
+    let layout = &replaced.carol.layout;
     let before = held(&replaced.carol.app, store);
     let old = before.device.unwrap();
+    let listed = layout.stores().await.unwrap();
+    assert_eq!(listed.len(), 1);
+    let name = listed[0].name.clone();
     assert!(matches!(
         restore(
             network.reopen(&replaced.carol).interrupt_after_swap(),
@@ -330,20 +336,51 @@ async fn a_restore_interrupted_after_its_swap_is_finished_by_retrying_it() {
         .await,
         Err(BootstrapError::Cancelled)
     ));
-    let directory = replaced.carol.layout.store_dir(&store);
-    let decided = directory.device_reset().unwrap().unwrap();
-    assert_eq!(decided.old_device, old);
+    let directory = layout.store_dir(&store);
+    let decided = directory.unfinished_replacement().unwrap().unwrap();
+    assert_eq!(decided.reset.old_device, old);
+    assert_eq!(decided.by, ReplacedBy::Restore);
+    let unfinished = |error: &StoreLockError| matches!(error, StoreLockError::ReplacementUnfinished { store: named, by: ReplacedBy::Restore } if *named == store);
     assert!(matches!(
         network.reopen(&replaced.carol).open(store).await,
-        Err(CovenError::Lock(StoreLockError::BootstrapPending(_)))
+        Err(CovenError::Lock(error)) if unfinished(&error)
     ));
+    assert!(matches!(
+        network.reopen(&replaced.carol).open_read_only(store).await,
+        Err(ReadOnlyOpenError::Local(CovenError::Lock(error))) if unfinished(&error)
+    ));
+    assert_eq!(
+        layout.stores().await.unwrap(),
+        [StoreInfo {
+            id: store,
+            name,
+            unfinished_replacement: Some(ReplacedBy::Restore),
+        }]
+    );
+    assert_eq!(held(&replaced.carol.app, store), before);
+    // A reset would load under the replaced pair and keep the old copy.
+    let files = files_under(&store_path(&replaced));
+    let refused = network
+        .reopen(&replaced.carol)
+        .reset_device(store, "Carol's laptop")
+        .await;
+    assert!(
+        matches!(&refused, Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(error))) if unfinished(error)),
+        "{:?}",
+        refused.as_ref().err()
+    );
+    assert_eq!(files_under(&store_path(&replaced)), files);
     assert_eq!(held(&replaced.carol.app, store), before);
     let handle = restore(network.reopen(&replaced.carol), store, &replaced.code)
         .await
         .unwrap();
     assert_eq!(
         restored(&network, &replaced, handle, old).await,
-        decided.new_device
+        decided.reset.new_device
+    );
+    assert_eq!(
+        layout.stores().await.unwrap()[0].unfinished_replacement,
+        None
     );
     network.close().await;
 }

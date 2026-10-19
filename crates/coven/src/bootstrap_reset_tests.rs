@@ -210,7 +210,7 @@ async fn missing_custody_resets_as_a_new_device_and_keeps_the_notice() {
             Err(CovenError::DeviceKeyMissing { store }) if store == f.directory.id()
         ));
     }
-    assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert_eq!(f.directory.settings().unwrap().device_id, old);
     assert_eq!(f.storage.request_count(), before);
     // Calling reset_device is the app's approval.
@@ -329,7 +329,7 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
                 .unwrap();
         }
         handle.close().await.unwrap();
-        assert_eq!(f.directory.device_reset().unwrap(), None);
+        assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
         assert_eq!(f.directory.settings().unwrap().device_id, old);
     }
     assert_eq!(sends(&f), before);
@@ -346,14 +346,17 @@ async fn a_restored_copy_behind_storage_stops_until_the_app_resets_it() {
     handle.close().await.unwrap();
 }
 
-/// A reset stopped right after its swap names its decision and the store
-/// waits for it; the next reset finishes it with the same fresh id (§19.3).
+/// A reset stopped right after its swap names its decision, and the store
+/// waits for it: opening names reset_device, and the store still lists with
+/// its name and that state. A restore is refused and changes nothing; the
+/// next reset finishes it with the same fresh id (§19.3).
 #[tokio::test]
 async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
     let f = Fixture::new().await;
     f.setup().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     uploaded(&f, "kept").await;
+    let code = f.handle.restore_code().await.unwrap();
     f.handle.close().await.unwrap();
     custody(&f).delete_device_id().unwrap();
     assert!(matches!(
@@ -363,19 +366,60 @@ async fn a_reset_interrupted_after_its_swap_is_finished_by_the_next_reset() {
             .await,
         Err(BootstrapError::Cancelled)
     ));
-    let decided = f.directory.device_reset().unwrap().unwrap();
+    let decided = f.directory.unfinished_replacement().unwrap().unwrap();
+    assert_eq!(decided.by, ReplacedBy::Reset);
+    let store = f.directory.id();
+    let unfinished = |error: &StoreLockError| matches!(error, StoreLockError::ReplacementUnfinished { store: named, by: ReplacedBy::Reset } if *named == store);
     assert!(matches!(
-        reopen(&f).open(f.directory.id()).await,
-        Err(CovenError::Lock(StoreLockError::BootstrapPending(_)))
+        reopen(&f).open(store).await,
+        Err(CovenError::Lock(error)) if unfinished(&error)
     ));
+    let layout = StoreLayout::new(f._root.path().into());
+    assert_eq!(
+        layout.stores().await.unwrap(),
+        [StoreInfo {
+            id: store,
+            name: "Reset".into(),
+            unfinished_replacement: Some(ReplacedBy::Reset),
+        }]
+    );
+    // A restore would commit the code's pair and remove the old copy.
+    let path = f.directory.database_path().parent().unwrap().to_owned();
+    let files = files_under(&path);
+    let device = custody(&f).device_id().unwrap();
+    let (_, cancel) = watch::channel(false);
+    let refused = reopen(&f)
+        .restore_device(
+            store,
+            &code,
+            Some(S3Credentials {
+                access_key_id: "member-key".into(),
+                secret_access_key: SecretText::new("secret".into()),
+            }),
+            "Restored phone",
+            |_| {},
+            &cancel,
+        )
+        .await;
+    assert!(
+        matches!(&refused, Err(BootstrapError::Directory(BootstrapDirectoryError::Lock(error))) if unfinished(error)),
+        "{:?}",
+        refused.as_ref().err()
+    );
+    assert_eq!(files_under(&path), files);
+    assert_eq!(custody(&f).device_id().unwrap(), device);
     let handle = reopen(&f)
-        .reset_device(f.directory.id(), "Restored phone")
+        .reset_device(store, "Restored phone")
         .await
         .unwrap();
-    assert_eq!(handle.device_reset().await.unwrap(), Some(decided));
+    assert_eq!(handle.device_reset().await.unwrap(), Some(decided.reset));
     assert_eq!(notes(&handle).await, ["kept"]);
     assert!(!loading_area(&f).exists());
     handle.close().await.unwrap();
+    assert_eq!(
+        layout.stores().await.unwrap()[0].unfinished_replacement,
+        None
+    );
 }
 
 /// A reset that fails while its new device loads changes nothing: the store
@@ -400,7 +444,7 @@ async fn a_reset_failing_while_it_loads_leaves_the_store_as_it_was() {
     assert!(reset.await.unwrap().is_err());
     f.storage.set_online(true);
     assert!(loading_area(&f).exists());
-    assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert_eq!(f.directory.settings().unwrap().device_id, old);
     assert_eq!(custody(&f).device_id().unwrap(), Some(old));
     let handle = reopen(&f).open(f.directory.id()).await.unwrap();
@@ -466,7 +510,7 @@ async fn a_keychain_without_the_store_refuses_and_names_the_missing_member_keys(
             .await,
         Err(CovenError::MemberKeysMissing { store }) if store == f.directory.id()
     ));
-    assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert_eq!(f.directory.settings().unwrap().device_id, old);
     // The original keychain still opens the untouched store.
     let handle = reopen(&f).open(f.directory.id()).await.unwrap();
@@ -485,7 +529,7 @@ async fn an_unconnected_reset_resumes_with_the_local_creation_name() {
             .await,
         Err(BootstrapError::Cancelled)
     ));
-    let reset = f.directory.device_reset().unwrap().unwrap();
+    let reset = f.directory.unfinished_replacement().unwrap().unwrap().reset;
     assert_eq!(f.directory.settings().unwrap().device_id, reset.new_device);
     let handle = reopen(&f)
         .reset_device(f.directory.id(), "Phone")
@@ -513,7 +557,7 @@ async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
         b"damaged database"
     );
     assert_eq!(f.directory.settings().unwrap(), old);
-    assert_eq!(f.directory.device_reset().unwrap(), None);
+    assert_eq!(f.directory.unfinished_replacement().unwrap(), None);
     assert!(!loading_area(&f).exists());
 }
 
@@ -540,7 +584,7 @@ async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
             "{:?}",
             reset.as_ref().err()
         );
-        assert_eq!(directory.device_reset().unwrap(), None);
+        assert_eq!(directory.unfinished_replacement().unwrap(), None);
         assert_eq!(directory.settings().unwrap(), settings);
         assert!(!directory
             .database_path()

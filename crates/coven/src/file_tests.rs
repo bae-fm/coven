@@ -408,7 +408,7 @@ async fn a_restored_install_resets_as_a_new_device_before_its_first_write() {
             .await,
         Err(CovenError::DeviceKeyMissing { .. })
     ));
-    assert_eq!(directory.device_reset().unwrap(), None);
+    assert_eq!(directory.unfinished_replacement().unwrap(), None);
     let handle = builder(&restored, layout.clone(), ids.clone())
         .reset_device(directory.id(), "Restored")
         .await

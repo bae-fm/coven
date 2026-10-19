@@ -7,13 +7,15 @@
 //! the swap move the old local state into an archive and the new
 //! installation into place; a restore then removes the archive. A failure
 //! before the swap leaves the store untouched, and the call that swapped can
-//! undo it. An interrupted swap only moves forward: the next call finishes it.
+//! undo it. An interrupted swap only moves forward: the next call of the same
+//! kind finishes it, and the other kind is refused.
 
 use super::{
     atomic_file::{self, exists},
     bootstrap::{self, BootstrapLease},
     creation, device_reset, lock, settings, BootstrapDirectoryError, BootstrapStore, DeviceReset,
-    DirectoryCreationError, FileError, StoreDir, StoreDirAccess, StoreLock, StoreLockError,
+    DirectoryCreationError, FileError, ReplacedBy, ReplacementRecord, StoreDir, StoreDirAccess,
+    StoreLock, StoreLockError,
 };
 use crate::id_source::{IdSource, StoreId};
 use std::{
@@ -31,6 +33,7 @@ pub struct ReplacementStore {
     path: PathBuf,
     id: StoreId,
     reset: DeviceReset,
+    by: ReplacedBy,
     lease: Arc<BootstrapLease>,
     /// Keeps every handle out while the new installation loads and swaps in.
     writer: Mutex<Option<StoreLock>>,
@@ -79,12 +82,13 @@ impl ReplacementStore {
         }
     }
 
-    /// Move the old local state into its archive and the loaded installation
-    /// into the store's directory, keeping the store's custody files in place,
-    /// then release the writer lock: from here the marker refuses other opens.
-    /// The loading database must be closed. A failure undoes whatever moved
-    /// and leaves the store as it was.
-    pub fn swap(&self) -> Result<(), BootstrapDirectoryError> {
+    /// Record the swap, naming the call that began it and the store's `name`
+    /// in the loaded database, then move the old local state into its archive
+    /// and the loaded installation into the store's directory, keeping the
+    /// store's custody files in place. Then release the writer lock: from here
+    /// the marker refuses other opens. The loading database must be closed. A
+    /// failure undoes whatever moved and leaves the store as it was.
+    pub fn swap(&self, name: String) -> Result<(), BootstrapDirectoryError> {
         let mut loading = self
             .loading
             .lock()
@@ -94,7 +98,12 @@ impl ReplacementStore {
         }
         // No reader may hold the moving files open.
         let _readers = lock::exclude_readers(&self.path, self.id)?;
-        let swapped = device_reset::record(&self.path, &self.reset)
+        let record = ReplacementRecord {
+            reset: self.reset,
+            by: self.by,
+            name,
+        };
+        let swapped = device_reset::record(&self.path, &record)
             .map_err(DirectoryCreationError::from)
             .and_then(|_| device_reset::forward(&self.path, self.id, self.reset));
         if let Err(error) = swapped {
@@ -189,9 +198,11 @@ fn remove_area(directory: &Path) -> Result<(), FileError> {
 
 /// Hold the store's bootstrap and writer locks, then continue a swap already
 /// under way or begin loading a replacement, resuming one that was loading.
+/// A swap that the other call began is refused before anything changes.
 pub(super) async fn begin(
     root: &Path,
     id: StoreId,
+    by: ReplacedBy,
     ids: &dyn IdSource,
 ) -> Result<ReplacementStore, BootstrapDirectoryError> {
     let root = fs::canonicalize(root)
@@ -207,18 +218,27 @@ pub(super) async fn begin(
     let recorded = match device_reset::read(&path)? {
         // Publication removed the marker but not the record: that replacement
         // is finished, and this call begins a new one.
-        Some(reset) if !pending && current.device_id == reset.new_device => {
+        Some(record) if !pending && current.device_id == record.reset.new_device => {
             device_reset::finish(&path)?;
             None
         }
         recorded => recorded,
     };
     let (reset, loading) = match recorded {
+        // Finishing the other call's swap would load under different keys,
+        // or keep or remove a different copy.
+        Some(record) if record.by != by => {
+            return Err(StoreLockError::ReplacementUnfinished {
+                store: id,
+                by: record.by,
+            }
+            .into())
+        }
         // An interrupted swap or undo finishes the swap.
-        Some(reset) => {
+        Some(record) => {
             let _readers = lock::exclude_readers(&path, id)?;
-            device_reset::forward(&path, id, reset)?;
-            (reset, None)
+            device_reset::forward(&path, id, record.reset)?;
+            (record.reset, None)
         }
         None if pending => return Err(StoreLockError::BootstrapPending(id).into()),
         None => {
@@ -254,6 +274,7 @@ pub(super) async fn begin(
         path,
         id,
         reset,
+        by,
         lease,
         writer: Mutex::new(writer),
         loading: Mutex::new(loading),

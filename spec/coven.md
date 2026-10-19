@@ -2351,6 +2351,11 @@ failed. Instead the app passes Carol's current code to
   the old copy and every keychain entry as they were. Calling it again finishes
   an interrupted restore. Once the pair is installed, the call just opens the
   store.
+- If the laptop stops after the swap, its store waits for Carol's restore.
+  Opening it fails with `ReplacementUnfinished`, naming `restore_device`, and
+  the app's list of stores still shows it in that state. A `reset_device` call
+  is refused before anything changes: it would load under the pair history
+  replaced, fail, and leave the store waiting (§19.3).
 - As in a reset, the new device registers as replacing the old one, carries the
   old copy's owed provider cleanup, and reports the reset notice (§19.3).
 
@@ -2508,7 +2513,9 @@ everything is encrypted.
   own special rules (§10.3, §13.2). Neither lets a device send ordinary writes
   before it has applied the sequence.
 - **Unfinished installations are hidden.** While loading, the installation is
-  missing from listings and ordinary opens refuse it. It stays at its permanent
+  missing from listings and ordinary opens refuse it with `BootstrapPending`. A
+  replacement of an installation the device already has is not hidden: its
+  store stays listed (§19.3). It stays at its permanent
   path throughout. Only after loading does coven commit the final keys and
   credentials and make it visible, without closing or moving the database. So the
   app's first commits are made against the installed membership and rows (§2.1).
@@ -4186,6 +4193,17 @@ laptop in place from her current restore code instead (§13.1).
   finishes. If committing the keys fails and every prior value is restored, the
   reset moves the old installation back. Otherwise the next reset finishes the
   swap with the recorded new id. There is no separate recovery journal.
+- **Only the call that swapped finishes it.** The record also names that call,
+  `reset_device` or `restore_device` (§13.1), and the store's name as the new
+  installation loaded it. Opening fails with `ReplacementUnfinished`, naming the
+  call, so the app can tell it from an unfinished first installation, which
+  fails with `BootstrapPending` (§13.4). The app's list of stores keeps the
+  store, in that state, so the app can offer to finish it. It shows the
+  recorded name: while files move, neither database can be read.
+- The other call is refused before anything changes. A reset can't finish a
+  restore: it would load under the pair the restore replaces and fail every
+  time. A restore can't finish a reset: it would remove the old copy the reset
+  keeps for inspection.
 - Only owed provider cleanup carries over: readable `DeleteAccessKey` work, owed
   revocations of account sharing, and the old installation's open invites, which
   become owed cleanup. They are copied into the new database, with its reset
@@ -6738,6 +6756,8 @@ maps them are with each provider in Appendix E.
 | `DbError::DamagedDatabase` | a damaged database fails to open | §19.3 |
 | `DbError::MigrationKindMismatch { version }` | a migration's declared kind, `addition` or `breaking`, disagrees with the kind coven finds; nothing commits | §18.3 |
 | `AlreadyOpen` | the store is still open in this process, or locked by another process | F.4 |
+| `BootstrapPending` | a first installation, by restore or join, is unfinished; only that call resumes it | §13.4 |
+| `ReplacementUnfinished` | a reset or restore in place swapped the new installation in but did not finish; names the call that finishes it, and refuses the other | §13.1, §19.3 |
 | `SchemaError::ForeignKeyNotPrimaryKey` | a synced table's foreign key doesn't reference the parent's whole primary key | §9.1, A.9 |
 | `SchemaError::LocalChildUpdate` | a local foreign key into a synced non-key column has an update action other than cascade or set null | §9.1 |
 

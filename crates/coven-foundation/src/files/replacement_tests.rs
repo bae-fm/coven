@@ -59,7 +59,7 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
         let old = f.store.settings().unwrap().device_id;
         let replacement = f
             .layout
-            .begin_replacement(f.store.id(), &UuidIds)
+            .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
             .await
             .unwrap();
         let reset = replacement.device_reset();
@@ -77,22 +77,31 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
             b"old database"
         );
         assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
-        assert_eq!(f.store.device_reset().unwrap(), None);
+        assert_eq!(f.store.unfinished_replacement().unwrap(), None);
         assert_eq!(
             replacement.directory().settings().unwrap().device_id,
             reset.new_device
         );
-        replacement.swap().unwrap();
+        replacement.swap("Household".into()).unwrap();
         assert!(replacement.is_swapped());
-        // The marker now refuses other opens; the new installation opens
-        // through the replacement's own directory.
+        // The marker now refuses other opens, naming the call that finishes
+        // the swap; the new installation opens through the replacement's own
+        // directory. The store still lists, so the app can offer to finish it.
         assert!(matches!(
             f.store.lock_exclusive(),
-            Err(StoreLockError::BootstrapPending(_))
+            Err(StoreLockError::ReplacementUnfinished { store, by: ReplacedBy::Reset })
+                if store == f.store.id()
         ));
         drop(replacement.directory().lock_exclusive().unwrap());
-        assert_eq!(f.store.device_reset().unwrap(), Some(reset));
-        assert!(f.layout.store_ids().await.unwrap().is_empty());
+        assert_eq!(
+            f.store.unfinished_replacement().unwrap(),
+            Some(ReplacementRecord {
+                reset,
+                by: ReplacedBy::Reset,
+                name: "Household".into(),
+            })
+        );
+        assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
         let directory = replacement.directory();
         assert_eq!(directory.settings().unwrap().device_id, reset.new_device);
         assert_eq!(
@@ -135,7 +144,7 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
         replacement.publish().unwrap();
         assert_eq!(archive(&f, &replacement).exists(), !discard);
         assert!(!f.path.join(".coven-replacement").exists());
-        assert_eq!(f.store.device_reset().unwrap(), None);
+        assert_eq!(f.store.unfinished_replacement().unwrap(), None);
         drop(replacement);
         assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
         assert_eq!(f.store.settings().unwrap().device_id, reset.new_device);
@@ -148,13 +157,15 @@ async fn an_unswapped_replacement_resumes_with_its_id_or_is_cancelled() {
     let f = store(2);
     let first = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     let reset = first.device_reset();
     load(&first);
     assert!(matches!(
-        f.layout.begin_replacement(f.store.id(), &UuidIds).await,
+        f.layout
+            .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
+            .await,
         Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(
             _
         )))
@@ -164,7 +175,7 @@ async fn an_unswapped_replacement_resumes_with_its_id_or_is_cancelled() {
     drop(f.store.lock_exclusive().unwrap());
     let resumed = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     assert_eq!(resumed.device_reset(), reset);
@@ -180,7 +191,7 @@ async fn an_unswapped_replacement_resumes_with_its_id_or_is_cancelled() {
     );
     let fresh = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     assert_ne!(fresh.device_reset().new_device, reset.new_device);
@@ -191,25 +202,25 @@ async fn a_reader_refuses_the_swap_and_moves_nothing() {
     let f = store(3);
     let replacement = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     load(&replacement);
     let reader = f.store.lock_read_only().unwrap();
     assert!(matches!(
-        replacement.swap(),
+        replacement.swap("Household".into()),
         Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(
             _
         )))
     ));
     drop(reader);
     assert!(!replacement.is_swapped());
-    assert_eq!(f.store.device_reset().unwrap(), None);
+    assert_eq!(f.store.unfinished_replacement().unwrap(), None);
     assert_eq!(
         std::fs::read(f.store.database_path()).unwrap(),
         b"old database"
     );
-    replacement.swap().unwrap();
+    replacement.swap("Household".into()).unwrap();
 }
 
 #[tokio::test]
@@ -218,15 +229,15 @@ async fn unswapping_puts_the_old_installation_back() {
     let old = f.store.settings().unwrap();
     let replacement = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     let reset = replacement.device_reset();
     load(&replacement);
-    replacement.swap().unwrap();
+    replacement.swap("Household".into()).unwrap();
     replacement.unswap().await.unwrap();
     assert_eq!(f.store.settings().unwrap(), old);
-    assert_eq!(f.store.device_reset().unwrap(), None);
+    assert_eq!(f.store.unfinished_replacement().unwrap(), None);
     assert_eq!(
         std::fs::read(f.store.database_path()).unwrap(),
         b"old database"
@@ -242,7 +253,7 @@ async fn unswapping_puts_the_old_installation_back() {
     // The loaded installation waits for the next call, with its id.
     let resumed = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     assert_eq!(resumed.device_reset(), reset);
@@ -257,26 +268,37 @@ async fn an_interrupted_swap_is_finished_by_the_next_call() {
     let f = store(5);
     let replacement = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     let reset = replacement.device_reset();
     load(&replacement);
     drop(replacement);
     // The swap recorded its decision and moved the database aside, then stopped.
-    device_reset::record(&f.path, &reset).unwrap();
+    device_reset::record(
+        &f.path,
+        &ReplacementRecord {
+            reset,
+            by: ReplacedBy::Reset,
+            name: "Household".into(),
+        },
+    )
+    .unwrap();
     let archive = f
         .path
         .join(format!("discarded-device-{}", reset.old_device.0));
     std::fs::create_dir(&archive).unwrap();
     std::fs::rename(f.store.database_path(), archive.join("store.db")).unwrap();
     assert!(matches!(
-        f.store.unfinished_device_reset(),
-        Ok(Some(found)) if found == reset
+        f.store.unfinished_replacement(),
+        Ok(Some(found)) if found.reset == reset
     ));
+    // Before the marker, only the record keeps the store from listing as
+    // finished; it lists with the call that finishes it.
+    assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
     let resumed = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     assert!(resumed.is_swapped());
@@ -296,7 +318,7 @@ async fn an_interrupted_swap_is_finished_by_the_next_call() {
         b"old database"
     );
     resumed.publish().unwrap();
-    assert_eq!(f.store.device_reset().unwrap(), None);
+    assert_eq!(f.store.unfinished_replacement().unwrap(), None);
 }
 
 #[tokio::test]
@@ -304,25 +326,94 @@ async fn a_record_left_by_interrupted_publication_begins_a_new_replacement() {
     let f = store(6);
     let replacement = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     let reset = replacement.device_reset();
     load(&replacement);
-    replacement.swap().unwrap();
+    replacement.swap("Household".into()).unwrap();
     // Publication removed the marker; the record removal did not happen.
     std::fs::remove_dir_all(f.path.join(".coven-replacement")).unwrap();
     std::fs::remove_file(f.path.join(".coven-bootstrap")).unwrap();
     drop(replacement);
-    assert_eq!(f.store.device_reset().unwrap(), Some(reset));
+    assert_eq!(
+        device_reset::read(&f.path)
+            .unwrap()
+            .map(|record| record.reset),
+        Some(reset)
+    );
+    assert_eq!(f.store.unfinished_replacement().unwrap(), None);
+    drop(f.store.lock_exclusive().unwrap());
     let next = f
         .layout
-        .begin_replacement(f.store.id(), &UuidIds)
+        .begin_replacement(f.store.id(), ReplacedBy::Reset, &UuidIds)
         .await
         .unwrap();
     assert!(!next.is_swapped());
     assert_eq!(next.device_reset().old_device, reset.new_device);
-    assert_eq!(f.store.device_reset().unwrap(), None);
-    drop(next);
-    assert_eq!(f.store.unfinished_device_reset().unwrap(), None);
+    assert_eq!(device_reset::read(&f.path).unwrap(), None);
+}
+
+/// A swap one call began is finished only by that call: the other is refused
+/// before anything moves, whichever began it (§19.3).
+#[tokio::test]
+async fn the_other_call_is_refused_by_a_swap_under_way() {
+    for (began, other) in [
+        (ReplacedBy::Reset, ReplacedBy::Restore),
+        (ReplacedBy::Restore, ReplacedBy::Reset),
+    ] {
+        let f = store(7);
+        let replacement = f
+            .layout
+            .begin_replacement(f.store.id(), began, &UuidIds)
+            .await
+            .unwrap();
+        let reset = replacement.device_reset();
+        load(&replacement);
+        replacement.swap("Household".into()).unwrap();
+        drop(replacement);
+        let before = walk(&f.path);
+        assert!(matches!(
+            f.layout.begin_replacement(f.store.id(), other, &UuidIds).await,
+            Err(BootstrapDirectoryError::Lock(StoreLockError::ReplacementUnfinished { store, by }))
+                if store == f.store.id() && by == began
+        ));
+        assert_eq!(walk(&f.path), before);
+        assert!(matches!(
+            f.store.lock_exclusive(),
+            Err(StoreLockError::ReplacementUnfinished { by, .. }) if by == began
+        ));
+        let resumed = f
+            .layout
+            .begin_replacement(f.store.id(), began, &UuidIds)
+            .await
+            .unwrap();
+        assert!(resumed.is_swapped());
+        assert_eq!(resumed.device_reset(), reset);
+        resumed.publish().unwrap();
+        drop(resumed);
+        f.store.lock_exclusive().unwrap();
+    }
+}
+
+/// Every entry under `path` with its contents, relative to it and sorted,
+/// for comparing a tree before and after.
+fn walk(path: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        let relative = PathBuf::from(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            found.extend(
+                walk(&entry.path())
+                    .into_iter()
+                    .map(|(inner, bytes)| (relative.join(inner), bytes)),
+            );
+            found.push((relative, None));
+        } else {
+            found.push((relative, Some(std::fs::read(entry.path()).unwrap())));
+        }
+    }
+    found.sort();
+    found
 }

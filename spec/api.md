@@ -450,8 +450,21 @@ pub struct StoreLayout { /* private fields */ }
 pub struct StoreInfo {
     /// The store's identity.
     pub id: StoreId,
-    /// The current name from this device's committed database state.
+    /// The current name from this device's committed database state. While
+    /// a replacement is unfinished, the name its new installation loaded.
     pub name: String,
+    /// The call that must finish a replacement of this device's installation
+    /// before the store opens (§19.3); `None` when no replacement is unfinished.
+    pub unfinished_replacement: Option<ReplacedBy>,
+}
+
+/// The call that began a replacement, and the only call that finishes it (§19.3).
+pub enum ReplacedBy {
+    /// `CovenBuilder::reset_device`, which keeps the old copy for inspection.
+    Reset,
+    /// `CovenBuilder::restore_device`, which commits the restore code's member
+    /// keys and removes the old copy (§13.1).
+    Restore,
 }
 
 /// The opening choices for stores under one layout (E1).
@@ -1222,9 +1235,13 @@ pub enum StoreLockError {
     /// then tries to take the lock. The wait uses release notifications, with
     /// no timeout or polling, keyed by canonical directory and store id.
     AlreadyOpen(StoreId),
-    /// An unfinished installation must be resumed by the call that began it:
-    /// restore, join, reset_device or restore_device.
+    /// An unfinished first installation must be resumed by the call that
+    /// began it: restore or join.
     BootstrapPending(StoreId),
+    /// A replacement of this device's installation swapped in but did not
+    /// finish. Opening, and the other of `reset_device` and `restore_device`,
+    /// are refused before anything changes; only `by` finishes it (§19.3).
+    ReplacementUnfinished { store: StoreId, by: ReplacedBy },
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
     /// Opening or locking the lock file failed.
@@ -1426,10 +1443,6 @@ pub fn set_keyring_service(name: impl Into<String>) -> Result<(), KeyError>;
 impl StoreDir {
     /// The store identified by this directory.
     pub fn id(&self) -> StoreId;
-
-    /// The recorded replacement of this installation, if one is unfinished
-    /// or its record outlived publication (§19.3).
-    pub fn device_reset(&self) -> Result<Option<DeviceReset>, FileError>;
 }
 
 impl StoreLayout {
@@ -1438,6 +1451,8 @@ impl StoreLayout {
 
     /// The stores on this device, ordered by id, with their committed names.
     /// Reads names from their databases; unreadable names return StoreLayoutError::Store.
+    /// A store whose replacement is unfinished is listed with the call that
+    /// finishes it; an unfinished first installation is not listed.
     pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError>;
 
     /// The directory of the store with `id`.
@@ -1538,8 +1553,9 @@ impl CovenBuilder {
     /// aside only once loading is complete. Saved member keys that history
     /// has replaced fail with MemberKeysReplaced and change nothing. Uses the
     /// existing bootstrap errors; an interrupted call resumes with the same
-    /// fresh id. The returned handle holds a device-reset notice that unsent
-    /// edits may have been lost (E5).
+    /// fresh id. A swap restore_device began is refused with
+    /// ReplacementUnfinished, changing nothing. The returned handle holds a
+    /// device-reset notice that unsent edits may have been lost (E5).
     pub async fn reset_device(self, store: StoreId, device_name: &str) -> Result<CovenHandle, BootstrapError>;
 
     /// Opens the store for reading only, alongside a handle that has it open,
@@ -4309,7 +4325,10 @@ pub enum ProviderSignOut {
   device loads beside the old copy, which stays openable until the load
   completes; a failure before the swap, or a failed key commit after it,
   leaves the old copy and every keychain entry as they were. Retrying the
-  same call finishes an interrupted restore.
+  same call finishes an interrupted restore. Until then, opening fails with
+  `StoreLockError::ReplacementUnfinished { by: Restore }`, `StoreLayout::stores`
+  lists the store in that state, and `reset_device` is refused with that error,
+  changing nothing ([§19.3](coven.md#193-another-copy-of-the-same-device)).
 - An admin adds a person with an invite, and approves their join request
   ([§13.2](coven.md#132-adding-a-person-invites)).
 - Before `create_invite` makes any provider change, an App-folder Dropbox
@@ -4635,9 +4654,10 @@ impl CovenBuilder {
     /// removed and the synced restore code rewritten. A failure before the
     /// swap, or a failed key commit after it, leaves the old copy and every
     /// keychain entry unchanged; retrying the call finishes an interrupted
-    /// one. When custody holds the code's pair and applied history binds it,
-    /// the store just opens. S3 credentials as for `restore_from_code`. The
-    /// handle holds the device-reset notice (E5).
+    /// one. A swap reset_device began is refused with ReplacementUnfinished,
+    /// changing nothing. When custody holds the code's pair and applied
+    /// history binds it, the store just opens. S3 credentials as for
+    /// `restore_from_code`. The handle holds the device-reset notice (E5).
     pub async fn restore_device(
         self,
         store: StoreId,

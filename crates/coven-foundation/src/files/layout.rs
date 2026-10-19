@@ -42,7 +42,8 @@ impl StoreDirectories {
         Self { app_dir }
     }
 
-    /// The stores on this device, ordered by id (E1).
+    /// The stores on this device, ordered by id (E1), including those whose
+    /// replacement is unfinished, but no unpublished first installation.
     /// Only directories with a canonical UUID name and matching valid settings
     /// are stores. Invalid entries are logged; filesystem failures are errors.
     pub async fn store_ids(&self) -> Result<Vec<StoreId>, StoreDirectoriesError> {
@@ -87,7 +88,9 @@ impl StoreDirectories {
                     continue;
                 }
             };
-            if super::bootstrap::is_pending(&path)? {
+            // A first installation stays hidden until published; a store
+            // whose replacement is unfinished lists, so the app can finish it.
+            if super::bootstrap::is_pending(&path)? && super::device_reset::read(&path)?.is_none() {
                 tracing::debug!(path = %path.display(), "store is awaiting bootstrap publication");
                 continue;
             }
@@ -136,10 +139,13 @@ pub trait StoreDirectoriesAccess: Sized {
     /// Replace the installation of a published store, or continue a
     /// replacement under way: hold the store's bootstrap and writer locks, so
     /// no handle opens it meanwhile, and load the new installation in a
-    /// hidden directory inside the store's directory (§19.3).
+    /// hidden directory inside the store's directory (§19.3). A swap under
+    /// way that the other call began is refused with
+    /// `StoreLockError::ReplacementUnfinished`, changing nothing.
     fn begin_replacement(
         &self,
         id: StoreId,
+        by: super::ReplacedBy,
         ids: &dyn IdSource,
     ) -> impl std::future::Future<
         Output = Result<super::ReplacementStore, super::BootstrapDirectoryError>,
@@ -157,9 +163,10 @@ impl StoreDirectoriesAccess for StoreDirectories {
     async fn begin_replacement(
         &self,
         id: StoreId,
+        by: super::ReplacedBy,
         ids: &dyn IdSource,
     ) -> Result<super::ReplacementStore, super::BootstrapDirectoryError> {
-        super::replacement::begin(&self.app_dir.join("stores"), id, ids).await
+        super::replacement::begin(&self.app_dir.join("stores"), id, by, ids).await
     }
 }
 

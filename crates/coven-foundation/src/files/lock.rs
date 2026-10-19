@@ -140,10 +140,20 @@ pub enum StoreLockError {
     /// Async opens wait for a closing instance in this process to release it.
     #[error("store {0} is already open")]
     AlreadyOpen(StoreId),
-    /// An unfinished installation must be resumed by the call that began it:
-    /// a restore or join with its code, or a device reset or restore in place.
+    /// An unfinished first installation must be resumed by the call that
+    /// began it: a restore or join with its code.
     #[error("store {0} requires restore or join to finish bootstrap")]
     BootstrapPending(StoreId),
+    /// A replacement of this device's installation swapped in but did not
+    /// finish. Only the call it names finishes it; the other is refused
+    /// before anything changes (§19.3).
+    #[error("store {store} requires {by} to finish replacing this device's installation")]
+    ReplacementUnfinished {
+        /// The store whose installation is being replaced.
+        store: StoreId,
+        /// The call that began the replacement.
+        by: super::ReplacedBy,
+    },
     /// A supplied lock protects a different directory.
     #[error("lock does not protect store {0}")]
     WrongDirectory(StoreId),

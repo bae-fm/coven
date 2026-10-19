@@ -4,15 +4,6 @@
 use super::*;
 use coven_foundation::files::DirectoryCreationError;
 
-/// What becomes of the replaced installation's local state once the new one
-/// is in place.
-pub(super) enum OldInstallation {
-    /// Kept for inspection, as a reset does (§19.3).
-    Keep,
-    /// Removed before publication, as a restore does (§13.1).
-    Remove,
-}
-
 /// Restore this device's installation of `store` from the person's current
 /// restore code, in place of the installation it holds (§13.1). The code must
 /// name this store; its member keys are checked against history before the
@@ -58,7 +49,7 @@ pub(crate) async fn restore_device(
         .read()?
         .is_some_and(|held| held.member() == code.member && held.keys().public_keys() == pair);
     let unfinished = directory
-        .unfinished_device_reset()
+        .unfinished_replacement()
         .map_err(CovenError::from)?;
     if held && unfinished.is_none() {
         // Custody alone also holds a stale pair; the applied history decides.
@@ -82,7 +73,7 @@ pub(crate) async fn restore_device(
             sign_in,
             name: device_name.into(),
         },
-        OldInstallation::Remove,
+        ReplacedBy::Restore,
         status,
         cancel,
     )
@@ -91,16 +82,17 @@ pub(crate) async fn restore_device(
 
 /// Load the new installation beside the old one, swap it into the store's
 /// directory, commit its custody, settle the old installation's local state,
-/// then publish it. Until the swap, the old installation and every keychain
-/// entry stay as they were, and the store opens as before. A failure after
-/// this call's own swap, with custody unchanged, puts the old installation
-/// back. A swap interrupted any other way only moves forward: the next call
-/// finishes it.
+/// then publish it. A reset keeps the old local state for inspection; a
+/// restore removes it (§13.1). Until the swap, the old installation and every
+/// keychain entry stay as they were, and the store opens as before. A failure
+/// after this call's own swap, with custody unchanged, puts the old
+/// installation back. A swap interrupted any other way only moves forward:
+/// the next call of the same kind finishes it, and the other is refused.
 pub(super) async fn replace_installation(
     mut builder: CovenBuilder,
     store: StoreId,
     request: BootstrapRequest,
-    old: OldInstallation,
+    by: ReplacedBy,
     status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError> {
@@ -109,7 +101,7 @@ pub(super) async fn replace_installation(
     status(BootstrapStatus::Connecting);
     let replacement = builder
         .layout
-        .begin_replacement(store, builder.ids.as_ref())
+        .begin_replacement(store, by, builder.ids.as_ref())
         .await?;
     let swapping = !replacement.is_swapped();
     let loaded = prepare_and_load(
@@ -138,12 +130,15 @@ pub(super) async fn replace_installation(
         Err(error) => return Err(error),
     };
     let (database, waits) = if swapping {
+        // Listings show this name until the swap finishes.
+        let name = database.store_name().await;
         // The loading database closes before its files move.
         database.close().await.map_err(CovenError::from)?;
+        let name = name?;
         if let Err(error) = check_cancel(cancel) {
             return combine(Err(error), replacement.cancel().map_err(Into::into));
         }
-        replacement.swap()?;
+        replacement.swap(name)?;
         #[cfg(test)]
         if builder.interrupt_after_swap {
             // As if the process stopped here: nothing is undone.
@@ -186,7 +181,7 @@ pub(super) async fn replace_installation(
             commit::Uncommitted::Partly(error) => undo(error, database, None).await,
         };
     }
-    if let OldInstallation::Remove = old {
+    if by == ReplacedBy::Restore {
         if let Err(error) = replacement.remove_replaced() {
             return combine(Err(error.into()), close(database).await);
         }

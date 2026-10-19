@@ -1,8 +1,9 @@
 //! Store listings read names from the same database as the open handle.
 
-use crate::{CovenError, FileError, StoreDir, StoreId, StoreInfo};
+use crate::{CovenError, FileError, StoreDir, StoreId};
 use coven_foundation::files::{
-    BootstrapDirectoryError, BootstrapStore, ReplacementStore, StoreDirectoriesAccess,
+    BootstrapDirectoryError, BootstrapStore, ReplacedBy, ReplacementStore, StoreDirAccess,
+    StoreDirectoriesAccess,
 };
 use coven_foundation::id_source::IdSource;
 use std::path::PathBuf;
@@ -11,6 +12,19 @@ use std::path::PathBuf;
 #[derive(Clone, Debug)]
 pub struct StoreLayout {
     directories: coven_foundation::files::StoreDirectories,
+}
+
+/// A store on this device (E1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StoreInfo {
+    /// The store's identity.
+    pub id: StoreId,
+    /// The current name from this device's committed database state. While
+    /// a replacement is unfinished, the name its new installation loaded.
+    pub name: String,
+    /// The call that must finish a replacement of this device's installation
+    /// before the store opens (§19.3); `None` when no replacement is unfinished.
+    pub unfinished_replacement: Option<ReplacedBy>,
 }
 
 /// A failure listing stores or reading a committed store name.
@@ -47,13 +61,34 @@ impl StoreLayout {
 
     /// Stores on this device, ordered by id, with their committed names.
     /// A damaged name is an error; a listing never substitutes an older name.
+    /// A store whose replacement is unfinished lists with the call that
+    /// finishes it, so the app can offer to; an unfinished first installation
+    /// is not listed.
     pub async fn stores(&self) -> Result<Vec<StoreInfo>, StoreLayoutError> {
         let mut stores = Vec::new();
         for id in self.directories.store_ids().await? {
-            let name = coven_database::read_store_name(self.store_dir(&id))
-                .await
-                .map_err(|source| StoreLayoutError::Store { store: id, source })?;
-            stores.push(StoreInfo { id, name });
+            let directory = self.store_dir(&id);
+            let failed = |source: CovenError| StoreLayoutError::Store { store: id, source };
+            let unfinished = {
+                let directory = directory.clone();
+                crate::coven::blocking(move || directory.unfinished_replacement())
+                    .await
+                    .map_err(|error| failed(error.into()))?
+            };
+            stores.push(match unfinished {
+                Some(record) => StoreInfo {
+                    id,
+                    name: record.name,
+                    unfinished_replacement: Some(record.by),
+                },
+                None => StoreInfo {
+                    id,
+                    name: coven_database::read_store_name(directory)
+                        .await
+                        .map_err(failed)?,
+                    unfinished_replacement: None,
+                },
+            });
         }
         Ok(stores)
     }
@@ -84,8 +119,9 @@ impl StoreLayout {
     pub(crate) async fn begin_replacement(
         &self,
         id: StoreId,
+        by: ReplacedBy,
         ids: &dyn IdSource,
     ) -> Result<ReplacementStore, BootstrapDirectoryError> {
-        self.directories.begin_replacement(id, ids).await
+        self.directories.begin_replacement(id, by, ids).await
     }
 }

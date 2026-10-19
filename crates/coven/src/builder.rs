@@ -199,7 +199,9 @@ impl CovenBuilder {
     /// unsent is salvaged. The new device loads beside the old copy, which
     /// moves aside only once loading is complete; saved member keys that
     /// history has replaced fail with `MemberKeysReplaced` and change nothing.
-    /// An interrupted call resumes with the same fresh id. The returned
+    /// An interrupted call resumes with the same fresh id. A swap that
+    /// `restore_device` began is refused with
+    /// `StoreLockError::ReplacementUnfinished`, changing nothing. The returned
     /// handle's `device_reset()` names the old and new ids.
     pub async fn reset_device(
         self,
@@ -215,9 +217,11 @@ impl CovenBuilder {
     /// checked against history before the store or keychain changes. The new
     /// device loads beside the old copy, which stays openable until the load
     /// completes; then it swaps in, and the old copy is removed. An
-    /// interrupted call is finished by retrying it; a device whose custody and
-    /// applied history already hold the code's pair just opens. S3 requires
-    /// the separately held key, as `restore_from_code` does.
+    /// interrupted call is finished by retrying it; a swap `reset_device`
+    /// began is refused with `StoreLockError::ReplacementUnfinished`, changing
+    /// nothing. A device whose custody and applied history already hold the
+    /// code's pair just opens. S3 requires the separately held key, as
+    /// `restore_from_code` does.
     pub async fn restore_device(
         self,
         store: StoreId,
@@ -256,6 +260,18 @@ impl CovenBuilder {
         let connector = self.connector();
         let transfers = self.transfers.clone();
         let database = self.database(directory.clone())?;
+        // Before the swap's marker exists, only the record shows that a
+        // replacement is moving the files a reader would open (§19.3).
+        if let Some(record) = directory
+            .unfinished_replacement()
+            .map_err(CovenError::from)?
+        {
+            return Err(CovenError::from(StoreLockError::ReplacementUnfinished {
+                store,
+                by: record.by,
+            })
+            .into());
+        }
         let database = database.open_read_only().await?;
         if let Some(identity) = database.store_state().await?.store {
             identity
@@ -342,9 +358,14 @@ impl CovenBuilder {
             let mut builder = self;
             let settings = lock.settings()?;
             let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, settings.id));
-            // An interrupted reset_device resumes only through reset_device (§19.3).
-            if directory.unfinished_device_reset()?.is_some() {
-                return Err(StoreLockError::BootstrapPending(settings.id).into());
+            // An interrupted replacement resumes only through the call that
+            // began it (§19.3).
+            if let Some(record) = directory.unfinished_replacement()? {
+                return Err(StoreLockError::ReplacementUnfinished {
+                    store: settings.id,
+                    by: record.by,
+                }
+                .into());
             }
             // A copy restored without its non-backed-up custody id, or a
             // keychain that no longer names it, changes nothing (§19.3).

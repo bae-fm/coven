@@ -55,6 +55,7 @@ async fn publication_sync_failure_releases_the_store_before_returning() {
         [StoreInfo {
             id: expected,
             name: "Household".into(),
+            unfinished_replacement: None,
         }]
     );
     let reopened = builder().open(expected).await.unwrap();
@@ -189,7 +190,8 @@ async fn creation_initializes_every_builtin_identity_custody_before_setup() {
             layout.stores().await.unwrap(),
             [StoreInfo {
                 id,
-                name: "Created".into()
+                name: "Created".into(),
+                unfinished_replacement: None,
             }]
         );
         handle

@@ -95,7 +95,7 @@ pub(crate) async fn reset_device(
             sign_in,
             name: device_name.into(),
         },
-        replace::OldInstallation::Keep,
+        ReplacedBy::Reset,
         |_| {},
         &never,
     )
@@ -137,7 +137,7 @@ async fn reset_unconnected(
 ) -> Result<CovenHandle, BootstrapError> {
     let replacement = builder
         .layout
-        .begin_replacement(store, builder.ids.as_ref())
+        .begin_replacement(store, ReplacedBy::Reset, builder.ids.as_ref())
         .await?;
     let reset = replacement.device_reset();
     let swapping = !replacement.is_swapped();
@@ -149,7 +149,7 @@ async fn reset_unconnected(
             let database = builder.database(replacement.directory())?.open().await?;
             let recorded = async {
                 database
-                    .initialize_store_name(name)
+                    .initialize_store_name(name.clone())
                     .await
                     .map_err(CovenError::from)?;
                 database
@@ -171,12 +171,14 @@ async fn reset_unconnected(
                     .map_err(CovenError::from)
                     .map_err(BootstrapError::from),
             )
+            .map(|()| name)
         }
         .await;
-        if let Err(error) = prepared {
-            return combine(Err(error), replacement.cancel().map_err(Into::into));
-        }
-        replacement.swap()?;
+        let name = match prepared {
+            Ok(name) => name,
+            Err(error) => return combine(Err(error), replacement.cancel().map_err(Into::into)),
+        };
+        replacement.swap(name)?;
         #[cfg(test)]
         if builder.interrupt_after_swap {
             // As if the process stopped here: nothing is undone.

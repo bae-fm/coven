@@ -456,7 +456,7 @@ mod recovery {
             );
             // Failed checks move nothing and decide no reset.
             assert_eq!(std::fs::read(directory.database_path()).unwrap(), damaged);
-            assert_eq!(directory.device_reset().unwrap(), None);
+            assert_eq!(directory.unfinished_replacement().unwrap(), None);
             let old_device = directory.settings().unwrap().device_id;
             storage.set_online(true);
             let recovered = builder()

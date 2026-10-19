@@ -8,7 +8,9 @@ use coven_crypto::custody::{InMemoryCustody, StoreKeychain, SyncedKeychain};
 use coven_database::Database;
 use coven_format::codes::{InviteCode, RestoreCode};
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{BootstrapDirectoryError, BootstrapStore, ReplacementStore};
+use coven_foundation::files::{
+    BootstrapDirectoryError, BootstrapStore, ReplacedBy, ReplacementStore,
+};
 use coven_storage::{
     ConnectionCredentials, InviteStorage, StorageCredentials, StorageFailure, StorageSettings,
 };
@@ -592,6 +594,29 @@ fn combine<T>(
             cleanup: Box::new(cleanup),
         }),
     }
+}
+
+/// Every entry under `path` with its contents, sorted, so a test can show
+/// that a refused replacement changed nothing.
+#[cfg(test)]
+fn files_under(path: &std::path::Path) -> Vec<(std::path::PathBuf, Option<Vec<u8>>)> {
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(path).unwrap() {
+        let entry = entry.unwrap();
+        let relative = std::path::PathBuf::from(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            found.extend(
+                files_under(&entry.path())
+                    .into_iter()
+                    .map(|(inner, bytes)| (relative.join(inner), bytes)),
+            );
+            found.push((relative, None));
+        } else {
+            found.push((relative, Some(std::fs::read(entry.path()).unwrap())));
+        }
+    }
+    found.sort();
+    found
 }
 
 #[cfg(test)]

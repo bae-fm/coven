@@ -902,6 +902,7 @@ mod store_rename {
                 vec![StoreInfo {
                     id: device.store,
                     name: "家庭 recipes".into(),
+                    unfinished_replacement: None,
                 }]
             );
         }

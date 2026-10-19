@@ -122,10 +122,18 @@ impl StoreDir {
         }
     }
 
+    /// A marker beside a replacement record belongs to a swap under way;
+    /// alone, it belongs to a first installation.
     fn check_published(&self) -> Result<(), StoreLockError> {
         let bootstrapping = self.bootstrap.as_ref().is_some_and(|lease| lease.is_held());
         if !bootstrapping && super::bootstrap::is_pending(&self.path)? {
-            return Err(StoreLockError::BootstrapPending(self.id));
+            return Err(match super::device_reset::read(&self.path)? {
+                Some(record) => StoreLockError::ReplacementUnfinished {
+                    store: self.id,
+                    by: record.by,
+                },
+                None => StoreLockError::BootstrapPending(self.id),
+            });
         }
         Ok(())
     }
@@ -133,12 +141,6 @@ impl StoreDir {
     /// The store identified by this directory.
     pub fn id(&self) -> StoreId {
         self.id
-    }
-
-    /// The recorded replacement of this installation, if one is unfinished
-    /// or its record outlived publication (§19.3).
-    pub fn device_reset(&self) -> Result<Option<super::DeviceReset>, super::FileError> {
-        super::device_reset::read(&self.path)
     }
 }
 
@@ -167,11 +169,11 @@ pub trait StoreDirAccess: Sized {
     /// Retained remote input has its own SQLite owner: receiving bytes must not
     /// wait for a transaction applying those bytes to the application database.
     fn input_database_path(&self) -> PathBuf;
-    /// Whether a replacement's swap is under way (§19.3). A record that
-    /// remains only because publication was interrupted after removing the
-    /// bootstrap marker, with settings already naming the new device, is
-    /// removed; an unfinished one is returned.
-    fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError>;
+    /// The record of a replacement whose swap is under way (§19.3). A record
+    /// that remains only because publication was interrupted after removing
+    /// the bootstrap marker, with settings already naming the new device, is
+    /// not returned; the next replacement removes it. Reads only.
+    fn unfinished_replacement(&self) -> Result<Option<super::ReplacementRecord>, SettingsError>;
     /// The settings written when this store was created, restored or joined.
     /// Reading takes no lock; a read-only open uses it alongside a writer.
     fn settings(&self) -> Result<StoreSettings, SettingsError>;
@@ -215,17 +217,8 @@ impl StoreDirAccess for StoreDir {
     fn input_database_path(&self) -> PathBuf {
         self.path.join("inputs.db")
     }
-    fn unfinished_device_reset(&self) -> Result<Option<super::DeviceReset>, SettingsError> {
-        let Some(reset) = self.device_reset()? else {
-            return Ok(None);
-        };
-        if self.settings()?.device_id == reset.new_device
-            && !super::bootstrap::is_pending(&self.path)?
-        {
-            super::device_reset::finish(&self.path)?;
-            return Ok(None);
-        }
-        Ok(Some(reset))
+    fn unfinished_replacement(&self) -> Result<Option<super::ReplacementRecord>, SettingsError> {
+        super::device_reset::unfinished(&self.path, self.id)
     }
     fn settings(&self) -> Result<StoreSettings, SettingsError> {
         settings::read(&self.path, self.id)

@@ -12,7 +12,7 @@ pub use crate::error::{
 pub use crate::handle::{CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
 pub use crate::saved_restore::{saved_restore_codes, SavedRestoreCode};
-pub use crate::store_layout::{StoreLayout, StoreLayoutError};
+pub use crate::store_layout::{StoreInfo, StoreLayout, StoreLayoutError};
 pub use coven_crypto::custody::{
     set_keyring_service, IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError,
     MemberKeyCustody, Passphrase, StoreKeyCustody,
@@ -21,7 +21,6 @@ pub use coven_crypto::{
     CircleKey, CryptoError, MaterialError, MemberIdentity, MemberKeys, MemberPublicKeys,
     SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
-pub use coven_database::StoreIdentity as StoreInfo;
 pub use coven_database::{
     named_params, params, prepare_user_file, types, CacheFill, ChangeOp, ChangeSource,
     ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, FileDecl, FileRef,
@@ -54,7 +53,7 @@ pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{assert_no_open_files_under, open_files_under};
 pub use coven_foundation::files::{
     write_atomic, BootstrapDirectoryError, DeviceReset, DirectoryCreationError, FileError,
-    FileName, FileNameError, SettingsError, StoreDir, StoreLockError,
+    FileName, FileNameError, ReplacedBy, SettingsError, StoreDir, StoreLockError,
 };
 pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{

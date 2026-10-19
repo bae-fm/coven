@@ -137,7 +137,8 @@ async fn application_lifecycle_two_stores_lock_read_only_live_query_and_reopen()
         layout.stores().await.unwrap(),
         vec![StoreInfo {
             id: second.id(),
-            name: "Work".into()
+            name: "Work".into(),
+            unfinished_replacement: None,
         }]
     );
 }

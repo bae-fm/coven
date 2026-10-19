@@ -157,8 +157,14 @@ pub(super) async fn reserve_bootstrap_directory(
     // including one in another process. Refuse it before inspecting its data.
     let _writer = lock::acquire_for_open(&path, id).await?;
     // A store in the middle of a swap is finished by the call that began it.
-    if device_reset::read(&path)?.is_some() {
-        return Err(StoreLockError::BootstrapPending(id).into());
+    if let Some(record) =
+        device_reset::unfinished(&path, id).map_err(DirectoryCreationError::Settings)?
+    {
+        return Err(StoreLockError::ReplacementUnfinished {
+            store: id,
+            by: record.by,
+        }
+        .into());
     }
     if !is_pending(&path)? {
         return Err(DirectoryCreationError::AlreadyExists(id).into());

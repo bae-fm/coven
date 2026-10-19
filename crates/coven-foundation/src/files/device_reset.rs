@@ -2,8 +2,9 @@
 //!
 //! `reset_device` and `restore_device` load the new installation in its own
 //! directory inside the store's, then move it into place. The durable record
-//! names the old and new device ids: written before anything moves, it makes
-//! ordinary opens refuse the store, and every retry finishes the same swap.
+//! names the old and new device ids and the call that began the swap: written
+//! before anything moves, it makes ordinary opens refuse the store, naming
+//! that call, and every retry of that call finishes the same swap.
 //! The bootstrap marker separates the two moves. Without it, the old local
 //! state is still moving into its archive; with it, the new installation is
 //! moving in. The settings change last. Each step is idempotent, so a retry
@@ -14,7 +15,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
-use super::{atomic_file, bootstrap, settings, DirectoryCreationError, FileError};
+use super::{atomic_file, bootstrap, settings, DirectoryCreationError, FileError, SettingsError};
 use crate::id_source::{DeviceId, StoreId};
 
 pub(crate) const RECORD: &str = "device-reset.json";
@@ -34,13 +35,47 @@ pub struct DeviceReset {
     pub new_device: DeviceId,
 }
 
-pub(super) fn read(directory: &Path) -> Result<Option<DeviceReset>, FileError> {
+/// The call that began a replacement, and so the only call that finishes it
+/// (§19.3). The other call would load under different keys, or keep or remove
+/// a different copy, so it is refused before anything changes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ReplacedBy {
+    /// `CovenBuilder::reset_device`, which keeps the old copy for inspection.
+    Reset,
+    /// `CovenBuilder::restore_device`, which commits the restore code's member
+    /// keys and removes the old copy (§13.1).
+    Restore,
+}
+
+impl std::fmt::Display for ReplacedBy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Reset => "reset_device",
+            Self::Restore => "restore_device",
+        })
+    }
+}
+
+/// The durable record of a replacement whose swap has begun (§19.3).
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ReplacementRecord {
+    /// The installation being replaced and its fresh successor.
+    pub reset: DeviceReset,
+    /// The call that began the swap and finishes it.
+    pub by: ReplacedBy,
+    /// The store's name in the new installation's loaded database. While the
+    /// swap is unfinished neither database can be read, so listings show this.
+    pub name: String,
+}
+
+pub(super) fn read(directory: &Path) -> Result<Option<ReplacementRecord>, FileError> {
     let path = directory.join(RECORD);
     atomic_file::read_optional(&path)?
         .map(|bytes| {
             serde_json::from_slice(&bytes).map_err(|error| {
                 FileError::at(
-                    "read device reset",
+                    "read replacement record",
                     &path,
                     std::io::Error::new(std::io::ErrorKind::InvalidData, error),
                 )
@@ -49,12 +84,33 @@ pub(super) fn read(directory: &Path) -> Result<Option<DeviceReset>, FileError> {
         .transpose()
 }
 
+/// The record of a replacement that has not finished: one whose marker is
+/// still present, or whose settings do not yet name the new device. A record
+/// that outlived publication is not returned.
+pub(super) fn unfinished(
+    directory: &Path,
+    id: StoreId,
+) -> Result<Option<ReplacementRecord>, SettingsError> {
+    let Some(record) = read(directory)? else {
+        return Ok(None);
+    };
+    if !bootstrap::is_pending(directory)?
+        && settings::read(directory, id)?.device_id == record.reset.new_device
+    {
+        return Ok(None);
+    }
+    Ok(Some(record))
+}
+
 /// Keep the first decision: a retried swap never changes the chosen fresh id.
-pub(super) fn record(directory: &Path, reset: &DeviceReset) -> Result<DeviceReset, FileError> {
+pub(super) fn record(
+    directory: &Path,
+    record: &ReplacementRecord,
+) -> Result<ReplacementRecord, FileError> {
     if let Some(recorded) = read(directory)? {
         return Ok(recorded);
     }
-    if reset.old_device == reset.new_device {
+    if record.reset.old_device == record.reset.new_device {
         return Err(FileError::at(
             "record device reset",
             &directory.join(RECORD),
@@ -64,9 +120,9 @@ pub(super) fn record(directory: &Path, reset: &DeviceReset) -> Result<DeviceRese
             ),
         ));
     }
-    let bytes = serde_json::to_vec(reset).expect("device reset encodes");
+    let bytes = serde_json::to_vec(record).expect("replacement record encodes");
     atomic_file::replace(&directory.join(RECORD), &bytes)?;
-    Ok(*reset)
+    Ok(record.clone())
 }
 
 /// The directory where the replacement of the store at `directory` loads.
