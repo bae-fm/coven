@@ -158,9 +158,63 @@ code_checks() {
     # shellcheck disable=SC2086
     cargo test $packages --all-features
 
-    step "cargo test --no-default-features"
-    # shellcheck disable=SC2086
-    cargo test $packages --no-default-features
+    # A crate's features only ever add code, so the pass above already runs
+    # everything its build without them would, except what that build alone
+    # compiles. Each such crate is tested on its own: run beside the others,
+    # a dev-dependency's feature list would turn its features back on.
+    local passes crate tests
+    passes=$(feature_off_tests)
+    while read -r crate tests; do
+        [ -n "$crate" ] && crate_selected "$crate" || continue
+        if [ "$tests" = all ]; then
+            step "cargo test -p $crate --no-default-features"
+            cargo test -p "$crate" --no-default-features
+        else
+            step "cargo test -p $crate --no-default-features --doc"
+            cargo test -p "$crate" --no-default-features --doc
+        fi
+    done <<< "$passes"
+}
+
+# The crates whose build without their features compiles something the build
+# with them all does not, each followed by the tests that build changes: `all`,
+# or `doc` when the only such code is a `cfg_attr(not(feature …), doc = …)`
+# example. That code is a `not(…)` cfg naming a feature, a `cfg!` naming one, or
+# a feature that turns on a feature of a dependency outside the workspace.
+feature_off_tests() {
+    cargo metadata --format-version 1 --no-deps | "$(command -v python3 || command -v python)" -c '
+import json, os, re, sys
+meta = json.load(sys.stdin)
+members = {package["name"] for package in meta["packages"]}
+for package in sorted(meta["packages"], key=lambda package: package["name"]):
+    features = package["features"]
+    if not features:
+        continue
+    code = examples = False
+    for enabled in (entry for entries in features.values() for entry in entries):
+        dependency = enabled.removeprefix("dep:").split("/")[0].rstrip("?")
+        if dependency not in members and dependency not in features:
+            code = True
+    for directory, _, files in os.walk(os.path.dirname(package["manifest_path"])):
+        for name in (name for name in files if name.endswith(".rs")):
+            with open(os.path.join(directory, name), encoding="utf-8") as file:
+                text = file.read()
+            for negation in re.finditer(r"\bnot\(", text):
+                depth, end = 1, negation.end()
+                while depth and end < len(text):
+                    depth += {"(": 1, ")": -1}.get(text[end], 0)
+                    end += 1
+                if "feature" not in text[negation.start():end]:
+                    continue
+                if re.search(r"cfg_attr\(\s*\Z", text[:negation.start()]) and re.match(r"\s*,\s*doc\s*=", text[end:]):
+                    examples = True
+                else:
+                    code = True
+            if re.search(r"cfg!\([^;]*feature", text):
+                code = True
+    if code or examples:
+        print(package["name"], "all" if code else "doc")
+' | tr -d '\r'
 }
 
 # A Lean proof, built from scratch in a full run and incrementally in a changed
