@@ -146,6 +146,32 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
     );
 }
 
+/// No app call asks again for a slot or a pass, so a local failure that
+/// clears by itself, such as a locked keychain, retries them under the shared
+/// backoff. A lasting one still waits for the app (E5).
+#[test]
+fn local_failures_retry_slots_and_passes_as_they_clear() {
+    for subject in [PendingSubject::Slot(Slot(4)), PendingSubject::Connection] {
+        for (failure, retry) in [
+            (LocalFailure::Database, Retry::Automatic),
+            (LocalFailure::Disk, Retry::Automatic),
+            (LocalFailure::KeyCustody, Retry::Automatic),
+            (LocalFailure::Crypto, Retry::AppAction),
+            (LocalFailure::Operation, Retry::AppAction),
+        ] {
+            let record = PendingRecord {
+                subject: subject.clone(),
+                reason: PendingReason::Failed(failure),
+            };
+            assert_eq!(record.retry(), retry, "{record:?}");
+            assert_eq!(
+                record.can_retry(env!("CARGO_PKG_VERSION"), 1),
+                retry == Retry::Automatic
+            );
+        }
+    }
+}
+
 #[test]
 fn pending_subjects_keep_their_variant_and_snapshot_order() {
     use coven_foundation::id_source::{CircleId, StoreId};

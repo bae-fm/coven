@@ -64,3 +64,17 @@ pub(crate) async fn apply_write(
         )
         .await
 }
+
+/// Copy a directory tree, as restoring a backup of an installation does.
+pub(crate) fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
+    for entry in std::fs::read_dir(from).unwrap() {
+        let entry = entry.unwrap();
+        let target = to.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            std::fs::create_dir_all(&target).unwrap();
+            copy_tree(&entry.path(), &target);
+        } else {
+            std::fs::copy(entry.path(), target).unwrap();
+        }
+    }
+}

@@ -553,6 +553,9 @@ arrives in a later slot can't let it get past 41.
 - **Refused writes don't stop anything.** Writes cut off by a removal or a key
   replacement are consumed without effect and recorded as `WritesRefused` (§14.1).
   The device moves on to the next slot.
+- **Local failures don't stop it either.** A locked keychain or a failed disk
+  write while applying a slot fails only that pass, and sync tries the slot
+  again (§19.1).
 - **What the model covers** is set out in §22.
 
 ### 6. A sync pass
@@ -2559,10 +2562,10 @@ Ben at slot 52. When Ben's phone reads slot 52, it first deletes his restore
 code and S3 key from iCloud Keychain (§13.1), then applies the slot. His laptop
 no longer offers Household. The order matters: the removal never applies while
 the code is still offered. If the deletion fails, the pass fails with that
-error and applies nothing; the app's retry (api.md
-[E5](api.md#e5-storage-and-sync)) reads slot 52 again and repeats it. The same
-holds when Ben, as an admin, removes himself: `remove_member` returns the
-failure, and calling it again finishes. Removing only one of Ben's devices
+error and applies nothing. Sync tries the pass again on the shared schedule
+(§6.7), reads slot 52 again and repeats the deletion (§19.1). When Ben, as an
+admin, removes himself, `remove_member` returns the failure instead, and
+calling it again finishes. Removing only one of Ben's devices
 deletes neither entry, because Ben is still a member with other devices.
 
 Removing a member also removes their devices and their circle memberships. A
@@ -4072,6 +4075,14 @@ read, never a refusal.
 - A failed database transaction keeps the old state and applied slot. A
   corrupted database reports `Failed(LocalFailure::Database)` with the native
   cause on the call.
+- A local failure says nothing about the slot being applied. Say Ben's phone
+  locks while it applies Ana's write at slot 60, and the keychain refuses to
+  save his keys. Slot 60 doesn't block: the pass fails, keeping the old state,
+  and sync tries it again on the shared schedule (§6.7) until the keychain
+  answers. A failed database or disk write is the same. Nobody else would ask
+  for the pass again, so without this the device would stay stuck after the
+  cause cleared. Only an operation the app started returns such a failure to
+  its call instead, and the app calls again.
 - If coven can't save pending state, it stops sync and database calls with
   `DbError::PendingPersistence`. The app must never see an empty list after a
   failed save.

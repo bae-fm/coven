@@ -196,6 +196,17 @@ impl SyncError {
         }
     }
 
+    /// A local database, disk or custody failure that can clear by itself,
+    /// such as a locked keychain or a failed disk write (E5). It fails only
+    /// this attempt and says nothing about the slot being applied (§19.1).
+    pub(crate) fn local_failure_clears_by_itself(&self) -> bool {
+        matches!(
+            self,
+            Self::Database(_) | Self::SecureStorage(_) | Self::Failed { .. }
+        ) && crate::PendingReason::Failed(self.local_failure()).clears()
+            == Some(crate::pending::Clears::ByItself)
+    }
+
     /// The local category and one shared cause, for a status and a waiting
     /// caller failed by the same error.
     pub fn into_shared(

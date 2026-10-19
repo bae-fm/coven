@@ -183,6 +183,55 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
     }
 }
 
+/// A local failure that clears by itself, here a keychain refusing to save
+/// Ben's keys while he applies a slot, retries on the shared backoff with no
+/// app action: no one else calls for the pass again (§6.7, E5).
+#[tokio::test]
+async fn a_local_failure_retries_the_pass_on_its_own() {
+    let mut group = Group::new();
+    let ana = group.device(1).await;
+    group.custody = Custody::Keychain;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    ben.sync.pass().await.unwrap();
+    insert(ana.database(), "a", "applied on retry").await;
+    ana.sync.pass().await.unwrap();
+    let slot = ana.database().applied_slot().await.unwrap();
+    ben.keychain.fail_next_operation();
+    let mut status = ben.sync.state.subscribe_sync();
+    let (ben_codes, _) = codes(&ben, Keychain::in_memory("sync-loop-ben").unwrap());
+    let ben_loop = SyncLoop::new(ben.sync.clone(), ben_codes);
+    ben_loop.start().unwrap();
+    tokio::time::timeout(
+        std::time::Duration::from_secs(10),
+        status.wait_for(|status| matches!(status, SyncStatus::Failed { .. })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(
+        ben.database().pending::<PendingRecord>().await.unwrap(),
+        [PendingRecord {
+            subject: PendingSubject::Connection,
+            reason: PendingReason::Failed(LocalFailure::KeyCustody),
+        }]
+    );
+    // The first retry waits one second, well before the idle pass.
+    group
+        .clock
+        .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1));
+    reached(&ben, slot).await;
+    assert_eq!(
+        rows(ben.database()).await,
+        [("a".into(), "applied on retry".into())]
+    );
+    ben_loop.close().await.unwrap();
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}
+
 #[tokio::test]
 async fn a_removed_device_never_retries_on_a_new_connection() {
     let group = Group::new();

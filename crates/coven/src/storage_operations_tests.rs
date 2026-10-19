@@ -70,10 +70,9 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     .await;
     assert_eq!(ben.handle.applied_slot().await, applied);
     assert_eq!(laptop.saved_restore_codes().await.unwrap(), saved);
+    // Sync retries a custody failure on its own, under the shared backoff,
+    // and applies the removal once the keychain answers (E5).
     ben.app.refuse_synced_keychain_operations(false);
-    // A custody failure waits for the app to retry (E5).
-    stop(&ben.handle).await;
-    ben.handle.start_sync().await.unwrap();
     wait_for(&ben.handle, removed).await;
     assert!(ben.handle.applied_slot().await > applied);
     assert!(laptop.saved_restore_codes().await.unwrap().is_empty());

@@ -433,15 +433,23 @@ impl SequenceSync {
                     )
                     .await
                 {
+                    // A local failure that clears by itself, such as a locked
+                    // keychain, fails only this pass; the next one applies
+                    // the slot again (§19.1).
+                    if error.local_failure_clears_by_itself() {
+                        return Err(error);
+                    }
                     return Err(self.block(session, at, error).await);
                 }
                 input.release().await?;
             }
             *ring = tentative_ring;
             if let Some((slot, error)) = failure {
-                // A failed slot read supplies no bytes to apply. A failure
-                // during application, including its required reload, blocks.
-                if matches!(error, SyncError::Storage(_)) {
+                // A failed slot read supplies no bytes to apply, and a local
+                // failure says nothing about the slot. A failure during
+                // application, including its required reload, blocks.
+                if matches!(error, SyncError::Storage(_)) || error.local_failure_clears_by_itself()
+                {
                     return Err(error);
                 }
                 return Err(self.block(session, slot, error).await);

@@ -204,7 +204,7 @@ async fn rotation_does_not_need_preceding_circle_material() {
 #[tokio::test]
 async fn audience_keys_never_enter_database_files() {
     let mut group = Group::new();
-    group.passphrase_custody = true;
+    group.custody = Custody::Passphrase;
     let ana = group.device(1).await;
     group.create(&ana).await;
     let circle = ana.sync.create_circle("Gifts".into()).await.unwrap();
@@ -271,7 +271,7 @@ fn assert_database_has_no_keys(ana: &Device, ring: &StoreKeyring, circle: Circle
 async fn resume_key_generation(saved: bool) -> serde_json::Value {
     use coven_foundation::id_source::IdSource;
     let mut group = Group::new();
-    group.passphrase_custody = true;
+    group.custody = Custody::Passphrase;
     let ana = group.device(1).await;
     group.create(&ana).await;
     let circle = CircleId(group.ids.new_id());

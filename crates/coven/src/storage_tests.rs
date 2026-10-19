@@ -206,14 +206,10 @@ async fn a_failed_first_connection_shows_in_status_and_retries_after_backoff() {
     f.app.fail_next_keychain_operation();
     f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Failed { .. })).await;
-    assert!(f.handle.test_connection_retry_wait().await.is_none());
-    let attempts = *f.connector.attempts.borrow();
+    // A custody failure clears by itself, as a locked keychain does once
+    // unlocked: the pass after backoff reads the credentials again (§19.1).
+    assert!(f.handle.test_connection_retry_wait().await.is_some());
     f.advance(Duration::from_secs(30));
-    tokio::time::sleep(Duration::from_millis(50)).await;
-    assert_eq!(*f.connector.attempts.borrow(), attempts);
-    f.handle.stop_sync();
-    status(&f.handle, |s| matches!(s, SyncStatus::Stopped)).await;
-    f.handle.start_sync().await.unwrap();
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.close().await.unwrap();
 }

@@ -275,6 +275,16 @@ impl PendingRecord {
                     None => reason.retry(),
                 }
             }
+            // An operation the app started returned this failure to the
+            // app's call, and the app calls again. Nobody calls again for
+            // work coven drives itself, such as the pass: a local failure
+            // that clears by itself retries under the shared backoff.
+            (subject, reason @ PendingReason::Failed(_))
+                if !matches!(subject, PendingSubject::Operation { .. })
+                    && reason.clears() == Some(Clears::ByItself) =>
+            {
+                Retry::Automatic
+            }
             (_, reason) => reason.retry(),
         }
     }

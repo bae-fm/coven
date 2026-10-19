@@ -313,7 +313,7 @@ async fn a_competing_binding_of_the_candidate_installs_it_before_releasing_write
 
 async fn competing_replacement(same_candidate: bool, compare: bool) {
     let mut group = Group::new();
-    group.passphrase_custody = true;
+    group.custody = Custody::Passphrase;
     let ana = group.device(1).await;
     let ben = group.device(2).await;
     group.create(&ana).await;

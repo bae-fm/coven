@@ -2446,8 +2446,9 @@ while let Ok(values) = lost.next().await {
   - Keep whether the provider answered; `StorageFailure::Network` alone
     cannot decide this. A server error response is not an offline device.
   - A denied required read can fail the pass. A slot’s unavailable key, schema
-    or damaged bytes gives `Blocked`; a failed file or retention wait stays
-    with its subject.
+    or damaged bytes gives `Blocked`. A local failure applying it, such as a
+    locked keychain, gives `Failed` and retries under backoff (§19.1). A failed
+    file or retention wait stays with its subject.
   - Removal records a `Connection` block with `Removed`, and stops the loop
     for good. Another copy using this device's id fails the pass with
     `DeviceIdInUse` and stops the loop, recording nothing (§19.3). Local
@@ -3235,8 +3236,10 @@ impl PendingRecord {
     /// Automatic: retryable reads, keys, snapshots, provider work and
     /// unfinished operation/undo work, subject to shared backoff.
     /// Storage Network/Conflict/RateLimited/NotFound/SessionExpired retry
-    /// automatically. Files and coven-owned operations also retry storage
-    /// QuotaExceeded/File and local database, disk or custody failures.
+    /// automatically. So do local database, disk or custody failures, such
+    /// as a locked keychain, except in an operation the app started: its call
+    /// returns them and the app calls again (§19.1). Files and coven-owned
+    /// operations also retry storage QuotaExceeded/File.
     /// AfterUpdate: refused immutable objects and unsupported formats/schema.
     /// Never: WritesRefused or this device's removal/replacement.
     /// AppAction: failures a person clears, such as required credentials;

@@ -1,8 +1,8 @@
 use crate::*;
 use coven_crypto::{
     custody::{
-        InMemoryCustody, KeySession, Keychain, Passphrase, PassphraseCustody, StoreKeychain,
-        SyncedKeychain,
+        InMemoryCustody, KeySession, Keychain, KeyringCustody, Passphrase, PassphraseCustody,
+        StoreKeychain, SyncedKeychain,
     },
     MemberIdentity, StoreKey, StoreKeyring,
 };
@@ -25,6 +25,8 @@ pub(crate) struct Device {
     pub(crate) storage: MemoryStorage,
     pub(crate) identity: MemberIdentity,
     pub(crate) work: coven_database::test_utils::WorkCounter,
+    /// Holds the person's synced entries, and keys under `Custody::Keychain`.
+    pub(crate) keychain: Arc<Keychain>,
 }
 impl Device {
     pub(crate) fn database(&self) -> &Database {
@@ -45,7 +47,15 @@ pub(crate) struct Group {
     pub(crate) version: std::sync::atomic::AtomicU32,
     /// Whether a breaking migration journals the raises passes publish.
     pub(crate) raises: std::sync::atomic::AtomicBool,
-    pub(crate) passphrase_custody: bool,
+    pub(crate) custody: Custody,
+}
+/// Where an installation keeps its store and member keys.
+pub(crate) enum Custody {
+    Memory,
+    /// Files sealed with a passphrase, in the store directory.
+    Passphrase,
+    /// The installation's in-memory keychain, as the OS keychain would.
+    Keychain,
 }
 impl Group {
     pub(crate) fn new() -> Self {
@@ -66,7 +76,7 @@ impl Group {
             clock,
             version: 1.into(),
             raises: false.into(),
-            passphrase_custody: false,
+            custody: Custody::Memory,
         }
     }
     pub(crate) async fn device(&self, seed: u8) -> Device {
@@ -85,7 +95,7 @@ impl Group {
     pub(crate) async fn copy(&self, device: Device) -> (Device, Device) {
         device.sync.database.close().await.unwrap();
         let temp = tempfile::tempdir().unwrap();
-        copy_tree(device._temp.path(), temp.path());
+        crate::tests::copy_tree(device._temp.path(), temp.path());
         let identity = device.identity.clone();
         let original = self.open(device._temp, identity.clone()).await;
         (original, self.open(temp, identity).await)
@@ -187,38 +197,40 @@ impl Group {
         let directory = StoreDirectories::new(temp.path().into()).store_dir(&self.store);
         let work = coven_database::test_utils::WorkCounter::default();
         database.test_track_work(work.clone()).await.unwrap();
-        let (store_keys, member_keys) = if self.passphrase_custody {
-            let store_keys = KeySession::store(Arc::new(PassphraseCustody::new(
-                Passphrase::new("store test phrase".into()),
-                directory.owned_file(StoreFile::StoreKeys),
-                self.store,
-            )))
-            .unwrap();
-            let member_keys = KeySession::member(Arc::new(PassphraseCustody::new(
-                Passphrase::new("member test phrase".into()),
-                directory.owned_file(StoreFile::MemberKeys),
-                self.store,
-            )))
-            .unwrap();
-            if store_keys.read().unwrap().is_none() {
-                if let Some(ring) = &ring {
-                    store_keys.persist(ring).unwrap();
-                }
-            }
-            if member_keys.read().unwrap().is_none() {
-                member_keys.persist(&identity).unwrap();
-            }
-            (store_keys, member_keys)
-        } else {
-            (
-                KeySession::store(Arc::new(match ring {
-                    Some(ring) => InMemoryCustody::new(ring),
-                    None => InMemoryCustody::empty(),
-                }))
+        let keychain = Keychain::in_memory("sequence-test").unwrap();
+        let (store_keys, member_keys) = match self.custody {
+            Custody::Memory => (
+                KeySession::store(Arc::new(InMemoryCustody::empty())).unwrap(),
+                KeySession::member(Arc::new(InMemoryCustody::empty())).unwrap(),
+            ),
+            Custody::Passphrase => (
+                KeySession::store(Arc::new(PassphraseCustody::new(
+                    Passphrase::new("store test phrase".into()),
+                    directory.owned_file(StoreFile::StoreKeys),
+                    self.store,
+                )))
                 .unwrap(),
-                KeySession::member(Arc::new(InMemoryCustody::new(identity.clone()))).unwrap(),
-            )
+                KeySession::member(Arc::new(PassphraseCustody::new(
+                    Passphrase::new("member test phrase".into()),
+                    directory.owned_file(StoreFile::MemberKeys),
+                    self.store,
+                )))
+                .unwrap(),
+            ),
+            Custody::Keychain => {
+                let keys = Arc::new(StoreKeychain::new(keychain.clone(), self.store));
+                (
+                    KeySession::store(Arc::new(KeyringCustody::new(keys.clone()))).unwrap(),
+                    KeySession::member(Arc::new(KeyringCustody::new(keys))).unwrap(),
+                )
+            }
         };
+        if let (None, Some(ring)) = (store_keys.read().unwrap(), &ring) {
+            store_keys.persist(ring).unwrap();
+        }
+        if member_keys.read().unwrap().is_none() {
+            member_keys.persist(&identity).unwrap();
+        }
         let device = directory.settings().unwrap().device_id;
         let state = Arc::new(SyncState::new());
         let clock: coven_foundation::clock::ClockRef = self.clock.clone();
@@ -250,10 +262,7 @@ impl Group {
                 device,
                 Arc::new(store_keys),
                 Arc::new(member_keys),
-                Arc::new(SyncedKeychain::new(
-                    Keychain::in_memory("sequence-test").unwrap(),
-                    self.store,
-                )),
+                Arc::new(SyncedKeychain::new(keychain.clone(), self.store)),
                 state,
                 clock,
                 self.ids.clone(),
@@ -269,6 +278,7 @@ impl Group {
             storage,
             identity,
             work,
+            keychain,
         }
     }
     pub(crate) async fn create(&self, ana: &Device) {
@@ -380,18 +390,6 @@ pub(crate) fn codes(
     )
 }
 
-pub(crate) fn copy_tree(from: &std::path::Path, to: &std::path::Path) {
-    for entry in std::fs::read_dir(from).unwrap() {
-        let entry = entry.unwrap();
-        let target = to.join(entry.file_name());
-        if entry.file_type().unwrap().is_dir() {
-            std::fs::create_dir_all(&target).unwrap();
-            copy_tree(&entry.path(), &target);
-        } else {
-            std::fs::copy(entry.path(), target).unwrap();
-        }
-    }
-}
 pub(crate) fn access(name: &str) -> coven_format::MemberAccess {
     coven_format::MemberAccess::S3AccessKey {
         access_key_id: name.into(),
@@ -560,7 +558,7 @@ pub(crate) async fn assert_idle_work(device: &Device) {
 #[tokio::test]
 async fn idle_pass_reads_only_the_next_slot_and_floor() {
     let mut group = Group::new();
-    group.passphrase_custody = true;
+    group.custody = Custody::Passphrase;
     let counter = coven_foundation::test_work::Counter::default();
     let ana = counter.run(group.device(1)).await;
     assert_eq!(counter.take().custody_derivations, 2);

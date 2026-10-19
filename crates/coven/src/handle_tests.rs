@@ -783,7 +783,7 @@ fn immutable_refusals_and_required_versions_wait_for_an_update() {
 }
 
 #[test]
-fn local_and_access_failures_require_app_action() {
+fn access_and_lasting_local_failures_require_app_action() {
     for reason in [
         PendingReason::NoStorage,
         PendingReason::AccessRemains {
@@ -803,14 +803,20 @@ fn local_and_access_failures_require_app_action() {
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Missing)),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Changed)),
         PendingReason::FileUnavailable(FileMissingReason::Source(FileSourceFailure::Integrity)),
-        PendingReason::Failed(LocalFailure::Database),
-        PendingReason::Failed(LocalFailure::Disk),
-        PendingReason::Failed(LocalFailure::KeyCustody),
         PendingReason::Failed(LocalFailure::Crypto),
         PendingReason::Failed(LocalFailure::Operation),
         PendingReason::Paused,
     ] {
         assert_eq!(retry(reason.clone()), Retry::AppAction, "{reason:?}");
+    }
+    // A pass that fails on a local failure that clears by itself, such as a
+    // locked keychain, retries on its own: no app call asks for it again.
+    for failure in [
+        LocalFailure::Database,
+        LocalFailure::Disk,
+        LocalFailure::KeyCustody,
+    ] {
+        assert_eq!(retry(PendingReason::Failed(failure)), Retry::Automatic);
     }
     assert_eq!(retry(PendingReason::Removed), Retry::Never);
     // This installation never sends again with a retired pair; restoring
