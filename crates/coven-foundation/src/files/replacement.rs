@@ -1,10 +1,11 @@
 //! A new installation of a published store, loaded beside the store's own
 //! files before it takes their place (§19.3).
 //!
-//! `reset_device` loads the replacement in a hidden directory inside the
-//! store's directory, while the store stays as it was and its writer lock
-//! stays held. Only once the replacement is loaded does the swap move the old
-//! local state into an archive and the new installation into place. A failure
+//! `reset_device` and `restore_device` load the replacement in a hidden
+//! directory inside the store's directory, while the store stays as it was
+//! and its writer lock stays held. Only once the replacement is loaded does
+//! the swap move the old local state into an archive and the new
+//! installation into place; a restore then removes the archive. A failure
 //! before the swap leaves the store untouched, and the call that swapped can
 //! undo it. An interrupted swap only moves forward: the next call finishes it.
 
@@ -121,6 +122,17 @@ impl ReplacementStore {
         let _writer = self.directory().lock_for_open().await?;
         let _readers = lock::exclude_readers(&self.path, self.id)?;
         Ok(device_reset::backward(&self.path, self.id, self.reset)?)
+    }
+
+    /// Remove the swapped-out installation's archive before publication: a
+    /// restore keeps no old copy. A failure leaves the swap for the next call
+    /// to finish.
+    pub fn remove_replaced(&self) -> Result<(), BootstrapDirectoryError> {
+        assert!(
+            self.is_swapped(),
+            "the old installation is removed after the swap"
+        );
+        Ok(device_reset::discard(&self.path, self.reset.old_device)?)
     }
 
     /// Publish the swapped installation: remove the hidden directory, then

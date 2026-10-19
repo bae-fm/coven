@@ -446,6 +446,11 @@ pub(crate) const POLICY: Policy = Policy {
         ),
         ("crates/coven/src/bootstrap_replace.rs", "<free>", "publish"),
         (
+            "crates/coven/src/bootstrap_replace.rs",
+            "<free>",
+            "restore_device",
+        ),
+        (
             "crates/coven/src/bootstrap_reset.rs",
             "<free>",
             "reset_device",
@@ -484,6 +489,11 @@ pub(crate) const POLICY: Policy = Policy {
             "crates/coven/src/builder.rs",
             "CovenBuilder",
             "reset_device",
+        ),
+        (
+            "crates/coven/src/builder.rs",
+            "CovenBuilder",
+            "restore_device",
         ),
         (
             "crates/coven/src/builder.rs",

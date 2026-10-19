@@ -1,5 +1,5 @@
 use super::*;
-use crate::tests::wait_for_sent;
+use crate::tests::{held, wait_for_sent};
 use coven_storage::{
     test_utils::{MemoryRequest, MemoryStorage},
     Storage,
@@ -517,30 +517,6 @@ async fn an_unconnected_reset_keeps_files_when_the_local_name_cannot_be_read() {
     assert!(!loading_area(&f).exists());
 }
 
-/// What this installation's keychain holds for a store.
-#[derive(Debug, PartialEq)]
-struct Held {
-    device: Option<DeviceId>,
-    keys: MemberPublicKeys,
-    code: Option<Vec<u8>>,
-    credentials: Option<Vec<u8>>,
-}
-
-fn held(app: &TestCoven, store: StoreId) -> Held {
-    use coven_crypto::custody::KeyringCustody;
-    let keychain = Arc::new(app.store_keychain(store));
-    let identity = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone()))
-        .unwrap()
-        .unwrap();
-    let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
-    Held {
-        device: keychain.device_id().unwrap(),
-        keys: identity.keys().public_keys(),
-        code: bytes(keychain.synced_restore_code().unwrap()),
-        credentials: bytes(keychain.storage_credentials().unwrap()),
-    }
-}
-
 /// Ana replaces Carol's member keys with a pair Carol prepared elsewhere.
 /// Carol's laptop still holds the old pair, so resetting it would register a
 /// device with keys history no longer binds: the reset refuses before
@@ -549,35 +525,7 @@ fn held(app: &TestCoven, store: StoreId) -> Held {
 #[tokio::test]
 async fn a_reset_with_replaced_member_keys_refuses_and_changes_nothing() {
     let mut network = crate::tests::Network::new(2).await;
-    let carol = network.devices.remove(1);
-    let member = carol
-        .handle
-        .members()
-        .await
-        .unwrap()
-        .into_iter()
-        .find(|member| member.is_self)
-        .unwrap()
-        .id;
-    let prepared = MemberKeys::generate().unwrap();
-    network.devices[0]
-        .handle
-        .replace_member_keys_for(&member, prepared.public_keys())
-        .await
-        .unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        let mut status = carol.handle.subscribe_sync_status();
-        while !matches!(
-            carol.handle.restore_code().await,
-            Err(SyncError::MemberKeysReplaced { .. })
-        ) {
-            carol.handle.sync_now();
-            status.changed().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    carol.handle.close().await.unwrap();
+    let crate::tests::KeysReplaced { carol, member, .. } = network.replace_keys_elsewhere().await;
     let directory = carol.layout.store_dir(&carol.store);
     let settings = directory.settings().unwrap();
     let before = held(&carol.app, carol.store);

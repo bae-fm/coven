@@ -4,16 +4,103 @@
 use super::*;
 use coven_foundation::files::DirectoryCreationError;
 
+/// What becomes of the replaced installation's local state once the new one
+/// is in place.
+pub(super) enum OldInstallation {
+    /// Kept for inspection, as a reset does (§19.3).
+    Keep,
+    /// Removed before publication, as a restore does (§13.1).
+    Remove,
+}
+
+/// Restore this device's installation of `store` from the person's current
+/// restore code, in place of the installation it holds (§13.1). The code must
+/// name this store; its member keys are checked against history before the
+/// store or keychain changes. A device whose custody holds the code's pair and whose
+/// applied history binds it has nothing to restore, which is also what a
+/// retry finds after an interruption once the restore was published: the
+/// store simply opens.
+pub(crate) async fn restore_device(
+    mut builder: CovenBuilder,
+    store: StoreId,
+    code: &str,
+    s3_credentials: Option<S3Credentials>,
+    device_name: &str,
+    status: impl Fn(BootstrapStatus),
+    cancel: &watch::Receiver<bool>,
+) -> Result<CovenHandle, BootstrapError> {
+    check_cancel(cancel)?;
+    let code = coven_sync::read_restore_code(code)?;
+    if code.store != store {
+        return Err(CodeError::WrongStore {
+            expected: store,
+            actual: code.store,
+        }
+        .into());
+    }
+    let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
+    let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
+    let directory = builder.layout.store_dir(&store);
+    let keychain = Arc::new(StoreKeychain::new(builder.keychain()?, store));
+    // One identity session reads now and keeps the code's pair at publication.
+    let identity = CovenBuilder::make_identity(
+        std::mem::replace(
+            &mut builder.identity,
+            CustodyChoice::Configured(IdentityCustody::InMemory),
+        ),
+        &directory,
+        store,
+        keychain,
+    )?;
+    builder.identity = CustodyChoice::Session(identity.clone());
+    let pair = code.member_keys.public_keys();
+    let held = identity
+        .read()?
+        .is_some_and(|held| held.member() == code.member && held.keys().public_keys() == pair);
+    let unfinished = directory
+        .unfinished_device_reset()
+        .map_err(CovenError::from)?;
+    if held && unfinished.is_none() {
+        // Custody alone also holds a stale pair; the applied history decides.
+        let database = builder.database(directory)?.open_read_only().await?;
+        let state = database.store_state().await;
+        database.close().await.map_err(CovenError::from)?;
+        let bound = state?
+            .members
+            .get(&code.member)
+            .is_some_and(|member| !member.removed && member.keys == pair);
+        if bound {
+            return Ok(builder.open(store).await?);
+        }
+    }
+    replace_installation(
+        builder,
+        store,
+        BootstrapRequest::Restore {
+            code,
+            data,
+            sign_in,
+            name: device_name.into(),
+        },
+        OldInstallation::Remove,
+        status,
+        cancel,
+    )
+    .await
+}
+
 /// Load the new installation beside the old one, swap it into the store's
-/// directory, commit its custody, then publish it. Until the swap, the old
-/// installation and every keychain entry stay as they were, and the store
-/// opens as before. A failure after this call's own swap, with custody
-/// unchanged, puts the old installation back. A swap interrupted any other
-/// way only moves forward: the next call finishes it.
+/// directory, commit its custody, settle the old installation's local state,
+/// then publish it. Until the swap, the old installation and every keychain
+/// entry stay as they were, and the store opens as before. A failure after
+/// this call's own swap, with custody unchanged, puts the old installation
+/// back. A swap interrupted any other way only moves forward: the next call
+/// finishes it.
 pub(super) async fn replace_installation(
     mut builder: CovenBuilder,
     store: StoreId,
     request: BootstrapRequest,
+    old: OldInstallation,
     status: impl Fn(BootstrapStatus),
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError> {
@@ -99,6 +186,11 @@ pub(super) async fn replace_installation(
             commit::Uncommitted::Partly(error) => undo(error, database, None).await,
         };
     }
+    if let OldInstallation::Remove = old {
+        if let Err(error) = replacement.remove_replaced() {
+            return combine(Err(error.into()), close(database).await);
+        }
+    }
     publish(&replacement, owners, database, waits, true).await
 }
 
@@ -172,3 +264,7 @@ async fn close(database: Database) -> Result<(), BootstrapError> {
         .map_err(CovenError::from)
         .map_err(BootstrapError::from)
 }
+
+#[cfg(test)]
+#[path = "bootstrap_replace_tests.rs"]
+mod tests;

@@ -1,9 +1,9 @@
 //! Swapping a loaded replacement into a store's directory (§19.3).
 //!
-//! `reset_device` loads the new installation in its own directory inside the
-//! store's, then moves it into place. The durable record names the old and
-//! new device ids: written before anything moves, it makes ordinary opens
-//! refuse the store, and every retry finishes the same swap.
+//! `reset_device` and `restore_device` load the new installation in its own
+//! directory inside the store's, then move it into place. The durable record
+//! names the old and new device ids: written before anything moves, it makes
+//! ordinary opens refuse the store, and every retry finishes the same swap.
 //! The bootstrap marker separates the two moves. Without it, the old local
 //! state is still moving into its archive; with it, the new installation is
 //! moving in. The settings change last. Each step is idempotent, so a retry
@@ -126,6 +126,17 @@ pub(super) fn backward(
         atomic_file::sync_publication(&archive)?;
     }
     Ok(atomic_file::remove(&directory.join(RECORD))?)
+}
+
+/// Remove a swap's archive: a restore keeps no old copy (§13.1).
+pub(super) fn discard(directory: &Path, old_device: DeviceId) -> Result<(), FileError> {
+    let archive = archive(directory, old_device);
+    if atomic_file::exists("inspect discarded device archive", &archive)? {
+        fs::remove_dir_all(&archive)
+            .map_err(|source| FileError::at("remove discarded device archive", &archive, source))?;
+        atomic_file::sync_publication(&archive)?;
+    }
+    Ok(())
 }
 
 /// Whether an entry stays where it is while installations swap: the custody

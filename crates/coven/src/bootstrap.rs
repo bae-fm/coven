@@ -29,6 +29,7 @@ mod join;
 
 #[path = "bootstrap_replace.rs"]
 mod replace;
+pub(super) use replace::restore_device;
 
 #[path = "bootstrap_reset.rs"]
 mod reset;
@@ -500,7 +501,7 @@ async fn prepare_and_load(
         }
         // The notice commits before any handle is published (E5).
         if let Some(replacement) = replacement {
-            reset::carry_discarded_provider_work(&sync, replacement).await?;
+            reset::carry_discarded_provider_work(&sync, &database, replacement).await?;
         }
         Ok::<_, BootstrapError>(true)
     };

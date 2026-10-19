@@ -54,7 +54,7 @@ fn archive(f: &Fixture, replacement: &ReplacementStore) -> PathBuf {
 
 #[tokio::test]
 async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
-    {
+    for discard in [false, true] {
         let f = store(1);
         let old = f.store.settings().unwrap().device_id;
         let replacement = f
@@ -129,8 +129,11 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
             std::fs::read(archive(&f, &replacement).join("files").join("photo")).unwrap(),
             b"unsent"
         );
+        if discard {
+            replacement.remove_replaced().unwrap();
+        }
         replacement.publish().unwrap();
-        assert!(archive(&f, &replacement).exists());
+        assert_eq!(archive(&f, &replacement).exists(), !discard);
         assert!(!f.path.join(".coven-replacement").exists());
         assert_eq!(f.store.device_reset().unwrap(), None);
         drop(replacement);

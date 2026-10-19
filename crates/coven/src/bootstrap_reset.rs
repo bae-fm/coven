@@ -95,6 +95,7 @@ pub(crate) async fn reset_device(
             sign_in,
             name: device_name.into(),
         },
+        replace::OldInstallation::Keep,
         |_| {},
         &never,
     )
@@ -106,8 +107,14 @@ pub(crate) async fn reset_device(
 /// carries nothing; any other failure fails the replacement, which retries.
 pub(super) async fn carry_discarded_provider_work(
     sync: &SequenceSync,
+    database: &Database,
     replacement: &ReplacementStore,
 ) -> Result<(), BootstrapError> {
+    // A resumed swap already holds the notice, and a restore may have
+    // removed the old database since.
+    if database.device_reset().await? == Some(replacement.device_reset()) {
+        return Ok(());
+    }
     let path = replacement.discarded_database_path();
     let records = match coven_database::discarded_operations(path).await {
         Ok(records) => records,

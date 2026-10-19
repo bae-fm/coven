@@ -441,6 +441,86 @@ impl Network {
     }
 }
 
+/// Carol, the member on device 1, after Ana replaced her keys with a pair
+/// Carol prepared elsewhere. Her laptop applied the replacement and closed.
+#[cfg(test)]
+pub(crate) struct KeysReplaced {
+    pub(crate) carol: Device,
+    pub(crate) member: MemberId,
+    /// Carol's restore code with the prepared pair, current in history.
+    pub(crate) code: String,
+    /// The code her laptop showed before, which history now refuses.
+    pub(crate) stale: String,
+}
+
+impl Network {
+    /// Replace device 1's member keys from device 0, the admin, and remove
+    /// device 1 from the network once it has stopped on the replacement.
+    pub(crate) async fn replace_keys_elsewhere(&mut self) -> KeysReplaced {
+        let carol = self.devices.remove(1);
+        let stale = carol.handle.restore_code().await.unwrap();
+        let old = coven_sync::read_restore_code(&stale).unwrap();
+        let prepared = MemberKeys::generate().unwrap();
+        self.devices[0]
+            .handle
+            .replace_member_keys_for(&old.member, prepared.public_keys())
+            .await
+            .unwrap();
+        tokio::time::timeout(Duration::from_secs(10), async {
+            let mut status = carol.handle.subscribe_sync_status();
+            while !matches!(
+                carol.handle.restore_code().await,
+                Err(SyncError::MemberKeysReplaced { .. })
+            ) {
+                carol.handle.sync_now();
+                status.changed().await.unwrap();
+            }
+        })
+        .await
+        .unwrap();
+        carol.handle.close().await.unwrap();
+        let member = old.member;
+        let code = coven_format::codes::RestoreCode {
+            member_keys: prepared,
+            ..old
+        }
+        .to_text()
+        .unwrap()
+        .to_string();
+        KeysReplaced {
+            carol,
+            member,
+            code,
+            stale,
+        }
+    }
+}
+
+/// What this installation's keychain holds for a store.
+#[cfg(test)]
+#[derive(Debug, PartialEq)]
+pub(crate) struct Held {
+    pub(crate) device: Option<DeviceId>,
+    pub(crate) keys: MemberPublicKeys,
+    pub(crate) code: Option<Vec<u8>>,
+    pub(crate) credentials: Option<Vec<u8>>,
+}
+
+pub(crate) fn held(app: &TestCoven, store: StoreId) -> Held {
+    use coven_crypto::custody::KeyringCustody;
+    let keychain = Arc::new(app.store_keychain(store));
+    let identity = MemberKeyCustody::unlock(&KeyringCustody::new(keychain.clone()))
+        .unwrap()
+        .unwrap();
+    let bytes = |value: Option<SecretBytes>| value.map(|value| value.as_bytes().to_vec());
+    Held {
+        device: keychain.device_id().unwrap(),
+        keys: identity.keys().public_keys(),
+        code: bytes(app.synced_keychain(store).restore_code().unwrap()),
+        credentials: bytes(keychain.storage_credentials().unwrap()),
+    }
+}
+
 /// S3 keys a handle lists as pending deletion, by key id (§14.3).
 pub(crate) async fn access_keys(handle: &CovenHandle) -> Vec<AccessKeyToDelete> {
     let mut keys: Vec<_> = handle

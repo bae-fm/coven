@@ -209,6 +209,36 @@ impl CovenBuilder {
         bootstrap::reset_device(self, store, device_name).await
     }
 
+    /// Restore this device's installation of `store` from the person's
+    /// current restore code, for a device whose member keys were replaced
+    /// (§13.1). The code must name this store, and its pair must be current,
+    /// checked against history before the store or keychain changes. The new
+    /// device loads beside the old copy, which stays openable until the load
+    /// completes; then it swaps in, and the old copy is removed. An
+    /// interrupted call is finished by retrying it; a device whose custody and
+    /// applied history already hold the code's pair just opens. S3 requires
+    /// the separately held key, as `restore_from_code` does.
+    pub async fn restore_device(
+        self,
+        store: StoreId,
+        code: &str,
+        s3_credentials: Option<S3Credentials>,
+        device_name: &str,
+        on_status: impl Fn(BootstrapStatus),
+        cancel: &tokio::sync::watch::Receiver<bool>,
+    ) -> Result<CovenHandle, BootstrapError> {
+        bootstrap::restore_device(
+            self,
+            store,
+            code,
+            s3_credentials,
+            device_name,
+            on_status,
+            cancel,
+        )
+        .await
+    }
+
     /// Opens the store for reading only, alongside a handle that has it open.
     /// Its shared lock protects both read connections and local cache metadata.
     /// It runs no migration and refuses a database whose schema is newer or

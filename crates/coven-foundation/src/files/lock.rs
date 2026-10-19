@@ -140,7 +140,8 @@ pub enum StoreLockError {
     /// Async opens wait for a closing instance in this process to release it.
     #[error("store {0} is already open")]
     AlreadyOpen(StoreId),
-    /// An unfinished new-device installation must be resumed with its code.
+    /// An unfinished installation must be resumed by the call that began it:
+    /// a restore or join with its code, or a device reset or restore in place.
     #[error("store {0} requires restore or join to finish bootstrap")]
     BootstrapPending(StoreId),
     /// A supplied lock protects a different directory.

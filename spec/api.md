@@ -1222,7 +1222,8 @@ pub enum StoreLockError {
     /// then tries to take the lock. The wait uses release notifications, with
     /// no timeout or polling, keyed by canonical directory and store id.
     AlreadyOpen(StoreId),
-    /// An unfinished installation must be resumed with restore, join or reset_device.
+    /// An unfinished installation must be resumed by the call that began it:
+    /// restore, join, reset_device or restore_device.
     BootstrapPending(StoreId),
     /// A supplied lock protects a different directory.
     WrongDirectory(StoreId),
@@ -4292,6 +4293,14 @@ pub enum ProviderSignOut {
 - Both synced entries belong to the person. Deleting the store from one device
   keeps them; a device deletes them when it applies the person's removal from
   the store, before the slot applies (§14.1).
+- A device that still holds the store under member keys another device
+  replaced restores in place with `CovenBuilder::restore_device`
+  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). The code must
+  name that store, or the call fails with `CodeError::WrongStore`. The new
+  device loads beside the old copy, which stays openable until the load
+  completes; a failure before the swap, or a failed key commit after it,
+  leaves the old copy and every keychain entry as they were. Retrying the
+  same call finishes an interrupted restore.
 - An admin adds a person with an invite, and approves their join request
   ([§13.2](coven.md#132-adding-a-person-invites)).
 - Before `create_invite` makes any provider change, an App-folder Dropbox
@@ -4392,6 +4401,8 @@ pub enum CodeError {
     Invalid,
     /// The call needs the other kind of code.
     WrongKind { expected: CodeKind, actual: CodeKind },
+    /// A valid restore code names another store than the one being restored.
+    WrongStore { expected: StoreId, actual: StoreId },
 }
 
 /// Filesystem failures while reserving, publishing or cancelling a new device.
@@ -4605,6 +4616,30 @@ pub async fn restore_from_code(
     cancel: &watch::Receiver<bool>,
 ) -> Result<CovenHandle, BootstrapError>;
 
+impl CovenBuilder {
+    /// Restores this device's installation of `store` from the person's
+    /// current restore code, for a device whose member keys were replaced
+    /// (§13.1). The code must name `store`; its pair is checked against
+    /// history before the store or keychain changes, so an old code fails
+    /// with MemberKeysReplaced. The new device loads beside the old copy and
+    /// swaps in only once loaded; then the pair is committed, the old copy
+    /// removed and the synced restore code rewritten. A failure before the
+    /// swap, or a failed key commit after it, leaves the old copy and every
+    /// keychain entry unchanged; retrying the call finishes an interrupted
+    /// one. When custody holds the code's pair and applied history binds it,
+    /// the store just opens. S3 credentials as for `restore_from_code`. The
+    /// handle holds the device-reset notice (E5).
+    pub async fn restore_device(
+        self,
+        store: StoreId,
+        code: &str,
+        s3_credentials: Option<S3Credentials>,
+        device_name: &str,
+        on_status: impl Fn(BootstrapStatus),
+        cancel: &watch::Receiver<bool>,
+    ) -> Result<CovenHandle, BootstrapError>;
+}
+
 /// A saved restore choice, containing no secrets or store name (§13.1).
 pub struct SavedRestoreCode {
     pub store_id: StoreId,
@@ -4796,6 +4831,24 @@ match restore_from_keychain(
     Some(handle) => show_store(handle),
     None => show_saved_code_removed(),
 }
+```
+
+If Carol's laptop stopped with `MemberKeysReplaced`, it restores in place from the
+code her phone shows, keeping its copy until the new one is ready:
+
+```rust
+let handle = Coven::builder(layout.clone())
+    .synced_tables(tables())
+    .migrations(migrations())
+    .restore_device(
+        store,
+        &scanned,
+        s3_credentials,
+        "Carol's laptop",
+        |step| show_step(step),
+        &cancel_rx,
+    )
+    .await?;
 ```
 
 Example, Ana adding Carol. On Ana's phone:

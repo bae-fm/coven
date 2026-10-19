@@ -2330,6 +2330,27 @@ Ana's new laptop scans the code from her phone and signs in to her Dropbox. Then
 Restoring always makes a fresh device. It doesn't rescue the old installation's
 unsent writes.
 
+**Restoring in place.** Ana replaced Carol's member keys with a pair Carol
+prepared on her phone. Carol's laptop still holds the store under the old pair,
+and stops with `MemberKeysReplaced`. Discarding the laptop's copy and restoring
+from scratch would leave the laptop with no copy at all if the restore then
+failed. Instead the app passes Carol's current code to
+`CovenBuilder::restore_device` (api.md [E10](api.md#e10-joining-and-restore)).
+
+- The code must name this store. Loading checks its pair against history before
+  the store or keychain changes: an old code fails with `MemberKeysReplaced`, and
+  the laptop's store and keychain stay as they were.
+- The new device loads beside the old copy, which stays in place until loading
+  has finished (§19.3). Then the new device takes its place, coven commits the
+  new pair and removes the old copy. The synced restore code is rewritten with
+  the current pair, never deleted.
+- A failure before that swap, or a key commit that fails right after it, leaves
+  the old copy and every keychain entry as they were. Calling it again finishes
+  an interrupted restore. Once the pair is installed, the call just opens the
+  store.
+- As in a reset, the new device registers as replacing the old one, carries the
+  old copy's owed provider cleanup, and reports the reset notice (§19.3).
+
 #### 13.2 Adding a person: invites
 
 Ana adds Dan to Household on Dropbox:
@@ -4131,8 +4152,8 @@ Carol's laptop still holds the old pair. A new device registered with that pair
 would sign writes that no longer count. Loading reads the history that replaced
 the pair, so the reset fails with `MemberKeysReplaced` before registering
 anything, removes the hidden directory and leaves the laptop's store and
-keychain as they were. Every retry refuses the same way. Only Carol's current
-restore code can install the new pair.
+keychain as they were. Every retry refuses the same way. Carol restores the
+laptop in place from her current restore code instead (§13.1).
 
 - A load that fails for another reason, such as a lost connection, keeps its
   work in the hidden directory. The store opens as before, and the next reset
@@ -4140,9 +4161,9 @@ restore code can install the new pair.
 - **The swap.** Once loading has finished, coven records the old and new ids in
   the store's directory. It moves the old local state aside whole, including
   SQLite's journals and local file sources, and keeps it for inspection, not as
-  live state. Then it moves the new installation into place and commits its keys
-  and credentials. The store's location and passphrase-sealed custody files stay
-  where they are.
+  live state; a restore in place removes it instead (§13.1). Then it moves the
+  new installation into place and commits its keys and credentials. The store's
+  location and passphrase-sealed custody files stay where they are.
 - From the record on, ordinary opening refuses the installation until the reset
   finishes. If committing the keys fails and every prior value is restored, the
   reset moves the old installation back. Otherwise the next reset finishes the
