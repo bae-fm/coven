@@ -329,11 +329,6 @@ pub(crate) const POLICY: Policy = Policy {
         (
             "crates/coven-sync/src/restore_codes.rs",
             "RestoreCodes",
-            "install_oauth",
-        ),
-        (
-            "crates/coven-sync/src/restore_codes.rs",
-            "RestoreCodes",
             "adopt_delivered_key",
         ),
         // A sign-in's custody: device custody once per opened installation,

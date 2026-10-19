@@ -207,27 +207,6 @@ impl RestoreCodes {
         guard.as_ref().ok_or(DbError::StoreClosed)?.connection()
     }
 
-    /// Commit a verified OAuth upgrade before installing it on the live connection.
-    /// The existing credential operation rolls custody back if installation fails.
-    pub async fn install_oauth(&self, tokens: coven_storage::OAuthTokens) -> Result<(), SyncError> {
-        let inner = self.inner.clone();
-        crate::files::join(tokio::spawn(async move {
-            let guard = inner.lock().await;
-            let owner = guard.as_ref().ok_or(DbError::StoreClosed)?;
-            let location = owner.settings.read()?.ok_or(SyncError::NoStorage)?;
-            owner
-                .install(
-                    ConnectionCredentials {
-                        location,
-                        credentials: StorageCredentials::OAuth(tokens),
-                    },
-                    true,
-                )
-                .await
-        }))
-        .await
-    }
-
     /// Remove local credentials before disconnecting; failed removal changes no connection.
     pub async fn forget_credentials(&self) -> Result<(), SyncError> {
         let guard = self.inner.lock().await;
