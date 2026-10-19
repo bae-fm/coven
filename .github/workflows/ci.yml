@@ -49,9 +49,26 @@ jobs:
           fi
       # The pinned toolchain and components come from rust-toolchain.toml on
       # the first cargo invocation.
-      - uses: Swatinem/rust-cache@v2
+      #
+      # Most of the build is the workspace's own crates, which every commit
+      # changes. The whole target directory, with their incremental state, is
+      # saved after each run and restored from the latest one with the same
+      # manifests and toolchain, so rustc recompiles only what changed. A
+      # checkout's fresh timestamps make cargo rerun rustc on every workspace
+      # crate, which is why incremental state and not the artifacts alone is
+      # what makes the next build short. (Swatinem/rust-cache keeps
+      # dependencies only, under a key that never changes, and turns
+      # incremental compilation off.)
+      - name: Restore the build
+        uses: actions/cache@v5
         with:
-          shared-key: coven-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.143
