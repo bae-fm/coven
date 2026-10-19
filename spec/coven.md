@@ -6517,7 +6517,9 @@ Lean proofs once, on Linux, since a proof checks the same on any platform.
 6. `cargo doc` with broken links denied.
 7. Every crate built without test code, so an item only tests use shows up as
    dead.
-8. The tests, with all features and with none. Among them:
+8. The tests, with all features; and, for each crate whose build without its
+   features compiles code the full build lacks, that crate's tests changed by
+   it, built alone without its features. Among them:
    - §2's promises are exercised through app calls where visible: committed
      writes survive dropping the handle and process exits at each point after
      commit, stay queued, and upload after reopening; app reads and writes finish
