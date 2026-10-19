@@ -43,6 +43,10 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     ));
     drop(directory);
     drop(pending);
+    assert!(matches!(
+        layout.store_dir(&id).lock_for_deletion(),
+        Err(StoreLockError::BootstrapPending(_))
+    ));
     let pending = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     assert_eq!(pending.directory().settings().unwrap().device_id, device);
     assert_eq!(
@@ -137,6 +141,7 @@ async fn cancellation_removes_unpublished_bytes_and_permits_a_new_identity() {
     pending.cancel().unwrap();
     pending.cancel().unwrap();
     assert!(layout.store_ids().await.unwrap().is_empty());
+    assert_eq!(lock::store_entries(&temp.path().join("stores")), 0);
     drop(pending);
     let fresh = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
     assert_ne!(fresh.directory().settings().unwrap().device_id, device);
@@ -168,6 +173,8 @@ async fn finished_bootstrap_releases_its_lease_even_when_directory_clones_remain
         } else {
             pending.cancel().unwrap();
         }
+        // Nothing named for the store remains, its bootstrap lock included.
+        assert_eq!(lock::store_entries(&temp.path().join("stores")), 0);
         let replacement = layout.begin_bootstrap(id, &UuidIds).await.unwrap();
         assert!(matches!(
             directory.lock_exclusive(),

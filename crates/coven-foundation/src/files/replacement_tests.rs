@@ -425,6 +425,11 @@ async fn deletion_removes_an_unfinished_swap_once_its_call_stops() {
         ));
         deletion.remove_directory().unwrap();
         assert!(!f.path.exists());
+        assert_eq!(
+            super::lock::store_entries(f.path.parent().unwrap()),
+            0,
+            "no lock file named for the store remains"
+        );
         assert!(f.layout.store_ids().await.unwrap().is_empty());
         assert!(f.store.lock_for_deletion().unwrap().is_none());
     }

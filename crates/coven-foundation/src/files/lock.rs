@@ -2,7 +2,9 @@
 
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
+use crate::files::bootstrap::BootstrapLease;
 use crate::files::{atomic_file, settings, FileError, SettingsError, StoreSettings};
 use crate::id_source::StoreId;
 
@@ -80,34 +82,48 @@ pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock,
     })
 }
 
-/// Exclusive access to both the writer and readers, authorizing deletion.
-/// For a store whose replacement is unfinished, also the bootstrap lock a
-/// running `reset_device` or `restore_device` holds (§19.3).
+/// Exclusive access to the writer, readers and bootstrap, authorizing
+/// deletion. Holding the bootstrap lock keeps every restore, join and
+/// replacement of the store out, including a `reset_device` or
+/// `restore_device` that holds only that lock between the steps of an
+/// unfinished swap (§19.3), and lets deletion remove its lock file too.
 #[derive(Debug)]
 pub struct StoreDeletionLock {
     store: LockedStore<LockedFile>,
     _readers: LockedFile,
-    _replacement: Option<LockedFile>,
+    bootstrap: HeldBootstrap,
+}
+
+/// How a deletion holds the store's bootstrap lock.
+#[derive(Debug)]
+enum HeldBootstrap {
+    /// Taken by the deletion itself.
+    Locked(LockedFile),
+    /// The lease of a bootstrap cancelling its own unpublished store.
+    Leased(Arc<BootstrapLease>),
+}
+
+impl HeldBootstrap {
+    fn release(self) {
+        match self {
+            Self::Locked(file) => drop(file),
+            Self::Leased(lease) => lease.release(),
+        }
+    }
 }
 
 impl StoreDeletionLock {
-    /// Also hold the bootstrap lock: between its own steps, a replacement's
-    /// call can hold only that lock while its swap is unfinished.
-    pub(super) fn exclude_replacement(mut self) -> Result<Self, StoreLockError> {
-        let path = bootstrap_lock_path(&self.store.directory, self.store.id);
-        self._replacement = Some(try_lock(&path, self.store.id, false)?);
-        Ok(self)
-    }
-
     /// Unpublish the directory and remove its contents before releasing and
     /// removing its sibling locks. Retry failures through `lock_for_deletion`,
     /// including a failure after only the lock files remain.
     pub fn remove_directory(mut self) -> Result<(), FileError> {
         let root = self.store.directory.parent().expect("store parent");
-        // Opening and creation also take this lock. Neither can reuse a lock
-        // file between releasing its OS lock and unlinking its name.
+        // Every lock acquisition and creation also takes this lock. None can
+        // open a lock file between its release here and the removal of its
+        // name, so no one holds an unlinked lock while another locks a new
+        // file at the same path.
         let _layout = lock_layout(root)?;
-        let paths = lock_paths(&self.store.directory, self.store.id);
+        let paths = deletion_lock_paths(&self.store.directory, self.store.id);
         let destination = deletion_path(&self.store.directory, self.store.id);
         if inspect_directory(&self.store.directory)? {
             if self.store.directory != destination {
@@ -125,8 +141,18 @@ impl StoreDeletionLock {
         }
         #[cfg(unix)]
         sync_removal(&self.store.directory)?;
-        // Windows must see closed handles before their lock files are removed.
-        drop(self);
+        // Release before removing, on every platform. Windows keeps a file
+        // deleted while a handle is open until that handle closes, and
+        // refuses to open its name meanwhile, which would refuse the next
+        // lock of this store. Under the layout lock, releasing first is as
+        // safe as removing a held file.
+        let Self {
+            store,
+            _readers,
+            bootstrap,
+        } = self;
+        drop((store, _readers));
+        bootstrap.release();
         for path in paths {
             atomic_file::remove(&path)?;
         }
@@ -311,8 +337,23 @@ pub(crate) fn lock_paths(directory: &Path, id: StoreId) -> [PathBuf; 2] {
 
 /// The lock a bootstrap or replacement holds for its whole call, beside the
 /// store's directory.
-pub(super) fn bootstrap_lock_path(directory: &Path, id: StoreId) -> PathBuf {
+fn bootstrap_lock_path(directory: &Path, id: StoreId) -> PathBuf {
     directory.with_file_name(format!(".coven-bootstrap-{id}.lock"))
+}
+
+/// Take the bootstrap lock without waiting. Under the layout lock, so a
+/// deletion never removes the file between this open and this lock.
+pub(super) fn lock_bootstrap(directory: &Path, id: StoreId) -> Result<LockedFile, StoreLockError> {
+    let _layout = lock_layout(directory.parent().expect("store parent"))?;
+    try_lock(&bootstrap_lock_path(directory, id), id, false)
+}
+
+/// Every lock file named for a store, in the order deletion removes them.
+/// The bootstrap lock goes first: while the writer or reader lock file
+/// remains, creation refuses to reuse the id (`creation::create`).
+fn deletion_lock_paths(directory: &Path, id: StoreId) -> [PathBuf; 3] {
+    let [writer, readers] = lock_paths(directory, id);
+    [bootstrap_lock_path(directory, id), writer, readers]
 }
 
 pub(crate) fn deletion_path(directory: &Path, id: StoreId) -> PathBuf {
@@ -335,9 +376,13 @@ fn inspect_directory(directory: &Path) -> Result<bool, FileError> {
     }
 }
 
-pub(crate) fn for_deletion(
+/// Lock a store, or what an interrupted deletion left of it, for deletion.
+/// `lease` is the bootstrap lock of a bootstrap deleting its own store;
+/// otherwise deletion takes that lock itself.
+pub(super) fn for_deletion(
     directory: &Path,
     id: StoreId,
+    lease: Option<Arc<BootstrapLease>>,
 ) -> Result<Option<StoreDeletionLock>, StoreLockError> {
     let root = directory.parent().expect("store parent");
     let root = match std::fs::canonicalize(root) {
@@ -355,7 +400,7 @@ pub(crate) fn for_deletion(
     } else {
         deletion_path(&published, id)
     };
-    let paths = lock_paths(&directory, id);
+    let paths = deletion_lock_paths(&directory, id);
     if !inspect_directory(&directory)? {
         let mut remaining = false;
         for path in &paths {
@@ -370,7 +415,13 @@ pub(crate) fn for_deletion(
             return Ok(None);
         }
     }
-    let [writer, readers] = paths;
+    let [bootstrap, writer, readers] = paths;
+    // First, so a bootstrap that has not yet made the directory is refused
+    // before any other lock file is created for its id.
+    let bootstrap = match lease {
+        Some(lease) => HeldBootstrap::Leased(lease),
+        None => HeldBootstrap::Locked(try_lock(&bootstrap, id, false)?),
+    };
     Ok(Some(StoreDeletionLock {
         store: LockedStore {
             _file: try_lock(&writer, id, false)?,
@@ -378,7 +429,7 @@ pub(crate) fn for_deletion(
             id,
         },
         _readers: try_lock(&readers, id, false)?,
-        _replacement: None,
+        bootstrap,
     }))
 }
 

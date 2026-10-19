@@ -1,6 +1,6 @@
 //! Process-local lock lifetimes. Only closing instances cause an async wait.
 
-use super::lock::{bootstrap_lock_path, lock_existing, try_lock, LockedFile, StoreLockError};
+use super::lock::{lock_bootstrap, lock_existing, LockedFile, StoreLockError};
 use crate::id_source::StoreId;
 use std::{
     collections::BTreeMap,
@@ -111,7 +111,7 @@ impl LockRegistration {
         let (directory, id) = &self.entry.store;
         let file = match self.entry.kind {
             LockKind::Writer => lock_existing(directory, *id, false)?.1,
-            LockKind::Bootstrap => try_lock(&bootstrap_lock_path(directory, *id), *id, false)?,
+            LockKind::Bootstrap => lock_bootstrap(directory, *id)?,
         };
         Ok(RegisteredLock {
             _file: file,

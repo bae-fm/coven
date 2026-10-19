@@ -199,10 +199,12 @@ pub trait StoreDirAccess: Sized {
     /// writes waiting, so a range still recorded as being written has no
     /// live writer (Appendix C.3).
     fn exclude_cache_writes(&self) -> Result<CacheWriteLock, FileError>;
-    /// Lock an existing store or a directory left by an interrupted deletion.
-    /// An absent store with leftover locks can finish their removal on retry.
-    /// A store whose replacement is unfinished is locked for deletion too,
-    /// unless the call replacing it still runs; an unfinished first
+    /// Lock an existing store or a directory left by an interrupted deletion,
+    /// holding its writer, reader and bootstrap locks so that removal takes
+    /// every lock file named for the store. An absent store with leftover
+    /// locks can finish their removal on retry. A running restore, join or
+    /// replacement refuses with `StoreLockError::AlreadyOpen`. A store whose
+    /// replacement is unfinished is locked for deletion; an unfinished first
     /// installation is refused with `StoreLockError::BootstrapPending`.
     /// No directory is created by this call.
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError>;
@@ -252,21 +254,22 @@ impl StoreDirAccess for StoreDir {
         lock::cache_writes(&self.path, false)
     }
     fn lock_for_deletion(&self) -> Result<Option<StoreDeletionLock>, StoreLockError> {
-        let Some(guard) = lock::for_deletion(&self.path, self.id)? else {
-            return Ok(None);
-        };
-        if self.is_bootstrapping() {
-            return Ok(Some(guard));
+        let lease = self.bootstrap.clone().filter(|lease| lease.is_held());
+        let bootstrapping = lease.is_some();
+        let locked = lock::for_deletion(&self.path, self.id, lease);
+        // A marker beside a replacement record belongs to a swap under way,
+        // which deletion removes whole: both installations, the record and
+        // the replacement's directory. Alone, it belongs to a first
+        // installation, which only its own call resumes or cancels, whether
+        // or not that call is running and holding the bootstrap lock.
+        if !bootstrapping
+            && matches!(locked, Ok(Some(_)) | Err(StoreLockError::AlreadyOpen(_)))
+            && super::device_reset::read(&self.path)?.is_none()
+            && super::bootstrap::is_pending(&self.path)?
+        {
+            return Err(StoreLockError::BootstrapPending(self.id));
         }
-        match super::device_reset::read(&self.path)? {
-            // Deleting removes both installations, the record and the
-            // replacement's directory, unless its call is still running.
-            Some(_) => Ok(Some(guard.exclude_replacement()?)),
-            None if super::bootstrap::is_pending(&self.path)? => {
-                Err(StoreLockError::BootstrapPending(self.id))
-            }
-            None => Ok(Some(guard)),
-        }
+        locked
     }
     fn verify_lock(&self, lock: &StoreLock) -> Result<(), StoreLockError> {
         lock.verify(&self.path, self.id)

@@ -161,12 +161,14 @@ pub enum Audience {
   "Dropbox: ana@example.com" without keeping a second copy. Neither returns
   credentials or contacts storage. Before setup they return
   `None`; disconnect retains the location, and unreadable settings remain an error.
-- Store lock files live beside each store directory. Deletion holds the writer
-  and reader locks while removing the directory, then releases and removes the
-  lock files. Creation and lock-file removal are serialized by the layout.
-  Deleting a store whose replacement is unfinished also holds the bootstrap
-  lock: after its swap, a running `reset_device` or `restore_device` holds
-  only that lock between steps, and deletion must not remove files under it.
+- Store lock files live beside each store directory: the writer, reader and
+  bootstrap locks. Deletion holds all three while removing the directory, then
+  releases and removes every lock file, so a deleted store leaves nothing named
+  for it. Holding the bootstrap lock keeps out a running restore, join or
+  replacement: after its swap, a running `reset_device` or `restore_device`
+  holds only that lock between steps, and deletion must not remove files under
+  it. Lock acquisition, creation and lock-file removal are serialized by the
+  layout, so no one can lock a lock file between its release and its removal.
 - Deleting a store with storage set up loses whatever hasn't been uploaded.
   So before Ana deletes the Household store from her phone, the app shows
   her `unsent_work()`: say, 3 writes and 1 file still waiting. These are the

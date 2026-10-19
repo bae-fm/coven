@@ -5,21 +5,28 @@ use crate::id_source::UuidIds;
 use uuid::Uuid;
 
 #[test]
-fn deletion_holds_only_a_sibling_lock_and_removes_it_after_the_directory() {
+fn deletion_holds_only_sibling_locks_and_removes_them_after_the_directory() {
     let root = tempfile::tempdir().unwrap();
     let layout = StoreDirectories::new(root.path().to_owned());
     let id = StoreId(Uuid::from_u128(1));
     let store = layout.create_store_dir(id, &UuidIds).unwrap();
     let lock = store.lock_for_deletion().unwrap().unwrap();
-    let path = root.path().join("stores").join(format!(".{id}.lock"));
-    assert!(path.is_file(), "the held lock must be beside the store");
-    let file = OpenOptions::new()
-        .read(true)
-        .write(true)
-        .open(&path)
-        .unwrap();
-    assert!(matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
-    drop(file);
+    let stores = root.path().join("stores");
+    let paths = [
+        format!(".{id}.lock"),
+        format!(".{id}.readers.lock"),
+        format!(".coven-bootstrap-{id}.lock"),
+    ]
+    .map(|name| stores.join(name));
+    for path in &paths {
+        assert!(path.is_file(), "the held lock must be beside the store");
+        let file = OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(path)
+            .unwrap();
+        assert!(matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
+    }
     let mut contents: Vec<_> = std::fs::read_dir(&lock.store.directory)
         .unwrap()
         .map(|entry| entry.unwrap().file_name())
@@ -27,8 +34,10 @@ fn deletion_holds_only_a_sibling_lock_and_removes_it_after_the_directory() {
     contents.sort();
     assert_eq!(contents, ["cache", "files", "settings.json"]);
     lock.remove_directory().unwrap();
-    assert!(!path.exists());
-    assert_eq!(store_entries(&root.path().join("stores")), 0);
+    for path in &paths {
+        assert!(!path.exists());
+    }
+    assert_eq!(store_entries(&stores), 0);
 }
 
 #[test]
@@ -172,14 +181,14 @@ fn readers_coexist_with_the_writer_but_all_must_close_before_deletion() {
 
 #[test]
 fn deletion_retries_when_only_some_lock_files_remain_before_id_reuse() {
-    for removed_locks in [0, 1] {
+    for removed_locks in [0, 1, 2] {
         let root = tempfile::tempdir().unwrap();
         let layout = StoreDirectories::new(root.path().to_owned());
         let id = StoreId(Uuid::from_u128(1));
         let store = layout.create_store_dir(id, &UuidIds).unwrap();
         let deletion = store.lock_for_deletion().unwrap().unwrap();
         let path = deletion.store.directory.clone();
-        let paths = lock_paths(&path, id);
+        let paths = deletion_lock_paths(&path, id);
         // Interruption after removing the directory, before removing all locks.
         std::fs::remove_dir_all(&path).unwrap();
         drop(deletion);
@@ -236,6 +245,35 @@ fn failed_unpublication_keeps_the_store_and_its_locks_for_retry() {
         .unwrap()
         .remove_directory()
         .unwrap();
+    assert!(store.lock_for_deletion().unwrap().is_none());
+}
+
+/// A bootstrap that holds its lock before making the directory refuses
+/// deletion before deletion creates any other lock file for its id. Once it
+/// stops without making the directory, deletion removes its lock file.
+#[test]
+fn a_bootstrap_lock_without_its_store_is_refused_while_held_then_removed() {
+    let root = tempfile::tempdir().unwrap();
+    let layout = StoreDirectories::new(root.path().to_owned());
+    let id = StoreId(Uuid::from_u128(1));
+    let stores = root.path().join("stores");
+    std::fs::create_dir(&stores).unwrap();
+    let path = stores.join(id.to_string());
+    let bootstrap = lock_bootstrap(&path, id).unwrap();
+    let store = layout.store_dir(&id);
+    assert!(matches!(
+        store.lock_for_deletion(),
+        Err(StoreLockError::AlreadyOpen(found)) if found == id
+    ));
+    assert_eq!(store_entries(&stores), 1);
+    drop(bootstrap);
+    store
+        .lock_for_deletion()
+        .unwrap()
+        .unwrap()
+        .remove_directory()
+        .unwrap();
+    assert_eq!(store_entries(&stores), 0);
     assert!(store.lock_for_deletion().unwrap().is_none());
 }
 

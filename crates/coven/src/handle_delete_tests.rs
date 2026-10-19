@@ -364,7 +364,30 @@ async fn removing_a_store_from_one_device_keeps_the_persons_synced_entries() {
         .unwrap()
         .unwrap();
         assert_eq!(restored.store_id(), phone.store);
-        restored.close().await.unwrap();
+        // Deleting the restored store leaves no file named for it, its
+        // restore's bootstrap lock included.
+        if discard {
+            restored.close().await.unwrap();
+            laptop
+                .discard_store(&StoreLayout::new(root.path().into()).store_dir(&phone.store))
+                .await
+                .unwrap();
+        } else {
+            restored.delete_store(IfUnsent::Discard).await.unwrap();
+        }
+        assert_eq!(
+            files_named_for(root.path(), phone.store),
+            Vec::<String>::new()
+        );
         network.close().await;
     }
+}
+
+/// The entries in an app's stores directory whose names contain `store`.
+fn files_named_for(app_dir: &std::path::Path, store: StoreId) -> Vec<String> {
+    std::fs::read_dir(app_dir.join("stores"))
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+        .filter(|name| name.contains(&store.to_string()))
+        .collect()
 }
