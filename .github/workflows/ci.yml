@@ -90,8 +90,8 @@ jobs:
       # as a passing one's. Only main saves: one platform's build is 2 to 4 GB
       # compressed, so a set from every branch would evict main's from the
       # repository's 10 GB, and a pull request restores main's latest.
-      - name: Drop the workspace's own outputs before saving the build
-        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
+      - name: Drop the workspace's own outputs and report what the build holds
+        if: ${{ !cancelled() }}
         run: |
           for name in $(cargo metadata --format-version 1 --no-deps |
               "$(command -v python3 || command -v python)" -c '
@@ -103,7 +103,7 @@ jobs:
               rm -f target/debug/deps/"$name"-* target/debug/deps/lib"$name"-*
           done
           rm -rf target/doc
-          du -sh target/debug/* ~/.cargo/registry 2>/dev/null | sort -h | tail -6
+          du -sh target/debug/* target/debug/incremental/* ~/.cargo/registry 2>/dev/null | sort -h | tail -30
       - name: Save the build
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@v5
