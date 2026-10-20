@@ -645,6 +645,7 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
     // The failure's record commits with its wait.
     let mut pending = b.database.subscribe_pending::<crate::PendingRecord>();
     let mut status = b.database.subscribe_eager_cache_fill_status();
+    let mut rearmed = b.files.inner.waits.rearmed();
     apply_all(&a, &b).await;
     tokio::time::timeout(Duration::from_secs(5), async {
         while b
@@ -657,6 +658,21 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
             .is_empty()
         {
             pending.next().await.unwrap();
+        }
+    })
+    .await
+    .unwrap();
+    // The worker starts the wait's timer only after the record commits. A
+    // clock set before then would move the timer's start, not its end.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while b
+            .files
+            .inner
+            .waits
+            .next_due(|subject| matches!(subject, RetrySubject::Download { .. }))
+            .is_none()
+        {
+            rearmed.changed().await.unwrap();
         }
     })
     .await
