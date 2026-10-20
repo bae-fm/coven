@@ -119,6 +119,8 @@ async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() 
             f.files.inner.database.download_waits().await.unwrap().len(),
             1
         );
+        // The app call received the error; the record holds none.
+        assert_eq!(f.file_cause(&file).await, None);
         f.storage.set_online(true);
         if pin {
             f.files.pin(std::slice::from_ref(&file)).await.unwrap();

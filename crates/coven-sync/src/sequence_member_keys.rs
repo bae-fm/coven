@@ -263,13 +263,13 @@ impl SequenceSync {
                         .last()
                         .is_some()
                     {
-                        return Err(SyncError::Pending(Box::new(PendingRecord {
-                            subject: PendingSubject::Operation {
+                        return Err(SyncError::Pending(Box::new(PendingRecord::new(
+                            PendingSubject::Operation {
                                 id,
                                 kind: OperationKind::ReplaceMemberKeys,
                             },
-                            reason: PendingReason::Waits(Prerequisite::SequenceCatchUp),
-                        })));
+                            PendingReason::Waits(Prerequisite::SequenceCatchUp),
+                        ))));
                     }
                 }
                 held_current(session, &identity)?;

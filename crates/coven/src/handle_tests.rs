@@ -643,11 +643,7 @@ fn row_keys_preserve_column_order_and_sql_storage_classes() {
 }
 
 fn retry(reason: PendingReason) -> Retry {
-    PendingRecord {
-        subject: PendingSubject::Connection,
-        reason,
-    }
-    .retry()
+    PendingRecord::new(PendingSubject::Connection, reason).retry()
 }
 
 #[test]
@@ -837,13 +833,13 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
         WriteCutoff::MemberRemoved,
         WriteCutoff::MemberKeysReplaced,
     ] {
-        let record = PendingRecord {
-            subject: PendingSubject::Slot(Slot(7)),
-            reason: PendingReason::WritesRefused {
+        let record = PendingRecord::new(
+            PendingSubject::Slot(Slot(7)),
+            PendingReason::WritesRefused {
                 cutoff: Slot(5),
                 cause,
             },
-        };
+        );
         assert_eq!(record.retry(), Retry::Never, "{record:?}");
     }
     // A refused administrative operation records its local category; an
@@ -852,13 +848,13 @@ fn cut_off_writes_are_final_and_rejected_operations_wait_for_the_app() {
         (OperationKind::CreateCircle, Retry::AppAction),
         (OperationKind::RotateKey, Retry::Never),
     ] {
-        let record = PendingRecord {
-            subject: PendingSubject::Operation {
+        let record = PendingRecord::new(
+            PendingSubject::Operation {
                 id: OperationId(3),
                 kind,
             },
-            reason: PendingReason::Failed(LocalFailure::Operation),
-        };
+            PendingReason::Failed(LocalFailure::Operation),
+        );
         assert_eq!(record.retry(), expected, "{record:?}");
     }
 }

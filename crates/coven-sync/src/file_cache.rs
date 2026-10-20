@@ -2,13 +2,13 @@
 
 use super::file_cache_retry::{download_clears, download_subject};
 use super::file_error::TransferError;
+use super::file_failure::{file_subject, FileCopy, FileFailure};
 use crate::pending::Clears;
 use crate::{
     files::file_read::UploadedFile,
     files::{Files, FilesInner},
     FileReadError,
 };
-use crate::{PendingReason, PendingSubject};
 use coven_database::{DbError, FileRef};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
@@ -170,13 +170,14 @@ impl FilesInner {
             // the fill continues (§17.6, E8).
             let reason = match result {
                 Ok(()) => None,
-                Err(TransferError::Refused(refusal)) => {
+                Err(error) => {
                     // Authenticated chunks that are not this file publish no
                     // completed file: they leave the cache with the refusal.
-                    self.database.evict(file).await?;
-                    Some(PendingReason::Refused(refusal))
+                    if matches!(error, TransferError::Refused(_)) {
+                        self.database.evict(file).await?;
+                    }
+                    Some(self.file_failure(file, FileCopy::Stored, FileFailure::Held(error)))
                 }
-                Err(error) => Some(self.download_reason(file, &error)),
             };
             // Recoverable failures keep their work, whether waiting for a
             // timer or a new connection. Only terminal outcomes settle it.
@@ -226,10 +227,6 @@ impl FilesInner {
                 _ = sequence.changed() => return Ok(()),
                 result = keep => result,
             };
-            let subject = PendingSubject::File {
-                device: file.uploader(),
-                file: file.id(),
-            };
             match kept {
                 Ok(()) => {
                     self.finish_download(&file, None, true).await?;
@@ -238,7 +235,9 @@ impl FilesInner {
                     DbError::FileRefChanged { .. } | DbError::FileAbsent { .. },
                 ))) => self.database.settle_pin_request(file).await?,
                 Err(error) => {
-                    let reason = self.download_reason(&file, &error);
+                    let reason =
+                        self.file_failure(&file, FileCopy::Stored, FileFailure::Held(error));
+                    let subject = file_subject(&file);
                     if download_clears(&reason) == Clears::Never {
                         self.database.settle_pin_request(file).await?;
                     }

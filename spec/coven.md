@@ -4199,6 +4199,13 @@ offline too ([api.md E5](api.md#e5-storage-and-sync)).
   "key not available yet", "waiting for Ana's device to unshare" or "source file
   moved". It stays until that condition changes or the work settles. Time passing
   never clears it.
+- **A record also carries the error behind it,** while the process that met the
+  failure runs. Say Ana's laptop can't reach Dropbox while it uploads a photo: the
+  record's condition is a `Network` failure, and its cause is the error itself,
+  such as a DNS failure for the provider's host. Only the condition is saved, so
+  after a restart the record has no cause until the failure happens again. A
+  failure an app call returns goes to that call instead. Coven logs each failure
+  once, when its subject's condition appears or changes, not on every retry.
 - **A stuck slot has one record** naming its cause (§5.4). Coven doesn't add a
   wait for every later slot it can't reach.
 - **The other subjects** are writes, key copies, snapshots, files, operations,

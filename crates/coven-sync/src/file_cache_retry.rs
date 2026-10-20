@@ -1,9 +1,9 @@
 //! Download failure records and their timer or connection waits.
 
 use super::file_error::TransferError;
+use super::file_failure::{FileCopy, FileFailure};
 use crate::{
-    files::FilesInner, pending::Clears, FileReadError, LocalFailure, PendingReason, PendingRecord,
-    PendingSubject, Prerequisite,
+    files::FilesInner, pending::Clears, FileReadError, PendingReason, PendingRecord, PendingSubject,
 };
 use coven_database::{DbError, FileRef, RetrySubject, RetryWait};
 
@@ -35,18 +35,24 @@ impl FilesInner {
                     .await
             }
             None => {
+                // A partial read settles every failure but those a whole
+                // file must clear.
+                let ends = move |reason: &PendingReason| {
+                    whole
+                        || !matches!(
+                            reason,
+                            PendingReason::Refused(_)
+                                | PendingReason::FileUnavailable(_)
+                                | PendingReason::UpdateRequired(_)
+                        )
+                };
                 let upload = self
                     .database
-                    .clear_file_pending::<PendingRecord>(file, subject, move |record| {
-                        whole
-                            || !matches!(
-                                record.reason,
-                                PendingReason::Refused(_)
-                                    | PendingReason::FileUnavailable(_)
-                                    | PendingReason::UpdateRequired(_)
-                            )
+                    .clear_file_pending::<PendingRecord>(file, subject.clone(), move |record| {
+                        ends(&record.reason)
                     })
                     .await?;
+                self.waits.causes().cleared(&subject, ends);
                 if let Some(upload) = upload {
                     self.waits.forget(upload);
                 }
@@ -57,36 +63,50 @@ impl FilesInner {
         }
     }
 
-    pub(super) fn download_reason(&self, file: &FileRef, error: &TransferError) -> PendingReason {
-        match error {
-            TransferError::File(error) => self.read_pending(file, error),
-            TransferError::Refused(reason) => PendingReason::Refused(reason.clone()),
-        }
-    }
-
     /// Preserve the immediate native error even when persisting its durable
-    /// condition also fails.
+    /// condition also fails. The caller receives the error, so the record
+    /// keeps none as its cause.
     pub(super) async fn complete_download<T>(
         &self,
         file: &FileRef,
         result: Result<T, TransferError>,
         whole: bool,
     ) -> Result<T, FileReadError> {
-        let reason = result
-            .as_ref()
-            .err()
-            .map(|error| self.download_reason(file, error));
+        let recorded = !matches!(&result, Err(TransferError::File(error)) if unrecorded(error));
+        let reason = match &result {
+            Err(error) if recorded => {
+                Some(self.file_failure(file, FileCopy::Stored, FileFailure::Returned(error)))
+            }
+            Ok(_) | Err(_) => None,
+        };
         let result = result.map_err(|error| match error {
             TransferError::File(error) => error,
             TransferError::Refused(_) => FileReadError::Integrity {
                 id: file.id().to_string(),
             },
         });
-        if result.as_ref().is_err_and(unrecorded) {
+        if !recorded {
             return result;
         }
         let recorded = self.finish_download(file, reason, whole).await;
         combine(result, recorded)
+    }
+
+    /// A read-ahead has no caller: its failure is held as the record's
+    /// cause, and a failure to record its outcome is logged.
+    pub(super) async fn finish_read_ahead(
+        &self,
+        file: &FileRef,
+        result: Result<Vec<u8>, TransferError>,
+    ) {
+        let reason = match result {
+            Ok(_) => None,
+            Err(TransferError::File(error)) if unrecorded(&error) => return,
+            Err(error) => Some(self.file_failure(file, FileCopy::Stored, FileFailure::Held(error))),
+        };
+        if let Err(error) = self.finish_download(file, reason, false).await {
+            tracing::warn!(file = %file.id(), "recording a read-ahead's outcome failed: {error}");
+        }
     }
 
     /// Local reads can settle only a local source failure, not an upload's
@@ -109,15 +129,13 @@ impl FilesInner {
         let recorded = match &result {
             Ok(_) => match self
                 .database
-                .clear_file_pending::<PendingRecord>(file, subject, |record| {
-                    matches!(
-                        record.reason,
-                        PendingReason::FileUnavailable(crate::FileMissingReason::Source(_))
-                    )
+                .clear_file_pending::<PendingRecord>(file, subject.clone(), |record| {
+                    source_failure(&record.reason)
                 })
                 .await
             {
                 Ok(retry) => {
+                    self.waits.causes().cleared(&subject, source_failure);
                     if let Some(retry) = retry {
                         self.waits.forget(retry);
                     }
@@ -126,16 +144,12 @@ impl FilesInner {
                 Err(error) => Err(error.into()),
             },
             Err(error) => {
-                let reason = match error {
-                    FileReadError::Integrity { .. } => PendingReason::FileUnavailable(
-                        crate::FileMissingReason::Source(crate::FileSourceFailure::Integrity),
-                    ),
-                    error => self.read_pending(file, error),
-                };
+                let reason =
+                    self.file_failure(file, FileCopy::Original, FileFailure::ReturnedRead(error));
                 let waits = self.waits.clone();
                 match self
                     .database
-                    .fail_local_read(file, PendingRecord { subject, reason }, move |previous| {
+                    .fail_local_read(file, PendingRecord::new(subject, reason), move |previous| {
                         waits
                             .next(previous.as_ref())
                             .map_err(|error| DbError::SyncStream(Box::new(error)))
@@ -181,7 +195,7 @@ impl FilesInner {
         };
         let recorded = self
             .database
-            .fail_download(PendingRecord { subject, reason }, retry, wait)
+            .fail_download(PendingRecord::new(subject, reason), retry, wait)
             .await;
         if let Err(error) = recorded {
             self.waits.hold(retry);
@@ -196,43 +210,6 @@ impl FilesInner {
         }
         Ok(())
     }
-
-    /// The first unmet condition a failed read of `file` leaves (§17.5).
-    pub(super) fn read_pending(&self, file: &FileRef, error: &FileReadError) -> PendingReason {
-        match error {
-            FileReadError::NoStorage => PendingReason::NoStorage,
-            FileReadError::Storage(error) => {
-                match self.storage.read().expect("storage lock poisoned").as_ref() {
-                    Some(storage) => PendingReason::Storage {
-                        provider: storage.config().provider(),
-                        failure: error.failure(),
-                        answered: error.answered(),
-                    },
-                    None => PendingReason::NoStorage,
-                }
-            }
-            FileReadError::Uploading { .. } => PendingReason::Waits(Prerequisite::Object(
-                coven_storage::ObjectPath::file(self.directory.id(), file.uploader(), file.id()),
-            )),
-            FileReadError::Missing { reason, .. } => PendingReason::FileUnavailable(reason.clone()),
-            FileReadError::Integrity { .. } => {
-                PendingReason::Refused(crate::Refusal::Decryption { cause: None })
-            }
-            FileReadError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),
-            FileReadError::Disk(_) | FileReadError::Lock(_) => {
-                PendingReason::Failed(LocalFailure::Disk)
-            }
-            FileReadError::UserFileMissing { .. } => PendingReason::FileUnavailable(
-                crate::FileMissingReason::Source(crate::FileSourceFailure::Missing),
-            ),
-            FileReadError::UserFileChanged { .. } => PendingReason::FileUnavailable(
-                crate::FileMissingReason::Source(crate::FileSourceFailure::Changed),
-            ),
-            FileReadError::Database(_) | FileReadError::RangeOutOfBounds { .. } => {
-                PendingReason::Failed(LocalFailure::Database)
-            }
-        }
-    }
 }
 
 /// Provider and local failures use the shared classification. Immutable
@@ -245,6 +222,15 @@ pub(super) fn download_clears(reason: &PendingReason) -> Clears {
         | PendingReason::UpdateRequired(_) => Clears::Never,
         _ => Clears::ByItself,
     })
+}
+
+/// A failure of the attached original's source, which only reading it
+/// again settles.
+fn source_failure(reason: &PendingReason) -> bool {
+    matches!(
+        reason,
+        PendingReason::FileUnavailable(crate::FileMissingReason::Source(_))
+    )
 }
 
 /// Invalid arguments and a closed store do not introduce file work.

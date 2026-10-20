@@ -1,6 +1,9 @@
 //! The persistent upload queue and its bounded-memory transfer state machine.
 
-use crate::{files::file_error::*, files::FilesInner, PendingRecord, PendingSubject, SyncError};
+use crate::{
+    files::file_error::*, files::file_failure::file_subject, files::FilesInner, PendingRecord,
+    SyncError,
+};
 use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
 use coven_database::FileRefJournal;
 use coven_database::{
@@ -91,12 +94,6 @@ pub fn upload_queue_from_state(state: UploadQueueState) -> CovenResult<UploadQue
     })
 }
 
-fn file_subject(file: &FileRef) -> PendingSubject {
-    PendingSubject::File {
-        device: file.uploader(),
-        file: file.id(),
-    }
-}
 impl FilesInner {
     pub(crate) async fn drain_uploads(&self, force: bool) -> Result<DrainOutcome, SyncError> {
         let _guard = self.drain.lock().await;
@@ -160,7 +157,7 @@ impl FilesInner {
     }
 
     /// Whether this attempt stored the file. A failure becomes the file's
-    /// pending record; its native cause stays in this process's log.
+    /// pending record, which holds its error as the cause in this process.
     async fn attempt_upload(&self, item: FileUpload) -> Result<bool, SyncError> {
         if self.paused() {
             return Ok(false);
@@ -170,12 +167,14 @@ impl FilesInner {
             Ok(stored) => {
                 if stored {
                     self.waits.forget(RetrySubject::Upload(item.id));
+                    self.waits
+                        .causes()
+                        .cleared(&file_subject(&item.file), |_| true);
                 }
                 Ok(stored)
             }
             Err(error) => {
-                tracing::debug!(?error, file = %item.file.id(), "file upload attempt failed");
-                self.record_failure(&item, &error).await?;
+                self.record_failure(&item, error).await?;
                 Ok(false)
             }
         }

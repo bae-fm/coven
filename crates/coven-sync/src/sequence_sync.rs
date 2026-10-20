@@ -200,10 +200,10 @@ impl SequenceSync {
                         .map(|intro| intro.audience.clone())
                         .unwrap_or(Audience::Store);
                     self.database
-                        .record_pending(PendingRecord {
+                        .record_pending(PendingRecord::new(
                             subject,
-                            reason: PendingReason::KeyUnavailable { audience, key },
-                        })
+                            PendingReason::KeyUnavailable { audience, key },
+                        ))
                         .await?;
                 }
                 Err(error) => return Err(error),
@@ -622,9 +622,9 @@ impl SequenceSync {
                 Ok(())
             }
             coven_database::ApplyOutcome::Waiting(wait) => {
-                Err(SyncError::Pending(Box::new(PendingRecord {
-                    subject: PendingSubject::Slot(at),
-                    reason: match wait {
+                Err(SyncError::Pending(Box::new(PendingRecord::new(
+                    PendingSubject::Slot(at),
+                    match wait {
                         coven_database::WriteWait::Reload(audience) => {
                             PendingReason::Waits(Prerequisite::Reload(audience))
                         }
@@ -635,7 +635,7 @@ impl SequenceSync {
                         }
                         _ => PendingReason::Waits(Prerequisite::SequenceCatchUp),
                     },
-                })))
+                ))))
             }
         }
     }
@@ -667,10 +667,7 @@ impl SequenceSync {
             }
             _ => PendingReason::Failed(error.local_failure()),
         };
-        let record = PendingRecord {
-            subject: PendingSubject::Slot(slot),
-            reason,
-        };
+        let record = PendingRecord::new(PendingSubject::Slot(slot), reason);
         session.blocked = Some(record.clone());
         self.state
             .set(SequenceStatus::Blocked(Box::new(record.clone())));

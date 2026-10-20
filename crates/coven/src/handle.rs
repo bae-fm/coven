@@ -186,14 +186,19 @@ impl CovenHandle {
         self.database.subscribe_device_reset()
     }
 
-    /// Current local conditions, including while disconnected.
+    /// Current local conditions, including while disconnected. Each record
+    /// carries the error behind it while this process holds that error.
     pub async fn pending(&self) -> CovenResult<Vec<PendingRecord>> {
-        self.database.pending().await
+        let records = self.database.pending().await?;
+        Ok(self.files.pending_causes().attach(records))
     }
 
-    /// Observe the same committed pending query.
+    /// Observe the same committed pending query, with the same causes.
     pub fn subscribe_pending(&self) -> LiveQuery<Vec<PendingRecord>> {
-        self.database.subscribe_pending()
+        let causes = self.files.pending_causes();
+        self.database
+            .subscribe_pending()
+            .process(move |records| Ok(causes.attach(records)))
     }
 
     /// The members and their devices, as this device's applied slots have them (E9).

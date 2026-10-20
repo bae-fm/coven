@@ -23,6 +23,9 @@ async fn full_storage_retries_eager_downloads_under_backoff() {
         assert_eq!(waits[0].1.wait, Duration::from_secs(wait));
         let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
         assert_eq!(records[0].retry(), Retry::Automatic);
+        // No caller awaits the fill: its record carries the error.
+        let cause = b.file_cause(&file).await.unwrap();
+        assert!(cause.contains("QuotaExceeded"), "{cause}");
         let requests = a.storage.request_trace().len();
         b.files.inner.fill_eager().await.unwrap();
         assert_eq!(a.storage.request_trace().len(), requests);

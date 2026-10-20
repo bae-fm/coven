@@ -179,13 +179,13 @@ impl SequenceSync {
                         PendingReason::UpdateRequired(RequiredUpdate::AppSchema { version })
                     }
                 };
-                Err(SyncError::Pending(Box::new(PendingRecord {
-                    subject: PendingSubject::Operation {
+                Err(SyncError::Pending(Box::new(PendingRecord::new(
+                    PendingSubject::Operation {
                         id,
                         kind: OperationKind::RetainFiles,
                     },
                     reason,
-                })))
+                ))))
             }
         }
     }

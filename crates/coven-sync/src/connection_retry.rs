@@ -70,10 +70,7 @@ impl ConnectionRetry {
             *self = Self::Never;
             return Ok(());
         }
-        let record = PendingRecord {
-            subject: PendingSubject::Connection,
-            reason,
-        };
+        let record = PendingRecord::new(PendingSubject::Connection, reason);
         let retry = match error {
             SyncError::Pending(record) => record.retry(),
             _ => record.retry(),

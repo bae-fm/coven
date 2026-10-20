@@ -3213,6 +3213,12 @@ pub struct PendingRecord {
     pub subject: PendingSubject,
     /// The first unmet condition for this subject, kept as a typed value.
     pub reason: PendingReason,
+    /// The error behind `reason`, with every cause below it, while this
+    /// process holds it: an upload, download or read no caller awaited.
+    /// Never persisted, so a record read after a
+    /// restart has none, and none when the failure went back to an app call.
+    /// Equality ignores it.
+    pub cause: Option<Arc<dyn std::error::Error + Send + Sync>>,
 }
 
 /// Stable identities; this device keeps one record per subject.
@@ -3329,6 +3335,9 @@ pub enum Retry {
 }
 
 impl PendingRecord {
+    /// The record of `subject`'s first unmet condition, with no cause held.
+    pub fn new(subject: PendingSubject, reason: PendingReason) -> Self;
+
     /// Automatic: retryable reads, keys, snapshots, provider work and
     /// unfinished operation/undo work, subject to shared backoff.
     /// Storage Network/Conflict/RateLimited/NotFound/SessionExpired retry

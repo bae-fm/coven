@@ -36,13 +36,27 @@ pub enum FileSourceFailure {
 }
 
 /// One local first unmet condition, identified by its subject (§19.1, E5).
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PendingRecord {
     /// The work that cannot advance.
     pub subject: PendingSubject,
     /// The first condition in its processing order.
     pub reason: PendingReason,
+    /// The error behind `reason`, while this process holds it: the provider,
+    /// disk or database failure, with every cause below it. Only the reason
+    /// is persisted, so a record read after a restart, or one whose last
+    /// failure went back to an app call, has none. It names the failure and
+    /// is no part of the record's identity: equality ignores it.
+    #[serde(skip)]
+    pub cause: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
 }
+
+impl PartialEq for PendingRecord {
+    fn eq(&self, other: &Self) -> bool {
+        self.subject == other.subject && self.reason == other.reason
+    }
+}
+impl Eq for PendingRecord {}
 
 /// Stable identities of work, independent of attempts and wall-clock time.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -261,6 +275,15 @@ pub enum Retry {
     Never,
 }
 impl PendingRecord {
+    /// The record of `subject`'s first unmet condition, with no cause held.
+    pub fn new(subject: PendingSubject, reason: PendingReason) -> Self {
+        Self {
+            subject,
+            reason,
+            cause: None,
+        }
+    }
+
     /// Retry according to the cause and the owner of the unfinished work.
     pub fn retry(&self) -> Retry {
         match (&self.subject, self.reason.retry_cause()) {
@@ -396,12 +419,12 @@ impl PendingReason {
 
 impl PendingValue for PendingRecord {
     fn provider_access(id: OperationId, account: String, grant: bool, owner: bool) -> Self {
-        Self {
-            subject: PendingSubject::Operation {
+        Self::new(
+            PendingSubject::Operation {
                 id,
                 kind: OperationKind::RevokeAccess,
             },
-            reason: if owner {
+            if owner {
                 PendingReason::ProviderPending {
                     action: if grant {
                         ProviderAccessAction::Grant
@@ -413,28 +436,28 @@ impl PendingValue for PendingRecord {
             } else {
                 PendingReason::PendingOwner { account }
             },
-        }
+        )
     }
     fn reload(audience: Audience) -> Self {
-        Self {
-            subject: PendingSubject::Audience(audience.clone()),
-            reason: PendingReason::Waits(Prerequisite::Reload(audience)),
-        }
+        Self::new(
+            PendingSubject::Audience(audience.clone()),
+            PendingReason::Waits(Prerequisite::Reload(audience)),
+        )
     }
     fn access_key(id: OperationId, key: crate::AccessKeyToDelete) -> Self {
-        Self {
-            subject: PendingSubject::Operation {
+        Self::new(
+            PendingSubject::Operation {
                 id,
                 kind: crate::OperationKind::DeleteAccessKey,
             },
-            reason: PendingReason::DeleteAccessKey(key),
-        }
+            PendingReason::DeleteAccessKey(key),
+        )
     }
     fn writes_refused(slot: Slot, cutoff: Slot, cause: coven_database::WriteCutoff) -> Self {
-        Self {
-            subject: PendingSubject::Slot(slot),
-            reason: PendingReason::WritesRefused { cutoff, cause },
-        }
+        Self::new(
+            PendingSubject::Slot(slot),
+            PendingReason::WritesRefused { cutoff, cause },
+        )
     }
     type Subject = PendingSubject;
     fn subject(&self) -> &PendingSubject {

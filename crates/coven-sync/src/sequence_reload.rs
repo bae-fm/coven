@@ -412,12 +412,12 @@ impl SequenceSync {
                             ))
                         }
                         (_, None) => {
-                            return Err(SyncError::Pending(Box::new(PendingRecord {
-                                subject: crate::PendingSubject::Slot(slot),
-                                reason: crate::PendingReason::Waits(crate::Prerequisite::Reload(
+                            return Err(SyncError::Pending(Box::new(PendingRecord::new(
+                                crate::PendingSubject::Slot(slot),
+                                crate::PendingReason::Waits(crate::Prerequisite::Reload(
                                     audience.clone(),
                                 )),
-                            })))
+                            ))))
                         }
                     }
                 }
@@ -464,10 +464,10 @@ impl SequenceSync {
             // This activation remains pending; a later pass retries its exact
             // required reload using the newly observed floor.
             session.floor = Some(newer);
-            return Err(SyncError::Pending(Box::new(crate::PendingRecord {
-                subject: crate::PendingSubject::Slot(slot),
-                reason: crate::PendingReason::Waits(crate::Prerequisite::SequenceCatchUp),
-            })));
+            return Err(SyncError::Pending(Box::new(crate::PendingRecord::new(
+                crate::PendingSubject::Slot(slot),
+                crate::PendingReason::Waits(crate::Prerequisite::SequenceCatchUp),
+            ))));
         }
         Ok(())
     }

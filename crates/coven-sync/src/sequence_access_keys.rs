@@ -323,13 +323,13 @@ impl SequenceSync {
                 Step::Undo { key, reason } => {
                     let undo = async {
                         let Some(admin) = admin else {
-                            return Err(SyncError::Pending(Box::new(PendingRecord {
-                                subject: PendingSubject::Operation {
+                            return Err(SyncError::Pending(Box::new(PendingRecord::new(
+                                PendingSubject::Operation {
                                     id,
                                     kind: OperationKind::ReplaceAccessKey,
                                 },
-                                reason: PendingReason::AdminAccessRequired,
-                            })));
+                                PendingReason::AdminAccessRequired,
+                            ))));
                         };
                         match self.storage.delete(&path).await {
                             Ok(()) => (),

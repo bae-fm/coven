@@ -198,13 +198,7 @@ impl FileStream {
                             .range(start, length)
                             .await
                             .map_err(TransferError::from);
-                        if let Err(error) = ahead
-                            .owner
-                            .complete_download(&ahead.file, result, false)
-                            .await
-                        {
-                            tracing::debug!(?error, "file read-ahead failed");
-                        }
+                        ahead.owner.finish_read_ahead(&ahead.file, result).await;
                     }));
                 }
                 file.owner

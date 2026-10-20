@@ -75,8 +75,10 @@ async fn a_transient_failure_persists_its_delay_and_waits_it_out() {
             0
         );
         // The failure is the file's pending record, and T and W persist with
-        // it before the upload waits.
+        // it before the upload waits. The record carries the error itself.
         assert_eq!(f.upload_reason(&file).await, Some(network()));
+        let cause = f.file_cause(&file).await.unwrap();
+        assert!(cause.contains("Network"), "{cause}");
         let persisted = retry(&f).await.unwrap();
         assert_eq!(persisted.failures, attempt as u32 + 1);
         assert_eq!(persisted.wait, Duration::from_secs(wait));

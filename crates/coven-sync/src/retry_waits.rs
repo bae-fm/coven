@@ -51,6 +51,8 @@ pub struct RetryWaits {
     rearmed: tokio::sync::watch::Sender<u64>,
     /// The app's network reports, and how far each owner acted on them.
     network: network_report::Reports,
+    /// The error behind each failure recorded for a subject in this session.
+    causes: crate::PendingCauses,
 }
 
 #[derive(Default)]
@@ -89,6 +91,7 @@ impl RetryWaits {
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
+            causes: crate::PendingCauses::default(),
         };
         for (subject, wait) in waits {
             owner.arm_for(
@@ -110,7 +113,13 @@ impl RetryWaits {
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
+            causes: crate::PendingCauses::default(),
         }
+    }
+
+    /// The error behind each failure recorded for a subject in this session.
+    pub(crate) fn causes(&self) -> &crate::PendingCauses {
+        &self.causes
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, State> {

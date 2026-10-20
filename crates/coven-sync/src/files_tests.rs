@@ -233,6 +233,25 @@ impl Fixture {
             .find(|record| record.subject == subject)
             .map(|record| record.reason)
     }
+    /// The text of the error the file's pending record carries, if any.
+    async fn file_cause(&self, file: &FileRef) -> Option<String> {
+        let subject = crate::PendingSubject::File {
+            device: file.uploader(),
+            file: file.id(),
+        };
+        let records = self
+            .database
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap();
+        self.files
+            .pending_causes()
+            .attach(records)
+            .into_iter()
+            .find(|record| record.subject == subject)
+            .and_then(|record| record.cause)
+            .map(|cause| cause.to_string())
+    }
     fn path(&self, file: &FileRef) -> coven_storage::ObjectPath {
         coven_storage::ObjectPath::file(self.directory.id(), file.uploader(), file.id())
     }

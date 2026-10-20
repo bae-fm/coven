@@ -81,15 +81,15 @@ async fn history(actions: &[Value]) -> Value {
                         // Its own write to the very prerequisite it waits for
                         // must not wake the wait which this attempt records.
                         scope.run(commit(&device, prerequisite)).await;
-                        let error = SyncError::Pending(Box::new(PendingRecord {
-                            subject: PendingSubject::Operation {
+                        let error = SyncError::Pending(Box::new(PendingRecord::new(
+                            PendingSubject::Operation {
                                 id,
                                 kind: crate::OperationKind::RetainFiles,
                             },
-                            reason: PendingReason::PendingOwner {
+                            PendingReason::PendingOwner {
                                 account: format!("prerequisite{prerequisite}@example.com"),
                             },
-                        }));
+                        )));
                         device
                             .sync
                             .record_operation_error(

@@ -212,10 +212,10 @@ async fn a_local_failure_retries_the_pass_on_its_own() {
     .unwrap();
     assert_eq!(
         ben.database().pending::<PendingRecord>().await.unwrap(),
-        [PendingRecord {
-            subject: PendingSubject::Connection,
-            reason: PendingReason::Failed(LocalFailure::KeyCustody),
-        }]
+        [PendingRecord::new(
+            PendingSubject::Connection,
+            PendingReason::Failed(LocalFailure::KeyCustody)
+        )]
     );
     // The first retry waits one second, well before the idle pass.
     group

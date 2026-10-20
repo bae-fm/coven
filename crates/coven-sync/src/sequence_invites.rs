@@ -343,13 +343,15 @@ impl SequenceSync {
                 self.state.request_pass();
                 Ok(invite)
             }
-            InviteProgress::Waiting(reason) => Err(SyncError::Pending(Box::new(PendingRecord {
-                subject: PendingSubject::Operation {
-                    id: operation,
-                    kind: OperationKind::Invite,
-                },
-                reason,
-            }))),
+            InviteProgress::Waiting(reason) => {
+                Err(SyncError::Pending(Box::new(PendingRecord::new(
+                    PendingSubject::Operation {
+                        id: operation,
+                        kind: OperationKind::Invite,
+                    },
+                    reason,
+                ))))
+            }
             InviteProgress::Finished => Err(SyncError::InvitationChanged),
         }
     }
@@ -460,13 +462,13 @@ impl SequenceSync {
             {
                 InviteProgress::Finished => return Ok(()),
                 InviteProgress::Waiting(reason) => {
-                    return Err(SyncError::Pending(Box::new(PendingRecord {
-                        subject: PendingSubject::Operation {
+                    return Err(SyncError::Pending(Box::new(PendingRecord::new(
+                        PendingSubject::Operation {
                             id: record.id,
                             kind: OperationKind::Invite,
                         },
                         reason,
-                    })))
+                    ))))
                 }
                 InviteProgress::Shown(_) => (),
             }
@@ -483,13 +485,13 @@ impl SequenceSync {
     ) -> Result<(), SyncError> {
         match self.run_invite(session, ring, member, id).await? {
             InviteProgress::Waiting(reason) if reason != PendingReason::Paused => {
-                Err(SyncError::Pending(Box::new(PendingRecord {
-                    subject: PendingSubject::Operation {
+                Err(SyncError::Pending(Box::new(PendingRecord::new(
+                    PendingSubject::Operation {
                         id,
                         kind: OperationKind::Invite,
                     },
                     reason,
-                })))
+                ))))
             }
             _ => Ok(()),
         }

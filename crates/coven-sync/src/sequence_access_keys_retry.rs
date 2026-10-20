@@ -112,13 +112,13 @@ impl SequenceSync {
                     .forget(coven_database::RetrySubject::Operation(id));
                 return Ok(Ok(replacement));
             }
-            Ok(KeyProgress::Waiting(reason)) => SyncError::Pending(Box::new(PendingRecord {
-                subject: PendingSubject::Operation {
+            Ok(KeyProgress::Waiting(reason)) => SyncError::Pending(Box::new(PendingRecord::new(
+                PendingSubject::Operation {
                     id,
                     kind: OperationKind::ReplaceAccessKey,
                 },
                 reason,
-            })),
+            ))),
             Err(error) => error,
         };
         let recorded = async {

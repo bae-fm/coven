@@ -143,12 +143,14 @@ impl SequenceSync {
                 .await?
                 .ok_or(coven_database::DbError::OperationChanged(id))?;
             let account: String = serde_json::from_slice(&record.data)?;
-            let condition = |reason| PendingRecord {
-                subject: PendingSubject::Operation {
-                    id,
-                    kind: OperationKind::RevokeAccess,
-                },
-                reason,
+            let condition = |reason| {
+                PendingRecord::new(
+                    PendingSubject::Operation {
+                        id,
+                        kind: OperationKind::RevokeAccess,
+                    },
+                    reason,
+                )
             };
             if !session.history.owns_storage(member.member()) {
                 return Err(SyncError::Pending(Box::new(condition(

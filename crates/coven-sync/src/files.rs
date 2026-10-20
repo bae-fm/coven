@@ -6,6 +6,8 @@ mod file_cache;
 mod file_cache_retry;
 #[path = "file_error.rs"]
 mod file_error;
+#[path = "file_failure.rs"]
+mod file_failure;
 #[path = "file_read.rs"]
 mod file_read;
 #[path = "file_status.rs"]
@@ -197,6 +199,11 @@ impl Files {
                 task: tokio::sync::Mutex::new(Some(task)),
             }),
         }
+    }
+    /// The error behind each failure this store's work recorded in this
+    /// session, which `PendingCauses::attach` gives the records it explains.
+    pub fn pending_causes(&self) -> crate::PendingCauses {
+        self.inner.waits.causes().clone()
     }
     /// The limits shared by this handle's transfer consumers.
     pub fn transfer_limits(&self) -> TransferLimits {

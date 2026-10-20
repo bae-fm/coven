@@ -91,10 +91,10 @@ impl SequenceSync {
         self.waits
             .attempt_scope(id)
             .run(async {
-                let pending = PendingRecord {
-                    subject: PendingSubject::Operation { id, kind },
-                    reason: self.error_reason(error),
-                };
+                let pending = PendingRecord::new(
+                    PendingSubject::Operation { id, kind },
+                    self.error_reason(error),
+                );
                 let subject = RetrySubject::Operation(id);
                 if pending.retry() == Retry::Automatic {
                     let held = crate::RetryWaits::lacks_key(&pending.reason)

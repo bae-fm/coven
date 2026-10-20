@@ -16,13 +16,13 @@ impl SequenceSync {
             .await;
         let pending = match &result {
             Ok(InviteProgress::Waiting(reason)) => {
-                Some(SyncError::Pending(Box::new(PendingRecord {
-                    subject: PendingSubject::Operation {
+                Some(SyncError::Pending(Box::new(PendingRecord::new(
+                    PendingSubject::Operation {
                         id,
                         kind: OperationKind::Invite,
                     },
-                    reason: reason.clone(),
-                })))
+                    reason.clone(),
+                ))))
             }
             _ => None,
         };

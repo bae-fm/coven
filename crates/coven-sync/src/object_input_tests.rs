@@ -167,10 +167,10 @@ async fn io_differential_retained_ranges_and_refusal_eviction() {
         let path = ObjectPath::slot(store(), 1.try_into().unwrap());
         storage.create(&path, b"abcdefghij").await.unwrap();
         let object = storage.status(&path).await.unwrap().unwrap();
-        let refusal = crate::PendingRecord {
-            subject: crate::PendingSubject::Slot(coven_merge::Slot(1)),
-            reason: crate::PendingReason::Refused(crate::Refusal::Signature { cause: None }),
-        };
+        let refusal = crate::PendingRecord::new(
+            crate::PendingSubject::Slot(coven_merge::Slot(1)),
+            crate::PendingReason::Refused(crate::Refusal::Signature { cause: None }),
+        );
         receiver.db.record_pending(refusal.clone()).await.unwrap();
         let actions = vec![
             json!({"op":"read","start":start,"end":start+3}),

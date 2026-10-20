@@ -53,10 +53,10 @@ async fn storage_metadata_and_snapshot_subjects_are_available_through_the_facade
     assert_eq!(snapshot.device, device);
     assert_eq!(snapshot.number, 3);
     assert_eq!(snapshot.audience, Audience::Store);
-    let record = PendingRecord {
-        subject: PendingSubject::Snapshot(snapshot),
-        reason: PendingReason::Missing { path },
-    };
+    let record = PendingRecord::new(
+        PendingSubject::Snapshot(snapshot),
+        PendingReason::Missing { path },
+    );
     assert_eq!(record.retry(), Retry::Automatic);
 }
 
@@ -936,10 +936,10 @@ mod pending_records {
         .await
         .unwrap()
         .unwrap();
-        let record = PendingRecord {
-            subject: PendingSubject::Slot(Slot(slot)),
-            reason: PendingReason::Refused(Refusal::Signature { cause: None }),
-        };
+        let record = PendingRecord::new(
+            PendingSubject::Slot(Slot(slot)),
+            PendingReason::Refused(Refusal::Signature { cause: None }),
+        );
         assert_eq!(received.next().await.unwrap(), vec![record.clone()]);
         let reads = || async {
             network.devices[1]

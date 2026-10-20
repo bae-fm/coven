@@ -36,18 +36,18 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
             operation: Box::new(crate::SyncError::Rejected(
                 crate::OperationRejection::NotAllowed,
             )),
-            cleanup: Box::new(crate::SyncError::Pending(Box::new(PendingRecord {
-                subject: PendingSubject::Connection,
-                reason: cause.clone(),
-            }))),
+            cleanup: Box::new(crate::SyncError::Pending(Box::new(PendingRecord::new(
+                PendingSubject::Connection,
+                cause.clone(),
+            )))),
         };
-        let record = PendingRecord {
-            subject: PendingSubject::Operation {
+        let record = PendingRecord::new(
+            PendingSubject::Operation {
                 id: OperationId(1),
                 kind: OperationKind::ReplaceAccessKey,
             },
-            reason: error.pending_reason(CloudProvider::S3),
-        };
+            error.pending_reason(CloudProvider::S3),
+        );
         let encoded = serde_json::to_vec(&record).unwrap();
         let reopened: PendingRecord = serde_json::from_slice(&encoded).unwrap();
         assert_eq!(reopened, record);
@@ -68,14 +68,14 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
 
 #[test]
 fn conditional_conflicts_retry_without_becoming_throttling() {
-    let record = PendingRecord {
-        subject: PendingSubject::Connection,
-        reason: PendingReason::Storage {
+    let record = PendingRecord::new(
+        PendingSubject::Connection,
+        PendingReason::Storage {
             provider: CloudProvider::S3,
             failure: StorageFailure::Conflict,
             answered: true,
         },
-    };
+    );
     assert_eq!(record.retry(), Retry::Automatic);
 }
 
@@ -83,7 +83,7 @@ fn conditional_conflicts_retry_without_becoming_throttling() {
 /// backoff, after a person acts, or never (E5).
 #[test]
 fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() {
-    let record = |subject, reason| PendingRecord { subject, reason };
+    let record = |subject, reason| PendingRecord::new(subject, reason);
     let operation = |kind| PendingSubject::Operation {
         id: OperationId(1),
         kind,
@@ -162,10 +162,7 @@ fn local_failures_retry_slots_and_passes_as_they_clear() {
             (LocalFailure::Crypto, Retry::AppAction),
             (LocalFailure::Operation, Retry::AppAction),
         ] {
-            let record = PendingRecord {
-                subject: subject.clone(),
-                reason: PendingReason::Failed(failure),
-            };
+            let record = PendingRecord::new(subject.clone(), PendingReason::Failed(failure));
             assert_eq!(record.retry(), retry, "{record:?}");
             assert_eq!(
                 record.can_retry(env!("CARGO_PKG_VERSION"), 1),
