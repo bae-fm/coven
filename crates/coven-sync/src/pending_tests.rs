@@ -12,6 +12,7 @@ fn cleanup_retains_both_causes_and_obeys_the_unfinished_causes_retry_gate() {
             PendingReason::Storage {
                 provider: CloudProvider::S3,
                 failure: StorageFailure::Network,
+                answered: false,
             },
             Retry::Automatic,
             true,
@@ -72,6 +73,7 @@ fn conditional_conflicts_retry_without_becoming_throttling() {
         reason: PendingReason::Storage {
             provider: CloudProvider::S3,
             failure: StorageFailure::Conflict,
+            answered: true,
         },
     };
     assert_eq!(record.retry(), Retry::Automatic);
@@ -89,6 +91,7 @@ fn operation_failures_retry_as_they_clear_and_only_app_operations_wait_for_it() 
     let storage = |failure| PendingReason::Storage {
         provider: CloudProvider::S3,
         failure,
+        answered: true,
     };
     for (reason, coven) in [
         (PendingReason::Failed(LocalFailure::Disk), Retry::Automatic),
@@ -225,4 +228,21 @@ fn pending_subjects_keep_their_variant_and_snapshot_order() {
         serde_json::from_str::<PendingSubject>(encoded).unwrap(),
         subjects[5]
     );
+}
+
+/// Only a network failure no provider answered is offline (E5); its wait is
+/// the one a network report ends (§6.7).
+#[test]
+fn only_an_unanswered_network_failure_is_offline() {
+    let storage = |failure, answered| PendingReason::Storage {
+        provider: CloudProvider::S3,
+        failure,
+        answered,
+    };
+    assert!(storage(StorageFailure::Network, false).offline());
+    // A server's error response is an answer.
+    assert!(!storage(StorageFailure::Network, true).offline());
+    assert!(!storage(StorageFailure::RateLimited, true).offline());
+    assert!(!storage(StorageFailure::File, false).offline());
+    assert!(!PendingReason::Failed(LocalFailure::Disk).offline());
 }

@@ -33,8 +33,9 @@ and compares completion and the reader's persisted retry disposition.
 ## Waiting and reopening
 
 [Waiting.lean](io/CovenIO/Waiting.lean),
-[WaitingEvidence.lean](io/CovenIO/WaitingEvidence.lean) and
-[WaitingReopen.lean](io/CovenIO/WaitingReopen.lean) distinguish timed retry,
+[WaitingEvidence.lean](io/CovenIO/WaitingEvidence.lean),
+[WaitingReopen.lean](io/CovenIO/WaitingReopen.lean) and
+[WaitingNetwork.lean](io/CovenIO/WaitingNetwork.lean) distinguish timed retry,
 changed prerequisites and work that cannot retry. Delay records retain both
 the wall deadline and full wait. Reopening arms the remaining delay bounded
 by that full wait; the armed wait uses monotonic time. Provider cooldowns
@@ -51,6 +52,14 @@ unrelated, racing and own commits, then reopens the database both while
 waiting and during an attempt. It compares readiness and persisted failure
 counts after each attempted retry, including capped waits and a backward
 wall-clock change.
+
+WaitingNetwork.lean treats the app's network report as a commit changing the
+network, the prerequisite of a connection wait whose attempt got no provider
+response. A wait after a provider's answer names something else, so the report
+leaves it alone. Rust ends the wait by saving it with no full wait left, so a
+reopen cannot bring it back. `connection_retry::tests` and the
+`network_report` tests in `handle::sync_control::tests` check the Rust owner
+against these rules; no differential runner compares them.
 
 ## Work notifications
 

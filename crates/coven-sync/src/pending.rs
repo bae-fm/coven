@@ -179,6 +179,10 @@ pub enum PendingReason {
         provider: CloudProvider,
         /// The classification, without a process-local cause.
         failure: StorageFailure,
+        /// Whether the provider answered the failed request, even with an
+        /// error. `Network` alone cannot say: a server's error response is
+        /// an answer, a lookup or connection failure is not (E5).
+        answered: bool,
     },
     /// Complete immutable bytes failed a check.
     Refused(Refusal),
@@ -301,6 +305,13 @@ pub(crate) enum Clears {
     Never,
 }
 
+/// A failure that received no usable provider response: the device is
+/// offline (E5), and only a change in its network can end the wait early
+/// (§6.7). A server's error response is an answer, so it is not offline.
+pub(crate) fn offline(failure: StorageFailure, answered: bool) -> bool {
+    failure == StorageFailure::Network && !answered
+}
+
 /// Storage failures that subjects other than files and coven's own
 /// operations retry automatically (E5).
 pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
@@ -356,6 +367,12 @@ impl PendingReason {
             Self::Storage { failure, .. } => Some(storage_clears(*failure)),
             _ => None,
         }
+    }
+
+    /// Whether this reason records an attempt that received no usable
+    /// provider response, which the connection reports as `Offline` (E5).
+    pub(crate) fn offline(&self) -> bool {
+        matches!(self, Self::Storage { failure, answered, .. } if offline(*failure, *answered))
     }
 
     fn retry(&self) -> Retry {

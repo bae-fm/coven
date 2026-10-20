@@ -77,6 +77,14 @@ impl StorageConnections {
             if superseded() {
                 break;
             }
+            // The app's network report ends a wait for the network (§6.7).
+            if let Err(error) =
+                coven_sync::ConnectionRetry::network_changed(&self.database, &self.waits).await
+            {
+                self.publications
+                    .publish(coven_sync::connection_failure(error));
+                return;
+            }
             let previous = match self
                 .database
                 .retry_wait(coven_database::RetrySubject::Sync)
@@ -198,6 +206,12 @@ impl StorageConnections {
             // A closed loop has nothing to sync; status reports why.
             let _ = control.sync_now();
         }
+    }
+
+    /// The device's network changed: whichever owner is connecting or
+    /// syncing ends a wait for the network and runs a pass (§6.7).
+    pub(crate) fn network_changed(&self) {
+        self.waits.network_changed();
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncStatus> {

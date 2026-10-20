@@ -9,14 +9,14 @@ use coven_storage::Cooldown;
 use serde_json::json;
 use std::{sync::Arc, time::UNIX_EPOCH};
 
-struct Fixture {
+pub(crate) struct Fixture {
     _temporary: tempfile::TempDir,
     directory: StoreDir,
-    clock: Arc<FixedClock>,
+    pub(crate) clock: Arc<FixedClock>,
 }
 
 impl Fixture {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let temporary = tempfile::tempdir().unwrap();
         let directory = StoreDirectories::new(temporary.path().to_owned())
             .create_store_dir(StoreId(uuid::Uuid::from_u128(1)), &SequentialIds::new())
@@ -28,7 +28,7 @@ impl Fixture {
         }
     }
 
-    async fn open(&self) -> (Database, RetryWaits) {
+    pub(crate) async fn open(&self) -> (Database, RetryWaits) {
         let database = coven_database::DatabaseBuilder::new(self.directory.clone())
             .synced_tables(vec![])
             .migrations(vec![coven_database::Migration::addition(
@@ -43,7 +43,7 @@ impl Fixture {
         (database, waits)
     }
 
-    fn advance(&self, seconds: u64) {
+    pub(crate) fn advance(&self, seconds: u64) {
         self.clock
             .set(self.clock.now() + Duration::from_secs(seconds));
     }
@@ -51,7 +51,7 @@ impl Fixture {
 
 const JOIN: RetrySubject = RetrySubject::Join;
 
-async fn due(database: &Database, waits: &RetryWaits, subject: RetrySubject) -> bool {
+pub(crate) async fn due(database: &Database, waits: &RetryWaits, subject: RetrySubject) -> bool {
     let persisted = database.retry_wait(subject).await.unwrap();
     waits.due(subject, persisted.as_ref())
 }

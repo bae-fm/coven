@@ -749,6 +749,7 @@ fn storage_pending_retry_distinguishes_transient_failures_from_app_actions() {
                 retry(PendingReason::Storage {
                     provider: CloudProvider::S3,
                     failure,
+                    answered: true,
                 }),
                 expected,
                 "{failure:?}"

@@ -21,6 +21,14 @@ impl CovenHandle {
     pub fn sync_now(&self) {
         self.storage.sync_now();
     }
+    /// Tell coven the device's network changed: it became available, or
+    /// moved to another network. A backoff after an attempt that received
+    /// no provider response (`Offline`) ends and a pass runs now. Backoffs
+    /// after a provider's answer, and provider cooldowns, hold. Reports
+    /// coalesce as `sync_now` requests do.
+    pub fn network_changed(&self) {
+        self.storage.network_changed();
+    }
     /// Observe the current status and every subsequent status change.
     pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
         self.storage.subscribe()

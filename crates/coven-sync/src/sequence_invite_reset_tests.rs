@@ -76,6 +76,7 @@ async fn carried_account_revocation_reports_failure_and_survives_reopening() {
         PendingReason::Storage {
             provider: CloudProvider::Dropbox,
             failure: StorageFailure::PermissionDenied,
+            answered: false,
         }
     );
     let PendingSubject::Operation {

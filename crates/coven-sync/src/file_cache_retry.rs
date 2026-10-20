@@ -206,6 +206,7 @@ impl FilesInner {
                     Some(storage) => PendingReason::Storage {
                         provider: storage.config().provider(),
                         failure: error.failure(),
+                        answered: error.answered(),
                     },
                     None => PendingReason::NoStorage,
                 }

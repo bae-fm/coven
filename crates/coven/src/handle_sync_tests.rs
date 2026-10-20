@@ -657,3 +657,168 @@ async fn a_pass_losing_the_network_after_reaching_storage_is_offline() {
     );
     network.close().await;
 }
+
+/// The connection's persisted wait, once `ready` holds for it.
+async fn connection_wait(
+    device: &crate::tests::Device,
+    ready: impl Fn(&coven_database::RetryWait) -> bool,
+) -> coven_database::RetryWait {
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            if let Some(wait) = device.handle.test_connection_retry_wait().await {
+                if ready(&wait) {
+                    return wait;
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .expect("the connection's wait")
+}
+
+/// Ana's phone locked on a train: every pass found no network and backed off.
+/// Once it unlocks, `sync_now` still waits out the backoff, but the app's
+/// network report ends it and a pass runs at once (§6.7).
+#[tokio::test]
+async fn a_network_report_ends_an_offline_backoff_and_a_pass_runs() {
+    let network = Network::new(1).await;
+    let device = &network.devices[0];
+    // Waits end only when the test moves the fixed clock, which it never does.
+    network.polling.hold_waits();
+    device.storage.set_online(false);
+    attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
+    let wait = connection_wait(device, |_| true).await;
+    assert_eq!(wait.failures, 1);
+    assert!(!wait.wait.is_zero());
+    device.storage.set_online(true);
+    let requests = device.storage.request_trace().len();
+    for _ in 0..3 {
+        device.handle.sync_now();
+    }
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        device.storage.request_trace().len(),
+        requests,
+        "sync_now ran a pass inside the connection backoff"
+    );
+    let mut status = device.handle.subscribe_sync_status();
+    status.borrow_and_update();
+    device.handle.network_changed();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(device.handle.test_connection_retry_wait().await, None);
+    network.close().await;
+}
+
+/// A provider that answered asked for the wait: a new network changes
+/// neither its Retry-After nor the backoff after its answer (§6.7).
+#[tokio::test]
+async fn a_network_report_leaves_a_provider_cooldown_and_an_answered_backoff() {
+    let network = Network::new(1).await;
+    let device = &network.devices[0];
+    network.polling.hold_waits();
+    device
+        .storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::RateLimited,
+            retry_after: Some(200),
+            ..Faults::none()
+        })
+        .await;
+    attempt(device, |s| matches!(s, SyncStatus::Failed { .. })).await;
+    let wait = connection_wait(device, |_| true).await;
+    let requests = device.storage.request_trace().len();
+    device.handle.network_changed();
+    device.handle.network_changed();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        device.storage.request_trace().len(),
+        requests,
+        "a network report ended a provider's wait"
+    );
+    assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
+    network.close().await;
+}
+
+/// Reports while a pass runs coalesce into one: the pass fails for want of
+/// a network, the reports end the wait it failed into, and exactly one more
+/// pass runs. That pass, still offline, waits out its backoff (§6.7).
+#[tokio::test]
+async fn network_reports_during_a_pass_coalesce_into_one_more_pass() {
+    let network = Network::new(1).await;
+    let device = &network.devices[0];
+    network.polling.hold_waits();
+    let (read, reading) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    device
+        .storage
+        .hold_next_read(
+            coven_storage::ObjectPath::floor(device.store),
+            read,
+            resumed,
+        )
+        .await;
+    // The pass reads the floor, then claims a slot for this write.
+    insert(&device.handle, "offline").await;
+    reading.await.unwrap();
+    for _ in 0..3 {
+        device.handle.network_changed();
+    }
+    device.storage.set_online(false);
+    resume.send(()).unwrap();
+    // The first failure's wait ended; the second pass's failure waits.
+    let wait = connection_wait(device, |wait| wait.failures == 2).await;
+    assert!(!wait.wait.is_zero());
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
+    assert!(matches!(
+        &*device.handle.subscribe_sync_status().borrow(),
+        SyncStatus::Offline { .. }
+    ));
+    network.close().await;
+}
+
+/// Android stopped the app while Ana's phone was locked. The reopened store
+/// keeps the backoff, and her report still ends it while connecting: the
+/// connection's pending record says no provider answered (§6.7).
+#[tokio::test]
+async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
+    let mut network = Network::new(1).await;
+    network.polling.hold_waits();
+    let device = &network.devices[0];
+    device.storage.set_online(false);
+    attempt(device, |s| matches!(s, SyncStatus::Offline { .. })).await;
+    let wait = connection_wait(device, |_| true).await;
+    device.handle.close().await.unwrap();
+    device.storage.set_online(true);
+    let handle = network.reopen(device).open(device.store).await.unwrap();
+    network.devices[0].handle = handle;
+    let device = &network.devices[0];
+    let requests = device.storage.request_trace().len();
+    device.handle.start_sync().await.unwrap();
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        device.storage.request_trace().len(),
+        requests,
+        "reopening discarded the backoff"
+    );
+    assert_eq!(device.handle.test_connection_retry_wait().await, Some(wait));
+    let mut status = device.handle.subscribe_sync_status();
+    device.handle.network_changed();
+    tokio::time::timeout(
+        Duration::from_secs(5),
+        status.wait_for(|s| matches!(s, SyncStatus::Synced { .. })),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert_eq!(device.handle.test_connection_retry_wait().await, None);
+    network.close().await;
+}

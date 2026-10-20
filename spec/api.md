@@ -2490,6 +2490,18 @@ while let Ok(values) = lost.next().await {
   local write or `sync_now`, and every 30 seconds while idle, subject to
   connection backoff and provider cooldowns. Stopping and closing finish the
   active pass first.
+  - `sync_now` never shortens a backoff. `network_changed` ends one only when
+    its attempt got no provider response, which status shows as `Offline`.
+    Call it when the platform reports that the network became
+    available or changed, and when the app returns to the foreground or the
+    device wakes. It also requests a pass, so the app need not call both.
+    A backoff after a provider's answer, such as a server error, and a provider
+    cooldown hold: a new network changes neither
+    ([§6.7](coven.md#67-waiting-and-retrying)).
+  - The backoff ends durably: reopening after the report arms none. Reports
+    during a pass coalesce into one more pass. If the running pass fails for
+    want of a network, its wait ends too: the failure may have come before the
+    change. Reports while the connection is stopped apply when it starts.
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued
@@ -2541,7 +2553,8 @@ uploads, reads and operations. Their `StorageError` carries the native cause
 where one exists; setup adds the failed check or its distinct local failure
 without reclassifying storage failures. Missing member keys are always
 `StorageFailure::MemberKeysMissing`. Pending records retain this same
-classification when the native cause cannot survive closing the app.
+classification, and whether the provider answered, when the native cause cannot
+survive closing the app.
 
 Choosing a folder uses the handle's pending `authenticate` sign-in, so the app never
 needs tokens. `onedrive_root` starts at the person's default drive; `onedrive_folders`
@@ -3270,7 +3283,9 @@ pub enum PendingReason {
     KeyUnavailable { audience: Audience, key: KeyId },
     UpdateRequired(RequiredUpdate),
     NoStorage,
-    Storage { provider: CloudProvider, failure: StorageFailure },
+    /// `answered`: whether the provider answered the failed request, even
+    /// with an error. A `Network` failure nobody answered is `Offline` (E5).
+    Storage { provider: CloudProvider, failure: StorageFailure, answered: bool },
     Refused(Refusal),
     /// Consumed without effects; a permanent lower-slot cut-off (§14.1).
     WritesRefused { cutoff: Slot, cause: WriteCutoff },
@@ -3416,6 +3431,13 @@ impl CovenHandle {
     /// every 30 seconds, and at once after a local write. Requests coalesce
     /// while a pass or connection backoff is active; provider cooldowns hold.
     pub fn sync_now(&self);
+
+    /// The device's network changed: it became available, or moved to
+    /// another network. Ends a connection backoff whose last attempt got no
+    /// provider response (`Offline`) and syncs now, as `sync_now` does.
+    /// Backoffs after a provider's answer, and provider cooldowns, hold.
+    /// Reports coalesce as `sync_now` requests do (§6.7).
+    pub fn network_changed(&self);
 
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;

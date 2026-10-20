@@ -769,9 +769,33 @@ Unrelated commits and finished passes don't reset the delay.
   the wait, and can exceed five minutes. It is saved separately, at the scope it
   applies to, before any affected worker retries. It applies to every request it
   affects, including retries inside the provider's SDK and explicit retries from
-  the app. Restarting, `sync_now` and the app's retry never discard it.
+  the app. Restarting, `sync_now`, a network report and the app's retry never
+  discard it.
 - **A failed save.** If saving the delay fails, the work that started it fails and
   won't retry on its own.
+
+**A new network ends a wait for the network.** Ana's phone locks on a train.
+While it is locked, Android blocks the app's network, so every pass fails before
+it reaches storage, and the connection's backoff grows to five minutes. She
+unlocks the phone and the network is back, but the next pass is still up to five
+minutes away. Her app reports the change with `network_changed`
+([api.md E5](api.md#e5-storage-and-sync)), and the pass runs at once.
+
+- **Only a wait for the network ends.** The backoff keeps a device from
+  hammering a network it can't reach. Once the platform says the network
+  changed, waiting longer only delays a pass that can now succeed. So the report
+  ends a connection wait whose last attempt got no provider response. A wait
+  after an answer, such as a server error, and a provider's cooldown hold: a new
+  network changes neither.
+- **The backoff step stays.** If the next attempt still finds no network, it
+  waits the next delay, as after any failure. Each report adds at most one
+  attempt.
+- **The end is saved.** Coven saves the ended wait as T = now with W = 0, so
+  reopening arms nothing, whatever the wall clock reads. Keeping W would bring
+  the old wait back after the clock moved backward.
+- **Reports coalesce.** Reports during a pass, or before the connection handles
+  one, count as one. If the pass they arrived during fails for want of a
+  network, its wait ends too: the failure may have come before the change.
 
 ### 7. Order
 
@@ -5113,8 +5137,8 @@ rechecks (§20.5) and any container-existence check count here.
   minutes. Finishing a pass doesn't reset a delay. So in t seconds, n waits whose
   prerequisites nothing changes start at most n × (1 + ⌊t / d⌋) attempts, where d
   is the shortest of their delays. Each commit that changes a wait's prerequisite
-  can add one start, and so can each reopen while the wall clock hasn't moved
-  forward.
+  can add one start, and so can each network report (§6.7) and each reopen while
+  the wall clock hasn't moved forward.
 
 #### 21.3 How the costs are tested
 
@@ -6715,6 +6739,7 @@ Write-ups explain each model and state its assumptions:
 | Bookkeeping requests no pass, and no write is lost even when passes race | `write_never_lost`, `racing_passes`, `bookkeeping_retains_none` | `proofs/io/CovenIO/Wakes.lean` | §6.7 |
 | A wait is due when its delay passes or a commit changes the prerequisite it names; a commit changing another prerequisite leaves it waiting, and being woken doesn't reset the backoff. Every start after the first is paid for by a full delay or by such a commit, so a wait nothing changes starts at most 1 + ⌊t / d⌋ times in t seconds, and n of them at most n times that | `evidence_rate`, `unrelated_commit_ignored`, `evidence_keeps_backoff`, `unchanged_rate`, `unchanged_waits_rate` | `proofs/io/CovenIO/WaitingEvidence.lean` | §6.7, §21.2 |
 | A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |
+| A network report ends a connection wait for the network, at once or after the attempt it arrives during, and keeps its backoff; a wait after a provider's answer and a provider cooldown hold, and repeated reports coalesce. Each report adds at most one start. The ended wait, saved with no full wait left, reopens due under any wall clock; keeping its full wait would bring it back after the wall clock moved backward | `signal_ends_network_wait`, `signal_during_attempt_wakes`, `signal_keeps_backoff`, `signal_keeps_answered_wait`, `signal_keeps_cooldown`, `signals_coalesce`, `signal_rate`, `ended_reopens_due`, `kept_wait_returns` | `proofs/io/CovenIO/WaitingNetwork.lean` | §6.7, §21.2 |
 | The authored `read_through` and every queued original are preserved; a device's own earlier writes count as read | `authored_readThrough`, `catchup_preserves_originals`, `own_predecessor_is_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Given publication after the authored read, a device's own writes in number order, and authored reads that never decrease, slot order consumes every cause first; authored pasts are transitive | `ordered_application_causal`, `past_transitive` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Receivers that agree on a cause's slot agree whether it is in a write's past; later publication adds no intervening remote write | `receivers_agree`, `intervening_write_not_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |

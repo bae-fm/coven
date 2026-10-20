@@ -63,7 +63,8 @@ async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverab
             records[0].reason,
             PendingReason::Storage {
                 provider: coven_storage::CloudProvider::Dropbox,
-                failure
+                failure,
+                answered: false,
             }
         );
         assert_eq!(

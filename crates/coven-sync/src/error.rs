@@ -156,6 +156,7 @@ impl SyncError {
             SyncError::Storage(error) => PendingReason::Storage {
                 provider,
                 failure: error.failure(),
+                answered: error.answered(),
             },
             SyncError::Damaged(object) => PendingReason::Refused(object.failure.clone()),
             SyncError::UpdateRequired(update) => PendingReason::UpdateRequired(*update),

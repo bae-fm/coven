@@ -28,6 +28,7 @@ fn network() -> PendingReason {
     PendingReason::Storage {
         provider: coven_storage::CloudProvider::Dropbox,
         failure: StorageFailure::Network,
+        answered: false,
     }
 }
 

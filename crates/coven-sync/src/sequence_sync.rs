@@ -660,6 +660,7 @@ impl SequenceSync {
             SyncError::Storage(error) => PendingReason::Storage {
                 provider: self.storage.config().provider(),
                 failure: error.failure(),
+                answered: error.answered(),
             },
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
