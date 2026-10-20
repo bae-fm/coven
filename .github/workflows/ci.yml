@@ -25,16 +25,6 @@ concurrency:
   # A main run always finishes; GitHub still replaces a waiting run with the newest.
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
-# nextest gives each test a fresh process, whose glibc malloc starts with its
-# smallest trim threshold: a test allocating and freeing large buffers then
-# returns pages to the kernel on nearly every free and faults them back in.
-# coven-format's mutation tests spent most of their time there (about 45 of
-# 107 seconds in a Linux container, and over 400 on a runner). Never trimming
-# keeps that memory in the process; no test measures the process's resident
-# size. Other platforms' allocators ignore this.
-env:
-  GLIBC_TUNABLES: glibc.malloc.trim_threshold=1073741824:glibc.malloc.mmap_threshold=33554432
-
 jobs:
   check:
     strategy:

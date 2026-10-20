@@ -29,6 +29,21 @@ esac
 
 cd "$(dirname "$0")/.."
 
+# nextest gives each test a fresh process, whose glibc malloc starts with its
+# smallest trim threshold: a test allocating and freeing large buffers then
+# returns pages to the kernel on nearly every free and faults them back in.
+# coven-format's mutation tests spent most of their time there (45 of 107
+# seconds in a Linux container, over 400 on a CI runner). Never trimming keeps
+# that memory in the process; no test measures the process's resident size.
+# Other platforms' allocators ignore this.
+export GLIBC_TUNABLES=glibc.malloc.trim_threshold=1073741824:glibc.malloc.mmap_threshold=33554432
+# A #[tokio::test] holds its whole future on the test thread's stack. Three
+# of coven's tests need between 1.5 and 2 MiB of it at the test profile's
+# opt-level 1 on macOS, and built incrementally they overflowed the default
+# 2 MiB test thread on Linux and Windows. Test threads get a main thread's
+# 8 MiB.
+export RUST_MIN_STACK=8388608
+
 step() { echo ""; echo "── $1"; }
 
 # The workspace crates and proof packages this run checks. A full run checks
