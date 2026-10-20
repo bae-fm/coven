@@ -82,7 +82,16 @@ jobs:
       - uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest@0.9.143
+      # Tests make their stores under the system temporary directory. On
+      # Windows that is on C:, the runner's network-backed OS disk, where each
+      # fsync and file creation is slow; the runner's own temporary directory
+      # is on its local disk. The stores keep production's settings,
+      # synchronous writes included, so crash and durability tests check the
+      # same thing on a faster disk. Elsewhere TMP and TEMP go unread.
       - name: scripts/check.sh code
+        env:
+          TMP: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
         run: scripts/check.sh code
 
   proofs:
