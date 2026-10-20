@@ -458,14 +458,18 @@ async fn a_fill_preserves_eager_cancellation_and_retries_network_failures() {
     );
     assert!(file_records(&b).await.is_empty());
     b.files.evict_file(&file).await.unwrap();
-    a.storage
-        .set_faults(coven_storage::test_utils::Faults {
-            delay: Duration::from_millis(50),
-            ..coven_storage::test_utils::Faults::none()
-        })
-        .await;
-    // A newly observed version is eligible; cancel after its first request.
+    // A newly observed version is eligible; cancel while its first request
+    // is held.
     let second = a.uploaded("another", vec![73; CHUNK * 2]).await;
+    let (requested, request) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    a.storage
+        .hold_next_read(
+            coven_storage::ObjectPath::file(b.directory.id(), second.uploader(), second.id()),
+            requested,
+            resumed,
+        )
+        .await;
     for write in a.database.test_queued_writes().await.unwrap() {
         crate::tests::apply_write(&b.database, write).await.unwrap();
     }
@@ -473,12 +477,16 @@ async fn a_fill_preserves_eager_cancellation_and_retries_network_failures() {
         status.next().await.unwrap(),
         EagerCacheFillStatus::Downloading(_)
     ) {}
+    request.await.unwrap();
     // Cancellation commits before it is reported, with the set's coverage.
     b.files.cancel_eager_cache_fill().await.unwrap();
     assert!(matches!(
         b.database.eager_cache_fill_status().await.unwrap(),
         EagerCacheFillStatus::Cancelled(progress) if progress.files_total == 1
     ));
+    // Cancelling drops the held request, or releases it into a fill that
+    // stops before the file's next one.
+    let _ = resume.send(());
     while !matches!(
         status.next().await.unwrap(),
         EagerCacheFillStatus::Cancelled(_)
