@@ -208,7 +208,7 @@ async fn removing_one_device_keeps_the_persons_synced_entries() {
             .builder(StoreLayout::new(root.path().into()))
             .synced_tables(Vec::new())
             .migrations(Vec::new())
-            .clock(std::sync::Arc::new(crate::tests::PollingClock(
+            .clock(std::sync::Arc::new(crate::tests::PollingClock::new(
                 network.clock.clone(),
             )))
             .storage_connector(std::sync::Arc::new(phone.storage.for_device())),

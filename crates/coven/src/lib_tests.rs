@@ -72,6 +72,8 @@ pub(crate) struct Device {
 pub(crate) struct Network {
     root: tempfile::TempDir,
     pub(crate) clock: Arc<FixedClock>,
+    /// Every device's clock: the fixed clock, with waits shortened.
+    pub(crate) polling: Arc<PollingClock>,
     ids: IdSourceRef,
     /// The synced tables and migrations every device opens with.
     schema: (Vec<SyncedTable>, Vec<Migration>),
@@ -95,11 +97,10 @@ fn migrations() -> Vec<Migration> {
 fn builder(
     app: &TestCoven,
     layout: StoreLayout,
-    clock: ClockRef,
+    clock: Arc<PollingClock>,
     ids: IdSourceRef,
     storage: Arc<MemoryStorage>,
 ) -> CovenBuilder {
-    let clock = Arc::new(PollingClock(clock));
     app.builder(layout)
         .synced_tables(tables())
         .migrations(migrations())
@@ -107,33 +108,9 @@ fn builder(
         .id_source(ids)
         .storage_connector(storage)
 }
-/// Preserve the fixture's timestamps while polling without production delays:
-/// retry delays and cooldowns, up to five minutes, pass a thousand times
-/// faster; their timers, not the fixed clock, report them over. The
-/// 30-second idle interval keeps its length, so passes run when asked.
-#[cfg(test)]
-pub(crate) struct PollingClock(pub(crate) ClockRef);
-impl Clock for PollingClock {
-    fn now(&self) -> std::time::SystemTime {
-        self.0.now()
-    }
-    fn elapsed(&self) -> Duration {
-        self.0.elapsed()
-    }
-    fn sleep(
-        &self,
-        duration: Duration,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> {
-        let idle = Duration::from_secs(30);
-        Box::pin(tokio::time::sleep(
-            if duration != idle && duration <= Duration::from_secs(300) {
-                duration / 1000
-            } else {
-                duration
-            },
-        ))
-    }
-}
+#[path = "../tests/fixtures/polling_clock.rs"]
+mod polling_clock;
+pub(crate) use polling_clock::PollingClock;
 
 impl Network {
     pub(crate) async fn new(count: usize) -> Self {
@@ -154,6 +131,7 @@ impl Network {
         let app_dir = root.path().join("0");
         std::fs::create_dir(&app_dir).unwrap();
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
+        let polling = Arc::new(PollingClock::new(clock.clone()));
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
         let app = TestCoven::new();
         let directory = app
@@ -171,7 +149,7 @@ impl Network {
         let builder = builder(
             &app,
             StoreLayout::new(app_dir.clone()),
-            clock.clone(),
+            polling.clone(),
             ids.clone(),
             storage.clone(),
         )
@@ -215,6 +193,7 @@ impl Network {
             _sign_in: sign_in,
             root,
             clock,
+            polling,
             ids,
             schema: (tables, migrations),
             devices: vec![Device {
@@ -261,7 +240,7 @@ impl Network {
             builder(
                 &app,
                 layout.clone(),
-                self.clock.clone(),
+                self.polling.clone(),
                 self.ids.clone(),
                 storage.clone(),
             )
@@ -387,7 +366,7 @@ impl Network {
             device.handle = builder(
                 &device.app,
                 device.layout.clone(),
-                self.clock.clone(),
+                self.polling.clone(),
                 self.ids.clone(),
                 device.storage.clone(),
             )
@@ -427,7 +406,7 @@ impl Network {
         builder(
             &device.app,
             device.layout.clone(),
-            self.clock.clone(),
+            self.polling.clone(),
             self.ids.clone(),
             device.storage.clone(),
         )

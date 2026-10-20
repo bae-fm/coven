@@ -352,7 +352,9 @@ async fn removing_a_store_from_one_device_keeps_the_persons_synced_entries() {
                 .builder(StoreLayout::new(root.path().into()))
                 .synced_tables(Vec::new())
                 .migrations(Vec::new())
-                .clock(Arc::new(crate::tests::PollingClock(network.clock.clone())))
+                .clock(Arc::new(crate::tests::PollingClock::new(
+                    network.clock.clone(),
+                )))
                 .storage_connector(Arc::new(phone.storage.for_device())),
             &saved[0],
             None,
