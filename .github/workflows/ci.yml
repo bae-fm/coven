@@ -103,7 +103,8 @@ jobs:
               rm -f target/debug/deps/"$name"-* target/debug/deps/lib"$name"-*
           done
           rm -rf target/doc
-          du -sh target/debug/* target/debug/incremental/* ~/.cargo/registry 2>/dev/null | sort -h | tail -30
+          # du counts a file once, under the first argument holding it.
+          du -sh target/debug/incremental/* target/debug/* ~/.cargo/registry 2>/dev/null | sort -h | tail -30
       - name: Save the build
         if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@v5
