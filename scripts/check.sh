@@ -336,26 +336,40 @@ runner() {
 }
 
 # Run exactly the named ignored tests of one package: cargo flags, `--`, then
-# full test paths and test-harness flags. A bare filter would also run every
-# longer name containing it, which can need another runner; an --exact name
-# the binary lacks would run nothing, so each one must be listed.
+# full test paths, and `--nocapture` to show each one's output. They are built
+# with the whole workspace, as the code checks build it, so a run that checks
+# both, or restores CI's saved build, compiles them once. A test the package
+# lacks would run nothing, so each one must be listed.
 exact_ignored() {
-    local package=$1 flags=() listed test
+    local package=$1 flags=() tests=() output=() filter listed test
     shift
     while [ "$1" != -- ]; do
         flags+=("$1")
         shift
     done
     shift
-    listed=$(cargo test -p "$package" ${flags[@]+"${flags[@]}"} -- --list --ignored | tr -d '\r')
     for test in "$@"; do
-        case $test in --*) continue ;; esac
-        if ! printf '%s\n' "$listed" | grep -qxF "$test: test"; then
-            echo "the $package test binary is missing $test" >&2
+        case $test in
+            --nocapture) output=(--success-output immediate --failure-output immediate) ;;
+            --*)
+                echo "exact_ignored: unknown flag $test" >&2
+                exit 2
+                ;;
+            *) tests+=("$test") ;;
+        esac
+    done
+    filter="package($package) & ($(printf 'test(=%s) | ' "${tests[@]}"))"
+    filter="${filter% | )})"
+    listed=$(cargo nextest list --workspace ${flags[@]+"${flags[@]}"} --run-ignored only \
+        -E "$filter" --message-format oneline | tr -d '\r')
+    for test in "${tests[@]}"; do
+        if ! printf '%s\n' "$listed" | grep -qE " ${test//./\\.}\$"; then
+            echo "the $package tests are missing $test" >&2
             exit 1
         fi
     done
-    cargo test -p "$package" ${flags[@]+"${flags[@]}"} -- --ignored --exact "$@"
+    cargo nextest run --workspace ${flags[@]+"${flags[@]}"} --run-ignored only -E "$filter" \
+        --no-fail-fast ${output[@]+"${output[@]}"}
 }
 
 # Each differential runs when its model or the Rust crate it compares is selected.

@@ -116,9 +116,18 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: Swatinem/rust-cache@v2
+      # The differential tests run from the workspace's test binaries, the
+      # ones the Linux check builds, so main's latest saved Linux build serves
+      # this job too; it saves nothing of its own.
+      - name: Restore the build
+        uses: actions/cache/restore@v5
         with:
-          shared-key: coven-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}
+          path: *build_paths
+          key: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
+          restore-keys: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest@0.9.143
       # elan reads each proof's lean-toolchain the first time lake runs there;
       # the cache keeps those toolchains. The proofs themselves are built from
       # scratch every run (scripts/check.sh).
