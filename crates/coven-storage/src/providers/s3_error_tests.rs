@@ -35,8 +35,6 @@ async fn timeout_and_storage_full_responses_preserve_their_classification_and_ca
         ("OverQuota", 403, QuotaExceeded, false),
         ("QuotaExceeded", 403, QuotaExceeded, false),
         ("InsufficientStorage", 507, QuotaExceeded, false),
-        ("XMinioStorageFull", 507, QuotaExceeded, false),
-        ("XMinioStorageFull", 400, QuotaExceeded, false),
         ("UnknownStorageError", 507, QuotaExceeded, false),
         ("UnknownProviderError", 400, Refused, false),
         ("AccessDenied", 403, PermissionDenied, false),

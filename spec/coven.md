@@ -6267,10 +6267,10 @@ is read from the token itself. Because the key reaches its whole bucket, its
 member-side check requires the account's bucket listing to be refused.
 
 **RustFS.** Each key is a service account made through
-`/rustfs/admin/v3/add-service-account` with the member policy inline, as plain
-JSON; MinIO's `/minio/admin` alias expects madmin's encrypted bodies. Every
-member key's parent is one dedicated user, `coven`, created once with a random
-secret nobody keeps and granted `readwrite`. A service account's access is its
+`/rustfs/admin/v3/add-service-account`, RustFS's admin API, with the member
+policy inline in a plain JSON body. Every member key's parent is one dedicated
+user, `coven`, created once with a random secret nobody keeps and granted
+`readwrite`. A service account's access is its
 parent's intersected with its own policy. Deleting that parent would delete every
 member's key, so coven never deletes it. Each account takes the short name, with
 the description `<key name> member <member or invite id>`. Revocation calls

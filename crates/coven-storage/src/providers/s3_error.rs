@@ -101,7 +101,7 @@ fn s3_service_failure(
             | "IncorrectEndpoint"
             | "IllegalLocationConstraintException",
         ) => StorageFailure::RegionMismatch,
-        Some("OverQuota" | "QuotaExceeded" | "InsufficientStorage" | "XMinioStorageFull") => {
+        Some("OverQuota" | "QuotaExceeded" | "InsufficientStorage") => {
             StorageFailure::QuotaExceeded
         }
         Some("RequestTimeout") => StorageFailure::Network,

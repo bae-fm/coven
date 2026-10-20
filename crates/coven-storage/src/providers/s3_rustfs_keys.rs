@@ -1,10 +1,10 @@
 //! Member keys on RustFS (Appendix E.12): service accounts with the member policy inline,
-//! through `/rustfs/admin/v3`, which takes plain JSON where MinIO's
-//! `/minio/admin` alias expects madmin's encrypted bodies. Every member key is
-//! a service account of one dedicated parent user, `coven`, granted
-//! `readwrite`; a service account's access is its parent's intersected with
-//! its own policy. Deleting the parent would delete every member's key, so
-//! coven never deletes it. Revocation deletes the service account.
+//! made through RustFS's admin API at `/rustfs/admin/v3`, whose requests carry
+//! plain JSON bodies. Every member key is a service account of one dedicated
+//! parent user, `coven`, granted `readwrite`; a service account's access is
+//! its parent's intersected with its own policy. Deleting the parent would
+//! delete every member's key, so coven never deletes it. Revocation deletes
+//! the service account.
 use super::minting::{member_policy, AdminRequest, KeyMinter, Pending};
 use super::*;
 use crate::providers::s3_admin_query::{amz_date, authorization, SignedRequest};
