@@ -1,4 +1,5 @@
 //! Event-driven sequence passes with durable backoff and retained app wakes.
+use crate::pending_cause::Failure;
 use crate::{SequenceStatus, SequenceSync, SyncError, SyncFailure, SyncStatus};
 use coven_database::{DbError, RetrySubject};
 use std::{sync::Arc, time::Duration};
@@ -114,17 +115,52 @@ async fn pass(
 }
 
 /// What a failed pass shows: a blocked slot, an attempt that received no
-/// provider response, or the failure itself (E5).
+/// provider response, or the failure itself (E5). A blocked slot's error is
+/// logged when the slot or its reason changes.
 fn failed(sync: &SequenceSync, error: SyncError) -> SyncStatus {
-    if let SequenceStatus::Blocked(record) = &*sync.state.subscribe().borrow() {
-        if let crate::PendingSubject::Slot(slot) = record.subject {
-            return SyncStatus::Blocked {
-                slot,
-                reason: record.reason.clone(),
-            };
+    let blocked = match &*sync.state.subscribe().borrow() {
+        SequenceStatus::Blocked(record) => Some(record.as_ref().clone()),
+        SequenceStatus::Opening | SequenceStatus::Synced { .. } | SequenceStatus::Stopped(_) => {
+            None
         }
+    };
+    let Some(record) = blocked else {
+        return crate::connection_failure(error);
+    };
+    let crate::PendingSubject::Slot(slot) = record.subject else {
+        return crate::connection_failure(error);
+    };
+    let causes = sync.waits.causes();
+    let error = match error {
+        // A later pass stops at the block itself: the slot keeps the error
+        // the pass that blocked it returned.
+        SyncError::Pending(block) if *block == record => {
+            causes.failed(
+                &record.subject,
+                &record.reason,
+                Failure::Repeated(&SyncError::Pending(block)),
+            );
+            causes
+                .attach(vec![record.clone()])
+                .pop()
+                .and_then(|record| record.cause)
+        }
+        // The pass that blocked the slot returns the error that blocked it.
+        error => {
+            let cause = error.into_shared().1;
+            causes.failed(
+                &record.subject,
+                &record.reason,
+                Failure::Held(cause.clone()),
+            );
+            Some(cause)
+        }
+    };
+    SyncStatus::Blocked {
+        slot,
+        reason: record.reason,
+        error,
     }
-    crate::connection_failure(error)
 }
 
 async fn run(

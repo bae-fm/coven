@@ -3526,7 +3526,15 @@ pub enum SyncStatus {
     /// The pass reached its observed end; other subjects may still be pending.
     Synced { finished_at: SystemTime },
     /// This slot invokes §5.4's stuck-device rule.
-    Blocked { slot: Slot, reason: PendingReason },
+    /// `error` is the error that blocked the slot, with every cause below
+    /// it, while this process holds it; a device that opens already blocked
+    /// has none, since only the reason is saved. Coven logs it when the
+    /// blocked slot or its reason changes.
+    Blocked {
+        slot: Slot,
+        reason: PendingReason,
+        error: Option<Arc<dyn std::error::Error + Send + Sync>>,
+    },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed { error: SyncFailure },
 }

@@ -49,6 +49,10 @@ pub enum SyncStatus {
         slot: coven_merge::Slot,
         /// Why it cannot apply.
         reason: crate::PendingReason,
+        /// The error that blocked the slot, with every cause below it, while
+        /// this process holds it. A device that opens already blocked has
+        /// none: only the reason is saved.
+        error: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
     },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed {

@@ -174,9 +174,17 @@ async fn a_damaged_slot_shows_the_loop_blocked_on_it() {
     .unwrap()
     .clone();
     assert!(
-        matches!(shown, SyncStatus::Blocked { slot: blocked, reason: PendingReason::Refused(_) } if blocked.0 == slot),
+        matches!(&shown, SyncStatus::Blocked { slot: blocked, reason: PendingReason::Refused(_), .. } if blocked.0 == slot),
         "{shown:?}"
     );
+    // The status carries the error that blocked the slot.
+    let SyncStatus::Blocked {
+        error: Some(error), ..
+    } = &shown
+    else {
+        panic!("the blocking error was dropped: {shown:?}");
+    };
+    assert!(error.to_string().contains("damaged object"), "{error}");
     ben_loop.close().await.unwrap();
     for device in [&ana, &ben] {
         device.sync.database.close().await.unwrap();

@@ -865,7 +865,7 @@ async fn a_missing_reset_body_blocks_its_slot_and_applies_once_it_arrives() {
     .unwrap()
     .unwrap()
     .clone();
-    let SyncStatus::Blocked { slot, reason } = blocked else {
+    let SyncStatus::Blocked { slot, reason, .. } = blocked else {
         unreachable!()
     };
     assert!(matches!(

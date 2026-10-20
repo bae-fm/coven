@@ -24,6 +24,9 @@ pub(crate) enum Failure<'a> {
     /// An app call returns this error to its caller, which holds it; the
     /// record keeps no cause, so it never names an earlier failure's.
     Returned(&'a (dyn Error + 'static)),
+    /// Work stopped at this failure again, without the error that caused
+    /// it: the record keeps the error it holds for the same reason.
+    Repeated(&'a (dyn Error + 'static)),
 }
 
 /// Each subject's last recorded failure and, when held, its error. One
@@ -43,25 +46,31 @@ impl PendingCauses {
         self.held.lock().expect("pending causes poisoned")
     }
 
-    /// Record that `subject` failed with `reason`, keeping a held error as
-    /// its cause. Logs the failure when the subject's reason appears or
-    /// changes, at warn, or at debug for a wait, and returns whether it did. The error's text names every
-    /// cause with secrets and URLs already cut (coven-storage).
+    /// Record that `subject` failed with `reason`, and keep its error as
+    /// the record's cause as `failure` says. The failure is logged when the
+    /// subject's reason appears or changes: at warn, or at debug for a wait.
+    /// Returns whether it was. The error's text names every cause, with
+    /// secrets and URLs already cut (coven-storage).
     pub(crate) fn failed(
         &self,
         subject: &PendingSubject,
         reason: &PendingReason,
         failure: Failure<'_>,
     ) -> bool {
+        let mut held = self.lock();
+        let kept = held
+            .get(subject)
+            .filter(|recorded| recorded.reason == *reason)
+            .map(|recorded| recorded.cause.clone());
+        let changed = kept.is_none();
         let (error, cause): (&(dyn Error + 'static), _) = match &failure {
             Failure::Held(cause) => (cause.as_ref(), Some(cause.clone())),
             Failure::Returned(error) => (*error, None),
+            Failure::Repeated(error) => (*error, kept.flatten()),
         };
-        let mut held = self.lock();
-        let changed = held
-            .get(subject)
-            .is_none_or(|recorded| recorded.reason != *reason);
-        if changed && reason.waits() {
+        // A slot's record blocks the whole device (§5.4), whatever it waits for.
+        let waits = reason.waits() && !matches!(subject, PendingSubject::Slot(_));
+        if changed && waits {
             tracing::debug!(?subject, ?reason, "pending work waits: {error}");
         } else if changed {
             tracing::warn!(?subject, ?reason, "pending work failed: {error}");
