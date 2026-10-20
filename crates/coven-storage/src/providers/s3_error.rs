@@ -6,11 +6,16 @@ pub(super) fn s3_error<E>(error: SdkError<E>) -> StorageError
 where
     E: ProvideErrorMetadata + std::error::Error + Send + Sync + 'static,
 {
-    // A local send refusal is not a provider network or configuration failure.
+    // A local send refusal, such as the publication gate's or the provider
+    // cooldown's from an interceptor, is not a provider network or
+    // configuration failure. The SDK's own text is only "dispatch failure":
+    // the refusal is a cause further down, so the whole chain prints.
     let mut cause: &(dyn std::error::Error + 'static) = &error;
     loop {
         if let Some(refusal) = cause.downcast_ref::<StorageError>() {
-            return refusal.failure().with_source(error);
+            return refusal
+                .failure()
+                .with_source(crate::providers::error_text::WithCauses(error));
         }
         match cause.source() {
             Some(source) => cause = source,

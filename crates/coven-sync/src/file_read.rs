@@ -406,6 +406,7 @@ impl UploadedFile {
     fn integrity(&self) -> FileReadError {
         FileReadError::Integrity {
             id: self.file.id().to_string(),
+            cause: None,
         }
     }
     fn check_range(&self, offset: u64, len: u64) -> Result<(), FileReadError> {
@@ -484,7 +485,7 @@ impl UploadedFile {
             let plain = self
                 .header
                 .open_chunk(&self.key, self.path.as_str(), first, &bytes)
-                .map_err(|_| self.integrity())?;
+                .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
             return Ok((
                 first,
                 vec![OpenedChunk {
@@ -552,7 +553,7 @@ impl UploadedFile {
             let opened = self
                 .header
                 .open_chunk(&self.key, self.path.as_str(), index, sealed)
-                .map_err(|_| self.integrity())?;
+                .map_err(|error| FileReadError::chunk(self.file.id().to_string(), error))?;
             plain.push(OpenedChunk {
                 plaintext: opened,
                 ciphertext: sealed.to_vec(),
@@ -624,6 +625,7 @@ async fn fetch(
         Err(error) if error.failure() == coven_storage::StorageFailure::InvalidRange => {
             return Err(FileReadError::Integrity {
                 id: file.id().to_string(),
+                cause: None,
             })
         }
         Err(error) => return Err(error.into()),
@@ -635,6 +637,7 @@ async fn fetch(
     if bytes.len() as u64 != end - start {
         return Err(FileReadError::Integrity {
             id: file.id().to_string(),
+            cause: None,
         });
     }
     Ok(bytes)

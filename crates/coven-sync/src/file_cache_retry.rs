@@ -81,8 +81,13 @@ impl FilesInner {
         };
         let result = result.map_err(|error| match error {
             TransferError::File(error) => error,
-            TransferError::Refused(_) => FileReadError::Integrity {
+            // A refused transfer keeps its authentication failure.
+            TransferError::Refused(refusal) => FileReadError::Integrity {
                 id: file.id().to_string(),
+                cause: match refusal {
+                    crate::Refusal::Decryption { cause } => cause,
+                    _ => None,
+                },
             },
         });
         if !recorded {

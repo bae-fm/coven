@@ -3946,7 +3946,9 @@ pub enum FileReadError {
     UserFileChanged { id: String, path: PathBuf },
     /// A chunk, a copy on this device, or the object at the fixed path failed
     /// its check; a stored object of the wrong size is damage, not absence (§17.4).
-    Integrity { id: String },
+    /// `cause` is the authentication failure when a chunk didn't open; a size,
+    /// layout or hash disagreement has none.
+    Integrity { id: String, cause: Option<Arc<CryptoError>> },
     /// The range lies outside the file.
     RangeOutOfBounds { id: String, offset: u64, end: u64, size: u64 },
     /// Storage failed, including Network when required chunks aren't cached.

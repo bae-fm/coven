@@ -56,6 +56,10 @@ pub enum FileReadError {
     Integrity {
         /// The file's fixed object id.
         id: String,
+        /// The authentication failure, when a chunk failed to open. A size,
+        /// layout or hash disagreement has no cause beyond the comparison.
+        #[source]
+        cause: Option<std::sync::Arc<coven_crypto::CryptoError>>,
     },
     /// The requested range is outside the file.
     #[error("file {id} range {offset}..{end} exceeds {size}")]
@@ -91,12 +95,26 @@ impl From<DbError> for FileReadError {
         }
     }
 }
+impl FileReadError {
+    /// A chunk of file `id` that did not seal or open. An authentication
+    /// failure keeps its crypto error. A chunk length outside the header's
+    /// layout is the layout's disagreement, which the comparison states.
+    pub(crate) fn chunk(id: String, error: coven_format::file::FileError) -> Self {
+        Self::Integrity {
+            id,
+            cause: match error {
+                coven_format::file::FileError::Crypto(error) => Some(std::sync::Arc::new(error)),
+                coven_format::file::FileError::Format(_) => None,
+            },
+        }
+    }
+}
 impl From<LocalFileError> for FileReadError {
     fn from(error: LocalFileError) -> Self {
         match error {
             LocalFileError::UserFileMissing { id, path } => Self::UserFileMissing { id, path },
             LocalFileError::UserFileChanged { id, path } => Self::UserFileChanged { id, path },
-            LocalFileError::Integrity { id } => Self::Integrity { id },
+            LocalFileError::Integrity { id } => Self::Integrity { id, cause: None },
             LocalFileError::RangeOutOfBounds {
                 id,
                 offset,

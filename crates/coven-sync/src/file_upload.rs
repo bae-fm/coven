@@ -205,6 +205,7 @@ impl FilesInner {
             .encrypted_size()
             .map_err(|_| FileReadError::Integrity {
                 id: item.file.id().to_string(),
+                cause: None,
             })?;
         let mut transfer = FileTransfer {
             owner: self,
@@ -326,9 +327,7 @@ impl FileTransfer<'_> {
             // Re-reading after checking would permit a source change between them.
             let sealed = header
                 .seal_chunk(self.key, self.path.as_str(), index, &plain)
-                .map_err(|_| FileReadError::Integrity {
-                    id: self.item.file.id().to_string(),
-                })?;
+                .map_err(|error| FileReadError::chunk(self.item.file.id().to_string(), error))?;
             let start = (position - chunk.offset) as usize;
             let count = (end - position).min((sealed.len() - start) as u64) as usize;
             bytes.extend_from_slice(&sealed[start..start + count]);

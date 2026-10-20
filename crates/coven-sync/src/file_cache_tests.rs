@@ -167,9 +167,10 @@ async fn explicit_authentication_failure_is_a_permanent_file_refusal() {
     let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = f.uploaded("damaged", vec![20; CHUNK]).await;
     f.storage.corrupt_byte(&f.path(&file), 15).await.unwrap();
+    // The error keeps the chunk's authentication failure.
     assert!(matches!(
         f.files.read_file(&file).await,
-        Err(FileReadError::Integrity { .. })
+        Err(FileReadError::Integrity { cause: Some(_), .. })
     ));
     assert!(matches!(
         file_records(&f).await.as_slice(),

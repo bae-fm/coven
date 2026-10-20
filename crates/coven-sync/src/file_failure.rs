@@ -114,8 +114,10 @@ impl FilesInner {
             (Original, FileReadError::Integrity { .. }) => PendingReason::FileUnavailable(
                 FileMissingReason::Source(FileSourceFailure::Integrity),
             ),
-            (Stored, FileReadError::Integrity { .. }) => {
-                PendingReason::Refused(crate::Refusal::Decryption { cause: None })
+            (Stored, FileReadError::Integrity { cause, .. }) => {
+                PendingReason::Refused(crate::Refusal::Decryption {
+                    cause: cause.clone(),
+                })
             }
             (Stored, FileReadError::Uploading { .. }) => {
                 PendingReason::Waits(Prerequisite::Object(coven_storage::ObjectPath::file(

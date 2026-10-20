@@ -4231,10 +4231,12 @@ read, never a refusal.
 
 - Calls and pending records use the same `Refusal` variant. A call keeps the
   native error; a durable record keeps its category. File integrity failures are
-  the exception: the file API returns `FileReadError::Integrity { id }` for failed
-  authentication or content checks, without a native cause. The pending record
-  still distinguishes `Refused(Decryption)` from `Refused(ContentHash)`. This lets
-  the app handle both failures alike while pending work preserves the reason.
+  the exception: the file API returns `FileReadError::Integrity` for failed
+  authentication or content checks alike. It keeps the authentication failure
+  when a chunk didn't open, and so does the pending record's
+  `Refused(Decryption)` in the process that met it. The pending record still
+  distinguishes `Refused(Decryption)` from `Refused(ContentHash)`. This lets the
+  app handle both failures alike while pending work preserves the reason.
 - An applicable coven update permits one recheck of a refused object. Reopening
   the same version doesn't repeat it.
 - A refused slot stops the device under §5.4's rule. No later floor, reset or

@@ -142,12 +142,14 @@ pub(crate) fn complete(file: &FileRef, object: &StoredObject) -> Result<(), File
         .encrypted_size()
         .map_err(|_| FileReadError::Integrity {
             id: file.id().to_string(),
+            cause: None,
         })?;
     if object.size == expected {
         Ok(())
     } else {
         Err(FileReadError::Integrity {
             id: file.id().to_string(),
+            cause: None,
         })
     }
 }

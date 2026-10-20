@@ -39,9 +39,14 @@ async fn the_sdk_checks_again_at_transmission_and_preserves_the_local_refusal() 
         Arc::new(crate::TransferBudget::new(crate::TransferLimits::default())),
     );
     let path = ObjectPath::slot(crate::test_utils::STORE_ID, std::num::NonZeroU64::MIN);
-    assert_eq!(
-        storage.create(&path, b"entry").await.unwrap_err().failure(),
-        StorageFailure::CatchUpRequired
+    let error = storage.create(&path, b"entry").await.unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::CatchUpRequired);
+    // The text reaches the refusal below the SDK's "dispatch failure".
+    let text = error.to_string();
+    assert!(
+        text.starts_with("CatchUpRequired: dispatch failure: ")
+            && text.ends_with("interceptor encountered an error: CatchUpRequired"),
+        "{text}"
     );
     assert_eq!(gate.0.load(Ordering::SeqCst), 2);
     assert_eq!(requests.load(Ordering::SeqCst), 0);
