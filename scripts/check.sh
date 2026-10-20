@@ -37,12 +37,6 @@ cd "$(dirname "$0")/.."
 # that memory in the process; no test measures the process's resident size.
 # Other platforms' allocators ignore this.
 export GLIBC_TUNABLES=glibc.malloc.trim_threshold=1073741824:glibc.malloc.mmap_threshold=33554432
-# A #[tokio::test] holds its whole future on the test thread's stack. Three
-# of coven's tests need between 1.5 and 2 MiB of it at the test profile's
-# opt-level 1 on macOS, and built incrementally they overflowed the default
-# 2 MiB test thread on Linux and Windows. Test threads get a main thread's
-# 8 MiB.
-export RUST_MIN_STACK=8388608
 
 step() { echo ""; echo "── $1"; }
 
