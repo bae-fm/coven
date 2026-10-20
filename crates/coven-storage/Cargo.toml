@@ -19,12 +19,13 @@ url = { workspace = true, features = ["serde"] }
 uuid.workspace = true
 tracing.workspace = true
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }
+http.workspace = true
 oauth2.workspace = true
 open.workspace = true
-aws-sdk-s3 = { workspace = true, features = ["rt-tokio", "default-https-client"] }
+aws-sdk-s3 = { workspace = true, features = ["rt-tokio"] }
 aws-credential-types.workspace = true
 aws-smithy-async.workspace = true
-aws-smithy-runtime-api.workspace = true
+aws-smithy-runtime-api = { workspace = true, features = ["client", "http-1x"] }
 hex.workspace = true
 base64.workspace = true
 xmlparser.workspace = true

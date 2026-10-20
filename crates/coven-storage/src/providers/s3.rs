@@ -3,7 +3,9 @@ use crate::session::{S3Part, SessionState};
 use crate::*;
 use async_trait::async_trait;
 use aws_sdk_s3::{
-    config::{Region, RequestChecksumCalculation, ResponseChecksumValidation},
+    config::{
+        timeout::TimeoutConfig, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+    },
     error::ProvideErrorMetadata,
     primitives::ByteStream,
     types::{CompletedMultipartUpload, CompletedPart},
@@ -48,6 +50,8 @@ mod metadata;
 mod read;
 #[path = "s3_restart.rs"]
 mod restart;
+#[path = "s3_http.rs"]
+mod transport;
 pub(crate) use detect::detect;
 #[path = "s3_gcs_keys.rs"]
 mod gcs_keys;
@@ -165,6 +169,10 @@ impl S3Storage {
         let signing = clock::SigningClock::new(clock);
         let mut builder = aws_sdk_s3::config::Builder::new()
             .behavior_version_latest()
+            .http_client(transport::S3HttpClient::new()?)
+            // The HTTP client's own request limit is the only timeout, as for
+            // every provider; the SDK passes it no settings of its own.
+            .timeout_config(TimeoutConfig::disabled())
             .region(Region::new(region.clone()))
             .credentials_provider(credentials.clone())
             .identity_cache(aws_sdk_s3::config::IdentityCache::no_cache())

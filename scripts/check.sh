@@ -137,6 +137,9 @@ code_checks() {
     step "owner-construction-check: Appendix F.1 dependencies, F.2 and F.3 capabilities and owners, F.5 conventions"
     cargo run --quiet -p owner-construction-check -- .
 
+    step "cargo deny check bans: the crates Appendix F.1 refuses"
+    cargo deny check bans
+
     step "cargo fmt --check"
     cargo fmt --all --check
 

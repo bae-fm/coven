@@ -6452,6 +6452,12 @@ document:
   `coven-foundation`; each concept has one type.
 - Each external dependency's version is set once, in the workspace, and crates
   name only the features they need.
+- Every HTTPS request, S3's SDK included, goes through a reqwest client that
+  one function builds, and it checks certificates with the platform's own
+  verifier. So coven trusts what the device trusts, on every platform. A crate
+  that reads a root list itself is refused in `deny.toml`: on Android native
+  code can read no root list, and the AWS SDK's own client panicked there,
+  finding none.
 
 ### F.2 Capabilities
 
@@ -6567,7 +6573,8 @@ One script runs every check. CI runs the code checks on every platform, and the
 Lean proofs once, on Linux, since a proof checks the same on any platform.
 
 1. Formatting, and clippy with warnings denied.
-2. The dependency rules of F.1.
+2. The dependency rules of F.1, with `cargo deny check bans` for the crates
+   `deny.toml` refuses.
 3. The rules of F.2 and F.3, by a checker that reads the syntax tree of every
    crate, including inside macro calls, against the policy file.
 4. The checker's own guard tests: every file, owner and composition root the

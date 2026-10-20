@@ -14,6 +14,7 @@ on:
       - "Cargo.toml"
       - "Cargo.lock"
       - "clippy.toml"
+      - "deny.toml"
       - "rust-toolchain.toml"
       - "spec/**"
       - ".github/workflows/ci.yml"
@@ -72,7 +73,7 @@ jobs:
           restore-keys: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-nextest@0.9.143
+          tool: cargo-nextest@0.9.143,cargo-deny@0.19.9
       # Tests make their stores under the system temporary directory. On
       # Windows that is on C:, the runner's OS disk, where file creation and
       # fsync are several times slower than on D:, which holds the runner's

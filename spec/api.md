@@ -193,6 +193,16 @@ pub enum Audience {
   Apple's CloudKit framework through `objc2-cloud-kit`. Native failures retain
   their cause in `StorageError::Provider`. On other platforms, setup returns
   `StorageFailure::ProviderUnavailable`.
+- Dropbox, OneDrive and S3 are reached over HTTPS through clients built one
+  way, which check each server's certificate with the platform's own verifier
+  (`rustls-platform-verifier`). So coven trusts what the device trusts, the
+  same for every provider ([Appendix F.1](coven.md#f1-crates)). A verifier that
+  cannot start is `StorageFailure::InvalidConfiguration`.
+- On Android the verifier asks the JVM, so the app initializes it before any
+  storage call: it passes its `Context` to
+  `rustls_platform_verifier::android::init_with_env` and packages the
+  verifier's Android classes. Coven cannot tell beforehand that this was
+  skipped; the first HTTPS connection then panics inside the verifier.
 
 ```rust
 /// A store's UUID, independent of its name and location (E1).
