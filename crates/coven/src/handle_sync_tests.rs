@@ -452,10 +452,18 @@ async fn a_refused_rotation_is_reported_until_it_retries_itself() {
     let network = Network::new(2).await;
     let owner = &network.devices[0];
     let rotation = refuse_rotation(&network, StorageFailure::QuotaExceeded, 507).await;
+    // On the polling clock the rotation's first retry follows its refusal by
+    // a millisecond and replaces the report before a busy test can see it.
+    // Its waits now end when the test moves the fixed clock.
+    network.polling.hold_waits();
     let mut status = owner.handle.subscribe_sync_status();
     owner.handle.sync_now();
     rotation_failed(&mut status).await;
     owner.storage.set_faults(Faults::none()).await;
+    // The first retry waits a second.
+    network
+        .clock
+        .set(network.clock.now() + Duration::from_secs(1));
     tokio::time::timeout(Duration::from_secs(15), async {
         owner.handle.sync_now();
         loop {

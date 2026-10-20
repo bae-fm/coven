@@ -284,7 +284,10 @@ impl CovenHandle {
     }
     /// Reload this device from snapshots, retaining and replaying its waiting writes (§19.2).
     pub async fn reload_from_snapshot(&self) -> Result<(), OperationError> {
-        self.storage.reload_from_snapshot().await
+        // An operation's state runs to tens of KiB; boxed, the future the
+        // app holds stays small (application_api_tests bounds it). The other
+        // operations below are boxed for the same reason.
+        Box::pin(self.storage.reload_from_snapshot()).await
     }
     /// Reset the store audience from this device as an admin, then reload locally (§19.4).
     pub async fn reset_store(&self) -> Result<(), SyncError> {
@@ -296,7 +299,7 @@ impl CovenHandle {
         &self,
         operation: OperationId,
     ) -> Result<(), OperationError> {
-        self.storage.retry_pending_operation(operation).await
+        Box::pin(self.storage.retry_pending_operation(operation)).await
     }
     /// Fixes a fresh member id or an existing active replacement target, as
     /// an admin, then shares access and creates an invitation expiring after a
@@ -306,7 +309,7 @@ impl CovenHandle {
         target: InviteTarget,
         access: InviteAccess,
     ) -> Result<Invite, SyncError> {
-        self.storage.create_invite(target, access).await
+        Box::pin(self.storage.create_invite(target, access)).await
     }
     /// Checked join requests, starting with the current list.
     pub fn subscribe_join_requests(&self) -> tokio::sync::watch::Receiver<Vec<JoinRequest>> {
@@ -314,15 +317,15 @@ impl CovenHandle {
     }
     /// Approve the exact request shown by the subscription.
     pub async fn approve_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        self.storage.approve_join_request(request).await
+        Box::pin(self.storage.approve_join_request(request)).await
     }
     /// Decline a request and revoke its invitation's access.
     pub async fn decline_join_request(&self, request: &JoinRequest) -> Result<(), SyncError> {
-        self.storage.decline_join_request(request).await
+        Box::pin(self.storage.decline_join_request(request)).await
     }
     /// Cancel an unsettled invitation and revoke its access.
     pub async fn cancel_invite(&self, invite: &InviteId) -> Result<(), SyncError> {
-        self.storage.cancel_invite(*invite).await
+        Box::pin(self.storage.cancel_invite(*invite)).await
     }
     /// Circle calls borrowing this store's operation owner.
     pub fn circles(&self) -> Circles<'_> {

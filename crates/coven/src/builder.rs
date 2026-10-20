@@ -208,7 +208,7 @@ impl CovenBuilder {
         store: StoreId,
         device_name: &str,
     ) -> Result<CovenHandle, BootstrapError> {
-        bootstrap::reset_device(self, store, device_name).await
+        Box::pin(bootstrap::reset_device(self, store, device_name)).await
     }
 
     /// Restore this device's installation of `store` from the person's
@@ -231,7 +231,7 @@ impl CovenBuilder {
         on_status: impl Fn(BootstrapStatus),
         cancel: &tokio::sync::watch::Receiver<bool>,
     ) -> Result<CovenHandle, BootstrapError> {
-        bootstrap::restore_device(
+        Box::pin(bootstrap::restore_device(
             self,
             store,
             code,
@@ -239,7 +239,7 @@ impl CovenBuilder {
             device_name,
             on_status,
             cancel,
-        )
+        ))
         .await
     }
 

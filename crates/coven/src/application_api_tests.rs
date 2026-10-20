@@ -183,3 +183,142 @@ fn app_tests_can_find_open_files_and_assert_they_are_released() {
     drop(file);
     assert_no_open_files_under(directory.path());
 }
+
+/// What an app awaits from a call that bootstraps a device or runs one of
+/// coven's operations stays small: the work under it reaches tens of KiB, and
+/// each such call holds that on the heap. An app's own future embeds these
+/// calls' futures, and a runtime polls them on 2 MiB worker threads. The bound
+/// is 8 KiB, over twice the largest of them (`open`, 3 KiB) and under half of
+/// any unboxed operation (16–25 KiB).
+#[test]
+fn bootstrap_and_operation_futures_stay_small() {
+    use crate::{
+        BootstrapStatus, CovenBuilder, CovenHandle, InviteAccess, InviteId, InviteTarget,
+        JoinRequest, MemberId, MemberPublicKeys, OperationId, S3Credentials, SavedRestoreCode,
+        StoreId,
+    };
+    use std::future::Future;
+    use tokio::sync::watch::Receiver;
+
+    /// The size of the future `_call` returns, without calling it.
+    fn size<A, F: Future>(_call: impl FnOnce(A) -> F) -> usize {
+        std::mem::size_of::<F>()
+    }
+    type Status = fn(BootstrapStatus);
+    let sizes = [
+        (
+            "restore_from_code",
+            size(
+                |(b, c, s, d, o, x): (
+                    CovenBuilder,
+                    &'static str,
+                    Option<S3Credentials>,
+                    &'static str,
+                    Status,
+                    &'static Receiver<bool>,
+                )| crate::restore_from_code(b, c, s, d, o, x),
+            ),
+        ),
+        (
+            "restore_from_keychain",
+            size(
+                |(b, c, s, d, o, x): (
+                    CovenBuilder,
+                    &'static SavedRestoreCode,
+                    Option<S3Credentials>,
+                    &'static str,
+                    Status,
+                    &'static Receiver<bool>,
+                )| crate::restore_from_keychain(b, c, s, d, o, x),
+            ),
+        ),
+        (
+            "join_with_invite",
+            size(
+                |(b, c, d, o, x): (
+                    CovenBuilder,
+                    &'static str,
+                    &'static str,
+                    Status,
+                    &'static Receiver<bool>,
+                )| crate::join_with_invite(b, c, d, o, x),
+            ),
+        ),
+        (
+            "create_store",
+            size(|(b, n): (CovenBuilder, &'static str)| b.create_store(n)),
+        ),
+        ("open", size(|(b, s): (CovenBuilder, StoreId)| b.open(s))),
+        (
+            "open_read_only",
+            size(|(b, s): (CovenBuilder, StoreId)| b.open_read_only(s)),
+        ),
+        (
+            "reset_device",
+            size(|(b, s, d): (CovenBuilder, StoreId, &'static str)| b.reset_device(s, d)),
+        ),
+        (
+            "restore_device",
+            size(
+                |(b, s, c, k, d, o, x): (
+                    CovenBuilder,
+                    StoreId,
+                    &'static str,
+                    Option<S3Credentials>,
+                    &'static str,
+                    Status,
+                    &'static Receiver<bool>,
+                )| b.restore_device(s, c, k, d, o, x),
+            ),
+        ),
+        (
+            "create_invite",
+            size(
+                |(h, t, a): (&'static CovenHandle, InviteTarget, InviteAccess)| {
+                    h.create_invite(t, a)
+                },
+            ),
+        ),
+        (
+            "approve_join_request",
+            size(|(h, r): (&'static CovenHandle, &'static JoinRequest)| h.approve_join_request(r)),
+        ),
+        (
+            "decline_join_request",
+            size(|(h, r): (&'static CovenHandle, &'static JoinRequest)| h.decline_join_request(r)),
+        ),
+        (
+            "cancel_invite",
+            size(|(h, i): (&'static CovenHandle, &'static InviteId)| h.cancel_invite(i)),
+        ),
+        (
+            "retry_pending_operation",
+            size(|(h, o): (&'static CovenHandle, OperationId)| h.retry_pending_operation(o)),
+        ),
+        (
+            "reload_from_snapshot",
+            size(|h: &'static CovenHandle| h.reload_from_snapshot()),
+        ),
+        (
+            "reset_store",
+            size(|h: &'static CovenHandle| h.reset_store()),
+        ),
+        (
+            "replace_member_keys",
+            size(|h: &'static CovenHandle| h.replace_member_keys()),
+        ),
+        (
+            "replace_member_keys_for",
+            size(
+                |(h, m, k): (&'static CovenHandle, &'static MemberId, MemberPublicKeys)| {
+                    h.replace_member_keys_for(m, k)
+                },
+            ),
+        ),
+    ];
+    let large: Vec<_> = sizes
+        .into_iter()
+        .filter(|(_, size)| *size > 8 * 1024)
+        .collect();
+    assert!(large.is_empty(), "futures over 8 KiB: {large:?}");
+}

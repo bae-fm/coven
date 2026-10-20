@@ -118,7 +118,7 @@ pub async fn observe_file(
         metadata,
         modified_at,
     };
-    let mut buffer = [0; 64 * 1024];
+    let mut buffer = vec![0; 64 * 1024];
     let mut size = 0u64;
     loop {
         let read = file

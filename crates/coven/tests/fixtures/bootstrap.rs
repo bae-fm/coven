@@ -163,7 +163,9 @@ impl Installation {
             .with_keychain(self.keychain.clone())
             .synced_tables(tables())
             .migrations(migrations())
-            .clock(Arc::new(crate::tests::PollingClock(owner.clock.clone())))
+            .clock(Arc::new(crate::tests::PollingClock::new(
+                owner.clock.clone(),
+            )))
             .storage_connector(storage)
     }
 

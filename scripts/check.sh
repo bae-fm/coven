@@ -29,6 +29,15 @@ esac
 
 cd "$(dirname "$0")/.."
 
+# nextest gives each test a fresh process, whose glibc malloc starts with its
+# smallest trim threshold: a test allocating and freeing large buffers then
+# returns pages to the kernel on nearly every free and faults them back in.
+# coven-format's mutation tests spent most of their time there (45 of 107
+# seconds in a Linux container, over 400 on a CI runner). Never trimming keeps
+# that memory in the process; no test measures the process's resident size.
+# Other platforms' allocators ignore this.
+export GLIBC_TUNABLES=glibc.malloc.trim_threshold=1073741824:glibc.malloc.mmap_threshold=33554432
+
 step() { echo ""; echo "── $1"; }
 
 # The workspace crates and proof packages this run checks. A full run checks
@@ -154,13 +163,102 @@ code_checks() {
     # shellcheck disable=SC2086
     cargo check $packages
 
-    step "cargo test --all-features"
+    # nextest runs every test binary's tests side by side, each in its own
+    # process; its set is cargo test's, less the doctests run after it.
+    step "cargo nextest run --all-features"
     # shellcheck disable=SC2086
-    cargo test $packages --all-features
+    cargo nextest run $packages --all-features --no-fail-fast
 
-    step "cargo test --no-default-features"
+    step "cargo test --doc --all-features"
     # shellcheck disable=SC2086
-    cargo test $packages --no-default-features
+    cargo test $packages --all-features --doc
+
+    # A crate's features only ever add code, so the pass above already runs
+    # everything its build without them would, except what that build alone
+    # compiles. Those crates are tested again without their features: beside
+    # the others when no member turns those features on, so only they rebuild;
+    # otherwise on their own, since a dependent's feature list would turn them
+    # back on.
+    local passes crate tests built together=() filters=()
+    passes=$(feature_off_tests)
+    while read -r crate tests built; do
+        [ -n "$crate" ] && crate_selected "$crate" || continue
+        if [ "$built" = together ]; then
+            together+=("$crate")
+            if [ "$tests" = all ]; then
+                filters+=("package($crate)")
+            fi
+            continue
+        fi
+        if [ "$tests" = all ]; then
+            step "cargo nextest run -p $crate --no-default-features"
+            cargo nextest run -p "$crate" --no-default-features --no-fail-fast
+        fi
+        step "cargo test -p $crate --no-default-features --doc"
+        cargo test -p "$crate" --no-default-features --doc
+    done <<< "$passes"
+    if [ ${#together[@]} != 0 ]; then
+        if [ ${#filters[@]} != 0 ]; then
+            local filter
+            filter=$(printf ' | %s' "${filters[@]}")
+            step "cargo nextest run --no-default-features (${filter:3})"
+            # shellcheck disable=SC2086
+            cargo nextest run $packages --no-default-features --no-fail-fast -E "${filter:3}"
+        fi
+        step "cargo test --doc --no-default-features (for ${together[*]})"
+        # shellcheck disable=SC2086
+        cargo test $packages --no-default-features --doc
+    fi
+}
+
+# The crates whose build without their features compiles something the build
+# with them all does not, each followed by the tests that build changes, `all`,
+# or `doc` when the only such code is a `cfg_attr(not(feature …), doc = …)`
+# example; and then by `together` when no workspace member turns on any of its
+# features, so a build of the whole workspace leaves them off, or `alone`. That
+# code is a `not(…)` cfg naming a feature, a `cfg!` naming one, or a feature
+# that turns on a feature of a dependency outside the workspace.
+feature_off_tests() {
+    cargo metadata --format-version 1 --no-deps | "$(command -v python3 || command -v python)" -c '
+import json, os, re, sys
+meta = json.load(sys.stdin)
+members = {package["name"] for package in meta["packages"]}
+for package in sorted(meta["packages"], key=lambda package: package["name"]):
+    features = package["features"]
+    if not features:
+        continue
+    code = examples = False
+    for enabled in (entry for entries in features.values() for entry in entries):
+        dependency = enabled.removeprefix("dep:").split("/")[0].rstrip("?")
+        if dependency not in members and dependency not in features:
+            code = True
+    for directory, _, files in os.walk(os.path.dirname(package["manifest_path"])):
+        for name in (name for name in files if name.endswith(".rs")):
+            with open(os.path.join(directory, name), encoding="utf-8") as file:
+                text = file.read()
+            for negation in re.finditer(r"\bnot\(", text):
+                depth, end = 1, negation.end()
+                while depth and end < len(text):
+                    depth += {"(": 1, ")": -1}.get(text[end], 0)
+                    end += 1
+                if "feature" not in text[negation.start():end]:
+                    continue
+                if re.search(r"cfg_attr\(\s*\Z", text[:negation.start()]) and re.match(r"\s*,\s*doc\s*=", text[end:]):
+                    examples = True
+                else:
+                    code = True
+            if re.search(r"cfg!\([^;]*feature", text):
+                code = True
+    if not (code or examples):
+        continue
+    forced = any(
+        dependency["name"] == package["name"]
+        and (dependency["features"] or (dependency["uses_default_features"] and features.get("default")))
+        for dependent in meta["packages"]
+        for dependency in dependent["dependencies"]
+    )
+    print(package["name"], "all" if code else "doc", "alone" if forced else "together")
+' | tr -d '\r'
 }
 
 # A Lean proof, built from scratch in a full run and incrementally in a changed
@@ -232,26 +330,40 @@ runner() {
 }
 
 # Run exactly the named ignored tests of one package: cargo flags, `--`, then
-# full test paths and test-harness flags. A bare filter would also run every
-# longer name containing it, which can need another runner; an --exact name
-# the binary lacks would run nothing, so each one must be listed.
+# full test paths, and `--nocapture` to show each one's output. They are built
+# with the whole workspace, as the code checks build it, so a run that checks
+# both, or restores CI's saved build, compiles them once. A test the package
+# lacks would run nothing, so each one must be listed.
 exact_ignored() {
-    local package=$1 flags=() listed test
+    local package=$1 flags=() tests=() output=() filter listed test
     shift
     while [ "$1" != -- ]; do
         flags+=("$1")
         shift
     done
     shift
-    listed=$(cargo test -p "$package" ${flags[@]+"${flags[@]}"} -- --list --ignored | tr -d '\r')
     for test in "$@"; do
-        case $test in --*) continue ;; esac
-        if ! printf '%s\n' "$listed" | grep -qxF "$test: test"; then
-            echo "the $package test binary is missing $test" >&2
+        case $test in
+            --nocapture) output=(--success-output immediate --failure-output immediate) ;;
+            --*)
+                echo "exact_ignored: unknown flag $test" >&2
+                exit 2
+                ;;
+            *) tests+=("$test") ;;
+        esac
+    done
+    filter="package($package) & ($(printf 'test(=%s) | ' "${tests[@]}"))"
+    filter="${filter% | )})"
+    listed=$(cargo nextest list --workspace ${flags[@]+"${flags[@]}"} --run-ignored only \
+        -E "$filter" --message-format oneline | tr -d '\r')
+    for test in "${tests[@]}"; do
+        if ! printf '%s\n' "$listed" | grep -qE " ${test//./\\.}\$"; then
+            echo "the $package tests are missing $test" >&2
             exit 1
         fi
     done
-    cargo test -p "$package" ${flags[@]+"${flags[@]}"} -- --ignored --exact "$@"
+    cargo nextest run --workspace ${flags[@]+"${flags[@]}"} --run-ignored only -E "$filter" \
+        --no-fail-fast ${output[@]+"${output[@]}"}
 }
 
 # Each differential runs when its model or the Rust crate it compares is selected.
