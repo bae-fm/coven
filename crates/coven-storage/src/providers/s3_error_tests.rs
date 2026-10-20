@@ -58,6 +58,9 @@ async fn timeout_and_storage_full_responses_preserve_their_classification_and_ca
         assert_eq!(native.err().message(), Some("credential-echo"));
         assert_eq!(native.raw().status().as_u16(), status);
         assert!(!format!("{error:?} {error}").contains("credential-echo"));
+        assert!(error
+            .to_string()
+            .contains(&format!("HTTP {status} ({code})")));
         actual.push((code, status, error.failure(), error.retryable()));
     }
     assert_eq!(actual, cases);
@@ -210,21 +213,88 @@ async fn sdk_request_construction_is_invalid_configuration() {
     assert!(sdk_error::<ListObjectsV2Error>(&error).source().is_some());
 }
 
+/// A transport failure names its cause, with any URL cut to its scheme and
+/// host: a signed URL's query, a path and credentials in it never print.
 #[test]
-fn sdk_transport_failures_remain_retryable_and_retain_native_causes() {
+fn sdk_transport_failures_remain_retryable_and_name_their_redacted_causes() {
+    let cause = "error sending request for url \
+        (https://ana:hunter2@bucket.example:9000/store/key?X-Amz-Signature=deadbeef)";
     for native in [
-        SdkError::<ListObjectsV2Error>::timeout_error("credential-echo"),
-        SdkError::dispatch_failure(ConnectorError::io("credential-echo".into())),
-        SdkError::dispatch_failure(ConnectorError::timeout("credential-echo".into())),
+        SdkError::<ListObjectsV2Error>::timeout_error(cause),
+        SdkError::dispatch_failure(ConnectorError::io(cause.into())),
+        SdkError::dispatch_failure(ConnectorError::timeout(cause.into())),
     ] {
         let error = s3_error(native);
         assert_eq!(error.failure(), StorageFailure::Network);
         assert!(error.retryable());
         assert!(!error.answered());
         assert!(sdk_error::<ListObjectsV2Error>(&error).source().is_some());
-        assert!(!format!("{error:?} {error}").contains("credential-echo"));
+        for text in [error.to_string(), format!("{error:?}")] {
+            assert!(
+                text.contains("error sending request for url (https://bucket.example:9000/…)"),
+                "{text}"
+            );
+            for hidden in ["deadbeef", "Signature", "hunter2", "ana", "/store/key"] {
+                assert!(!text.contains(hidden), "{hidden} in {text}");
+            }
+        }
     }
 }
+
+/// A certificate the device does not trust fails the request with a message
+/// naming the certificate, and nothing of the request but its host.
+#[tokio::test]
+async fn a_tls_failure_names_the_certificate() {
+    use tokio_rustls::rustls::{
+        pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},
+        ServerConfig,
+    };
+    let certificate = CertificateDer::from_pem_slice(UNTRUSTED_CERTIFICATE.as_bytes()).unwrap();
+    let key = PrivateKeyDer::from_pem_slice(UNTRUSTED_KEY.as_bytes()).unwrap();
+    let config = ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(vec![certificate], key)
+        .unwrap();
+    let acceptor = tokio_rustls::TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        while let Ok((socket, _)) = listener.accept().await {
+            // The client refuses the certificate, so every handshake fails.
+            let _ = acceptor.accept(socket).await;
+        }
+    });
+    let storage = provider(&format!("https://{address}"));
+    let error = storage
+        .status(&ObjectPath::floor(STORE_ID))
+        .await
+        .unwrap_err();
+    assert_eq!(error.failure(), StorageFailure::Network);
+    let text = error.to_string();
+    assert!(text.contains("certificate"), "{text}");
+    assert!(text.contains(&format!("https://{address}/…")), "{text}");
+    assert!(!text.contains(&STORE_ID.to_string()), "{text}");
+    assert!(!text.contains("secret"), "{text}");
+}
+
+/// A self-signed certificate for 127.0.0.1 that no platform trusts.
+const UNTRUSTED_CERTIFICATE: &str = "-----BEGIN CERTIFICATE-----
+MIIBcjCCARegAwIBAgIUE+fnYR+qkNOKpgMgown0dxy7oBUwCgYIKoZIzj0EAwIw
+FTETMBEGA1UEAwwKY292ZW4tdGVzdDAgFw0yNjEwMjAxNzE5MjZaGA8yMTI2MDky
+NjE3MTkyNlowFTETMBEGA1UEAwwKY292ZW4tdGVzdDBZMBMGByqGSM49AgEGCCqG
+SM49AwEHA0IABA5TrFuO/qRmQLK5eLgIgcwssnHGJsBXi/byXFcxu9y6YtSwBVHs
+qK2VZYmNic8bKNE1zOAn3FfTv13ziard7LCjQzBBMB0GA1UdDgQWBBRAOPRh/K+w
+ujjxi5i91ZmodDp38TAPBgNVHRMBAf8EBTADAQH/MA8GA1UdEQQIMAaHBH8AAAEw
+CgYIKoZIzj0EAwIDSQAwRgIhAIjJLRA89a+nau3kLWVwW6oGWpGZBUQeztMhos4G
+wk3nAiEAgMAgCUji019YTa7LZPnPY3zY/+c5WbFpHTU1yvP0A6I=
+-----END CERTIFICATE-----
+";
+const UNTRUSTED_KEY: &str = "-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgUdyqLLEZT0KXW3gf
+sDHHoTdd31SoiUSKvZdBlUqXrOChRANCAAQOU6xbjv6kZkCyuXi4CIHMLLJxxibA
+V4v28lxXMbvcumLUsAVR7KitlWWJjYnPGyjRNczgJ9xX079d84mq3eyw
+-----END PRIVATE KEY-----
+";
 
 #[tokio::test]
 async fn throttled_responses_retain_retry_after_seconds_dates_and_missing_basis() {

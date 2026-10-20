@@ -36,6 +36,7 @@ where
         failure,
         source: Box::new(S3ResponseError {
             status,
+            code: error.code().map(str::to_owned),
             retry_after: error.raw_response().and_then(|response| {
                 response.headers().get("retry-after").map(|value| {
                     crate::providers::http::retry_after_header(
@@ -129,23 +130,71 @@ fn s3_service_failure(
     }
 }
 
-// SDK service errors can echo credentials in their message or response body.
-// Keep the original typed cause available through Error::source, but do not
-// include it in ordinary storage error formatting.
+// An S3 service's reply can echo credentials in its message or body, so a
+// failure that got a reply prints only its HTTP status and error code. One that
+// got none prints its cause chain, its transport, TLS or DNS failure, with each
+// URL cut to its scheme and host: a signed URL's query and the object's path
+// never print. The original typed cause stays available through Error::source.
 struct S3ResponseError {
     status: Option<u16>,
+    code: Option<String>,
     retry_after: Option<crate::RetryAfter>,
     error: Box<dyn std::error::Error + Send + Sync>,
 }
 impl fmt::Debug for S3ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("S3ResponseError")
+        f.debug_tuple("S3ResponseError")
+            .field(&format_args!("{self}"))
+            .finish()
     }
 }
 impl fmt::Display for S3ResponseError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str("S3 request failed")
+        if let Some(status) = self.status {
+            write!(f, "S3 answered HTTP {status}")?;
+            if let Some(code) = &self.code {
+                write!(f, " ({code})")?;
+            }
+            return Ok(());
+        }
+        f.write_str("S3 request failed")?;
+        let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(self.error.as_ref());
+        while let Some(error) = cause {
+            write!(f, ": {}", redact_urls(&error.to_string()))?;
+            cause = error.source();
+        }
+        Ok(())
     }
+}
+/// `text` with each URL cut to its scheme, host and port.
+fn redact_urls(text: &str) -> String {
+    let mut redacted = String::with_capacity(text.len());
+    let mut rest = text;
+    while let Some(start) = ["http://", "https://"]
+        .iter()
+        .filter_map(|scheme| rest.find(scheme))
+        .min()
+    {
+        redacted.push_str(&rest[..start]);
+        let end = rest[start..]
+            .find(|c: char| c.is_whitespace() || matches!(c, ')' | '"' | '\'' | '>'))
+            .map_or(rest.len(), |length| start + length);
+        match url::Url::parse(&rest[start..end]) {
+            Ok(url) => {
+                redacted.push_str(url.scheme());
+                redacted.push_str("://");
+                redacted.push_str(url.host_str().unwrap_or_default());
+                if let Some(port) = url.port() {
+                    redacted.push_str(&format!(":{port}"));
+                }
+                redacted.push_str("/…");
+            }
+            Err(_) => redacted.push_str("<url>"),
+        }
+        rest = &rest[end..];
+    }
+    redacted.push_str(rest);
+    redacted
 }
 impl std::error::Error for S3ResponseError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
