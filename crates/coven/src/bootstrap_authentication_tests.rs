@@ -122,7 +122,7 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
     let (sleeping, mut asleep) = watch::channel(false);
     let (resume, resumed) = watch::channel(false);
     let clock = Arc::new(JoinClock {
-        clock: crate::tests::PollingClock(owner.clock.clone()),
+        clock: crate::tests::PollingClock::new(owner.clock.clone()),
         sleeping,
         resume: resumed,
     });
