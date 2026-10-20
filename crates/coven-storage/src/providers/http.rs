@@ -12,19 +12,20 @@ use std::sync::Arc;
 /// A token is used until the provider rejects it with HTTP 401; the request
 /// then refreshes once through the sign-in's custody and is retried once (§20.2).
 pub struct OAuthSession {
-    client: reqwest::Client,
+    client: super::http_client::HttpClient,
     provider: CloudProvider,
     tokens: HeldTokens,
     clock: ClockRef,
 }
 impl OAuthSession {
-    /// Build a connection with redirect handling disabled: bearer tokens must not
+    /// Sign in over `client`, which follows no redirect: bearer tokens must not
     /// follow provider-returned URLs to other origins.
-    pub fn new(
+    pub(crate) fn new(
         provider: CloudProvider,
         tokens: OAuthTokens,
         custody: Arc<dyn TokenCustody>,
         clock: ClockRef,
+        client: super::http_client::HttpClient,
     ) -> Result<Self, StorageError> {
         if !matches!(provider, CloudProvider::Dropbox | CloudProvider::OneDrive) {
             return Err(
@@ -32,7 +33,7 @@ impl OAuthSession {
             );
         }
         Ok(Self {
-            client: client().map_err(|e| transport(provider, e))?,
+            client,
             provider,
             tokens: HeldTokens::new(tokens, custody),
             clock,
@@ -182,7 +183,7 @@ impl OAuthSession {
             .client
             .execute(request)
             .await
-            .map_err(|e| transport(self.provider, e))?;
+            .map_err(|error| error.into_storage(self.provider))?;
         if let Some(tokens) = tokens {
             response.extensions_mut().insert(tokens.access);
         }
@@ -193,13 +194,6 @@ pub(crate) enum Body {
     Empty,
     Json(Value),
     Bytes(Vec<u8>),
-}
-pub(crate) fn client() -> Result<reqwest::Client, reqwest::Error> {
-    reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .retry(reqwest::retry::never())
-        .timeout(std::time::Duration::from_secs(120))
-        .build()
 }
 pub(crate) fn transport(provider: CloudProvider, error: reqwest::Error) -> StorageError {
     let failure = if error.is_builder() {

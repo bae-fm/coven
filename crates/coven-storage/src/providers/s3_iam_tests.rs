@@ -492,8 +492,19 @@ impl Fake {
             },
             self.clock.clone(),
             Arc::new(UuidIds),
+            crate::providers::tests::http_client(),
         )
         .unwrap()
+    }
+
+    /// The member's own connection with a minted key.
+    fn member(&self, name: S3ProfileName, key: S3Credentials) -> S3Storage {
+        let (config, clock, ids) = (self.config(name), self.clock.clone(), Arc::new(UuidIds));
+        let (cooldown, http) = (
+            Arc::new(crate::NoCooldown),
+            crate::providers::tests::http_client(),
+        );
+        S3Storage::new(config, key, clock, ids, cooldown, http).unwrap()
     }
 }
 
@@ -755,14 +766,7 @@ async fn minted_iam_keys_can_read_bucket_versioning_without_listing_other_stores
         let admin = fake.admin(profile);
         let scope = scope();
         let minted = admin.mint(&scope).await.unwrap();
-        let storage = S3Storage::new(
-            fake.config(profile),
-            minted.credentials,
-            fake.clock.clone(),
-            Arc::new(UuidIds),
-            std::sync::Arc::new(crate::NoCooldown),
-        )
-        .unwrap();
+        let storage = fake.member(profile, minted.credentials);
         assert_eq!(
             storage.bucket_versioning().await.unwrap(),
             S3BucketVersioning::Disabled
@@ -780,14 +784,7 @@ async fn minted_copy_profile_keys_abort_a_session_whose_initiation_reply_was_los
         let admin = fake.admin(profile);
         let scope = scope();
         let minted = admin.mint(&scope).await.unwrap();
-        let storage = S3Storage::new(
-            fake.config(profile),
-            minted.credentials,
-            fake.clock.clone(),
-            Arc::new(UuidIds),
-            std::sync::Arc::new(crate::NoCooldown),
-        )
-        .unwrap();
+        let storage = fake.member(profile, minted.credentials);
         let path = ObjectPath::slot(scope.store, std::num::NonZeroU64::MIN);
         let publication = crate::PublicationRequest::new(
             Arc::new(crate::test_utils::UnrestrictedPublications),

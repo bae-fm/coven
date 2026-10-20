@@ -151,6 +151,7 @@ async fn fixture(
             request_checksums: false,
             ..profile::PLAIN
         },
+        crate::providers::tests::http_client(),
     )
     .unwrap();
     Fixture {

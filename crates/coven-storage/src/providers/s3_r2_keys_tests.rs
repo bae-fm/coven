@@ -127,6 +127,7 @@ async fn fake() -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessKeyAdmin>) {
         endpoints,
         Arc::new(SystemClock),
         Arc::new(UuidIds),
+        crate::providers::tests::http_client(),
     )
     .unwrap();
     (state, server, admin)
@@ -276,6 +277,7 @@ async fn a_bucket_scoped_key_must_not_list_other_buckets() {
             minting::AdminEndpoints::production(),
             Arc::new(SystemClock),
             Arc::new(UuidIds),
+            crate::providers::tests::http_client(),
         )
         .unwrap();
         let key = S3Credentials {

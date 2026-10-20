@@ -414,6 +414,7 @@ async fn fake(uniform: bool) -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessK
         endpoints,
         Arc::new(Pauses(state.clone())),
         Arc::new(UuidIds),
+        crate::providers::tests::http_client(),
     )
     .unwrap();
     (state, server, admin)

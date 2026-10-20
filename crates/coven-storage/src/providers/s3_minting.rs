@@ -84,16 +84,34 @@ impl AdminEndpoints {
 /// One admin call's inputs: the credential, the location, where to send and
 /// the signing time.
 pub(crate) struct AdminRequest {
-    pub(super) http: reqwest::Client,
-    pub(super) admin: AdminCredential,
+    http: HttpClient,
+    pub(crate) admin: AdminCredential,
     pub(super) config: StorageConfig,
     pub(super) endpoints: AdminEndpoints,
-    pub(super) now: std::time::SystemTime,
+    pub(crate) now: std::time::SystemTime,
+}
+
+impl AdminRequest {
+    /// Start one of this call's HTTP requests; `send` sends it.
+    pub(crate) fn http_request(
+        &self,
+        method: reqwest::Method,
+        url: Url,
+    ) -> reqwest::RequestBuilder {
+        self.http.request(method, url)
+    }
+    /// Send a request `http_request` started.
+    pub(crate) async fn send(
+        &self,
+        request: reqwest::RequestBuilder,
+    ) -> Result<reqwest::Response, StorageError> {
+        self.http.send(CloudProvider::S3, request).await
+    }
 }
 
 /// A location's key administration with admin access for one operation.
 pub(crate) struct ProfileKeyAdmin {
-    http: reqwest::Client,
+    http: HttpClient,
     admin: AdminCredential,
     config: StorageConfig,
     endpoints: AdminEndpoints,
@@ -137,6 +155,7 @@ pub(crate) fn key_admin(
     endpoints: AdminEndpoints,
     clock: ClockRef,
     ids: IdSourceRef,
+    http: HttpClient,
 ) -> Result<std::sync::Arc<dyn AccessKeyAdmin>, StorageError> {
     let StorageConfig::S3 {
         endpoint, profile, ..
@@ -177,8 +196,7 @@ pub(crate) fn key_admin(
         _ => {}
     }
     Ok(std::sync::Arc::new(ProfileKeyAdmin {
-        http: crate::providers::http::client()
-            .map_err(|e| crate::providers::http::transport(CloudProvider::S3, e))?,
+        http,
         admin,
         config,
         endpoints,
@@ -209,6 +227,7 @@ impl AccessKeyAdmin for ProfileKeyAdmin {
             self.clock.clone(),
             self.ids.clone(),
             std::sync::Arc::new(crate::NoCooldown),
+            self.http.clone(),
         )?;
         let run = self.ids.new_id();
         let pause = Duration::from_secs(1);

@@ -742,6 +742,16 @@ can have changed.
 Ana's invite has no join request yet, so polling for one backs off. Once Dan's
 request arrives, waiting for Ana to decide sends no repeated request.
 
+**A slow request is not a failed one.** A request to a provider has no
+deadline. Ana's phone sends a 32 MiB part over a link moving 100 KB/s; it takes
+over five minutes, and it finishes. A request fails only when no bytes move, in
+either direction, for 60 seconds: while connecting, sending its body, waiting
+for the reply, or reading the reply. Phones pause for tens of seconds while they
+change networks and then recover, so a shorter limit would fail live transfers;
+a minute of silence means the connection is gone. The failure is a network
+failure, retried on the schedule below. Every provider's requests, S3's and key
+administration's included, follow this one rule.
+
 **Retry timing.** Automatic waits, including those of operations, invites,
 joining, missing keys and files, share one schedule of delays: 1, 2, 4, …, 256
 seconds, then 300.

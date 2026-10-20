@@ -1,10 +1,12 @@
 use super::pagination::Pagination;
+use crate::providers::http_client::HttpClient;
 use crate::session::{S3Part, SessionState};
 use crate::*;
 use async_trait::async_trait;
 use aws_sdk_s3::{
     config::{
         timeout::TimeoutConfig, Region, RequestChecksumCalculation, ResponseChecksumValidation,
+        StalledStreamProtectionConfig,
     },
     error::ProvideErrorMetadata,
     primitives::ByteStream,
@@ -123,6 +125,7 @@ impl S3Storage {
         clock: ClockRef,
         ids: IdSourceRef,
         cooldown: std::sync::Arc<dyn Cooldown>,
+        http: HttpClient,
     ) -> Result<Self, StorageError> {
         let StorageConfig::S3 {
             endpoint, profile, ..
@@ -136,7 +139,7 @@ impl S3Storage {
             StorageFailure::InvalidConfiguration
                 .with_source("an uncatalogued S3 endpoint needs settings detected at setup"),
         )?;
-        Self::with_settings(config, credentials, clock, ids, cooldown, settings)
+        Self::with_settings(config, credentials, clock, ids, cooldown, settings, http)
     }
     /// Connect with explicit settings; detection probes candidates this way.
     fn with_settings(
@@ -146,6 +149,7 @@ impl S3Storage {
         ids: IdSourceRef,
         cooldown: std::sync::Arc<dyn Cooldown>,
         settings: S3Settings,
+        http: HttpClient,
     ) -> Result<Self, StorageError> {
         let StorageConfig::S3 {
             bucket,
@@ -166,13 +170,15 @@ impl S3Storage {
         let credentials = SigningCredentials(std::sync::Arc::new(std::sync::RwLock::new(
             aws_credentials(credentials),
         )));
+        let transport = transport::S3HttpClient::new(http);
         let signing = clock::SigningClock::new(clock);
         let mut builder = aws_sdk_s3::config::Builder::new()
             .behavior_version_latest()
-            .http_client(transport::S3HttpClient::new()?)
-            // The HTTP client's own request limit is the only timeout, as for
-            // every provider; the SDK passes it no settings of its own.
+            .http_client(transport)
+            // The HTTP client's stall window is the only limit, as for every
+            // provider (§6.7); the SDK adds none of its own.
             .timeout_config(TimeoutConfig::disabled())
+            .stalled_stream_protection(StalledStreamProtectionConfig::disabled())
             .region(Region::new(region.clone()))
             .credentials_provider(credentials.clone())
             .identity_cache(aws_sdk_s3::config::IdentityCache::no_cache())

@@ -504,6 +504,7 @@ impl Fixture {
             STORE,
             clock,
             Arc::new(UuidIds),
+            crate::providers::tests::http_client(),
         )
         .await
     }
@@ -793,6 +794,7 @@ async fn listings_exclude_detection_probes_and_malformed_ones() {
             Arc::new(SystemClock),
             Arc::new(UuidIds),
             std::sync::Arc::new(crate::NoCooldown),
+            crate::providers::tests::http_client(),
         )
         .unwrap(),
     ));
@@ -851,6 +853,7 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
         STORE,
         Arc::new(SystemClock),
         Arc::new(UuidIds),
+        crate::providers::tests::http_client(),
     )
     .await
     .unwrap_err();
@@ -888,6 +891,7 @@ async fn complete_v2_does_not_pass_when_v1_never_completes() {
         Arc::new(UuidIds),
         Arc::new(crate::NoCooldown),
         profile::PLAIN,
+        crate::providers::tests::http_client(),
     )
     .unwrap();
     let mut probes = Probes {

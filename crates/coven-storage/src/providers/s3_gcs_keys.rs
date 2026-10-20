@@ -106,8 +106,7 @@ impl<'a> Gcs<'a> {
         let post = method == Method::POST;
         let mut request = self
             .context
-            .http
-            .request(method, url)
+            .http_request(method, url)
             .bearer_auth(token.as_str());
         request = match body {
             Some(body) => request.json(&body),
@@ -115,10 +114,7 @@ impl<'a> Gcs<'a> {
             None if post => request.header(reqwest::header::CONTENT_LENGTH, "0"),
             None => request,
         };
-        let response = request
-            .send()
-            .await
-            .map_err(|error| crate::providers::http::transport(CloudProvider::S3, error))?;
+        let response = self.context.send(request).await?;
         let status = response.status().as_u16();
         if tolerated.contains(&status) {
             return Ok(None);

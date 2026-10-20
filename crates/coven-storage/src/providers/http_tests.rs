@@ -2,6 +2,20 @@ use super::*;
 use crate::providers::tests::{response, TestServer};
 use axum::Router;
 
+/// GET `url` through the providers' client, as a OneDrive call.
+async fn get(url: &str) -> Result<reqwest::Response, StorageError> {
+    let client = crate::providers::http_client::HttpClient::new(std::sync::Arc::new(
+        coven_foundation::clock::SystemClock,
+    ))
+    .unwrap();
+    client
+        .send(
+            CloudProvider::OneDrive,
+            client.request(reqwest::Method::GET, url),
+        )
+        .await
+}
+
 #[test]
 fn malformed_provider_timestamps_are_protocol_failures_with_the_parse_cause() {
     use std::error::Error;
@@ -148,7 +162,7 @@ fn typed_provider_error_mapping() {
 async fn ranged_reads_refuse_ignored_ranges_and_wrong_offsets() {
     let server =
         TestServer::new(Router::new().fallback(|| async { response(200, "abcdefgh") })).await;
-    let response = client().unwrap().get(&server.url).send().await.unwrap();
+    let response = get(&server.url).await.unwrap();
     assert!(matches!(
         read_response(
             CloudProvider::Dropbox,
@@ -166,13 +180,7 @@ async fn network_errors_are_distinct_and_response_bodies_do_not_print() {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
-    let error = client()
-        .unwrap()
-        .get(format!("http://{address}"))
-        .send()
-        .await
-        .unwrap_err();
-    let error = transport(CloudProvider::OneDrive, error);
+    let error = get(&format!("http://{address}")).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Network);
     assert!(error.retryable());
     assert!(!error.answered(), "a refused connection is no answer");
@@ -437,7 +445,7 @@ async fn dropbox_native_classification_preserves_provider_wait_and_cause() {
             }
         }))
         .await;
-        let response = client().unwrap().get(&server.url).send().await.unwrap();
+        let response = get(&server.url).await.unwrap();
         let error = checked(CloudProvider::Dropbox, response).await.unwrap_err();
         assert_eq!(error.failure(), expected, "{body}");
         assert_eq!(error.retryable(), retryable, "{body}");
@@ -479,7 +487,7 @@ async fn malformed_success_keeps_the_original_response() {
         Router::new().fallback(|| async { response(200, "not-json credential-echo") }),
     )
     .await;
-    let response = client().unwrap().get(&server.url).send().await.unwrap();
+    let response = get(&server.url).await.unwrap();
     let error = json(CloudProvider::OneDrive, response).await.unwrap_err();
     assert_eq!(error.failure(), StorageFailure::Protocol);
     assert!(!format!("{error} {error:?}").contains("credential-echo"));
@@ -503,7 +511,7 @@ async fn throttling_retains_headers_without_printing_them() {
                 .unwrap()
         }))
         .await;
-        let response = client().unwrap().get(&server.url).send().await.unwrap();
+        let response = get(&server.url).await.unwrap();
         let error = checked(provider, response).await.unwrap_err();
         assert_eq!(error.failure(), StorageFailure::RateLimited);
         assert!(error.retryable());
@@ -531,12 +539,7 @@ async fn interrupted_bodies_keep_the_transport_failure() {
             socket.write_all(b"HTTP/1.1 206 Partial Content\r\nContent-Length: 4\r\nContent-Range: bytes 3-6/8\r\nConnection: close\r\n\r\nx").await.unwrap();
             socket.shutdown().await.unwrap();
         });
-        let response = client()
-            .unwrap()
-            .get(format!("http://{address}"))
-            .send()
-            .await
-            .unwrap();
+        let response = get(&format!("http://{address}")).await.unwrap();
         let error = read_response(provider, response, Some(ByteRange::new(3, 7).unwrap()))
             .await
             .unwrap_err();
@@ -564,7 +567,7 @@ async fn ranged_body_must_match_the_entire_requested_interval() {
                 .unwrap()
         }))
         .await;
-        let response = client().unwrap().get(&server.url).send().await.unwrap();
+        let response = get(&server.url).await.unwrap();
         assert_eq!(
             read_response(
                 CloudProvider::Dropbox,
@@ -742,6 +745,7 @@ fn session_with(
         Arc::new(coven_foundation::clock::FixedClock::new(
             std::time::SystemTime::UNIX_EPOCH,
         )),
+        crate::providers::tests::http_client(),
     )
     .unwrap()
 }

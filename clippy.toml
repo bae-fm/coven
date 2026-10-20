@@ -1,12 +1,18 @@
 # Keep this workspace independent of ancestor Clippy configurations.
 # The owner-construction checker enforces the file capability in Appendix F.2.
 
-# std's File locks return Unsupported on Android; lock through
-# coven_foundation::files::FileLock, which takes flock on every Unix.
 disallowed-methods = [
+    # std's File locks return Unsupported on Android; lock through
+    # coven_foundation::files::FileLock, which takes flock on every Unix.
     { path = "std::fs::File::lock", reason = "Unsupported on Android; use FileLock" },
     { path = "std::fs::File::lock_shared", reason = "Unsupported on Android; use FileLock" },
     { path = "std::fs::File::try_lock", reason = "Unsupported on Android; use FileLock" },
     { path = "std::fs::File::try_lock_shared", reason = "Unsupported on Android; use FileLock" },
     { path = "std::fs::File::unlock", reason = "Unsupported on Android; use FileLock" },
+    # Every HTTP request goes through coven-storage's HttpClient, which builds
+    # the one reqwest client and applies the stall window (§6.7).
+    { path = "reqwest::Client::new", reason = "build HttpClient instead" },
+    { path = "reqwest::Client::builder", reason = "build HttpClient instead" },
+    { path = "reqwest::Client::execute", reason = "send through HttpClient, under the stall window" },
+    { path = "reqwest::RequestBuilder::send", reason = "send through HttpClient, under the stall window" },
 ]

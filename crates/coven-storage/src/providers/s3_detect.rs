@@ -28,6 +28,7 @@ pub(crate) async fn detect(
     store: StoreId,
     clock: ClockRef,
     ids: IdSourceRef,
+    http: HttpClient,
 ) -> Result<S3Detection, StorageError> {
     let StorageConfig::S3 {
         endpoint, profile, ..
@@ -48,6 +49,7 @@ pub(crate) async fn detect(
             ids.clone(),
             std::sync::Arc::new(crate::NoCooldown),
             S3Settings { signing, ..base },
+            http.clone(),
         )?;
         let namespace = namespace(&candidate, store, run);
         let result = candidate

@@ -751,6 +751,12 @@ pub(crate) const POLICY: Policy = Policy {
         "IdentityCustody",
         "Command",
         "Request",
+        // A handle on the providers' one HTTP client, cloned into each
+        // connection and admin call as the reqwest client inside it is. It
+        // holds the connector's clock only to time the stall window (§6.7).
+        "HttpClient",
+        // When one HTTP exchange last moved bytes; it lives for that exchange.
+        "ExchangeProgress",
     ],
     // Writes borrow the database's retained connection and id source; app
     // SQL receives none of those dependencies.

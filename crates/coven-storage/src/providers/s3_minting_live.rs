@@ -27,6 +27,7 @@ async fn s3_member_key_lifecycle() {
         AdminEndpoints::production(),
         Arc::new(SystemClock),
         Arc::new(UuidIds),
+        crate::providers::tests::http_client(),
     )
     .expect("the selected profile mints keys");
     let store = StoreId(UuidIds.new_id());
@@ -168,6 +169,7 @@ async fn lifecycle(
         Arc::new(SystemClock),
         Arc::new(UuidIds),
         std::sync::Arc::new(crate::NoCooldown),
+        crate::providers::tests::http_client(),
     )?;
     // Setup's versioning check, read with the member key.
     let StorageConfig::S3 {

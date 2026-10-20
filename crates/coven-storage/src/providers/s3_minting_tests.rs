@@ -20,6 +20,7 @@ fn admin(config: StorageConfig) -> Result<std::sync::Arc<dyn AccessKeyAdmin>, St
         AdminEndpoints::production(),
         std::sync::Arc::new(SystemClock),
         std::sync::Arc::new(UuidIds),
+        crate::providers::tests::http_client(),
     )
 }
 
@@ -97,6 +98,7 @@ fn only_versity_admin_access_names_a_separate_iam_endpoint() {
             AdminEndpoints::production(),
             std::sync::Arc::new(SystemClock),
             std::sync::Arc::new(UuidIds),
+            crate::providers::tests::http_client(),
         )
     };
     let versity = Some(S3ProfileName::VersityGw);

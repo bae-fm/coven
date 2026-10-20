@@ -19,6 +19,7 @@ pub(crate) async fn check_new_store(
     store: StoreId,
     clock: ClockRef,
     ids: IdSourceRef,
+    http: HttpClient,
 ) -> Result<(), StorageError> {
     let StorageConfig::S3 {
         endpoint, profile, ..
@@ -51,6 +52,7 @@ pub(crate) async fn check_new_store(
             ids.clone(),
             std::sync::Arc::new(crate::NoCooldown),
             settings,
+            http.clone(),
         )?;
         match storage.holds_only(store).await {
             Ok(true) => return Ok(()),

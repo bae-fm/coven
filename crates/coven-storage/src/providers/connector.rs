@@ -1,8 +1,8 @@
 //! Provider construction from an explicit location and device credentials.
 
 use super::{
-    oauth_folders::OAuthFolders, DropboxStorage, OAuthSession, OneDriveStorage, S3Storage,
-    StorageFolder,
+    http_client::HttpClient, oauth_folders::OAuthFolders, DropboxStorage, OAuthSession,
+    OneDriveStorage, S3Storage, StorageFolder,
 };
 use crate::{
     ProviderAuth, ProviderOps, S3Credentials, S3Detection, StorageConfig, StorageConnection,
@@ -122,10 +122,14 @@ pub trait StorageConnector: Send + Sync {
     }
 }
 
-/// The provider composition root retains the supplied clock and id source.
+/// The provider composition root retains the supplied clock and id source,
+/// and the one HTTP client every connection it makes sends through.
 pub struct ProviderConnector {
     clock: ClockRef,
     ids: IdSourceRef,
+    /// Building it fails only when TLS cannot be set up; each call needing it
+    /// then returns that failure.
+    http: Result<HttpClient, Arc<reqwest::Error>>,
     #[cfg(any(test, feature = "test-utils"))]
     folder_api: Option<String>,
 }
@@ -133,6 +137,7 @@ impl ProviderConnector {
     /// Retain the capabilities used to construct subsequent connections.
     pub fn new(clock: ClockRef, ids: IdSourceRef) -> Self {
         Self {
+            http: HttpClient::new(clock.clone()).map_err(Arc::new),
             clock,
             ids,
             #[cfg(any(test, feature = "test-utils"))]
@@ -144,6 +149,14 @@ impl ProviderConnector {
     pub fn with_folder_api(mut self, api: String) -> Self {
         self.folder_api = Some(api);
         self
+    }
+    /// The HTTP client, or why TLS could not be set up.
+    fn http(&self, provider: crate::CloudProvider) -> Result<HttpClient, StorageError> {
+        self.http.clone().map_err(|source| StorageError::Provider {
+            provider,
+            failure: StorageFailure::InvalidConfiguration,
+            source: Box::new(source),
+        })
     }
     async fn with_folders<T, F, Fut>(
         &self,
@@ -167,7 +180,13 @@ impl ProviderConnector {
         .to_owned();
         #[cfg(any(test, feature = "test-utils"))]
         let api = self.folder_api.clone().unwrap_or(api);
-        let session = OAuthSession::new(access.provider(), tokens, custody, self.clock.clone())?;
+        let session = OAuthSession::new(
+            access.provider(),
+            tokens,
+            custody,
+            self.clock.clone(),
+            self.http(access.provider())?,
+        )?;
         request(OAuthFolders::new(session, access, api, cooldown)).await
     }
 }
@@ -265,8 +284,10 @@ impl StorageConnector for ProviderConnector {
         }
         .validate()?;
         let provider = config.provider();
-        let session =
-            |tokens, custody| OAuthSession::new(provider, tokens, custody, self.clock.clone());
+        let http = self.http(provider)?;
+        let session = |tokens, custody| {
+            OAuthSession::new(provider, tokens, custody, self.clock.clone(), http.clone())
+        };
         let provider: Arc<dyn ProviderOps> = match (&config, auth) {
             (StorageConfig::S3 { .. }, ProviderAuth::S3(credentials)) => Arc::new(S3Storage::new(
                 config,
@@ -274,6 +295,7 @@ impl StorageConnector for ProviderConnector {
                 self.clock.clone(),
                 self.ids.clone(),
                 cooldown.clone(),
+                http.clone(),
             )?),
             (StorageConfig::Dropbox { .. }, ProviderAuth::OAuth { tokens, custody }) => {
                 let session = session(tokens, custody)?;
@@ -322,6 +344,7 @@ impl StorageConnector for ProviderConnector {
             store,
             self.clock.clone(),
             self.ids.clone(),
+            self.http(crate::CloudProvider::S3)?,
         )
         .await
     }
@@ -342,6 +365,7 @@ impl StorageConnector for ProviderConnector {
             store,
             self.clock.clone(),
             self.ids.clone(),
+            self.http(crate::CloudProvider::S3)?,
         )
         .await
     }
@@ -357,6 +381,7 @@ impl StorageConnector for ProviderConnector {
             super::s3::minting::AdminEndpoints::production(),
             self.clock.clone(),
             self.ids.clone(),
+            self.http(crate::CloudProvider::S3)?,
         )
     }
 }

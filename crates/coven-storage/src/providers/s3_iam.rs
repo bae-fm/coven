@@ -190,9 +190,7 @@ impl<'a> Iam<'a> {
         parameters: &[(&str, &str)],
     ) -> Result<String, StorageError> {
         send(
-            &self.context.http,
-            self.context.now,
-            &self.context.admin,
+            self.context,
             &QueryService {
                 endpoint: &self.endpoint,
                 region: &self.region,

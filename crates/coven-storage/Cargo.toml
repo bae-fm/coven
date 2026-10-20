@@ -20,6 +20,8 @@ uuid.workspace = true
 tracing.workspace = true
 reqwest = { workspace = true, features = ["json", "form", "rustls"] }
 http.workspace = true
+http-body.workspace = true
+bytes.workspace = true
 oauth2.workspace = true
 open.workspace = true
 aws-sdk-s3 = { workspace = true, features = ["rt-tokio"] }

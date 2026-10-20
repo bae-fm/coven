@@ -21,6 +21,7 @@ fn storage(url: &str) -> S3Storage {
         Arc::new(FixedClock::new(std::time::UNIX_EPOCH)),
         Arc::new(SequentialIds::new()),
         std::sync::Arc::new(crate::NoCooldown),
+        crate::providers::tests::http_client(),
     )
     .unwrap()
 }

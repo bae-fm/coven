@@ -6,6 +6,7 @@ pub use admin_access::DesktopDeviceSignIn;
 pub use admin_access::{obtain_admin_access, AdminAccessSource, DeviceSignInPresenter};
 mod http;
 mod http_body;
+mod http_client;
 mod oauth;
 mod oauth_folders;
 pub use oauth_folders::StorageFolder;
@@ -98,7 +99,9 @@ pub fn s3_key_admin_at(
             gcs_projects: endpoint.clone(),
             cloudflare: endpoint,
         },
-        clock,
+        clock.clone(),
         ids,
+        http_client::HttpClient::new(clock)
+            .map_err(|error| http::transport(crate::CloudProvider::S3, error))?,
     )
 }

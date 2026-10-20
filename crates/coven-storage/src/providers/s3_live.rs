@@ -75,6 +75,7 @@ impl LiveS3 {
             store,
             Arc::new(SystemClock),
             Arc::new(UuidIds),
+            crate::providers::tests::http_client(),
         )
         .await;
         // Production detection removes current probe objects. Certification
@@ -153,6 +154,7 @@ impl LiveS3 {
                 Arc::new(UuidIds),
                 std::sync::Arc::new(crate::NoCooldown),
                 settings,
+                crate::providers::tests::http_client(),
             ),
             None => S3Storage::new(
                 config,
@@ -160,6 +162,7 @@ impl LiveS3 {
                 Arc::new(SystemClock),
                 Arc::new(UuidIds),
                 std::sync::Arc::new(crate::NoCooldown),
+                crate::providers::tests::http_client(),
             ),
         }
         .expect("live S3 connection");

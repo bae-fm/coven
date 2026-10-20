@@ -108,16 +108,12 @@ impl Cloudflare<'_> {
         };
         let mut request = self
             .context
-            .http
-            .request(method, url)
+            .http_request(method, url)
             .bearer_auth(token.as_str());
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let response = request
-            .send()
-            .await
-            .map_err(|error| crate::providers::http::transport(CloudProvider::S3, error))?;
+        let response = self.context.send(request).await?;
         if tolerated.contains(&response.status().as_u16()) {
             return Ok(None);
         }

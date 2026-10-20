@@ -80,9 +80,7 @@ impl QueryError {
 /// Send one signed POST of form parameters; return the reply body. A non-2xx
 /// reply becomes an error classified by its code, keeping the code as cause.
 pub(crate) async fn send(
-    client: &reqwest::Client,
-    now: SystemTime,
-    admin: &AdminCredential,
+    context: &super::s3::minting::AdminRequest,
     service: &QueryService<'_>,
     action: &str,
     parameters: &[(&str, &str)],
@@ -92,7 +90,7 @@ pub(crate) async fn send(
         secret_access_key,
         session_token,
         ..
-    } = admin
+    } = &context.admin
     else {
         return Err(StorageFailure::InvalidConfiguration
             .with_source("this service's admin API takes an access key"));
@@ -102,7 +100,7 @@ pub(crate) async fn send(
         Some(port) => format!("{}:{port}", service.endpoint.host_str().unwrap_or_default()),
         None => service.endpoint.host_str().unwrap_or_default().to_owned(),
     };
-    let stamp = amz_date(now);
+    let stamp = amz_date(context.now);
     let content_type = "application/x-www-form-urlencoded; charset=utf-8";
     let mut headers = vec![
         ("content-type", content_type.to_owned()),
@@ -125,18 +123,14 @@ pub(crate) async fn send(
         &headers,
         body.as_bytes(),
     );
-    let mut request = client.post(service.endpoint.clone());
+    let mut request = context.http_request(reqwest::Method::POST, service.endpoint.clone());
     for (name, value) in &headers {
         if *name != "host" {
             request = request.header(*name, value);
         }
     }
-    let response = request
-        .header("authorization", authorization)
-        .body(body)
-        .send()
-        .await
-        .map_err(|error| super::http::transport(CloudProvider::S3, error))?;
+    let request = request.header("authorization", authorization).body(body);
+    let response = context.send(request).await?;
     let status = response.status().as_u16();
     let bytes = response
         .bytes()

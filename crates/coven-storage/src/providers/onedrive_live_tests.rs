@@ -53,6 +53,7 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
         tokens.clone(),
         Arc::new(crate::test_utils::RefusedRefresh),
         clock.clone(),
+        crate::providers::tests::http_client(),
     )
     .unwrap();
     let drive = runtime.block_on(async {
@@ -94,6 +95,7 @@ fn run(test: impl AsyncFnOnce(&mut Live<'_>)) {
                     tokens,
                     Arc::new(crate::test_utils::RefusedRefresh),
                     clock.clone(),
+                    crate::providers::tests::http_client(),
                 )
                 .unwrap(),
                 Arc::new(UuidIds),
@@ -174,6 +176,7 @@ fn onedrive_live_sequence() {
                     tokens.clone(),
                     Arc::new(crate::test_utils::RefusedRefresh),
                     live.clock.clone(),
+                    crate::providers::tests::http_client(),
                 )
                 .unwrap();
                 writers.push(Arc::new(StorageConnection::from_provider(Arc::new(

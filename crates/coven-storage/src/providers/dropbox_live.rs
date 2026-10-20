@@ -75,6 +75,7 @@ impl Live {
             tokens.clone(),
             Arc::new(crate::test_utils::RefusedRefresh),
             clock.clone(),
+            crate::providers::tests::http_client(),
         )
         .unwrap();
         Self {
@@ -166,6 +167,7 @@ impl Live {
             self.tokens.clone(),
             Arc::new(crate::test_utils::RefusedRefresh),
             self.clock.clone(),
+            crate::providers::tests::http_client(),
         )
         .unwrap();
         Arc::new(StorageConnection::from_provider(Arc::new(

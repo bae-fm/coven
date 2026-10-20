@@ -266,6 +266,7 @@ async fn fake() -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessKeyAdmin>) {
         minting::AdminEndpoints::production(),
         Arc::new(SystemClock),
         Arc::new(UuidIds),
+        crate::providers::tests::http_client(),
     )
     .unwrap();
     (state, server, admin)

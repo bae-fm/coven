@@ -79,6 +79,7 @@ pub(crate) fn session_with_clock(
         },
         Arc::new(crate::test_utils::RefusedRefresh),
         clock,
+        crate::providers::tests::http_client(),
     )
     .unwrap()
 }
@@ -480,3 +481,12 @@ pub(crate) async fn compare_create_model(storage: &dyn crate::Storage, copy: boo
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "access_live.rs"]
 mod access_live;
+
+/// The providers' HTTP client on the system clock. Many tests give providers
+/// a clock whose pauses return at once; the stall window must not run on it.
+pub(crate) fn http_client() -> crate::providers::http_client::HttpClient {
+    crate::providers::http_client::HttpClient::new(std::sync::Arc::new(
+        coven_foundation::clock::SystemClock,
+    ))
+    .unwrap()
+}

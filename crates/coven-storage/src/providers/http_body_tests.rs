@@ -18,10 +18,15 @@ async fn http_delivers_the_first_body_bytes_before_the_response_finishes() {
         socket.write_all(b"def").await.unwrap();
         socket.shutdown().await.unwrap();
     });
-    let response = crate::providers::http::client()
-        .unwrap()
-        .get(format!("http://{address}"))
-        .send()
+    let client = crate::providers::http_client::HttpClient::new(std::sync::Arc::new(
+        coven_foundation::clock::SystemClock,
+    ))
+    .unwrap();
+    let response = client
+        .send(
+            CloudProvider::Dropbox,
+            client.request(reqwest::Method::GET, format!("http://{address}")),
+        )
         .await
         .unwrap();
     let metadata = StoredObject {

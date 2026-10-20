@@ -1,39 +1,37 @@
-//! The S3 SDK sends through a reqwest client from `http::client`, the builder
-//! Dropbox, OneDrive, key minting and admin sign-in use. So S3 checks
-//! server certificates with the platform's verifier, as every other provider
-//! does: what the OS trusts on Android, iOS, macOS, Windows and Linux. The
-//! SDK's own client instead read a root list from the OS, which Android does
-//! not expose to native code, so it trusted nothing there.
+//! The S3 SDK sends through coven's `HttpClient`, as Dropbox, OneDrive, key
+//! minting and admin sign-in do. So S3 checks server certificates with the
+//! platform's verifier, as every other provider does: what the OS trusts on
+//! Android, iOS, macOS, Windows and Linux. The SDK's own client instead read a
+//! root list from the OS, which Android does not expose to native code, so it
+//! trusted nothing there. S3 also shares the stall window (§6.7).
 
-use crate::providers::http;
-use crate::{CloudProvider, StorageError};
+use crate::providers::http_client::{HttpClient, SendError};
 use aws_sdk_s3::primitives::SdkBody;
 use aws_smithy_runtime_api::client::{
     http::{
-        HttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings, SharedHttpConnector,
+        HttpClient as SdkHttpClient, HttpConnector, HttpConnectorFuture, HttpConnectorSettings,
+        SharedHttpConnector,
     },
     orchestrator::{HttpRequest, HttpResponse},
     result::ConnectorError,
     runtime_components::RuntimeComponents,
 };
 
-/// The SDK's HTTP client, sending every request through one reqwest client.
+/// The SDK's HTTP client, sending every request through one `HttpClient`.
 #[derive(Debug)]
 pub(super) struct S3HttpClient(SharedHttpConnector);
 
 impl S3HttpClient {
-    /// Build the client. A TLS setup failure, such as a platform verifier that
-    /// cannot start, is `InvalidConfiguration`, never a panic.
-    pub(super) fn new() -> Result<Self, StorageError> {
-        let client = http::client().map_err(|error| http::transport(CloudProvider::S3, error))?;
-        Ok(Self(SharedHttpConnector::new(S3HttpConnector(client))))
+    /// Send through `client`.
+    pub(super) fn new(client: HttpClient) -> Self {
+        Self(SharedHttpConnector::new(S3HttpConnector(client)))
     }
 }
 
-impl HttpClient for S3HttpClient {
-    /// The S3 configuration turns the SDK's timeouts off, so `settings` carries
-    /// none: the reqwest client's own request limit applies, as for every
-    /// provider.
+impl SdkHttpClient for S3HttpClient {
+    /// The S3 configuration turns the SDK's timeouts and stalled-stream
+    /// protection off, so `settings` carries none: the stall window applies,
+    /// as for every provider.
     fn http_connector(
         &self,
         _settings: &HttpConnectorSettings,
@@ -44,7 +42,7 @@ impl HttpClient for S3HttpClient {
 }
 
 #[derive(Debug)]
-struct S3HttpConnector(reqwest::Client);
+struct S3HttpConnector(HttpClient);
 
 impl HttpConnector for S3HttpConnector {
     fn call(&self, mut request: HttpRequest) -> HttpConnectorFuture {
@@ -73,7 +71,10 @@ impl HttpConnector for S3HttpConnector {
         };
         let client = self.0.clone();
         HttpConnectorFuture::new(async move {
-            let response = client.execute(request).await.map_err(connector_error)?;
+            let response = client.execute(request).await.map_err(|error| match error {
+                SendError::Http(error) => connector_error(error),
+                SendError::Stalled(stalled) => ConnectorError::timeout(stalled.into()),
+            })?;
             let response =
                 ::http::Response::<reqwest::Body>::from(response).map(SdkBody::from_body_1_x);
             HttpResponse::try_from(response)

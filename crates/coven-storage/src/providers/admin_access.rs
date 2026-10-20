@@ -270,7 +270,7 @@ pub(crate) async fn identity_center(
     presenter: &dyn DeviceSignInPresenter,
     clock: ClockRef,
 ) -> Result<AdminCredential, StorageError> {
-    let http = super::http::client()
+    let http = super::http_client::HttpClient::new(clock.clone())
         .map_err(|error| super::http::transport(crate::CloudProvider::S3, error))?;
     let post = |path: &str, body: serde_json::Value| {
         let url = endpoints.oidc.join(path);
@@ -279,11 +279,11 @@ pub(crate) async fn identity_center(
             let url =
                 url.map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
             let response = http
-                .post(url)
-                .json(&body)
-                .send()
-                .await
-                .map_err(|error| super::http::transport(crate::CloudProvider::S3, error))?;
+                .send(
+                    crate::CloudProvider::S3,
+                    http.request(reqwest::Method::POST, url).json(&body),
+                )
+                .await?;
             let status = response.status().as_u16();
             let value: serde_json::Value = response
                 .json()
@@ -358,12 +358,10 @@ pub(crate) async fn identity_center(
     url.query_pairs_mut()
         .append_pair("account_id", account_id)
         .append_pair("role_name", role_name);
-    let response = http
-        .get(url)
-        .header("x-amz-sso_bearer_token", access_token.as_str())
-        .send()
-        .await
-        .map_err(|error| super::http::transport(crate::CloudProvider::S3, error))?;
+    let request = http
+        .request(reqwest::Method::GET, url)
+        .header("x-amz-sso_bearer_token", access_token.as_str());
+    let response = http.send(crate::CloudProvider::S3, request).await?;
     let response = super::http::checked(crate::CloudProvider::S3, response).await?;
     let value: serde_json::Value = response
         .json()

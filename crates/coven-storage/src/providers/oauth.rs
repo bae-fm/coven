@@ -178,7 +178,7 @@ pub struct OAuthClients {
     dropbox: Option<DropboxClients>,
     onedrive: Option<String>,
     clock: ClockRef,
-    client: Result<reqwest::Client, Arc<reqwest::Error>>,
+    client: Result<super::http_client::HttpClient, Arc<reqwest::Error>>,
     #[cfg(any(test, feature = "test-utils"))]
     token_override: Option<String>,
 }
@@ -225,8 +225,8 @@ impl OAuthClients {
             google: google_client_id.map(|id| GoogleClient { id, secret: None }),
             dropbox,
             onedrive: onedrive_client_id,
+            client: super::http_client::HttpClient::new(clock.clone()).map_err(Arc::new),
             clock,
-            client: http::client().map_err(Arc::new),
             #[cfg(any(test, feature = "test-utils"))]
             token_override: None,
         }
@@ -455,15 +455,16 @@ impl OAuthClients {
             .as_ref()
             .map_err(|source| StorageError::Provider {
                 provider,
-                failure: crate::StorageFailure::Network,
+                // The client could not be built: TLS setup failed.
+                failure: crate::StorageFailure::InvalidConfiguration,
                 source: Box::new(source.clone()),
             })?;
         let response = client
-            .post(token)
-            .form(params)
-            .send()
-            .await
-            .map_err(|e| http::transport(provider, e))?;
+            .send(
+                provider,
+                client.request(reqwest::Method::POST, token).form(params),
+            )
+            .await?;
         let status = response.status();
         if !status.is_success() {
             return Err(http::response_error(provider, response).await.into());

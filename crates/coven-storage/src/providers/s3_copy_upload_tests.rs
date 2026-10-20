@@ -108,6 +108,7 @@ pub(super) fn gcs_provider(url: &str) -> StorageConnection<S3Storage> {
         Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH)),
         Arc::new(SequentialIds::new()),
         std::sync::Arc::new(crate::NoCooldown),
+        crate::providers::tests::http_client(),
     )
     .unwrap();
     storage.client = Client::from_conf(

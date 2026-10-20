@@ -141,18 +141,14 @@ impl<'a> Admin<'a> {
             &headers,
             body.as_bytes(),
         );
-        let mut request = self.context.http.request(method, url);
+        let mut request = self.context.http_request(method, url);
         for (name, value) in &headers {
             if *name != "host" {
                 request = request.header(*name, value);
             }
         }
-        let response = request
-            .header("authorization", signature)
-            .body(body)
-            .send()
-            .await
-            .map_err(|error| crate::providers::http::transport(CloudProvider::S3, error))?;
+        let request = request.header("authorization", signature).body(body);
+        let response = self.context.send(request).await?;
         if tolerated.contains(&response.status().as_u16()) {
             return Ok(None);
         }
