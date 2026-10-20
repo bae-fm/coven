@@ -250,7 +250,7 @@ pub(super) async fn begin(
             )? {
                 remove_area(&path)?;
             }
-            creation::create_directory_tree(&area)
+            creation::create_directory(&area)
                 .map_err(|source| FileError::at("create replacement area", &area, source))?;
             let loading = bootstrap::reserve_bootstrap_directory(&area, id, ids).await?;
             let new = loading

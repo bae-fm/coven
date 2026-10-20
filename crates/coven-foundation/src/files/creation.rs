@@ -45,7 +45,7 @@ pub(crate) fn create(
     ids: &dyn IdSource,
     unpublished: bool,
 ) -> Result<StoreDir, DirectoryCreationError> {
-    create_directory_tree(root)
+    create_directory(root)
         .map_err(|source| FileError::at("create stores directory", root, source))?;
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve stores directory", root, source))?;
@@ -110,35 +110,53 @@ pub(crate) fn create(
     Ok(StoreDir::new(destination, id))
 }
 
+/// Create `path` unless it is already a directory. Its parent must exist:
+/// coven creates directories only inside the app directory, one level at a
+/// time, and never opens anything above it. Android refuses an app access to
+/// the directories above its own.
 #[cfg(windows)]
-pub(crate) fn create_directory_tree(path: &Path) -> io::Result<()> {
-    fs::create_dir_all(path)
+pub(crate) fn create_directory(path: &Path) -> io::Result<()> {
+    make_directory(path)
+}
+
+/// Create `path` unless it is already a directory, then sync its parent so
+/// the entry is durable. Its parent must exist: coven creates directories
+/// only inside the app directory, one level at a time, and never opens
+/// anything above it. Android refuses an app access to the directories above
+/// its own.
+#[cfg(unix)]
+pub(crate) fn create_directory(path: &Path) -> io::Result<()> {
+    create_directory_with_sync(path, &crate::files::atomic_file::sync_directory)
 }
 
 #[cfg(unix)]
-pub(crate) fn create_directory_tree(path: &Path) -> io::Result<()> {
-    create_directory_tree_with_sync(path, &crate::files::atomic_file::sync_directory)
-}
-
-#[cfg(unix)]
-fn create_directory_tree_with_sync(
+fn create_directory_with_sync(
     path: &Path,
     sync: &impl Fn(&Path) -> io::Result<()>,
 ) -> io::Result<()> {
-    fs::create_dir_all(path)?;
+    make_directory(path)?;
     // Existence does not prove durability: an earlier attempt may have made
-    // any ancestor and failed before syncing its parent. Repeat each barrier
-    // on retry, including directories another creator made concurrently.
-    for ancestor in path
-        .ancestors()
-        .filter(|ancestor| !ancestor.as_os_str().is_empty())
-    {
-        sync(ancestor)?;
+    // the directory and failed before syncing its parent. Repeat the barrier
+    // on retry, including when another creator made it concurrently.
+    let parent = match path.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    sync(parent)
+}
+
+fn make_directory(path: &Path) -> io::Result<()> {
+    match fs::create_dir(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {
+            if fs::metadata(path)?.is_dir() {
+                Ok(())
+            } else {
+                Err(error)
+            }
+        }
+        Err(error) => Err(error),
     }
-    if path.is_relative() {
-        sync(Path::new("."))?;
-    }
-    Ok(())
 }
 
 #[cfg(test)]

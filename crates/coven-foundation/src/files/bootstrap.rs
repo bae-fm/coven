@@ -129,7 +129,7 @@ pub(super) async fn reserve_bootstrap_directory(
     id: StoreId,
     ids: &dyn IdSource,
 ) -> Result<BootstrapStore, BootstrapDirectoryError> {
-    creation::create_directory_tree(root)
+    creation::create_directory(root)
         .map_err(|source| FileError::at("create bootstrap layout", root, source))?;
     let root = fs::canonicalize(root)
         .map_err(|source| FileError::at("resolve bootstrap layout", root, source))?;

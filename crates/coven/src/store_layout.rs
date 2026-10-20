@@ -53,6 +53,8 @@ impl From<coven_foundation::files::StoreDirectoriesError> for StoreLayoutError {
 
 impl StoreLayout {
     /// The app directory under which stores have their own directories (E1).
+    /// The app creates `app_dir`; coven creates directories only inside it
+    /// and never opens a directory above it, which Android refuses.
     pub fn new(app_dir: PathBuf) -> Self {
         Self {
             directories: coven_foundation::files::StoreDirectories::new(app_dir),

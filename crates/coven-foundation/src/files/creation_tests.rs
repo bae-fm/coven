@@ -31,8 +31,11 @@ fn creation_never_overwrites_a_store_or_even_an_empty_directory() {
 #[test]
 fn restored_and_joined_directories_get_fresh_device_ids_for_the_same_store() {
     let directory = tempfile::tempdir().unwrap();
-    let first = StoreDirectories::new(directory.path().join("first-device"));
-    let restored = StoreDirectories::new(directory.path().join("restored-device"));
+    let [first, restored] = ["first-device", "restored-device"].map(|name| {
+        let app_dir = directory.path().join(name);
+        fs::create_dir(&app_dir).unwrap();
+        StoreDirectories::new(app_dir)
+    });
     let id = StoreId(Uuid::from_u128(1));
     let one = first
         .create_store_dir(id, &UuidIds)
@@ -108,26 +111,35 @@ fn concurrent_creation_of_the_same_id_publishes_exactly_one_store() {
 #[test]
 fn retrying_directory_creation_repeats_a_failed_durability_barrier() {
     use std::cell::RefCell;
-    let directory = tempfile::tempdir().unwrap();
-    let app_dir = directory.path().join("app");
-    let stores = app_dir.join("stores");
-    let first = create_directory_tree_with_sync(&stores, &|path| {
-        if path == directory.path() {
-            Err(io::Error::other("injected parent sync failure"))
-        } else {
-            crate::files::atomic_file::sync_directory(path)
-        }
+    let app_dir = tempfile::tempdir().unwrap();
+    let stores = app_dir.path().join("stores");
+    let first = create_directory_with_sync(&stores, &|_| {
+        Err(io::Error::other("injected parent sync failure"))
     });
     assert!(first.is_err());
-    assert!(app_dir.is_dir());
+    assert!(stores.is_dir());
     let synced = RefCell::new(Vec::new());
-    create_directory_tree_with_sync(&stores, &|path| {
+    create_directory_with_sync(&stores, &|path| {
         synced.borrow_mut().push(path.to_owned());
         crate::files::atomic_file::sync_directory(path)
     })
     .unwrap();
-    assert!(
-        synced.borrow().contains(&directory.path().to_owned()),
-        "retry must sync the parent whose first sync failed"
+    assert_eq!(
+        *synced.borrow(),
+        [app_dir.path().to_owned()],
+        "retry must sync the parent whose first sync failed, and nothing above it"
     );
+}
+
+#[test]
+fn creation_needs_the_app_directory_to_exist() {
+    let directory = tempfile::tempdir().unwrap();
+    let missing = directory.path().join("app");
+    let layout = StoreDirectories::new(missing.clone());
+    let id = StoreId(Uuid::from_u128(1));
+    let Err(DirectoryCreationError::File(error)) = layout.create_store_dir(id, &UuidIds) else {
+        panic!("creating a store inside a missing app directory must fail");
+    };
+    assert!(error.to_string().contains("create stores directory"));
+    assert!(!missing.exists(), "coven must not create the app directory");
 }

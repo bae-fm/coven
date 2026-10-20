@@ -37,7 +37,8 @@ pub enum StoreDirectoriesError {
 }
 
 impl StoreDirectories {
-    /// The stores under `app_dir`, one directory each (E1).
+    /// The stores under `app_dir`, one directory each (E1). The app creates
+    /// `app_dir`; coven creates directories only inside it.
     pub fn new(app_dir: PathBuf) -> Self {
         Self { app_dir }
     }

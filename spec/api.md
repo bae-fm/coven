@@ -1473,7 +1473,9 @@ impl StoreDir {
 }
 
 impl StoreLayout {
-    /// The stores under `app_dir`, one directory each.
+    /// The stores under `app_dir`, one directory each. The app creates
+    /// `app_dir`; coven creates directories only inside it and never opens a
+    /// directory above it, which Android refuses.
     pub fn new(app_dir: PathBuf) -> Self;
 
     /// The stores on this device, ordered by id, with their committed names.
