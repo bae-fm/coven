@@ -166,12 +166,21 @@ code_checks() {
 
     # A crate's features only ever add code, so the pass above already runs
     # everything its build without them would, except what that build alone
-    # compiles. Each such crate is tested on its own: run beside the others,
-    # a dev-dependency's feature list would turn its features back on.
-    local passes crate tests
+    # compiles. Those crates are tested again without their features: beside
+    # the others when no member turns those features on, so only they rebuild;
+    # otherwise on their own, since a dependent's feature list would turn them
+    # back on.
+    local passes crate tests built together=() filters=()
     passes=$(feature_off_tests)
-    while read -r crate tests; do
+    while read -r crate tests built; do
         [ -n "$crate" ] && crate_selected "$crate" || continue
+        if [ "$built" = together ]; then
+            together+=("$crate")
+            if [ "$tests" = all ]; then
+                filters+=("package($crate)")
+            fi
+            continue
+        fi
         if [ "$tests" = all ]; then
             step "cargo nextest run -p $crate --no-default-features"
             cargo nextest run -p "$crate" --no-default-features --no-fail-fast
@@ -179,13 +188,27 @@ code_checks() {
         step "cargo test -p $crate --no-default-features --doc"
         cargo test -p "$crate" --no-default-features --doc
     done <<< "$passes"
+    if [ ${#together[@]} != 0 ]; then
+        if [ ${#filters[@]} != 0 ]; then
+            local filter
+            filter=$(printf ' | %s' "${filters[@]}")
+            step "cargo nextest run --no-default-features (${filter:3})"
+            # shellcheck disable=SC2086
+            cargo nextest run $packages --no-default-features --no-fail-fast -E "${filter:3}"
+        fi
+        step "cargo test --doc --no-default-features (for ${together[*]})"
+        # shellcheck disable=SC2086
+        cargo test $packages --no-default-features --doc
+    fi
 }
 
 # The crates whose build without their features compiles something the build
-# with them all does not, each followed by the tests that build changes: `all`,
+# with them all does not, each followed by the tests that build changes, `all`,
 # or `doc` when the only such code is a `cfg_attr(not(feature …), doc = …)`
-# example. That code is a `not(…)` cfg naming a feature, a `cfg!` naming one, or
-# a feature that turns on a feature of a dependency outside the workspace.
+# example; and then by `together` when no workspace member turns on any of its
+# features, so a build of the whole workspace leaves them off, or `alone`. That
+# code is a `not(…)` cfg naming a feature, a `cfg!` naming one, or a feature
+# that turns on a feature of a dependency outside the workspace.
 feature_off_tests() {
     cargo metadata --format-version 1 --no-deps | "$(command -v python3 || command -v python)" -c '
 import json, os, re, sys
@@ -217,8 +240,15 @@ for package in sorted(meta["packages"], key=lambda package: package["name"]):
                     code = True
             if re.search(r"cfg!\([^;]*feature", text):
                 code = True
-    if code or examples:
-        print(package["name"], "all" if code else "doc")
+    if not (code or examples):
+        continue
+    forced = any(
+        dependency["name"] == package["name"]
+        and (dependency["features"] or (dependency["uses_default_features"] and features.get("default")))
+        for dependent in meta["packages"]
+        for dependency in dependent["dependencies"]
+    )
+    print(package["name"], "all" if code else "doc", "alone" if forced else "together")
 ' | tr -d '\r'
 }
 
