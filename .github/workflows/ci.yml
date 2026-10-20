@@ -101,6 +101,7 @@ jobs:
               rm -f target/debug/deps/"$name"-* target/debug/deps/lib"$name"-*
           done
           rm -rf target/doc
+          du -sh target/debug/* ~/.cargo/registry 2>/dev/null | sort -h | tail -6
       - name: Save the build
         if: ${{ !cancelled() }}
         uses: actions/cache/save@v5
