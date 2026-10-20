@@ -71,6 +71,10 @@ struct DatabaseInner {
     /// free, so a test can stall that disk work.
     #[cfg(test)]
     removal_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// Fail this many coming `end_retry_waits` transactions with a disk
+    /// error, so a test can show that a failed end leaves every wait.
+    #[cfg(any(test, feature = "test-utils"))]
+    retry_end_failures: std::sync::atomic::AtomicUsize,
 }
 
 // The lock outlives every connection, including when the last handle is dropped.

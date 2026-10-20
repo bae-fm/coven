@@ -181,8 +181,24 @@ impl Database {
             + 'static,
     ) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
         self.call(move |inner| {
+            #[cfg(any(test, feature = "test-utils"))]
+            let injected = inner
+                .retry_end_failures
+                .fetch_update(
+                    std::sync::atomic::Ordering::SeqCst,
+                    std::sync::atomic::Ordering::SeqCst,
+                    |left| left.checked_sub(1),
+                )
+                .is_ok();
             inner.access.with_writer(|writer| {
                 writer.transaction(|db| {
+                    #[cfg(any(test, feature = "test-utils"))]
+                    if injected {
+                        return Err(DbError::Sqlite(rusqlite::Error::SqliteFailure(
+                            rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_IOERR),
+                            Some("injected retry end failure".into()),
+                        )));
+                    }
                     let waits = retry::read_all(db)?;
                     let pending = crate::pending::read::<P>(db)?;
                     let uploads = crate::file_queue::read(db)?;
@@ -209,6 +225,19 @@ impl Database {
             })
         })
         .await
+    }
+
+    /// Fail the next `count` `end_retry_waits` transactions with a disk error.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn fail_retry_ends(&self, count: usize) {
+        let _ = self
+            .call(move |inner| {
+                inner
+                    .retry_end_failures
+                    .store(count, std::sync::atomic::Ordering::SeqCst);
+                Ok::<_, DbError>(())
+            })
+            .await;
     }
 
     /// Forget a wait once its work succeeds or no longer retries automatically.

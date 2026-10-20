@@ -791,3 +791,42 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
     );
     f.close().await;
 }
+
+/// A report the file worker could not act on, because ending the wait
+/// failed to save, stays: every wait keeps its backoff, and the next plan
+/// ends the upload's wait (§6.7).
+#[tokio::test]
+async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
+    let clock = Arc::new(FixedClock::new(
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+    ));
+    let f = fixture(&clock).await;
+    f.attach("files", "photo", b"photo".to_vec()).await;
+    f.storage
+        .set_faults(fail_next(StorageFailure::Network, None))
+        .await;
+    f.files.inner.drain_uploads(true).await.unwrap();
+    let wait = retry(&f).await;
+    let waits = &f.files.inner.waits;
+    waits.network_changed();
+    f.database.fail_retry_ends(1).await;
+    assert!(waits
+        .end_offline_waits(crate::NetworkOwner::Files)
+        .await
+        .is_err());
+    assert_eq!(retry(&f).await, wait);
+    let requests = f.storage.request_trace().len();
+    f.files.inner.drain_uploads(false).await.unwrap();
+    assert_eq!(f.storage.request_trace().len(), requests);
+    // No new report: the one the failure left is acted on now.
+    assert!(waits
+        .end_offline_waits(crate::NetworkOwner::Files)
+        .await
+        .unwrap());
+    assert!(retry(&f).await.unwrap().wait.is_zero());
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        1
+    );
+    f.close().await;
+}

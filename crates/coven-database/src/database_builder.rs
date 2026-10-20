@@ -173,6 +173,8 @@ impl DatabaseBuilder {
                 staging: Mutex::new(BTreeSet::new()),
                 #[cfg(test)]
                 removal_gate: Mutex::new(None),
+                #[cfg(any(test, feature = "test-utils"))]
+                retry_end_failures: std::sync::atomic::AtomicUsize::new(0),
             }))),
         })
     }

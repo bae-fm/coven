@@ -796,6 +796,9 @@ minutes away. Her app reports the change with `network_changed`
 - **The end is saved.** Coven saves the ended wait as T = now with W = 0, so
   reopening arms nothing, whatever the wall clock reads. Keeping W would bring
   the old wait back after the clock moved backward.
+  If that save fails, every wait keeps its backoff and the report stays: the
+  owner acts on it again the next time it plans, so a failed write never drops
+  a report.
 - **Reports coalesce.** The connection acts on reports between passes, and the
   file worker between its transfers. Reports one hasn't acted on yet count as
   one. If the pass or transfer they arrived during fails for want of a network,

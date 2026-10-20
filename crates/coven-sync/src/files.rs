@@ -163,6 +163,8 @@ impl Files {
                         .end_offline_waits(crate::NetworkOwner::Files)
                         .await
                     {
+                        // The waits keep their backoff and the report stays,
+                        // so the worker's next plan ends them.
                         tracing::error!(?error, "ending file waits for the network failed");
                     }
                     match owner.drain_uploads(false).await {

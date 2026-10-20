@@ -47,7 +47,8 @@ impl NetworkOwner {
     }
 }
 
-/// Reports so far, and the count each owner has acted on.
+/// Reports so far, and the count each owner has acted on; an owner acts
+/// on a report only once its waits for the network ended.
 pub(crate) struct Reports {
     reported: tokio::sync::watch::Sender<u64>,
     handled: [AtomicU64; 2],
@@ -96,9 +97,7 @@ impl RetryWaits {
     /// available, or moved to another network (§6.7). Each owner acts on it
     /// when it next plans; reports before then coalesce.
     pub fn network_changed(&self) {
-        self.network
-            .reported
-            .send_modify(|count| *count = count.wrapping_add(1));
+        self.network.reported.send_modify(|count| *count += 1);
         // The connection's owners plan again on a changed schedule.
         self.rearmed
             .send_modify(|count| *count = count.wrapping_add(1));
@@ -117,13 +116,16 @@ impl RetryWaits {
     /// provider's answer, one held because saving it failed, and the
     /// provider cooldown hold. Returns whether a report arrived, so the
     /// owner also runs the work it asks for. If reading or saving fails,
-    /// every wait holds and the owner reports the error.
+    /// every wait holds, the owner reports the error, and the report stays
+    /// unacted on, so the owner's next plan acts on it again.
     pub async fn end_offline_waits(&self, owner: NetworkOwner) -> Result<bool, SyncError> {
         let reported = *self.network.reported.borrow();
-        if self.network.handled[owner.index()].swap(reported, Ordering::SeqCst) == reported {
+        let handled = &self.network.handled[owner.index()];
+        if handled.load(Ordering::SeqCst) >= reported {
             return Ok(false);
         }
         let Some(database) = &self.database else {
+            handled.fetch_max(reported, Ordering::SeqCst);
             return Ok(true);
         };
         // A wait this session holds for the app stays held; one already
@@ -168,6 +170,8 @@ impl RetryWaits {
         {
             self.arm(subject, &ended);
         }
+        // Reports since `reported` was read stay for the next plan.
+        handled.fetch_max(reported, Ordering::SeqCst);
         Ok(true)
     }
 }

@@ -150,3 +150,33 @@ async fn a_report_leaves_a_wait_held_for_the_app() {
     assert!(!due(&database, &waits, SYNC).await);
     database.close().await.unwrap();
 }
+
+/// A report whose end failed to save is not used up: the connection's wait
+/// keeps its backoff, and acting again ends it (§6.7).
+#[tokio::test]
+async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
+    let fixture = Fixture::new();
+    let (database, waits) = fixture.open().await;
+    let mut retry = ConnectionRetry::Automatic;
+    fail(&mut retry, &database, &waits, false).await;
+    let saved = database.retry_wait(SYNC).await.unwrap();
+    database.fail_retry_ends(1).await;
+    waits.network_changed();
+    assert!(waits
+        .end_offline_waits(crate::NetworkOwner::Connection)
+        .await
+        .is_err());
+    assert_eq!(database.retry_wait(SYNC).await.unwrap(), saved);
+    assert!(!due(&database, &waits, SYNC).await);
+    assert!(waits
+        .end_offline_waits(crate::NetworkOwner::Connection)
+        .await
+        .unwrap());
+    assert!(due(&database, &waits, SYNC).await);
+    // Acted on: nothing is left for the next plan.
+    assert!(!waits
+        .end_offline_waits(crate::NetworkOwner::Connection)
+        .await
+        .unwrap());
+    database.close().await.unwrap();
+}
