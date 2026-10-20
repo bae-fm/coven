@@ -914,3 +914,21 @@ async fn a_pausing_operation_refuses_app_writes_until_it_finishes() {
     assert_eq!(ids, expected);
     db.close().await.unwrap();
 }
+
+/// SQLite's memory statistics take one process-wide mutex on every
+/// allocation, serializing independent connections; `.cargo/config.toml`
+/// builds the bundled SQLite without them. A config cargo stops reading would
+/// otherwise go unnoticed, as it did once.
+#[test]
+fn bundled_sqlite_is_built_without_global_memory_statistics() {
+    let connection = rusqlite::Connection::open_in_memory().unwrap();
+    let disabled: bool = connection
+        .query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_compile_options
+                           WHERE compile_options = 'DEFAULT_MEMSTATUS=0')",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert!(disabled);
+}
