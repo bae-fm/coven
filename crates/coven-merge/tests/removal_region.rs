@@ -69,7 +69,7 @@ fn claim(value: &str, ms: u64) -> Constraints {
 // public merge functions, including their region discovery and closure.
 struct IndexedView {
     rows: BTreeMap<RowId, (RemovalRow, Constraints)>,
-    edges: BTreeMap<RowId, BTreeSet<RowId>>,
+    children: BTreeMap<RowId, BTreeSet<RowId>>,
     groups: BTreeMap<RowId, BTreeSet<Group>>,
     members: BTreeMap<Group, BTreeSet<RowId>>,
     visited: RefCell<BTreeSet<Group>>,
@@ -79,7 +79,7 @@ impl IndexedView {
     fn new(rows: BTreeMap<RowId, (RemovalRow, Constraints)>) -> Self {
         let mut view = Self {
             rows,
-            edges: BTreeMap::new(),
+            children: BTreeMap::new(),
             groups: BTreeMap::new(),
             members: BTreeMap::new(),
             visited: RefCell::new(BTreeSet::new()),
@@ -87,13 +87,8 @@ impl IndexedView {
         for (row, (data, constraints)) in &view.rows {
             if let RemovalRow::Present { references, .. } = data {
                 for reference in references.values() {
-                    let parent = &reference.parent.row;
-                    view.edges
-                        .entry(row.clone())
-                        .or_default()
-                        .insert(parent.clone());
-                    view.edges
-                        .entry(parent.clone())
+                    view.children
+                        .entry(reference.parent.row.clone())
                         .or_default()
                         .insert(row.clone());
                 }
@@ -148,8 +143,8 @@ impl RemovalView for IndexedView {
         Ok(self.rows[row].1.clone())
     }
 
-    fn related(&self, row: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
-        Ok(self.edges.get(row).cloned().unwrap_or_default())
+    fn children(&self, row: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
+        Ok(self.children.get(row).cloned().unwrap_or_default())
     }
 
     fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
@@ -351,7 +346,9 @@ fn twenty_thousand_rows_cover_claims_audiences_and_deep_chains() {
     for n in 8_000..10_000 {
         assert!(!partial.removed.contains_key(&row(n)));
     }
-    assert_eq!(before.visited.borrow().len(), before.members.len());
+    // Rows 10_001 to 11_999 are only row 10_000's parents: their removal
+    // cannot change, so only the after view reads their groups.
+    assert_eq!(before.visited.borrow().len(), before.members.len() - 1_999);
     assert_eq!(after.visited.borrow().len(), after.members.len());
     assert!(!partial.removed.contains_key(&row(0)));
     for n in 2..8_000 {

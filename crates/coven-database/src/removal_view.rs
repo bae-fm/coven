@@ -275,16 +275,8 @@ impl RemovalView for DatabaseRemovalView<'_> {
     ) -> Result<Constraints, Self::Error> {
         Ok(self.evaluated(row)?.constraints)
     }
-    fn related(&self, id: &RowId) -> Result<BTreeSet<RowId>, Self::Error> {
-        let mut related = BTreeSet::new();
-        if let RemovalRow::Present { references, .. } = self.evaluated(id)?.facts {
-            for reference in references.into_values() {
-                related.insert(reference.parent.row);
-            }
-        }
-        if let Some(children) = self.edges.get(id) {
-            related.extend(children.iter().cloned());
-        }
+    fn children(&self, id: &RowId) -> Result<BTreeSet<RowId>, Self::Error> {
+        let mut children = self.edges.get(id).cloned().unwrap_or_default();
         for declaration in &self.schema.declarations {
             let table = self.schema.table(&declaration.name);
             for fk in table
@@ -292,7 +284,7 @@ impl RemovalView for DatabaseRemovalView<'_> {
                 .iter()
                 .filter(|fk| fk.target.eq_ignore_ascii_case(&id.table))
             {
-                related.extend(crate::row_queries::children(
+                children.extend(crate::row_queries::children(
                     self.database,
                     table,
                     &self.schema.foreign_key(table, fk),
@@ -300,7 +292,7 @@ impl RemovalView for DatabaseRemovalView<'_> {
                 )?);
             }
         }
-        Ok(related)
+        Ok(children)
     }
     fn groups(&self, id: &RowId) -> Result<BTreeSet<Group>, Self::Error> {
         let row = self.evaluated(id)?;

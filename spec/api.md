@@ -830,8 +830,6 @@ pub enum MergeError {
     ParentGeneration(u64),
     /// A reference reaches an audience some readers of the child cannot read.
     ReferenceAudience(coven_merge::RowId),
-    /// A removal view omitted a parent from the region it declared closed.
-    RegionNotClosed(coven_merge::RowId),
     /// The removal view listed a row more than once.
     // Requires coven-merge/test-utils; coven/test-utils does not enable it.
     #[cfg(feature = "test-utils")]

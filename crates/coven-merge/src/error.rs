@@ -56,9 +56,6 @@ pub enum MergeError {
     /// A reference reaches an audience some readers of the child cannot read.
     #[error("reference from {0:?} reaches an unreadable audience")]
     ReferenceAudience(RowId),
-    /// A removal view omitted a parent from the region it declared closed.
-    #[error("removal region does not contain parent {0:?}")]
-    RegionNotClosed(RowId),
     /// The removal view listed a row more than once.
     #[error("removal view lists {0:?} twice")]
     #[cfg(any(test, feature = "test-utils"))]

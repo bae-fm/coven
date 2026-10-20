@@ -642,9 +642,9 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
         ) -> Result<Constraints, MergeError> {
             self.0.constraints(r, refs)
         }
-        fn related(&self, r: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
+        fn children(&self, r: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
             assert_ne!(r, &row(99));
-            self.0.related(r)
+            self.0.children(r)
         }
     }
     let mut before = MemoryView::default();
@@ -667,6 +667,44 @@ fn locality_uses_old_edges_and_never_enumerates_unrelated_rows() {
 }
 
 #[test]
+fn a_change_reads_its_parents_without_recomputing_their_other_children() {
+    // Row 1 is row 0's child. Rows 2 to 5 are row 1's children; row 6 is row
+    // 2's child and row 7 is row 3's. Row 2 starts failing a CHECK.
+    let mut before = MemoryView::default();
+    for n in 0..8 {
+        before.present(row(n), 1, stamp(n + 1));
+    }
+    before.reference(&row(1), row(0), 1, OnDelete::Cascade);
+    for n in 2..6 {
+        before.reference(&row(n), row(1), 1, OnDelete::Cascade);
+    }
+    before.reference(&row(6), row(2), 1, OnDelete::Cascade);
+    before.reference(&row(7), row(3), 1, OnDelete::Cascade);
+    let mut after = before.clone();
+    after
+        .checks
+        .entry(row(2))
+        .or_default()
+        .failed_checks
+        .insert("valid".into());
+    let patch = recompute(&before, &after, [row(2)]).unwrap();
+    // Row 2's removal can only take out row 6. Rows 0 and 1 are read to
+    // evaluate them; rows 3, 4, 5 and 7 depend on nothing that changed.
+    assert_eq!(patch.region, [row(0), row(1), row(2), row(6)].into());
+    assert_eq!(patch.removed, removals(&after).unwrap().removed);
+    assert_eq!(rules(&patch, &row(2)), [Rule::Check("valid".into())].into());
+    assert_eq!(
+        rules(&patch, &row(6)),
+        [Rule::ForeignKey(ForeignKey::new(
+            ["parent"],
+            "rows",
+            ["id"]
+        ))]
+        .into()
+    );
+}
+
+#[test]
 fn null_substitutions_feed_checks() {
     struct Resolved(MemoryView);
     impl FullRemovalView for Resolved {
@@ -685,8 +723,8 @@ fn null_substitutions_feed_checks() {
         fn row(&self, r: &RowId) -> Result<RemovalRow, MergeError> {
             self.0.row(r)
         }
-        fn related(&self, r: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
-            self.0.related(r)
+        fn children(&self, r: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
+            self.0.children(r)
         }
         fn constraints(
             &self,

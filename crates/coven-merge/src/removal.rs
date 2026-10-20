@@ -161,10 +161,11 @@ pub trait RemovalView {
         row: &RowId,
         references: &BTreeMap<crate::ForeignKey, ReferenceValue>,
     ) -> Result<Constraints, Self::Error>;
-    /// Indexed reference edges in both directions: parents and children. Include
-    /// absent and removed rows, and edges before reference substitution.
-    /// Competition belongs in [`Self::groups`], not in these edges.
-    fn related(&self, row: &RowId) -> Result<BTreeSet<RowId>, Self::Error>;
+    /// Rows whose references point at this row: the rows its removal takes
+    /// out with it. Include removed rows and references before substitution.
+    /// A row's parents come from [`Self::row`]; competition belongs in
+    /// [`Self::groups`], not in these edges.
+    fn children(&self, row: &RowId) -> Result<BTreeSet<RowId>, Self::Error>;
     /// The row's key group and its current unique claim groups, using values
     /// after reference substitution. Include removed rows' claims. The union
     /// of the before/after views in [`recompute`] covers groups a row left.
@@ -222,55 +223,91 @@ pub fn removals<V: FullRemovalView>(view: &V) -> Result<RemovalResult, V::Error>
             return Err(MergeError::DuplicateRow(row.clone()).into());
         }
     }
-    let region = region(&[view], seen.clone())?;
+    let region = inputs(view, &mut BTreeSet::new(), seen.clone())?;
     let mut order = rows;
-    order.extend(region.iter().filter(|r| !seen.contains(*r)).cloned());
+    order.extend(region.keys().filter(|r| !seen.contains(*r)).cloned());
     evaluate(view, region, &order)
 }
 
-/// Recompute only the touched rows' dependency region in the union of the
-/// before/after views. Including old edges releases former losers and children
-/// when a claim/reference changes. The region is closed under parents and
-/// rivals, so proofs/merge.md B9 (`Audience.lean`, `removal_local`) gives exactly
-/// the full recomputation's answer there. Outside it no input or dependency
-/// changed. The caller must include admin changes' rows among `touched`.
-/// No global row enumeration is performed by this function. Each competition
-/// group is expanded at most once in each view, so rivals are visited by group
+/// Recompute only the rows whose removal a change to `touched` can change: the
+/// touched rows and, through any chain, their children and rivals, in the
+/// union of the before/after views. Including old edges releases former losers
+/// and children when a claim/reference changes. Their parents and rivals in
+/// the after view, closed the same way, are evaluated with them, so
+/// proofs/merge.md B9 (`Audience.lean`, `removal_local`) gives exactly the full
+/// recomputation's answer there. Every other row's inputs and dependencies are
+/// unchanged, so its removal stands; a parent's other children are never read.
+/// The caller must include admin changes' rows among `touched`. No global row
+/// enumeration is performed by this function. Each competition group is
+/// expanded at most once in each view, so rivals are visited by group
 /// membership rather than by every pair of competing rows.
 pub fn recompute<E: From<MergeError>>(
     before: &impl RemovalView<Error = E>,
     after: &impl RemovalView<Error = E>,
     touched: impl IntoIterator<Item = RowId>,
 ) -> Result<RemovalResult, E> {
-    let region = region(&[before, after], touched.into_iter().collect())?;
-    let order: Vec<_> = region.iter().cloned().collect();
-    evaluate(after, region, &order)
-}
-
-fn region<E: From<MergeError>>(
-    views: &[&dyn RemovalView<Error = E>],
-    mut rows: BTreeSet<RowId>,
-) -> Result<BTreeSet<RowId>, E> {
-    let mut visited = vec![BTreeSet::new(); views.len()];
-    let mut pending: Vec<_> = rows.iter().cloned().collect();
+    let mut before_groups = BTreeSet::new();
+    let mut after_groups = BTreeSet::new();
+    let mut changed: BTreeSet<RowId> = touched.into_iter().collect();
+    let mut pending: Vec<_> = changed.iter().cloned().collect();
     while let Some(row) = pending.pop() {
-        for (view, groups) in views.iter().zip(&mut visited) {
-            let mut include = |neighbors: BTreeSet<RowId>| {
-                for neighbor in neighbors {
-                    if rows.insert(neighbor.clone()) {
-                        pending.push(neighbor);
-                    }
-                }
-            };
-            include(view.related(&row)?);
-            for group in view.groups(&row)? {
-                if groups.insert(group.clone()) {
-                    include(view.members(&group)?);
-                }
+        let mut dependents = BTreeSet::new();
+        for (view, groups) in [
+            (before as &dyn RemovalView<Error = E>, &mut before_groups),
+            (after as &dyn RemovalView<Error = E>, &mut after_groups),
+        ] {
+            dependents.extend(view.children(&row)?);
+            dependents.extend(rivals(view, groups, &row)?);
+        }
+        for dependent in dependents {
+            if changed.insert(dependent.clone()) {
+                pending.push(dependent);
             }
         }
     }
-    Ok(rows)
+    let region = inputs(after, &mut after_groups, changed)?;
+    let order: Vec<_> = region.keys().cloned().collect();
+    evaluate(after, region, &order)
+}
+
+/// The members of the row's groups not yet expanded in this view.
+fn rivals<E: From<MergeError>>(
+    view: &dyn RemovalView<Error = E>,
+    expanded: &mut BTreeSet<Group>,
+    row: &RowId,
+) -> Result<BTreeSet<RowId>, E> {
+    let mut rivals = BTreeSet::new();
+    for group in view.groups(row)? {
+        if expanded.insert(group.clone()) {
+            rivals.extend(view.members(&group)?);
+        }
+    }
+    Ok(rivals)
+}
+
+/// The rows' facts, with every parent and rival they read, transitively.
+fn inputs<E: From<MergeError>>(
+    view: &dyn RemovalView<Error = E>,
+    expanded: &mut BTreeSet<Group>,
+    rows: BTreeSet<RowId>,
+) -> Result<BTreeMap<RowId, RemovalRow>, E> {
+    let mut region = BTreeMap::new();
+    let mut pending: Vec<_> = rows.into_iter().collect();
+    while let Some(row) = pending.pop() {
+        if region.contains_key(&row) {
+            continue;
+        }
+        let facts = view.row(&row)?;
+        if facts.present() == facts.generation().is_multiple_of(2) {
+            return Err(MergeError::GenerationParity(facts.generation()).into());
+        }
+        if let RemovalRow::Present { references, .. } = &facts {
+            pending.extend(references.values().map(|r| r.parent.row.clone()));
+        }
+        pending.extend(rivals(view, expanded, &row)?);
+        region.insert(row, facts);
+    }
+    Ok(region)
 }
 
 struct Facts {
@@ -279,28 +316,17 @@ struct Facts {
     references: BTreeMap<crate::ForeignKey, ReferenceValue>,
 }
 
-fn evaluate<V: RemovalView>(
-    view: &V,
-    region: BTreeSet<RowId>,
+fn evaluate<E: From<MergeError>>(
+    view: &dyn RemovalView<Error = E>,
+    raw: BTreeMap<RowId, RemovalRow>,
     order: &[RowId],
-) -> Result<RemovalResult, V::Error> {
-    let mut raw = BTreeMap::new();
-    for row in &region {
-        let facts = view.row(row)?;
-        if facts.present() == facts.generation().is_multiple_of(2) {
-            return Err(MergeError::GenerationParity(facts.generation()).into());
-        }
-        raw.insert(row.clone(), facts);
-    }
+) -> Result<RemovalResult, E> {
     let mut facts = BTreeMap::new();
     for (row, data) in &raw {
         let mut resolved = BTreeMap::new();
         if let RemovalRow::Present { references, .. } = data {
             for (name, reference) in references {
-                let parent_gen = raw
-                    .get(&reference.parent.row)
-                    .ok_or_else(|| MergeError::RegionNotClosed(reference.parent.row.clone()))?
-                    .generation();
+                let parent_gen = raw[&reference.parent.row].generation();
                 resolved.insert(name.clone(), resolve_reference(row, reference, parent_gen)?);
             }
         }
@@ -339,7 +365,7 @@ fn evaluate<V: RemovalView>(
     out.extend(judged.keys().cloned());
     close(&facts, &children, order, &mut out);
     let mut result = RemovalResult {
-        region,
+        region: raw.into_keys().collect(),
         ..RemovalResult::default()
     };
     for (row, fact) in facts {

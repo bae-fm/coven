@@ -627,6 +627,67 @@ async fn writes_visit_only_indexed_rows_in_a_ten_thousand_row_store() {
 }
 
 #[tokio::test]
+async fn an_update_does_no_work_for_its_parents_other_children() {
+    let store = TestStore::new();
+    let db = store.schema(vec![
+        SyncedTable::new("people", RowIdentity::SharedKey),
+        SyncedTable::new("releases", RowIdentity::SharedKey),
+        SyncedTable::new("tracks", RowIdentity::SharedKey),
+        SyncedTable::new("history", RowIdentity::IndependentUuid).audience_column("audience"),
+    ], "CREATE TABLE people(id TEXT NOT NULL PRIMARY KEY);
+        CREATE TABLE releases(id TEXT NOT NULL PRIMARY KEY);
+        CREATE TABLE tracks(id TEXT NOT NULL PRIMARY KEY,release_id TEXT NOT NULL REFERENCES releases(id) ON DELETE CASCADE);
+        CREATE INDEX tracks_release ON tracks(release_id);
+        CREATE TABLE history(id TEXT NOT NULL PRIMARY KEY,person_id TEXT NOT NULL REFERENCES people(id) ON DELETE CASCADE,track_id TEXT NOT NULL REFERENCES tracks(id) ON DELETE CASCADE,played_ms INTEGER NOT NULL CHECK(played_ms>0),audience TEXT NOT NULL);
+        CREATE INDEX history_person ON history(person_id); CREATE INDEX history_track ON history(track_id);").await.unwrap();
+    sql(
+        &db,
+        "INSERT INTO people VALUES('ana'); INSERT INTO releases VALUES('album');
+         INSERT INTO tracks VALUES('track','album');
+         INSERT INTO history VALUES('00000000-0000-4000-8000-000000000001','ana','track',1,'store')",
+    )
+    .await
+    .unwrap();
+    let play = |played: i64| {
+        db.write(move |context| {
+            context.execute(
+                "UPDATE history SET played_ms=?1 WHERE id='00000000-0000-4000-8000-000000000001'",
+                [played],
+            )?;
+            Ok(())
+        })
+    };
+    // Each play follows another, so both measured writes do the same work.
+    play(2).await.unwrap();
+    play(3).await.unwrap();
+    let alone = db.inspect_writer(|db| db.fullscan_statements()).len();
+    // The play's track and person gain other children. Their removal cannot
+    // change when the play's position does, so the write reads none of them.
+    db.write(|context| {
+        for n in 0..200 {
+            context.execute(
+                "INSERT INTO tracks VALUES(?1,'album')",
+                [format!("other {n}")],
+            )?;
+            context.execute(
+                "INSERT INTO history VALUES(?1,'ana','track',1,'store')",
+                [format!("00000000-0000-4000-8001-{n:012}")],
+            )?;
+        }
+        Ok(())
+    })
+    .await
+    .unwrap();
+    play(4).await.unwrap();
+    play(5).await.unwrap();
+    assert_eq!(
+        db.inspect_writer(|db| db.fullscan_statements()).len(),
+        alone
+    );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn an_immediate_foreign_key_fails_at_the_app_statement() {
     let fixture = TestStore::new();
     let db = fixture.schema(vec![SyncedTable::new("parents",RowIdentity::SharedKey),SyncedTable::new("children",RowIdentity::SharedKey)],"CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY); CREATE TABLE children(id TEXT NOT NULL PRIMARY KEY,parent TEXT REFERENCES parents(id))").await.unwrap();

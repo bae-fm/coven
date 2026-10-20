@@ -262,22 +262,19 @@ impl RemovalView for MemoryView {
     ) -> Result<Constraints, MergeError> {
         Ok(self.checks.get(row).cloned().unwrap_or_default())
     }
-    fn related(&self, r: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
-        let mut edges = BTreeSet::new();
+    fn children(&self, r: &RowId) -> Result<BTreeSet<RowId>, MergeError> {
+        let mut children = BTreeSet::new();
         for (child, facts) in &self.data {
             if let RemovalRow::Present { references, .. } = facts {
-                for reference in references.values() {
-                    let parent = &reference.parent.row;
-                    if child == r {
-                        edges.insert(parent.clone());
-                    }
-                    if parent == r {
-                        edges.insert(child.clone());
-                    }
+                if references
+                    .values()
+                    .any(|reference| &reference.parent.row == r)
+                {
+                    children.insert(child.clone());
                 }
             }
         }
-        Ok(edges)
+        Ok(children)
     }
     fn groups(&self, row: &RowId) -> Result<BTreeSet<Group>, MergeError> {
         view_groups(self, row)
