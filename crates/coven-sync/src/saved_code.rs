@@ -3,9 +3,10 @@
 
 use crate::SyncError;
 use coven_crypto::{
-    custody::{KeyError, RestoreCodeChange, SyncedKeychain},
-    MaterialError, SecretBytes,
+    custody::{KeyError, RestoreCodeChange, SyncedKeychain, SyncedRestoreCode},
+    MaterialError, MemberIdentity, SecretBytes,
 };
+use coven_database::StoreState;
 use coven_format::codes::{KeychainRestoreCode, RestoreCode};
 use coven_foundation::id_source::StoreId;
 use coven_merge::Slot;
@@ -40,9 +41,13 @@ pub(crate) fn save(
     name: &SavedName,
 ) -> Result<(), SyncError> {
     synced.change_restore_code(|saved| {
-        let newer = saved
-            .and_then(|bytes| KeychainRestoreCode::from_bytes(bytes.as_bytes()).ok())
-            .filter(|saved| saved.code.store == code.store && saved.named_at > name.named_at.0);
+        let newer = match saved {
+            Some(SyncedRestoreCode::Saved(bytes)) => {
+                KeychainRestoreCode::from_bytes(bytes.as_bytes()).ok()
+            }
+            None | Some(SyncedRestoreCode::Ambiguous) => None,
+        }
+        .filter(|saved| saved.code.store == code.store && saved.named_at > name.named_at.0);
         let (label, named_at) = match &newer {
             Some(saved) => (saved.name.as_str(), saved.named_at),
             None => (name.name.as_str(), name.named_at.0),
@@ -53,23 +58,48 @@ pub(crate) fn save(
 
 /// Rewrite the entry's name when `name` is newer, keeping the code the entry
 /// holds: only setup, joining, restoring, resetting and member-key replacement
-/// save a code (§13.1). An absent entry stays absent, so a forgotten entry
-/// stays forgotten. An entry that can't be read fails with
-/// `MaterialError::Encoding`, and one naming another store with
-/// `RestoreCodeStoreId`: there is no code to keep.
-pub fn follow_name(synced: &SyncedKeychain, name: &SavedName) -> Result<(), KeyError> {
+/// save a code over a readable one (§13.1). An absent entry stays absent, so a
+/// forgotten entry stays forgotten.
+///
+/// This device has the store open, so it holds the store's current code and
+/// name. An entry it can't read (another format, another store's code, or a
+/// copy in more than one keychain group) is replaced with `current`'s code
+/// under `name`, as one copy. When `current` gives no code, because this
+/// device's keys were replaced, the store has no location, or the member was
+/// removed, the entry stays as it is. A keychain failure fails the call.
+pub fn follow_name<E: From<KeyError>>(
+    synced: &SyncedKeychain,
+    name: &SavedName,
+    current: impl FnOnce() -> Result<Option<RestoreCode>, E>,
+) -> Result<(), E> {
     if !synced.supported() {
         return Ok(());
     }
+    let encoding = || E::from(KeyError::from(MaterialError::Encoding));
     synced.change_restore_code(|saved| {
-        let Some(bytes) = saved else {
-            return Ok(RestoreCodeChange::Keep);
+        let read = match saved {
+            None => return Ok(RestoreCodeChange::Keep),
+            Some(SyncedRestoreCode::Saved(bytes)) => {
+                read_saved_code(synced.store(), bytes.as_bytes())
+            }
+            Some(SyncedRestoreCode::Ambiguous) => Err(UnreadableSavedCode::Ambiguous),
         };
-        let saved = KeychainRestoreCode::from_bytes(bytes.as_bytes())
-            .map_err(|_| MaterialError::Encoding)?;
-        if saved.code.store != synced.store() {
-            return Err(KeyError::RestoreCodeStoreId);
-        }
+        let saved = match read {
+            Ok((saved, _)) => saved,
+            Err(reason) => {
+                let Some(code) = current()? else {
+                    tracing::warn!(
+                        ?reason,
+                        "keeping an unreadable saved restore code: this device holds no current code"
+                    );
+                    return Ok(RestoreCodeChange::Keep);
+                };
+                tracing::warn!(?reason, "replacing an unreadable saved restore code");
+                let bytes = KeychainRestoreCode::encode(&name.name, name.named_at.0, &code)
+                    .map_err(|_| encoding())?;
+                return Ok(RestoreCodeChange::Write(SecretBytes::new(bytes.to_vec())));
+            }
+        };
         if saved.named_at >= name.named_at.0 {
             return Ok(RestoreCodeChange::Keep);
         }
@@ -79,9 +109,30 @@ pub fn follow_name(synced: &SyncedKeychain, name: &SavedName) -> Result<(), KeyE
             "rewriting the saved restore code's store name"
         );
         let bytes = KeychainRestoreCode::encode(&name.name, name.named_at.0, &saved.code)
-            .map_err(|_| MaterialError::Encoding)?;
+            .map_err(|_| encoding())?;
         Ok(RestoreCodeChange::Write(SecretBytes::new(bytes.to_vec())))
     })
+}
+
+/// The code a device with the store open saves in place of an unreadable
+/// entry (§13.1), or `None` when it holds no current code: the store has no
+/// location or identity, custody holds no member pair, the member was
+/// removed, or another device replaced the keys this device holds.
+pub fn replacement_code(
+    state: &StoreState,
+    identity: Option<&MemberIdentity>,
+    location: Option<&StorageConfig>,
+) -> Result<Option<RestoreCode>, SyncError> {
+    let (Some(identity), Some(location)) = (identity, location) else {
+        return Ok(None);
+    };
+    match crate::restore_codes::member_code(state, identity, location) {
+        Ok(code) => Ok(Some(code)),
+        Err(SyncError::NoStorage | SyncError::Removed | SyncError::MemberKeysReplaced { .. }) => {
+            Ok(None)
+        }
+        Err(error) => Err(error),
+    }
 }
 
 /// Why a saved entry can't be restored from. Listing shows it, with its

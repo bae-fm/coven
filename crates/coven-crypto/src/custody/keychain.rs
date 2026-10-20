@@ -71,6 +71,12 @@ pub(crate) trait KeychainBackend: std::any::Any + Send + Sync {
     ) -> Result<(), KeyError>;
     fn delete(&self, scope: EntryScope, service: &str, account: &str) -> Result<(), KeyError>;
     fn synced_restore_codes(&self, service: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError>;
+    /// Every keychain group's copy of one synced entry.
+    fn synced_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError>;
+    /// Leave exactly one copy of a synced entry, holding `bytes`: write the
+    /// first group's copy, or a new entry when there is none, then delete the
+    /// other groups' copies. A failure part way leaves more than one copy.
+    fn replace_synced(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError>;
     fn supports_synced_entries(&self) -> bool;
 }
 
@@ -137,6 +143,14 @@ impl Keychain {
 
     pub(super) fn delete(&self, scope: EntryScope, account: &str) -> Result<(), KeyError> {
         self.backend.delete(scope, &self.name, account)
+    }
+
+    pub(super) fn synced_copies(&self, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+        self.backend.synced_copies(&self.name, account)
+    }
+
+    pub(super) fn replace_synced(&self, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
+        self.backend.replace_synced(&self.name, account, bytes)
     }
 }
 

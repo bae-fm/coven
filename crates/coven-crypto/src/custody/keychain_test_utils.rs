@@ -4,7 +4,64 @@ use crate::custody::KeychainError;
 use std::collections::BTreeMap;
 
 /// The synced entries iCloud Keychain carries to every device of one person.
-type SyncedEntries = Arc<Mutex<BTreeMap<String, SecretBytes>>>;
+type SyncedEntries = Arc<Mutex<SyncedGroups>>;
+
+/// The keychain groups an app can read. Apple keeps one copy of an entry per
+/// group: a write naming no group adds to the default group, or, when that
+/// group already holds the entry, updates every group's copy; a read naming
+/// none gives the first copy, and a deletion naming none deletes them all.
+#[derive(Default)]
+pub(super) struct SyncedGroups {
+    default: BTreeMap<String, SecretBytes>,
+    another: BTreeMap<String, SecretBytes>,
+}
+
+impl SyncedGroups {
+    fn read(&self, account: &str) -> Option<SecretBytes> {
+        self.copies(account).into_iter().next()
+    }
+
+    fn write(&mut self, account: &str, bytes: &[u8]) {
+        if self.default.contains_key(account) {
+            if let Some(copy) = self.another.get_mut(account) {
+                *copy = SecretBytes::new(bytes.to_vec());
+            }
+        }
+        self.default
+            .insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
+    }
+
+    fn delete(&mut self, account: &str) {
+        self.default.remove(account);
+        self.another.remove(account);
+    }
+
+    fn copies(&self, account: &str) -> Vec<SecretBytes> {
+        [&self.default, &self.another]
+            .into_iter()
+            .filter_map(|group| group.get(account))
+            .map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec()))
+            .collect()
+    }
+
+    fn replace(&mut self, account: &str, bytes: &[u8]) {
+        let bytes = SecretBytes::new(bytes.to_vec());
+        if self.default.contains_key(account) || !self.another.contains_key(account) {
+            self.default.insert(account.to_owned(), bytes);
+            self.another.remove(account);
+        } else {
+            self.another.insert(account.to_owned(), bytes);
+        }
+    }
+
+    fn all(&self) -> Vec<(String, SecretBytes)> {
+        [&self.default, &self.another]
+            .into_iter()
+            .flatten()
+            .map(|(account, bytes)| (account.clone(), SecretBytes::new(bytes.as_bytes().to_vec())))
+            .collect()
+    }
+}
 
 pub(super) struct MemoryEntries {
     /// This device's own entries.
@@ -42,17 +99,23 @@ impl MemoryEntries {
     fn change<T>(
         &mut self,
         scope: EntryScope,
-        change: impl FnOnce(&mut BTreeMap<String, SecretBytes>) -> T,
+        device: impl FnOnce(&mut BTreeMap<String, SecretBytes>) -> T,
+        synced_groups: impl FnOnce(&mut SyncedGroups) -> T,
     ) -> Result<T, KeyError> {
         self.check(scope)?;
         Ok(match scope {
-            EntryScope::DeviceOnly => change(&mut self.device),
-            EntryScope::Synced => change(&mut synced(&self.synced)),
+            EntryScope::DeviceOnly => device(&mut self.device),
+            EntryScope::Synced => synced_groups(&mut synced(&self.synced)),
         })
+    }
+
+    fn synced<T>(&mut self, change: impl FnOnce(&mut SyncedGroups) -> T) -> Result<T, KeyError> {
+        self.check(EntryScope::Synced)?;
+        Ok(change(&mut synced(&self.synced)))
     }
 }
 
-fn synced(entries: &SyncedEntries) -> std::sync::MutexGuard<'_, BTreeMap<String, SecretBytes>> {
+fn synced(entries: &SyncedEntries) -> std::sync::MutexGuard<'_, SyncedGroups> {
     entries
         .lock()
         .expect("in-memory synced keychain entries lock is poisoned")
@@ -71,11 +134,15 @@ impl KeychainBackend for Mutex<MemoryEntries> {
     ) -> Result<Option<SecretBytes>, KeyError> {
         self.lock()
             .expect("in-memory keychain entries lock is poisoned")
-            .change(scope, |entries| {
-                entries
-                    .get(account)
-                    .map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec()))
-            })
+            .change(
+                scope,
+                |entries| {
+                    entries
+                        .get(account)
+                        .map(|bytes| SecretBytes::new(bytes.as_bytes().to_vec()))
+                },
+                |groups| groups.read(account),
+            )
     }
 
     fn write(
@@ -87,31 +154,32 @@ impl KeychainBackend for Mutex<MemoryEntries> {
     ) -> Result<(), KeyError> {
         self.lock()
             .expect("in-memory keychain entries lock is poisoned")
-            .change(scope, |entries| {
-                entries.insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
-            })
+            .change(
+                scope,
+                |entries| {
+                    entries.insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
+                },
+                |groups| groups.write(account, bytes),
+            )
     }
 
     fn delete(&self, scope: EntryScope, _: &str, account: &str) -> Result<(), KeyError> {
         self.lock()
             .expect("in-memory keychain entries lock is poisoned")
-            .change(scope, |entries| {
-                entries.remove(account);
-            })
+            .change(
+                scope,
+                |entries| {
+                    entries.remove(account);
+                },
+                |groups| groups.delete(account),
+            )
     }
 
     fn synced_restore_codes(&self, _: &str) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
         let entries = self
             .lock()
             .expect("in-memory keychain entries lock is poisoned")
-            .change(EntryScope::Synced, |entries| {
-                entries
-                    .iter()
-                    .map(|(account, bytes)| {
-                        (account.clone(), SecretBytes::new(bytes.as_bytes().to_vec()))
-                    })
-                    .collect::<Vec<_>>()
-            })?;
+            .synced(|groups| groups.all())?;
         let mut codes = Vec::new();
         for (account, bytes) in entries {
             if let Some(store) = restore_code_store(&account)? {
@@ -119,6 +187,18 @@ impl KeychainBackend for Mutex<MemoryEntries> {
             }
         }
         Ok(codes)
+    }
+
+    fn synced_copies(&self, _: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+        self.lock()
+            .expect("in-memory keychain entries lock is poisoned")
+            .synced(|groups| groups.copies(account))
+    }
+
+    fn replace_synced(&self, _: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
+        self.lock()
+            .expect("in-memory keychain entries lock is poisoned")
+            .synced(|groups| groups.replace(account, bytes))
     }
 }
 
@@ -178,6 +258,21 @@ impl Keychain {
             .lock()
             .expect("in-memory keychain entries lock is poisoned")
             .fail_after = successes.iter().copied().collect();
+    }
+
+    /// Save a synced entry's copy in a second keychain group, as an app that
+    /// moved to a new group can find its old copy beside the new one.
+    /// Requires an in-memory keychain.
+    pub(crate) fn write_in_another_group(&self, account: &str, bytes: &[u8]) {
+        synced(
+            &self
+                .memory_backend()
+                .lock()
+                .expect("in-memory keychain entries lock is poisoned")
+                .synced,
+        )
+        .another
+        .insert(account.to_owned(), SecretBytes::new(bytes.to_vec()));
     }
 
     /// While `refuse` holds, refuse every call this device makes on a synced

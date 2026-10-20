@@ -207,7 +207,9 @@ fn a_change_keeps_writes_or_deletes_the_code_it_read() {
     };
     synced
         .change_restore_code(|saved| {
-            assert_eq!(saved.unwrap().as_bytes(), b"restore");
+            assert!(
+                matches!(saved, Some(SyncedRestoreCode::Saved(bytes)) if bytes.as_bytes() == b"restore")
+            );
             Ok::<_, KeyError>(RestoreCodeChange::Keep)
         })
         .unwrap();
@@ -245,6 +247,57 @@ fn a_change_keeps_writes_or_deletes_the_code_it_read() {
         Err(KeyError::Left)
     ));
     assert!(read(&synced).is_none());
+}
+
+#[test]
+fn a_change_sees_every_groups_copy_and_a_write_leaves_one() {
+    let phone = Keychain::in_memory("groups").unwrap();
+    let laptop = phone.another_device();
+    let id = StoreId(Uuid::from_u128(1));
+    let synced = saved(&phone, id);
+    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    let ambiguous = |keychain: &Arc<Keychain>| {
+        matches!(
+            &keychain.synced_restore_codes().unwrap()[..],
+            [(_, SyncedRestoreCode::Ambiguous)]
+        )
+    };
+    assert!(ambiguous(&laptop));
+    synced
+        .change_restore_code(|saved| {
+            assert!(matches!(saved, Some(SyncedRestoreCode::Ambiguous)));
+            Ok::<_, KeyError>(RestoreCodeChange::Keep)
+        })
+        .unwrap();
+    assert!(ambiguous(&laptop));
+    synced
+        .change_restore_code(|_| {
+            Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(b"one".to_vec())))
+        })
+        .unwrap();
+    assert!(matches!(
+        &laptop.synced_restore_codes().unwrap()[..],
+        [(store, SyncedRestoreCode::Saved(bytes))] if *store == id && bytes.as_bytes() == b"one"
+    ));
+    // A copy only in another group is rewritten there, not copied beside it.
+    synced.delete_restore_code().unwrap();
+    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    synced
+        .change_restore_code(|_| {
+            Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(b"two".to_vec())))
+        })
+        .unwrap();
+    assert!(matches!(
+        &laptop.synced_restore_codes().unwrap()[..],
+        [(_, SyncedRestoreCode::Saved(bytes))] if bytes.as_bytes() == b"two"
+    ));
+    // Deleting by store id deletes every group's copy.
+    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    synced
+        .set_restore_code(&SecretBytes::new(b"default".to_vec()))
+        .unwrap();
+    synced.forget().unwrap();
+    assert!(laptop.synced_restore_codes().unwrap().is_empty());
 }
 
 /// Forgetting deletes the person's entries for one store from every device,

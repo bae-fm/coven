@@ -135,6 +135,72 @@ impl KeychainBackend for NativeKeychain {
     ) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
         Err(KeyError::Unsupported)
     }
+
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn synced_copies(&self, service: &str, account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+        self.copies(service, account)?
+            .iter()
+            .map(|entry| {
+                Ok(SecretBytes::new(
+                    entry.get_secret().map_err(KeychainError::from)?,
+                ))
+            })
+            .collect()
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    fn synced_copies(&self, _service: &str, _account: &str) -> Result<Vec<SecretBytes>, KeyError> {
+        Err(KeyError::Unsupported)
+    }
+
+    /// Each search result names its keychain group, so writing or deleting
+    /// through it reaches only that group's copy.
+    #[cfg(any(target_os = "macos", target_os = "ios"))]
+    fn replace_synced(&self, service: &str, account: &str, bytes: &[u8]) -> Result<(), KeyError> {
+        let copies = self.copies(service, account)?;
+        let Some((first, others)) = copies.split_first() else {
+            return self.write(EntryScope::Synced, service, account, bytes);
+        };
+        first.set_secret(bytes).map_err(KeychainError::from)?;
+        for other in others {
+            match other.delete_credential() {
+                Ok(()) | Err(keyring_core::Error::NoEntry) => {}
+                Err(error) => return Err(KeychainError::from(error).into()),
+            }
+        }
+        Ok(())
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios")))]
+    fn replace_synced(
+        &self,
+        _service: &str,
+        _account: &str,
+        _bytes: &[u8],
+    ) -> Result<(), KeyError> {
+        Err(KeyError::Unsupported)
+    }
+}
+
+#[cfg(any(target_os = "macos", target_os = "ios"))]
+impl NativeKeychain {
+    /// The synced entries for exactly this service and account, one per
+    /// keychain group that holds one. Apple matches both exactly; the result
+    /// is filtered again so a store matching loosely finds no other entry.
+    fn copies(&self, service: &str, account: &str) -> Result<Vec<keyring_core::Entry>, KeyError> {
+        let query = std::collections::HashMap::from([("service", service), ("account", account)]);
+        let entries = self.synced.search(&query).map_err(KeychainError::from)?;
+        Ok(entries
+            .into_iter()
+            .filter(|entry| {
+                entry
+                    .get_specifiers()
+                    .is_some_and(|(found_service, found)| {
+                        found_service == service && found == account
+                    })
+            })
+            .collect())
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]

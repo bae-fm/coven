@@ -16,6 +16,32 @@ use coven_storage::{
 };
 use std::sync::Arc;
 
+/// This member's restore code from the applied `state`: their stable id and
+/// the held pair it binds now, the store id and `location` (§13.1).
+pub(crate) fn member_code(
+    state: &coven_database::StoreState,
+    identity: &MemberIdentity,
+    location: &StorageConfig,
+) -> Result<RestoreCode, SyncError> {
+    let store = state.store.as_ref().ok_or(SyncError::NoStorage)?;
+    let current = crate::effects::member(state, &identity.member())
+        .ok_or(SyncError::Removed)?
+        .keys;
+    // A kept self-replacement's candidate is current before custody
+    // installs it; a retired pair never is.
+    let selected = identity
+        .activate(&current)
+        .ok_or(SyncError::MemberKeysReplaced {
+            member: identity.member(),
+        })?;
+    Ok(RestoreCode {
+        store: store.id,
+        member: identity.member(),
+        member_keys: selected.keys().clone(),
+        storage: location.encode()?,
+    })
+}
+
 /// Owns code generation and credential changes for one open handle. Closing
 /// waits for updates holding the lock, even when their app futures were dropped.
 #[derive(Clone)]
@@ -344,28 +370,12 @@ impl RestoreCodesInner {
 
     async fn code(&self) -> Result<RestoreCode, SyncError> {
         let state = self.database.store_state().await?;
-        let store = state.store.clone().ok_or(SyncError::NoStorage)?;
         let location = self.settings.read()?.ok_or(SyncError::NoStorage)?;
         let identity = self
             .identity
             .read()?
             .ok_or(coven_storage::StorageFailure::MemberKeysMissing)?;
-        let current = crate::effects::member(&state, &identity.member())
-            .ok_or(SyncError::Removed)?
-            .keys;
-        // A kept self-replacement's candidate is current before custody
-        // installs it; a retired pair never is.
-        let selected = identity
-            .activate(&current)
-            .ok_or(SyncError::MemberKeysReplaced {
-                member: identity.member(),
-            })?;
-        Ok(RestoreCode {
-            store: store.id,
-            member: identity.member(),
-            member_keys: selected.keys().clone(),
-            storage: location.encode()?,
-        })
+        member_code(&state, &identity, &location)
     }
 
     async fn install_s3(

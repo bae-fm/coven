@@ -462,6 +462,7 @@ async fn prepare_and_load(
             ring.clone(),
             identity,
             Arc::new(SyncedKeychain::new(builder.keychain()?, settings.id)),
+            Arc::new(StorageSettings::new(directory.clone())),
             state.clone(),
             builder.clock.clone(),
             builder.ids.clone(),

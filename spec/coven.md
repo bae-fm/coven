@@ -2336,7 +2336,9 @@ A name rewrite changes only the name. It keeps the code the entry holds: a
 device saves a code of its own only at the points above. Otherwise Ana's
 laptop, applying a rename while it still held member keys her phone had just
 replaced, would put her old code back. When the entry is absent, nothing is
-written, so a forgotten entry (below) stays forgotten. If the rewrite fails,
+written, so a forgotten entry (below) stays forgotten. An entry the device
+can't read at all is replaced instead, as unreadable entries (below) describe.
+If the rewrite fails,
 what triggered it fails with the error and changes nothing: a sync pass applies
 nothing and is tried again on the shared schedule (§6.7), and an opening call
 returns the error.
@@ -2386,6 +2388,25 @@ nothing in the app could remove it. So an entry is listed as unreadable when:
 Reading the keychain itself is different. When the keychain is locked or
 refuses a read, listing fails as a whole. A refused read says nothing about
 the entry, and offering to delete it then could cost Ana a good code.
+
+A device that has the store open replaces an unreadable entry instead of
+failing on it. Opening the store and applying a rename both read the entry to
+update its name. When the entry can't be read, the device saves what it
+should hold: the store's current name, with the slot that set it, and the
+device's own current code. Without this, one damaged entry would make every
+one of Ana's devices fail to open Household, or to apply Ben's rename.
+
+- The new entry is one copy, in one keychain group. The device writes the
+  first group's copy, then deletes the others, so a failure part way leaves
+  the entry unreadable, never absent, and the next opening finishes.
+- The device saves nothing when it holds no current code: when another device
+  replaced the member keys it holds, the store has no storage location, or the
+  member was removed. Its old code would no longer restore the store; the
+  entry stays unreadable, for the person to forget.
+- An absent entry stays absent. Forgetting is the person's choice; a damaged
+  entry isn't.
+- A refused keychain read still fails the opening or the sync pass, and
+  changes nothing.
 
 Storage access is separate. On S3 the person keeps their access key apart, in a
 password manager say, and enters it, unless the QR transfer or Keychain supplied

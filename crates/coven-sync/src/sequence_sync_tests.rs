@@ -258,11 +258,12 @@ impl Group {
             SequenceSync::open(
                 database,
                 Arc::new(storage.clone()),
-                directory,
+                directory.clone(),
                 device,
                 Arc::new(store_keys),
                 Arc::new(member_keys),
                 Arc::new(SyncedKeychain::new(keychain.clone(), self.store)),
+                Arc::new(StorageSettings::new(directory.clone())),
                 state,
                 clock,
                 self.ids.clone(),

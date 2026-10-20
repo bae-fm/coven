@@ -107,26 +107,42 @@ impl SyncedKeychain {
     /// decides from what it read, with no other change of a synced entry in
     /// this process in between. A name rewrite keeps the code it read this
     /// way, and a code saved meanwhile is never overwritten by an older one
-    /// (§13.1). A write after leaving returns `KeyError::Left`.
+    /// (§13.1). `change` sees every keychain group's copy: more than one is
+    /// `SyncedRestoreCode::Ambiguous`. A write leaves exactly one copy: it
+    /// writes the first group's and then deletes the others, so a failure
+    /// part way leaves the entry ambiguous, never absent, and repeating the
+    /// change finishes. A write after leaving returns `KeyError::Left`.
     /// Native non-Apple keychains return `KeyError::Unsupported`.
     pub fn change_restore_code<E: From<KeyError>>(
         &self,
-        change: impl FnOnce(Option<SecretBytes>) -> Result<RestoreCodeChange, E>,
+        change: impl FnOnce(Option<SyncedRestoreCode>) -> Result<RestoreCodeChange, E>,
     ) -> Result<(), E> {
         let left = self.left.lock().expect("synced keychain lock poisoned");
         let _changes = changes();
         let account = self.account(RESTORE_CODE_ENTRY);
-        let saved = self.keychain.read(EntryScope::Synced, &account)?;
+        let mut copies = self.keychain.synced_copies(&account)?;
+        let saved = match copies.len() {
+            0 => None,
+            1 => copies.pop().map(SyncedRestoreCode::Saved),
+            _ => Some(SyncedRestoreCode::Ambiguous),
+        };
         match change(saved)? {
             RestoreCodeChange::Keep => Ok(()),
             RestoreCodeChange::Write(_) if *left => Err(KeyError::Left.into()),
             RestoreCodeChange::Write(bytes) => {
-                Ok(self
-                    .keychain
-                    .write(EntryScope::Synced, &account, bytes.as_bytes())?)
+                Ok(self.keychain.replace_synced(&account, bytes.as_bytes())?)
             }
             RestoreCodeChange::Delete => Ok(self.keychain.delete(EntryScope::Synced, &account)?),
         }
+    }
+
+    /// Save a copy of the restore code in a second keychain group beside this
+    /// store's entry, so listing finds the store ambiguous. Requires an
+    /// in-memory keychain.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub fn set_restore_code_in_another_group(&self, code: &SecretBytes) {
+        self.keychain
+            .write_in_another_group(&self.account(RESTORE_CODE_ENTRY), code.as_bytes());
     }
 
     /// Delete the synced restore code; succeeds if absent (§13.1).

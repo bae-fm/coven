@@ -614,3 +614,118 @@ async fn forgetting_fails_part_way_with_the_store_still_listed() {
     app.forget_saved_restore_code(id).await.unwrap();
     assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap()).is_empty());
 }
+
+/// The entry bytes a device can't read: another format, damaged, or another
+/// store's code.
+fn unreadable_entries() -> [SecretBytes; 3] {
+    [
+        SecretBytes::new(b"damaged".to_vec()),
+        // A bare restore code, as saved before entries carried the name.
+        SecretBytes::new(code(1, &s3_location()).to_bytes().unwrap().to_vec()),
+        entry(&code(99, &s3_location())),
+    ]
+}
+
+#[tokio::test]
+async fn opening_replaces_an_unreadable_entry_with_the_current_code_and_name() {
+    let mut network =
+        crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
+    network.devices[0]
+        .handle
+        .rename_store("Family")
+        .await
+        .unwrap();
+    let renamed_at = network.devices[0].handle.applied_slot().await;
+    let current = network.devices[0].handle.restore_code().await.unwrap();
+    let device = network.devices.remove(0);
+    device.handle.close().await.unwrap();
+    let synced = device.app.synced_keychain(device.store);
+    let reopen = || async {
+        network
+            .reopen(&device)
+            .open(device.store)
+            .await
+            .unwrap()
+            .close()
+            .await
+            .unwrap();
+    };
+    let expect_current = || {
+        let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
+        assert_eq!(
+            (saved.name.as_str(), saved.named_at),
+            ("Family", renamed_at)
+        );
+        assert_eq!(saved.code.to_text().unwrap().as_str(), current);
+    };
+    for unreadable in unreadable_entries() {
+        synced.set_restore_code(&unreadable).unwrap();
+        reopen().await;
+        expect_current();
+    }
+    // Copies in two keychain groups become one.
+    synced.set_restore_code_in_another_group(&SecretBytes::new(b"old group".to_vec()));
+    assert!(matches!(
+        device.app.saved_restore_codes().await.unwrap()[..],
+        [SavedRestoreEntry::Unreadable {
+            reason: UnreadableSavedCode::Ambiguous,
+            ..
+        }]
+    ));
+    reopen().await;
+    expect_current();
+    assert!(matches!(
+        device.app.saved_restore_codes().await.unwrap()[..],
+        [SavedRestoreEntry::Readable(_)]
+    ));
+    // A forgotten entry stays forgotten.
+    device
+        .app
+        .forget_saved_restore_code(device.store)
+        .await
+        .unwrap();
+    reopen().await;
+    assert!(synced.restore_code().unwrap().is_none());
+    // A refused read still fails the opening and changes nothing.
+    synced.set_restore_code(&unreadable_entries()[0]).unwrap();
+    device.app.refuse_synced_keychain_operations(true);
+    assert!(matches!(
+        network.reopen(&device).open(device.store).await,
+        Err(CovenError::Key(KeyError::KeychainTemporarilyUnavailable(_)))
+    ));
+    device.app.refuse_synced_keychain_operations(false);
+    assert_eq!(
+        synced.restore_code().unwrap().unwrap().as_bytes(),
+        b"damaged"
+    );
+}
+
+#[tokio::test]
+async fn a_rename_replaces_an_unreadable_entry_with_the_current_code() {
+    let network = crate::tests::Network::new(2).await;
+    let (ana, ben) = (&network.devices[0], &network.devices[1]);
+    for (index, unreadable) in unreadable_entries().into_iter().enumerate() {
+        // Ana renames on her own device, then Ben's device applies her rename.
+        for (device, renaming) in [(ana, true), (ben, false)] {
+            let name = format!("Family {index}");
+            device
+                .app
+                .synced_keychain(device.store)
+                .set_restore_code(&SecretBytes::new(unreadable.as_bytes().to_vec()))
+                .unwrap();
+            if renaming {
+                ana.handle.rename_store(&name).await.unwrap();
+            } else {
+                network.sync(1).await;
+                assert_eq!(ben.handle.store_name().await.unwrap(), name);
+            }
+            let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
+            assert_eq!(saved.name, name);
+            assert_eq!(
+                saved.code.to_text().unwrap().as_str(),
+                device.handle.restore_code().await.unwrap()
+            );
+        }
+    }
+    network.close().await;
+}

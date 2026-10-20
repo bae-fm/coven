@@ -344,6 +344,7 @@ impl StorageConnections {
                 keys,
                 self.identity.clone(),
                 self.synced.clone(),
+                Arc::new(coven_storage::StorageSettings::new(self.directory.clone())),
                 self.publications.state.clone(),
                 self.clock.clone(),
                 self.ids.clone(),

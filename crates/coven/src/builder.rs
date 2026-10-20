@@ -541,8 +541,8 @@ struct OpeningOwners {
 impl OpeningStore {
     async fn open(self) -> CovenResult<CovenHandle> {
         let database = self.database.open_locked(self.lock).await?;
-        let store = database.store_state().await?.store;
-        if let Some(identity) = &store {
+        let state = database.store_state().await?;
+        if let Some(identity) = &state.store {
             identity.check_settings(&self.directory.settings()?)?;
         }
         let waits = Arc::new(
@@ -551,10 +551,26 @@ impl OpeningStore {
         let owners = crate::coven::blocking(move || {
             let owners = self.builder.owners(self.directory, self.keychain)?;
             // The saved restore code's name catches up with this store's
-            // when the store's is newer (§13.1). A store never set up has
-            // no saved code.
-            if let Some(identity) = &store {
-                coven_sync::follow_name(&owners.synced, &coven_sync::SavedName::of(identity))?;
+            // when the store's is newer, and an unreadable entry is replaced
+            // with this device's current code (§13.1). A store never set up
+            // has no saved code.
+            if let Some(identity) = &state.store {
+                coven_sync::follow_name(
+                    &owners.synced,
+                    &coven_sync::SavedName::of(identity),
+                    || {
+                        let location =
+                            coven_storage::StorageSettings::new(owners.directory.clone())
+                                .read()
+                                .map_err(|error| sync_error(error.into()))?;
+                        coven_sync::replacement_code(
+                            &state,
+                            owners.identity.read()?.as_ref(),
+                            location.as_ref(),
+                        )
+                        .map_err(sync_error)
+                    },
+                )?;
             }
             Ok::<_, CovenError>(owners)
         })
@@ -563,6 +579,11 @@ impl OpeningStore {
             .handle(database, waits)
             .map_err(|error| CovenError::Database(DbError::SyncStream(Box::new(error))))
     }
+}
+
+/// A sync failure while opening, as the opening call reports it.
+fn sync_error(error: SyncError) -> CovenError {
+    CovenError::Database(DbError::SyncStream(Box::new(error)))
 }
 
 impl OpeningOwners {

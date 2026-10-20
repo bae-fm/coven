@@ -4357,6 +4357,13 @@ pub enum ProviderSignOut {
   rewrite keeps the entry's code, and an absent entry stays absent. A failed
   rewrite fails the sync pass or the opening call
   ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
+- When that rewrite finds the entry unreadable (another format, damaged,
+  another store's code, or copies in more than one keychain group), the device
+  replaces it with one copy holding its own current code and the store's
+  current name. Opening and applying the rename then succeed. A device that
+  holds no current code (keys replaced, no storage location, or the member
+  removed) leaves the entry as it is. A refused keychain read still fails the
+  call.
 - A QR scan from one of the person's own devices may supply both the code
   and the S3 key, because the person controls the showing device. The key
   accompanies the code; it is never part of the restore-code encoding.
