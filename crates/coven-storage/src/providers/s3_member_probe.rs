@@ -90,7 +90,9 @@ impl S3Storage {
             .body
             .collect()
             .await
-            .map_err(|error| StorageFailure::Network.with_source(error))?
+            .map_err(|error| {
+                StorageFailure::Network.with_source(crate::providers::error_text::WithCauses(error))
+            })?
             .into_bytes();
         if read.as_ref() != bytes {
             return Err(StorageFailure::Protocol.with_source("member key read other bytes"));

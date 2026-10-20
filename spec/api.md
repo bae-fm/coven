@@ -2976,9 +2976,11 @@ pub enum StorageError {
     Caused { failure: StorageFailure, source: Box<dyn std::error::Error + Send + Sync> },
     /// A provider failure with its original transport, SDK or framework cause.
     /// Its text names that cause safely: an answered S3 request shows its HTTP
-    /// status and error code, never the reply's message; an unanswered one
-    /// shows its transport, TLS or DNS failure, with each URL cut to its scheme
-    /// and host, so a signed query or object path never prints.
+    /// status and error code, never the reply's message. A request to any
+    /// provider that got no reply shows every layer of its transport, TLS or
+    /// DNS failure, such as "client error (Connect): dns error: …" below
+    /// "error sending request", with each URL cut to its scheme and host, so a
+    /// signed query, a token or an object path never prints.
     Provider {
         provider: CloudProvider,
         failure: StorageFailure,

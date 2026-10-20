@@ -243,3 +243,48 @@ fn stalled(error: &(dyn std::error::Error + 'static)) -> bool {
     }
     false
 }
+
+/// A request that reaches no server names the failure behind reqwest's own
+/// "error sending request": a host that doesn't resolve, a refused
+/// connection. The URL keeps only its scheme and host, in the text, in
+/// `Debug`, and in every cause below it.
+#[tokio::test]
+async fn an_unreachable_server_names_every_layer_of_its_cause() {
+    let client = HttpClient::new(Arc::new(coven_foundation::clock::SystemClock)).unwrap();
+    for (url, origin, cause) in [
+        (
+            "https://ana:hunter2@coven-test.invalid/2/files/Gifts.txt?token=deadbeef",
+            "https://coven-test.invalid/…",
+            "dns error: ",
+        ),
+        (
+            "http://127.0.0.1:1/2/files/Gifts.txt?token=deadbeef",
+            "http://127.0.0.1:1/…",
+            // hyper's own words; the OS's message after them differs by
+            // platform ("Connection refused (os error 61)" on macOS).
+            "tcp connect error: ",
+        ),
+    ] {
+        let error = client
+            .send(CloudProvider::Dropbox, client.request(Method::GET, url))
+            .await
+            .unwrap_err();
+        assert_eq!(error.failure(), StorageFailure::Network);
+        assert!(!error.answered());
+        let text = error.to_string();
+        assert!(text.starts_with("Dropbox: Network: "), "{text}");
+        assert!(text.contains(origin), "{text}");
+        assert!(text.contains(cause), "{text}");
+        let mut shown = vec![text, format!("{error:?}")];
+        let mut layer = std::error::Error::source(&error);
+        while let Some(cause) = layer {
+            shown.push(format!("{cause} {cause:?}"));
+            layer = cause.source();
+        }
+        for text in shown {
+            for hidden in ["hunter2", "ana", "Gifts", "deadbeef", "token"] {
+                assert!(!text.contains(hidden), "{hidden} in {text}");
+            }
+        }
+    }
+}

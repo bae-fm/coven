@@ -1,6 +1,7 @@
 //! Built-in provider network implementations.
 mod access;
 mod admin_access;
+mod error_text;
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 pub use admin_access::DesktopDeviceSignIn;
 pub use admin_access::{obtain_admin_access, AdminAccessSource, DeviceSignInPresenter};

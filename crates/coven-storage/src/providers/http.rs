@@ -195,6 +195,10 @@ pub(crate) enum Body {
     Json(Value),
     Bytes(Vec<u8>),
 }
+/// A request that got no reply. Its text names every cause, such as the DNS,
+/// TLS or connection failure behind reqwest's "error sending request". The
+/// kept error's URL is cut to its scheme and host first, so neither its text,
+/// its `Debug` nor a walk of its causes shows a path or query.
 pub(crate) fn transport(provider: CloudProvider, error: reqwest::Error) -> StorageError {
     let failure = if error.is_builder() {
         StorageFailure::InvalidConfiguration
@@ -204,7 +208,9 @@ pub(crate) fn transport(provider: CloudProvider, error: reqwest::Error) -> Stora
     StorageError::Provider {
         provider,
         failure,
-        source: Box::new(error.without_url()),
+        source: Box::new(super::error_text::WithCauses(
+            super::error_text::origin_only(error),
+        )),
     }
 }
 

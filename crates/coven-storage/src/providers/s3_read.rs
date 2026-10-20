@@ -14,7 +14,7 @@ impl ObjectBody for S3Body {
             .map_err(|source| StorageError::Provider {
                 provider: CloudProvider::S3,
                 failure: StorageFailure::Network,
-                source: Box::new(source),
+                source: Box::new(crate::providers::error_text::WithCauses(source)),
             })
     }
 }

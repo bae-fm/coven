@@ -155,7 +155,7 @@ impl ProviderConnector {
         self.http.clone().map_err(|source| StorageError::Provider {
             provider,
             failure: StorageFailure::InvalidConfiguration,
-            source: Box::new(source),
+            source: Box::new(super::error_text::WithCauses(source)),
         })
     }
     async fn with_folders<T, F, Fut>(

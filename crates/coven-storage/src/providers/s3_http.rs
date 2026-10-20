@@ -86,7 +86,9 @@ impl HttpConnector for S3HttpConnector {
 /// Classify a reqwest failure for the SDK's retry decision. A failure after
 /// the request was built, connecting or exchanging bytes, is transient I/O,
 /// as the SDK's own client treats a closed or interrupted connection.
+/// The URL, signed query and all, is cut to its scheme and host first.
 fn connector_error(error: reqwest::Error) -> ConnectorError {
+    let error = crate::providers::error_text::origin_only(error);
     if error.is_timeout() {
         ConnectorError::timeout(error.into())
     } else if error.is_builder() {

@@ -551,7 +551,9 @@ async fn interrupted_bodies_keep_the_transport_failure() {
         let StorageError::Provider { source, .. } = error else {
             panic!("transport cause discarded")
         };
-        assert!(source.downcast_ref::<reqwest::Error>().is_some());
+        assert!(source
+            .source()
+            .is_some_and(|cause| cause.is::<reqwest::Error>()));
         server.await.unwrap();
     }
 }

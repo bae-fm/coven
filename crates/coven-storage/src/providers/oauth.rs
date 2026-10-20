@@ -457,7 +457,7 @@ impl OAuthClients {
                 provider,
                 // The client could not be built: TLS setup failed.
                 failure: crate::StorageFailure::InvalidConfiguration,
-                source: Box::new(source.clone()),
+                source: Box::new(super::error_text::WithCauses(source.clone())),
             })?;
         let response = client
             .send(
