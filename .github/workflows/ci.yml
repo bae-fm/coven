@@ -51,8 +51,8 @@ jobs:
       # the first cargo invocation.
       #
       # Most of the build is the workspace's own crates, which every commit
-      # changes. The whole target directory, with their incremental state, is
-      # saved after each run and restored from the latest one with the same
+      # changes. The target directory, with their incremental state, is saved
+      # after each run and restored from the latest one with the same
       # manifests and toolchain, so rustc recompiles only what changed. A
       # checkout's fresh timestamps make cargo rerun rustc on every workspace
       # crate, which is why incremental state and not the artifacts alone is
@@ -60,9 +60,10 @@ jobs:
       # dependencies only, under a key that never changes, and turns
       # incremental compilation off.)
       - name: Restore the build
-        uses: actions/cache@v5
+        id: build
+        uses: actions/cache/restore@v5
         with:
-          path: |
+          path: &build_paths |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
@@ -73,9 +74,9 @@ jobs:
         with:
           tool: cargo-nextest@0.9.143
       # Tests make their stores under the system temporary directory. On
-      # Windows that is on C:, the runner's network-backed OS disk, where each
-      # fsync and file creation is slow; the runner's own temporary directory
-      # is on its local disk. The stores keep production's settings,
+      # Windows that is on C:, the runner's OS disk, where file creation and
+      # fsync are several times slower than on D:, which holds the runner's
+      # own temporary directory. The stores keep production's settings,
       # synchronous writes included, so crash and durability tests check the
       # same thing on a faster disk. Elsewhere TMP and TEMP go unread.
       - name: scripts/check.sh code
@@ -83,6 +84,29 @@ jobs:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
         run: scripts/check.sh code
+      # The next run rebuilds the workspace's own libraries and test binaries
+      # whatever it restores; only their incremental state and the
+      # dependencies' outputs save it work. A failed run's build is as sound
+      # as a passing one's.
+      - name: Drop the workspace's own outputs before saving the build
+        if: ${{ !cancelled() }}
+        run: |
+          for name in $(cargo metadata --format-version 1 --no-deps |
+              "$(command -v python3 || command -v python)" -c '
+          import json, sys
+          for package in json.load(sys.stdin)["packages"]:
+              for target in package["targets"]:
+                  print(target["name"].replace("-", "_"))
+          ' | tr -d '\r' | sort -u); do
+              rm -f target/debug/deps/"$name"-* target/debug/deps/lib"$name"-*
+          done
+          rm -rf target/doc
+      - name: Save the build
+        if: ${{ !cancelled() }}
+        uses: actions/cache/save@v5
+        with:
+          path: *build_paths
+          key: ${{ steps.build.outputs.cache-primary-key }}
 
   proofs:
     runs-on: ubuntu-latest
