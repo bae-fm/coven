@@ -107,6 +107,17 @@ impl Key {
         }
     }
 
+    fn end(&self) -> &'static str {
+        match self {
+            Self::Scope(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE scope=?1",
+            Self::Operation(_) => {
+                "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE operation=?1"
+            }
+            Self::Upload(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE upload=?1",
+            Self::Download(_) => "UPDATE _coven_retries SET not_before=?2,wait=0 WHERE download=?1",
+        }
+    }
+
     fn delete(&self) -> &'static str {
         match self {
             Self::Scope(_) => "DELETE FROM _coven_retries WHERE scope=?1",
@@ -268,6 +279,21 @@ pub(crate) fn save_download(
             crate::user_file::encode_time(wait.not_before),
             millis(wait)?,
         ],
+    )?;
+    Ok(())
+}
+
+/// End the subject's wait at `now` in place: `T = now`, `W = 0`, keeping its
+/// failure count and, for a download, the pending record it belongs to.
+pub(crate) fn end(
+    db: &DatabaseConnection,
+    subject: RetrySubject,
+    now: SystemTime,
+) -> Result<(), DbError> {
+    let key = key(subject);
+    db.internal_execute(
+        key.end(),
+        rusqlite::params![key.value(), crate::user_file::encode_time(now)],
     )?;
     Ok(())
 }

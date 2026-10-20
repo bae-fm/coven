@@ -392,3 +392,63 @@ async fn access_replacement_retries_and_undo_match_lean() {
         rejected_undo(reopen, true).await;
     }
 }
+
+/// Coven's own operation whose request got no reply waits its backoff; a
+/// pass before then leaves it. The app's network report ends that wait,
+/// keeping its failure count, and the next pass resumes it (§6.7).
+#[tokio::test]
+async fn a_network_report_ends_an_offline_operation_wait() {
+    let group = Group::new();
+    let ana = group.device(1).await;
+    let ben = group.device(2).await;
+    group.create(&ana).await;
+    group.admit(&ana, &ben).await;
+    let admin = Arc::new(group.storage.key_admin());
+    ana.storage
+        .set_faults(Faults {
+            lose_completion_reply: true,
+            ..Faults::none()
+        })
+        .await;
+    assert!(ana
+        .sync
+        .replace_member_access_key(ben.identity.member(), admin.clone())
+        .await
+        .is_err());
+    let record = parent(&ana).await.unwrap();
+    let subject = coven_database::RetrySubject::Operation(record.id);
+    let wait = ana.database().retry_wait(subject).await.unwrap().unwrap();
+    ana.storage.set_faults(Faults::none()).await;
+    ana.sync.pass().await.unwrap();
+    assert_eq!(parent(&ana).await.unwrap().last_step, record.last_step);
+    ana.sync.waits.network_changed();
+    // The file worker's report leaves the operation to the connection.
+    ana.sync
+        .waits
+        .end_offline_waits(crate::NetworkOwner::Files)
+        .await
+        .unwrap();
+    assert_eq!(
+        ana.database().retry_wait(subject).await.unwrap(),
+        Some(wait)
+    );
+    assert!(ana
+        .sync
+        .waits
+        .end_offline_waits(crate::NetworkOwner::Connection)
+        .await
+        .unwrap());
+    let ended = ana.database().retry_wait(subject).await.unwrap().unwrap();
+    assert_eq!(
+        (ended.failures, ended.wait),
+        (wait.failures, Duration::ZERO)
+    );
+    ana.sync.pass().await.unwrap();
+    assert!(
+        parent(&ana).await.is_none(),
+        "the report let the operation resume"
+    );
+    for device in [&ana, &ben] {
+        device.database().close().await.unwrap();
+    }
+}

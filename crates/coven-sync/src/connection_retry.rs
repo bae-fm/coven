@@ -117,40 +117,6 @@ impl ConnectionRetry {
         Ok(())
     }
 
-    /// Handle the app's network report (§6.7). A connection wait whose last
-    /// attempt received no provider response, the attempt status showed as
-    /// `Offline`, ends now and keeps its failure count. A wait after a
-    /// provider's answer, and the provider cooldown, hold: a new network
-    /// changes neither. Returns whether a report arrived, so a started loop
-    /// also runs the pass it asks for. If reading or saving fails, the old
-    /// wait holds and the caller reports the error.
-    pub async fn network_changed(
-        database: &Database,
-        waits: &RetryWaits,
-    ) -> Result<bool, SyncError> {
-        if !waits.take_network_change() {
-            return Ok(false);
-        }
-        let Some(wait) = database.retry_wait(RetrySubject::Sync).await? else {
-            return Ok(true);
-        };
-        // A wait that could not be saved holds for the app, network or not.
-        if waits.held(RetrySubject::Sync) || waits.ran_out(RetrySubject::Sync, &wait) {
-            return Ok(true);
-        }
-        // The connection record is saved with the wait in one transaction
-        // (`failed`), so it names the failure this wait follows.
-        let offline = database
-            .pending::<PendingRecord>()
-            .await?
-            .into_iter()
-            .any(|record| record.subject == PendingSubject::Connection && record.reason.offline());
-        if offline {
-            waits.end(RetrySubject::Sync, &wait).await?;
-        }
-        Ok(true)
-    }
-
     /// A completed pass clears its condition and exponent together.
     pub async fn succeeded(
         &mut self,

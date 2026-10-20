@@ -367,3 +367,49 @@ async fn io_differential_download() {
     }
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
+
+/// An eager download that found no network waits its backoff until the
+/// app's network report ends it; one the provider answered keeps its wait
+/// (§6.7).
+#[tokio::test]
+async fn a_network_report_ends_only_an_offline_download_wait() {
+    for answered in [false, true] {
+        let clock = clock();
+        let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
+        let b = eager_reader(&a, &clock).await;
+        apply_all(&a, &b).await;
+        a.storage
+            .set_faults(Faults {
+                fail_next: 1,
+                failure: StorageFailure::Network,
+                response: answered.then_some(503),
+                ..Faults::none()
+            })
+            .await;
+        b.files.inner.fill_eager().await.unwrap();
+        let before = b.files.inner.database.download_waits().await.unwrap();
+        assert_eq!(before[0].1.wait, Duration::from_secs(1));
+        let waits = &b.files.inner.waits;
+        waits.network_changed();
+        waits
+            .end_offline_waits(crate::NetworkOwner::Files)
+            .await
+            .unwrap();
+        let after = b.files.inner.database.download_waits().await.unwrap();
+        if answered {
+            assert_eq!(after, before);
+        } else {
+            assert_eq!(after[0].1.failures, 1);
+            assert!(after[0].1.wait.is_zero());
+        }
+        b.files.inner.fill_eager().await.unwrap();
+        assert_eq!(
+            b.files.inner.database.missing_bytes(&file).await.unwrap() == 0,
+            !answered,
+            "answered {answered}"
+        );
+        b.close().await;
+        a.close().await;
+    }
+}

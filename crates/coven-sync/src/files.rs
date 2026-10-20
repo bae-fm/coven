@@ -109,6 +109,7 @@ impl Files {
     ) -> Self {
         let mut changes = database.queued_work_changes();
         let mut sending = send.subscribe();
+        let mut reports = waits.network_reports();
         let (cancel_eager, _) = watch::channel(0);
         let (sequence_active, _) = watch::channel(false);
         let (stop, mut stopping) = watch::channel(false);
@@ -149,10 +150,21 @@ impl Files {
                     },
                     _=wake.notified()=>{},
                     result=sending.changed()=>if result.is_err() { break; },
+                    result=reports.changed()=>if result.is_err() { break; },
                     _=&mut retry=>{},
                 }
                 let Some(owner) = weak.upgrade() else { break };
                 let work = async {
+                    // A network report ends upload and download waits for
+                    // the network; reports during this work are acted on
+                    // after it, ending the waits it fails into (§6.7).
+                    if let Err(error) = owner
+                        .waits
+                        .end_offline_waits(crate::NetworkOwner::Files)
+                        .await
+                    {
+                        tracing::error!(?error, "ending file waits for the network failed");
+                    }
                     match owner.drain_uploads(false).await {
                         Ok(_) => (),
                         Err(SyncError::NoStorage) => {

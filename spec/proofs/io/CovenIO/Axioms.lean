@@ -78,6 +78,7 @@ import CovenIO
 #print axioms CovenIO.Waiting.signal_keeps_cooldown
 #print axioms CovenIO.Waiting.paid_run
 #print axioms CovenIO.Waiting.signal_rate
+#print axioms CovenIO.Waiting.signal_waits_rate
 #print axioms CovenIO.Waiting.ended_reopens_due
 #print axioms CovenIO.Waiting.kept_wait_returns
 #print axioms CovenIO.Waiting.Examples.unlocked_starts_at_once

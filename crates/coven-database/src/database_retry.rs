@@ -168,6 +168,49 @@ impl Database {
         .await
     }
 
+    /// End, in one transaction, the persisted waits `select` picks after
+    /// reading every wait, every pending record and the upload queue as one
+    /// committed state. Each ended wait keeps its failure count; its deadline
+    /// becomes `now` and its full wait zero, so reopening arms none (§6.7).
+    /// Returns the ended waits.
+    pub async fn end_retry_waits<P: crate::PendingValue>(
+        &self,
+        now: std::time::SystemTime,
+        select: impl FnOnce(&[(RetrySubject, RetryWait)], &[P], &[crate::FileUpload]) -> Vec<RetrySubject>
+            + Send
+            + 'static,
+    ) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
+        self.call(move |inner| {
+            inner.access.with_writer(|writer| {
+                writer.transaction(|db| {
+                    let waits = retry::read_all(db)?;
+                    let pending = crate::pending::read::<P>(db)?;
+                    let uploads = crate::file_queue::read(db)?;
+                    let mut ended = Vec::new();
+                    for subject in select(&waits, &pending, &uploads) {
+                        let Some((_, wait)) = waits.iter().find(|(held, _)| *held == subject)
+                        else {
+                            return Err(DbError::Invariant {
+                                what: "an ended retry wait is persisted",
+                            });
+                        };
+                        retry::end(db, subject, now)?;
+                        ended.push((
+                            subject,
+                            RetryWait {
+                                failures: wait.failures,
+                                not_before: now,
+                                wait: std::time::Duration::ZERO,
+                            },
+                        ));
+                    }
+                    Ok(ended)
+                })
+            })
+        })
+        .await
+    }
+
     /// Forget a wait once its work succeeds or no longer retries automatically.
     pub async fn clear_retry(&self, subject: RetrySubject) -> Result<(), DbError> {
         self.call(move |inner| {

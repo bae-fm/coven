@@ -2490,18 +2490,21 @@ while let Ok(values) = lost.next().await {
   local write or `sync_now`, and every 30 seconds while idle, subject to
   connection backoff and provider cooldowns. Stopping and closing finish the
   active pass first.
-  - `sync_now` never shortens a backoff. `network_changed` ends one only when
-    its attempt got no provider response, which status shows as `Offline`.
-    Call it when the platform reports that the network became
-    available or changed, and when the app returns to the foreground or the
-    device wakes. It also requests a pass, so the app need not call both.
-    A backoff after a provider's answer, such as a server error, and a provider
-    cooldown hold: a new network changes neither
-    ([§6.7](coven.md#67-waiting-and-retrying)).
-  - The backoff ends durably: reopening after the report arms none. Reports
-    during a pass coalesce into one more pass. If the running pass fails for
-    want of a network, its wait ends too: the failure may have come before the
-    change. Reports while the connection is stopped apply when it starts.
+  - `sync_now` never shortens a backoff. `network_changed` ends every backoff
+    whose last attempt got no provider response: the connection's, which status
+    shows as `Offline`, and those of coven's operations, queued uploads and
+    eager downloads, whose pending records say `answered: false`. Call it when
+    the platform reports that the network became available or changed, and
+    when the app returns to the foreground or the device wakes. It also requests
+    a pass, so the app need not call both. A backoff after a provider's answer,
+    such as a server error, and a provider cooldown hold: a new network changes
+    neither ([§6.7](coven.md#67-waiting-and-retrying)).
+  - Each backoff ends durably, keeping its failure count: reopening after the
+    report arms none. Reports during a pass coalesce into one more pass, and
+    reports during transfers are acted on after them. If the running pass or
+    transfer fails for want of a network, its wait ends too: the failure may
+    have come before the change. Reports while the connection is stopped apply
+    when it starts.
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued
@@ -3433,10 +3436,11 @@ impl CovenHandle {
     pub fn sync_now(&self);
 
     /// The device's network changed: it became available, or moved to
-    /// another network. Ends a connection backoff whose last attempt got no
-    /// provider response (`Offline`) and syncs now, as `sync_now` does.
-    /// Backoffs after a provider's answer, and provider cooldowns, hold.
-    /// Reports coalesce as `sync_now` requests do (§6.7).
+    /// another network. Ends every backoff whose last attempt got no provider
+    /// response: the connection's (`Offline`), operations', uploads' and
+    /// eager downloads'. Syncs now, as `sync_now` does. Backoffs after a
+    /// provider's answer, and provider cooldowns, hold. Reports coalesce as
+    /// `sync_now` requests do (§6.7).
     pub fn network_changed(&self);
 
     /// The sync status, live. The first value is the current status.

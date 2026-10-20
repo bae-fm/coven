@@ -27,9 +27,10 @@ async fn fail(
         .unwrap();
 }
 
-async fn report(database: &Database, waits: &RetryWaits) -> bool {
+async fn report(waits: &RetryWaits) -> bool {
     waits.network_changed();
-    ConnectionRetry::network_changed(database, waits)
+    waits
+        .end_offline_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap()
 }
@@ -45,7 +46,7 @@ async fn a_report_ends_an_offline_wait_and_keeps_its_backoff() {
         fail(&mut retry, &database, &waits, false).await;
     }
     assert!(!due(&database, &waits, SYNC).await);
-    assert!(report(&database, &waits).await);
+    assert!(report(&waits).await);
     assert!(due(&database, &waits, SYNC).await);
     let ended = database.retry_wait(SYNC).await.unwrap().unwrap();
     assert_eq!(
@@ -53,10 +54,11 @@ async fn a_report_ends_an_offline_wait_and_keeps_its_backoff() {
         (2, fixture.clock.now(), Duration::ZERO)
     );
     // Reports coalesce: none arrived since, and a second ends nothing new.
-    assert!(!ConnectionRetry::network_changed(&database, &waits)
+    assert!(!waits
+        .end_offline_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap());
-    assert!(report(&database, &waits).await);
+    assert!(report(&waits).await);
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), Some(ended));
     fail(&mut retry, &database, &waits, false).await;
     let next = database.retry_wait(SYNC).await.unwrap().unwrap();
@@ -74,14 +76,20 @@ async fn a_report_leaves_an_answered_wait_and_the_provider_cooldown() {
     let mut retry = ConnectionRetry::Automatic;
     fail(&mut retry, &database, &waits, true).await;
     let answered = database.retry_wait(SYNC).await.unwrap();
-    assert!(report(&database, &waits).await);
+    assert!(report(&waits).await);
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), answered);
     assert!(!due(&database, &waits, SYNC).await);
     // An offline wait ends, but a live cooldown still holds the pass.
     fail(&mut retry, &database, &waits, false).await;
     waits.record(Duration::from_secs(600)).await.unwrap();
-    assert!(report(&database, &waits).await);
-    assert!(waits.ran_out(SYNC, &database.retry_wait(SYNC).await.unwrap().unwrap()));
+    assert!(report(&waits).await);
+    assert!(database
+        .retry_wait(SYNC)
+        .await
+        .unwrap()
+        .unwrap()
+        .wait
+        .is_zero());
     assert!(!due(&database, &waits, SYNC).await);
     fixture.advance(599);
     assert!(!due(&database, &waits, SYNC).await);
@@ -102,7 +110,7 @@ async fn an_ended_wait_stays_ended_across_reopening() {
     for _ in 0..9 {
         fail(&mut retry, &database, &waits, false).await;
     }
-    assert!(report(&database, &waits).await);
+    assert!(report(&waits).await);
     database.close().await.unwrap();
     fixture
         .clock
@@ -136,8 +144,9 @@ async fn a_report_leaves_a_wait_held_for_the_app() {
     let saved = database.retry_wait(SYNC).await.unwrap();
     // The next attempt's wait could not be saved.
     waits.hold(SYNC);
-    assert!(report(&database, &waits).await);
+    assert!(report(&waits).await);
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), saved);
-    assert!(waits.held(SYNC));
+    fixture.advance(3600);
+    assert!(!due(&database, &waits, SYNC).await);
     database.close().await.unwrap();
 }

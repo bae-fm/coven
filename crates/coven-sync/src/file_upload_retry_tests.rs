@@ -695,3 +695,99 @@ async fn other_bytes_at_an_own_file_path_refuse_only_that_upload() {
 
 #[path = "file_upload_failure_tests.rs"]
 mod failures;
+
+/// Ana's phone locked mid-upload: the upload failed with no network and
+/// waits its backoff. Her network report ends that wait, keeping its failure
+/// count, and the upload runs (§6.7).
+#[tokio::test]
+async fn a_network_report_ends_an_offline_upload_wait() {
+    let clock = Arc::new(FixedClock::new(
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+    ));
+    let f = fixture(&clock).await;
+    let file = f.attach("files", "photo", b"photo".to_vec()).await;
+    for _ in 0..2 {
+        f.storage
+            .set_faults(fail_next(StorageFailure::Network, None))
+            .await;
+        f.files.inner.drain_uploads(true).await.unwrap();
+    }
+    assert_eq!(retry(&f).await.unwrap().wait, Duration::from_secs(2));
+    let waits = &f.files.inner.waits;
+    waits.network_changed();
+    assert!(waits
+        .end_offline_waits(crate::NetworkOwner::Files)
+        .await
+        .unwrap());
+    let ended = retry(&f).await.unwrap();
+    assert_eq!(
+        (ended.failures, ended.not_before, ended.wait),
+        (2, clock.now(), Duration::ZERO)
+    );
+    // The connection's owner acts on the same report for its own waits.
+    assert!(waits
+        .end_offline_waits(crate::NetworkOwner::Connection)
+        .await
+        .unwrap());
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        1
+    );
+    assert!(!f.queued(&file).await);
+    f.close().await;
+}
+
+/// A provider that answered decided the upload's wait, and its Retry-After
+/// holds the queue: a network report changes neither (§6.7).
+#[tokio::test]
+async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
+    let clock = Arc::new(FixedClock::new(
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+    ));
+    let f = fixture(&clock).await;
+    f.attach("files", "photo", b"photo".to_vec()).await;
+    f.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::Network,
+            response: Some(503),
+            ..Faults::none()
+        })
+        .await;
+    f.files.inner.drain_uploads(true).await.unwrap();
+    let answered = retry(&f).await;
+    let waits = &f.files.inner.waits;
+    waits.network_changed();
+    waits
+        .end_offline_waits(crate::NetworkOwner::Files)
+        .await
+        .unwrap();
+    assert_eq!(retry(&f).await, answered);
+    let requests = f.storage.request_trace().len();
+    f.files.inner.drain_uploads(false).await.unwrap();
+    assert_eq!(f.storage.request_trace().len(), requests);
+    // An offline wait under a live cooldown ends, but the cooldown holds.
+    advance(&clock, 1);
+    f.storage
+        .set_faults(fail_next(StorageFailure::Network, None))
+        .await;
+    f.files.inner.drain_uploads(false).await.unwrap();
+    coven_storage::Cooldown::record(waits.as_ref(), Duration::from_secs(600))
+        .await
+        .unwrap();
+    waits.network_changed();
+    waits
+        .end_offline_waits(crate::NetworkOwner::Files)
+        .await
+        .unwrap();
+    assert!(retry(&f).await.unwrap().wait.is_zero());
+    let requests = f.storage.request_trace().len();
+    f.files.inner.drain_uploads(false).await.unwrap();
+    assert_eq!(f.storage.request_trace().len(), requests);
+    advance(&clock, 600);
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        1
+    );
+    f.close().await;
+}

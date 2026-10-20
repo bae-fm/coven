@@ -822,3 +822,47 @@ async fn a_network_report_ends_an_offline_backoff_kept_across_reopening() {
     assert_eq!(device.handle.test_connection_retry_wait().await, None);
     network.close().await;
 }
+
+/// Ana's photo was uploading when her phone locked: the upload found no
+/// network and waits its own backoff. Once she unlocks, the network report
+/// ends that wait too, and the photo uploads at once (§6.7).
+#[tokio::test]
+async fn a_network_report_ends_an_offline_upload_backoff() {
+    let network = file_network().await;
+    let device = &network.devices[0];
+    device.handle.set_uploads_paused(true).await.unwrap();
+    attach(&device.handle, "photo", vec![3; 2048]).await;
+    network.sync(0).await;
+    network.polling.hold_waits();
+    device.storage.set_online(false);
+    let offline = |records: &[PendingRecord]| {
+        records.iter().any(|record| {
+            matches!(record.subject, PendingSubject::File { .. })
+                && matches!(
+                    record.reason,
+                    PendingReason::Storage {
+                        failure: StorageFailure::Network,
+                        answered: false,
+                        ..
+                    }
+                )
+        })
+    };
+    let mut pending = device.handle.subscribe_pending();
+    device.handle.set_uploads_paused(false).await.unwrap();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !offline(&pending.next().await.unwrap()) {}
+    })
+    .await
+    .unwrap();
+    device.storage.set_online(true);
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert!(
+        !stored(device, "photo").await,
+        "the upload skipped its backoff"
+    );
+    device.handle.network_changed();
+    wait_for_empty_queue(&device.handle).await;
+    assert!(stored(device, "photo").await);
+    network.close().await;
+}

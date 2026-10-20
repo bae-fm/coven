@@ -1,29 +1,32 @@
 import CovenIO.WaitingReopen
 
-/-! The app's network signal (§6.7, "Waiting and retrying"; api.md E5
-`network_changed`), as `ConnectionRetry::network_changed` runs it.
+/-! The app's network report (§6.7, "Waiting and retrying"; api.md E5
+`network_changed`), as `RetryWaits::end_offline_waits` runs it for the
+connection's wait and for each operation's, upload's and download's wait.
 
-The connection's wait names what its failed attempt lacked
-(`WaitingEvidence`'s `Armed.prereq`). An attempt that received no provider
-response lacked a usable network, so its wait names `network`. An attempt the
-provider answered, with a refusal or a server error, names something else:
-nothing the device's network does changes that answer. The app's signal that
-the network changed is a commit changing `network`: evidence against a wait
-that names it, and none against any other wait. It is the only evidence the
-connection's automatic wait has, so every `commit` below is a signal.
+Every wait names what its failed attempt lacked (`WaitingEvidence`'s
+`Armed.prereq`). An attempt that received no provider response lacked a
+usable network, so its wait names `network`. An attempt the provider
+answered, with a refusal or a server error, names something else: nothing the
+device's network does changes that answer. The app's report that the network
+changed is a commit changing `network`: evidence against a wait that names
+it, and none against any other wait. Each wait is its own session; one report
+is one commit to each of them. A `commit` below is any evidence its wait
+names: a report, or for an operation's wait another change it names.
 
-Proved here: a signal ends a wait for the network at once
+Proved here: a report ends a wait for the network at once
 (`signal_ends_network_wait`) and keeps its backoff (`signal_keeps_backoff`).
 It leaves a wait for an answered failure as it was
 (`signal_keeps_answered_wait`), and never ends a provider cooldown
-(`signal_keeps_cooldown`). Repeated signals coalesce: a second signal to a
-wait already ended changes nothing (`signals_coalesce`). A signal while an
+(`signal_keeps_cooldown`). Repeated reports coalesce: a second report to a
+wait already ended changes nothing (`signals_coalesce`). A report while an
 attempt runs ends the wait that attempt fails into
 (`signal_during_attempt_wakes`). Every start after the first is paid for by a
-full delay or by a signal, so in t seconds starts are at most
-1 + signals + ⌊t / d⌋ (`signal_rate`).
+full delay or by a commit, so in t seconds a wait starts at most
+1 + commits + ⌊t / d⌋ times (`signal_rate`), and n waits sharing the reports
+at most n times that (`signal_waits_rate`).
 
-Rust ends the wait durably: it saves the wait with deadline `T = now` and full
+Rust ends a wait durably: it saves the wait with deadline `T = now` and full
 wait `W = 0`, keeping the failure count, so a reopen arms no wait under any
 wall clock (`ended_reopens_due`). Keeping `W` would not do: once the wall
 clock moves back, a reopen arms the old wait again (`kept_wait_returns`). -/
@@ -70,15 +73,15 @@ theorem signal_keeps_cooldown (t : Timer) (now : Nat)
     (ready : due (appRetry t now) now = true) : t.provider ≤ now :=
   app_retry_keeps_cooldown t now ready
 
-/-! ## Signals pay for at most one start each -/
+/-! ## Each commit pays for at most one start -/
 
-/-- The signals in a run. -/
+/-- The commits in a run: reports, and other evidence its wait names. -/
 def commits : List Event → Nat
   | [] => 0
   | .commit _ :: es => commits es + 1
   | _ :: es => commits es
 
-/-- Signals a running attempt has seen and not yet paid for. -/
+/-- Commits a running attempt has seen and not yet paid for. -/
 def Session.credit (s : Session) : Nat :=
   match s.running with
   | some l => l.length
@@ -136,7 +139,7 @@ theorem paid_run {s t : Session} {es : List Event} (h : run s es = some t) :
       rw [split]; omega
 
 /-- From a session with no attempt running, starts over a run are at most one,
-plus one per signal, plus the elapsed time over `d`, for any `d` no longer than
+plus one per commit, plus the elapsed time over `d`, for any `d` no longer than
 the delay the next failure arms. -/
 theorem signal_rate {d : Nat} {s t : Session} {es : List Event} (positive : 0 < d)
     (floor : d ≤ s.floor) (idle : s.running = none) (h : run s es = some t) :
@@ -145,6 +148,37 @@ theorem signal_rate {d : Nat} {s t : Session} {es : List Event} (positive : 0 < 
   have paid := paid_run h
   simp [Session.credit, idle] at paid
   omega
+
+/-- One wait's run: its starting session, where it ended, and its events. -/
+structure WaitRun where
+  start : Session
+  finish : Session
+  events : List Event
+
+/-- Waits sharing a run's clock and reports: each runs from no attempt, with
+no delay below `d`, over at most `t` seconds and `r` commits. Together they
+start at most `n × (1 + r + ⌊t / d⌋)` times. -/
+theorem signal_waits_rate {d t r : Nat} (positive : 0 < d) (waits : List WaitRun)
+    (valid : ∀ w ∈ waits, run w.start w.events = some w.finish)
+    (idle : ∀ w ∈ waits, w.start.running = none)
+    (floor : ∀ w ∈ waits, d ≤ w.start.floor)
+    (time : ∀ w ∈ waits, ticks w.events ≤ t)
+    (reports : ∀ w ∈ waits, commits w.events ≤ r) :
+    (waits.map (starts ·.events)).sum ≤ waits.length * (1 + r + t / d) := by
+  induction waits with
+  | nil => simp
+  | cons w rest ih =>
+      have head := signal_rate positive (floor w (by simp)) (idle w (by simp))
+        (valid w (by simp))
+      have slower : ticks w.events / d ≤ t / d := Nat.div_le_div_right (time w (by simp))
+      have fewer := reports w (by simp)
+      have tail := ih (fun x m => valid x (List.mem_cons_of_mem _ m))
+        (fun x m => idle x (List.mem_cons_of_mem _ m))
+        (fun x m => floor x (List.mem_cons_of_mem _ m))
+        (fun x m => time x (List.mem_cons_of_mem _ m))
+        (fun x m => reports x (List.mem_cons_of_mem _ m))
+      simp only [List.map_cons, List.sum_cons, List.length_cons, Nat.succ_mul]
+      omega
 
 /-! ## Ending the wait survives a reopen -/
 

@@ -22,8 +22,9 @@ impl CovenHandle {
         self.storage.sync_now();
     }
     /// Tell coven the device's network changed: it became available, or
-    /// moved to another network. A backoff after an attempt that received
-    /// no provider response (`Offline`) ends and a pass runs now. Backoffs
+    /// moved to another network. Every backoff after an attempt that
+    /// received no provider response ends: the connection's (`Offline`),
+    /// operations', uploads' and eager downloads'; a pass runs now. Backoffs
     /// after a provider's answer, and provider cooldowns, hold. Reports
     /// coalesce as `sync_now` requests do.
     pub fn network_changed(&self) {

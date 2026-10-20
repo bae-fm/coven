@@ -19,10 +19,7 @@ use std::{
     collections::BTreeMap,
     future::Future,
     pin::Pin,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        Mutex,
-    },
+    sync::Mutex,
     time::{Duration, SystemTime},
 };
 
@@ -52,9 +49,8 @@ pub struct RetryWaits {
     /// Bumped whenever a failed attempt arms a new wait, so an owner waiting
     /// on the earlier schedule plans again.
     rearmed: tokio::sync::watch::Sender<u64>,
-    /// The app reported a network change that no connection owner has
-    /// handled yet. Repeated reports coalesce into one.
-    network: AtomicBool,
+    /// The app's network reports, and how far each owner acted on them.
+    network: network_report::Reports,
 }
 
 #[derive(Default)]
@@ -92,7 +88,7 @@ impl RetryWaits {
             state: Mutex::new(State::default()),
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
-            network: AtomicBool::new(false),
+            network: network_report::Reports::default(),
         };
         for (subject, wait) in waits {
             owner.arm_for(
@@ -113,7 +109,7 @@ impl RetryWaits {
             state: Mutex::new(State::default()),
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
-            network: AtomicBool::new(false),
+            network: network_report::Reports::default(),
         }
     }
 
@@ -242,61 +238,6 @@ impl RetryWaits {
             let wait = restart_wait(persisted.not_before, self.clock.now(), persisted.wait);
             self.arm_for(subject, persisted.not_before, wait);
         }
-    }
-
-    /// Whether this session holds the subject for the app because saving its
-    /// wait failed.
-    pub(crate) fn held(&self, subject: RetrySubject) -> bool {
-        self.lock()
-            .armed
-            .get(&subject)
-            .is_some_and(|armed| armed.timer.is_none())
-    }
-
-    /// Whether the subject's persisted wait is over, provider cooldown aside.
-    pub(crate) fn ran_out(&self, subject: RetrySubject, persisted: &RetryWait) -> bool {
-        self.enforce(subject, persisted);
-        let elapsed = self.clock.elapsed();
-        self.lock()
-            .armed
-            .get(&subject)
-            .is_some_and(|armed| armed.over(elapsed))
-    }
-
-    /// End the subject's wait now, keeping its failure count so the next
-    /// failure continues the backoff. The ended wait is saved as `T = now`
-    /// and `W = 0` before it is enforced, so no reopen arms the old wait
-    /// again under any wall clock (IO `ended_reopens_due`). If saving fails,
-    /// the old wait holds.
-    pub(crate) async fn end(
-        &self,
-        subject: RetrySubject,
-        previous: &RetryWait,
-    ) -> Result<(), SyncError> {
-        let ended = RetryWait {
-            failures: previous.failures,
-            not_before: self.clock.now(),
-            wait: Duration::ZERO,
-        };
-        if let Some(database) = &self.database {
-            database.record_retry(subject, ended).await?;
-        }
-        self.arm(subject, &ended);
-        Ok(())
-    }
-
-    /// The app reports that the device's network changed: it became
-    /// available, or moved to another network (§6.7). The connection's
-    /// owner handles it when it next plans; reports before then coalesce.
-    pub fn network_changed(&self) {
-        self.network.store(true, Ordering::SeqCst);
-        self.rearmed
-            .send_modify(|count| *count = count.wrapping_add(1));
-    }
-
-    /// Take the app's network report, if one arrived since the last take.
-    pub(crate) fn take_network_change(&self) -> bool {
-        self.network.swap(false, Ordering::SeqCst)
     }
 
     /// The owner evaluated the subject's work without running it, e.g.
@@ -457,6 +398,10 @@ impl coven_storage::Cooldown for RetryWaits {
 
 #[path = "operation_evidence.rs"]
 mod operation_evidence;
+
+#[path = "network_report.rs"]
+mod network_report;
+pub use network_report::NetworkOwner;
 
 #[cfg(test)]
 #[path = "retry_waits_tests.rs"]

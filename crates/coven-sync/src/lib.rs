@@ -38,7 +38,7 @@ pub use files::{
     FileStatus, FileStream, Files, PinProgress, QueuedUpload, TransferLimits, UploadPhase,
     UploadQueue,
 };
-pub use retry_waits::RetryWaits;
+pub use retry_waits::{NetworkOwner, RetryWaits};
 
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,

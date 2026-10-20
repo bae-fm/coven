@@ -151,11 +151,15 @@ async fn run(
     let mut idle = sync.clock.sleep(Duration::from_secs(30));
     let mut closing = None;
     loop {
-        // The app's network report ends a wait for the network and asks for
-        // a pass; reports during a pass are handled after it, so they end
-        // the wait it failed into (§6.7).
+        // The app's network report ends the connection's and operations'
+        // waits for the network and asks for a pass; reports during a pass
+        // are handled after it, so they end the waits it failed into (§6.7).
         if !paused {
-            match crate::ConnectionRetry::network_changed(&sync.database, &sync.waits).await {
+            match sync
+                .waits
+                .end_offline_waits(crate::NetworkOwner::Connection)
+                .await
+            {
                 Ok(reported) => pending |= reported && started,
                 Err(error) => {
                     status.publish(SyncStatus::Failed {
