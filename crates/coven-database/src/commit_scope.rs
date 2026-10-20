@@ -29,8 +29,10 @@ impl CommitScope {
     }
 
     /// Run `work` with its database calls' commits attributed to this scope.
-    pub async fn run<F: Future>(self, work: F) -> F::Output {
-        TASK.scope(self, work).await
+    /// The work is held once, inside the scope that polls it; an `async fn`
+    /// here would hold a second, moved copy beside it.
+    pub fn run<F: Future>(self, work: F) -> impl Future<Output = F::Output> {
+        TASK.scope(self, work)
     }
 }
 
