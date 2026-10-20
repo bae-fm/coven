@@ -28,6 +28,6 @@ impl CovenHandle {
         member: &MemberId,
         keys: MemberPublicKeys,
     ) -> Result<(), SyncError> {
-        self.storage.replace_member_keys_for(*member, keys).await
+        Box::pin(self.storage.replace_member_keys_for(*member, keys)).await
     }
 }

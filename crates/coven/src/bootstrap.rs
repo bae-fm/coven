@@ -119,7 +119,7 @@ pub async fn restore_from_code(
     let code = coven_sync::read_restore_code(code)?;
     let location = StorageConfig::decode(code.storage.as_bytes()).map_err(SyncError::from)?;
     let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
-    bootstrap_device(
+    Box::pin(bootstrap_device(
         builder,
         BootstrapRequest::Restore {
             code,
@@ -129,7 +129,7 @@ pub async fn restore_from_code(
         },
         on_status,
         cancel,
-    )
+    ))
     .await?
     .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
 }
@@ -161,7 +161,7 @@ pub async fn restore_from_keychain(
         s3_credentials
     };
     let (data, sign_in) = restore_connection(&builder, location, s3_credentials)?;
-    bootstrap_device(
+    Box::pin(bootstrap_device(
         builder,
         BootstrapRequest::Restore {
             code,
@@ -171,7 +171,7 @@ pub async fn restore_from_keychain(
         },
         on_status,
         cancel,
-    )
+    ))
     .await
 }
 
@@ -187,7 +187,7 @@ pub async fn join_with_invite(
     cancel: &watch::Receiver<bool>,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
     check_cancel(cancel)?;
-    bootstrap_device(
+    Box::pin(bootstrap_device(
         builder,
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
@@ -195,7 +195,7 @@ pub async fn join_with_invite(
         },
         on_status,
         cancel,
-    )
+    ))
     .await
 }
 
@@ -223,6 +223,8 @@ enum BootstrapRequest {
     },
 }
 
+/// Its state runs to tens of KiB, so the public calls await it boxed and the
+/// futures apps hold stay small (application_api_tests bounds them).
 async fn bootstrap_device(
     mut builder: CovenBuilder,
     request: BootstrapRequest,
