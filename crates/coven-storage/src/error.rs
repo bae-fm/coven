@@ -285,6 +285,12 @@ pub enum StorageSetupError {
     /// The facade could not commit to key custody.
     #[error("secure storage: {0}")]
     SecureStorage(#[from] KeyError),
+    /// This device or its member was removed from the store (§14.1).
+    #[error("this device or its member was removed")]
+    Removed,
+    /// The store needs a newer app schema or coven format (§18).
+    #[error("an update is required: {0:?}")]
+    UpdateRequired(coven_format::RequiredUpdate),
     /// A local setup step failed, retaining its cause.
     #[error("storage setup: {0}")]
     Internal(#[source] Box<dyn std::error::Error + Send + Sync>),

@@ -92,3 +92,56 @@ fn filesystem_and_settings_errors_accept_boxed_native_causes() {
     let corrupt = SettingsError::Corrupt(Box::new(std::fmt::Error));
     assert!(corrupt.source().unwrap().is::<std::fmt::Error>());
 }
+
+/// A removal or a required update reaches setup and unlock by name, whether
+/// the pass returned it or stopped at a record of it; anything else keeps
+/// its boxed cause.
+#[test]
+fn setup_and_unlock_name_a_removal_and_a_required_update() {
+    use crate::{PendingReason, PendingRecord, PendingSubject, RequiredUpdate, Slot};
+    let update = RequiredUpdate::CovenFormat { version: 9 };
+    let blocked = |reason| {
+        SyncError::Pending(Box::new(PendingRecord::new(
+            PendingSubject::Slot(Slot(4)),
+            reason,
+        )))
+    };
+    let removals: [fn() -> SyncError; 2] = [
+        || SyncError::Removed,
+        || {
+            SyncError::Pending(Box::new(PendingRecord::new(
+                PendingSubject::Slot(Slot(4)),
+                PendingReason::Removed,
+            )))
+        },
+    ];
+    for error in removals {
+        assert!(matches!(
+            unlock_error(error()),
+            StoreKeyUnlockError::Removed
+        ));
+        assert!(matches!(setup_error(error()), StorageSetupError::Removed));
+    }
+    for error in [
+        SyncError::UpdateRequired(update),
+        blocked(PendingReason::UpdateRequired(update)),
+    ] {
+        let unlock = unlock_error(error);
+        assert!(
+            matches!(unlock, StoreKeyUnlockError::UpdateRequired(required) if required == update),
+            "{unlock:?}"
+        );
+    }
+    assert!(matches!(
+        setup_error(SyncError::UpdateRequired(update)),
+        StorageSetupError::UpdateRequired(required) if required == update
+    ));
+    assert!(matches!(
+        unlock_error(blocked(PendingReason::NoStorage)),
+        StoreKeyUnlockError::Other(_)
+    ));
+    assert!(matches!(
+        setup_error(SyncError::KeyUnavailable(crate::KeyId(uuid::Uuid::nil()))),
+        StorageSetupError::Internal(_)
+    ));
+}

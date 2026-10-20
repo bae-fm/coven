@@ -9,20 +9,7 @@ use coven_merge::{Audience, Slot, WriteId};
 use coven_storage::{CloudProvider, RetainedAccess, StorageFailure};
 use serde::{Deserialize, Serialize};
 
-/// The software version required to decode or apply an input.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RequiredUpdate {
-    /// The application's schema.
-    AppSchema {
-        /// Required application schema version.
-        version: u32,
-    },
-    /// Coven's stored-object format.
-    CovenFormat {
-        /// Required object format version.
-        version: u16,
-    },
-}
+pub use coven_format::RequiredUpdate;
 
 /// The attaching device cannot supply the original file bytes.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]

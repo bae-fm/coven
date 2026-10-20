@@ -95,12 +95,44 @@ pub enum StoreKeyUnlockError {
     /// Custody refused to read or persist keys.
     #[error(transparent)]
     SecureStorage(#[from] KeyError),
+    /// This device or its member was removed from the store (§14.1).
+    #[error("this device or its member was removed")]
+    Removed,
+    /// The store needs a newer app schema or coven format (§18).
+    #[error("an update is required: {0:?}")]
+    UpdateRequired(crate::RequiredUpdate),
     /// Sequence validation or local work failed, preserving its cause.
     #[error("opening store keys: {0}")]
     Other(#[source] Box<dyn std::error::Error + Send + Sync>),
 }
 
+/// What setup and unlock report by name: a removal or a required update,
+/// whether the pass returned it or stopped at a record of it.
+enum Stopped {
+    Removed,
+    UpdateRequired(crate::RequiredUpdate),
+}
+
+fn stopped(error: &SyncError) -> Option<Stopped> {
+    let reason = match error {
+        SyncError::Removed => return Some(Stopped::Removed),
+        SyncError::UpdateRequired(update) => return Some(Stopped::UpdateRequired(*update)),
+        SyncError::Pending(record) => &record.reason,
+        _ => return None,
+    };
+    match reason {
+        crate::PendingReason::Removed => Some(Stopped::Removed),
+        crate::PendingReason::UpdateRequired(update) => Some(Stopped::UpdateRequired(*update)),
+        _ => None,
+    }
+}
+
 pub(crate) fn setup_error(error: SyncError) -> StorageSetupError {
+    match stopped(&error) {
+        Some(Stopped::Removed) => return StorageSetupError::Removed,
+        Some(Stopped::UpdateRequired(update)) => return StorageSetupError::UpdateRequired(update),
+        None => {}
+    }
     match error {
         SyncError::SecureStorage(error) => StorageSetupError::SecureStorage(error),
         SyncError::Storage(error) => StorageSetupError::Storage(error),
@@ -109,6 +141,13 @@ pub(crate) fn setup_error(error: SyncError) -> StorageSetupError {
 }
 
 pub(crate) fn unlock_error(error: SyncError) -> StoreKeyUnlockError {
+    match stopped(&error) {
+        Some(Stopped::Removed) => return StoreKeyUnlockError::Removed,
+        Some(Stopped::UpdateRequired(update)) => {
+            return StoreKeyUnlockError::UpdateRequired(update)
+        }
+        None => {}
+    }
     match error {
         SyncError::NoStorage => StoreKeyUnlockError::NoStorage,
         SyncError::SecureStorage(error) => StoreKeyUnlockError::SecureStorage(error),

@@ -45,7 +45,7 @@ pub mod writes_slot;
 pub mod test_utils;
 
 pub use error::Error;
-pub use version::FormatVersion;
+pub use version::{FormatVersion, RequiredUpdate};
 
 use admin::StoreChange;
 use error::bound;

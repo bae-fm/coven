@@ -31,6 +31,23 @@ impl FormatVersion {
     }
 }
 
+/// The software version required to decode or apply an input from storage:
+/// the app schema its writes use, or the object format it is encoded in.
+/// Sync, setup and unlock all report it, so it lives with the formats.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum RequiredUpdate {
+    /// The application's schema.
+    AppSchema {
+        /// Required application schema version.
+        version: u32,
+    },
+    /// Coven's stored-object format.
+    CovenFormat {
+        /// Required object format version.
+        version: u16,
+    },
+}
+
 #[cfg(test)]
 #[path = "version_tests.rs"]
 mod tests;

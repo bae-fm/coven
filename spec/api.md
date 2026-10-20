@@ -3048,6 +3048,10 @@ pub enum StorageSetupError {
     OAuth(OAuthError),
     /// Keeping credentials or keys failed.
     SecureStorage(KeyError),
+    /// This device or its member was removed from the store (§14.1).
+    Removed,
+    /// The store needs a newer app schema or coven format (§18).
+    UpdateRequired(RequiredUpdate),
     /// Local setup failed, with its cause.
     Internal(Box<dyn std::error::Error + Send + Sync>),
 }
@@ -3087,6 +3091,10 @@ pub enum StoreKeyUnlockError {
     Crypto(CryptoError),
     /// Unlocking or keeping keys in custody failed.
     SecureStorage(KeyError),
+    /// This device or its member was removed from the store (§14.1).
+    Removed,
+    /// The store needs a newer app schema or coven format (§18).
+    UpdateRequired(RequiredUpdate),
 
     /// Sequence validation or local work failed, preserving its cause.
     Other(Box<dyn std::error::Error + Send + Sync>),
