@@ -158,10 +158,11 @@ harness, the OS refuses every keychain call with `errSecMissingEntitlement`
 kills the process at launch, before any coven code runs; a build with no team
 should omit the entitlement. While the keychain is locked or the session can't
 show UI, the OS answers `errSecInteractionNotAllowed` (-25308): the entry is
-there, and the same read succeeds once the device unlocks. Coven returns these
-as `KeyError::Keychain`, keeping the native cause; an app that reads a key at
-startup should treat the last one as "device locked, ask again", not as a
-missing key.
+there, and the same read succeeds once the device unlocks. Coven returns the
+first as `KeyError::MissingKeychainEntitlement` and the second as
+`KeyError::KeychainTemporarilyUnavailable`, keeping the native cause in both;
+an app that reads a key at startup should treat the second as "device locked,
+ask again", not as a missing key.
 
 iCloud storage also needs the iCloud entitlement for the app's CloudKit
 container ([Storage](/docs/storage#icloud-cloudkit)).

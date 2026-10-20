@@ -52,6 +52,7 @@ sha2 = { version = "0.11.0", default-features = false }
 zeroize = "1.9.0"
 keyring-core = "1.0.0"
 apple-native-keyring-store = "1.0.2"
+security-framework = "3.7.0"
 android-native-keyring-store = "1.0.0"
 windows-native-keyring-store = "1.1.0"
 zbus-secret-service-keyring-store = "1.0.1"

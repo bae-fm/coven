@@ -2220,9 +2220,15 @@ store the app supplies. Members' private keys and audience keys stay in custody,
 never in the database.
 
 A locked session can make an existing keychain entry inaccessible. Coven reports
-native `NoStorageAccess` as `KeychainTemporarilyUnavailable`, separately from other
-keychain failures, so the app can ask the person to unlock the session. The native
-cause is retained; a refusal is never reported as a missing key.
+that as `KeychainTemporarilyUnavailable`, separately from other keychain failures,
+so the app can ask the person to unlock the session. The native keychains say it
+differently: a `NoStorageAccess` error, or on Apple the status
+`errSecInteractionNotAllowed` (-25308), which a locked device, a sleeping display
+or a session that can't show UI answers. Read as a generic failure, a locked Mac
+at startup would look like a broken store. Apple's `errSecMissingEntitlement`
+(-34018) gets its own error, `MissingKeychainEntitlement`: the app was signed
+without its keychain entitlement, and no retry helps. The native cause is
+retained; a refusal is never reported as a missing key.
 
 Preparation follows that boundary too. The journal records the audience and
 new key's id before saving its material in custody. Once saved, its public hash
