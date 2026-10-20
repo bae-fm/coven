@@ -58,16 +58,30 @@ pub(crate) fn name(database: &DatabaseConnection) -> Result<String, DbError> {
         .ok_or(DbError::DamagedDatabase)
 }
 
+/// The current name and the slot that set it; a local creation's name counts
+/// as set by slot 1, which will publish it (§13.1).
+pub(crate) fn named(database: &DatabaseConnection) -> Result<(String, Slot), DbError> {
+    database
+        .query(
+            "SELECT name,named_at FROM _coven_store WHERE singleton=1",
+            [],
+            |row| Ok((row.get(0)?, slot(row, 1)?)),
+        )?
+        .pop()
+        .ok_or(DbError::DamagedDatabase)
+}
+
 pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError> {
     let mut state = StoreState::default();
     state.store = database
         .query(
-            "SELECT store,name FROM _coven_store WHERE singleton=1 AND created=1",
+            "SELECT store,name,named_at FROM _coven_store WHERE singleton=1 AND created=1",
             [],
             |r| {
                 Ok(StoreIdentity {
                     id: StoreId(uuid::Uuid::from_bytes(r.get(0)?)),
                     name: r.get(1)?,
+                    named_at: slot(r, 2)?,
                 })
             },
         )?
@@ -159,7 +173,7 @@ pub(crate) fn read(database: &DatabaseConnection) -> Result<StoreState, DbError>
 }
 pub(crate) fn replace(database: &DatabaseConnection, state: &StoreState) -> Result<(), DbError> {
     if let Some(store) = &state.store {
-        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,created) VALUES(1,?1,?2,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,created=1",params![store.id.0.as_bytes().as_slice(),store.name])?;
+        database.internal_execute("INSERT INTO _coven_store(singleton,store,name,named_at,created) VALUES(1,?1,?2,?3,1) ON CONFLICT(singleton) DO UPDATE SET store=excluded.store,name=excluded.name,named_at=excluded.named_at,created=1",params![store.id.0.as_bytes().as_slice(),store.name,store.named_at.0.to_be_bytes().as_slice()])?;
     }
     for table in [
         "_coven_circle_deletions",

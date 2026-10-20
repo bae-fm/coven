@@ -163,10 +163,15 @@ pub(super) async fn replace_installation(
         Ok(owners) => owners,
         Err(error) => return undo(error.into(), database, swapping.then_some(replacement)).await,
     };
+    let name = match commit::loaded_name(&database).await {
+        Ok(name) => name,
+        Err(error) => return undo(error, database, swapping.then_some(replacement)).await,
+    };
     // The swapped store's own publication follows, and moves only forward.
     if let Err(uncommitted) = commit::commit(
         &directory,
         &code,
+        &name,
         &credentials,
         sign_in.as_ref(),
         &ring,

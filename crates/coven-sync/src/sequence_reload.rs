@@ -573,7 +573,7 @@ impl SequenceSync {
                 }
             });
         }
-        self.leave(&session.history, &at_target, member)?;
+        self.follow_synced_entries(&session.history, &at_target, member)?;
         self.keys.persist(ring)?;
         let authorship = Arc::new(SnapshotAuthorship {
             store: self.store(),

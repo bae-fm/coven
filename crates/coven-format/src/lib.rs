@@ -118,7 +118,7 @@ impl Object {
 /// are ignored here; [`Object::decode`] requires exactly one complete frame.
 pub fn frame_length(prefix: &[u8]) -> Result<usize, Error> {
     let bytes = prefix.get(..3).ok_or(Error::Truncated)?;
-    if !matches!(bytes[0], 1..=7 | 9..=16) {
+    if !matches!(bytes[0], 1..=7 | 9..=17) {
         return Err(Error::UnknownTag {
             field: "object kind",
             tag: bytes[0],

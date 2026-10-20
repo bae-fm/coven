@@ -541,15 +541,24 @@ struct OpeningOwners {
 impl OpeningStore {
     async fn open(self) -> CovenResult<CovenHandle> {
         let database = self.database.open_locked(self.lock).await?;
-        if let Some(identity) = database.store_state().await?.store {
+        let store = database.store_state().await?.store;
+        if let Some(identity) = &store {
             identity.check_settings(&self.directory.settings()?)?;
         }
         let waits = Arc::new(
             coven_sync::RetryWaits::open(database.clone(), self.builder.clock.clone()).await?,
         );
-        let owners =
-            crate::coven::blocking(move || self.builder.owners(self.directory, self.keychain))
-                .await?;
+        let owners = crate::coven::blocking(move || {
+            let owners = self.builder.owners(self.directory, self.keychain)?;
+            // The saved restore code's name catches up with this store's
+            // when the store's is newer (§13.1). A store never set up has
+            // no saved code.
+            if let Some(identity) = &store {
+                coven_sync::follow_name(&owners.synced, &coven_sync::SavedName::of(identity))?;
+            }
+            Ok::<_, CovenError>(owners)
+        })
+        .await?;
         owners
             .handle(database, waits)
             .map_err(|error| CovenError::Database(DbError::SyncStream(Box::new(error))))

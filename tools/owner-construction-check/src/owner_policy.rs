@@ -515,9 +515,12 @@ pub(crate) const POLICY: Policy = Policy {
         ("crates/coven/src/builder_creation.rs", "<free>", "create"),
         ("crates/coven/src/builder_creation.rs", "<free>", "prepare"),
         ("crates/coven/src/coven.rs", "Coven", "discard_store"),
-        // Recovery discovery acquires the registered keychain and scopes its entries.
+        // Recovery discovery and forgetting acquire the registered keychain and
+        // scope its entries.
         (SAVED_RESTORE, "<free>", "saved_restore_codes"),
         (SAVED_RESTORE, "<free>", "list"),
+        (SAVED_RESTORE, "<free>", "forget_saved_restore_code"),
+        (SAVED_RESTORE, "<free>", "forget"),
         ("crates/coven/src/handle.rs", "CovenHandle", "close"),
         ("crates/coven/src/handle.rs", "CovenHandle", "new"),
         (

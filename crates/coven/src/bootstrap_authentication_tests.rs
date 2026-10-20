@@ -18,7 +18,7 @@ async fn restore_and_keychain_restore_use_builder_sign_in_without_returning_toke
         let (_, cancel) = watch::channel(false);
         let handle = if from_keychain {
             SyncedKeychain::new(install.keychain.clone(), owner.directory.id())
-                .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+                .set_restore_code(&crate::tests::keychain_entry(&owner.code))
                 .unwrap();
             restore_from_keychain(
                 builder,
@@ -180,7 +180,7 @@ async fn restore_replaces_a_codes_label_with_the_members_own_sign_in() {
             let (_, cancel) = watch::channel(false);
             let handle = if from_keychain {
                 SyncedKeychain::new(install.keychain.clone(), owner.directory.id())
-                    .set_restore_code(&SecretBytes::new(code.to_bytes().unwrap().to_vec()))
+                    .set_restore_code(&crate::tests::keychain_entry(&code))
                     .unwrap();
                 let saved = crate::saved_restore::list(install.keychain.clone()).unwrap();
                 assert_eq!(saved[0].location, location);

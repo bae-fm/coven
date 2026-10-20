@@ -194,3 +194,75 @@ fn after_leaving_the_synced_entries_are_never_written_again() {
     assert!(synced.s3_credentials().unwrap().is_none());
     assert!(synced.restore_code().unwrap().is_none());
 }
+
+#[test]
+fn a_change_keeps_writes_or_deletes_the_code_it_read() {
+    let phone = Keychain::in_memory("change").unwrap();
+    let synced = saved(&phone, StoreId(Uuid::from_u128(1)));
+    let read = |synced: &SyncedKeychain| {
+        synced
+            .restore_code()
+            .unwrap()
+            .map(|b| b.as_bytes().to_vec())
+    };
+    synced
+        .change_restore_code(|saved| {
+            assert_eq!(saved.unwrap().as_bytes(), b"restore");
+            Ok::<_, KeyError>(RestoreCodeChange::Keep)
+        })
+        .unwrap();
+    assert_eq!(read(&synced).unwrap(), b"restore");
+    synced
+        .change_restore_code(|_| {
+            Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(
+                b"named".to_vec(),
+            )))
+        })
+        .unwrap();
+    assert_eq!(read(&synced).unwrap(), b"named");
+    // A refused read changes nothing and never reaches the decision.
+    phone.fail_next_operation();
+    assert!(matches!(
+        synced.change_restore_code(|_| -> Result<_, KeyError> { unreachable!() }),
+        Err(KeyError::KeychainTemporarilyUnavailable(_))
+    ));
+    synced
+        .change_restore_code(|_| Ok::<_, KeyError>(RestoreCodeChange::Delete))
+        .unwrap();
+    assert!(read(&synced).is_none());
+    synced
+        .change_restore_code(|saved| {
+            assert!(saved.is_none());
+            Ok::<_, KeyError>(RestoreCodeChange::Keep)
+        })
+        .unwrap();
+    // After leaving, a change may still keep or delete, never write.
+    synced.delete_entries().unwrap();
+    assert!(matches!(
+        synced.change_restore_code(|_| {
+            Ok::<_, KeyError>(RestoreCodeChange::Write(SecretBytes::new(b"back".to_vec())))
+        }),
+        Err(KeyError::Left)
+    ));
+    assert!(read(&synced).is_none());
+}
+
+/// Forgetting deletes the person's entries for one store from every device,
+/// like leaving, but later saves still write them (§13.1).
+#[test]
+fn forgetting_deletes_both_entries_without_leaving() {
+    let phone = Keychain::in_memory("forget").unwrap();
+    let laptop = phone.another_device();
+    let id = StoreId(Uuid::from_u128(1));
+    saved(&phone, id);
+    let on_laptop = SyncedKeychain::new(laptop.clone(), id);
+    on_laptop.forget().unwrap();
+    on_laptop.forget().unwrap();
+    let on_phone = SyncedKeychain::new(phone.clone(), id);
+    assert!(on_phone.restore_code().unwrap().is_none());
+    assert!(on_phone.s3_credentials().unwrap().is_none());
+    on_laptop
+        .set_restore_code(&SecretBytes::new(b"new code".to_vec()))
+        .unwrap();
+    assert_eq!(phone.synced_restore_codes().unwrap().len(), 1);
+}

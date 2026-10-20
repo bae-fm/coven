@@ -52,8 +52,9 @@ async fn member_keys_are_replaced_through_the_public_calls() {
             .restore_code()
             .unwrap()
             .unwrap();
-        RestoreCode::from_bytes(bytes.as_bytes())
+        coven_format::codes::KeychainRestoreCode::from_bytes(bytes.as_bytes())
             .unwrap()
+            .code
             .member_keys
             .public_keys()
     };

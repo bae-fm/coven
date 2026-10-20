@@ -65,6 +65,10 @@ pub struct StoreIdentity {
     pub id: StoreId,
     /// Its name.
     pub name: String,
+    /// The slot that set `name`: creation's slot 1, or the latest applied
+    /// rename that changed it. A saved restore code's name is replaced only
+    /// by one from a later slot (§13.1).
+    pub named_at: Slot,
 }
 
 impl StoreIdentity {

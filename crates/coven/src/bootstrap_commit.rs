@@ -20,7 +20,8 @@ impl Uncommitted {
 }
 
 /// Commit the installation's storage settings, store keys, member identity,
-/// device id and credentials, then `publish` it. An OAuth store commits
+/// device id and credentials, with the restore code saved beside the loaded
+/// store's `name` (§13.1), then `publish` it. An OAuth store commits
 /// `sign_in`'s current tokens, which then refresh in device custody; a
 /// rollback holds them in the session again. A failure before publication
 /// restores every prior value. `Ok(Some(_))` is a failure after publication,
@@ -28,6 +29,7 @@ impl Uncommitted {
 pub(super) fn commit(
     directory: &StoreDir,
     code: &RestoreCode,
+    name: &coven_sync::SavedName,
     credentials: &StorageCredentials,
     sign_in: Option<&Arc<coven_sync::SessionSignIn>>,
     ring: &StoreKeyring,
@@ -60,11 +62,11 @@ pub(super) fn commit(
                 coven_sync::commit_credentials(
                     keychain,
                     &StorageCredentials::OAuth(tokens.clone()),
-                    Some(code),
+                    Some((code, name)),
                 )
             })?,
             None => owners.credentials.write(|keychain| {
-                coven_sync::commit_credentials(keychain, credentials, Some(code))
+                coven_sync::commit_credentials(keychain, credentials, Some((code, name)))
             })?,
         });
         Ok(publish()?)
@@ -133,6 +135,7 @@ pub(super) fn commit(
 pub(super) async fn publish_bootstrap(
     pending: &BootstrapStore,
     code: RestoreCode,
+    name: coven_sync::SavedName,
     credentials: StorageCredentials,
     sign_in: Option<Arc<coven_sync::SessionSignIn>>,
     ring: StoreKeyring,
@@ -144,6 +147,7 @@ pub(super) async fn publish_bootstrap(
     let publication_error = commit(
         &directory,
         &code,
+        &name,
         &credentials,
         sign_in.as_ref(),
         &ring,
@@ -167,6 +171,14 @@ pub(super) async fn publish_bootstrap(
             source: Box::new(source),
         }),
     }
+}
+
+/// The loaded store's name and the slot that set it, for the saved code.
+pub(super) async fn loaded_name(
+    database: &Database,
+) -> Result<coven_sync::SavedName, BootstrapError> {
+    let (name, named_at) = database.named_store().await?;
+    Ok(coven_sync::SavedName { name, named_at })
 }
 
 #[cfg(test)]

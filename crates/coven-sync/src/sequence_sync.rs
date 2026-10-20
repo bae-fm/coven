@@ -46,7 +46,8 @@ pub struct SequenceSync {
     storage: Arc<dyn Storage>,
     keys: Arc<KeySession<StoreKeyring>>,
     member: Arc<KeySession<MemberIdentity>>,
-    /// The person's restore code and S3 key, deleted when they leave (§14.1).
+    /// The person's restore code and S3 key: the code's store name follows
+    /// applied renames (§13.1), and both are deleted when they leave (§14.1).
     synced: Arc<SyncedKeychain>,
     directory: StoreDir,
     device: DeviceId,
@@ -417,9 +418,9 @@ impl SequenceSync {
                     .await?;
                 continue;
             }
-            // A failed deletion fails this pass before any of its slots
-            // applies; it is not a fault of the slot, so nothing blocks.
-            self.leave(&session.history, &virtual_history, member)?;
+            // A failed keychain change fails this pass before any of its
+            // slots applies; it is not a fault of the slot, so nothing blocks.
+            self.follow_synced_entries(&session.history, &virtual_history, member)?;
             session.floor = floor;
             for (incoming, history, input) in slots {
                 let at = incoming.slot;
@@ -528,25 +529,38 @@ impl SequenceSync {
         Ok(())
     }
 
+    /// Bring the person's synced entries to `next` before committing the
+    /// slots or snapshot that reach it from `applied`, so a failure returns to
+    /// the caller with nothing committed; the retried pass or call reads the
+    /// same slots and repeats it.
+    ///
     /// The person leaves the store when their member's removal applies, by
     /// any admin including themselves. Their restore code and S3 key in
     /// iCloud Keychain then serve no device of theirs, so this device deletes
-    /// them before it commits the slots or snapshot that remove the member
-    /// (§14.1). From then on the keychain refuses to write them again. A
-    /// failed deletion returns to the caller with nothing committed; the
-    /// retried pass or call reads the removal again and repeats it. Removing
-    /// only a device leaves them: the person keeps their other devices.
-    pub(crate) fn leave(
+    /// them (§14.1). From then on the keychain refuses to write them again.
+    /// Removing only a device leaves them: the person keeps their other
+    /// devices. Otherwise a rename, this device's or another's, rewrites the
+    /// saved code's store name, unless the entry's is newer (§13.1).
+    pub(crate) fn follow_synced_entries(
         &self,
         applied: &History,
         next: &History,
         member: &MemberIdentity,
     ) -> Result<(), SyncError> {
         let left = |history: &History| crate::effects::left(&history.state, &member.member());
-        if left(next) && !left(applied) {
-            self.synced.delete_entries()?;
+        if left(next) {
+            if !left(applied) {
+                self.synced.delete_entries()?;
+            }
+            return Ok(());
         }
-        Ok(())
+        let named = |history: &History| history.state.store.as_ref().map(crate::SavedName::of);
+        match named(next) {
+            Some(name) if named(applied) != Some(name.clone()) => {
+                Ok(crate::follow_name(&self.synced, &name)?)
+            }
+            _ => Ok(()),
+        }
     }
 
     pub(crate) async fn apply(

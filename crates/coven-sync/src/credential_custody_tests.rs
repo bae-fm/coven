@@ -11,6 +11,20 @@ fn key() -> StorageCredentials {
     })
 }
 
+fn household() -> SavedName {
+    SavedName {
+        name: "Household".into(),
+        named_at: coven_merge::Slot(1),
+    }
+}
+
+/// The saved entry's code bytes and name.
+fn saved(store: &CredentialKeychains) -> (Vec<u8>, String) {
+    let bytes = store.synced.restore_code().unwrap().unwrap();
+    let saved = crate::read_saved_code(store.synced.store(), bytes.as_bytes()).unwrap();
+    (saved.code.to_bytes().unwrap().to_vec(), saved.name)
+}
+
 fn fixture(present: bool) -> (Arc<Keychain>, CredentialKeychains, RestoreCode) {
     let keychain = Keychain::in_memory("credential-commit").unwrap();
     let id = StoreId(uuid::Uuid::from_u128(1));
@@ -76,20 +90,23 @@ fn assert_prior(store: &CredentialKeychains, present: bool) {
 fn every_custody_read_and_write_failure_preserves_the_exact_prior_values() {
     for present in [false, true] {
         for with_code in [false, true] {
-            let count = if with_code { 6 } else { 4 };
+            // Saving the code reads the entry again before writing it.
+            let count = if with_code { 7 } else { 4 };
+            let name = household();
             for after in 0..count {
                 let (keychain, store, code) = fixture(present);
                 keychain.fail_operations_after(&[after]);
                 assert!(
                     matches!(
-                        commit_credentials(&store, &key(), with_code.then_some(&code)),
+                        commit_credentials(&store, &key(), with_code.then_some((&code, &name))),
                         Err(SyncError::SecureStorage(_))
                     ),
                     "after {after}, with code {with_code}"
                 );
                 assert_prior(&store, present);
                 let rollback =
-                    commit_credentials(&store, &key(), with_code.then_some(&code)).unwrap();
+                    commit_credentials(&store, &key(), with_code.then_some((&code, &name)))
+                        .unwrap();
                 let StorageCredentials::S3(device) = StorageCredentials::decode(
                     store
                         .device
@@ -114,8 +131,8 @@ fn every_custody_read_and_write_failure_preserves_the_exact_prior_values() {
                 );
                 if with_code {
                     assert_eq!(
-                        store.synced.restore_code().unwrap().unwrap().as_bytes(),
-                        code.to_bytes().unwrap().as_slice()
+                        saved(&store),
+                        (code.to_bytes().unwrap().to_vec(), "Household".into())
                     );
                 }
                 rollback.restore(&store).unwrap();
@@ -130,11 +147,12 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
     for present in [false, true] {
         for cleanup in 0..3 {
             let (keychain, store, code) = fixture(present);
+            let name = household();
             // Read all three entries; write device and S3; refuse code, then
             // refuse each compensation in turn without skipping the others.
             keychain.fail_operations_after(&[5, cleanup]);
             assert!(matches!(
-                commit_credentials(&store, &key(), Some(&code)),
+                commit_credentials(&store, &key(), Some((&code, &name))),
                 Err(SyncError::Cleanup { operation, cleanup })
                     if matches!(*operation, SyncError::SecureStorage(_))
                         && matches!(*cleanup, SyncError::SecureStorage(_))
@@ -160,7 +178,7 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
                     );
                 }
             }
-            commit_credentials(&store, &key(), Some(&code)).unwrap();
+            commit_credentials(&store, &key(), Some((&code, &name))).unwrap();
             assert_eq!(
                 store
                     .device
@@ -171,8 +189,8 @@ fn commit_and_rollback_failures_both_reach_the_initiator_and_retry_commits_every
                 key().encode().unwrap().as_bytes()
             );
             assert_eq!(
-                store.synced.restore_code().unwrap().unwrap().as_bytes(),
-                code.to_bytes().unwrap().as_slice()
+                saved(&store),
+                (code.to_bytes().unwrap().to_vec(), "Household".into())
             );
             let StorageCredentials::S3(keys) = key() else {
                 unreachable!()
@@ -202,14 +220,15 @@ fn switching_to_account_storage_removes_the_separate_s3_key_and_can_roll_back() 
         access_token: SecretText::new("account-token".into()),
         refresh_token: None,
     });
-    let rollback = commit_credentials(&store, &oauth, Some(&code)).unwrap();
+    let name = household();
+    let rollback = commit_credentials(&store, &oauth, Some((&code, &name))).unwrap();
     assert!(store.synced.s3_credentials().unwrap().is_none());
     rollback.restore(&store).unwrap();
     assert_prior(&store, true);
-    for after in 0..6 {
+    for after in 0..7 {
         keychain.fail_operations_after(&[after]);
         assert!(matches!(
-            commit_credentials(&store, &oauth, Some(&code)),
+            commit_credentials(&store, &oauth, Some((&code, &name))),
             Err(SyncError::SecureStorage(_))
         ));
         assert_prior(&store, true);

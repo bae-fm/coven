@@ -89,15 +89,21 @@ and for provider credentials and sign-in tokens.
 On Apple platforms coven also keeps the [restore code](/docs/sharing#a-person-s-new-device-the-restore-code)
 in a synced iCloud Keychain entry, and an S3 key in a separate synced entry
 beside it. Replacing the S3 key updates that entry without changing the code.
-`saved_restore_codes()` lists the saved stores by id and provider location,
-including whether an S3 key is saved beside each code. Pass the selected entry
-to `restore_from_keychain` to read its current code and key on a new device.
+The code is saved with the store's name, which every device of the person that
+has the store open keeps current: when it applies a rename, and when it opens
+the store. The name is the last one any of their devices saw, so a rename made
+while none had the store open leaves the old one; it is only a label, and the
+store is found by its id. `saved_restore_codes()` lists the saved stores by
+name, id and provider location, including whether an S3 key is saved beside
+each code. Pass the selected entry to `restore_from_keychain` to read its
+current code and key on a new device.
 
 Those two synced entries belong to the person, not to one device. Deleting a
 store from one device removes only that device's own entries, so the person's
 other devices still offer it. A device deletes the synced entries when it
 applies the person's removal from the store, including an admin removing
-themselves.
+themselves. `forget_saved_restore_code(store)` deletes them on request, from
+all the person's Apple devices, with no store open; it changes nothing else.
 
 ## Host secrets
 

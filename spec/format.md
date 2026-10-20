@@ -100,6 +100,7 @@ spaces only separate fields for reading. Example times are UTC.
 | Join request | `<store>/join-requests/<invite>` | a would-be member's id, public keys and device name | D8, D9 |
 | Key delivery | `<store>/access-keys/<member>/<attempt>` | an S3 access key sealed to one member | D9 |
 | Restore code, invite code | on paper or a screen, never in storage | what a new device needs to find and open the store | D13 |
+| Saved restore code | iCloud Keychain, never in storage | a restore code with the store's name, for the person's other Apple devices | D13 |
 | Bucket marker | `coven-bucket`, at the bucket's root, only where member keys reach the whole bucket | the id of the one store that owns the bucket, as plain text | D10 |
 
 ### Three layers
@@ -150,6 +151,7 @@ Format 1 uses these:
 | 14 | Slot header frame | D9 |
 | 15 | Snapshot announcement frame | D9 |
 | 16 | Key-copy acknowledgement frame | D9 |
+| 17 | Saved restore code frame | D13 |
 | 32 | Inner write | D9 |
 | 33 | Sequence slot | D9 |
 | 34 | Snapshot | D9 |
@@ -410,6 +412,7 @@ payload. D1 gives the frame's own layout.
 | 14 | Slot header | D9 |
 | 15 | Snapshot announcement | D9 |
 | 16 | Key-copy acknowledgement | empty; the box is in D9’s prefix |
+| 17 | Saved restore code | D13 |
 
 ---
 
@@ -1984,11 +1987,32 @@ storage      bytes
   so saved codes can distinguish accounts without carrying credentials.
 - The private-pair blob is unchanged, and explicitly belongs to `member`.
   Restore requires that id's current pair; an old code can't rebind it.
-- No store name is encoded. A restoring device learns it after loading, so
-  saved codes cannot retain an earlier name.
+- No store name is encoded. A code written down can't be corrected after a
+  rename, so a restoring device learns the name after loading. The copy coven
+  saves in iCloud Keychain carries a name beside the code instead (below).
 - A restore code never carries storage credentials: neither an S3 access key nor
   OAuth tokens. A device-to-device QR transfer or iCloud Keychain may carry the
   S3 key alongside the code (§13.1), outside this frame.
+
+### Saved restore code (kind 17)
+
+Coven saves a member's restore code in iCloud Keychain with the store's name, so
+the person's other Apple devices can list it by name (§13.1). The entry's bytes
+are this frame, `name:name | named_at:Slot | code:bytes`:
+
+```
+name      name
+named_at  Slot
+code      bytes
+```
+
+- `name` is the store's name as the saving device last had it.
+- `named_at` is the slot that set that name: 1 for the name chosen at creation,
+  or the slot of the rename. A device rewrites the name only with one from a
+  later slot, so a device that is behind never puts back an older name.
+- `code` holds a whole restore code frame (kind 10), as above. Its store id
+  names the entry's store.
+- It has no text form: it is never typed, scanned or shown.
 
 ### Invite code (kind 11)
 
@@ -2066,7 +2090,8 @@ kind, sealed object, file and code. Format 1 includes:
   active and frozen lost values, first-slot creations and per-device last-claim
   numbers;
 - a floor with original boxes, announcements and the first kept slot;
-- restore and invite codes, signed join requests and delivered S3 keys.
+- restore and invite codes, a saved restore code, signed join requests and
+  delivered S3 keys.
 
 **Decoding.**
 

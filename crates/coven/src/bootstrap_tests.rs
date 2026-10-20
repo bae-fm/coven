@@ -503,8 +503,16 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(
-        synced.restore_code().unwrap().unwrap().as_bytes(),
-        code.to_bytes().unwrap().as_slice()
+        crate::saved_restore::decode(
+            directory.id(),
+            synced.restore_code().unwrap().unwrap().as_bytes()
+        )
+        .unwrap()
+        .0
+        .code
+        .to_bytes()
+        .unwrap(),
+        code.to_bytes().unwrap()
     );
     restore_credentials::assert_key(&install, directory.id(), &replacement);
     handle
@@ -831,7 +839,7 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                 });
             let handle = if from_keychain {
                 SyncedKeychain::new(install.keychain.clone(), owner.directory.id())
-                    .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+                    .set_restore_code(&crate::tests::keychain_entry(&owner.code))
                     .unwrap();
                 restore_from_keychain(
                     builder,
@@ -941,7 +949,7 @@ async fn missing_keychain_code_returns_none_without_creating_a_store() {
     let install = Installation::new();
     let synced = SyncedKeychain::new(install.keychain.clone(), owner.directory.id());
     synced
-        .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+        .set_restore_code(&crate::tests::keychain_entry(&owner.code))
         .unwrap();
     let saved = crate::saved_restore::list(install.keychain.clone())
         .unwrap()

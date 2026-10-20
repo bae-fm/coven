@@ -87,10 +87,13 @@ password manager say, unless a QR scan from their own device or iCloud Keychain
 supplies it alongside the code. On Dropbox and OneDrive the new device signs in
 to the person's own account.
 
-On Apple platforms, `saved_restore_codes().await?` lists the store ids and
-provider locations coven saved, and whether each has an S3 key beside its code.
-The app passes the chosen entry to `restore_from_keychain`. It shows no store
-name until loading the store, so a rename cannot leave a stale recovery label.
+On Apple platforms, `saved_restore_codes().await?` lists the stores coven saved,
+with their names, ids and provider locations, and whether each has an S3 key
+beside its code. The name is the last one any of the person's devices saw: a
+label for the list, which a rename made while none of them had the store open
+leaves behind. The app passes the chosen entry to `restore_from_keychain`, which
+finds the store by its id. `forget_saved_restore_code(store)` removes an entry
+the person no longer wants offered.
 
 Ana's new laptop scans the code from her phone:
 

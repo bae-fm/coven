@@ -7,6 +7,7 @@ macro_rules! coven_sequence_tables {
                 singleton INTEGER PRIMARY KEY CHECK(singleton=1),
                 store BLOB NOT NULL CHECK(length(store)=16),
                 name TEXT NOT NULL,
+                named_at BLOB NOT NULL CHECK(length(named_at)=8 AND named_at>x'0000000000000000'),
                 created INTEGER NOT NULL CHECK(created IN (0,1))
             ) STRICT;
         ");

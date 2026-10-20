@@ -5,7 +5,7 @@ pub const STORE_ID: coven_foundation::id_source::StoreId =
     coven_foundation::id_source::StoreId(uuid::Uuid::from_bytes([0x10; 16]));
 
 use crate::admin::*;
-use crate::codes::{InviteCode, RestoreCode};
+use crate::codes::{InviteCode, KeychainRestoreCode, RestoreCode};
 use crate::key::encode_key;
 use crate::objects::*;
 use crate::snapshot::{SnapshotEncoder, SnapshotHeader, SnapshotRecord};
@@ -623,6 +623,14 @@ pub fn restore() -> RestoreCode {
             br#"{"S3":{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"store"}}"#
                 .to_vec(),
         ),
+    }
+}
+/// The restore code as iCloud Keychain saves it, named by a rename at slot 41.
+pub fn keychain_restore() -> KeychainRestoreCode {
+    KeychainRestoreCode {
+        name: "Family".into(),
+        named_at: 41,
+        code: restore(),
     }
 }
 /// Invite contents with a fixed test secret.

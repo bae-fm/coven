@@ -95,6 +95,48 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     network.close().await;
 }
 
+/// Ana renames Household. Ben's phone rewrites his saved code's name before
+/// it applies the rename, so a refused rewrite holds the rename back until
+/// the keychain answers, as a removal's deletion does.
+#[tokio::test]
+async fn a_rename_rewrites_the_saved_name_before_it_applies() {
+    let network = Network::new(2).await;
+    let ana = &network.devices[0];
+    let ben = &network.devices[1];
+    let laptop = ben.app.another_device();
+    stop(&ben.handle).await;
+    let applied = ben.handle.applied_slot().await;
+    ana.handle.rename_store("Family").await.unwrap();
+    ben.app.refuse_synced_keychain_operations(true);
+    ben.handle.start_sync().await.unwrap();
+    wait_for(&ben.handle, |status| {
+        matches!(
+            status,
+            SyncStatus::Failed {
+                error: SyncFailure::Other(_)
+            }
+        )
+    })
+    .await;
+    assert_eq!(ben.handle.applied_slot().await, applied);
+    assert_eq!(ben.handle.store_name().await.unwrap(), "Household");
+    assert_eq!(
+        laptop.saved_restore_codes().await.unwrap()[0].name,
+        "Household"
+    );
+    ben.app.refuse_synced_keychain_operations(false);
+    wait_for(&ben.handle, |status| {
+        matches!(status, SyncStatus::Synced { .. })
+    })
+    .await;
+    assert_eq!(ben.handle.store_name().await.unwrap(), "Family");
+    assert_eq!(
+        laptop.saved_restore_codes().await.unwrap()[0].name,
+        "Family"
+    );
+    network.close().await;
+}
+
 /// Once Ben's phone applies his removal, it refuses a new S3 key with
 /// `Removed`, connected or not. Ben has no storage access left to change, and
 /// saving the key would put it back in the iCloud Keychain his removal emptied.

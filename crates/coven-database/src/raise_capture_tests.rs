@@ -18,6 +18,7 @@ pub(crate) async fn connect(db: &Database) {
     state.store = Some(crate::StoreIdentity {
         id: crate::tests::store_id(),
         name: crate::tests::STORE_NAME.into(),
+        named_at: coven_merge::Slot(1),
     });
     db.admin_fixture(
         coven_format::admin::StoreChange::AddDevice {

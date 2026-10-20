@@ -205,7 +205,11 @@ fn keychain_code(
 ) -> Result<Option<(RestoreCode, StorageConfig)>, BootstrapError> {
     keychain
         .restore_code()?
-        .map(|bytes| crate::saved_restore::decode(store, bytes.as_bytes()).map_err(Into::into))
+        .map(|bytes| {
+            crate::saved_restore::decode(store, bytes.as_bytes())
+                .map(|(saved, location)| (saved.code, location))
+                .map_err(Into::into)
+        })
         .transpose()
 }
 
@@ -263,7 +267,11 @@ async fn bootstrap_device(
             waits,
         })) => {
             status(BootstrapStatus::Loading);
-            let result = match check_cancel(cancel).and_then(|()| {
+            // The saved code's name, read before the final steps, which no
+            // await separates.
+            let name = commit::loaded_name(&database).await;
+            let result = match name.and_then(|name| {
+                check_cancel(cancel)?;
                 builder.authentication.take();
                 let mut owners = builder.owners(
                     pending.directory(),
@@ -272,14 +280,15 @@ async fn bootstrap_device(
                 owners.state = state;
                 owners.publications = publications;
                 owners.storage = Some(storage);
-                Ok(owners)
+                Ok((owners, name))
             }) {
                 // No cancellable await separates final custody, publication
                 // and the handle.
-                Ok(owners) => {
+                Ok((owners, name)) => {
                     commit::publish_bootstrap(
                         &pending,
                         code,
+                        name,
                         credentials,
                         sign_in,
                         ring,

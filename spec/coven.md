@@ -2260,41 +2260,94 @@ Coven returns the code at setup and whenever the member's keys are replaced, and
 `restore_code()` shows it again. Keeping it safe, or asking the person to confirm
 they wrote it down, is up to the app; coven tracks no pending task for it.
 
-The code carries no name, and neither do coven's iCloud Keychain entries. A
-rename therefore cannot leave a saved recovery label behind. A restoring
-device learns the current name only after loading the store; before
-connecting, the app may show its id, provider and account or location, never a
-store name. Dropbox and OneDrive show the member's signed-in account label.
-S3 shows the bucket and endpoint; CloudKit exposes no account identity.
-`decode_code_info` exposes this location for a typed or scanned code, matching
-the Keychain list so Ana can distinguish her personal and work accounts before
-connecting.
+The code carries no name. Ana writes it down once, and a name on paper would
+be wrong after the first rename, with no way to correct it. So before
+connecting, a typed or scanned code shows only the store's id, the provider and
+its account or location; the device learns the store's name once it has loaded
+the store. Dropbox and OneDrive show the member's signed-in account label. S3
+shows the bucket and endpoint; CloudKit exposes no account identity.
+`decode_code_info` exposes this location, so Ana can tell her personal and
+work accounts apart before connecting.
 
 A new device gets the code in one of three ways:
 
 - **Scanning** a QR code on one of the person's devices that has the store open.
   The QR code is blurred until the person taps to show it. Because the person
   controls both devices, this transfer may also carry their S3 key (below).
-- **iCloud Keychain,** on Apple platforms. It holds the code and may hold the S3
-  key separately beside it. Coven refreshes the Keychain code after setup, joining
-  and member-key replacement. A changed S3 key updates its own entry without
-  changing the code (api.md [E9](api.md#e9-members-and-devices)).
+- **iCloud Keychain,** on Apple platforms. It holds the code with the store's
+  name, and may hold the S3 key separately beside it. Coven saves the Keychain
+  code after setup, joining, restoring, resetting (§19.3) and member-key
+  replacement. A changed S3 key updates its own entry without changing the code
+  (api.md [E9](api.md#e9-members-and-devices)).
 - **Typing** it in.
 
 On Ana's new laptop, `saved_restore_codes()` lets the app offer the stores whose
-codes coven saved in iCloud Keychain. Each entry gives the store id, the provider
-and its account or location as the code holds them, and whether an S3 key is
-saved beside it. There is no store name to become stale after a rename. Ana
-chooses an entry and the app passes it to `restore_from_keychain` (api.md
+codes coven saved in iCloud Keychain. Each entry gives the store's name and id,
+the provider and its account or location as the code holds them, and whether an
+S3 key is saved beside it. Ana sees Household in the list and chooses it, and
+the app passes the entry to `restore_from_keychain` (api.md
 [E10](api.md#e10-joining-and-restore)).
+
+**The saved name.** Unlike the written-down code, a Keychain entry can be
+rewritten, so it carries the store's name: a list of store ids and buckets would
+not tell Ana which store is which. Every device of hers that has the store open
+keeps the name current:
+
+- Setup, joining, restoring, resetting and member-key replacement save the code
+  with the name the device has then.
+- Before a device applies a rename, its own or another device's, it rewrites
+  the entry's name.
+- Opening the store rewrites the entry's name when the store's is newer.
+
+Ana's phone is the only device with Household open, and the app is closed. Ben,
+also an admin, renames Household to Family at slot 41. None of Ana's devices
+has seen slot 41, so her entry still says Household, and her new laptop lists
+Household. So the name means the last name one of Ana's devices saw, not
+necessarily the store's name now. That is acceptable because the name is only a
+label: restoring finds the store by its id, never by its name. Once the laptop
+has loaded the store it shows Family, and saving its code saves Family with it.
+
+Devices fall behind, so the entry also records the slot that set its name:
+slot 1 for the name chosen at creation, or the slot of the rename. A device
+writes its name only when its slot is later than the entry's, and otherwise
+keeps the entry's name. When Ana's phone next opens Household, before it has
+applied slot 41, its Household from slot 1 is older than the laptop's Family
+from slot 41, and the entry keeps Family. Without the slot, every device that
+opened while behind would put back a name the others had already moved past.
+
+A name rewrite changes only the name. It keeps the code the entry holds: a
+device saves a code of its own only at the points above. Otherwise Ana's
+laptop, applying a rename while it still held member keys her phone had just
+replaced, would put her old code back. When the entry is absent, nothing is
+written, so a forgotten entry (below) stays forgotten. If the rewrite fails,
+what triggered it fails with the error and changes nothing: a sync pass applies
+nothing and is tried again on the shared schedule (§6.7), and an opening call
+returns the error.
 
 These two Keychain entries belong to Ana, not to one device: every device on
 her Apple account sees them. So when Ana deletes Household from her phone, the
 phone removes only the entries it keeps for itself: its device id, its keys,
 its provider sign-in and the app's secrets (api.md [E1](api.md#e1-opening)).
 The restore code and S3 key stay, and her laptop still offers Household.
-Deleting them there would take the store from every device she has. They are
-deleted only when Ana leaves the store, when her membership ends (§14.1).
+Deleting them there would take the store from every device she has. Coven
+deletes them only when Ana leaves the store, when her membership ends (§14.1).
+
+Ana can also forget an entry herself. She once tried a store called Test on S3,
+then deleted its bucket, and her laptop still offers Test.
+`forget_saved_restore_code` deletes that store's restore code and S3 key from
+iCloud Keychain, and so from all of Ana's Apple devices (api.md
+[E10](api.md#e10-joining-and-restore)).
+
+- It changes nothing else: not the store, its storage, nor any device's copy
+  of it. A device that has Test open keeps it, and no longer rewrites the
+  entry's name.
+- It needs no open store and no provider connection.
+- Forgetting an entry that is already absent succeeds.
+- The S3 key goes first, then the code. The code is what the list shows, so a
+  failure part way leaves Test listed, never an unlisted key, and calling
+  again finishes.
+- A later join, restore, reset or member-key replacement on one of Ana's
+  devices saves the entry again, with a current code.
 
 Storage access is separate. On S3 the person keeps their access key apart, in a
 password manager say, and enters it, unless the QR transfer or Keychain supplied
@@ -5389,7 +5442,7 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 
 | Table | Holds |
 |---|---|
-| `_coven_store` | the store id and current name; before slot 1, the local creation name is marked as not yet applied (§10.3) |
+| `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
 | `_coven_user_files` | a user-provided original's path while a row or unpublished write can name it (§17.7) |
 | `_coven_pending` | one record per thing that can't proceed (§19.1) |
@@ -5539,7 +5592,7 @@ each named `<entry>:<store>`:
 | Scope | Entries | Deleted when |
 |---|---|---|
 | Device-only: never leaves this device or its backups | device id, store keys, member keys, provider credentials, the app's secrets and their list | the store is deleted from this device (api.md [E1](api.md#e1-opening)) |
-| Synced by iCloud Keychain to the person's Apple devices | restore code, and the S3 key beside it | the person's membership ends (§14.1) |
+| Synced by iCloud Keychain to the person's Apple devices | restore code with the store's name, and the S3 key beside it | the person's membership ends (§14.1), or the person forgets the entry (§13.1) |
 
 This is how the app's own secrets, such as an API token, are kept beside coven's
 keys (api.md [E11](api.md#e11-keys-and-secrets)):

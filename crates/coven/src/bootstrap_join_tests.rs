@@ -299,14 +299,11 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
     assert_eq!(restored.store_name().await.unwrap(), "After snapshot");
     let saved = install.keychain.synced_restore_codes().unwrap();
     assert_eq!(saved.len(), 1);
-    assert_eq!(
-        RestoreCode::from_bytes(saved[0].1.as_bytes())
-            .unwrap()
-            .to_text()
-            .unwrap()
-            .as_str(),
-        old_code.as_str()
-    );
+    let saved =
+        coven_format::codes::KeychainRestoreCode::from_bytes(saved[0].1.as_bytes()).unwrap();
+    // The saved code takes the name loading recovered from the snapshot.
+    assert_eq!(saved.name, "After snapshot");
+    assert_eq!(saved.code.to_text().unwrap().as_str(), old_code.as_str());
     restored.close().await.unwrap();
     let reopened = install
         .builder(&owner, owner.storage.clone())

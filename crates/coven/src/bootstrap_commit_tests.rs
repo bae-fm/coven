@@ -116,6 +116,7 @@ async fn custody_failure_restores_the_prior_keys_without_publishing() {
     let error = publish_bootstrap(
         &pending,
         code(id),
+        household(),
         credentials(),
         None,
         next,
@@ -174,6 +175,7 @@ async fn settings_rollback_failure_retains_both_causes_and_restores_other_custod
     let error = publish_bootstrap(
         &pending,
         code(id),
+        household(),
         credentials(),
         None,
         next,
@@ -240,6 +242,7 @@ async fn publication_failure_rolls_back_settings_and_custody() {
     let error = publish_bootstrap(
         &pending,
         code(id),
+        household(),
         credentials(),
         None,
         next,
@@ -310,6 +313,7 @@ async fn credential_publication_failures_restore_every_prior_custody_value() {
         let error = publish_bootstrap(
             &pending,
             code(id),
+            household(),
             credentials(),
             None,
             ring,
@@ -371,6 +375,7 @@ async fn bootstrap_reports_synced_key_rollback_failure_with_the_publication_fail
     let error = publish_bootstrap(
         &pending,
         code(id),
+        household(),
         credentials(),
         None,
         ring,
@@ -423,6 +428,7 @@ async fn cleanup_failure_returns_the_open_handle_with_its_session_keys() {
     let error = publish_bootstrap(
         &pending,
         code,
+        household(),
         credentials(),
         None,
         ring,
@@ -460,11 +466,12 @@ async fn publication_returns_the_handle_without_rereading_custody() {
     )
     .await;
     let waits = waits(&database).await;
-    // Publication needs eight keychain operations; the next read fails.
-    keychain.fail_operations_after(&[8]);
+    // Publication needs nine keychain operations; the next read fails.
+    keychain.fail_operations_after(&[9]);
     let result = publish_bootstrap(
         &pending,
         code(id),
+        household(),
         credentials(),
         None,
         StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap()),
@@ -505,6 +512,7 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
     let mut publishing = Box::pin(publish_bootstrap(
         &pending,
         code(id),
+        household(),
         credentials(),
         None,
         StoreKeyring::new(StoreKey::generate(KeyId(UuidIds.new_id())).unwrap()),
@@ -520,4 +528,12 @@ async fn publication_with_a_loaded_provider_does_not_suspend() {
     assert_eq!(layout.stores().await.unwrap().len(), 1);
     assert_eq!(handle.store_key_state().unwrap(), StoreKeyState::Available);
     handle.close().await.unwrap();
+}
+
+/// The name the fixture store was created with, set by slot 1.
+fn household() -> coven_sync::SavedName {
+    coven_sync::SavedName {
+        name: "Household".into(),
+        named_at: coven_merge::Slot(1),
+    }
 }

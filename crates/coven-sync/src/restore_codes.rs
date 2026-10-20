@@ -243,6 +243,9 @@ impl RestoreCodes {
             storage: data.location.encode()?,
         };
         let text = SecretText::new(code.to_text()?.to_string());
+        // The creation slot will publish the name chosen locally (§13.1).
+        let (name, named_at) = owner.database.named_store().await?;
+        let name = crate::SavedName { name, named_at };
         let previous_location = owner.settings.read()?;
         Ok((
             Box::new(move || {
@@ -252,7 +255,7 @@ impl RestoreCodes {
                         commit_credentials(
                             keychain,
                             &StorageCredentials::OAuth(tokens.clone()),
-                            Some(&code),
+                            Some((&code, &name)),
                         )
                     })?,
                     None => owner.credentials.write(|keychain| {
@@ -262,7 +265,7 @@ impl RestoreCodes {
                             }
                             credentials => credentials.clone(),
                         };
-                        commit_credentials(keychain, &credentials, Some(&code))
+                        commit_credentials(keychain, &credentials, Some((&code, &name)))
                     })?,
                 };
                 let rollback = move |owner: &RestoreCodesInner, previous| {
@@ -310,8 +313,9 @@ impl RestoreCodesInner {
                 .encode()?,
         };
         let text = SecretText::new(code.to_text()?.to_string());
-        self.credentials
-            .write(|keychains| keychains.refresh_restore_code(&code))?;
+        self.credentials.write(|keychains| {
+            keychains.refresh_restore_code(&code, &crate::SavedName::of(store))
+        })?;
         Ok(text)
     }
 

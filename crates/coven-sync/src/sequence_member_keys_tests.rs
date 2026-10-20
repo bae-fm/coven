@@ -211,10 +211,11 @@ async fn a_failed_code_refresh_keeps_the_replacement_paused_and_resumes_after_re
     // Custody failures on app operations wait for the app's retry (E6).
     ana.sync.retry_pending_operation(operation).await.unwrap();
     run_background(&ana, owner.clone()).await;
-    let code = coven_format::codes::RestoreCode::from_bytes(
+    let code = coven_format::codes::KeychainRestoreCode::from_bytes(
         store.restore_code().unwrap().unwrap().as_bytes(),
     )
-    .unwrap();
+    .unwrap()
+    .code;
     assert_eq!(
         code.member_keys.public_keys(),
         ana.identity.keys().public_keys()
@@ -263,10 +264,11 @@ async fn a_background_replacement_refreshes_the_code_before_releasing_writes() {
         .clock
         .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(120));
     run_background(&ana, owner.clone()).await;
-    let code = coven_format::codes::RestoreCode::from_bytes(
+    let code = coven_format::codes::KeychainRestoreCode::from_bytes(
         store.restore_code().unwrap().unwrap().as_bytes(),
     )
-    .unwrap();
+    .unwrap()
+    .code;
     assert_eq!(
         code.member_keys.public_keys(),
         ana.sync

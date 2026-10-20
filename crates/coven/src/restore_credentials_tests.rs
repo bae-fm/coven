@@ -74,7 +74,7 @@ async fn keychain_restore_uses_the_separate_key_or_the_explicit_replacement() {
         let install = Installation::new();
         let synced = synced_entries(&install, &owner);
         synced
-            .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+            .set_restore_code(&crate::tests::keychain_entry(&owner.code))
             .unwrap();
         let key = supplied_key("held-separately");
         synced
@@ -122,7 +122,7 @@ async fn missing_invalid_and_wrong_provider_keys_fail_before_bootstrap() {
             let text = owner.code.to_text().unwrap();
             if from_keychain {
                 synced_entries(&install, &owner)
-                    .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+                    .set_restore_code(&crate::tests::keychain_entry(&owner.code))
                     .unwrap();
             }
             let supplied = (provider != CloudProvider::S3).then(|| supplied_key("wrong-provider"));
@@ -190,7 +190,7 @@ async fn separately_held_key_read_failures_and_malformed_keys_are_visible_before
         let store = scoped(&install, &owner);
         let synced = synced_entries(&install, &owner);
         synced
-            .set_restore_code(&SecretBytes::new(owner.code.to_bytes().unwrap().to_vec()))
+            .set_restore_code(&crate::tests::keychain_entry(&owner.code))
             .unwrap();
         synced
             .set_s3_credentials(&SecretBytes::new(b"bad key encoding".to_vec()))
@@ -310,7 +310,7 @@ async fn cancelled_keychain_restore_preserves_the_code_and_separately_held_key()
         let install = Installation::new();
         let store = scoped(&install, &owner);
         let synced = synced_entries(&install, &owner);
-        let code = SecretBytes::new(owner.code.to_bytes().unwrap().to_vec());
+        let code = crate::tests::keychain_entry(&owner.code);
         let key = owner.s3_credentials().unwrap().encode().unwrap();
         synced.set_restore_code(&code).unwrap();
         synced.set_s3_credentials(&key).unwrap();

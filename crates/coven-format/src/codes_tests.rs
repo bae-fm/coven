@@ -250,3 +250,52 @@ fn restore_layout_places_member_immediately_after_store() {
     assert_eq!(&bytes[23..39], code.member.0.as_bytes());
     assert_eq!(&bytes[43..48], b"CVMK\x01");
 }
+
+#[test]
+fn saved_code_fixture_is_canonical_under_every_truncation_and_bit_change() {
+    let bytes = crate::tests::hex(include_str!("../fixtures/keychain-restore-code.hex"));
+    let saved = test_utils::keychain_restore();
+    assert_eq!(bytes, saved.to_bytes().unwrap().as_slice());
+    assert_eq!(bytes[0], 17);
+    let reencode = |bytes: &[u8]| KeychainRestoreCode::from_bytes(bytes)?.to_bytes();
+    let decoded = KeychainRestoreCode::from_bytes(&bytes).unwrap();
+    assert_eq!((decoded.name.as_str(), decoded.named_at), ("Family", 41));
+    assert_eq!(
+        decoded.code.to_bytes().unwrap(),
+        test_utils::restore().to_bytes().unwrap()
+    );
+    for end in 0..bytes.len() {
+        assert!(reencode(&bytes[..end]).is_err());
+    }
+    let mut changed = bytes.clone();
+    for index in 0..bytes.len() {
+        for bit in 0..8 {
+            changed[index] ^= 1 << bit;
+            if let Ok(encoded) = reencode(&changed) {
+                assert_eq!(encoded.as_slice(), changed);
+            }
+            changed[index] ^= 1 << bit;
+        }
+    }
+    changed.push(0);
+    assert_eq!(reencode(&changed), Err(Error::TrailingBytes));
+    changed = bytes;
+    changed[0] = 10;
+    assert!(reencode(&changed).is_err());
+}
+
+#[test]
+fn saved_codes_refuse_an_empty_name_or_a_zero_slot() {
+    let mut saved = test_utils::keychain_restore();
+    saved.named_at = 0;
+    assert!(saved.to_bytes().is_err());
+    saved.named_at = 1;
+    saved.name = String::new();
+    assert!(saved.to_bytes().is_err());
+    saved.name = "x".repeat(1024);
+    let bytes = saved.to_bytes().unwrap();
+    assert_eq!(
+        KeychainRestoreCode::from_bytes(&bytes).unwrap().name.len(),
+        1024
+    );
+}

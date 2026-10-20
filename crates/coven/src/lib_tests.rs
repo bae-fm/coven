@@ -961,3 +961,24 @@ mod pending_records {
         network.close().await;
     }
 }
+
+/// A restore code as coven saves it in iCloud Keychain, with the name its
+/// fixture store was created with (§13.1).
+pub(crate) fn keychain_entry(code: &coven_format::codes::RestoreCode) -> SecretBytes {
+    SecretBytes::new(
+        coven_format::codes::KeychainRestoreCode::encode("Household", 1, code)
+            .unwrap()
+            .to_vec(),
+    )
+}
+
+/// The saved entry iCloud Keychain holds for `store`, decoded.
+pub(crate) fn saved_entry(
+    app: &TestCoven,
+    store: StoreId,
+) -> Option<coven_format::codes::KeychainRestoreCode> {
+    app.synced_keychain(store)
+        .restore_code()
+        .unwrap()
+        .map(|bytes| coven_sync::read_saved_code(store, bytes.as_bytes()).unwrap())
+}

@@ -306,7 +306,7 @@ mod fixture {
               CASE WHEN (i/64)%4=0 THEN key END FROM fixture;
      INSERT INTO _coven_cache_budgets(namespace,bytes) SELECT 'audience_' || i,counter(1048576) FROM fixture WHERE true ON CONFLICT(namespace) DO UPDATE SET bytes=excluded.bytes;
      INSERT INTO _coven_snapshot_values SELECT audience,tab,key,x'00',1 FROM fixture;
-     INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',1);
+     INSERT INTO _coven_store VALUES(1,zeroblob(16),'fixture',x'0000000000000001',1);
      INSERT INTO _coven_published VALUES(1);
      INSERT INTO _coven_published_rows SELECT tab,key,audience,x'00',i%2 FROM fixture;
      INSERT INTO _coven_published_losses SELECT i,tab,key,audience,x'00' FROM fixture;

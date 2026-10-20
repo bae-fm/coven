@@ -61,6 +61,12 @@ impl TestCoven {
         crate::coven::blocking(move || crate::saved_restore::list(keychain)).await
     }
 
+    /// Forget one store's saved code and S3 key through the production path.
+    pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError> {
+        let keychain = self.keychain.clone();
+        crate::coven::blocking(move || crate::saved_restore::forget(keychain, store)).await
+    }
+
     /// Discard through the same locked directory and keychain path as `Coven`.
     pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError> {
         let directory = directory.clone();

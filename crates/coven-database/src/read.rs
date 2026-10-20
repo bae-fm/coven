@@ -125,6 +125,10 @@ impl<'connection> SqlReadContext<'connection> {
         Ok(crate::store_state_tables::name(self.database)?)
     }
 
+    pub(crate) fn named_store(&self) -> CovenResult<(String, coven_merge::Slot)> {
+        Ok(crate::store_state_tables::named(self.database)?)
+    }
+
     pub(crate) fn members(
         &self,
         device: coven_foundation::id_source::DeviceId,

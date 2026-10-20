@@ -258,6 +258,9 @@ impl TestCoven {
     /// List this installation's saved codes through the production discovery path (E10).
     pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreCode>, BootstrapError>;
 
+    /// Forget one store's saved code and S3 key through the production path (E10).
+    pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError>;
+
     /// Seed the simulated OS custody as if this installation had opened keys.
     pub fn keep_store_keys(
         &self,
@@ -4324,12 +4327,20 @@ pub enum ProviderSignOut {
   pair, store id and storage location. On S3, the person keeps their access key
   separately, such as in a password manager, and supplies it on the new device. Dropbox
   and OneDrive likewise require the person's provider sign-in.
-- Restore codes and coven's iCloud Keychain entries carry no name. Before
-  connecting, a restoring device may show the id, provider and account or location,
-  never a store name; it learns the name only after loading. An invite carries the current
-  name copied when it was made and expires within a day (§13.2).
+- A restore code carries no name. Before connecting, a device restoring from
+  a typed or scanned code may show the id, provider and account or location,
+  never a store name; it learns the name only after loading. An invite carries
+  the current name copied when it was made and expires within a day (§13.2).
   `decode_code_info` exposes the same location as a saved Keychain entry, so a
   typed or scanned code can show which account it is for before connecting.
+- Coven's iCloud Keychain entry saves the code with the store's name: the last
+  name one of the person's devices saw, kept with the slot that set it. Setup,
+  joining, restoring, resetting and member-key replacement save it; a device
+  rewrites only the name before applying a rename, and when opening finds its
+  own name newer than the entry's. An older name never replaces a newer one, a
+  rewrite keeps the entry's code, and an absent entry stays absent. A failed
+  rewrite fails the sync pass or the opening call
+  ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)).
 - A QR scan from one of the person's own devices may supply both the code
   and the S3 key, because the person controls the showing device. The key
   accompanies the code; it is never part of the restore-code encoding.
@@ -4340,14 +4351,18 @@ pub enum ProviderSignOut {
   new device, behind the same tap that reveals the code. After a key
   replacement it returns the new key. Other providers return `None`.
 - `saved_restore_codes()` lists the registered service's saved codes so the
-  app can offer a choice before opening a store. Entries expose the store id,
-  provider location, including the member's account label, and separate S3-key
-  presence, with no secrets or store name.
+  app can offer a choice before opening a store. Entries expose the store's
+  saved name and id, provider location, including the member's account label,
+  and separate S3-key presence, with no secrets.
   The app passes its selection to `restore_from_keychain`; no local store or
   provider connection is needed to list it.
 - Both synced entries belong to the person. Deleting the store from one device
   keeps them; a device deletes them when it applies the person's removal from
   the store, before the slot applies (§14.1).
+- `forget_saved_restore_code(store)` deletes one store's synced restore code
+  and S3 key, removing them from all the person's Apple devices. It changes no
+  store, storage or device's copy, needs no open store or provider connection,
+  and succeeds when the entries are already absent.
 - A device that still holds the store under member keys another device
   replaced restores in place with `CovenBuilder::restore_device`
   ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). The code must
@@ -4701,8 +4716,12 @@ impl CovenBuilder {
     ) -> Result<CovenHandle, BootstrapError>;
 }
 
-/// A saved restore choice, containing no secrets or store name (§13.1).
+/// A saved restore choice, containing no secrets (§13.1).
 pub struct SavedRestoreCode {
+    /// The store's name as one of the person's devices last saw it: a label
+    /// only, never used to find the store, which a rename made since no
+    /// device of theirs had it open leaves unchanged.
+    pub name: String,
     pub store_id: StoreId,
     /// Provider and account or location as the code holds them, without credentials.
     /// provider() identifies the provider; oauth_access() names its sign-in requirement.
@@ -4715,6 +4734,15 @@ pub struct SavedRestoreCode {
 /// Read failures, malformed codes and ambiguous entries fail the whole call.
 /// Native non-Apple platforms return BootstrapError::SecureStorage(KeyError::Unsupported).
 pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreCode>, BootstrapError>;
+
+/// Deletes the store's synced S3 key, then its restore code, from iCloud
+/// Keychain, and so from every one of the person's Apple devices (§13.1).
+/// Touches no store, storage or device's copy, and needs no open store or
+/// provider connection. Absent entries succeed; after a failure part way the
+/// store is still listed and calling again finishes. A later join, restore,
+/// reset or member-key replacement saves the entry again.
+/// Native non-Apple platforms return BootstrapError::SecureStorage(KeyError::Unsupported).
+pub async fn forget_saved_restore_code(store: StoreId) -> Result<(), BootstrapError>;
 
 /// Opens the selected store on a new Apple device from its current iCloud
 /// Keychain restore code (§13.1). On S3, uses supplied credentials when Some; None reads

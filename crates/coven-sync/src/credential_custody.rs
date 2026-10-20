@@ -1,6 +1,6 @@
 //! Device credentials and separately synced recovery values commit together.
 
-use crate::SyncError;
+use crate::{saved_code, SavedName, SyncError};
 use coven_crypto::{
     custody::{StoreKeychain, SyncedKeychain},
     SecretBytes,
@@ -35,11 +35,15 @@ impl CredentialKeychains {
         Ok(self.device.delete_storage_credentials()?)
     }
 
-    /// Replace the synced restore code, where the keychain keeps synced entries.
-    pub fn refresh_restore_code(&self, code: &RestoreCode) -> Result<(), SyncError> {
+    /// Save the synced restore code with the store's name, or the entry's
+    /// when that is newer, where the keychain keeps synced entries (§13.1).
+    pub fn refresh_restore_code(
+        &self,
+        code: &RestoreCode,
+        name: &SavedName,
+    ) -> Result<(), SyncError> {
         if self.synced.supported() {
-            self.synced
-                .set_restore_code(&SecretBytes::new(code.to_bytes()?.to_vec()))?;
+            saved_code::save(&self.synced, code, name)?;
         }
         Ok(())
     }
@@ -99,6 +103,27 @@ impl CredentialEntry {
     }
 }
 
+/// What a credential commit puts in one entry.
+enum Update<'a> {
+    /// Exactly these bytes, or nothing.
+    Value(Option<SecretBytes>),
+    /// The restore code, with the newer of this name and the entry's (§13.1).
+    Code(&'a RestoreCode, &'a SavedName),
+}
+
+impl Update<'_> {
+    fn apply(
+        &self,
+        entry: CredentialEntry,
+        keychain: &CredentialKeychains,
+    ) -> Result<(), SyncError> {
+        match self {
+            Self::Value(value) => entry.replace(keychain, value.as_ref()),
+            Self::Code(code, name) => saved_code::save(&keychain.synced, code, name),
+        }
+    }
+}
+
 /// Previous values of exactly the custody entries a credential commit changes.
 /// Setup and bootstrap retain this until their whole operation has committed.
 pub struct CredentialRollback {
@@ -126,30 +151,31 @@ impl CredentialRollback {
 }
 
 /// Commit device credentials and, on Apple, the separate S3 key. Setup and
-/// bootstrap also supply the restore code and remove any S3 entry when setting
-/// up an account provider. Replacing credentials supplies no
-/// code; OAuth refresh touches neither synced entry. A failed write restores
-/// every prior value and returns any rollback failures with the original cause.
+/// bootstrap also supply the restore code with the store's name, and remove
+/// any S3 entry when setting up an account provider. Replacing credentials
+/// supplies no code; OAuth refresh touches neither synced entry. A failed
+/// write restores every prior value and returns any rollback failures with
+/// the original cause.
 pub fn commit_credentials(
     keychain: &CredentialKeychains,
     credentials: &StorageCredentials,
-    code: Option<&RestoreCode>,
+    code: Option<(&RestoreCode, &SavedName)>,
 ) -> Result<CredentialRollback, SyncError> {
     let mut updates = vec![(
         CredentialEntry::DeviceCredentials,
-        Some(credentials.encode()?),
+        Update::Value(Some(credentials.encode()?)),
     )];
     if keychain.synced.supported() {
         if let StorageCredentials::S3(keys) = credentials {
-            updates.push((CredentialEntry::S3Credentials, Some(keys.encode()?)));
-        } else if code.is_some() {
-            updates.push((CredentialEntry::S3Credentials, None));
-        }
-        if let Some(code) = code {
             updates.push((
-                CredentialEntry::RestoreCode,
-                Some(SecretBytes::new(code.to_bytes()?.to_vec())),
+                CredentialEntry::S3Credentials,
+                Update::Value(Some(keys.encode()?)),
             ));
+        } else if code.is_some() {
+            updates.push((CredentialEntry::S3Credentials, Update::Value(None)));
+        }
+        if let Some((code, name)) = code {
+            updates.push((CredentialEntry::RestoreCode, Update::Code(code, name)));
         }
     }
     let previous = CredentialRollback {
@@ -158,8 +184,8 @@ pub fn commit_credentials(
             .map(|(entry, _)| Ok((*entry, entry.read(keychain)?)))
             .collect::<Result<_, SyncError>>()?,
     };
-    for (entry, bytes) in updates {
-        if let Err(operation) = entry.replace(keychain, bytes.as_ref()) {
+    for (entry, update) in updates {
+        if let Err(operation) = update.apply(entry, keychain) {
             return Err(match previous.restore(keychain) {
                 Ok(()) => operation,
                 Err(cleanup) => cleanup_error(operation, cleanup),

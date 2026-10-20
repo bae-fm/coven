@@ -118,8 +118,9 @@ async fn restored(
         .code
         .expect("the synced restore code is rewritten, never deleted");
     assert_eq!(
-        coven_format::codes::RestoreCode::from_bytes(&code)
+        coven_format::codes::KeychainRestoreCode::from_bytes(&code)
             .unwrap()
+            .code
             .member_keys
             .public_keys(),
         current.member_keys.public_keys()

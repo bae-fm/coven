@@ -161,6 +161,7 @@ pub(crate) fn checked_change(
             next.store = Some(StoreIdentity {
                 id: *store,
                 name: name.clone(),
+                named_at: slot,
             });
             next.members.insert(
                 *author,
@@ -187,6 +188,7 @@ pub(crate) fn checked_change(
                 return Ok(None);
             }
             store.name = name.clone();
+            store.named_at = slot;
         }
         AddMember {
             member: id,

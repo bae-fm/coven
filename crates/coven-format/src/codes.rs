@@ -10,6 +10,9 @@ use zeroize::Zeroizing;
 
 const MAX_STORAGE: usize = 16 * 1024;
 const MAX_CODE_BYTES: usize = 18 * 1024;
+// A saved code adds its frame prefix, a name of at most 1,024 bytes, its slot
+// and the code's length to the code itself.
+const MAX_KEYCHAIN_BYTES: usize = MAX_CODE_BYTES + crate::FRAME_PREFIX_LEN + 4 + 1024 + 8 + 4;
 const ALPHABET: &[u8; 32] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
 
 /// A person's keys and the store's identity and location (§13.1).
@@ -66,6 +69,69 @@ impl RestoreCode {
     /// Decode borrowed text without retaining any unerased private copies.
     pub fn from_text(text: &str) -> Result<Self, Error> {
         Self::from_bytes(&text_decode("CVR1-", text)?)
+    }
+}
+
+/// A restore code as coven saves it in iCloud Keychain: the store's name as the
+/// saving device had it, the slot that set that name, and the code (D13). The
+/// name is a label for the person's list; the code's store id finds the store.
+#[derive(Debug)]
+pub struct KeychainRestoreCode {
+    /// The store's name; a rename made while no device of the person had the
+    /// store open leaves it as they last saw it (§13.1).
+    pub name: String,
+    /// The slot that set `name`: 1 for creation, otherwise the rename's slot.
+    /// Only a name from a later slot replaces it.
+    pub named_at: u64,
+    /// The member's current restore code.
+    pub code: RestoreCode,
+}
+impl KeychainRestoreCode {
+    /// Encode a bounded frame into a buffer erased on drop, allocated once.
+    pub fn to_bytes(&self) -> Result<Zeroizing<Vec<u8>>, Error> {
+        Self::encode(&self.name, self.named_at, &self.code)
+    }
+    /// Encode the frame for these fields without owning the code.
+    pub fn encode(
+        label: &str,
+        named_at: u64,
+        code: &RestoreCode,
+    ) -> Result<Zeroizing<Vec<u8>>, Error> {
+        name(label)?;
+        require(named_at > 0, "name slot", Rule::Required)?;
+        let code = code.to_bytes()?;
+        let size = FRAME_PREFIX_LEN + 4 + label.len() + 8 + 4 + code.len();
+        let mut bytes = Zeroizing::new(Vec::new());
+        bytes
+            .try_reserve_exact(size)
+            .map_err(|_| Error::Allocation)?;
+        bytes.push(17);
+        bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
+        bytes.extend_from_slice(&((size - FRAME_PREFIX_LEN) as u32).to_be_bytes());
+        bytes.extend_from_slice(&(label.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(label.as_bytes());
+        bytes.extend_from_slice(&named_at.to_be_bytes());
+        bytes.extend_from_slice(&(code.len() as u32).to_be_bytes());
+        bytes.extend_from_slice(&code);
+        debug_assert_eq!(bytes.len(), size);
+        Ok(bytes)
+    }
+    /// Decode a borrowed frame; every owned copy of private material erases on drop.
+    pub fn from_bytes(bytes: &[u8]) -> Result<Self, Error> {
+        bound(bytes.len(), MAX_KEYCHAIN_BYTES, "saved code bytes")?;
+        let (kind, mut input) = decode_frame(bytes)?;
+        require(kind == 17, "saved restore code kind", Rule::Kind)?;
+        let label = crate::wire::get_name(&mut input)?;
+        let named_at = u64::get(&mut input)?;
+        require(named_at > 0, "name slot", Rule::Required)?;
+        let len = u32::get(&mut input)? as usize;
+        let code = RestoreCode::from_bytes(input.take(len)?)?;
+        input.finish()?;
+        Ok(Self {
+            name: label,
+            named_at,
+            code,
+        })
     }
 }
 
