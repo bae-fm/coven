@@ -123,7 +123,7 @@ impl<'a> ObjectStream<'a> {
         let capacity = usize::try_from(remaining)
             .map_err(|error| StorageFailure::Protocol.with_source(error))?;
         let mut bytes = Vec::with_capacity(capacity);
-        let mut chunk = [0; 64 * 1024];
+        let mut chunk = vec![0; 64 * 1024];
         loop {
             let length = self.read(&mut chunk).await?;
             if length == 0 {
