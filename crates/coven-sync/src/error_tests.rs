@@ -247,3 +247,28 @@ fn stored_damage_an_invariant_and_a_remote_refusal_stay_distinct() {
     };
     assert_eq!(object.failure, crate::Refusal::Parse { cause: None });
 }
+
+/// A failing operation's status names its record and the error behind it,
+/// not a debug dump.
+#[test]
+fn a_failing_operation_names_its_reason_and_cause() {
+    let mut record = crate::PendingRecord::new(
+        crate::PendingSubject::Operation {
+            id: crate::OperationId(4),
+            kind: crate::OperationKind::RetainFiles,
+        },
+        crate::PendingReason::Failed(crate::LocalFailure::Disk),
+    );
+    let failure = SyncFailure::Operation(Box::new(record.clone()));
+    assert_eq!(
+        failure.to_string(),
+        "coven's own work failed its last attempt: \
+         Operation { id: OperationId(4), kind: RetainFiles }: Failed(Disk)"
+    );
+    record.cause = Some(Arc::new(std::io::Error::other("disk full")));
+    let failure = SyncFailure::Operation(Box::new(record));
+    assert!(
+        failure.to_string().ends_with(": Failed(Disk): disk full"),
+        "{failure}"
+    );
+}

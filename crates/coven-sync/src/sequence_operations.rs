@@ -353,13 +353,16 @@ impl SequenceSync {
         if let Err(error) = &result {
             if let Some(record) = self.database.operation(id).await? {
                 let work: SequenceOperation = serde_json::from_slice(&record.data)?;
-                self.record_operation_error(id, work.kind(), error, ring)
-                    .await?;
+                self.record_operation_error(
+                    id,
+                    work.kind(),
+                    crate::sequence_sync::OperationFailure::Returned(error),
+                    ring,
+                )
+                .await?;
             }
         } else {
-            self.waits.clear_evidence(id);
-            self.waits
-                .forget(coven_database::RetrySubject::Operation(id));
+            self.waits.operation_advanced(id);
         }
         result
     }

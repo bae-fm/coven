@@ -9,7 +9,8 @@
 //! retry logs nothing more.
 
 use crate::{PendingReason, PendingRecord, PendingSubject};
-use std::collections::BTreeMap;
+use coven_database::OperationId;
+use std::collections::{BTreeMap, BTreeSet};
 use std::error::Error;
 use std::sync::{Arc, Mutex};
 
@@ -43,8 +44,8 @@ impl PendingCauses {
     }
 
     /// Record that `subject` failed with `reason`, keeping a held error as
-    /// its cause. Logs the failure at warn when the subject's reason appears
-    /// or changes, and returns whether it did. The error's text names every
+    /// its cause. Logs the failure when the subject's reason appears or
+    /// changes, at warn, or at debug for a wait, and returns whether it did. The error's text names every
     /// cause with secrets and URLs already cut (coven-storage).
     pub(crate) fn failed(
         &self,
@@ -60,7 +61,9 @@ impl PendingCauses {
         let changed = held
             .get(subject)
             .is_none_or(|recorded| recorded.reason != *reason);
-        if changed {
+        if changed && reason.waits() {
+            tracing::debug!(?subject, ?reason, "pending work waits: {error}");
+        } else if changed {
             tracing::warn!(?subject, ?reason, "pending work failed: {error}");
         }
         held.insert(
@@ -71,6 +74,14 @@ impl PendingCauses {
             },
         );
         changed
+    }
+
+    /// The error returned for the subject's last recorded failure came back
+    /// to work that drops it: the record keeps it as its cause after all.
+    pub(crate) fn kept(&self, subject: &PendingSubject, cause: Cause) {
+        if let Some(recorded) = self.lock().get_mut(subject) {
+            recorded.cause = Some(cause);
+        }
     }
 
     /// The subject's work advanced past a failure `ended` accepts: its record
@@ -85,6 +96,19 @@ impl PendingCauses {
         }
     }
 
+    /// The operation advanced or finished: a later failure is new.
+    pub(crate) fn cleared_operation(&self, id: OperationId) {
+        self.lock().retain(|subject, _| !operation(subject, id));
+    }
+
+    /// Forget the failures of operations that no longer exist.
+    pub(crate) fn retain_operations(&self, live: &BTreeSet<OperationId>) {
+        self.lock().retain(|subject, _| match subject {
+            PendingSubject::Operation { id, .. } => live.contains(id),
+            _ => true,
+        });
+    }
+
     /// `records`, each with the error behind it when this process holds the
     /// error for exactly the reason the record states.
     pub fn attach(&self, mut records: Vec<PendingRecord>) -> Vec<PendingRecord> {
@@ -97,6 +121,10 @@ impl PendingCauses {
         }
         records
     }
+}
+
+fn operation(subject: &PendingSubject, operation: OperationId) -> bool {
+    matches!(subject, PendingSubject::Operation { id, .. } if *id == operation)
 }
 
 #[cfg(test)]

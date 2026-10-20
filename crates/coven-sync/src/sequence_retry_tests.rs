@@ -95,7 +95,7 @@ async fn history(actions: &[Value]) -> Value {
                             .record_operation_error(
                                 id,
                                 crate::OperationKind::RetainFiles,
-                                &error,
+                                crate::sequence_sync::OperationFailure::Returned(&error),
                                 &group.ring,
                             )
                             .await

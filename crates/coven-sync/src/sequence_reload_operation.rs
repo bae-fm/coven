@@ -1,6 +1,6 @@
 //! An explicit reload retains its selected bodies and common target (§16.5, E6).
 use super::*;
-use coven_database::{NewOperation, OperationRecord, OperationUpdate, RetrySubject};
+use coven_database::{NewOperation, OperationRecord, OperationUpdate};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize)]
@@ -160,12 +160,16 @@ impl SequenceSync {
             .run(self.advance_reload(session, ring, member, record))
             .await
         {
-            self.record_operation_error(id, crate::OperationKind::ReloadFromSnapshot, &error, ring)
-                .await?;
+            self.record_operation_error(
+                id,
+                crate::OperationKind::ReloadFromSnapshot,
+                crate::sequence_sync::OperationFailure::Returned(&error),
+                ring,
+            )
+            .await?;
             return Err(error);
         }
-        self.waits.clear_evidence(id);
-        self.waits.forget(RetrySubject::Operation(id));
+        self.waits.operation_advanced(id);
         Ok(())
     }
 

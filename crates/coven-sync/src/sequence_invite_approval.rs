@@ -28,13 +28,16 @@ impl SequenceSync {
         };
         if let Some(error) = result.as_ref().err().or(pending.as_ref()) {
             if self.database.operation(id).await?.is_some() {
-                self.record_operation_error(id, OperationKind::Invite, error, ring)
-                    .await?;
+                self.record_operation_error(
+                    id,
+                    OperationKind::Invite,
+                    crate::sequence_sync::OperationFailure::Returned(error),
+                    ring,
+                )
+                .await?;
             }
         } else {
-            self.waits.clear_evidence(id);
-            self.waits
-                .forget(coven_database::RetrySubject::Operation(id));
+            self.waits.operation_advanced(id);
         }
         result
     }

@@ -134,13 +134,16 @@ impl SequenceSync {
                 .run(self.apply_retention(session, ring, member, record.clone()))
                 .await
             {
-                self.record_operation_error(record.id, OperationKind::RetainSequence, &error, ring)
-                    .await?;
+                self.record_operation_error(
+                    record.id,
+                    OperationKind::RetainSequence,
+                    crate::sequence_sync::OperationFailure::Held(error),
+                    ring,
+                )
+                .await?;
                 self.state.check()?;
             } else {
-                self.waits.clear_evidence(record.id);
-                self.waits
-                    .forget(coven_database::RetrySubject::Operation(record.id));
+                self.waits.operation_advanced(record.id);
             }
         }
         Ok(())

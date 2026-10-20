@@ -116,13 +116,16 @@ impl SequenceSync {
                 .run(self.apply_access(session, ring, member, record.id))
                 .await;
             if let Err(error) = result {
-                self.record_operation_error(record.id, OperationKind::RevokeAccess, &error, ring)
-                    .await?;
+                self.record_operation_error(
+                    record.id,
+                    OperationKind::RevokeAccess,
+                    crate::sequence_sync::OperationFailure::Held(error),
+                    ring,
+                )
+                .await?;
                 self.state.check()?;
             } else {
-                self.waits.clear_evidence(record.id);
-                self.waits
-                    .forget(coven_database::RetrySubject::Operation(record.id));
+                self.waits.operation_advanced(record.id);
             }
         }
         Ok(())

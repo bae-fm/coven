@@ -257,8 +257,9 @@ pub enum SyncFailure {
     #[error("storage failed: {0}")]
     Storage(#[source] Arc<StorageError>),
     /// The pass finished, but this work of coven's own failed its last
-    /// attempt; it retries under backoff (E5).
-    #[error("{0:?}")]
+    /// attempt; it retries under backoff (E5). The record carries the error
+    /// behind it while this process holds it, and the text names it.
+    #[error("coven's own work failed its last attempt: {0}")]
     Operation(Box<crate::PendingRecord>),
     /// Any other failure, retaining its typed cause.
     #[error("sync failed: {0}")]

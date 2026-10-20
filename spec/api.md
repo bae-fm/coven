@@ -3214,10 +3214,11 @@ pub struct PendingRecord {
     /// The first unmet condition for this subject, kept as a typed value.
     pub reason: PendingReason,
     /// The error behind `reason`, with every cause below it, while this
-    /// process holds it: an upload, download or read no caller awaited.
-    /// Never persisted, so a record read after a
-    /// restart has none, and none when the failure went back to an app call.
-    /// Equality ignores it.
+    /// process holds it: an upload, download or read no caller awaited, or
+    /// an attempt of an operation coven drives itself. Never persisted, so a
+    /// record read after a restart has none, and none when the failure went
+    /// back to an app call. Equality ignores it. A record's text names its
+    /// subject, its reason and this error.
     pub cause: Option<Arc<dyn std::error::Error + Send + Sync>>,
 }
 
@@ -3504,7 +3505,9 @@ pub enum SyncFailure {
     /// The provider refused or failed a request.
     Storage(Arc<StorageError>),
     /// The pass finished, but this work of coven's own failed its last
-    /// attempt; it retries under backoff (E5).
+    /// attempt; it retries under backoff (E5). The record carries the error
+    /// behind it while this process holds it, and the failure's text names
+    /// the subject, the reason and that error.
     Operation(Box<PendingRecord>),
     /// Any other failure, retaining its typed cause.
     Other(Arc<dyn std::error::Error + Send + Sync>),

@@ -93,7 +93,7 @@ impl SequenceSync {
                     self.record_operation_error(
                         id,
                         OperationKind::ReplaceMemberKeys,
-                        &error,
+                        crate::sequence_sync::OperationFailure::Returned(&error),
                         &ring,
                     )
                     .await?;
@@ -145,16 +145,14 @@ impl SequenceSync {
         match refresh(&identity, store) {
             Ok(code) => {
                 self.database.finish_operation(record.id).await?;
-                self.waits.clear_evidence(record.id);
-                self.waits
-                    .forget(coven_database::RetrySubject::Operation(record.id));
+                self.waits.operation_advanced(record.id);
                 Ok(Some(code))
             }
             Err(error) => {
                 self.record_operation_error(
                     record.id,
                     OperationKind::ReplaceMemberKeys,
-                    &error,
+                    crate::sequence_sync::OperationFailure::Returned(&error),
                     &ring,
                 )
                 .await?;
@@ -217,7 +215,7 @@ impl SequenceSync {
                     self.record_operation_error(
                         record.id,
                         OperationKind::ReplaceMemberKeys,
-                        &error,
+                        crate::sequence_sync::OperationFailure::Held(error),
                         ring,
                     )
                     .await?;

@@ -191,6 +191,14 @@ impl RetryWaits {
         self.lock().armed.remove(&subject);
     }
 
+    /// The operation advanced or finished: its wait, the evidence its wait
+    /// named and its last failure's cause all end.
+    pub(crate) fn operation_advanced(&self, id: coven_database::OperationId) {
+        self.clear_evidence(id);
+        self.forget(RetrySubject::Operation(id));
+        self.causes.cleared_operation(id);
+    }
+
     /// Forget operation waits whose operations no longer exist.
     pub(crate) fn retain_operations(
         &self,
@@ -201,6 +209,7 @@ impl RetryWaits {
             _ => true,
         });
         self.retain_evidence(live);
+        self.causes.retain_operations(live);
     }
 
     /// Whether the subject holds an armed wait in this session.

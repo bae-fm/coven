@@ -715,7 +715,7 @@ async fn reclaim(profile: S3ProfileName) {
         .record_operation_error(
             operation,
             OperationKind::ReplaceAccessKey,
-            &SyncError::from(StorageFailure::Network),
+            crate::sequence_sync::OperationFailure::Held(SyncError::from(StorageFailure::Network)),
             &group.ring,
         )
         .await

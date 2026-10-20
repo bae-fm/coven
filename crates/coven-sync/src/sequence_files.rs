@@ -149,13 +149,16 @@ impl SequenceSync {
         match result {
             Ok(()) => {
                 self.database.finish_operation(id).await?;
-                self.waits.clear_evidence(id);
-                self.waits
-                    .forget(coven_database::RetrySubject::Operation(id));
+                self.waits.operation_advanced(id);
             }
             Err(error) => {
-                self.record_operation_error(id, OperationKind::RetainFiles, &error, ring)
-                    .await?
+                self.record_operation_error(
+                    id,
+                    OperationKind::RetainFiles,
+                    crate::sequence_sync::OperationFailure::Held(error),
+                    ring,
+                )
+                .await?
             }
         }
         Ok(())

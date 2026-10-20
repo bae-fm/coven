@@ -66,13 +66,18 @@ impl SequenceSync {
             if record.kind != REPLACE_ACCESS_KEY || !self.operation_ready(&record, ring).await? {
                 continue;
             }
-            if self
+            if let Err(error) = self
                 .run_key_replacement(session, ring, identity, record.id)
                 .await?
-                .is_err()
             {
-                // The pending list reports an unfinished failure. A completed
-                // rejection has undone its work and ends only this operation.
+                // The pending list reports an unfinished failure, and its
+                // record keeps the error. A completed rejection has undone
+                // its work and ends only this operation.
+                let subject = crate::PendingSubject::Operation {
+                    id: record.id,
+                    kind: OperationKind::ReplaceAccessKey,
+                };
+                self.waits.causes().kept(&subject, error.into_shared().1);
                 self.state.check()?;
             }
         }
@@ -107,9 +112,7 @@ impl SequenceSync {
                     .lock()
                     .expect("admin access poisoned")
                     .remove(&id);
-                self.waits.clear_evidence(id);
-                self.waits
-                    .forget(coven_database::RetrySubject::Operation(id));
+                self.waits.operation_advanced(id);
                 return Ok(Ok(replacement));
             }
             Ok(KeyProgress::Waiting(reason)) => SyncError::Pending(Box::new(PendingRecord::new(
@@ -123,16 +126,19 @@ impl SequenceSync {
         };
         let recorded = async {
             if self.database.operation(id).await?.is_some() {
-                self.record_operation_error(id, OperationKind::ReplaceAccessKey, &error, ring)
-                    .await?;
+                self.record_operation_error(
+                    id,
+                    OperationKind::ReplaceAccessKey,
+                    crate::sequence_sync::OperationFailure::Returned(&error),
+                    ring,
+                )
+                .await?;
             } else {
                 self.admin_access
                     .lock()
                     .expect("admin access poisoned")
                     .remove(&id);
-                self.waits.clear_evidence(id);
-                self.waits
-                    .forget(coven_database::RetrySubject::Operation(id));
+                self.waits.operation_advanced(id);
             }
             Ok::<_, SyncError>(())
         }

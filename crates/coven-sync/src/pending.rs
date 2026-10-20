@@ -58,6 +58,18 @@ impl PartialEq for PendingRecord {
 }
 impl Eq for PendingRecord {}
 
+/// The subject and its reason, then the error behind it while this process
+/// holds it, such as `Operation { .. }: Storage { .. }: S3: Network: …`.
+impl std::fmt::Display for PendingRecord {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{:?}: {:?}", self.subject, self.reason)?;
+        match &self.cause {
+            Some(cause) => write!(f, ": {cause}"),
+            None => Ok(()),
+        }
+    }
+}
+
 /// Stable identities of work, independent of attempts and wall-clock time.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 pub enum PendingSubject {
@@ -389,6 +401,35 @@ impl PendingReason {
             Self::Failed(LocalFailure::Crypto | LocalFailure::Operation) => Some(Clears::Never),
             Self::Storage { failure, .. } => Some(storage_clears(*failure)),
             _ => None,
+        }
+    }
+
+    /// Whether this reason waits for a condition to change, as opposed to
+    /// reporting a failure or a verdict. A wait is ordinary progress, and
+    /// is logged at debug where a failure is logged at warn.
+    pub(crate) fn waits(&self) -> bool {
+        match self {
+            Self::Missing { .. }
+            | Self::Waits(_)
+            | Self::KeyUnavailable { .. }
+            | Self::NoStorage
+            | Self::ProviderPending { .. }
+            | Self::PendingOwner { .. }
+            | Self::AccountInUse { .. }
+            | Self::DeleteAccessKey(_)
+            | Self::Paused
+            | Self::AdminAccessRequired => true,
+            Self::UpdateRequired(_)
+            | Self::Storage { .. }
+            | Self::Refused(_)
+            | Self::WritesRefused { .. }
+            | Self::AccessRemains { .. }
+            | Self::FileUnavailable(_)
+            | Self::Failed(_)
+            | Self::Rejected(_)
+            | Self::Removed
+            | Self::MemberKeysReplaced { .. } => false,
+            Self::Cleanup { operation, cleanup } => operation.waits() && cleanup.waits(),
         }
     }
 

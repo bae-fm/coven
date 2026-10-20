@@ -854,6 +854,7 @@ pub(crate) mod sequence_reload;
 pub(crate) mod sequence_retention;
 #[path = "sequence_retry.rs"]
 mod sequence_retry;
+pub(crate) use sequence_retry::OperationFailure;
 #[path = "sequence_snapshots.rs"]
 mod sequence_snapshots;
 #[path = "snapshot_capture.rs"]

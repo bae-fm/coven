@@ -71,13 +71,15 @@ impl SyncLoop {
         receive.await.map_err(|_| DbError::StoreClosed)?
     }
 }
-/// Coven's own operation whose last attempt failed, if any: it retries under
-/// its own backoff, but the pass that left it is not `Synced` (E5).
+/// Coven's own operation whose last attempt failed, if any, with the error
+/// behind it while this process holds it: it retries under its own backoff,
+/// but the pass that left it is not `Synced` (E5).
 async fn failing(sync: &SequenceSync) -> Result<Option<crate::PendingRecord>, SyncError> {
+    let records = sync.database.pending::<crate::PendingRecord>().await?;
     Ok(sync
-        .database
-        .pending::<crate::PendingRecord>()
-        .await?
+        .waits
+        .causes()
+        .attach(records)
         .into_iter()
         .find(|record| {
             matches!(record.subject, crate::PendingSubject::Operation { kind, .. } if kind.coven_owned())
