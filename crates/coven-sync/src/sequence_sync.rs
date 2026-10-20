@@ -640,6 +640,8 @@ impl SequenceSync {
         }
     }
 
+    /// Every variant is matched by name, so a new one is classified here.
+    #[deny(clippy::wildcard_enum_match_arm)]
     async fn block(&self, session: &mut Session, slot: Slot, error: SyncError) -> SyncError {
         if let SyncError::DeviceIdInUse(evidence) = error {
             return self.state.stop_copy(evidence);
@@ -665,7 +667,26 @@ impl SequenceSync {
             SyncError::MemberKeysReplaced { member } => {
                 PendingReason::MemberKeysReplaced { member: *member }
             }
-            _ => PendingReason::Failed(error.local_failure()),
+            SyncError::Failed { .. }
+            | SyncError::Cleanup { .. }
+            | SyncError::NoStorage
+            | SyncError::StoreOwner
+            | SyncError::InvitationChanged
+            | SyncError::NotPending(_)
+            | SyncError::ReloadPending(_)
+            | SyncError::OperationData(_)
+            | SyncError::AccessKeyNotDeleted(_)
+            | SyncError::SequenceExhausted
+            | SyncError::Database(_)
+            | SyncError::SecureStorage(_)
+            | SyncError::Crypto(_)
+            | SyncError::Format(_)
+            | SyncError::Key(_)
+            | SyncError::KeyAlreadyUsed(_)
+            | SyncError::Rejected(_)
+            | SyncError::Removed
+            | SyncError::DeviceIdInUse(_)
+            | SyncError::WrongStore { .. } => PendingReason::Failed(error.local_failure()),
         };
         let record = PendingRecord::new(PendingSubject::Slot(slot), reason);
         session.blocked = Some(record.clone());

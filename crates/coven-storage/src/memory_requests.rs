@@ -97,6 +97,10 @@ impl MemoryStorage {
 }
 
 impl MemoryProvider {
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "a send fails only when the receiver is gone, which this names"
+    )]
     pub(super) async fn hold_access(&self, account: &str, grant: bool) {
         let held = {
             let mut state = self.state.lock().await;

@@ -113,6 +113,10 @@ impl LocalFileReader {
         self.reader.size()
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a size past the target integer is TooLarge, which names the field and size"
+    )]
     fn read_at(&self, offset: u64, len: u64) -> Result<Vec<u8>, LocalFileError> {
         let end = offset.saturating_add(len);
         if offset.checked_add(len).is_none() || end > self.reader.size() {
@@ -178,6 +182,10 @@ pub(crate) enum QueuedSource {
 
 /// The source a queued file's entry fixed at attachment; `None` once the
 /// file is no longer queued. Reads only the database.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(crate) fn queued_source(
     db: &DatabaseConnection,
     reference: &FileRef,

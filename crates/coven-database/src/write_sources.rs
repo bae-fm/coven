@@ -582,6 +582,10 @@ fn stored_verdict(verdict: &ChangeVerdict) -> Result<Option<Vec<u8>>, DbError> {
     })
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 fn read_verdict(stored: Option<Vec<u8>>) -> Result<ChangeVerdict, DbError> {
     stored.map_or(Ok(ChangeVerdict::Unjudged), |bytes| {
         merge_fields::decode_change_verdict(&bytes).map_err(|_| DbError::DamagedDatabase)

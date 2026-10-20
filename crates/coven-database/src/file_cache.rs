@@ -55,6 +55,10 @@ fn covering(
 }
 /// Encrypted byte offset and length of `index` in the stored entry
 /// beginning at `first`.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbError> {
     if index == HEADER {
         return Ok((0, coven_format::file::FILE_HEADER_LEN));
@@ -78,6 +82,10 @@ fn within(file: &FileRef, first: i64, index: i64) -> Result<(u64, usize), DbErro
 /// looked up, and its read recorded, under the writer; its bytes are read
 /// with no writer held (§21.2). An entry evicted between the lookup and
 /// opening its bytes is no longer cached.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(super) fn read<L>(
     access: &DatabaseAccess<L>,
     file: &FileRef,
@@ -304,6 +312,10 @@ pub(crate) fn declare_budgets(
         Ok(())
     })
 }
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(super) fn budget(db: &DatabaseConnection, namespace: &str) -> Result<u64, DbError> {
     let bytes = db
         .query(
@@ -332,6 +344,10 @@ pub(crate) fn total(db: &DatabaseConnection, namespace: &str) -> Result<i64, DbE
 }
 /// Evict over-budget entries; returns their recorded names, whose bytes the
 /// caller removes once the writer is free (Appendix C.3).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(super) fn trim(db: &DatabaseConnection, namespace: &str) -> Result<Vec<String>, DbError> {
     db.transaction(|db| {
         let budget = budget(db, namespace)?;
@@ -445,6 +461,10 @@ pub(super) fn settle_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), 
 }
 /// Check a finished whole cache file's header and length on disk, and return
 /// its size. It reads only the reserved file, so no writer is held (§21.2).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(super) fn whole_size(
     directory: &StoreDir,
     file: &FileRef,

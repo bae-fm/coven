@@ -2,6 +2,7 @@
 //! (§17.5, §17.7). Uploads, downloads and reads all classify here, and the
 //! error behind the reason is logged and held as the record's cause
 //! (`pending_cause.rs`).
+#![deny(clippy::wildcard_enum_match_arm)]
 
 use super::file_error::{FileReadError, TransferError};
 use crate::pending_cause::{Cause, Failure};

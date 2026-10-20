@@ -68,6 +68,10 @@ pub(crate) fn retain_header(
     Ok(())
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored signature of the wrong width is this column type error"
+)]
 fn header(db: &DatabaseConnection, write: WriteId) -> Result<Option<HeaderEvidence>, DbError> {
     Ok(db
         .query(

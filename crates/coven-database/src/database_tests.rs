@@ -538,6 +538,10 @@ fn read_only_process() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the migration panics, so opening never returns; the task carries the panic"
+)]
 async fn a_panicking_migration_preserves_its_panic_payload() {
     let call = tokio::spawn(async {
         let store = TestStore::new();

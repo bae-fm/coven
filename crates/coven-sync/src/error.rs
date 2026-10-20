@@ -147,6 +147,8 @@ impl From<DbError> for SyncError {
 
 impl SyncError {
     /// The durable reason for a failed request, without losing its typed cause here.
+    /// Every variant is matched by name, so a new one is classified here.
+    #[deny(clippy::wildcard_enum_match_arm)]
     pub fn pending_reason(&self, provider: coven_storage::CloudProvider) -> crate::PendingReason {
         use crate::PendingReason;
         use coven_merge::Audience;
@@ -173,7 +175,23 @@ impl SyncError {
                 operation: Box::new(operation.pending_reason(provider)),
                 cleanup: Box::new(cleanup.pending_reason(provider)),
             },
-            _ => PendingReason::Failed(error.local_failure()),
+            SyncError::Failed { .. }
+            | SyncError::NoStorage
+            | SyncError::StoreOwner
+            | SyncError::InvitationChanged
+            | SyncError::NotPending(_)
+            | SyncError::ReloadPending(_)
+            | SyncError::OperationData(_)
+            | SyncError::AccessKeyNotDeleted(_)
+            | SyncError::SequenceExhausted
+            | SyncError::Database(_)
+            | SyncError::SecureStorage(_)
+            | SyncError::Crypto(_)
+            | SyncError::Format(_)
+            | SyncError::Key(_)
+            | SyncError::KeyAlreadyUsed(_)
+            | SyncError::DeviceIdInUse(_)
+            | SyncError::WrongStore { .. } => PendingReason::Failed(error.local_failure()),
         }
     }
 
@@ -186,6 +204,7 @@ impl SyncError {
     }
 
     /// The local category recorded for a failure that names no other condition.
+    #[deny(clippy::wildcard_enum_match_arm)]
     pub(crate) fn local_failure(&self) -> crate::LocalFailure {
         match self {
             Self::Failed { failure, .. } => *failure,
@@ -193,7 +212,26 @@ impl SyncError {
             Self::SecureStorage(_) => crate::LocalFailure::KeyCustody,
             Self::Crypto(_) | Self::Key(_) => crate::LocalFailure::Crypto,
             Self::Cleanup { operation, .. } => operation.local_failure(),
-            _ => crate::LocalFailure::Operation,
+            Self::Pending(_)
+            | Self::NoStorage
+            | Self::StoreOwner
+            | Self::InvitationChanged
+            | Self::NotPending(_)
+            | Self::ReloadPending(_)
+            | Self::OperationData(_)
+            | Self::AccessKeyNotDeleted(_)
+            | Self::SequenceExhausted
+            | Self::Storage(_)
+            | Self::Format(_)
+            | Self::KeyUnavailable(_)
+            | Self::KeyAlreadyUsed(_)
+            | Self::Rejected(_)
+            | Self::Damaged(_)
+            | Self::Removed
+            | Self::DeviceIdInUse(_)
+            | Self::MemberKeysReplaced { .. }
+            | Self::UpdateRequired(_)
+            | Self::WrongStore { .. } => crate::LocalFailure::Operation,
         }
     }
 

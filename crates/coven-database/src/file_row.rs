@@ -23,6 +23,10 @@ pub(crate) struct FixedReference {
 }
 
 impl FixedReference {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     pub(crate) fn decode(value: &Value) -> Result<Self, DbError> {
         let Value::Text(text) = value else {
             return Err(DbError::DamagedDatabase);
@@ -102,6 +106,10 @@ pub(crate) fn lookup(
     Ok(((table.name.clone(), row_key(table, &values)?), values))
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a size past the target integer is TooLarge, which names the field and size"
+)]
 pub(crate) fn set(
     database: &DatabaseConnection,
     schema: &WriteSchema,

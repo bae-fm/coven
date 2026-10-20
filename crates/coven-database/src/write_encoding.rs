@@ -47,6 +47,10 @@ pub(crate) fn latest_timestamp(
     })
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a time past u64 milliseconds is ClockOutOfRange"
+)]
 pub(crate) fn timestamp(
     latest: Option<Timestamp>,
     now: SystemTime,

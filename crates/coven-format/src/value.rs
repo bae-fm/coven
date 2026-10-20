@@ -33,6 +33,10 @@ impl Wire for SigningKey {
     fn put(&self, out: &mut Encoder) -> Result<(), Error> {
         self.as_bytes().put(out)
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "coven-crypto refuses a signing key only as invalid or weak"
+    )]
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
         Self::from_bytes(Wire::get(input)?).map_err(|_| Error::InvalidSigningKey)
     }
@@ -133,6 +137,10 @@ impl StorageTime {
     }
 
     /// The exact provider time, refusing one before the Unix epoch.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a time before the epoch is the Range rule; how far before is not part of it"
+    )]
     pub fn from_system_time(time: std::time::SystemTime) -> Result<Self, Error> {
         let since = time
             .duration_since(std::time::UNIX_EPOCH)

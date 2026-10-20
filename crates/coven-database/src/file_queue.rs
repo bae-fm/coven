@@ -182,6 +182,10 @@ pub(crate) fn enqueue(
     Ok(())
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
     let rows = db.query(
         "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait
@@ -274,6 +278,10 @@ pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
 
 /// The first-read hash of one queued plaintext chunk. A missing hash is
 /// damage, found before any byte of that chunk is encrypted.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert is damage, a computed one a broken invariant"
+)]
 pub(crate) fn chunk_hash(
     db: &DatabaseConnection,
     file: &FileRef,

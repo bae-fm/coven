@@ -121,6 +121,10 @@ impl TestAuthorship {
 }
 
 impl crate::Authorship for TestAuthorship {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a test fixture whose header does not open is the fixture refusal this names"
+    )]
     fn header(
         &self,
         evidence: &coven_format::authorship::WriteEvidence,

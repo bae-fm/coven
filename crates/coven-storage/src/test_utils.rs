@@ -538,6 +538,10 @@ impl ProviderOps for MemoryProvider {
     fn single_request_limit(&self) -> u64 {
         self.single_limit
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a send fails only when the receiver is gone, which this names"
+    )]
     async fn create(
         &self,
         publication: &PublicationRequest,
@@ -653,6 +657,10 @@ impl ProviderOps for MemoryProvider {
         self.stream_recorded(path, range).await
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a send fails only when the receiver is gone, which this names"
+    )]
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix();
         self.before(MemoryRequest::List(prefix.clone())).await?;

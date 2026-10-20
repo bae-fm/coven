@@ -61,6 +61,10 @@ impl WriteSchema {
         &self.schema.tables[&name.to_ascii_lowercase()]
     }
     /// Validate an incoming row's table, key shape and declared audience.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the key check refuses only a key that isn't a declared independent UUID"
+    )]
     pub(crate) fn row_table(&self, row: &coven_merge::RowId) -> Result<&TableSchema, DbError> {
         use crate::snapshot_error::invalid;
         if !self

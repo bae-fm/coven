@@ -67,6 +67,10 @@ pub(crate) fn save(
 /// under `name`, as one copy. When `current` gives no code, because this
 /// device's keys were replaced, the store has no location, or the member was
 /// removed, the entry stays as it is. A keychain failure fails the call.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the encoder fails only on a name past its bound or on memory: Encoding"
+)]
 pub fn follow_name<E: From<KeyError>>(
     synced: &SyncedKeychain,
     name: &SavedName,

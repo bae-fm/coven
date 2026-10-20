@@ -139,6 +139,10 @@ impl Sealing {
         Ok(Self { header, key })
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "each wire read fails only with Encoding: the header's damage"
+    )]
     fn open(passphrase: &Passphrase, bytes: &[u8]) -> Result<Self, KeyError> {
         let mut body = bytes;
         wire::prefix(&mut body, HEADER).map_err(|_| KeyError::PassphraseHeader)?;
@@ -168,6 +172,10 @@ impl<T> std::fmt::Debug for PassphraseCustody<T> {
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "argon2 refusing stored parameters is their damage: PassphraseParameters"
+)]
 fn read_parameters(params: [u32; 3]) -> Result<argon2::Params, KeyError> {
     let [memory, iterations, lanes] = params;
     // These read bounds are independent of writer defaults: raising defaults

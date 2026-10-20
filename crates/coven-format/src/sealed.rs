@@ -59,9 +59,7 @@ pub(crate) fn encode_chunk(bytes: &[u8]) -> Result<Vec<u8>, Error> {
     require(length > 0, "sealed chunk", Rule::Chunk)?;
     bound(length, crate::wire::MAX_OBJECT, "sealed chunk")?;
     let mut result = Vec::new();
-    result
-        .try_reserve_exact(4 + bytes.len())
-        .map_err(|_| Error::Allocation)?;
+    result.try_reserve_exact(4 + bytes.len())?;
     result.extend_from_slice(&(length as u32).to_be_bytes());
     result.extend_from_slice(bytes);
     Ok(result)

@@ -230,14 +230,14 @@ impl Database {
     /// Fail the next `count` `end_retry_waits` transactions with a disk error.
     #[cfg(any(test, feature = "test-utils"))]
     pub async fn fail_retry_ends(&self, count: usize) {
-        let _ = self
-            .call(move |inner| {
-                inner
-                    .retry_end_failures
-                    .store(count, std::sync::atomic::Ordering::SeqCst);
-                Ok::<_, DbError>(())
-            })
-            .await;
+        self.call(move |inner| {
+            inner
+                .retry_end_failures
+                .store(count, std::sync::atomic::Ordering::SeqCst);
+            Ok::<_, DbError>(())
+        })
+        .await
+        .expect("an open store arms its retry-end failures");
     }
 
     /// Forget a wait once its work succeeds or no longer retries automatically.

@@ -429,6 +429,10 @@ fn read_inner(
     read_exact(input, length, path)
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "an identity hint that does not decode is a KeyIdentity mismatch"
+)]
 fn inner(
     input: &mut SlotPlaintext,
     path: &ObjectPath,

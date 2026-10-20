@@ -79,7 +79,13 @@ fn a_home_is_skipped_until_its_crate_lands_and_checked_after() {
         "owner-construction-check-homes-{}",
         std::process::id()
     ));
-    let _ = std::fs::remove_dir_all(&root);
+    // A run that stopped early may have left its fixture; none is fine too.
+    match std::fs::remove_dir_all(&root) {
+        Err(error) if error.kind() != std::io::ErrorKind::NotFound => {
+            panic!("remove a leftover fixture: {error}")
+        }
+        Ok(()) | Err(_) => {}
+    }
     let clock_crate = root.join("crates/coven-foundation");
     std::fs::create_dir_all(clock_crate.join("src")).expect("create fixture crate");
     std::fs::write(clock_crate.join("Cargo.toml"), "").expect("write fixture manifest");

@@ -70,6 +70,10 @@ pub(crate) mod purpose {
 }
 
 impl SequenceSync {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     pub(crate) fn artifact_file(
         &self,
         name: &str,
@@ -80,6 +84,10 @@ impl SequenceSync {
         ))
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a send fails only when the reader is gone, which BrokenPipe names"
+    )]
     pub(crate) async fn capture_snapshot(
         &self,
         capture: &Capture,
@@ -148,6 +156,10 @@ impl SequenceSync {
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a header channel closed before its header leaves the snapshot truncated"
+)]
 async fn seal_frames(
     mut writer: coven_foundation::files::FileWriter,
     header: tokio::sync::oneshot::Receiver<SnapshotObjectPrefix>,

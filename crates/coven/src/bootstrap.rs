@@ -199,6 +199,10 @@ pub async fn join_with_invite(
     .await
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "read_saved_code logs why a saved code is unreadable; restoring sees Invalid"
+)]
 fn keychain_code(
     keychain: &SyncedKeychain,
     store: StoreId,

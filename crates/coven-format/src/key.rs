@@ -117,18 +117,18 @@ pub fn decode_key(bytes: &[u8]) -> Result<Vec<Value>, Error> {
                             _ => return Err(key_error()),
                         }
                     }
-                    value.try_reserve(1).map_err(|_| Error::Allocation)?;
+                    value.try_reserve(1)?;
                     value.push(byte);
                 }
                 if tag == 0x20 {
-                    Value::Text(String::from_utf8(value).map_err(|_| Error::Utf8)?)
+                    Value::Text(String::from_utf8(value).map_err(Error::from)?)
                 } else {
                     Value::Blob(value)
                 }
             }
             _ => return Err(key_error()),
         };
-        values.try_reserve(1).map_err(|_| Error::Allocation)?;
+        values.try_reserve(1)?;
         values.push(value);
     }
     require(encode_key(&values)? == bytes, "key", Rule::KeyEncoding)?;

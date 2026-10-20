@@ -469,6 +469,10 @@ impl<'a> Owners<'a> {
 }
 
 /// The admission stored for one original row change, if judged.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(crate) fn stored(
     db: &DatabaseConnection,
     header: &WriteHeader,

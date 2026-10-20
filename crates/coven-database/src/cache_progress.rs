@@ -37,6 +37,10 @@ pub enum EagerCacheFillStatus {
 /// Verified plaintext bytes of `file` the cache holds: a checked whole file,
 /// or each authenticated chunk without its tag. A file this device still has
 /// queued is wholly local.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(crate) fn covered(
     db: &DatabaseConnection,
     file: &FileRef,

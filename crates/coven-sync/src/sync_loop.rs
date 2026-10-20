@@ -19,6 +19,10 @@ enum Command {
     Resume,
     Close(oneshot::Sender<Result<(), SyncError>>),
 }
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a command fails only when the loop has ended, which StoreClosed names"
+)]
 impl SyncLoop {
     /// Compose a stopped loop for an open, connected sequence owner.
     /// `codes` completes member-key replacement and installs delivered S3 keys
@@ -264,6 +268,10 @@ async fn run(
                 Some(Command::Now) => pending |= started,
                 Some(Command::Pause(reply)) => {
                     paused = true;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "the caller may have stopped waiting for the pause"
+                    )]
                     let _ = reply.send(());
                 }
                 Some(Command::Resume) => paused = false,
@@ -290,8 +298,13 @@ async fn run(
                     break;
                 }
                 None => {
+                    // Nobody is left to receive the outcome, so a failure
+                    // to release the transfers is logged.
                     if started && !paused {
-                        let _ = sync.files.set_storage(None, std::future::ready(Ok(()))).await;
+                        let released = sync.files.set_storage(None, std::future::ready(Ok(())));
+                        if let Err(error) = released.await {
+                            tracing::warn!("releasing transfers without a handle failed: {error}");
+                        }
                     }
                     break;
                 }
@@ -361,7 +374,10 @@ async fn run(
     drop(codes);
     drop(sync);
     if let Some((reply, result)) = closing {
-        let _ = reply.send(result);
+        // A closer that stopped waiting leaves a failure to the log.
+        if let Err(Err(error)) = reply.send(result) {
+            tracing::warn!("closing sync failed after its caller stopped waiting: {error}");
+        }
     }
 }
 

@@ -425,6 +425,10 @@ pub(crate) fn sync_directory(path: &Path) -> io::Result<()> {
 }
 
 #[cfg(windows)]
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a rename buffer past u32 bytes means the path is too long"
+)]
 fn windows_rename(file: &fs::File, to: &Path) -> io::Result<()> {
     use std::mem::{offset_of, size_of, size_of_val, MaybeUninit};
     use std::os::windows::ffi::OsStrExt;

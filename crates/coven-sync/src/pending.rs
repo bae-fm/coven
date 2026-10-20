@@ -347,7 +347,9 @@ pub(crate) fn automatic_storage(failure: StorageFailure) -> bool {
     )
 }
 
-/// How a provider failure clears.
+/// How a provider failure clears. Every variant is matched by name, so a
+/// new one is classified here.
+#[deny(clippy::wildcard_enum_match_arm)]
 pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
     use StorageFailure::*;
     match failure {
@@ -365,7 +367,23 @@ pub(crate) fn storage_clears(failure: StorageFailure) -> Clears {
         | AccountIdUnavailable
         | ProviderUnavailable
         | MemberKeysMissing => Clears::ByPerson,
-        _ => Clears::Never,
+        DropboxAppFolderNotShareable
+        | AlreadyExists
+        | KeyBeyondStore
+        | StoreExists
+        | OwnBucketRequired { .. }
+        | Refused
+        | Protocol
+        | InvalidPath
+        | InvalidRange
+        | InviteeIsStoreOwner
+        | InvitationMismatch
+        | SessionMismatch
+        | SessionIdentityUnknown
+        | InvalidPart
+        | SingleRequestTooLarge { .. }
+        | CopyTooLarge { .. }
+        | Encoding => Clears::Never,
     }
 }
 
@@ -380,6 +398,7 @@ impl PendingReason {
 
     /// How the failure this reason reports clears; `None` for a wait or a
     /// verdict, which are not failures.
+    #[deny(clippy::wildcard_enum_match_arm)]
     pub(crate) fn clears(&self) -> Option<Clears> {
         match self.retry_cause() {
             Self::Failed(
@@ -387,7 +406,25 @@ impl PendingReason {
             ) => Some(Clears::ByItself),
             Self::Failed(LocalFailure::Crypto | LocalFailure::Operation) => Some(Clears::Never),
             Self::Storage { failure, .. } => Some(storage_clears(*failure)),
-            _ => None,
+            Self::Missing { .. }
+            | Self::Waits(_)
+            | Self::KeyUnavailable { .. }
+            | Self::UpdateRequired(_)
+            | Self::NoStorage
+            | Self::Refused(_)
+            | Self::WritesRefused { .. }
+            | Self::ProviderPending { .. }
+            | Self::PendingOwner { .. }
+            | Self::AccountInUse { .. }
+            | Self::AccessRemains { .. }
+            | Self::DeleteAccessKey(_)
+            | Self::FileUnavailable(_)
+            | Self::Rejected(_)
+            | Self::Cleanup { .. }
+            | Self::Paused
+            | Self::AdminAccessRequired
+            | Self::Removed
+            | Self::MemberKeysReplaced { .. } => None,
         }
     }
 
@@ -426,6 +463,7 @@ impl PendingReason {
         matches!(self, Self::Storage { failure, answered, .. } if offline(*failure, *answered))
     }
 
+    #[deny(clippy::wildcard_enum_match_arm)]
     fn retry(&self) -> Retry {
         match self {
             Self::Missing { .. }
@@ -440,7 +478,15 @@ impl PendingReason {
             | Self::WritesRefused { .. }
             | Self::Removed
             | Self::MemberKeysReplaced { .. } => Retry::Never,
-            _ => Retry::AppAction,
+            Self::NoStorage
+            | Self::Storage { .. }
+            | Self::AccessRemains { .. }
+            | Self::DeleteAccessKey(_)
+            | Self::FileUnavailable(_)
+            | Self::Failed(_)
+            | Self::Cleanup { .. }
+            | Self::Paused
+            | Self::AdminAccessRequired => Retry::AppAction,
         }
     }
 }

@@ -9,9 +9,11 @@ pub(crate) fn take<'a>(bytes: &mut &'a [u8], len: usize) -> Result<&'a [u8], Mat
 }
 
 pub(crate) fn array<const N: usize>(bytes: &mut &[u8]) -> Result<[u8; N], MaterialError> {
-    take(bytes, N)?
-        .try_into()
-        .map_err(|_| MaterialError::Encoding)
+    let (value, rest) = bytes
+        .split_first_chunk::<N>()
+        .ok_or(MaterialError::Encoding)?;
+    *bytes = rest;
+    Ok(*value)
 }
 
 pub(crate) fn number(bytes: &mut &[u8]) -> Result<u64, MaterialError> {

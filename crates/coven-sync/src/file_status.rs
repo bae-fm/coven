@@ -137,6 +137,10 @@ impl FilesInner {
 /// An object at the fixed path counts as the file only at the file's complete
 /// encrypted size; anything else there is damage, not absence. Status and every
 /// ranged read check it, so they agree (ST `read_agrees_with_status`).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a size whose encrypted layout overflows fails the integrity check"
+)]
 pub(crate) fn complete(file: &FileRef, object: &StoredObject) -> Result<(), FileReadError> {
     let expected = FileHeader::new(file.plaintext_size())
         .encrypted_size()

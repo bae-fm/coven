@@ -36,9 +36,7 @@ impl Encoder {
             MAX_OBJECT,
             "object",
         )?;
-        self.bytes
-            .try_reserve(bytes.len())
-            .map_err(|_| Error::Allocation)?;
+        self.bytes.try_reserve(bytes.len())?;
         self.bytes.extend_from_slice(bytes);
         Ok(())
     }
@@ -199,7 +197,7 @@ pub(crate) fn get_sequence<T>(
         // Reserve only after decoding a real item. A hostile count must not
         // allocate space for values whose bytes have not been checked.
         let value = get(input)?;
-        result.try_reserve(1).map_err(|_| Error::Allocation)?;
+        result.try_reserve(1)?;
         result.push(value);
     }
     Ok(result)
@@ -247,11 +245,9 @@ pub(crate) fn get_text(
 ) -> Result<String, Error> {
     let length = u32::get(input)? as usize;
     bound(length, maximum, field)?;
-    let text = std::str::from_utf8(input.take(length)?).map_err(|_| Error::Utf8)?;
+    let text = std::str::from_utf8(input.take(length)?).map_err(Error::from)?;
     let mut value = String::new();
-    value
-        .try_reserve_exact(length)
-        .map_err(|_| Error::Allocation)?;
+    value.try_reserve_exact(length)?;
     value.push_str(text);
     Ok(value)
 }
@@ -267,9 +263,7 @@ pub(crate) fn get_blob(input: &mut Decoder<'_>) -> Result<Vec<u8>, Error> {
     bound(count, MAX_BYTES, "bytes")?;
     let bytes = input.take(count)?;
     let mut result = Vec::new();
-    result
-        .try_reserve_exact(count)
-        .map_err(|_| Error::Allocation)?;
+    result.try_reserve_exact(count)?;
     result.extend_from_slice(bytes);
     Ok(result)
 }
@@ -279,7 +273,7 @@ impl Wire for String {
         put_blob(self.as_bytes(), out)
     }
     fn get(input: &mut Decoder<'_>) -> Result<Self, Error> {
-        String::from_utf8(get_blob(input)?).map_err(|_| Error::Utf8)
+        String::from_utf8(get_blob(input)?).map_err(Error::from)
     }
 }
 

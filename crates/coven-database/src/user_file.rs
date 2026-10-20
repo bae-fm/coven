@@ -84,6 +84,10 @@ pub(crate) fn encode_path(path: &Path) -> Vec<u8> {
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(crate) fn read(
     db: &crate::sqlite::DatabaseConnection,
     schema: &crate::write_schema::WriteSchema,

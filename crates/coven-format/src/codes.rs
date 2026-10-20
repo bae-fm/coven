@@ -102,9 +102,7 @@ impl KeychainRestoreCode {
         let code = code.to_bytes()?;
         let size = FRAME_PREFIX_LEN + 4 + label.len() + 8 + 4 + code.len();
         let mut bytes = Zeroizing::new(Vec::new());
-        bytes
-            .try_reserve_exact(size)
-            .map_err(|_| Error::Allocation)?;
+        bytes.try_reserve_exact(size)?;
         bytes.push(17);
         bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
         bytes.extend_from_slice(&((size - FRAME_PREFIX_LEN) as u32).to_be_bytes());
@@ -223,9 +221,7 @@ fn storage(input: &mut Decoder<'_>) -> Result<SecretBytes, Error> {
     bound(len, MAX_STORAGE, "storage settings")?;
     let source = input.take(len)?;
     let mut bytes = Zeroizing::new(Vec::new());
-    bytes
-        .try_reserve_exact(len)
-        .map_err(|_| Error::Allocation)?;
+    bytes.try_reserve_exact(len)?;
     bytes.extend_from_slice(source);
     Ok(SecretBytes::new(std::mem::take(&mut *bytes)))
 }
@@ -244,9 +240,7 @@ fn encode_code(
         + storage.as_bytes().len();
     bound(size + 4, MAX_CODE_BYTES, "code bytes")?;
     let mut bytes = Zeroizing::new(Vec::new());
-    bytes
-        .try_reserve_exact(size)
-        .map_err(|_| Error::Allocation)?;
+    bytes.try_reserve_exact(size)?;
     bytes.push(kind);
     bytes.extend_from_slice(&FORMAT_VERSION.to_be_bytes());
     bytes.extend_from_slice(&((size - FRAME_PREFIX_LEN) as u32).to_be_bytes());
@@ -277,8 +271,7 @@ fn text_encode(prefix: &str, bytes: &[u8]) -> Result<Zeroizing<String>, Error> {
     bound(bytes.len() + 4, MAX_CODE_BYTES, "code bytes")?;
     let crc = Zeroizing::new(checksum(bytes).to_be_bytes());
     let mut text = Zeroizing::new(String::new());
-    text.try_reserve_exact(prefix.len() + ((bytes.len() + 4) * 8).div_ceil(5))
-        .map_err(|_| Error::Allocation)?;
+    text.try_reserve_exact(prefix.len() + ((bytes.len() + 4) * 8).div_ceil(5))?;
     text.push_str(prefix);
     let mut pending = Zeroizing::new(0u16);
     let mut bits = 0;
@@ -310,9 +303,7 @@ fn text_decode(prefix: &str, text: &str) -> Result<Zeroizing<Vec<u8>>, Error> {
         Rule::CodePadding,
     )?;
     let mut bytes = Zeroizing::new(Vec::new());
-    bytes
-        .try_reserve_exact(symbols.len() * 5 / 8)
-        .map_err(|_| Error::Allocation)?;
+    bytes.try_reserve_exact(symbols.len() * 5 / 8)?;
     let mut pending = Zeroizing::new(0u16);
     let mut bits = 0;
     for (offset, symbol) in symbols.iter().enumerate() {

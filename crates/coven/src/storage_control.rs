@@ -140,6 +140,10 @@ impl StorageConnections {
             match result {
                 Ok(()) if superseded() => {
                     let released = self.release(&mut live).await;
+                    #[expect(
+                        clippy::let_underscore_must_use,
+                        reason = "a failed release is published to the status, which carries it"
+                    )]
                     let _ = self.publish_released(released);
                     return;
                 }
@@ -180,6 +184,10 @@ impl StorageConnections {
                 }
             }
         }
+        #[expect(
+            clippy::let_underscore_must_use,
+            reason = "a failed release is published to the status, which carries it"
+        )]
         let _ = self.publish_released(Ok(()));
     }
 
@@ -197,7 +205,10 @@ impl StorageConnections {
                 return;
             }
             let released = owner.release(&mut live).await;
-            // No caller waits for stopping; the status carries a failure.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "no caller waits for stopping; the status carries a failure"
+            )]
             let _ = owner.publish_released(released);
         });
     }
@@ -205,7 +216,10 @@ impl StorageConnections {
     /// Request a pass while started.
     pub(crate) fn sync_now(&self) {
         if let Some(control) = self.control.lock().expect("loop control poisoned").as_ref() {
-            // A closed loop has nothing to sync; status reports why.
+            #[expect(
+                clippy::let_underscore_must_use,
+                reason = "a closed loop has nothing to sync; the status reports why"
+            )]
             let _ = control.sync_now();
         }
     }

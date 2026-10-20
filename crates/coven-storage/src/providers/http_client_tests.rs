@@ -47,6 +47,10 @@ async fn read_head(socket: &mut TcpStream) -> Vec<u8> {
 }
 
 /// A server that answers with a four-byte body, sending each byte when told.
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the test server only waits for the client to close"
+)]
 async fn dribbling_download() -> (String, mpsc::UnboundedSender<()>) {
     let (listener, url) = listener().await;
     let (send, mut sends) = mpsc::unbounded_channel::<()>();
@@ -113,6 +117,10 @@ async fn a_download_that_stops_fails_after_the_stall_window() {
 
 /// A server that reads the request body and reports each part it receives.
 /// It answers once the body ends.
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the test server only waits for the client to close"
+)]
 async fn counting_upload() -> (String, mpsc::UnboundedReceiver<usize>) {
     let (listener, url) = listener().await;
     let (report, reports) = mpsc::unbounded_channel();
@@ -209,6 +217,10 @@ async fn an_upload_that_stops_fails_after_the_stall_window() {
 /// Connecting and waiting for the reply count too: a server that never
 /// answers fails the request after the window.
 #[tokio::test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the test server only waits for the client to close"
+)]
 async fn a_request_with_no_reply_fails_after_the_stall_window() {
     let mut time = Time::new();
     let client = time.client();

@@ -25,6 +25,10 @@ pub(crate) fn retain(db: &DatabaseConnection, header: &WriteHeaderFrame) -> Resu
     Ok(())
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(crate) fn read(
     db: &DatabaseConnection,
     id: WriteId,

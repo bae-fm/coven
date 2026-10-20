@@ -573,6 +573,10 @@ pub(crate) async fn json(
 ) -> Result<Value, StorageError> {
     Ok(json_response(provider, response).await?.0)
 }
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the response is kept as the cause; the parse error adds nothing to it"
+)]
 pub(crate) async fn json_response(
     provider: CloudProvider,
     response: Response,
@@ -616,6 +620,10 @@ pub(crate) fn timestamp(
 }
 /// A provider's date with every returned digit; a time before the Unix epoch
 /// is a protocol error.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a time before the epoch is the protocol failure this names"
+)]
 pub(crate) fn storage_time(
     time: aws_sdk_s3::primitives::DateTime,
 ) -> Result<coven_format::value::StorageTime, StorageError> {
@@ -637,7 +645,7 @@ pub(crate) fn endpoint(
     let mut url = url::Url::parse(base)
         .map_err(|error| StorageFailure::InvalidConfiguration.with_source(error))?;
     url.path_segments_mut()
-        .map_err(|_| {
+        .map_err(|()| {
             StorageFailure::InvalidConfiguration.with_source("provider endpoint cannot hold paths")
         })?
         .pop_if_empty()

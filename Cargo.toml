@@ -90,6 +90,10 @@ new_without_default = "allow"
 # indirection (Appendix F.5).
 large_enum_variant = "allow"
 result_large_err = "allow"
+# A dropped Result or error is how a failure's cause disappears. Each site
+# that discards one on purpose says why with `#[expect(..., reason)]`.
+let_underscore_must_use = "deny"
+map_err_ignore = "deny"
 
 [profile.dev]
 incremental = true

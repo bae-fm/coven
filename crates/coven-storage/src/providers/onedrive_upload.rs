@@ -45,6 +45,10 @@ pub(super) fn native_code(error: &StorageError, code: &str) -> bool {
 }
 
 /// Earliest byte the provider still needs after accepting a sequential fragment.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "the response is kept as the cause; the parse error adds nothing to it"
+)]
 pub(super) fn next_offset(
     ranges: &Value,
     confirmed: u64,
@@ -580,6 +584,10 @@ impl OneDriveStorage {
             self.delete_temporary(publication, session).await,
         )
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "the response is kept as the cause; the parse error adds nothing to it"
+    )]
     async fn progress(
         &self,
         session: &mut UploadSession,

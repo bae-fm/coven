@@ -700,6 +700,10 @@ async fn committed_slots_release_their_received_and_local_claim_bytes() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the test checks what the attempt leaves behind, not its outcome"
+)]
 async fn writes_claimed_after_their_device_removal_are_consumed_and_refused() {
     let group = Group::new();
     let ana = group.device(1).await;

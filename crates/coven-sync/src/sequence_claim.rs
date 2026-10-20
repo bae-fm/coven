@@ -338,6 +338,10 @@ impl SequenceSync {
         Ok(())
     }
 
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a send fails only when the reader is gone, which BrokenPipe names"
+    )]
     pub(crate) async fn send_writes(
         &self,
         session: &mut Session,
@@ -462,7 +466,15 @@ impl SequenceSync {
                     })
                     .await;
                 if let Err(error) = result {
-                    let _ = send.send(Err(error)).await;
+                    // The reader stops only after its own failure or a
+                    // cancel; the reading failure then goes to the log.
+                    if let Err(tokio::sync::mpsc::error::SendError(Err(error))) =
+                        send.send(Err(error)).await
+                    {
+                        tracing::warn!(
+                            "reading writes to claim failed after the claim stopped: {error}"
+                        );
+                    }
                 }
             };
             let author = member.clone();

@@ -244,6 +244,10 @@ fn sdk_transport_failures_remain_retryable_and_name_their_redacted_causes() {
 /// A certificate the device does not trust fails the request with a message
 /// naming the certificate, and nothing of the request but its host.
 #[tokio::test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the client refuses the certificate: every handshake fails"
+)]
 async fn a_tls_failure_names_the_certificate() {
     use tokio_rustls::rustls::{
         pki_types::{pem::PemObject, CertificateDer, PrivateKeyDer},

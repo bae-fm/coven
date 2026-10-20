@@ -127,6 +127,10 @@ enum DecodedCode {
     Invite(InviteCode),
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a code that does not decode is Invalid, whichever field failed"
+)]
 fn decode(text: &str) -> Result<(DecodedCode, StorageConfig), CodeError> {
     if text.starts_with("CVR1-") {
         let code = RestoreCode::from_text(text).map_err(|_| CodeError::Invalid)?;

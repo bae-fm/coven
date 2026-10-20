@@ -158,6 +158,10 @@ pub(crate) fn visit<E: From<DbError>>(
 }
 
 /// A device's member, as the counted membership records it.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub(crate) fn member(
     db: &DatabaseConnection,
     device: DeviceId,

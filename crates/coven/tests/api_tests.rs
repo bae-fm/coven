@@ -18,7 +18,8 @@ impl Clock for AppClock {
 
 #[test]
 fn appendix_e_types_and_variants_are_available_at_the_crate_root() {
-    let _: Result<ObjectPath, PathError> = ObjectPath::parse("invalid");
+    let parsed: Result<ObjectPath, PathError> = ObjectPath::parse("invalid");
+    assert!(parsed.is_err());
     let clock: &dyn Clock = &AppClock;
     assert_eq!(clock.elapsed(), Duration::ZERO);
     let stored_at: StorageTime = StorageTime::new(1, 2).unwrap();

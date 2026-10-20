@@ -424,6 +424,10 @@ async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "a send fails only when the receiver is gone, which this names"
+)]
 async fn a_fill_preserves_eager_cancellation_and_retries_network_failures() {
     let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
     let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;

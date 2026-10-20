@@ -748,6 +748,10 @@ mod fixture_mutations {
     }
 
     #[test]
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "the mutations check that decoding never panics; any result is fine"
+    )]
     fn every_sequence_envelope_fixture_decodes_all_truncations_and_bit_changes() {
         for text in [
             include_str!("../fixtures/sealed-admin.hex"),

@@ -65,6 +65,10 @@ pub enum DrainOutcome {
 }
 /// Project the committed queue: a recorded provider session's confirmed
 /// bytes are progress, and a file without one is waiting (E7).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 pub fn upload_queue_from_state(state: UploadQueueState) -> CovenResult<UploadQueue> {
     let files = state
         .uploads
@@ -182,6 +186,10 @@ impl FilesInner {
     /// Send the file to the path and key its attaching write fixed. Confirmed
     /// storage retires the queue row and changes no app row (§17.7). Returns
     /// false when paused between parts.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a size whose encrypted layout overflows fails the integrity check"
+    )]
     pub(super) async fn upload(&self, item: &FileUpload) -> Result<bool, TransferError> {
         let coven_format::file_reference::FileReference { device, id, key } =
             item.file.reference().map_err(FileReadError::from)?;
@@ -289,6 +297,10 @@ struct FileTransfer<'a> {
     total: u64,
 }
 impl FileTransfer<'_> {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a value past the target integer breaks the named invariant"
+    )]
     async fn read_encrypted(&self, offset: u64, length: usize) -> Result<Vec<u8>, TransferError> {
         let header = FileHeader::new(self.item.file.plaintext_size());
         let end = offset

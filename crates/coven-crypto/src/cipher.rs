@@ -58,7 +58,8 @@ pub(crate) fn open(
     }
     XChaCha20Poly1305::new(key.into())
         .decrypt(nonce.into(), Payload { msg: sealed, aad })
-        .map_err(|_| CryptoError::Authentication)
+        // AEAD's error is a unit: authentication failed, and nothing more.
+        .map_err(|chacha20poly1305::aead::Error| CryptoError::Authentication)
 }
 
 pub(crate) fn seal_random(
@@ -78,8 +79,9 @@ pub(crate) fn open_random(
     aad: &[u8],
     sealed: &[u8],
 ) -> Result<Vec<u8>, CryptoError> {
-    let (nonce, ciphertext) = sealed.split_at_checked(24).ok_or(CryptoError::Malformed)?;
-    let nonce = nonce.try_into().map_err(|_| CryptoError::Malformed)?;
+    let (nonce, ciphertext) = sealed
+        .split_first_chunk::<24>()
+        .ok_or(CryptoError::Malformed)?;
     open(key, nonce, aad, ciphertext)
 }
 

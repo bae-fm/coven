@@ -257,6 +257,10 @@ impl PartDecoder {
 
 /// Decode a plaintext upload-queue value into the database's in-memory write.
 /// Stream consumers can instead use [`WriteHeaderFrame`] and [`PartDecoder`].
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a part longer than usize cannot be in these bytes: they are truncated"
+)]
 pub fn decode_plaintext(bytes: &[u8]) -> Result<WriteRecord, Error> {
     let length = frame_length(bytes)?;
     let header = WriteHeaderFrame::decode(bytes.get(..length).ok_or(Error::Truncated)?)?;

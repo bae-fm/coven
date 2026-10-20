@@ -194,6 +194,10 @@ impl StoreKeychain {
 
     /// The installation id kept outside device backups (§19.3). Reading it does
     /// not unlock any member or store key.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored device id fails only by not being 8 bytes"
+    )]
     pub fn device_id(&self) -> Result<Option<DeviceId>, KeyError> {
         self.read(DEVICE_ID_ENTRY)?
             .map(|bytes| {
@@ -270,6 +274,10 @@ impl StoreKeychain {
     }
 
     /// The app secret, or `None` if it was never set (E11).
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a host secret fails only by not being UTF-8, which Encoding names"
+    )]
     pub fn host_secret(&self, name: &str) -> Result<Option<String>, KeyError> {
         self.read(&host_secret_entry(name))?
             .map(|bytes| {
@@ -340,6 +348,10 @@ fn host_secret_entry(name: &str) -> String {
 // Values live in independent native entries and have no coven framing overhead.
 const HOST_SECRET_NAMES_PREFIX: &[u8] = b"CVHN\x01";
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a name list fails only by an invalid length or name: Encoding"
+)]
 fn decode_host_secret_names(mut bytes: &[u8]) -> Result<BTreeSet<&str>, MaterialError> {
     wire::prefix(&mut bytes, HOST_SECRET_NAMES_PREFIX)?;
     let mut names = BTreeSet::new();

@@ -23,6 +23,10 @@ mod tests;
 
 impl FileReference {
     /// Decode canonical decimal device, UUID and lowercase hexadecimal key.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a malformed reference is invalid as a whole"
+    )]
     pub fn decode(text: &str) -> Result<Self, Error> {
         let invalid = || Error::Invalid {
             field: "file reference",

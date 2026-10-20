@@ -113,6 +113,10 @@ struct AuthorizeRequest {
 }
 
 impl AuthorizeRequest {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a redirect or endpoint that does not parse is InvalidRedirect"
+    )]
     fn new(
         client_id: &str,
         endpoint: &str,
@@ -348,6 +352,10 @@ impl OAuthClients {
     }
     /// The authorization code of a checked redirect: its origin and path, its
     /// state, and either a code or the provider's error.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a redirect that does not parse is InvalidRedirect"
+    )]
     fn redirect_code(
         provider: CloudProvider,
         request: &AuthorizeRequest,

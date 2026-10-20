@@ -59,6 +59,10 @@ impl Read for FloorPlaintext {
     }
 }
 impl SequenceSync {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a copy count past u32 cannot be framed"
+    )]
     pub(super) async fn capture_floor(
         &self,
         capture: &FloorCapture,

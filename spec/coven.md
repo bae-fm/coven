@@ -6654,6 +6654,11 @@ used to pass collaborators; they are passed by name.
   provider request ran. Every object or operation that can't advance has a typed pending
   record, including maintenance and prerequisites (§19.1, api.md E5). A
   persisted reason never replaces its category with text.
+- **Nothing drops an error unsaid.** Clippy refuses a discarded `Result` and a
+  `map_err` that ignores its error. A site that discards one on purpose, such as
+  a send to a receiver that is gone, says why in its `expect` attribute. The
+  functions that turn errors into pending reasons name every variant, so a new
+  variant can't fall into a catch-all.
 - **Files.** A source file holds at most 1,000 lines, and its tests live beside it
   in `<name>_tests.rs`.
 - **Fakes.** Crates offer shared fakes through `test-utils` where needed, such as

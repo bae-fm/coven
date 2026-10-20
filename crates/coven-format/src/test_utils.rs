@@ -595,6 +595,10 @@ pub fn excluded_loss() -> crate::loss::Loss {
     }
 }
 /// A plaintext queue value produced by the format's queue encoder.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a length past usize cannot be allocated"
+)]
 pub fn write_plaintext(record: &WriteRecord) -> Result<Vec<u8>, crate::Error> {
     let encoder = crate::write_stream::WriteEncoder::new(record)?;
     let length =

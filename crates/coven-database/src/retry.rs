@@ -151,6 +151,10 @@ struct RawRow {
 }
 
 impl RawRow {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     fn decode(self) -> Result<(RetrySubject, RetryWait), DbError> {
         let subject = match (
             self.scope.as_deref(),
@@ -228,6 +232,10 @@ pub(crate) fn find(
 
 /// `W` is stored in whole milliseconds, rounded up so a persisted wait never
 /// shortens the one the session armed.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a value past the target integer breaks the named invariant"
+)]
 fn millis(wait: &RetryWait) -> Result<i64, DbError> {
     i64::try_from(wait.wait.as_nanos().div_ceil(1_000_000)).map_err(|_| DbError::Invariant {
         what: "a retry wait fits SQLite's integer",

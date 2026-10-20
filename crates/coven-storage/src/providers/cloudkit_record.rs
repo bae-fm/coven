@@ -59,6 +59,10 @@ impl Record {
             StorageFailure::Protocol.with_source(format!("CloudKit record omitted {key}"))
         })
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "an object of another class is a protocol failure; it is provider data"
+    )]
     pub(super) fn optional_text(&self, key: &str) -> Result<Option<String>, StorageError> {
         objc2::rc::autoreleasepool(|_| {
             match unsafe { self.0.objectForKey(&NSString::from_str(key)) } {
@@ -163,6 +167,10 @@ impl Record {
     }
     /// Read the staged file while still in the fetch callback. Memory is bounded
     /// even if the server's asset disagrees with its declared size.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "an object of another class is a protocol failure; it is provider data"
+    )]
     pub(super) fn asset_bytes(&self, files: &AssetFiles) -> Result<Vec<u8>, StorageError> {
         objc2::rc::autoreleasepool(|_| {
             let value = unsafe { self.0.objectForKey(&NSString::from_str("data")) }
@@ -372,6 +380,10 @@ pub(super) fn account_name(name: Option<String>) -> Result<String, StorageError>
 
 /// The item errors of a CloudKit `partialFailure`, or None when `error` is
 /// another failure. A partial failure without readable items is malformed.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "an object of another class is a protocol failure; it is provider data"
+)]
 fn partial_items(error: &NSError) -> Option<Result<Vec<Retained<NSError>>, StorageFailure>> {
     if !in_cloudkit_domain(error) || CKErrorCode(error.code()) != CKErrorCode::PartialFailure {
         return None;

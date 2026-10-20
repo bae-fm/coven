@@ -57,6 +57,10 @@ async fn an_empty_post_or_put_states_its_zero_length() {
 /// S3 shares the stall window: a GET whose body stops arriving fails once 61
 /// seconds pass without a byte.
 #[tokio::test]
+#[expect(
+    clippy::let_underscore_must_use,
+    reason = "the test server only waits for the client to close"
+)]
 async fn an_s3_download_that_stops_fails_after_the_stall_window() {
     use http_body::Body as _;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();

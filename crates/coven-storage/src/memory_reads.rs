@@ -80,6 +80,10 @@ struct MemoryBody {
 
 #[async_trait]
 impl ObjectBody for MemoryBody {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a send fails only when the receiver is gone, which this names"
+    )]
     async fn read(&mut self, output: &mut [u8]) -> Result<usize, StorageError> {
         let received = self.position - self.start;
         let end = match self.failure {
@@ -125,6 +129,10 @@ impl ObjectBody for MemoryBody {
 }
 
 impl MemoryProvider {
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a send fails only when the receiver is gone, which this names"
+    )]
     pub(super) async fn stream_recorded(
         &self,
         path: &ObjectPath,

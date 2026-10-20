@@ -20,6 +20,10 @@ impl OAuthPresenter for DesktopOAuthPresenter {
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a redirect that does not parse is InvalidRedirect"
+)]
 async fn receive_redirect(listener: tokio::net::TcpListener) -> Result<SecretText, OAuthError> {
     loop {
         let (mut socket, _) = listener.accept().await?;

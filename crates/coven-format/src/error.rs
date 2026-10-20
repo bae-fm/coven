@@ -134,6 +134,28 @@ impl std::error::Error for Error {
     }
 }
 
+/// A failed reservation is `Allocation`. Its layout is not kept: the request
+/// is within the format's own bounds, so only the memory itself was missing.
+impl From<std::collections::TryReserveError> for Error {
+    fn from(_: std::collections::TryReserveError) -> Self {
+        Self::Allocation
+    }
+}
+
+/// Text that isn't UTF-8 is `Utf8`, wherever its first bad byte is.
+impl From<std::str::Utf8Error> for Error {
+    fn from(_: std::str::Utf8Error) -> Self {
+        Self::Utf8
+    }
+}
+
+/// Text that isn't UTF-8 is `Utf8`, wherever its first bad byte is.
+impl From<std::string::FromUtf8Error> for Error {
+    fn from(_: std::string::FromUtf8Error) -> Self {
+        Self::Utf8
+    }
+}
+
 pub(crate) fn require(ok: bool, field: &'static str, rule: Rule) -> Result<(), Error> {
     if ok {
         Ok(())

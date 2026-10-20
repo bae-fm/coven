@@ -209,6 +209,10 @@ fn sort_name(bytes: &mut Vec<u8>, name: &str) {
 fn damaged() -> rusqlite::Error {
     rusqlite::Error::UserFunctionError(Box::new(DbError::DamagedDatabase))
 }
+#[expect(
+    clippy::map_err_ignore,
+    reason = "stored bytes that fail to decode are damage, which damaged() names"
+)]
 fn decoded<T>(result: Result<T, coven_format::Error>) -> rusqlite::Result<T> {
     result.map_err(|_| damaged())
 }

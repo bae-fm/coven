@@ -6,6 +6,10 @@ pub struct RowKey(pub(crate) Vec<rusqlite::types::Value>);
 
 impl RowKey {
     /// A merge row's encoded key as SQL values.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     pub(crate) fn decode(key: &[u8]) -> Result<Self, crate::DbError> {
         Ok(Self(
             coven_format::key::decode_key(key)

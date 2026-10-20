@@ -118,12 +118,13 @@ impl CircleKey {
 
     /// Check the hash committed by an authorized introduction before accepting this key.
     pub fn check_hash(&self, expected: &[u8; 32]) -> Result<(), MaterialError> {
-        self.key
-            .check_hash(expected)
-            .map_err(|_| MaterialError::CircleKeyConflict {
+        if !bool::from(self.key.hash().ct_eq(expected)) {
+            return Err(MaterialError::CircleKeyConflict {
                 circle: self.circle,
                 key: self.id(),
-            })
+            });
+        }
+        Ok(())
     }
 
     /// Derive separate encryption and authorship keys.

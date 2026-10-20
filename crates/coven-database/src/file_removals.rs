@@ -43,6 +43,10 @@ pub(crate) struct Released {
 /// `active` came from, so a reservation still holds its name or its
 /// publication has committed and removed the record. A recorded name that a
 /// row still references is a failure, and its bytes stay.
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 fn pending(
     db: &DatabaseConnection,
     active: &BTreeSet<FileName>,
@@ -67,6 +71,10 @@ fn pending(
     Ok((released, failures))
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 fn recorded_cache(
     db: &DatabaseConnection,
     paths: &[String],

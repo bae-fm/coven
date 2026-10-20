@@ -117,6 +117,10 @@ pub(crate) fn validate(
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a stored value that won't convert or decode is DamagedDatabase"
+)]
 fn current(
     db: &DatabaseConnection,
     schema: &WriteSchema,
@@ -210,6 +214,10 @@ impl FileRefJournal for FileRef {
         }
         Ok(coven_format::key::encode_key(&fields)?)
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     fn decode(bytes: &[u8]) -> Result<Self, DbError> {
         let fields = coven_format::key::decode_key(bytes)?;
         let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location, setters @ ..] =

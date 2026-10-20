@@ -424,6 +424,10 @@ impl UploadedFile {
             Ok(())
         }
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a size past the target integer is TooLarge, which names the field and size"
+    )]
     pub(crate) async fn range(&self, offset: u64, len: u64) -> Result<Vec<u8>, FileReadError> {
         self.owner.check_open()?;
         self.check_range(offset, len)?;
@@ -461,6 +465,10 @@ impl UploadedFile {
     }
     // Reads of one file coalesce; independent files can fetch concurrently.
     // The shared cache guard excludes eviction and store close during a fetch.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a chunk the file size's layout lacks is the disagreement Integrity names"
+    )]
     async fn chunks(
         &self,
         first: u64,

@@ -127,6 +127,10 @@ impl ObjectInput {
 
     /// The observation already retained at `path`, if any, with whatever of
     /// its bytes are retained.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     pub(crate) async fn retained(
         database: &Database,
         path: &ObjectPath,
@@ -150,6 +154,10 @@ impl ObjectInput {
     pub(crate) async fn received(&self) -> Result<bool, SyncError> {
         Ok(self.retained.received().await?)
     }
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     pub(crate) async fn observe(
         database: &Database,
         object: &StoredObject,

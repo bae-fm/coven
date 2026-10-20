@@ -15,6 +15,10 @@ pub struct SigningKey([u8; 32]);
 
 impl SigningKey {
     /// Validate a public signing key, refusing invalid and weak Ed25519 points.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "Ed25519's key error is opaque by design; InvalidSigningKey is all it says"
+    )]
     pub fn from_bytes(bytes: [u8; 32]) -> Result<Self, CryptoError> {
         let key = VerifyingKey::from_bytes(&bytes).map_err(|_| CryptoError::InvalidSigningKey)?;
         if key.is_weak() {
@@ -29,6 +33,10 @@ impl SigningKey {
     }
 
     /// Verify a detached signature against this public key (§12).
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "Ed25519's verification error is opaque by design; Signature is all it says"
+    )]
     pub fn verify(&self, message: &[u8], signature: &Signature) -> Result<(), CryptoError> {
         let key = VerifyingKey::from_bytes(&self.0)
             .expect("SigningKey contains a validated Ed25519 public key");

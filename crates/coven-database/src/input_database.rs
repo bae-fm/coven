@@ -221,6 +221,10 @@ impl InputDatabase {
     }
 }
 
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a size past the target integer is TooLarge, which names the field and size"
+)]
 fn sql_offset(value: u64) -> Result<i64, DbError> {
     i64::try_from(value).map_err(|_| DbError::TooLarge {
         field: "retained input bytes",
@@ -581,6 +585,10 @@ impl RetainedInput {
     }
 
     /// The checked file evidence of these bytes, if any (§17.8).
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a stored value that won't convert or decode is DamagedDatabase"
+    )]
     pub async fn files(&self) -> Result<Option<FileEvidence>, DbError> {
         self.read(|db, id| {
             let (complete, schema): (Option<bool>, Option<u32>) = db.query_row(

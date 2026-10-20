@@ -28,9 +28,7 @@ impl<I: Iterator<Item = Result<Vec<u8>, Error>>> PlaintextChunks<I> {
 
     fn chunk(&mut self) -> Result<Vec<u8>, Error> {
         let mut chunk = Vec::new();
-        chunk
-            .try_reserve_exact(CHUNK_SIZE)
-            .map_err(|_| Error::Allocation)?;
+        chunk.try_reserve_exact(CHUNK_SIZE)?;
         while chunk.len() < CHUNK_SIZE {
             if self.offset == self.frame.len() {
                 match self.frames.next() {
@@ -113,9 +111,7 @@ impl FrameDecoder {
                 return Ok(None);
             }
             let count = (target - self.bytes.len()).min(input.len());
-            self.bytes
-                .try_reserve_exact(count)
-                .map_err(|_| Error::Allocation)?;
+            self.bytes.try_reserve_exact(count)?;
             self.bytes.extend_from_slice(&input[..count]);
             *input = &input[count..];
             if let Some(remaining) = &mut self.remaining {
