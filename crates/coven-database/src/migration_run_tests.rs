@@ -53,14 +53,19 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
                 "an addition read another table's merge state: {loads:?}"
             );
         }
-        let statements = db.inspect_writer(|db| db.fullscan_statements());
+        let statements = db.inspect_writer(|db| db.profiled_statements());
         assert!(
             !statements
                 .iter()
-                .any(|(sql, _)| sql.contains("FROM main.\"local_cache\"")),
+                .any(|statement| statement.sql.contains("FROM main.\"local_cache\"")),
             "local rows must never be snapshotted"
         );
-        for (statement, rows) in &statements {
+        for crate::sqlite::tests::ProfiledStatement {
+            sql: statement,
+            fullscan_steps: rows,
+            ..
+        } in &statements
+        {
             if [
                 "_coven_rows",
                 "_coven_cells",
@@ -80,7 +85,7 @@ async fn migrations_leave_unrelated_merge_rows_unloaded_in_a_ten_thousand_row_st
             assert!(
                 !statements
                     .iter()
-                    .any(|(sql, _)| sql.contains("_coven_migration_before_")),
+                    .any(|statement| statement.sql.contains("_coven_migration_before_")),
                 "an addition must copy no rows: {statements:?}"
             );
         }

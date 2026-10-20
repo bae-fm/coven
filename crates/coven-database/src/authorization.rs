@@ -267,6 +267,14 @@ impl SqlAuthorization {
         reads.completed.clone()
     }
 
+    /// Whether the authorizer is recording what statements read or change.
+    /// It learns that only while a statement is prepared, so such a
+    /// statement must not come from the cache.
+    pub(crate) fn recording(&self) -> bool {
+        let state = self.state.lock().expect("SQL authorization lock poisoned");
+        state.reads.is_some() || state.columns.is_some() || state.mutations.is_some()
+    }
+
     pub(crate) fn begin_read_statement(&self) {
         if let Some(reads) = &mut self
             .state

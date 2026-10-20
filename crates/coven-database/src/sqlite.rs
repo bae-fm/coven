@@ -37,6 +37,10 @@ use crate::{
     SyncedTable,
 };
 
+/// Coven's statements kept prepared per connection: a local write runs about
+/// a hundred distinct ones, which a smaller cache would evict before reuse.
+const STATEMENT_CACHE: usize = 256;
+
 pub(crate) struct DatabaseConnection {
     #[cfg(any(test, feature = "test-utils"))]
     work: std::cell::RefCell<Option<crate::test_utils::WorkCounter>>,
@@ -51,7 +55,7 @@ pub(crate) struct DatabaseConnection {
     #[cfg(any(test, feature = "test-utils"))]
     write_checkpoint: std::cell::RefCell<Option<crate::test_utils::WriteCheckpointObserver>>,
     #[cfg(test)]
-    scans: std::sync::Mutex<Vec<(String, i32)>>,
+    scans: std::sync::Mutex<Vec<tests::ProfiledStatement>>,
     #[cfg(test)]
     merge_loads: std::sync::Mutex<BTreeMap<String, usize>>,
     /// Each queued write's record and judgement, also of a refused one, for
@@ -108,6 +112,7 @@ impl DatabaseConnection {
         // never a caller-selected SQLite URI or in-memory database.
         let connection = Connection::open_with_flags(path, flags | OpenFlags::SQLITE_OPEN_NO_MUTEX)
             .map_err(opening_error)?;
+        connection.set_prepared_statement_cache_capacity(STATEMENT_CACHE);
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DML, false)?;
         connection.set_db_config(rusqlite::config::DbConfig::SQLITE_DBCONFIG_DQS_DDL, false)?;
         connection.create_scalar_function(
@@ -446,7 +451,9 @@ impl DatabaseConnection {
         params: P,
     ) -> Result<usize, DbError> {
         let _scope = self.authorization.internal();
-        let changed = self.connection.execute(sql, params)?;
+        let changed = self.with_statement(sql, |statement| {
+            statement.execute(params).map_err(DbError::from)
+        })?;
         self.bound_stream_cache()?;
         Ok(changed)
     }
@@ -459,10 +466,12 @@ impl DatabaseConnection {
     ) -> Result<T, DbError> {
         let _scope = self.authorization.internal();
         self.authorization.begin_read_statement();
-        let result = self.connection.query_row(sql, params, map);
+        let result = self.with_statement(sql, |statement| {
+            statement.query_row(params, map).map_err(DbError::from)
+        });
         self.authorization
             .record_statement(&self.connection, None)?;
-        result.map_err(Into::into)
+        result
     }
 
     pub(crate) fn query<T, P: Params>(
@@ -488,18 +497,36 @@ impl DatabaseConnection {
     ) -> Result<(), E> {
         let _scope = self.authorization.internal();
         self.authorization.begin_read_statement();
-        let result = (|| {
-            let mut statement = self.connection.prepare(sql).map_err(DbError::from)?;
+        let result = self.with_statement(sql, |statement| {
             let mut rows = statement.query(params).map_err(DbError::from)?;
             while let Some(row) = rows.next().map_err(DbError::from)? {
                 visit(row)?;
             }
             Ok(())
-        })();
+        });
         self.authorization
             .record_statement(&self.connection, None)
             .map_err(DbError::from)?;
         result
+    }
+
+    /// Run coven's own SQL on the connection's cached statement, parsed once per
+    /// connection. The authorizer records reads only while a statement is
+    /// prepared, so while it records, the statement is prepared afresh.
+    fn with_statement<T, E: From<DbError>>(
+        &self,
+        sql: &str,
+        run: impl FnOnce(&mut rusqlite::Statement<'_>) -> Result<T, E>,
+    ) -> Result<T, E> {
+        if self.authorization.recording() {
+            run(&mut self.connection.prepare(sql).map_err(DbError::from)?)
+        } else {
+            let mut statement = self.connection.prepare_cached(sql).map_err(DbError::from)?;
+            // The statement profile reports each execution's own full scans.
+            #[cfg(test)]
+            statement.reset_status(rusqlite::StatementStatus::FullscanStep);
+            run(&mut statement)
+        }
     }
 
     pub(crate) fn migration_targets(&self, sql: &str) -> rusqlite::Result<BTreeSet<String>> {
@@ -970,4 +997,4 @@ fn opening_error(error: rusqlite::Error) -> DbError {
 
 #[cfg(test)]
 #[path = "sqlite_tests.rs"]
-mod tests;
+pub(crate) mod tests;

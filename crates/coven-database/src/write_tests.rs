@@ -521,18 +521,18 @@ async fn concurrent_calls_share_the_writer_and_allocate_a_gapless_sequence() {
 }
 
 fn assert_indexed(database: &Database) {
-    let statements = database.inspect_writer(|db| db.fullscan_statements());
+    let statements = database.inspect_writer(|db| db.profiled_statements());
     assert!(!statements.is_empty(), "the whole write must be traced");
     let mut scans = std::collections::BTreeMap::<&str, i64>::new();
-    for (sql, steps) in &statements {
-        if *steps != 0 {
-            *scans.entry(sql).or_default() += i64::from(*steps);
+    for statement in &statements {
+        if statement.fullscan_steps != 0 {
+            *scans.entry(&statement.sql).or_default() += i64::from(statement.fullscan_steps);
         }
     }
     assert_eq!(
         statements
             .iter()
-            .map(|(_, steps)| i64::from(*steps))
+            .map(|statement| i64::from(statement.fullscan_steps))
             .sum::<i64>(),
         0,
         "full scans: {scans:?}"
@@ -660,7 +660,7 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
     // Each play follows another, so both measured writes do the same work.
     play(2).await.unwrap();
     play(3).await.unwrap();
-    let alone = db.inspect_writer(|db| db.fullscan_statements()).len();
+    let alone = db.inspect_writer(|db| db.profiled_statements()).len();
     // The play's track and person gain other children. Their removal cannot
     // change when the play's position does, so the write reads none of them.
     db.write(|context| {
@@ -681,9 +681,50 @@ async fn an_update_does_no_work_for_its_parents_other_children() {
     play(4).await.unwrap();
     play(5).await.unwrap();
     assert_eq!(
-        db.inspect_writer(|db| db.fullscan_statements()).len(),
+        db.inspect_writer(|db| db.profiled_statements()).len(),
         alone
     );
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
+async fn a_write_reuses_the_statements_earlier_writes_prepared() {
+    let store = TestStore::new();
+    let db = store
+        .builder(notes(), vec![crate::Migration::addition(1, "notes", NOTES)])
+        .open()
+        .await
+        .unwrap();
+    sql(&db, "INSERT INTO notes VALUES('42','Groceries','')")
+        .await
+        .unwrap();
+    sql(&db, "UPDATE notes SET body='milk' WHERE id='42'")
+        .await
+        .unwrap();
+    sql(&db, "UPDATE notes SET body='eggs' WHERE id='42'")
+        .await
+        .unwrap();
+    // A statement run for the first time was parsed for this write. Only the
+    // app's statement and SQLite's own transaction control and session
+    // queries may be; coven's statements were parsed by the earlier writes.
+    let parsed: Vec<_> = db
+        .inspect_writer(|db| db.profiled_statements())
+        .into_iter()
+        .filter(|statement| statement.runs == 1)
+        .map(|statement| statement.sql)
+        .filter(|sql| {
+            !(sql.starts_with("PRAGMA ")
+                || [
+                    "BEGIN IMMEDIATE",
+                    "COMMIT",
+                    "SAVEPOINT changeset",
+                    "RELEASE changeset",
+                ]
+                .contains(&sql.as_str())
+                || sql.contains(" FROM 'main'.'"))
+        })
+        .collect();
+    assert_eq!(parsed, ["UPDATE notes SET body='eggs' WHERE id='42'"]);
     db.close().await.unwrap();
 }
 

@@ -292,9 +292,14 @@ async fn opening_ten_thousand_independent_rows_does_not_scan_app_tables() {
         .open()
         .await
         .unwrap();
-    let statements = db.inspect_writer(|writer| writer.fullscan_statements());
+    let statements = db.inspect_writer(|writer| writer.profiled_statements());
     assert!(!statements.is_empty(), "the open must be traced");
-    for (statement, steps) in statements {
+    for crate::sqlite::tests::ProfiledStatement {
+        sql: statement,
+        fullscan_steps: steps,
+        ..
+    } in statements
+    {
         // Metadata enumeration may scan sqlite_schema and pragma virtual tables.
         if steps > 0 {
             assert!(

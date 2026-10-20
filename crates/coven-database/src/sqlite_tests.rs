@@ -6,7 +6,17 @@ use crate::{
 use coven_foundation::id_source::CircleId;
 
 thread_local! {
-    static SCANS: std::cell::RefCell<Vec<(String, i32)>> = const { std::cell::RefCell::new(Vec::new()) };
+    static SCANS: std::cell::RefCell<Vec<ProfiledStatement>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// One statement execution the profile saw.
+#[derive(Clone, Debug)]
+pub(crate) struct ProfiledStatement {
+    pub(crate) sql: String,
+    /// Full-scan steps of this execution alone.
+    pub(crate) fullscan_steps: i32,
+    /// Executions of this prepared statement so far, this one included.
+    pub(crate) runs: i32,
 }
 
 pub(crate) struct StatementProfile<'a>(&'a DatabaseConnection);
@@ -57,10 +67,12 @@ impl DatabaseConnection {
             Some(|event| {
                 if let rusqlite::trace::TraceEvent::Profile(statement, _) = event {
                     SCANS.with(|scans| {
-                        scans.borrow_mut().push((
-                            statement.sql().into_owned(),
-                            statement.get_status(rusqlite::StatementStatus::FullscanStep),
-                        ))
+                        scans.borrow_mut().push(ProfiledStatement {
+                            sql: statement.sql().into_owned(),
+                            fullscan_steps: statement
+                                .get_status(rusqlite::StatementStatus::FullscanStep),
+                            runs: statement.get_status(rusqlite::StatementStatus::Run),
+                        })
                     });
                 }
             }),
@@ -68,7 +80,7 @@ impl DatabaseConnection {
         StatementProfile(self)
     }
 
-    pub(crate) fn fullscan_statements(&self) -> Vec<(String, i32)> {
+    pub(crate) fn profiled_statements(&self) -> Vec<ProfiledStatement> {
         self.scans.lock().unwrap().clone()
     }
 
@@ -550,7 +562,7 @@ async fn audience_validation_looks_up_children_only_when_the_parent_moves() {
             let profile=writer.profile_statements();
             let changes=crate::write_record::changes(writer,schema,&before,&after,&stored,&before.changes(&after, captured.keys().cloned()).unwrap(),&BTreeMap::new());
             drop(profile);
-            let lookups=writer.fullscan_statements().into_iter().filter(|(sql,_)| sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
+            let lookups=writer.profiled_statements().into_iter().filter(|s| s.sql.starts_with("SELECT DISTINCT r.table_name,r.key,r.audience FROM _coven_references v")).count();
             if moving {
                 assert!(matches!(changes,Err(DbError::ReferenceAudience{..})));
                 assert_eq!(lookups,1);
@@ -888,7 +900,7 @@ async fn rowid_authorization_does_not_query_metadata_for_each_write_or_trigger()
                     writer.app_execute("UPDATE items SET value=?1 WHERE id='a'", [value])?;
                 }
                 drop(profile);
-                for (statement, _) in writer.fullscan_statements() {
+                for ProfiledStatement { sql: statement, .. } in writer.profiled_statements() {
                     assert!(
                         !statement.contains("pragma_table") && !statement.contains("sqlite_schema"),
                         "write queried metadata: {statement}"
