@@ -116,6 +116,13 @@ impl Fixture {
             .open()
             .await
             .unwrap();
+        // The new owner's worker drains as soon as it starts, reading the
+        // persisted pause to decide; record it first, or that drain can upload
+        // before the test is ready for it.
+        FileDatabase::new(self.database.clone())
+            .set_uploads_paused(true)
+            .await
+            .unwrap();
         self.send = ready_state();
         let waits = Arc::new(
             crate::RetryWaits::open(self.database.clone(), self.clock.clone())
