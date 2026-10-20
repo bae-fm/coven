@@ -151,15 +151,13 @@ impl Network {
         migrations: Vec<Migration>,
     ) -> Self {
         let root = tempfile::tempdir().unwrap();
+        let app_dir = root.path().join("0");
+        std::fs::create_dir(&app_dir).unwrap();
         let clock = Arc::new(FixedClock::new(UNIX_EPOCH + Duration::from_secs(1000)));
         let ids: IdSourceRef = Arc::new(SequentialIds::new());
         let app = TestCoven::new();
         let directory = app
-            .create_closed_store(
-                &StoreLayout::new(root.path().join("0")),
-                "Household",
-                ids.clone(),
-            )
+            .create_closed_store(&StoreLayout::new(app_dir.clone()), "Household", ids.clone())
             .await
             .unwrap();
         let storage = Arc::new(
@@ -172,7 +170,7 @@ impl Network {
         );
         let builder = builder(
             &app,
-            StoreLayout::new(root.path().join("0")),
+            StoreLayout::new(app_dir.clone()),
             clock.clone(),
             ids.clone(),
             storage.clone(),
@@ -212,7 +210,7 @@ impl Network {
                 .await
                 .unwrap(),
         };
-        let initial_layout = StoreLayout::new(root.path().join("0"));
+        let initial_layout = StoreLayout::new(app_dir);
         let network = Self {
             _sign_in: sign_in,
             root,
@@ -253,7 +251,9 @@ impl Network {
             .await
             .unwrap();
         let app = TestCoven::new();
-        let layout = StoreLayout::new(self.root.path().join(index.to_string()));
+        let app_dir = self.root.path().join(index.to_string());
+        std::fs::create_dir(&app_dir).unwrap();
+        let layout = StoreLayout::new(app_dir);
         let storage = Arc::new(self.devices[0].storage.for_device());
         let (_, cancel) = tokio::sync::watch::channel(false);
         let name = format!("Device {index}");
