@@ -3,10 +3,10 @@
 
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 use crate::CloudProvider;
-use crate::{BootstrapError, CodeError, StorageConfig, StoreId};
+use crate::{BootstrapError, StorageConfig, StoreId};
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
-use coven_crypto::custody::{Keychain, SyncedKeychain};
-use coven_format::codes::KeychainRestoreCode;
+use coven_crypto::custody::{Keychain, SyncedKeychain, SyncedRestoreCode};
+use coven_sync::UnreadableSavedCode;
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 use std::sync::Arc;
 
@@ -26,12 +26,39 @@ pub struct SavedRestoreCode {
     pub has_s3_credentials: bool,
 }
 
-/// List the registered service's iCloud Keychain restore codes (§13.1).
-/// Returns one entry per store, ordered by store id, or an empty list.
-/// Read failures, malformed codes and ambiguous entries fail the whole call.
+/// One store's saved iCloud Keychain entry, as listing found it (§13.1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SavedRestoreEntry {
+    /// An entry the app can pass to `restore_from_keychain`.
+    Readable(SavedRestoreCode),
+    /// An entry coven can't restore from. The app offers to forget it.
+    Unreadable {
+        /// The store its keychain account names.
+        store_id: StoreId,
+        /// Why it can't be restored from.
+        reason: UnreadableSavedCode,
+    },
+}
+
+impl SavedRestoreEntry {
+    /// The store this entry is saved under.
+    pub fn store_id(&self) -> StoreId {
+        match self {
+            Self::Readable(saved) => saved.store_id,
+            Self::Unreadable { store_id, .. } => *store_id,
+        }
+    }
+}
+
+/// List the registered service's iCloud Keychain entries (§13.1): one per
+/// store, ordered by store id, or an empty list. An entry coven can't restore
+/// from is listed as `Unreadable`, never omitted, so the person can forget it.
+/// A keychain read failure (the search, an entry's bytes or an S3 key's
+/// presence) fails the whole call, as does a restore-code account with no
+/// store id, `KeyError::RestoreCodeStoreId`.
 /// Native non-Apple platforms return `BootstrapError::SecureStorage(KeyError::Unsupported)`.
-/// Pass the chosen entry to `restore_from_keychain`, which reads its current code and key.
-pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreCode>, BootstrapError> {
+/// Pass a readable entry to `restore_from_keychain`, which reads its current code and key.
+pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
     #[cfg(any(target_os = "macos", target_os = "ios"))]
     {
         crate::coven::blocking(|| list(Keychain::registered()?)).await
@@ -44,6 +71,7 @@ pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreCode>, BootstrapErr
 
 /// Delete the store's saved S3 key, then its restore code, from iCloud
 /// Keychain, and so from every one of the person's Apple devices (§13.1).
+/// Readable and unreadable entries alike; every keychain group's copy goes.
 /// The store, its storage and every device's copy stay; no store need be open
 /// and no provider connected. Absent entries succeed; after a failure part way
 /// the store is still listed, and calling again finishes. A later join,
@@ -62,40 +90,43 @@ pub async fn forget_saved_restore_code(store: StoreId) -> Result<(), BootstrapEr
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
-pub(crate) fn list(keychain: Arc<Keychain>) -> Result<Vec<SavedRestoreCode>, BootstrapError> {
+pub(crate) fn list(keychain: Arc<Keychain>) -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
     keychain
         .synced_restore_codes()?
         .into_iter()
-        .map(|(store_id, bytes)| {
-            let (saved, location) = decode(store_id, bytes.as_bytes())?;
-            let has_s3_credentials = location.provider() == CloudProvider::S3
-                && SyncedKeychain::new(keychain.clone(), store_id)
-                    .s3_credentials()?
-                    .is_some();
-            Ok(SavedRestoreCode {
-                name: saved.name,
-                store_id,
-                location,
-                has_s3_credentials,
-            })
-        })
+        .map(|(store, code)| entry(&SyncedKeychain::new(keychain.clone(), store), code))
         .collect()
+}
+
+/// Read one store's listed entry. Only a keychain read fails it; an entry
+/// coven can't restore from is `Unreadable`.
+#[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
+pub(crate) fn entry(
+    synced: &SyncedKeychain,
+    code: SyncedRestoreCode,
+) -> Result<SavedRestoreEntry, BootstrapError> {
+    let store_id = synced.store();
+    let decoded = match code {
+        SyncedRestoreCode::Saved(bytes) => coven_sync::read_saved_code(store_id, bytes.as_bytes()),
+        SyncedRestoreCode::Ambiguous => Err(UnreadableSavedCode::Ambiguous),
+    };
+    let (saved, location) = match decoded {
+        Ok(decoded) => decoded,
+        Err(reason) => return Ok(SavedRestoreEntry::Unreadable { store_id, reason }),
+    };
+    let has_s3_credentials =
+        location.provider() == CloudProvider::S3 && synced.s3_credentials()?.is_some();
+    Ok(SavedRestoreEntry::Readable(SavedRestoreCode {
+        name: saved.name,
+        store_id,
+        location,
+        has_s3_credentials,
+    }))
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 pub(crate) fn forget(keychain: Arc<Keychain>, store: StoreId) -> Result<(), BootstrapError> {
     Ok(SyncedKeychain::new(keychain, store).forget()?)
-}
-
-/// Read a saved entry for `store`, and its code's location.
-pub(crate) fn decode(
-    store: StoreId,
-    bytes: &[u8],
-) -> Result<(KeychainRestoreCode, StorageConfig), CodeError> {
-    let saved = coven_sync::read_saved_code(store, bytes).map_err(|_| CodeError::Invalid)?;
-    let location =
-        StorageConfig::decode(saved.code.storage.as_bytes()).map_err(|_| CodeError::Invalid)?;
-    Ok((saved, location))
 }
 
 #[cfg(test)]

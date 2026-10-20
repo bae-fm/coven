@@ -21,7 +21,7 @@ fn household() -> SavedName {
 /// The saved entry's code bytes and name.
 fn saved(store: &CredentialKeychains) -> (Vec<u8>, String) {
     let bytes = store.synced.restore_code().unwrap().unwrap();
-    let saved = crate::read_saved_code(store.synced.store(), bytes.as_bytes()).unwrap();
+    let (saved, _) = crate::read_saved_code(store.synced.store(), bytes.as_bytes()).unwrap();
     (saved.code.to_bytes().unwrap().to_vec(), saved.name)
 }
 

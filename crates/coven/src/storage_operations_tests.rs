@@ -48,7 +48,7 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     let ana = &network.devices[0];
     let ben = &network.devices[1];
     let laptop = ben.app.another_device();
-    let saved = laptop.saved_restore_codes().await.unwrap();
+    let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
     assert_eq!(saved.len(), 1);
     assert!(saved[0].has_s3_credentials);
     stop(&ben.handle).await;
@@ -69,13 +69,16 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
     })
     .await;
     assert_eq!(ben.handle.applied_slot().await, applied);
-    assert_eq!(laptop.saved_restore_codes().await.unwrap(), saved);
+    assert_eq!(
+        crate::tests::readable(laptop.saved_restore_codes().await.unwrap()),
+        saved
+    );
     // Sync retries a custody failure on its own, under the shared backoff,
     // and applies the removal once the keychain answers (E5).
     ben.app.refuse_synced_keychain_operations(false);
     wait_for(&ben.handle, removed).await;
     assert!(ben.handle.applied_slot().await > applied);
-    assert!(laptop.saved_restore_codes().await.unwrap().is_empty());
+    assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben
         .app
         .synced_keychain(ben.store)
@@ -91,7 +94,10 @@ async fn a_members_removal_deletes_their_synced_entries_before_it_applies() {
         .unwrap()
         .is_some());
     // Ana is still a member: her entries stay.
-    assert_eq!(ana.app.saved_restore_codes().await.unwrap().len(), 1);
+    assert_eq!(
+        crate::tests::readable(ana.app.saved_restore_codes().await.unwrap()).len(),
+        1
+    );
     network.close().await;
 }
 
@@ -121,7 +127,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
     assert_eq!(ben.handle.applied_slot().await, applied);
     assert_eq!(ben.handle.store_name().await.unwrap(), "Household");
     assert_eq!(
-        laptop.saved_restore_codes().await.unwrap()[0].name,
+        crate::tests::readable(laptop.saved_restore_codes().await.unwrap())[0].name,
         "Household"
     );
     ben.app.refuse_synced_keychain_operations(false);
@@ -131,7 +137,7 @@ async fn a_rename_rewrites_the_saved_name_before_it_applies() {
     .await;
     assert_eq!(ben.handle.store_name().await.unwrap(), "Family");
     assert_eq!(
-        laptop.saved_restore_codes().await.unwrap()[0].name,
+        crate::tests::readable(laptop.saved_restore_codes().await.unwrap())[0].name,
         "Family"
     );
     network.close().await;
@@ -178,7 +184,7 @@ async fn a_removed_member_cannot_save_storage_credentials() {
             .s3_credentials()
             .unwrap()
             .is_none());
-        assert!(laptop.saved_restore_codes().await.unwrap().is_empty());
+        assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
         // Disconnecting removed this device's own credentials; none return.
         assert_eq!(held(&ben.app), before.clone().filter(|_| connected));
     }
@@ -207,7 +213,10 @@ async fn leave(refused: bool) {
     let ana = &network.devices[0];
     let ben = &network.devices[1];
     let laptop = ben.app.another_device();
-    assert_eq!(laptop.saved_restore_codes().await.unwrap().len(), 1);
+    assert_eq!(
+        crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(),
+        1
+    );
     let member = own_member(&ben.handle).await;
     if refused {
         // The removal is claimed, but this device applies it only once the
@@ -218,11 +227,14 @@ async fn leave(refused: bool) {
             matches!(result, Err(SyncError::SecureStorage(_))),
             "{result:?}"
         );
-        assert_eq!(laptop.saved_restore_codes().await.unwrap().len(), 1);
+        assert_eq!(
+            crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(),
+            1
+        );
         ben.app.refuse_synced_keychain_operations(false);
     }
     ben.handle.remove_member(&member).await.unwrap();
-    assert!(laptop.saved_restore_codes().await.unwrap().is_empty());
+    assert!(crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).is_empty());
     assert!(ben
         .app
         .synced_keychain(ben.store)
@@ -231,7 +243,10 @@ async fn leave(refused: bool) {
         .is_none());
     ben.handle.sync_now();
     wait_for(&ben.handle, removed).await;
-    assert_eq!(ana.app.saved_restore_codes().await.unwrap().len(), 1);
+    assert_eq!(
+        crate::tests::readable(ana.app.saved_restore_codes().await.unwrap()).len(),
+        1
+    );
     network.close().await;
 }
 
@@ -242,7 +257,7 @@ async fn removing_one_device_keeps_the_persons_synced_entries() {
     let network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let phone = &network.devices[0];
     let laptop = phone.app.another_device();
-    let saved = laptop.saved_restore_codes().await.unwrap();
+    let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
     let root = tempfile::tempdir().unwrap();
     let (_, cancel) = tokio::sync::watch::channel(false);
     let restored = restore_from_keychain(
@@ -269,8 +284,14 @@ async fn removing_one_device_keeps_the_persons_synced_entries() {
         .unwrap();
     phone.handle.sync_now();
     wait_for(&phone.handle, removed).await;
-    assert_eq!(laptop.saved_restore_codes().await.unwrap(), saved);
-    assert_eq!(phone.app.saved_restore_codes().await.unwrap(), saved);
+    assert_eq!(
+        crate::tests::readable(laptop.saved_restore_codes().await.unwrap()),
+        saved
+    );
+    assert_eq!(
+        crate::tests::readable(phone.app.saved_restore_codes().await.unwrap()),
+        saved
+    );
     restored.close().await.unwrap();
     network.close().await;
 }

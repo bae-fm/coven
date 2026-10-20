@@ -178,7 +178,9 @@ async fn join_accepts_provider_access_and_approval_then_loads_the_store() {
             Some(location.clone())
         );
         assert_eq!(
-            crate::saved_restore::list(install.keychain.clone()).unwrap()[0].location,
+            crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
+                [0]
+            .location,
             location
         );
         assert_eq!(restored.member, member);
@@ -503,7 +505,7 @@ async fn s3_credential_changes_preserve_the_code_location_and_member_across_reop
         .unwrap();
     assert_eq!(handle.restore_code().await.unwrap(), before);
     assert_eq!(
-        crate::saved_restore::decode(
+        coven_sync::read_saved_code(
             directory.id(),
             synced.restore_code().unwrap().unwrap().as_bytes()
         )
@@ -843,7 +845,9 @@ async fn restores_return_session_keys_and_builder_choices_without_reopening() {
                     .unwrap();
                 restore_from_keychain(
                     builder,
-                    &crate::saved_restore::list(install.keychain.clone()).unwrap()[0],
+                    &crate::tests::readable(
+                        crate::saved_restore::list(install.keychain.clone()).unwrap(),
+                    )[0],
                     owner.s3_credentials(),
                     "Laptop",
                     |_| {},
@@ -951,9 +955,9 @@ async fn missing_keychain_code_returns_none_without_creating_a_store() {
     synced
         .set_restore_code(&crate::tests::keychain_entry(&owner.code))
         .unwrap();
-    let saved = crate::saved_restore::list(install.keychain.clone())
-        .unwrap()
-        .remove(0);
+    let saved =
+        crate::tests::readable(crate::saved_restore::list(install.keychain.clone()).unwrap())
+            .remove(0);
     synced.delete_restore_code().unwrap();
     let (_, cancel) = watch::channel(false);
     let result = restore_from_keychain(

@@ -107,8 +107,12 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
         codes.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
         vec![a_id, b_id]
     );
-    assert_eq!(codes[0].1.as_bytes(), b"replacement");
-    assert_eq!(codes[1].1.as_bytes(), b"code-b");
+    assert!(
+        matches!(&codes[0].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"replacement")
+    );
+    assert!(
+        matches!(&codes[1].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"code-b")
+    );
     a_synced.delete_restore_code().unwrap();
     a_synced.delete_restore_code().unwrap();
     assert!(a_synced.restore_code().unwrap().is_none());
@@ -141,7 +145,7 @@ fn restore_codes_and_s3_keys_sync_separately_and_only_codes_discover_stores() {
 }
 
 #[test]
-fn discovery_filters_scope_and_kind_but_rejects_malformed_and_ambiguous_ids() {
+fn discovery_filters_scope_and_kind_but_rejects_ids_coven_never_writes() {
     let fake = Keychain::in_memory("discovery").unwrap();
     fake.write(
         EntryScope::DeviceOnly,
@@ -160,17 +164,52 @@ fn discovery_filters_scope_and_kind_but_rejects_malformed_and_ambiguous_ids() {
     ));
     fake.delete(EntryScope::Synced, "restore-code:invalid")
         .unwrap();
-    let id = StoreId(Uuid::from_u128(1));
+    // Another spelling of a valid id is an account no store id reads or
+    // deletes, so it can't be listed under one.
+    let id = StoreId(Uuid::from_u128(0xabcdef));
     for account in [
-        format!("restore-code:{id}"),
         format!("restore-code:{}", id.0.simple()),
+        format!("restore-code:{}", id.0.braced()),
+        format!("restore-code:{}", id.to_string().to_uppercase()),
     ] {
-        fake.write(EntryScope::Synced, &account, b"duplicate")
+        fake.write(EntryScope::Synced, &account, b"other spelling")
             .unwrap();
+        assert!(matches!(
+            fake.synced_restore_codes(),
+            Err(KeyError::RestoreCodeStoreId)
+        ));
+        fake.delete(EntryScope::Synced, &account).unwrap();
     }
-    assert!(
-        matches!(fake.synced_restore_codes(), Err(KeyError::AmbiguousRestoreCode(store)) if store == id)
+    SyncedKeychain::new(fake.clone(), id)
+        .set_restore_code(&SecretBytes::new(b"code".to_vec()))
+        .unwrap();
+    let codes = fake.synced_restore_codes().unwrap();
+    assert!(matches!(&codes[..], [(store, SyncedRestoreCode::Saved(_))] if *store == id));
+}
+
+#[test]
+fn a_store_found_in_more_than_one_keychain_group_is_ambiguous() {
+    let (a, b, c) = (
+        StoreId(Uuid::from_u128(1)),
+        StoreId(Uuid::from_u128(2)),
+        StoreId(Uuid::from_u128(3)),
     );
+    let code = |bytes: &[u8]| SecretBytes::new(bytes.to_vec());
+    let codes = by_store(vec![
+        (c, code(b"c")),
+        (b, code(b"b in one group")),
+        (a, code(b"a")),
+        (b, code(b"b in another")),
+        (b, code(b"b in a third")),
+    ]);
+    assert_eq!(
+        codes.iter().map(|(store, _)| *store).collect::<Vec<_>>(),
+        [a, b, c]
+    );
+    assert!(matches!(&codes[0].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"a"));
+    assert!(matches!(codes[1].1, SyncedRestoreCode::Ambiguous));
+    assert!(matches!(&codes[2].1, SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == b"c"));
+    assert_eq!(format!("{:?}", codes[0].1), "Saved([REDACTED])");
 }
 
 #[test]

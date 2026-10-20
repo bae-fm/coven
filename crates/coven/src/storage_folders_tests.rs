@@ -733,7 +733,7 @@ async fn setup_records_the_account_and_signing_in_again_refreshes_only_the_label
                 expected
             );
             assert_eq!(
-                f.app.saved_restore_codes().await.unwrap()[0].location,
+                crate::tests::readable(f.app.saved_restore_codes().await.unwrap())[0].location,
                 expected
             );
             // Display metadata cannot replace the account used for membership.
@@ -782,7 +782,7 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
         let code = f.handle.restore_code().await.unwrap();
         let keychain = f.app.store_keychain(f.handle.store_id());
         let credentials = keychain.storage_credentials().unwrap().unwrap();
-        let saved = f.app.saved_restore_codes().await.unwrap();
+        let saved = crate::tests::readable(f.app.saved_restore_codes().await.unwrap());
         f.handle.authenticate(access).await.unwrap();
         f.fake
             .expect(account_reply(location.provider(), "ignored", 1).status(503));
@@ -797,7 +797,10 @@ async fn account_lookup_failure_retains_committed_location_credentials_and_code(
             StorageFailure::Network
         );
         assert_eq!(f.handle.restore_code().await.unwrap(), code);
-        assert_eq!(f.app.saved_restore_codes().await.unwrap(), saved);
+        assert_eq!(
+            crate::tests::readable(f.app.saved_restore_codes().await.unwrap()),
+            saved
+        );
         assert_eq!(
             keychain.storage_credentials().unwrap().unwrap().as_bytes(),
             credentials.as_bytes()
@@ -868,7 +871,7 @@ async fn malformed_accounts_fail_before_setup_publishes_anything() {
             StorageFailure::Protocol
         );
         assert_eq!(f.handle.storage_config().await.unwrap(), None);
-        assert!(f.app.saved_restore_codes().await.unwrap().is_empty());
+        assert!(crate::tests::readable(f.app.saved_restore_codes().await.unwrap()).is_empty());
         f.no_credentials();
         f.fake.consumed();
         f.handle.close().await.unwrap();

@@ -46,7 +46,7 @@ fn save(app: &TestCoven, code: &RestoreCode) -> SyncedKeychain {
 #[tokio::test]
 async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
     let app = TestCoven::new();
-    assert!(app.saved_restore_codes().await.unwrap().is_empty());
+    assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap()).is_empty());
     let locations = [
         s3_location(),
         StorageConfig::Dropbox {
@@ -107,7 +107,7 @@ async fn listing_reports_each_saved_location_and_separate_s3_key_presence() {
     app.synced_keychain(StoreId(Uuid::from_u128(99)))
         .set_s3_credentials(&SecretBytes::new(b"orphan key".to_vec()))
         .unwrap();
-    let saved = app.saved_restore_codes().await.unwrap();
+    let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
     assert_eq!(saved, expected);
     assert_eq!(
         saved
@@ -150,7 +150,7 @@ async fn dropbox_accounts_are_distinguishable_in_both_saved_and_decoded_choices(
         save(&app, &code);
         decoded.push(decode_code_info(&code.to_text().unwrap()).unwrap());
     }
-    let saved = app.saved_restore_codes().await.unwrap();
+    let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
     assert_eq!(saved.len(), 2);
     assert_ne!(saved[0].location, saved[1].location);
     assert!(saved[0].location.same_location(&saved[1].location));
@@ -167,6 +167,11 @@ async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() 
     for id in [1, 2] {
         save(&app, &code(id, &s3_location()));
     }
+    // An unreadable entry beside them changes nothing: a refused read says
+    // nothing about any entry.
+    app.synced_keychain(StoreId(Uuid::from_u128(3)))
+        .set_restore_code(&SecretBytes::new(b"damaged".to_vec()))
+        .unwrap();
     for after in 0..3 {
         app.fail_keychain_operations_after(&[after]);
         assert!(matches!(
@@ -175,36 +180,121 @@ async fn listing_fails_as_a_whole_when_discovery_or_a_separate_key_read_fails() 
                 KeyError::KeychainTemporarilyUnavailable(_)
             ))
         ));
-        assert_eq!(app.saved_restore_codes().await.unwrap().len(), 2);
+        assert_eq!(app.saved_restore_codes().await.unwrap().len(), 3);
     }
+    app.refuse_synced_keychain_operations(true);
+    assert!(matches!(
+        app.saved_restore_codes().await,
+        Err(BootstrapError::SecureStorage(
+            KeyError::KeychainTemporarilyUnavailable(_)
+        ))
+    ));
 }
 
 #[tokio::test]
-async fn listing_rejects_malformed_codes_locations_and_mismatched_store_ids() {
+async fn listing_shows_an_unreadable_entry_beside_a_readable_one() {
     let app = TestCoven::new();
     let valid = code(1, &s3_location());
     save(&app, &valid);
-    let other = app.synced_keychain(StoreId(Uuid::from_u128(2)));
+    let readable = SavedRestoreEntry::Readable(SavedRestoreCode {
+        name: name(valid.store),
+        store_id: valid.store,
+        location: s3_location(),
+        has_s3_credentials: false,
+    });
+    let store = StoreId(Uuid::from_u128(2));
+    let other = app.synced_keychain(store);
     let malformed_location = RestoreCode {
         storage: SecretBytes::new(b"invalid location".to_vec()),
         ..code(2, &s3_location())
     };
-    for bytes in [
-        SecretBytes::new(b"invalid code".to_vec()),
-        // A bare restore code, without the name coven saves beside it.
-        SecretBytes::new(code(2, &s3_location()).to_bytes().unwrap().to_vec()),
-        entry(&malformed_location),
+    for (bytes, reason) in [
+        (
+            SecretBytes::new(b"invalid code".to_vec()),
+            UnreadableSavedCode::Format,
+        ),
+        // A bare restore code, as saved before entries carried the store's name.
+        (
+            SecretBytes::new(code(2, &s3_location()).to_bytes().unwrap().to_vec()),
+            UnreadableSavedCode::Format,
+        ),
+        (entry(&malformed_location), UnreadableSavedCode::Format),
         // Store 1's entry, saved under store 2's account.
-        entry(&valid),
+        (entry(&valid), UnreadableSavedCode::OtherStore),
     ] {
         other.set_restore_code(&bytes).unwrap();
-        assert!(matches!(
-            app.saved_restore_codes().await,
-            Err(BootstrapError::Code(CodeError::Invalid))
-        ));
+        let saved = app.saved_restore_codes().await.unwrap();
+        assert_eq!(
+            saved,
+            [
+                readable.clone(),
+                SavedRestoreEntry::Unreadable {
+                    store_id: store,
+                    reason
+                }
+            ]
+        );
+        assert_eq!(saved[1].store_id(), store);
     }
     other.delete_restore_code().unwrap();
-    assert_eq!(app.saved_restore_codes().await.unwrap().len(), 1);
+    assert_eq!(app.saved_restore_codes().await.unwrap(), [readable]);
+}
+
+#[tokio::test]
+async fn an_entry_more_than_one_keychain_group_holds_is_unreadable_without_reading_it() {
+    let keychain = coven_crypto::custody::Keychain::in_memory("ambiguous").unwrap();
+    let store = StoreId(Uuid::from_u128(1));
+    // Reading nothing, it can't fail on a refusing keychain.
+    keychain.refuse_synced_operations(true);
+    assert_eq!(
+        crate::saved_restore::entry(
+            &SyncedKeychain::new(keychain, store),
+            coven_crypto::custody::SyncedRestoreCode::Ambiguous
+        )
+        .unwrap(),
+        SavedRestoreEntry::Unreadable {
+            store_id: store,
+            reason: UnreadableSavedCode::Ambiguous
+        }
+    );
+}
+
+#[tokio::test]
+async fn forgetting_an_unreadable_entry_deletes_its_code_and_key_and_keeps_the_others() {
+    let phone = TestCoven::new();
+    let laptop = phone.another_device();
+    let household = save(&phone, &code(1, &s3_location()));
+    let key = SecretBytes::new(b"S3 key".to_vec());
+    household.set_s3_credentials(&key).unwrap();
+    let store = StoreId(Uuid::from_u128(2));
+    let old = phone.synced_keychain(store);
+    old.set_restore_code(&SecretBytes::new(
+        code(2, &s3_location()).to_bytes().unwrap().to_vec(),
+    ))
+    .unwrap();
+    old.set_s3_credentials(&key).unwrap();
+    let listed = laptop.saved_restore_codes().await.unwrap();
+    assert_eq!(listed.len(), 2);
+    assert_eq!(
+        listed[1],
+        SavedRestoreEntry::Unreadable {
+            store_id: store,
+            reason: UnreadableSavedCode::Format
+        }
+    );
+    laptop
+        .forget_saved_restore_code(listed[1].store_id())
+        .await
+        .unwrap();
+    for app in [&phone, &laptop] {
+        let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
+        assert_eq!(saved.len(), 1);
+        assert_eq!(saved[0].store_id, StoreId(Uuid::from_u128(1)));
+        assert!(saved[0].has_s3_credentials);
+        let synced = app.synced_keychain(store);
+        assert!(synced.restore_code().unwrap().is_none());
+        assert!(synced.s3_credentials().unwrap().is_none());
+    }
 }
 
 #[tokio::test]
@@ -214,9 +304,11 @@ async fn listing_reports_presence_without_decoding_the_separately_saved_key() {
     store
         .set_s3_credentials(&SecretBytes::new(b"damaged key".to_vec()))
         .unwrap();
-    assert!(app.saved_restore_codes().await.unwrap()[0].has_s3_credentials);
+    assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap())[0].has_s3_credentials);
     store.delete_s3_credentials().unwrap();
-    assert!(!app.saved_restore_codes().await.unwrap()[0].has_s3_credentials);
+    assert!(
+        !crate::tests::readable(app.saved_restore_codes().await.unwrap())[0].has_s3_credentials
+    );
 }
 
 #[tokio::test]
@@ -225,7 +317,7 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
         crate::tests::Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
     let device = &network.devices[0];
     let app = &device.app;
-    let initial = app.saved_restore_codes().await.unwrap();
+    let initial = crate::tests::readable(app.saved_restore_codes().await.unwrap());
     assert_eq!(
         initial,
         [SavedRestoreCode {
@@ -246,7 +338,7 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
     );
     save(app, &unrelated);
     device.handle.rename_store("Renamed library").await.unwrap();
-    let expected = app.saved_restore_codes().await.unwrap();
+    let expected = crate::tests::readable(app.saved_restore_codes().await.unwrap());
     let renamed = expected.iter().find(|entry| entry.store_id == device.store);
     assert_eq!(renamed.unwrap().name, "Renamed library");
     let mut current = device.handle.restore_code().await.unwrap();
@@ -254,7 +346,10 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
         let refreshed = device.handle.replace_member_keys().await.unwrap();
         assert_ne!(refreshed.as_str(), current);
         current = refreshed.as_str().to_owned();
-        assert_eq!(app.saved_restore_codes().await.unwrap(), expected);
+        assert_eq!(
+            crate::tests::readable(app.saved_restore_codes().await.unwrap()),
+            expected
+        );
     }
     // A selection made before replacement reads the current pair and separate
     // key, on Ana's laptop, which iCloud Keychain gave the same entries.
@@ -282,8 +377,14 @@ async fn setup_refresh_and_restore_on_another_device_share_one_entry_per_store()
     .unwrap();
     assert_eq!(restored.restore_code().await.unwrap(), current);
     assert_eq!(restored.store_name().await.unwrap(), "Renamed library");
-    assert_eq!(app.saved_restore_codes().await.unwrap(), expected);
-    assert_eq!(laptop.saved_restore_codes().await.unwrap(), expected);
+    assert_eq!(
+        crate::tests::readable(app.saved_restore_codes().await.unwrap()),
+        expected
+    );
+    assert_eq!(
+        crate::tests::readable(laptop.saved_restore_codes().await.unwrap()),
+        expected
+    );
     restored.close().await.unwrap();
     network.close().await;
 }
@@ -328,7 +429,7 @@ async fn a_local_rename_rewrites_only_the_saved_name() {
         ("Family".into(), renamed_at)
     );
     assert_eq!(
-        device.app.saved_restore_codes().await.unwrap()[0].name,
+        crate::tests::readable(device.app.saved_restore_codes().await.unwrap())[0].name,
         "Family"
     );
     let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
@@ -447,7 +548,7 @@ async fn a_rename_after_forgetting_saves_nothing_and_a_key_replacement_saves_aga
         .await
         .unwrap();
     device.handle.rename_store("Family").await.unwrap();
-    assert!(device.app.saved_restore_codes().await.unwrap().is_empty());
+    assert!(crate::tests::readable(device.app.saved_restore_codes().await.unwrap()).is_empty());
     let code = device.handle.replace_member_keys().await.unwrap();
     let saved = crate::tests::saved_entry(&device.app, device.store).unwrap();
     assert_eq!(saved.name, "Family");
@@ -465,10 +566,13 @@ async fn forgetting_deletes_the_code_and_key_from_every_device_and_repeats() {
         .unwrap();
     save(&phone, &code(2, &s3_location()));
     let store = StoreId(Uuid::from_u128(1));
-    assert_eq!(laptop.saved_restore_codes().await.unwrap().len(), 2);
+    assert_eq!(
+        crate::tests::readable(laptop.saved_restore_codes().await.unwrap()).len(),
+        2
+    );
     laptop.forget_saved_restore_code(store).await.unwrap();
     for app in [&phone, &laptop] {
-        let saved = app.saved_restore_codes().await.unwrap();
+        let saved = crate::tests::readable(app.saved_restore_codes().await.unwrap());
         assert_eq!(saved.len(), 1);
         assert_eq!(saved[0].store_id, StoreId(Uuid::from_u128(2)));
         let synced = app.synced_keychain(store);
@@ -481,7 +585,10 @@ async fn forgetting_deletes_the_code_and_key_from_every_device_and_repeats() {
         .forget_saved_restore_code(StoreId(Uuid::from_u128(3)))
         .await
         .unwrap();
-    assert_eq!(phone.saved_restore_codes().await.unwrap().len(), 1);
+    assert_eq!(
+        crate::tests::readable(phone.saved_restore_codes().await.unwrap()).len(),
+        1
+    );
 }
 
 #[tokio::test]
@@ -500,7 +607,10 @@ async fn forgetting_fails_part_way_with_the_store_still_listed() {
         ))
     ));
     assert!(store.s3_credentials().unwrap().is_none());
-    assert_eq!(app.saved_restore_codes().await.unwrap().len(), 1);
+    assert_eq!(
+        crate::tests::readable(app.saved_restore_codes().await.unwrap()).len(),
+        1
+    );
     app.forget_saved_restore_code(id).await.unwrap();
-    assert!(app.saved_restore_codes().await.unwrap().is_empty());
+    assert!(crate::tests::readable(app.saved_restore_codes().await.unwrap()).is_empty());
 }

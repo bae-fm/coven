@@ -184,13 +184,37 @@ impl std::fmt::Debug for SyncedKeychain {
     }
 }
 
+/// One store's synced restore-code entry, as listing found it (§13.1).
+pub enum SyncedRestoreCode {
+    /// The entry's bytes.
+    Saved(SecretBytes),
+    /// More than one of the app's keychain groups holds an entry for the
+    /// store. Reading by store id could give either; deleting by store id
+    /// removes them all.
+    Ambiguous,
+}
+
+impl std::fmt::Debug for SyncedRestoreCode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Saved(_) => f.write_str("Saved([REDACTED])"),
+            Self::Ambiguous => f.write_str("Ambiguous"),
+        }
+    }
+}
+
 /// The store named by a synced restore-code account; `None` for other entries.
+/// The id must be spelled as [`SyncedKeychain`] writes it: an account it never
+/// writes is one no store id reads or deletes.
 #[cfg(any(target_os = "macos", target_os = "ios", test, feature = "test-utils"))]
 pub(crate) fn restore_code_store(account: &str) -> Result<Option<StoreId>, KeyError> {
     match account.split_once(':') {
         Some((RESTORE_CODE_ENTRY, id)) => uuid::Uuid::parse_str(id)
-            .map(|id| Some(StoreId(id)))
-            .map_err(|_| KeyError::RestoreCodeStoreId),
+            .ok()
+            .map(StoreId)
+            .filter(|store| store.to_string() == id)
+            .map(Some)
+            .ok_or(KeyError::RestoreCodeStoreId),
         _ => {
             tracing::debug!(account, "skipping synced entry that is not a restore code");
             Ok(None)

@@ -266,7 +266,7 @@ impl TestCoven {
     pub async fn discard_store(&self, directory: &StoreDir) -> Result<(), StoreDeletionError>;
 
     /// List this installation's saved codes through the production discovery path (E10).
-    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreCode>, BootstrapError>;
+    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError>;
 
     /// Forget one store's saved code and S3 key through the production path (E10).
     pub async fn forget_saved_restore_code(&self, store: StoreId) -> Result<(), BootstrapError>;
@@ -1406,11 +1406,9 @@ pub enum KeyError {
     /// this installation refuses to write them again (§14.1).
     Left,
 
-    /// A synced restore-code account contains an invalid store id.
+    /// A synced restore-code account's id part is not a store id as coven
+    /// writes it.
     RestoreCodeStoreId,
-
-    /// Multiple accessible keychain groups contain a restore code for one store.
-    AmbiguousRestoreCode(coven_foundation::id_source::StoreId),
 }
 
 /// Secret bytes crossing custody or code boundaries, erased when dropped (§12.4, §13).
@@ -4369,18 +4367,30 @@ pub enum ProviderSignOut {
   new device, behind the same tap that reveals the code. After a key
   replacement it returns the new key. Other providers return `None`.
 - `saved_restore_codes()` lists the registered service's saved codes so the
-  app can offer a choice before opening a store. Entries expose the store's
-  saved name and id, provider location, including the member's account label,
-  and separate S3-key presence, with no secrets.
+  app can offer a choice before opening a store. A readable entry exposes the
+  store's saved name and id, provider location, including the member's account
+  label, and separate S3-key presence, with no secrets.
   The app passes its selection to `restore_from_keychain`; no local store or
   provider connection is needed to list it.
+- An entry coven can't restore from is listed too, as unreadable, with the
+  store id its keychain account names and the reason: saved in another format
+  or damaged, holding another store's code, or held in more than one of the
+  app's keychain groups. The app offers to forget it. Otherwise one such entry
+  would hide every other choice, and the person could never remove it.
+- Only a failure to read the keychain itself fails the whole list: the search,
+  an entry's bytes, or an S3 key's presence. A locked keychain says nothing
+  about any entry, and offering to delete one then could cost the person a good
+  code. A restore-code account whose id part is not a store id as coven writes
+  it fails the list with `KeyError::RestoreCodeStoreId`: coven never writes one,
+  and there is no store id to forget it by.
 - Both synced entries belong to the person. Deleting the store from one device
   keeps them; a device deletes them when it applies the person's removal from
   the store, before the slot applies (§14.1).
 - `forget_saved_restore_code(store)` deletes one store's synced restore code
   and S3 key, removing them from all the person's Apple devices. It changes no
   store, storage or device's copy, needs no open store or provider connection,
-  and succeeds when the entries are already absent.
+  and succeeds when the entries are already absent. It deletes an unreadable
+  entry the same way, by its store id, in every keychain group that holds one.
 - A device that still holds the store under member keys another device
   replaced restores in place with `CovenBuilder::restore_device`
   ([§13.1](coven.md#131-a-persons-new-device-the-restore-code)). The code must
@@ -4748,13 +4758,48 @@ pub struct SavedRestoreCode {
     pub has_s3_credentials: bool,
 }
 
-/// The registered service's saved iCloud Keychain codes; empty when none are saved.
-/// Read failures, malformed codes and ambiguous entries fail the whole call.
+/// One store's saved iCloud Keychain entry, as listing found it (§13.1).
+pub enum SavedRestoreEntry {
+    /// An entry the app can pass to `restore_from_keychain`.
+    Readable(SavedRestoreCode),
+    /// An entry coven can't restore from. The app offers to forget it.
+    Unreadable {
+        /// The store its keychain account names.
+        store_id: StoreId,
+        reason: UnreadableSavedCode,
+    },
+}
+
+impl SavedRestoreEntry {
+    /// The store this entry is saved under.
+    pub fn store_id(&self) -> StoreId;
+}
+
+/// Why a saved entry can't be restored from (§13.1).
+pub enum UnreadableSavedCode {
+    /// Not a saved restore code coven reads: saved in another format, such as
+    /// a bare restore code from before entries carried the store's name, or
+    /// damaged. Includes a code whose storage location doesn't decode.
+    Format,
+    /// The code of another store than the one its account names.
+    OtherStore,
+    /// More than one of the app's keychain groups holds an entry for the store,
+    /// so reading it by store id could give either.
+    Ambiguous,
+}
+
+/// The registered service's saved iCloud Keychain entries, one per store,
+/// ordered by store id; empty when none are saved. An entry coven can't
+/// restore from is listed as `Unreadable`, never omitted, and never fails the
+/// call. A keychain read failure (the search, an entry's bytes or an S3 key's
+/// presence) fails the whole call, as does a restore-code account with no
+/// store id, `KeyError::RestoreCodeStoreId`.
 /// Native non-Apple platforms return BootstrapError::SecureStorage(KeyError::Unsupported).
-pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreCode>, BootstrapError>;
+pub async fn saved_restore_codes() -> Result<Vec<SavedRestoreEntry>, BootstrapError>;
 
 /// Deletes the store's synced S3 key, then its restore code, from iCloud
 /// Keychain, and so from every one of the person's Apple devices (§13.1).
+/// Readable and unreadable entries alike; every keychain group's copy goes.
 /// Touches no store, storage or device's copy, and needs no open store or
 /// provider connection. Absent entries succeed; after a failure part way the
 /// store is still listed and calling again finishes. A later join, restore,
@@ -4917,7 +4962,14 @@ If the laptop uses iCloud Keychain instead, Ana chooses from the saved entries:
 
 ```rust
 let saved = saved_restore_codes().await?;
-let selected = choose_saved_store(&saved);
+let selected = match choose_saved_store(&saved) {
+    SavedRestoreEntry::Readable(selected) => selected,
+    // An entry coven can't read is offered only for deletion.
+    SavedRestoreEntry::Unreadable { store_id, .. } => {
+        forget_saved_restore_code(*store_id).await?;
+        return Ok(());
+    }
+};
 let mut builder = Coven::builder(layout.clone())
     .synced_tables(tables())
     .migrations(migrations())

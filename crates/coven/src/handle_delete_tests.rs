@@ -324,7 +324,7 @@ async fn removing_a_store_from_one_device_keeps_the_persons_synced_entries() {
         let mut network = Network::with_schema(CloudProvider::S3, Vec::new(), Vec::new()).await;
         let phone = network.devices.remove(0);
         let laptop = phone.app.another_device();
-        let saved = laptop.saved_restore_codes().await.unwrap();
+        let saved = crate::tests::readable(laptop.saved_restore_codes().await.unwrap());
         assert_eq!(saved.len(), 1);
         assert!(saved[0].has_s3_credentials);
         phone
@@ -343,8 +343,14 @@ async fn removing_a_store_from_one_device_keeps_the_persons_synced_entries() {
         }
         assert!(phone.layout.stores().await.unwrap().is_empty());
         device_entries_gone(&phone.app, phone.store);
-        assert_eq!(laptop.saved_restore_codes().await.unwrap(), saved);
-        assert_eq!(phone.app.saved_restore_codes().await.unwrap(), saved);
+        assert_eq!(
+            crate::tests::readable(laptop.saved_restore_codes().await.unwrap()),
+            saved
+        );
+        assert_eq!(
+            crate::tests::readable(phone.app.saved_restore_codes().await.unwrap()),
+            saved
+        );
         let root = tempfile::tempdir().unwrap();
         let (_, cancel) = tokio::sync::watch::channel(false);
         let restored = restore_from_keychain(

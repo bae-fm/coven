@@ -12,7 +12,15 @@ fn code(store: StoreId) -> RestoreCode {
         store,
         member: MemberId(Uuid::from_u128(7)),
         member_keys: coven_crypto::MemberKeys::generate().unwrap(),
-        storage: SecretBytes::new(b"location".to_vec()),
+        storage: StorageConfig::S3 {
+            bucket: "household".into(),
+            region: "us-east-1".into(),
+            endpoint: None,
+            profile: None,
+            prefix: "libraries".into(),
+        }
+        .encode()
+        .unwrap(),
     }
 }
 
@@ -35,7 +43,7 @@ fn put(synced: &SyncedKeychain, label: &str, slot: u64, code: &RestoreCode) {
 
 fn held(synced: &SyncedKeychain) -> (String, u64, Vec<u8>) {
     let bytes = synced.restore_code().unwrap().unwrap();
-    let saved = read_saved_code(synced.store(), bytes.as_bytes()).unwrap();
+    let (saved, _) = read_saved_code(synced.store(), bytes.as_bytes()).unwrap();
     (
         saved.name,
         saved.named_at,

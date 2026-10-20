@@ -2300,7 +2300,8 @@ A new device gets the code in one of three ways:
 On Ana's new laptop, `saved_restore_codes()` lets the app offer the stores whose
 codes coven saved in iCloud Keychain. Each entry gives the store's name and id,
 the provider and its account or location as the code holds them, and whether an
-S3 key is saved beside it. Ana sees Household in the list and chooses it, and
+S3 key is saved beside it; an entry coven can't read is listed too, for the
+person to remove (below). Ana sees Household in the list and chooses it, and
 the app passes the entry to `restore_from_keychain` (api.md
 [E10](api.md#e10-joining-and-restore)).
 
@@ -2364,6 +2365,27 @@ iCloud Keychain, and so from all of Ana's Apple devices (api.md
   again finishes.
 - A later join, restore, reset or member-key replacement on one of Ana's
   devices saves the entry again, with a current code.
+
+Some entries can't be used at all. Say Ana's phone saved Household's code
+before coven saved the store's name beside it. Her laptop can't read that
+entry, so it can't restore from it. The list still shows it, as an *unreadable
+entry*: the store id its keychain account names, and why it can't be read. The
+app offers to forget it, and `forget_saved_restore_code` deletes it by that id.
+
+A person must always be able to remove a saved entry they can't use. If one
+unreadable entry failed the whole list, it would hide every other store, and
+nothing in the app could remove it. So an entry is listed as unreadable when:
+
+- it is not a saved code coven reads: saved in an older format, or damaged;
+- it holds another store's code than the one its account names;
+- more than one of the app's keychain groups holds an entry for the store.
+  Apple divides an app's keychain entries into groups, and an app that moved
+  to a new group can see both. Reading by store id could give either, so
+  coven restores from neither; forgetting deletes them all.
+
+Reading the keychain itself is different. When the keychain is locked or
+refuses a read, listing fails as a whole. A refused read says nothing about
+the entry, and offering to delete it then could cost Ana a good code.
 
 Storage access is separate. On S3 the person keeps their access key apart, in a
 password manager say, and enters it, unless the QR transfer or Keychain supplied

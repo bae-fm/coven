@@ -9,6 +9,7 @@ use coven_crypto::{
 use coven_format::codes::{KeychainRestoreCode, RestoreCode};
 use coven_foundation::id_source::StoreId;
 use coven_merge::Slot;
+use coven_storage::StorageConfig;
 
 /// The store's name as this device has it, and the slot that set it: 1 for
 /// creation, otherwise the rename's. Of two names, the later slot's is newer.
@@ -83,19 +84,39 @@ pub fn follow_name(synced: &SyncedKeychain, name: &SavedName) -> Result<(), KeyE
     })
 }
 
-/// Read a saved entry for `store`.
+/// Why a saved entry can't be restored from. Listing shows it, with its
+/// store id, so the person can forget it (§13.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum UnreadableSavedCode {
+    /// Not a saved restore code coven reads: saved in another format, such as
+    /// a bare restore code from before entries carried the store's name, or
+    /// damaged. Includes a code whose storage location doesn't decode.
+    Format,
+    /// The code of another store than the one its account names.
+    OtherStore,
+    /// More than one of the app's keychain groups holds an entry for the
+    /// store, so reading it by store id could give either.
+    Ambiguous,
+}
+
+/// Read a saved entry for `store`, and its code's location.
 pub fn read_saved_code(
     store: StoreId,
     bytes: &[u8],
-) -> Result<KeychainRestoreCode, coven_format::Error> {
-    let saved = KeychainRestoreCode::from_bytes(bytes)?;
+) -> Result<(KeychainRestoreCode, StorageConfig), UnreadableSavedCode> {
+    let saved = KeychainRestoreCode::from_bytes(bytes).map_err(|error| {
+        tracing::warn!(%store, %error, "saved restore code does not decode");
+        UnreadableSavedCode::Format
+    })?;
     if saved.code.store != store {
-        return Err(coven_format::Error::Invalid {
-            field: "saved restore code store",
-            rule: coven_format::error::Rule::Store,
-        });
+        tracing::warn!(%store, other = %saved.code.store, "saved restore code names another store");
+        return Err(UnreadableSavedCode::OtherStore);
     }
-    Ok(saved)
+    let location = StorageConfig::decode(saved.code.storage.as_bytes()).map_err(|error| {
+        tracing::warn!(%store, %error, "saved restore code's location does not decode");
+        UnreadableSavedCode::Format
+    })?;
+    Ok((saved, location))
 }
 
 fn encode(name: &str, named_at: u64, code: &RestoreCode) -> Result<SecretBytes, SyncError> {

@@ -1,7 +1,7 @@
 //! One registered service, with independent entries for each store (E1).
 
 use super::platform::NativeKeychain;
-use super::{KeyError, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
+use super::{KeyError, SyncedRestoreCode, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
 use crate::{wire, MaterialError, SecretBytes};
 use coven_foundation::id_source::{DeviceId, StoreId};
 use std::{
@@ -99,21 +99,16 @@ impl Keychain {
         }))
     }
 
-    /// List this service's synced restore codes without knowing any store ids (§13.1).
-    /// Apple searches the synced store by service; account prefixes are filtered
-    /// locally because its keyring API supports exact matches only. Results are
-    /// limited to the app's accessible keychain groups. Any read failure fails
+    /// List this service's synced restore codes without knowing any store ids,
+    /// one per store, ordered by store id (§13.1). Apple searches the synced
+    /// store by service; account prefixes are filtered locally because its
+    /// keyring API supports exact matches only. Results are limited to the
+    /// app's accessible keychain groups; a store more than one of them holds
+    /// an entry for is `SyncedRestoreCode::Ambiguous`. Any read failure fails
     /// the entire call; a missing or unreadable code is never silently omitted.
     /// Native non-Apple keychains return `KeyError::Unsupported`.
-    pub fn synced_restore_codes(&self) -> Result<Vec<(StoreId, SecretBytes)>, KeyError> {
-        let codes = self.backend.synced_restore_codes(&self.name)?;
-        let mut stores = std::collections::BTreeMap::new();
-        for (store, code) in codes {
-            if stores.insert(store, code).is_some() {
-                return Err(KeyError::AmbiguousRestoreCode(store));
-            }
-        }
-        Ok(stores.into_iter().collect())
+    pub fn synced_restore_codes(&self) -> Result<Vec<(StoreId, SyncedRestoreCode)>, KeyError> {
+        Ok(by_store(self.backend.synced_restore_codes(&self.name)?))
     }
 
     /// Whether this backend keeps entries iCloud Keychain carries to the
@@ -393,6 +388,22 @@ impl<T> std::fmt::Debug for KeyringCustody<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("KeyringCustody([REDACTED])")
     }
+}
+
+/// Group the restore codes a search found by store, ordered by store id. A
+/// store found more than once is ambiguous: no copy is the store's code.
+fn by_store(codes: Vec<(StoreId, SecretBytes)>) -> Vec<(StoreId, SyncedRestoreCode)> {
+    let mut stores = std::collections::BTreeMap::new();
+    for (store, code) in codes {
+        stores
+            .entry(store)
+            .and_modify(|found| {
+                tracing::warn!(%store, "more than one keychain group holds a restore code");
+                *found = SyncedRestoreCode::Ambiguous;
+            })
+            .or_insert(SyncedRestoreCode::Saved(code));
+    }
+    stores.into_iter().collect()
 }
 
 #[cfg(test)]

@@ -980,5 +980,21 @@ pub(crate) fn saved_entry(
     app.synced_keychain(store)
         .restore_code()
         .unwrap()
-        .map(|bytes| coven_sync::read_saved_code(store, bytes.as_bytes()).unwrap())
+        .map(|bytes| {
+            coven_sync::read_saved_code(store, bytes.as_bytes())
+                .unwrap()
+                .0
+        })
+}
+
+/// The readable entries of a listing, for fixtures that save only codes coven
+/// reads; an unreadable entry fails the test.
+pub(crate) fn readable(entries: Vec<SavedRestoreEntry>) -> Vec<SavedRestoreCode> {
+    entries
+        .into_iter()
+        .map(|entry| match entry {
+            SavedRestoreEntry::Readable(saved) => saved,
+            unreadable => panic!("expected a readable saved entry, got {unreadable:?}"),
+        })
+        .collect()
 }

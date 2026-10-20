@@ -56,7 +56,7 @@ impl TestCoven {
     }
 
     /// List this installation's saved codes through the production discovery path.
-    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreCode>, BootstrapError> {
+    pub async fn saved_restore_codes(&self) -> Result<Vec<SavedRestoreEntry>, BootstrapError> {
         let keychain = self.keychain.clone();
         crate::coven::blocking(move || crate::saved_restore::list(keychain)).await
     }

@@ -134,7 +134,7 @@ pub async fn restore_from_code(
     .ok_or_else(|| SyncError::from(StorageFailure::MemberKeysMissing).into())
 }
 
-/// Restore the entry selected from `saved_restore_codes`. Reads the current
+/// Restore a readable entry selected from `saved_restore_codes`. Reads the current
 /// code by store id, including a replacement saved since listing. Returns None
 /// if that store's code is no longer saved.
 /// S3 uses the explicit key when supplied, otherwise its separately synced key.
@@ -206,9 +206,9 @@ fn keychain_code(
     keychain
         .restore_code()?
         .map(|bytes| {
-            crate::saved_restore::decode(store, bytes.as_bytes())
+            coven_sync::read_saved_code(store, bytes.as_bytes())
                 .map(|(saved, location)| (saved.code, location))
-                .map_err(Into::into)
+                .map_err(|_| CodeError::Invalid.into())
         })
         .transpose()
 }

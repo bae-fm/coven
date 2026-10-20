@@ -96,7 +96,9 @@ while none had the store open leaves the old one; it is only a label, and the
 store is found by its id. `saved_restore_codes()` lists the saved stores by
 name, id and provider location, including whether an S3 key is saved beside
 each code. Pass the selected entry to `restore_from_keychain` to read its
-current code and key on a new device.
+current code and key on a new device. An entry coven can't read, saved in
+another format, damaged, or held in more than one keychain group, is listed
+too, by store id with the reason, so the person can forget it.
 
 Those two synced entries belong to the person, not to one device. Deleting a
 store from one device removes only that device's own entries, so the person's

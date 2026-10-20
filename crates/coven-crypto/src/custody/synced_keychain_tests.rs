@@ -48,10 +48,10 @@ fn synced_restore_code_failures_preserve_the_previous_code() {
         fake.synced_restore_codes(),
         Err(KeyError::KeychainTemporarilyUnavailable(_))
     ));
-    assert_eq!(
-        fake.synced_restore_codes().unwrap()[0].1.as_bytes(),
-        original.as_bytes()
-    );
+    assert!(matches!(
+        &fake.synced_restore_codes().unwrap()[0].1,
+        SyncedRestoreCode::Saved(bytes) if bytes.as_bytes() == original.as_bytes()
+    ));
 }
 
 #[test]

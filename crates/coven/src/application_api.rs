@@ -11,7 +11,9 @@ pub use crate::error::{
 };
 pub use crate::handle::{CovenHandle, IfUnsent};
 pub use crate::read_handle::CovenReadHandle;
-pub use crate::saved_restore::{forget_saved_restore_code, saved_restore_codes, SavedRestoreCode};
+pub use crate::saved_restore::{
+    forget_saved_restore_code, saved_restore_codes, SavedRestoreCode, SavedRestoreEntry,
+};
 pub use crate::store_layout::{StoreInfo, StoreLayout, StoreLayoutError};
 pub use coven_crypto::custody::{
     set_keyring_service, IdentityCustody, IdentityError, KeyCustody, KeyError, KeychainError,
@@ -31,7 +33,9 @@ pub use coven_database::{
     SchemaError, SnapshotError, SqlContext, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
     ToSql, UnsentWork, UserFile, WriteBatch, WriteId, WriteWait,
 };
-pub use coven_sync::{decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata};
+pub use coven_sync::{
+    decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, UnreadableSavedCode,
+};
 pub use coven_sync::{
     DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStatus, FileStream,
     PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadQueue,

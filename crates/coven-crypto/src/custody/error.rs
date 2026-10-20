@@ -69,12 +69,10 @@ pub enum KeyError {
     /// The person left the store, so their synced entries stay deleted (§14.1).
     #[error("the person left the store; their synced entries stay deleted")]
     Left,
-    /// A synced restore-code account contains an invalid store id.
+    /// A synced restore-code account's id part is not a store id as coven
+    /// writes it.
     #[error("invalid store id in synced restore-code entry")]
     RestoreCodeStoreId,
-    /// Multiple accessible keychain groups contain a restore code for one store.
-    #[error("multiple synced restore codes for store {0}")]
-    AmbiguousRestoreCode(coven_foundation::id_source::StoreId),
 }
 
 /// A native keychain error whose diagnostic output never includes secret bytes.
