@@ -1,6 +1,7 @@
 //! Process-local lock lifetimes. Only closing instances cause an async wait.
 
-use super::lock::{lock_bootstrap, lock_existing, LockedFile, StoreLockError};
+use super::file_lock::FileLock;
+use super::lock::{lock_bootstrap, lock_existing, StoreLockError};
 use crate::id_source::StoreId;
 use std::{
     collections::BTreeMap,
@@ -82,7 +83,7 @@ impl Drop for StoreClosingGuard {
 #[derive(Debug)]
 pub(super) struct RegisteredLock {
     // Field order makes notification follow both unlock and file close.
-    _file: LockedFile,
+    _file: FileLock,
     registration: LockRegistration,
 }
 

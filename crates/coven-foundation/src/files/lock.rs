@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use crate::files::bootstrap::BootstrapLease;
+use crate::files::file_lock::{FileLock, LockMode};
 use crate::files::{atomic_file, settings, FileError, SettingsError, StoreSettings};
 use crate::id_source::StoreId;
 
@@ -52,14 +53,14 @@ impl StoreLock {
 /// A shared lock that prevents deletion while a reader holds store files open.
 #[derive(Debug)]
 pub struct StoreReadLock {
-    _file: LockedFile,
+    _file: FileLock,
 }
 
 /// A held lock on the cache's range writes: shared by a write in progress,
 /// exclusive while opening finds abandoned ones. Dropping it unlocks.
 #[derive(Debug)]
 pub struct CacheWriteLock {
-    _file: LockedFile,
+    _file: FileLock,
 }
 
 /// The cache-write lock file, in the store directory beside the cache folder,
@@ -70,16 +71,14 @@ const CACHE_WRITES: &str = ".coven-cache-writes.lock";
 /// locks it waits: a range write is short, and opening needs them finished.
 pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock, FileError> {
     let path = store.join(CACHE_WRITES);
-    let file = open_lock(&path)?;
-    let locked = if shared {
-        file.lock_shared()
+    let mode = if shared {
+        LockMode::Shared
     } else {
-        file.lock()
+        LockMode::Exclusive
     };
-    locked.map_err(|source| FileError::at("lock cache writes", &path, source))?;
-    Ok(CacheWriteLock {
-        _file: LockedFile { file },
-    })
+    let file = FileLock::lock(open_lock(&path)?, mode)
+        .map_err(|source| FileError::at("lock cache writes", &path, source))?;
+    Ok(CacheWriteLock { _file: file })
 }
 
 /// Exclusive access to the writer, readers and bootstrap, authorizing
@@ -89,8 +88,8 @@ pub(super) fn cache_writes(store: &Path, shared: bool) -> Result<CacheWriteLock,
 /// unfinished swap (§19.3), and lets deletion remove its lock file too.
 #[derive(Debug)]
 pub struct StoreDeletionLock {
-    store: LockedStore<LockedFile>,
-    _readers: LockedFile,
+    store: LockedStore<FileLock>,
+    _readers: FileLock,
     bootstrap: HeldBootstrap,
 }
 
@@ -98,7 +97,7 @@ pub struct StoreDeletionLock {
 #[derive(Debug)]
 enum HeldBootstrap {
     /// Taken by the deletion itself.
-    Locked(LockedFile),
+    Locked(FileLock),
     /// The lease of a bootstrap cancelling its own unpublished store.
     Leased(Arc<BootstrapLease>),
 }
@@ -199,26 +198,6 @@ pub enum StoreLockError {
     File(#[from] FileError),
 }
 
-#[derive(Debug)]
-pub(crate) struct LockedFile {
-    file: File,
-}
-
-impl Drop for LockedFile {
-    fn drop(&mut self) {
-        // Closing alone leaves the lock held while a concurrently forked child
-        // retains the open file before exec closes its inherited descriptors.
-        self.file.unlock().expect("release owned store lock");
-    }
-}
-
-impl LockedFile {
-    #[cfg(test)]
-    pub(super) fn inherited_file(&self) -> File {
-        self.file.try_clone().unwrap()
-    }
-}
-
 fn open_lock(path: &Path) -> Result<File, FileError> {
     OpenOptions::new()
         .read(true)
@@ -229,19 +208,14 @@ fn open_lock(path: &Path) -> Result<File, FileError> {
         .map_err(|source| FileError::at("open store lock", path, source))
 }
 
-pub(crate) fn try_lock(
-    path: &Path,
-    id: StoreId,
-    shared: bool,
-) -> Result<LockedFile, StoreLockError> {
-    let file = open_lock(path)?;
-    let result = if shared {
-        file.try_lock_shared()
+pub(crate) fn try_lock(path: &Path, id: StoreId, shared: bool) -> Result<FileLock, StoreLockError> {
+    let mode = if shared {
+        LockMode::Shared
     } else {
-        file.try_lock()
+        LockMode::Exclusive
     };
-    match result {
-        Ok(()) => Ok(LockedFile { file }),
+    match FileLock::try_lock(open_lock(path)?, mode) {
+        Ok(file) => Ok(file),
         Err(TryLockError::WouldBlock) => Err(StoreLockError::AlreadyOpen(id)),
         Err(TryLockError::Error(source)) => Err(FileError::at("lock store", path, source).into()),
     }
@@ -250,12 +224,10 @@ pub(crate) fn try_lock(
 // This file belongs to the layout and is never removed. It serializes lock
 // acquisition, creation, and lock-file removal across processes, so no caller
 // can hold an unlinked lock while another locks a new file at the same path.
-pub(crate) fn lock_layout(root: &Path) -> Result<LockedFile, FileError> {
+pub(crate) fn lock_layout(root: &Path) -> Result<FileLock, FileError> {
     let path = root.join(".coven-stores.lock");
-    let file = open_lock(&path)?;
-    file.lock()
-        .map_err(|source| FileError::at("lock store layout", &path, source))?;
-    Ok(LockedFile { file })
+    FileLock::lock(open_lock(&path)?, LockMode::Exclusive)
+        .map_err(|source| FileError::at("lock store layout", &path, source))
 }
 
 #[cfg(any(test, feature = "test-utils"))]
@@ -298,7 +270,7 @@ fn resolve_directory(directory: &Path) -> Result<PathBuf, FileError> {
         .map_err(|source| FileError::at("resolve store directory", directory, source))
 }
 
-pub(super) fn exclude_readers(directory: &Path, id: StoreId) -> Result<LockedFile, StoreLockError> {
+pub(super) fn exclude_readers(directory: &Path, id: StoreId) -> Result<FileLock, StoreLockError> {
     let _layout = lock_layout(directory.parent().expect("store parent"))?;
     try_lock(&lock_paths(directory, id)[1], id, false)
 }
@@ -315,7 +287,7 @@ pub(super) fn lock_existing(
     directory: &Path,
     id: StoreId,
     shared: bool,
-) -> Result<(PathBuf, LockedFile), StoreLockError> {
+) -> Result<(PathBuf, FileLock), StoreLockError> {
     let directory = std::fs::canonicalize(directory)
         .map_err(|source| FileError::at("resolve store directory", directory, source))?;
     let _layout = lock_layout(directory.parent().expect("store parent"))?;
@@ -343,7 +315,7 @@ fn bootstrap_lock_path(directory: &Path, id: StoreId) -> PathBuf {
 
 /// Take the bootstrap lock without waiting. Under the layout lock, so a
 /// deletion never removes the file between this open and this lock.
-pub(super) fn lock_bootstrap(directory: &Path, id: StoreId) -> Result<LockedFile, StoreLockError> {
+pub(super) fn lock_bootstrap(directory: &Path, id: StoreId) -> Result<FileLock, StoreLockError> {
     let _layout = lock_layout(directory.parent().expect("store parent"))?;
     try_lock(&bootstrap_lock_path(directory, id), id, false)
 }

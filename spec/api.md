@@ -1206,6 +1206,27 @@ pub use coven_foundation::files::FileError as DiskError;
 /// unsupported systems fail with the OS cause, without a weaker rename fallback.
 pub fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), FileError>;
 
+/// Whether other holders may share a `FileLock`.
+pub enum LockMode {
+    /// Coexists with other shared holders and excludes exclusive ones.
+    Shared,
+    /// Excludes every other holder.
+    Exclusive,
+}
+
+/// An OS lock on an open file, released when dropped. Separate opens of one
+/// file exclude each other, within a process and across processes. Unix
+/// systems, Android included, take `flock`; Windows takes `LockFileEx`.
+/// std's `File::lock` family is not used: on Android it returns `Unsupported`.
+pub struct FileLock { /* private */ }
+
+impl FileLock {
+    /// Wait for the lock on `file`.
+    pub fn lock(file: File, mode: LockMode) -> std::io::Result<FileLock>;
+    /// Lock `file` unless another holder excludes it (`TryLockError::WouldBlock`).
+    pub fn try_lock(file: File, mode: LockMode) -> Result<FileLock, std::fs::TryLockError>;
+}
+
 /// Every file under `dir` this process has open, once per descriptor or handle.
 /// Excludes directories and, on Windows, handles opened only to read attributes.
 /// Panics if the directory cannot be resolved or enumeration fails. Files closed

@@ -25,7 +25,10 @@ fn deletion_holds_only_sibling_locks_and_removes_them_after_the_directory() {
             .write(true)
             .open(path)
             .unwrap();
-        assert!(matches!(file.try_lock(), Err(TryLockError::WouldBlock)));
+        assert!(matches!(
+            FileLock::try_lock(file, LockMode::Exclusive),
+            Err(TryLockError::WouldBlock)
+        ));
     }
     let mut contents: Vec<_> = std::fs::read_dir(&lock.store.directory)
         .unwrap()

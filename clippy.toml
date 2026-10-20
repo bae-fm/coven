@@ -1,2 +1,12 @@
 # Keep this workspace independent of ancestor Clippy configurations.
 # The owner-construction checker enforces the file capability in Appendix F.2.
+
+# std's File locks return Unsupported on Android; lock through
+# coven_foundation::files::FileLock, which takes flock on every Unix.
+disallowed-methods = [
+    { path = "std::fs::File::lock", reason = "Unsupported on Android; use FileLock" },
+    { path = "std::fs::File::lock_shared", reason = "Unsupported on Android; use FileLock" },
+    { path = "std::fs::File::try_lock", reason = "Unsupported on Android; use FileLock" },
+    { path = "std::fs::File::try_lock_shared", reason = "Unsupported on Android; use FileLock" },
+    { path = "std::fs::File::unlock", reason = "Unsupported on Android; use FileLock" },
+]

@@ -10,6 +10,7 @@ mod bootstrap;
 mod creation;
 mod device_reset;
 mod directory;
+mod file_lock;
 mod file_reader;
 mod layout;
 mod lock;
@@ -25,6 +26,7 @@ pub use bootstrap::{BootstrapDirectoryError, BootstrapStore};
 pub use creation::DirectoryCreationError;
 pub use device_reset::{DeviceReset, ReplacedBy, ReplacementRecord};
 pub use directory::{FileArea, FileName, FileNameError, StoreDir, StoreDirAccess, StoreFile};
+pub use file_lock::{FileLock, LockMode};
 pub use file_reader::FileReader;
 pub use layout::{StoreDirectories, StoreDirectoriesAccess, StoreDirectoriesError};
 pub use lock::{

@@ -53,7 +53,8 @@ pub use coven_foundation::files::FileError as DiskError;
 pub use coven_foundation::files::{assert_no_open_files_under, open_files_under};
 pub use coven_foundation::files::{
     write_atomic, BootstrapDirectoryError, DeviceReset, DirectoryCreationError, FileError,
-    FileName, FileNameError, ReplacedBy, SettingsError, StoreDir, StoreLockError,
+    FileLock, FileName, FileNameError, LockMode, ReplacedBy, SettingsError, StoreDir,
+    StoreLockError,
 };
 pub use coven_foundation::id_source::MemberId;
 pub use coven_foundation::id_source::{
