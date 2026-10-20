@@ -531,3 +531,17 @@ fn assert_unresolved_factory_call(source: &str) {
     );
     assert!(found[0].message.contains("Factory::run"), "{found:?}");
 }
+
+/// A function pointer holds no value of its argument types, so a field that
+/// takes an owner as an argument does not make its struct an owner. One that
+/// returns an owner still does: calling it supplies one.
+#[test]
+fn function_pointer_fields_retain_only_their_outputs() {
+    let source = format!(
+        "{WORKER} struct Takes {{ run: fn(&Worker) }} struct Gives {{ make: fn() -> Worker }}"
+    );
+    let files = [RustFile::fixture(PATH, &source)];
+    let graph = OwnerGraph::collect(&files, &POLICY);
+    assert!(!graph.owners.contains("Takes"));
+    assert!(graph.owners.contains("Gives"));
+}

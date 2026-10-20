@@ -88,8 +88,10 @@ pub(crate) fn type_names(ty: &syn::Type) -> BTreeSet<String> {
     names.names
 }
 
-/// Types supplied to a callee. A callback receives its arguments from that
-/// callee; only its return value can supply a capability to it.
+/// Types supplied to a callee, or held by a field. A callback receives its
+/// arguments from its caller; only its return value can supply a capability.
+/// So a field holding a function pointer retains none of its argument types:
+/// `fn(&AdminRequest)` holds no request.
 pub(crate) fn supplied_type_names(ty: &syn::Type) -> BTreeSet<String> {
     let mut names = TypeNames {
         callback_outputs_only: true,
@@ -154,7 +156,7 @@ impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
                 syn::Item::Struct(item) => item
                     .fields
                     .iter()
-                    .flat_map(|field| type_names(&field.ty))
+                    .flat_map(|field| supplied_type_names(&field.ty))
                     .collect(),
                 syn::Item::Enum(item) => item
                     .variants
@@ -163,16 +165,16 @@ impl<'ast> Visit<'ast> for DeclarationCollector<'_> {
                         variant
                             .fields
                             .iter()
-                            .flat_map(|field| type_names(&field.ty))
+                            .flat_map(|field| supplied_type_names(&field.ty))
                     })
                     .collect(),
                 syn::Item::Union(item) => item
                     .fields
                     .named
                     .iter()
-                    .flat_map(|field| type_names(&field.ty))
+                    .flat_map(|field| supplied_type_names(&field.ty))
                     .collect(),
-                syn::Item::Type(item) => type_names(&item.ty),
+                syn::Item::Type(item) => supplied_type_names(&item.ty),
                 _ => BTreeSet::new(),
             };
             let info = self

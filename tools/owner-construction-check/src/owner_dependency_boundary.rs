@@ -18,7 +18,8 @@ use crate::finding::Finding;
 use crate::owner_graph::OwnerGraph;
 use crate::policy::Policy;
 use crate::syntax::{
-    is_test_only, is_test_source, type_name, type_names, visibility_crosses_owner, RustFile,
+    is_test_only, is_test_source, supplied_type_names, type_name, type_names,
+    visibility_crosses_owner, RustFile,
 };
 
 struct OwnerMethod {
@@ -179,7 +180,7 @@ fn collect_retained_service_owner_fields_in_items(
                     if !visibility_crosses_owner(&field.vis) {
                         continue;
                     }
-                    let exposes_service = type_names(&field.ty).iter().any(|name| {
+                    let exposes_service = supplied_type_names(&field.ty).iter().any(|name| {
                         retained_service_types.contains(name)
                             || !graph.retained(name).is_disjoint(retained_service_types)
                     });
