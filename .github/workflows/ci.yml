@@ -87,9 +87,11 @@ jobs:
       # The next run rebuilds the workspace's own libraries and test binaries
       # whatever it restores; only their incremental state and the
       # dependencies' outputs save it work. A failed run's build is as sound
-      # as a passing one's.
+      # as a passing one's. Only main saves: one platform's build is 2 to 4 GB
+      # compressed, so a set from every branch would evict main's from the
+      # repository's 10 GB, and a pull request restores main's latest.
       - name: Drop the workspace's own outputs before saving the build
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         run: |
           for name in $(cargo metadata --format-version 1 --no-deps |
               "$(command -v python3 || command -v python)" -c '
@@ -103,7 +105,7 @@ jobs:
           rm -rf target/doc
           du -sh target/debug/* ~/.cargo/registry 2>/dev/null | sort -h | tail -6
       - name: Save the build
-        if: ${{ !cancelled() }}
+        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
         uses: actions/cache/save@v5
         with:
           path: *build_paths
