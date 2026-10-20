@@ -858,3 +858,58 @@ async fn a_refresh_its_custody_cannot_commit_fails_the_request_without_retrying(
         .iter()
         .all(|(token, _)| token == "Bearer token"));
 }
+
+/// An error response prints its status and the codes its body states from
+/// each provider's fixed vocabulary, never a message, a description, an
+/// account or a path, and never a "code" that isn't a short word.
+#[test]
+fn provider_responses_name_their_fixed_vocabulary_codes() {
+    use serde_json::json;
+    for (status, body, expected) in [
+        (
+            409,
+            json!({"error_summary": "path/not_found/..", "error": {".tag": "path", "path": {".tag": "not_found"}}, "user_message": {"text": "secret"}}),
+            "provider returned HTTP 409 (path/not_found)",
+        ),
+        (
+            200,
+            json!({".tag": "failed", "failed": {".tag": "insufficient_quota"}}),
+            "provider returned HTTP 200 (failed/insufficient_quota)",
+        ),
+        (
+            404,
+            json!({"error": {"code": "itemNotFound", "message": "secret item", "innerError": {"code": "resourceNotFound", "request-id": "secret-id"}}}),
+            "provider returned HTTP 404 (itemNotFound, resourceNotFound)",
+        ),
+        (
+            403,
+            json!({"error": {"code": 403, "message": "secret", "status": "PERMISSION_DENIED", "errors": [{"reason": "forbidden", "message": "secret"}], "details": [{"reason": "IAM_PERMISSION_DENIED", "metadata": {"permission": "secret"}}]}}),
+            "provider returned HTTP 403 (PERMISSION_DENIED, forbidden, IAM_PERMISSION_DENIED)",
+        ),
+        (
+            400,
+            json!({"error": "invalid_grant", "error_description": "AADSTS70000: secret", "error_codes": [70000], "trace_id": "secret"}),
+            "provider returned HTTP 400 (invalid_grant, 70000)",
+        ),
+        (
+            403,
+            json!({"success": false, "errors": [{"code": 10000, "message": "secret"}]}),
+            "provider returned HTTP 403 (10000)",
+        ),
+        (
+            400,
+            json!({"error": "secret ana@example.com", "error_description": "secret"}),
+            "provider returned HTTP 400",
+        ),
+        (500, json!("secret"), "provider returned HTTP 500"),
+    ] {
+        let response = ProviderResponse::new(
+            status,
+            reqwest::header::HeaderMap::new(),
+            body.to_string().into_bytes(),
+        );
+        assert_eq!(response.to_string(), expected);
+        let debug = format!("{response:?}");
+        assert!(!debug.contains("secret"), "{debug}");
+    }
+}

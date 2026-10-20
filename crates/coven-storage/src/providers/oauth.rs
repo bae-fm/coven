@@ -44,13 +44,27 @@ pub enum OAuthError {
     Storage(#[from] StorageError),
 }
 
-/// The original checked error callback, omitted from diagnostics because it may
-/// contain secrets echoed by the provider.
-#[derive(Debug, thiserror::Error)]
-#[error("provider returned an OAuth error redirect")]
+/// The original checked error callback. Diagnostics show only its `error`
+/// code (RFC 6749 §4.1.2.1), such as `server_error`: the callback's other
+/// fields may contain secrets echoed by the provider.
+#[derive(Debug)]
 pub struct OAuthRedirectError {
+    /// The `error` field, when it is a code from a fixed vocabulary.
+    code: Option<String>,
     callback: SecretText,
 }
+
+impl std::fmt::Display for OAuthRedirectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("provider returned an OAuth error redirect")?;
+        match &self.code {
+            Some(code) => write!(f, " ({code})"),
+            None => Ok(()),
+        }
+    }
+}
+
+impl std::error::Error for OAuthRedirectError {}
 
 impl OAuthRedirectError {
     /// Inspect the unmodified callback explicitly, including provider extensions.
@@ -363,7 +377,10 @@ impl OAuthClients {
             if error.as_str().is_empty() || fields.contains_key("code") {
                 return Err(OAuthError::InvalidRedirect);
             }
-            let source = OAuthRedirectError { callback };
+            let source = OAuthRedirectError {
+                code: http::fixed_word(error.as_str()),
+                callback,
+            };
             if error.as_str() == "access_denied" {
                 return Err(OAuthError::Denied(source));
             }

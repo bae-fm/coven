@@ -9,7 +9,9 @@ use objc2_cloud_kit::{
     CKRecord, CKRecordChangedErrorClientRecordKey, CKRecordID, CKReference, CKReferenceAction,
     CKShare,
 };
-use objc2_foundation::{NSCopying, NSDictionary, NSError, NSNumber, NSString, NSURL};
+use objc2_foundation::{
+    NSCopying, NSDictionary, NSError, NSNumber, NSString, NSUnderlyingErrorKey, NSURL,
+};
 use std::time::Duration;
 
 pub(super) use crate::session::CLOUDKIT_PART_SIZE as PART_SIZE;
@@ -474,13 +476,51 @@ fn retry_after(error: &NSError) -> Option<Duration> {
         .max()
 }
 
-/// A CloudKit failure, with what its NSError states about the server's answer
-/// read once at conversion: whether the server answered, and its requested
-/// wait. The NSError stays the cause.
+/// The domain and code of `error`, of the errors beneath it
+/// (`NSUnderlyingErrorKey`), and of each partial-failure item, such as
+/// "CKErrorDomain (2) [items: CKErrorDomain (14) ×2]" or "CKErrorDomain (4):
+/// NSURLErrorDomain (-1009)". Domains and codes are fixed vocabulary;
+/// userInfo's descriptions, records, item ids and share URLs never print.
+fn codes(error: &NSError) -> String {
+    let mut text = String::new();
+    let mut layer = Some(error.retain());
+    // NSError chains are short; the bound only guards a malformed cycle.
+    for _ in 0..8 {
+        let Some(error) = layer.take() else {
+            break;
+        };
+        if !text.is_empty() {
+            text.push_str(": ");
+        }
+        text.push_str(&format!("{} ({})", error.domain(), error.code()));
+        if let Some(Ok(items)) = partial_items(&error) {
+            let mut counts = std::collections::BTreeMap::<String, usize>::new();
+            for item in &items {
+                *counts.entry(codes(item)).or_default() += 1;
+            }
+            let items: Vec<String> = counts
+                .into_iter()
+                .map(|(codes, count)| match count {
+                    1 => codes,
+                    count => format!("{codes} ×{count}"),
+                })
+                .collect();
+            text.push_str(&format!(" [items: {}]", items.join(", ")));
+        }
+        layer = unsafe { error.userInfo().objectForKey(NSUnderlyingErrorKey) }
+            .and_then(|value| value.downcast::<NSError>().ok());
+    }
+    text
+}
+
+/// A CloudKit failure, with what its NSError states read once at conversion:
+/// whether the server answered, its requested wait, and its codes. The
+/// NSError stays the cause.
 pub(crate) struct NativeError {
     error: Retained<NSError>,
     answered: bool,
     retry_after: Option<Duration>,
+    codes: String,
 }
 impl NativeError {
     pub(crate) fn answered(&self) -> bool {
@@ -497,8 +537,9 @@ impl std::fmt::Debug for NativeError {
 }
 impl std::fmt::Display for NativeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        // NSError's userInfo can contain whole records and share URLs.
-        write!(f, "{} ({})", self.error.domain(), self.error.code())
+        // NSError's userInfo can contain whole records and share URLs, so
+        // only the codes read from it print.
+        f.write_str(&self.codes)
     }
 }
 impl std::error::Error for NativeError {
@@ -514,6 +555,7 @@ pub(super) fn native_error(error: &NSError) -> StorageError {
             error: error.retain(),
             answered: answered(error),
             retry_after: retry_after(error),
+            codes: codes(error),
         }),
     }
 }

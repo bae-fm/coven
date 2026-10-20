@@ -137,6 +137,11 @@ async fn redirect_provider_errors_keep_their_classification_and_original_callbac
                     .downcast::<crate::providers::OAuthRedirectError>()
                     .unwrap()
             };
+            // Only the redirect's fixed-vocabulary code prints.
+            assert_eq!(
+                original.to_string(),
+                format!("provider returned an OAuth error redirect ({code})")
+            );
             let requests = presenter.requests.lock().unwrap();
             assert_eq!(requests.len(), 1);
             let url = url::Url::parse(&requests[0]).unwrap();
@@ -399,6 +404,12 @@ async fn token_errors_retain_the_original_response_during_sign_in_and_refresh() 
             let refreshed = flow.clients.refresh(&previous).await.err().unwrap();
             for error in [signed_in, refreshed] {
                 assert!(!format!("{error} {error:?}").contains("secret"));
+                assert!(
+                    error
+                        .to_string()
+                        .ends_with(&format!("provider returned HTTP {status} ({code})")),
+                    "{error}"
+                );
                 assert_eq!(error.failure(), expected, "{provider:?}: {code}");
                 assert_eq!(
                     error.retryable(),

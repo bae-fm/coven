@@ -2975,8 +2975,13 @@ pub enum StorageError {
     /// A failure with its diagnostic or original local cause.
     Caused { failure: StorageFailure, source: Box<dyn std::error::Error + Send + Sync> },
     /// A provider failure with its original transport, SDK or framework cause.
-    /// Its text names that cause safely: an answered S3 request shows its HTTP
-    /// status and error code, never the reply's message. A request to any
+    /// Its text names that cause safely. An answered request shows its HTTP
+    /// status and the error codes the reply states from the provider's fixed
+    /// vocabulary, such as S3's `AccessDenied`, Dropbox's `path/not_found`,
+    /// Graph's `itemNotFound` or an OAuth `invalid_grant`; a CloudKit failure
+    /// shows the domain and code of its NSError, of the errors beneath it and
+    /// of each partial-failure item. It never shows a reply's message or
+    /// description, which can echo credentials or names. A request to any
     /// provider that got no reply shows every layer of its transport, TLS or
     /// DNS failure, such as "client error (Connect): dns error: …" below
     /// "error sending request", with each URL cut to its scheme and host, so a
@@ -3010,8 +3015,11 @@ impl StorageError {
 }
 
 /// An HTTP provider's original response, retained as a StorageError cause.
-/// Bodies and headers are omitted from Display and Debug because providers
-/// can echo credentials. This also retains Dropbox's asynchronous job failures
+/// Display and Debug show the status and the body's fixed-vocabulary error
+/// codes (an OAuth `error` and Microsoft's `error_codes`, Dropbox's tags,
+/// Graph's `code` and inner codes, Google's `status` and `reason`s,
+/// Cloudflare's numeric codes), never the body's other text or the headers,
+/// because providers can echo credentials. This also retains Dropbox's asynchronous job failures
 /// and malformed OneDrive progress responses, even when HTTP succeeded.
 pub struct ProviderResponse { /* private */ }
 
@@ -4627,8 +4635,9 @@ pub enum OAuthError {
 }
 
 /// An original checked OAuth error callback, retained as the cause of Denied
-/// or StorageError::Provider. Display and Debug omit the callback because the
-/// provider may echo secrets in any field.
+/// or StorageError::Provider. Display and Debug show only its OAuth `error`
+/// code; the rest of the callback is omitted because the provider may echo
+/// secrets in any field.
 pub struct OAuthRedirectError { /* private */ }
 
 impl OAuthRedirectError {
@@ -4935,8 +4944,9 @@ impl OAuthAccess {
   retryable `Network` failures. Only an `access_denied` redirect is `Denied`;
   native cancellation stays `Cancelled`. Other redirect errors are `Refused`.
   Token failures retain the original `ProviderResponse`; redirect failures
-  retain the original `OAuthRedirectError`, including denial. Neither prints
-  provider-supplied details.
+  retain the original `OAuthRedirectError`, including denial. Each prints
+  only the status and the OAuth error code, never a description or other
+  provider-supplied detail.
 - Refresh and S3 key replacement leave restore codes untouched. Restore
   codes carry the storage location, never S3 keys or OAuth tokens.
 - Token custody retains the client id and granted access. Refresh uses that

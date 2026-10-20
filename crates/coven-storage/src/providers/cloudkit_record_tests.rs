@@ -149,6 +149,56 @@ fn partial_failures_answer_through_their_items_and_wait_for_the_longest() {
     assert!(conflict.answered());
 }
 
+/// A CloudKit failure prints the domain and code of its error, of the error
+/// beneath it, and of each partial-failure item: never a description, a
+/// record or an item id.
+#[test]
+fn native_failures_name_their_underlying_and_item_codes() {
+    let description = NSString::from_str("secret description");
+    let offline = unsafe {
+        NSError::initWithDomain_code_userInfo(
+            NSError::alloc(),
+            &NSString::from_str("NSURLErrorDomain"),
+            -1009,
+            Some(&NSDictionary::<NSString, AnyObject>::from_slices(
+                &[objc2_foundation::NSLocalizedDescriptionKey],
+                &[&*description],
+            )),
+        )
+    };
+    let failed = native(
+        CKErrorCode::NetworkFailure,
+        &[(unsafe { NSUnderlyingErrorKey }, &*offline)],
+    );
+    let error = native_error(&failed);
+    let domain = unsafe { CKErrorDomain }.to_string();
+    let expected = format!("{domain} (4): NSURLErrorDomain (-1009)");
+    assert_eq!(
+        std::error::Error::source(&error).unwrap().to_string(),
+        expected
+    );
+    assert!(error.to_string().ends_with(&expected), "{error}");
+
+    let batch = partial(
+        &[
+            native(CKErrorCode::QuotaExceeded, &[]),
+            native(CKErrorCode::QuotaExceeded, &[]),
+            failed.clone(),
+        ],
+        None,
+    );
+    let text = native_error(&batch).to_string();
+    assert!(
+        text.ends_with(&format!(
+            "{domain} (2) [items: {domain} (25) ×2, {expected}]"
+        )),
+        "{text}"
+    );
+    for text in [text, format!("{:?}", native_error(&failed))] {
+        assert!(!text.contains("secret"), "{text}");
+    }
+}
+
 #[test]
 fn an_empty_or_missing_account_is_authentication() {
     for name in [None, Some(String::new())] {

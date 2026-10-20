@@ -310,16 +310,92 @@ pub(crate) fn retry_after_header(value: &str, date: Option<&str>) -> crate::Retr
     }
 }
 
+impl ProviderResponse {
+    /// The error codes the body states, from each provider's fixed
+    /// vocabulary: an OAuth `error` (RFC 6749 §5.2) and Microsoft's
+    /// `error_codes`, Dropbox's error tags, Microsoft Graph's `code` and its
+    /// inner codes, Google's `status` and `reason`s, Cloudflare's numeric
+    /// codes. Never a message, a description or anything else in the body:
+    /// those can echo credentials, paths or account names.
+    fn codes(&self) -> Vec<String> {
+        let Ok(value) = serde_json::from_slice::<Value>(self.body()) else {
+            return Vec::new();
+        };
+        let mut codes = Vec::new();
+        let mut push = |code: Option<String>| {
+            if let Some(code) = code.filter(|code| !codes.contains(code)) {
+                codes.push(code);
+            }
+        };
+        // Dropbox's asynchronous job status is a tagged body of its own.
+        push(dropbox_tags(&value));
+        let error = &value["error"];
+        push(error.as_str().and_then(fixed_word));
+        push(dropbox_tags(error));
+        let mut inner = error;
+        while inner.is_object() {
+            push(inner["code"].as_str().and_then(fixed_word));
+            inner = match inner.get("innerError") {
+                Some(next) => next,
+                None => &inner["innererror"],
+            };
+        }
+        push(error["status"].as_str().and_then(fixed_word));
+        for list in [&error["errors"], &error["details"]] {
+            for item in list.as_array().into_iter().flatten() {
+                push(item["reason"].as_str().and_then(fixed_word));
+            }
+        }
+        for code in value["error_codes"].as_array().into_iter().flatten() {
+            push(code.as_u64().map(|code| code.to_string()));
+        }
+        for item in value["errors"].as_array().into_iter().flatten() {
+            push(item["code"].as_u64().map(|code| code.to_string()));
+        }
+        codes
+    }
+}
+/// A word from a provider's fixed vocabulary: letters, digits, `_`, `.`,
+/// `-` and `/`, at most 64 of them. Any other text is not printed.
+pub(super) fn fixed_word(word: &str) -> Option<String> {
+    let fixed = (1..=64).contains(&word.len())
+        && word
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-' | '/'));
+    fixed.then(|| word.to_owned())
+}
+/// Dropbox's nested union tags, such as `path/not_found`.
+fn dropbox_tags(value: &Value) -> Option<String> {
+    let mut tags = Vec::new();
+    let mut union = value;
+    while let Some(tag) = union
+        .get(".tag")
+        .and_then(Value::as_str)
+        .and_then(fixed_word)
+    {
+        union = &union[tag.as_str()];
+        tags.push(tag);
+    }
+    (!tags.is_empty()).then(|| tags.join("/"))
+}
 impl fmt::Debug for ProviderResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("ProviderResponse")
             .field("status", &self.status)
+            .field("codes", &self.codes())
             .finish_non_exhaustive()
     }
 }
+/// The status and the body's fixed-vocabulary codes, such as "provider
+/// returned HTTP 409 (path/not_found)".
 impl fmt::Display for ProviderResponse {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "provider returned HTTP {}", self.status)
+        write!(f, "provider returned HTTP {}", self.status)?;
+        let codes = self.codes();
+        if !codes.is_empty() {
+            write!(f, " ({})", codes.join(", "))?;
+        }
+        Ok(())
     }
 }
 impl std::error::Error for ProviderResponse {}
