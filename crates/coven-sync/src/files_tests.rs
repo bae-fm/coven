@@ -536,6 +536,8 @@ async fn cancelling_a_pin_releases_partial_budget_exemptions() {
 mod cache;
 #[path = "file_status_tests.rs"]
 mod status;
+#[path = "file_upload_copy_tests.rs"]
+mod upload_copy;
 #[path = "file_upload_retry_tests.rs"]
 mod upload_retry;
 #[path = "file_upload_tests.rs"]

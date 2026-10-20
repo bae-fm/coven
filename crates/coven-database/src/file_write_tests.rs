@@ -144,7 +144,7 @@ pub(crate) fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
 pub(crate) async fn complete_uploads(db: &Database) {
     let owner = crate::FileDatabase::new(db.clone());
     for upload in owner.uploads().await.unwrap() {
-        owner.complete_upload(upload.id, ()).await.unwrap();
+        owner.complete_upload(upload.id, (), None).await.unwrap();
     }
 }
 
@@ -618,10 +618,16 @@ async fn shared_bytes_last_until_the_final_queued_upload_completes() {
     let uploads = owner.uploads().await.unwrap();
     assert_eq!(uploads.len(), 2);
     assert_ne!(uploads[0].file.id(), uploads[1].file.id());
-    owner.complete_upload(uploads[0].id, ()).await.unwrap();
+    owner
+        .complete_upload(uploads[0].id, (), None)
+        .await
+        .unwrap();
     assert_eq!(owned_paths(&store), paths);
     assert_eq!(std::fs::read(&paths[0]).unwrap(), b"original");
-    owner.complete_upload(uploads[1].id, ()).await.unwrap();
+    owner
+        .complete_upload(uploads[1].id, (), None)
+        .await
+        .unwrap();
     assert!(owned_paths(&store).is_empty());
     assert_eq!(local_count(&db, "_coven_file_removals"), 0);
     db.close().await.unwrap();

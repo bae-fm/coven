@@ -61,8 +61,8 @@ async fn only_changed_file_references_become_eager_work() {
     let second = b.file_ref("files", "7").await.unwrap();
     assert_ne!(second.id(), first.id());
     assert_eq!(work(&b).await, vec![second]);
-    // Completing its own upload leaves the attaching device's bytes to its
-    // cache: the eager row's current file becomes its work.
+    // Completing its own upload with no copy kept for the cache leaves the
+    // eager row's current file as the attaching device's work.
     complete_uploads(&a).await;
     assert_eq!(
         work(&a).await,

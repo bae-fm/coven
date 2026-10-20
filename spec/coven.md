@@ -3455,12 +3455,26 @@ as a song in their music folder.
 - If it moves or changes before upload, coven reports it as missing or changed,
   before reading any of it.
 - After a successful upload, reads on the attaching device use the cache or
-  storage. Coven never reads the original again, and it stays where it is.
+  storage. Coven never reads the original again, and it stays where it is. So
+  if the file must stay on this device, pinned or eager (§17.6), the device
+  downloads its cache copy from storage like any other device.
 - Deleting a row deletes only coven's copies of its file, never the original.
 
 An **app-provided** file is bytes the app hands to coven, which keeps and owns
 them. The app can hand them over as a stream, so a large file never has to fit in
 memory.
+
+- Coven keeps its copy until the upload succeeds. After that, reads on the
+  attaching device use the cache or storage, as for a user-provided file.
+- If the file must stay on this device, pinned or eager (§17.6), coven's copy
+  becomes its cache copy in the step that completes the upload (§17.7). The
+  device doesn't download what it just uploaded.
+
+Ana's laptop imports an album and attaches its cover to an eager table. When the
+cover's upload completes, her laptop keeps the copy it uploaded from. It doesn't
+download the cover again, and its eager-fill progress never shows the cover.
+Without this rule the laptop would throw the bytes away and fetch them straight
+back from storage.
 
 For both kinds, the first read records the whole-file content hash and a SHA-256
 hash of each 64 KiB chunk of plaintext (the last chunk may be shorter). That read
@@ -3636,14 +3650,23 @@ app unpins it.
   Publishing replaces the separate cached chunks in one step. A cancellation or a
   crash leaves no partly downloaded file exempt from eviction.
 - A file still queued for upload on this device is pinned at once. The
-  transaction that retires its upload carries the pin to the stored file, which
-  coven then keeps whole from storage like any pin.
+  transaction that retires its upload keeps the pin. An app-provided file's own
+  copy becomes its pinned cache file (§17.7). A user-provided file's pin is
+  carried to the stored file, which coven then keeps whole from storage like
+  any pin.
 
 The app can remove an uploaded file from the cache; that never touches storage.
 
 **Eager downloads** keep their requested file references until each one settles,
 failures included. Evicting a completed download doesn't request it again; a
 changed reference can.
+
+The device that uploads an eager file has nothing to download for it. Its upload
+makes an app-provided file's own copy the cache copy (§17.7), so the file never
+becomes eager work there. That copy counts against the namespace's budget like
+any cached file; evicting it requests nothing. A user-provided file becomes eager
+work when its upload completes, because the original is never read again
+(§17.1).
 
 **Progress** for pins and eager downloads counts authenticated bytes committed to
 the cache. The one-time reads and the subscriptions report the same data
@@ -3744,6 +3767,25 @@ hold up the attaching write's own upload.
 - A crash before that transaction retries the same upload. An occupied path
   counts as this upload only after its bytes compare equal (§19.3).
 - Rows may arrive before their files. No write waits for file bytes.
+
+**The uploading device keeps its copy.** An app-provided file that must stay on
+this device, pinned or eager (§17.6), gets its cache file before completion.
+
+- The uploader writes the whole encrypted file: the bytes a single create sent,
+  or coven's copy encrypted again, each chunk checked against its recorded hash
+  as for sending. Chunk nonces are their indexes (Appendix D.4), so the cache
+  file is byte for byte the stored object.
+- Its name is recorded before it's created, and its bytes are synced before the
+  transaction (Appendix C.3). The completing transaction publishes it as the
+  file's cache copy, pinned if the queued file was and its row still names it,
+  and releases coven's staged copy. No step leaves the file neither queued nor
+  cached.
+- A failure writing the cache file fails the attempt, which retries like any
+  other. A crash before the transaction leaves the upload queued; its retry
+  finds the stored object and writes the cache file again.
+- The transaction decides again whether the file must stay. One unpinned in
+  between leaves the cache file for removal with the staged copy. One pinned in
+  between, with no cache file written, waits for a whole copy from storage.
 
 #### 17.8 Deleting stored files
 

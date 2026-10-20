@@ -137,7 +137,10 @@ async fn an_upload_failure_records_its_wait_and_pending_record_and_completion_re
         .await
         .unwrap();
     // One transaction retires the queue row, its wait and its record.
-    owner.complete_upload(id, Subject::Number(7)).await.unwrap();
+    owner
+        .complete_upload(id, Subject::Number(7), None)
+        .await
+        .unwrap();
     assert_eq!(local_count(&db, "_coven_retries"), 0);
     assert!(owner.uploads().await.unwrap().is_empty());
     assert!(db.pending::<Record>().await.unwrap().is_empty());

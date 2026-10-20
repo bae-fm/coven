@@ -706,10 +706,11 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
 }
 
 /// A pin taken while the file is still queued here is kept through its
-/// upload: completing the upload carries the pin to the stored file, and the
-/// file worker keeps it whole from storage without the app pinning again, so
-/// reading it then needs no request. A pin released while queued leaves
-/// nothing pinned (§17.6, E8).
+/// upload without the app pinning again: completing an app file's upload
+/// pins coven's own copy, and an original's carries the pin to the stored
+/// file, which the file worker keeps whole from storage. Either way reading
+/// it then needs no request. A pin released while queued leaves nothing
+/// pinned (§17.6, E8).
 #[tokio::test]
 async fn a_pin_taken_while_queued_survives_the_upload() {
     for original in [false, true] {

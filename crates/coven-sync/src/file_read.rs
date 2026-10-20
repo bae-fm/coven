@@ -12,7 +12,7 @@ use coven_format::{
     file::{FileHeader, FILE_HEADER_LEN},
 };
 use coven_foundation::files::StoreDirAccess;
-use coven_foundation::files::{FileArea, FileName, StoreReadLock};
+use coven_foundation::files::{FileName, StoreReadLock};
 use coven_storage::{ByteRange, ObjectPath};
 use std::sync::Arc;
 
@@ -363,21 +363,7 @@ impl UploadedFile {
         Ok(())
     }
     pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
-        let name = FileName::new(self.owner.ids.new_id().to_string()).expect("UUID cache name");
-        let reservation = self.owner.database.reserve_cache_file(name.clone()).await?;
-        let target = self.owner.directory.file(FileArea::Cache, &name);
-        let directory = self.owner.directory.clone();
-        // Cleanup cannot release the name while creation still runs after a
-        // cancelled await; the blocking task retains its reservation.
-        let (reservation, writer) = crate::files::join(tokio::task::spawn_blocking(move || {
-            let writer = (|| -> Result<_, FileReadError> {
-                let lock = directory.lock_read_only()?;
-                Ok(target.create_writer(lock)?)
-            })();
-            (reservation, writer)
-        }))
-        .await;
-        let mut writer = writer?;
+        let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
         writer.append(&self.header.encode()).await?;
         let mut hash = ContentHasher::new();
         let mut index = 0;
@@ -400,7 +386,7 @@ impl UploadedFile {
         }
         writer.finish().await?;
         let _cache = self.owner.cache.write().await;
-        reservation.publish(&self.file).await?;
+        reservation.publish().await?;
         Ok(())
     }
     fn integrity(&self) -> FileReadError {

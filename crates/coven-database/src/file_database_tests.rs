@@ -15,9 +15,11 @@ async fn reopen_waits_for_a_cache_reservation_after_its_database_owner_drops() {
         .schema(tables(Provenance::AppProvided), SCHEMA)
         .await
         .unwrap();
+    attach(&db, vec![5; 3], true).await.unwrap();
+    let file = db.file_ref("files", "7").await.unwrap();
     let owner = FileDatabase::new(db.clone());
     let reservation = owner
-        .reserve_cache_file(FileName::new("reserved").unwrap())
+        .reserve_cache_file(&file, FileName::new("reserved").unwrap())
         .await
         .unwrap();
     drop(db);
@@ -42,10 +44,12 @@ fn cancelled_cache_reservations_drop_outside_a_runtime_and_record_cleanup_failur
         let db = runtime
             .block_on(store.schema(tables(Provenance::AppProvided), SCHEMA))
             .unwrap();
+        runtime.block_on(attach(&db, vec![5; 3], true)).unwrap();
+        let file = runtime.block_on(db.file_ref("files", "7")).unwrap();
         let owner = FileDatabase::new(db.clone());
         let name = FileName::new("reserved").unwrap();
         let reservation = runtime
-            .block_on(owner.reserve_cache_file(name.clone()))
+            .block_on(owner.reserve_cache_file(&file, name.clone()))
             .unwrap();
         let path = store
             .database_path()
@@ -175,7 +179,7 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
             assert_eq!(owned_paths(&store).len(), 2);
         }
         let writes = db.test_queued_writes().await.unwrap().len();
-        owner.complete_upload(first_id, ()).await.unwrap();
+        owner.complete_upload(first_id, (), None).await.unwrap();
         assert!(owner.open_upload_source(&first).await.unwrap().is_none());
         assert_eq!(db.file_ref("files", "7").await.ok(), current);
         assert_eq!(db.test_queued_writes().await.unwrap().len(), writes);
@@ -210,7 +214,7 @@ async fn completion_retires_the_queue_without_writing_whatever_the_row_became() 
         }
         // Completing it again breaks the queue's own rule; nothing is damaged.
         assert!(matches!(
-            owner.complete_upload(first_id, ()).await,
+            owner.complete_upload(first_id, (), None).await,
             Err(DbError::Invariant { .. })
         ));
         db.close().await.unwrap();
@@ -317,7 +321,7 @@ async fn chunk_hashes_belong_to_the_queued_file_whatever_its_row_becomes() {
                 .find(|upload| upload.file == first)
                 .unwrap()
                 .id;
-            owner.complete_upload(first_id, ()).await.unwrap();
+            owner.complete_upload(first_id, (), None).await.unwrap();
             // Completing A cannot delete B's facts.
             assert_eq!(
                 local_count(&db, "_coven_file_chunks"),
@@ -583,7 +587,7 @@ async fn a_stalled_pin_read_holds_back_no_app_write() {
     let file = db.file_ref("files", "7").await.unwrap();
     let owner = FileDatabase::new(db.clone());
     let name = FileName::new("pinned").unwrap();
-    let reservation = owner.reserve_cache_file(name.clone()).await.unwrap();
+    let reservation = owner.reserve_cache_file(&file, name.clone()).await.unwrap();
     let path = store
         .database_path()
         .parent()
@@ -595,7 +599,7 @@ async fn a_stalled_pin_read_holds_back_no_app_write() {
         .status()
         .unwrap()
         .success());
-    let publication = tokio::spawn(async move { reservation.publish(&file).await });
+    let publication = tokio::spawn(async move { reservation.publish().await });
     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
     assert!(!publication.is_finished(), "the read is stalled");
     let written = tokio::time::timeout(

@@ -386,47 +386,87 @@ impl FileDatabase {
         })
         .await
     }
+    /// Whether completing this queued upload would keep coven's own copy as
+    /// the file's cache copy: the queue's source is that copy of app-provided
+    /// bytes, and the file must be cached here, pinned while queued and still
+    /// named by its row, or named by an eager row (§17.6). A user's original
+    /// is never read again after its upload (§17.1), so it never answers yes.
+    /// Completion decides again in its own transaction; this lets the
+    /// uploader write the copy first.
+    pub async fn upload_keeps_copy(&self, file: &FileRef) -> Result<bool, DbError> {
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Err(read_only());
+        };
+        let file = file.clone();
+        database
+            .call(move |inner| {
+                inner.access.with_committed(|db| {
+                    let schema = &inner.access.write_schema;
+                    Ok(matches!(
+                        file_ref::queued_source(db, &file)?,
+                        Some(file_ref::QueuedSource::Copy(_))
+                    ) && (file_queue::pinned(db, &file)?
+                        && file_ref::naming(db, schema, &file)?.is_some()
+                        || crate::eager_work::named(db, schema, &file)?.is_some()))
+                })
+            })
+            .await
+    }
     /// Retire an upload once storage confirms its complete bytes (§17.7): one
     /// transaction removes the queue row, its chunk hashes, the copy kept for
     /// it and this device's pending record about the file. No app row, file
     /// reference or write changes, so a row retargeted, moved or deleted
     /// meanwhile keeps its newer state. Afterwards this device reads the file
-    /// from the cache or storage. A pin taken while queued becomes the stored
-    /// file's carried pin in that transaction (§17.6).
+    /// from the cache or storage.
+    ///
+    /// A file that must stay cached here, pinned while queued and still named
+    /// by its row, or named by an eager row, takes `copy`, the whole encrypted
+    /// file the uploader wrote from coven's own copy, as its cache copy in
+    /// that transaction: pinned if the pin was, under the budget otherwise
+    /// (§17.6). Without one, the pin becomes the stored file's carried pin
+    /// and the eager row's file becomes eager work, both kept whole from
+    /// storage. A copy nothing needs any more is removed with the queue's own.
     pub async fn complete_upload<S: serde::Serialize + Send + 'static>(
         &self,
         id: i64,
         subject: S,
+        copy: Option<CacheReservation>,
     ) -> Result<(), DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
-        database
-            .call(move |inner| {
-                let (result, chosen) = inner.access.with_writer(|writer| {
-                    let schema = &inner.access.write_schema;
-                    let result = writer.transaction(|db| {
-                        let (reference, pinned) = file_queue::complete(db, id)?;
-                        if pinned {
-                            cache::request_pin(db, &reference)?;
-                        }
-                        crate::eager_work::uploaded(db, schema, &reference)?;
-                        crate::pending::clear(db, &subject)
-                    });
-                    Ok::<_, DbError>((result, super::released(writer, &inner.staging)))
-                })?;
-                inner.finish_removals(result, chosen)
-            })
-            .await
+        let resources = database.inner.clone();
+        // Its own blocking task, as `CacheReservation::publish` has: the copy
+        // is dropped after the database guard on every path, since releasing
+        // it takes that lock again.
+        finish_blocking(
+            tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
+                let mut copy = copy;
+                let slot = resources.read().expect("database lock poisoned");
+                let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
+                let completed = inner.call(|inner| complete(inner, id, &subject, copy.as_mut()));
+                if let Some(copy) = &mut copy {
+                    copy.release(inner);
+                }
+                completed
+            }))
+            .await,
+        )
     }
-    /// Reserve a cache file while it is assembled and checked. Only the writer
-    /// can pin; read-only file owners continue to cache individual chunks.
-    pub async fn reserve_cache_file(&self, name: FileName) -> Result<CacheReservation, DbError> {
+    /// Reserve a whole cache file of `file` while it is written and checked.
+    /// Only the writer can pin or complete uploads; read-only file owners
+    /// continue to cache individual chunks.
+    pub async fn reserve_cache_file(
+        &self,
+        file: &FileRef,
+        name: FileName,
+    ) -> Result<CacheReservation, DbError> {
         let FileDatabaseAccess::Writer(database) = &self.access else {
             return Err(read_only());
         };
         let lease = database.file_tasks.clone().read_owned().await;
         let resources = database.inner.clone();
+        let file = file.clone();
         database
             .call(move |inner| {
                 inner.access.with_writer(|writer| {
@@ -455,6 +495,7 @@ impl FileDatabase {
                 })?;
                 Ok(CacheReservation {
                     database: resources,
+                    file,
                     name,
                     lease: Some(lease),
                 })
@@ -714,39 +755,37 @@ impl FileDatabase {
     }
 }
 
-/// Bytes reserved for a verified whole-file cache pin.
+/// Bytes reserved for one file's whole encrypted cache file while it is
+/// written: a pin's, or an upload's own copy.
 pub struct CacheReservation {
     database: Arc<RwLock<Option<DatabaseInner>>>,
+    file: FileRef,
     name: FileName,
     lease: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 impl CacheReservation {
     /// Atomically publish a fully synced and content-checked whole file as pinned.
     /// Any older chunk files become recorded removals in the same transaction.
-    pub async fn publish(self, file: &FileRef) -> Result<(), DbError> {
+    pub async fn publish(self) -> Result<(), DbError> {
         let mut pending = self;
-        let file = file.clone();
+        let database = pending.database.clone();
         finish_blocking(
             tokio::task::spawn_blocking(crate::commit_scope::bind(move || {
                 {
-                    let slot = pending.database.read().expect("database lock poisoned");
+                    let slot = database.read().expect("database lock poisoned");
                     let inner = slot.as_ref().ok_or(DbError::StoreClosed)?;
                     // Disk reads finish before the writer is taken: a stalled
                     // read must not hold back app writes (§21.2).
-                    let size = cache::whole_size(&inner.access.directory, &file, &pending.name)?;
+                    let size =
+                        cache::whole_size(&inner.access.directory, &pending.file, &pending.name)?;
                     inner
                         .access
                         .with_writer(|writer| {
                             writer.transaction(|db| {
-                                file_ref::validate(db, &inner.access.write_schema, &file)?;
-                                cache::publish(db, &file, &pending.name, size)
+                                file_ref::validate(db, &inner.access.write_schema, &pending.file)?;
+                                cache::publish(db, &pending.file, &pending.name, size, true)
                             })?;
-                            inner
-                                .staging
-                                .lock()
-                                .expect("staging lock poisoned")
-                                .remove(&pending.name);
-                            pending.lease.take();
+                            pending.release(inner);
                             Ok::<_, DbError>(super::released(writer, &inner.staging))
                         })
                         // The entries it replaced go once the writer is free.
@@ -756,6 +795,14 @@ impl CacheReservation {
             }))
             .await,
         )
+    }
+    /// Give up the name once a transaction has decided its bytes: published,
+    /// or left to its recorded removal. Releasing again does nothing.
+    fn release(&mut self, inner: &DatabaseInner) {
+        if self.lease.is_some() {
+            inner.release_file_reservations(std::iter::once(&self.name));
+            self.lease.take();
+        }
     }
 }
 impl Drop for CacheReservation {
@@ -768,6 +815,56 @@ impl Drop for CacheReservation {
             .expect("reservation holds close guard")
             .release_file_reservations(std::iter::once(&self.name));
     }
+}
+/// One upload's completion and its cache copy, under the writer (§17.7).
+/// The copy's bytes are checked first, with no writer held (§21.2).
+fn complete<S: serde::Serialize>(
+    inner: &DatabaseInner,
+    id: i64,
+    subject: &S,
+    copy: Option<&mut CacheReservation>,
+) -> Result<(), DbError> {
+    let size = copy
+        .as_deref()
+        .map(|copy| cache::whole_size(&inner.access.directory, &copy.file, &copy.name))
+        .transpose()?;
+    let (result, chosen) = inner.access.with_writer(|writer| {
+        let schema = &inner.access.write_schema;
+        let result = writer.transaction(|db| {
+            let (reference, pinned) = file_queue::complete(db, id)?;
+            let eager = crate::eager_work::named(db, schema, &reference)?;
+            match copy.as_deref().zip(size) {
+                Some((copy, size)) => {
+                    if cache::id(&copy.file)? != cache::id(&reference)? {
+                        return Err(DbError::Invariant {
+                            what: "an upload keeps a cache copy of its own file",
+                        });
+                    }
+                    // A pin keeps a file only while its row names it.
+                    let pinned = pinned && file_ref::naming(db, schema, &reference)?.is_some();
+                    if pinned || eager.is_some() {
+                        cache::publish(db, &reference, &copy.name, size, pinned)?;
+                    }
+                }
+                None => {
+                    if pinned {
+                        cache::request_pin(db, &reference)?;
+                    }
+                    if let Some(current) = &eager {
+                        crate::eager_work::request(db, current)?;
+                    }
+                }
+            }
+            crate::pending::clear(db, subject)
+        });
+        // Published, its name is the cache's; otherwise its recorded removal
+        // goes with the queue's copy.
+        if let Some(copy) = copy {
+            copy.release(inner);
+        }
+        Ok::<_, DbError>((result, super::released(writer, &inner.staging)))
+    })?;
+    inner.finish_removals(result, chosen)
 }
 /// Find a queued file's source under the writer, then open and check its
 /// bytes once the writer is free: checking reads the whole file (§21.2).

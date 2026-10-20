@@ -9,14 +9,15 @@ use crate::{
     files::{Files, FilesInner},
     FileReadError,
 };
-use coven_database::{DbError, FileRef};
+use coven_database::{CacheReservation, DbError, FileRef};
+use coven_foundation::files::{FileArea, FileName, FileWriter, StoreDirAccess};
 use futures_util::{StreamExt, TryStreamExt};
 use std::sync::Arc;
 
 impl Files {
     /// Download missing chunks and retain complete files regardless of
     /// budgets. Progress is the committed coverage `pin_progress` reads. A
-    /// file still queued here is whole already; its upload carries the pin.
+    /// file still queued here is whole already; its upload keeps the pin.
     pub async fn pin(&self, files: &[FileRef]) -> Result<(), FileReadError> {
         self.inner.check_open()?;
         let _pins = self.inner.pins.lock().await;
@@ -97,6 +98,29 @@ impl Files {
     }
 }
 impl FilesInner {
+    /// Reserve a whole cache file of `file` and create it for writing. The
+    /// writer syncs its bytes on finishing; the reservation then publishes
+    /// them, and a dropped one leaves them to their recorded removal.
+    pub(crate) async fn create_cache_file(
+        &self,
+        file: &FileRef,
+    ) -> Result<(CacheReservation, FileWriter), FileReadError> {
+        let name = FileName::new(self.ids.new_id().to_string()).expect("UUID cache name");
+        let reservation = self.database.reserve_cache_file(file, name.clone()).await?;
+        let target = self.directory.file(FileArea::Cache, &name);
+        let directory = self.directory.clone();
+        // Cleanup cannot release the name while creation still runs after a
+        // cancelled await; the blocking task retains its reservation.
+        let (reservation, writer) = crate::files::join(tokio::task::spawn_blocking(move || {
+            let writer = (|| -> Result<_, FileReadError> {
+                let lock = directory.lock_read_only()?;
+                Ok(target.create_writer(lock)?)
+            })();
+            (reservation, writer)
+        }))
+        .await;
+        Ok((reservation, writer?))
+    }
     /// §6.7. One file's failure is that file's pending record; a failure
     /// no file subject holds, such as reading the work, fails the fill.
     pub(crate) async fn fill_eager(self: &Arc<Self>) -> Result<(), crate::SyncError> {

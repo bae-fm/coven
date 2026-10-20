@@ -431,8 +431,9 @@ pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
     Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3 UNION ALL SELECT 1 FROM _coven_pin_requests WHERE namespace=?1 AND file_id=?2)",(file.namespace(),&id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))?
         || crate::file_queue::pinned(db, file)?)
 }
-/// Carry a queued file's pin to the stored file as its upload completes: the
-/// pin then waits for a whole copy from storage like any pin (§17.6).
+/// Carry a queued file's pin to the stored file as its upload completes
+/// with no copy of its own kept: the pin then waits for a whole copy from
+/// storage like any pin (§17.6).
 pub(super) fn request_pin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbError> {
     db.internal_execute(
         "INSERT INTO _coven_pin_requests(namespace,file_id,reference) VALUES(?1,?2,?3)
@@ -489,12 +490,14 @@ pub(super) fn whole_size(
     })
 }
 /// Publish a whole file `whole_size` checked as the file's only cache entry,
-/// pinned; older entries become recorded removals in the same transaction.
+/// pinned or under the budget; older entries become recorded removals in
+/// the same transaction.
 pub(super) fn publish(
     db: &DatabaseConnection,
     file: &FileRef,
     name: &FileName,
     size: i64,
+    pinned: bool,
 ) -> Result<(), DbError> {
     let id = id(file)?;
     db.internal_execute("INSERT INTO _coven_file_removals(area,path) SELECT 'cache',path FROM _coven_cache WHERE namespace=?1 AND file_id=?2",(file.namespace(),&id))?;
@@ -502,7 +505,7 @@ pub(super) fn publish(
         "DELETE FROM _coven_cache WHERE namespace=?1 AND file_id=?2",
         (file.namespace(), &id),
     )?;
-    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,1,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE])?;
+    db.internal_execute("INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash) VALUES(?1,?2,?7,?3,?4,?5,?8,?6)",rusqlite::params![file.namespace(),id,name.as_str(),size,tick(db)?,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE,pinned])?;
     db.internal_execute(
         "DELETE FROM _coven_file_removals WHERE area='cache' AND path=?1",
         [name.as_str()],

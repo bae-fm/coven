@@ -102,37 +102,24 @@ pub(crate) fn settle(db: &DatabaseConnection, reference: &FileRef) -> Result<(),
     Ok(())
 }
 
-/// An upload this device completed leaves its file to the cache: if an eager
-/// row still names it, it becomes eager work like a changed reference.
-pub(crate) fn uploaded(
+/// The current reference of the eager row that still names this file, if
+/// one does: such a file must be cached on this device (§17.6). An upload
+/// completing here keeps its own copy for it, or makes it eager work.
+pub(crate) fn named(
     db: &DatabaseConnection,
     schema: &WriteSchema,
     reference: &FileRef,
-) -> Result<(), DbError> {
-    let Some(file) = schema
+) -> Result<Option<FileRef>, DbError> {
+    let eager = schema
         .declarations
         .iter()
         .find(|declaration| declaration.name == reference.table())
         .and_then(|declaration| declaration.files.as_ref())
-    else {
-        return Ok(());
-    };
-    if file.fill != CacheFill::CacheEager {
-        return Ok(());
+        .is_some_and(|file| file.fill == CacheFill::CacheEager);
+    if !eager {
+        return Ok(None);
     }
-    let current = match file_ref::read(db, schema, reference.table(), reference.key()) {
-        Ok(current) => current,
-        Err(DbError::FileAbsent { .. } | DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => {
-            return Ok(())
-        }
-        Err(error) => return Err(error),
-    };
-    if crate::database::file_database::cache_id(&current)?
-        == crate::database::file_database::cache_id(reference)?
-    {
-        request(db, &current)?;
-    }
-    Ok(())
+    file_ref::naming(db, schema, reference)
 }
 
 #[cfg(test)]

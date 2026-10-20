@@ -192,9 +192,15 @@ async fn reconnect_wakes_the_eager_worker_without_a_pass() {
 #[tokio::test]
 async fn carried_pins_survive_a_provider_sign_in_failure() {
     let clock = clock();
-    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock.clone()).await;
+    // A pinned original's upload carries its pin to storage (§17.6).
+    let f = Fixture::with_clock(
+        Provenance::UserProvided,
+        CacheFill::CacheLazy,
+        clock.clone(),
+    )
+    .await;
     f.files.stop_background_for_counts().await;
-    let file = f.attach("files", "pinned", vec![72; CHUNK]).await;
+    let file = f.original("pinned", &[72; CHUNK]).await;
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     f.files.set_uploads_paused(false).await.unwrap();
     f.files.inner.drain_uploads(false).await.unwrap();

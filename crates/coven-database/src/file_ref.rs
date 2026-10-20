@@ -18,7 +18,7 @@ use coven_merge::{Audience, RowId, WriteId};
 
 #[path = "local_file.rs"]
 mod local_file;
-pub(crate) use local_file::{open as open_local, open_source, queued_source};
+pub(crate) use local_file::{open as open_local, open_source, queued_source, QueuedSource};
 pub use local_file::{LocalFileError, LocalFileStream};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -100,6 +100,23 @@ pub(crate) fn read(
         table: table.into(),
         key: key.clone(),
     })
+}
+
+/// The row's current reference while it still names `reference`'s file, in
+/// that row version or a newer one; `None` once the row is gone or names
+/// another file.
+pub(crate) fn naming(
+    db: &DatabaseConnection,
+    schema: &WriteSchema,
+    reference: &FileRef,
+) -> Result<Option<FileRef>, DbError> {
+    match current(db, schema, reference.table(), reference.key()) {
+        Ok(current) => Ok(current.filter(|current| {
+            (current.uploader(), current.id()) == (reference.uploader(), reference.id())
+        })),
+        Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) fn validate(

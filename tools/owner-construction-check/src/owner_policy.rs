@@ -141,6 +141,13 @@ pub(crate) const POLICY: Policy = Policy {
             "CacheReservation",
             "publish",
         ),
+        // Consumes the upload's cache reservation on its own blocking task,
+        // releasing it after the database guard as `publish` does.
+        (
+            "crates/coven-database/src/file_database.rs",
+            "FileDatabase",
+            "complete_upload",
+        ),
         (
             "crates/coven-database/src/file_database.rs",
             "FileDatabase",
@@ -288,10 +295,11 @@ pub(crate) const POLICY: Policy = Policy {
             "FileStream",
             "read_at",
         ),
+        // Creates a reserved cache file for a pin or an upload's own copy.
         (
-            "crates/coven-sync/src/file_read.rs",
-            "UploadedFile",
-            "keep_whole",
+            "crates/coven-sync/src/file_cache.rs",
+            "FilesInner",
+            "create_cache_file",
         ),
         ("crates/coven-sync/src/file_read.rs", "UploadedFile", "open"),
         ("crates/coven-sync/src/files.rs", "Files", "new"),

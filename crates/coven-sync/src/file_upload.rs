@@ -17,6 +17,9 @@ use coven_storage::{ObjectPath, UploadSession};
 use futures_util::StreamExt;
 use std::{sync::atomic::Ordering, time::SystemTime};
 
+#[path = "file_upload_copy.rs"]
+mod copy;
+
 /// Observable upload queue state (E7), projected from one committed snapshot.
 #[derive(Clone, Debug, PartialEq)]
 pub struct UploadQueue {
@@ -225,7 +228,7 @@ impl FilesInner {
         };
         // One request within the provider's limit holds the whole encrypted
         // file; past the buffered bound a session holds one part at a time.
-        if item.session.is_none()
+        let sent = if item.session.is_none()
             && total <= coven_storage::buffered_request_limit(storage.as_ref())
         {
             let bytes = transfer.read_encrypted(0, total as usize).await?;
@@ -240,6 +243,7 @@ impl FilesInner {
                 }
                 Err(error) => return Err(error.into()),
             }
+            Some(bytes)
         } else {
             let session = item
                 .session
@@ -262,11 +266,9 @@ impl FilesInner {
                         .await?;
                 }
             }
-        }
-        self.database
-            .complete_upload(item.id, file_subject(&item.file))
-            .await
-            .map_err(FileReadError::from)?;
+            None
+        };
+        transfer.complete(sent).await?;
         Ok(true)
     }
     /// Different bytes at a file path fail this upload attempt (§19.3).

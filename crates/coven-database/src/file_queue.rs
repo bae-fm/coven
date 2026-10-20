@@ -251,7 +251,7 @@ pub(crate) fn queued(db: &DatabaseConnection, file: &FileRef) -> Result<bool, Db
 }
 
 /// Pin or unpin a file this device still has queued, returning whether it
-/// is queued. Its upload's completion carries the pin to the stored file.
+/// is queued. Its upload's completion keeps the pin (§17.6).
 pub(crate) fn set_pinned(
     db: &DatabaseConnection,
     file: &FileRef,
