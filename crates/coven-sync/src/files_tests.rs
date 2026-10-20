@@ -87,16 +87,16 @@ impl Fixture {
                 .with_publication_gate(send.clone())
                 .with_cooldown(waits.clone()),
         );
-        let files = Files::new(
-            FileDatabase::new(database.clone()),
-            directory.clone(),
-            Some(storage.clone()),
+        let files = paused_files(
+            &database,
+            &directory,
+            storage.clone(),
             send.clone(),
             waits,
             ids.clone(),
             transfers,
-        );
-        files.set_uploads_paused(true).await.unwrap();
+        )
+        .await;
         Self {
             root,
             directory,
@@ -116,13 +116,6 @@ impl Fixture {
             .open()
             .await
             .unwrap();
-        // The new owner's worker drains as soon as it starts, reading the
-        // persisted pause to decide; record it first, or that drain can upload
-        // before the test is ready for it.
-        FileDatabase::new(self.database.clone())
-            .set_uploads_paused(true)
-            .await
-            .unwrap();
         self.send = ready_state();
         let waits = Arc::new(
             crate::RetryWaits::open(self.database.clone(), self.clock.clone())
@@ -138,16 +131,16 @@ impl Fixture {
                 .with_publication_gate(self.send.clone())
                 .with_cooldown(waits.clone()),
         );
-        self.files = Files::new(
-            FileDatabase::new(self.database.clone()),
-            self.directory.clone(),
-            Some(self.storage.clone()),
+        self.files = paused_files(
+            &self.database,
+            &self.directory,
+            self.storage.clone(),
             self.send.clone(),
             waits,
             self.ids.clone(),
             transfers,
-        );
-        self.files.set_uploads_paused(true).await.unwrap();
+        )
+        .await;
     }
     async fn attach(&self, table: &str, id: &str, bytes: Vec<u8>) -> FileRef {
         let namespace = table.to_owned();
@@ -855,6 +848,37 @@ impl Files {
             join(task).await;
         }
     }
+}
+
+/// The fixture's file owner, with uploads paused before its worker starts.
+/// The worker drains once as it starts, reading the persisted pause; paused
+/// only afterwards, that drain could read the setting first and then upload a
+/// file the test queues meanwhile.
+async fn paused_files(
+    database: &Database,
+    directory: &StoreDir,
+    storage: Arc<dyn Storage>,
+    send: Arc<crate::SyncState>,
+    waits: Arc<crate::RetryWaits>,
+    ids: IdSourceRef,
+    transfers: Arc<coven_storage::TransferBudget>,
+) -> Files {
+    FileDatabase::new(database.clone())
+        .set_uploads_paused(true)
+        .await
+        .unwrap();
+    let files = Files::new(
+        FileDatabase::new(database.clone()),
+        directory.clone(),
+        Some(storage),
+        send,
+        waits,
+        ids,
+        transfers,
+    );
+    // The owner's own copy of the setting, which parts check between sends.
+    files.set_uploads_paused(true).await.unwrap();
+    files
 }
 
 fn ready_state() -> Arc<crate::SyncState> {
