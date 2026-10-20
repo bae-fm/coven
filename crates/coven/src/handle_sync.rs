@@ -30,6 +30,15 @@ impl CovenHandle {
     pub fn network_changed(&self) {
         self.storage.network_changed();
     }
+    /// The person asked to retry everything now, such as by pulling to
+    /// refresh. Every ordinary backoff ends, answered or not: the
+    /// connection's, operations', uploads' and eager downloads'; a pass runs
+    /// now. Provider cooldowns hold, and failures that never retry stay. An
+    /// ended wait keeps its failure count, so a retry that fails again waits
+    /// the next longer delay. Requests coalesce as `sync_now` requests do.
+    pub fn retry_now(&self) {
+        self.storage.retry_now();
+    }
     /// Observe the current status and every subsequent status change.
     pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
         self.storage.subscribe()

@@ -194,12 +194,13 @@ async fn run(
     let mut closing = None;
     loop {
         // The app's network report ends the connection's and operations'
-        // waits for the network and asks for a pass; reports during a pass
-        // are handled after it, so they end the waits it failed into (§6.7).
+        // waits for the network, and the person's retry all their waits; each
+        // asks for a pass. Reports during a pass are handled after it, so
+        // they end the waits it failed into (§6.7).
         if !paused {
             match sync
                 .waits
-                .end_offline_waits(crate::NetworkOwner::Connection)
+                .end_reported_waits(crate::NetworkOwner::Connection)
                 .await
             {
                 Ok(reported) => pending |= reported && started,

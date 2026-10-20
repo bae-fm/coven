@@ -77,10 +77,11 @@ impl StorageConnections {
             if superseded() {
                 break;
             }
-            // The app's network report ends a wait for the network (§6.7).
+            // The app's network report ends a wait for the network, and the
+            // person's retry any wait (§6.7).
             if let Err(error) = self
                 .waits
-                .end_offline_waits(coven_sync::NetworkOwner::Connection)
+                .end_reported_waits(coven_sync::NetworkOwner::Connection)
                 .await
             {
                 self.publications
@@ -224,10 +225,16 @@ impl StorageConnections {
         }
     }
 
-    /// The device's network changed: the connection's owner and the file
-    /// worker each end their waits for the network (§6.7).
+    /// The device's network changed: the connection's owner, the upload
+    /// worker and the eager fill each end their waits for the network (§6.7).
     pub(crate) fn network_changed(&self) {
         self.waits.network_changed();
+    }
+
+    /// The person asked to retry everything now: the same owners end every
+    /// ordinary wait they retry (§6.7).
+    pub(crate) fn retry_now(&self) {
+        self.waits.retry_requested();
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncStatus> {

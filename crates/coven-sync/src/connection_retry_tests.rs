@@ -30,7 +30,7 @@ async fn fail(
 async fn report(waits: &RetryWaits) -> bool {
     waits.network_changed();
     waits
-        .end_offline_waits(crate::NetworkOwner::Connection)
+        .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap()
 }
@@ -55,7 +55,7 @@ async fn a_report_ends_an_offline_wait_and_keeps_its_backoff() {
     );
     // Reports coalesce: none arrived since, and a second ends nothing new.
     assert!(!waits
-        .end_offline_waits(crate::NetworkOwner::Connection)
+        .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap());
     assert!(report(&waits).await);
@@ -163,19 +163,19 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     database.fail_retry_ends(1).await;
     waits.network_changed();
     assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Connection)
+        .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .is_err());
     assert_eq!(database.retry_wait(SYNC).await.unwrap(), saved);
     assert!(!due(&database, &waits, SYNC).await);
     assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Connection)
+        .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap());
     assert!(due(&database, &waits, SYNC).await);
     // Acted on: nothing is left for the next plan.
     assert!(!waits
-        .end_offline_waits(crate::NetworkOwner::Connection)
+        .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap());
     database.close().await.unwrap();

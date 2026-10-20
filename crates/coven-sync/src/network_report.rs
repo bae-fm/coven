@@ -1,8 +1,12 @@
-//! The app's report that the device's network changed (§6.7; IO
-//! `WaitingNetwork`). A wait whose last attempt received no provider
-//! response waits for the network, so a report ends it: the connection's
-//! backoff, an operation's, a queued upload's and an eager download's. A wait
-//! after a provider's answer, and the provider cooldown, hold.
+//! The app's reports that ends waits early (§6.7; IO `WaitingNetwork`).
+//!
+//! A network report says the device's network changed. A wait whose last
+//! attempt received no provider response waits for the network, so the
+//! report ends it: the connection's backoff, an operation's, a queued
+//! upload's and an eager download's. A wait after a provider's answer holds.
+//! A retry report says the person asked to retry everything now: it ends
+//! every ordinary wait, answered or not. Neither ends the provider cooldown,
+//! and an ended wait keeps its failure count.
 //!
 //! Each owner acts on reports for the waits it retries, when it next plans:
 //! the connection and its sync loop after the pass in flight, the eager fill
@@ -10,7 +14,8 @@
 //! uploads. A report during an attempt also ends the wait that attempt fails
 //! into (IO `signal_during_attempt_wakes`): the passes and fills act on it
 //! after the attempt, and the upload worker ends that wait as the attempt
-//! ends. Reports an owner has not acted on yet coalesce into one.
+//! ends. Reports an owner has not acted on yet coalesce into one, which ends
+//! every ordinary wait if any of them was a retry report.
 
 use crate::{PendingRecord, PendingSubject, RetryWaits, SyncError};
 use coven_database::{FileUpload, RetrySubject, RetryWait};
@@ -20,7 +25,7 @@ use std::{
     time::SystemTime,
 };
 
-/// An owner of waits that acts on network reports.
+/// An owner of waits that acts on reports.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum NetworkOwner {
     /// The connection and its sync loop: the connection's backoff and
@@ -50,10 +55,22 @@ impl NetworkOwner {
     }
 }
 
-/// Reports so far, and the count each owner has acted on; an owner acts
-/// on a report only once its waits for the network ended.
+/// Which waits a report ends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Ending {
+    /// Waits whose last attempt received no provider response.
+    Network,
+    /// Every ordinary wait: the person asked to retry everything now.
+    Every,
+}
+
+/// Reports so far, the latest retry report among them, and the count each
+/// owner has acted on; an owner acts on a report only once the waits it
+/// ends have ended.
 pub(crate) struct Reports {
     reported: tokio::sync::watch::Sender<u64>,
+    /// The number of the latest retry report; zero before any.
+    retried: AtomicU64,
     handled: [AtomicU64; 3],
 }
 
@@ -61,8 +78,25 @@ impl Default for Reports {
     fn default() -> Self {
         Self {
             reported: tokio::sync::watch::channel(0).0,
+            retried: AtomicU64::new(0),
             handled: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
         }
+    }
+}
+
+impl Reports {
+    /// Reports so far, and which waits those after `seen` end; `None` when
+    /// none arrived since.
+    fn since(&self, seen: u64) -> (u64, Option<Ending>) {
+        let reported = self.reported.borrow();
+        let ending = if *reported <= seen {
+            None
+        } else if self.retried.load(Ordering::SeqCst) > seen {
+            Some(Ending::Every)
+        } else {
+            Some(Ending::Network)
+        };
+        (*reported, ending)
     }
 }
 
@@ -100,34 +134,50 @@ impl RetryWaits {
     /// available, or moved to another network (§6.7). Each owner acts on it
     /// when it next plans; reports before then coalesce.
     pub fn network_changed(&self) {
-        self.network.reported.send_modify(|count| *count += 1);
-        // The connection's owners plan again on a changed schedule.
+        self.report(Ending::Network);
+    }
+
+    /// The person asked to retry everything now (§6.7): each owner ends
+    /// every ordinary wait it retries when it next plans, as for a network
+    /// report, answered or not. The provider cooldown holds.
+    pub fn retry_requested(&self) {
+        self.report(Ending::Every);
+    }
+
+    fn report(&self, ending: Ending) {
+        self.network.reported.send_modify(|count| {
+            *count += 1;
+            if ending == Ending::Every {
+                self.network.retried.store(*count, Ordering::SeqCst);
+            }
+        });
+        // The owners plan again on a changed schedule.
         self.rearmed
             .send_modify(|count| *count = count.wrapping_add(1));
     }
 
-    /// Changes with every network report, for an owner that waits on its
-    /// own timers.
+    /// Changes with every report, for an owner that waits on its own timers.
     pub fn network_reports(&self) -> tokio::sync::watch::Receiver<u64> {
         self.network.reported.subscribe()
     }
 
-    /// End `owner`'s waits that wait for the network, if a report arrived
-    /// since it last acted (§6.7). Each such wait keeps its failure count, so
-    /// the next failure continues the backoff, and is saved ended, so no
-    /// reopen arms it again (IO `ended_reopens_due`). A wait after a
-    /// provider's answer, one held because saving it failed, and the
-    /// provider cooldown hold. Returns whether a report arrived, so the
+    /// End the waits the reports since `owner` last acted end (§6.7): its
+    /// waits for the network, or every ordinary wait it retries after a
+    /// retry report. Each ended wait keeps its failure count, so the next
+    /// failure continues the backoff, and is saved ended, so no reopen arms
+    /// it again (IO `ended_reopens_due`). The provider cooldown holds, and a
+    /// network report leaves a wait after a provider's answer and one held
+    /// because saving it failed. Returns whether a report arrived, so the
     /// owner also runs the work it asks for. If reading or saving fails,
-    /// every wait holds, the owner reports the error, and the report stays
-    /// unacted on, so the owner's next plan acts on it again.
-    pub async fn end_offline_waits(&self, owner: NetworkOwner) -> Result<bool, SyncError> {
-        let reported = *self.network.reported.borrow();
+    /// every wait holds, the owner reports the error, and the reports stay
+    /// unacted on, so the owner's next plan acts on them again.
+    pub async fn end_reported_waits(&self, owner: NetworkOwner) -> Result<bool, SyncError> {
         let handled = &self.network.handled[owner.index()];
-        if handled.load(Ordering::SeqCst) >= reported {
+        let (reported, ending) = self.network.since(handled.load(Ordering::SeqCst));
+        let Some(ending) = ending else {
             return Ok(false);
-        }
-        self.end_network_waits(owner, None).await?;
+        };
+        self.end_waits(owner, move |_| Some(ending)).await?;
         // Reports since `reported` was read stay for the next plan.
         handled.fetch_max(reported, Ordering::SeqCst);
         Ok(true)
@@ -139,29 +189,34 @@ impl RetryWaits {
         *self.network.reported.borrow()
     }
 
-    /// End these subjects' waits for the network, whatever reports their
-    /// owner already acted on: each one's attempt was running when a report
-    /// arrived, so the report ends the wait it failed into (IO
-    /// `signal_during_attempt_wakes`). Fails as `end_offline_waits` does.
+    /// Which waits the reports since `seen` end; `None` when none arrived.
+    pub(crate) fn reports_since(&self, seen: u64) -> Option<Ending> {
+        self.network.since(seen).1
+    }
+
+    /// End each subject's wait as the reports that arrived while its attempt
+    /// ran say, whatever reports their owner already acted on: the report
+    /// ends the wait the attempt failed into (IO
+    /// `signal_during_attempt_wakes`). Fails as `end_reported_waits` does.
     pub(crate) async fn end_waits_after_report(
         &self,
         owner: NetworkOwner,
-        subjects: BTreeSet<RetrySubject>,
+        subjects: &BTreeMap<RetrySubject, Ending>,
     ) -> Result<(), SyncError> {
-        self.end_network_waits(owner, Some(subjects)).await
+        let subjects = subjects.clone();
+        self.end_waits(owner, move |subject| subjects.get(subject).copied())
+            .await
     }
 
-    /// End `owner`'s waits for the network, or only those of `only`.
-    async fn end_network_waits(
+    /// End `owner`'s waits as `ending` says for each subject.
+    async fn end_waits(
         &self,
         owner: NetworkOwner,
-        only: Option<BTreeSet<RetrySubject>>,
+        ending: impl Fn(&RetrySubject) -> Option<Ending> + Send + 'static + Clone,
     ) -> Result<(), SyncError> {
-        let Some(database) = &self.database else {
-            return Ok(());
-        };
-        // A wait this session holds for the app stays held; one already
-        // over needs no end unless a new failure replaced it.
+        // A wait this session holds for the app stays held unless the person
+        // retries; one already over needs no end unless a new failure
+        // replaced it.
         let (held, over) = {
             let elapsed = self.clock.elapsed();
             let state = self.lock();
@@ -179,29 +234,66 @@ impl RetryWaits {
             }
             (held, over)
         };
+        // The person's retry releases a held wait: it was holding for them.
+        let released: Vec<RetrySubject> = held
+            .iter()
+            .filter(|subject| ending(subject) == Some(Ending::Every))
+            .copied()
+            .collect();
+        let Some(database) = &self.database else {
+            // A handle that cannot persist keeps its waits in memory: the
+            // person's retry forgets them.
+            let every: Vec<RetrySubject> = self
+                .lock()
+                .armed
+                .keys()
+                .filter(|subject| owner.retries(subject) && ending(subject) == Some(Ending::Every))
+                .copied()
+                .collect();
+            for subject in every {
+                self.forget(subject);
+            }
+            return Ok(());
+        };
+        let chosen = ending.clone();
         let select = move |waits: &[(RetrySubject, RetryWait)],
                            pending: &[PendingRecord],
                            uploads: &[FileUpload]| {
             waits
                 .iter()
                 .filter(|(subject, wait)| {
+                    let Some(ending) = chosen(subject) else {
+                        return false;
+                    };
                     owner.retries(subject)
-                        && only.as_ref().is_none_or(|only| only.contains(subject))
-                        && !held.contains(subject)
                         && over.get(subject) != Some(&wait.not_before)
                         && !wait.wait.is_zero()
-                        && record_for(*subject, pending, uploads)
-                            .is_some_and(|record| record.reason.offline())
+                        && match ending {
+                            Ending::Every => true,
+                            Ending::Network => {
+                                !held.contains(subject)
+                                    && record_for(*subject, pending, uploads)
+                                        .is_some_and(|record| record.reason.offline())
+                            }
+                        }
                 })
                 .map(|(subject, _)| *subject)
                 .collect()
         };
         let now: SystemTime = self.clock.now();
-        for (subject, ended) in database
+        let mut ended = BTreeSet::new();
+        for (subject, wait) in database
             .end_retry_waits::<PendingRecord>(now, select)
             .await?
         {
-            self.arm(subject, &ended);
+            self.arm(subject, &wait);
+            ended.insert(subject);
+        }
+        // A held wait with no saved row to end is simply forgotten.
+        for subject in released {
+            if !ended.contains(&subject) {
+                self.forget(subject);
+            }
         }
         Ok(())
     }

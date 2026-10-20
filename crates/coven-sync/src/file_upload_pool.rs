@@ -5,8 +5,8 @@
 //! in progress.
 
 use crate::{
-    files::file_failure::file_subject, files::FilesInner, NetworkOwner, PendingRecord, Retry,
-    SyncError,
+    files::file_failure::file_subject, files::FilesInner, retry_waits::Ending, NetworkOwner,
+    PendingRecord, Retry, SyncError,
 };
 use coven_database::{DbError, FileUpload, RetrySubject};
 use coven_storage::StorageFailure;
@@ -104,9 +104,10 @@ struct Run<'a> {
     ready: VecDeque<FileUpload>,
     /// Something may have made more uploads eligible since that read.
     stale: bool,
-    /// Uploads whose attempt failed after a network report arrived while it
-    /// ran; the report ends the wait each failed into.
-    crossed: BTreeSet<RetrySubject>,
+    /// Uploads whose attempt failed after a report arrived while it ran,
+    /// with which waits those reports end; they end the wait each failed
+    /// into.
+    crossed: BTreeMap<RetrySubject, Ending>,
     /// Files this run stored.
     uploaded: usize,
 }
@@ -311,27 +312,27 @@ impl FilesInner {
         }
     }
 
-    /// Act on network reports for upload waits, as each plan does (§6.7).
+    /// Act on reports for upload waits, as each plan does (§6.7).
     /// A failure keeps every wait and the report, for the next plan.
     async fn act_on_reports(&self, run: &mut Run<'_>) {
         if !run.crossed.is_empty() {
             let crossed = std::mem::take(&mut run.crossed);
             match self
                 .waits
-                .end_waits_after_report(NetworkOwner::Uploads, crossed.clone())
+                .end_waits_after_report(NetworkOwner::Uploads, &crossed)
                 .await
             {
                 Ok(()) => run.stale = true,
                 Err(error) => {
-                    tracing::error!(?error, "ending upload waits for the network failed");
+                    tracing::error!(?error, "ending reported upload waits failed");
                     run.crossed = crossed;
                 }
             }
         }
-        match self.waits.end_offline_waits(NetworkOwner::Uploads).await {
+        match self.waits.end_reported_waits(NetworkOwner::Uploads).await {
             Ok(true) => run.stale = true,
             Ok(false) => {}
-            Err(error) => tracing::error!(?error, "ending upload waits for the network failed"),
+            Err(error) => tracing::error!(?error, "ending reported upload waits failed"),
         }
     }
 
@@ -405,8 +406,8 @@ impl FilesInner {
             run.uploaded += 1;
             // Completion can leave eager work, such as a carried pin (§17.6).
             self.fill_wake.notify_one();
-        } else if started.is_some_and(|seen| self.waits.network_reported() > seen) {
-            run.crossed.insert(RetrySubject::Upload(id));
+        } else if let Some(ending) = started.and_then(|seen| self.waits.reports_since(seen)) {
+            run.crossed.insert(RetrySubject::Upload(id), ending);
         }
         for retry in self.retries().iter_mut() {
             if let Some(covers) = &mut retry.covers {

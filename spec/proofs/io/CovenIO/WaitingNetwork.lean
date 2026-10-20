@@ -1,8 +1,9 @@
 import CovenIO.WaitingReopen
 
 /-! The app's network report (§6.7, "Waiting and retrying"; api.md E5
-`network_changed`), as `RetryWaits::end_offline_waits` runs it for the
-connection's wait and for each operation's, upload's and download's wait.
+`network_changed`), and the person's retry (`retry_now`), as
+`RetryWaits::end_reported_waits` runs them for the connection's wait and for
+each operation's, upload's and download's wait.
 
 Every wait names what its failed attempt lacked (`WaitingEvidence`'s
 `Armed.prereq`). An attempt that received no provider response lacked a
@@ -70,6 +71,50 @@ theorem signal_keeps_backoff (a : Armed) (now : Nat) (raced : Bool) :
 /-- Ending the ordinary wait, as the app's retry does, leaves a provider
 cooldown in force: an attempt it lets start is past the cooldown. -/
 theorem signal_keeps_cooldown (t : Timer) (now : Nat)
+    (ready : due (appRetry t now) now = true) : t.provider ≤ now :=
+  app_retry_keeps_cooldown t now ready
+
+/-! ## The person's retry
+
+`retry_now` is the person asking to retry everything now, such as by pulling
+to refresh. Rust reports it to every owner as it reports a network change,
+and each owner ends every ordinary wait it retries, whatever the wait names:
+to each wait, the retry is a commit changing what that wait names. So it ends
+every idle wait (`retry_ends_wait`), keeps its failure count
+(`retry_keeps_backoff`), ends the wait an attempt running meanwhile fails
+into (`retry_during_attempt_wakes`), and never ends a provider cooldown
+(`retry_keeps_cooldown`). Being a commit, it adds at most one start to each
+wait, as a report does (`signal_rate`). -/
+
+/-- The person's retry, to one wait: a commit changing what the wait names. -/
+def retryAll (s : Session) : Session :=
+  match s.armed with
+  | some a => wake s a.prereq
+  | none => s
+
+/-- The person's retry ends an idle wait, whatever it names. -/
+theorem retry_ends_wait (s : Session) (a : Armed) (armed : s.armed = some a)
+    (idle : s.running = none) : (retryAll s).ready = true := by
+  cases woken : a.woken <;>
+    simp [retryAll, wake, armed, idle, woken, Session.ready, Armed.due]
+
+/-- It keeps the failure count, so a retry that fails again waits the next
+delay rather than starting the backoff over. -/
+theorem retry_keeps_backoff (s : Session) :
+    (retryAll s).armed.map (·.failures) = s.armed.map (·.failures) := by
+  unfold retryAll
+  cases armed : s.armed with
+  | none => simp [armed]
+  | some a =>
+      cases woken : a.woken <;> simp [wake, armed, woken]
+
+/-- During an attempt, it ends the wait the attempt fails into. -/
+theorem retry_during_attempt_wakes (p : Nat) {s t : Session}
+    (h : run s [.start, .commit p, .finish p] = some t) : t.ready = true :=
+  racing_commit_wakes p h
+
+/-- It never ends a provider cooldown: an attempt it lets start is past it. -/
+theorem retry_keeps_cooldown (t : Timer) (now : Nat)
     (ready : due (appRetry t now) now = true) : t.provider ≤ now :=
   app_retry_keeps_cooldown t now ready
 

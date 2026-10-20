@@ -419,6 +419,7 @@ mod operation_evidence;
 
 #[path = "network_report.rs"]
 mod network_report;
+pub(crate) use network_report::Ending;
 pub use network_report::NetworkOwner;
 
 #[cfg(test)]

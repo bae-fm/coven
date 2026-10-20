@@ -425,7 +425,7 @@ async fn a_network_report_ends_an_offline_operation_wait() {
     // The upload worker's report leaves the operation to the connection.
     ana.sync
         .waits
-        .end_offline_waits(crate::NetworkOwner::Uploads)
+        .end_reported_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap();
     assert_eq!(
@@ -435,7 +435,7 @@ async fn a_network_report_ends_an_offline_operation_wait() {
     assert!(ana
         .sync
         .waits
-        .end_offline_waits(crate::NetworkOwner::Connection)
+        .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap());
     let ended = ana.database().retry_wait(subject).await.unwrap().unwrap();

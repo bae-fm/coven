@@ -730,7 +730,7 @@ async fn a_network_report_ends_an_offline_upload_wait() {
     let waits = &f.files.inner.waits;
     waits.network_changed();
     assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Uploads)
+        .end_reported_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap());
     let ended = retry(&f).await.unwrap();
@@ -740,7 +740,7 @@ async fn a_network_report_ends_an_offline_upload_wait() {
     );
     // The connection's owner acts on the same report for its own waits.
     assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Connection)
+        .end_reported_waits(crate::NetworkOwner::Connection)
         .await
         .unwrap());
     assert_eq!(
@@ -773,7 +773,7 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
     let waits = &f.files.inner.waits;
     waits.network_changed();
     waits
-        .end_offline_waits(crate::NetworkOwner::Uploads)
+        .end_reported_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap();
     assert_eq!(retry(&f).await, answered);
@@ -791,7 +791,7 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
         .unwrap();
     waits.network_changed();
     waits
-        .end_offline_waits(crate::NetworkOwner::Uploads)
+        .end_reported_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap();
     assert!(retry(&f).await.unwrap().wait.is_zero());
@@ -825,7 +825,7 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     waits.network_changed();
     f.database.fail_retry_ends(1).await;
     assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Uploads)
+        .end_reported_waits(crate::NetworkOwner::Uploads)
         .await
         .is_err());
     assert_eq!(retry(&f).await, wait);
@@ -836,8 +836,48 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
         1
     );
     assert!(!waits
-        .end_offline_waits(crate::NetworkOwner::Uploads)
+        .end_reported_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap());
+    f.close().await;
+}
+
+/// The person's retry ends an upload's own wait, but not the provider's
+/// cooldown: nothing is sent until the cooldown ends (§6.7).
+#[tokio::test]
+async fn the_persons_retry_keeps_a_provider_cooldown() {
+    let clock = Arc::new(FixedClock::new(
+        SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
+    ));
+    let f = fixture(&clock).await;
+    let file = f.attach("files", "photo", b"photo".to_vec()).await;
+    f.storage
+        .set_faults(fail_next(StorageFailure::RateLimited, Some(600)))
+        .await;
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        0
+    );
+    let waits = &f.files.inner.waits;
+    waits.retry_requested();
+    assert!(waits
+        .end_reported_waits(crate::NetworkOwner::Uploads)
+        .await
+        .unwrap());
+    let ended = retry(&f).await.unwrap();
+    assert_eq!((ended.failures, ended.wait), (1, Duration::ZERO));
+    assert!(waits.cooldown().is_some());
+    let requests = f.storage.request_trace().len();
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        0
+    );
+    assert_eq!(f.storage.request_trace().len(), requests);
+    advance(&clock, 600);
+    assert_eq!(
+        drained(f.files.inner.drain_uploads(false).await.unwrap()),
+        1
+    );
+    assert!(!f.queued(&file).await);
     f.close().await;
 }

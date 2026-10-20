@@ -2513,6 +2513,14 @@ while let Ok(values) = lost.next().await {
     transfer fails for want of a network, its wait ends too: the failure may
     have come before the change. Reports while the connection is stopped apply
     when it starts.
+  - `retry_now` is the person asking to retry everything now, such as by
+    pulling to refresh. `sync_now` leaves every backoff in place; `retry_now`
+    ends every ordinary one, answered or not: the connection's, operations',
+    uploads' and eager downloads'. It requests a pass, travels and coalesces
+    as a network report does, and keeps each wait's failure count, so a retry
+    that fails again waits the next longer delay. Provider cooldowns,
+    failures that never retry, and waits for new credentials or a new
+    connection hold ([§6.7](coven.md#67-waiting-and-retrying)).
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued
@@ -3479,6 +3487,13 @@ impl CovenHandle {
     /// provider's answer, and provider cooldowns, hold. Reports coalesce as
     /// `sync_now` requests do (§6.7).
     pub fn network_changed(&self);
+
+    /// The person asked to retry everything now. Ends every ordinary
+    /// backoff, answered or not: the connection's, operations', uploads'
+    /// and eager downloads'; each keeps its failure count. Syncs now, as
+    /// `sync_now` does. Provider cooldowns and failures that never retry
+    /// hold. Requests coalesce with network reports (§6.7).
+    pub fn retry_now(&self);
 
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;

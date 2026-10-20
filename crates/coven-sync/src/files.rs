@@ -377,17 +377,17 @@ async fn fill_worker(
         }
         let Some(owner) = owner.upgrade() else { break };
         let fill = async {
-            // A network report ends download waits for the network; reports
-            // during this fill are acted on after it, ending the waits it
-            // fails into (§6.7).
+            // A network report ends download waits for the network, and the
+            // person's retry every download wait; reports during this fill
+            // are acted on after it, ending the waits it fails into (§6.7).
             if let Err(error) = owner
                 .waits
-                .end_offline_waits(crate::NetworkOwner::Downloads)
+                .end_reported_waits(crate::NetworkOwner::Downloads)
                 .await
             {
                 // The waits keep their backoff and the report stays, so the
                 // next fill ends them.
-                tracing::error!(?error, "ending download waits for the network failed");
+                tracing::error!(?error, "ending reported download waits failed");
             }
             if let Err(error) = owner.fill_eager().await {
                 tracing::error!(?error, "eager cache fill failed");

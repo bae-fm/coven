@@ -806,6 +806,28 @@ minutes away. Her app reports the change with `network_changed`
   have come before the change. The upload worker ends that one upload's wait as
   the upload fails, because its other uploads keep running.
 
+**The person's retry ends every ordinary wait.** Ben's library shows a cover
+that won't download: the provider answered "not found" while Ana's upload was
+still on its way, and the download now waits five minutes. Ben pulls to
+refresh. A pass alone would leave that wait in place, so his app calls
+`retry_now` ([api.md E5](api.md#e5-storage-and-sync)). It ends every ordinary
+wait, answered or not: the connection's, the operations', the uploads' and the
+eager downloads'. A pass runs at once, and the cover downloads.
+
+- **It travels as a report.** Coven delivers the retry exactly as a network
+  report: the same owners act on it when they next plan, it ends the wait of
+  an attempt it arrives during, and it is saved the same way. Retries and
+  reports one owner hasn't acted on yet count as one, which ends every wait if
+  any of them was a retry.
+- **The provider's cooldown holds.** The provider asked every consumer to wait;
+  the person tapping again doesn't change that.
+- **Failures that never retry stay,** and so does a wait for new credentials or
+  a new connection: retrying doesn't change what they wait for.
+- **The backoff step stays.** An ended wait keeps its failure count. If the
+  retry fails again, the next wait is the next longer delay, not one second. So
+  each retry adds exactly one attempt to each wait; restarting the count would
+  let one tap buy a burst of automatic attempts at a provider that just failed.
+
 ### 7. Order
 
 Two things order writes, and they answer different questions:
@@ -6832,6 +6854,7 @@ Write-ups explain each model and state its assumptions:
 | A wait is due when its delay passes or a commit changes the prerequisite it names; a commit changing another prerequisite leaves it waiting, and being woken doesn't reset the backoff. Every start after the first is paid for by a full delay or by such a commit, so a wait nothing changes starts at most 1 + ⌊t / d⌋ times in t seconds, and n of them at most n times that | `evidence_rate`, `unrelated_commit_ignored`, `evidence_keeps_backoff`, `unchanged_rate`, `unchanged_waits_rate` | `proofs/io/CovenIO/WaitingEvidence.lean` | §6.7, §21.2 |
 | A reopened wait keeps its backoff and is due within its full wait under any wall clock; without a forward wall-clock jump, each reopen adds at most one start, and a forward jump can end a wait early | `reopen_within_wait`, `reopened_due`, `reopen_rate`, `reopen_unchanged_rate`, `forward_jump_ends_wait` | `proofs/io/CovenIO/WaitingReopen.lean` | §6.7, §21.2 |
 | A network report ends a wait for the network, at once or after the attempt it arrives during, and keeps its backoff; a wait after a provider's answer and a provider cooldown hold, and repeated reports coalesce. Each report adds at most one start to each wait, so n waits gain at most n per report. The ended wait, saved with no full wait left, reopens due under any wall clock; keeping its full wait would bring it back after the wall clock moved backward | `signal_ends_network_wait`, `signal_during_attempt_wakes`, `signal_keeps_backoff`, `signal_keeps_answered_wait`, `signal_keeps_cooldown`, `signals_coalesce`, `signal_rate`, `signal_waits_rate`, `ended_reopens_due`, `kept_wait_returns` | `proofs/io/CovenIO/WaitingNetwork.lean` | §6.7, §21.2 |
+| The person's retry ends every ordinary wait, whatever it names, at once or after the attempt it arrives during, and keeps its backoff; a provider cooldown holds | `retry_ends_wait`, `retry_during_attempt_wakes`, `retry_keeps_backoff`, `retry_keeps_cooldown` | `proofs/io/CovenIO/WaitingNetwork.lean` | §6.7 |
 | The authored `read_through` and every queued original are preserved; a device's own earlier writes count as read | `authored_readThrough`, `catchup_preserves_originals`, `own_predecessor_is_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Given publication after the authored read, a device's own writes in number order, and authored reads that never decrease, slot order consumes every cause first; authored pasts are transitive | `ordered_application_causal`, `past_transitive` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |
 | Receivers that agree on a cause's slot agree whether it is in a write's past; later publication adds no intervening remote write | `receivers_agree`, `intervening_write_not_read` | `proofs/sequence/CovenSequence/Causality.lean` | §7.1 |

@@ -402,7 +402,7 @@ async fn a_network_report_ends_only_an_offline_download_wait() {
         let waits = &b.files.inner.waits;
         waits.network_changed();
         waits
-            .end_offline_waits(crate::NetworkOwner::Downloads)
+            .end_reported_waits(crate::NetworkOwner::Downloads)
             .await
             .unwrap();
         let after = b.files.inner.database.download_waits().await.unwrap();
@@ -421,4 +421,53 @@ async fn a_network_report_ends_only_an_offline_download_wait() {
         b.close().await;
         a.close().await;
     }
+}
+
+/// Ben pulls to refresh while an eager download waits after the provider
+/// answered "not found", which a network report leaves alone. His retry ends
+/// that wait, keeping its failure count, and the download completes now that
+/// the object is there (§6.7).
+#[tokio::test]
+async fn the_persons_retry_ends_an_answered_download_wait() {
+    let clock = clock();
+    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let file = a.uploaded("eager", vec![73; CHUNK * 2]).await;
+    let b = eager_reader(&a, &clock).await;
+    apply_all(&a, &b).await;
+    a.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::NotFound,
+            response: Some(404),
+            ..Faults::none()
+        })
+        .await;
+    b.files.inner.fill_eager().await.unwrap();
+    let before = b.files.inner.database.download_waits().await.unwrap();
+    assert_eq!(before[0].1.wait, Duration::from_secs(1));
+    let waits = &b.files.inner.waits;
+    waits.network_changed();
+    waits
+        .end_reported_waits(crate::NetworkOwner::Downloads)
+        .await
+        .unwrap();
+    assert_eq!(
+        b.files.inner.database.download_waits().await.unwrap(),
+        before
+    );
+    waits.retry_requested();
+    assert!(waits
+        .end_reported_waits(crate::NetworkOwner::Downloads)
+        .await
+        .unwrap());
+    let after = b.files.inner.database.download_waits().await.unwrap();
+    assert_eq!(after[0].1.failures, before[0].1.failures);
+    assert!(after[0].1.wait.is_zero());
+    b.files.inner.fill_eager().await.unwrap();
+    assert_eq!(
+        b.files.inner.database.missing_bytes(&file).await.unwrap(),
+        0
+    );
+    b.close().await;
+    a.close().await;
 }
