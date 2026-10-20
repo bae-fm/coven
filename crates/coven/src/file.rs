@@ -9,15 +9,21 @@ impl CovenHandle {
         self.files.file_status(file).await
     }
     /// Queue, pause setting and provider-confirmed session progress in one
-    /// committed database snapshot, available while disconnected (E7).
+    /// committed database snapshot, available while disconnected, with the
+    /// files this device is sending now (E7).
     pub async fn uploads(&self) -> CovenResult<UploadQueue> {
-        coven_sync::upload_queue_from_state(self.database.upload_queue().await?)
+        self.files
+            .uploads_in_flight()
+            .project(self.database.upload_queue().await?)
     }
-    /// The same pre-built query, through the app's live-query mechanism.
+    /// The same pre-built query, through the app's live-query mechanism. It
+    /// also answers again as an upload starts or ends.
     pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue> {
+        let sending = self.files.uploads_in_flight();
         self.database
             .subscribe_upload_queue()
-            .process(coven_sync::upload_queue_from_state)
+            .rerun_on(sending.changes())
+            .process(move |state| sending.project(state))
     }
     /// Optionally retry recoverable uploads early; provider cooldowns still
     /// hold them and individual failures stay in pending() (§17.7).

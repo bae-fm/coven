@@ -44,7 +44,7 @@ impl TransferBudget {
             changed: Notify::new(),
         }
     }
-    /// The current limits, also used by the next upload drain.
+    /// The current limits; the next upload to start checks the upload limit.
     pub fn limits(&self) -> TransferLimits {
         self.state.lock().expect("transfer budget poisoned").limits
     }

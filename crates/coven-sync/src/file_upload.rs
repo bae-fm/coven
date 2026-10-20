@@ -1,171 +1,25 @@
-//! The persistent upload queue and its bounded-memory transfer state machine.
+//! One attempt to upload a queued file, through its bounded-memory transfer
+//! state machine.
 
 use crate::{
-    files::file_error::*, files::file_failure::file_subject, files::FilesInner, PendingRecord,
-    SyncError,
+    files::file_error::*, files::file_failure::file_subject, files::FilesInner, SyncError,
 };
 use coven_crypto::{FileKey, FILE_CHUNK_TAG_LEN};
 use coven_database::FileRefJournal;
-use coven_database::{
-    CovenResult, DbError, FileRef, FileUpload, LocalFileStream, RetrySubject, UploadQueueState,
-};
+use coven_database::{DbError, FileUpload, LocalFileStream, RetrySubject};
 use coven_format::{
     chunks::CHUNK_SIZE,
     file::{FileHeader, FILE_HEADER_LEN},
 };
 use coven_storage::{ObjectPath, UploadSession};
-use futures_util::StreamExt;
-use std::{sync::atomic::Ordering, time::SystemTime};
 
 #[path = "file_upload_copy.rs"]
 mod copy;
 
-/// Observable upload queue state (E7), projected from one committed snapshot.
-#[derive(Clone, Debug, PartialEq)]
-pub struct UploadQueue {
-    /// Whether transfer work is paused; persisted across reopening.
-    pub paused: bool,
-    /// Waiting files, oldest first.
-    pub files: Vec<QueuedUpload>,
-}
-/// One waiting upload and its committed progress.
-#[derive(Clone, Debug, PartialEq)]
-pub struct QueuedUpload {
-    /// Captured row version.
-    pub file: FileRef,
-    /// Progress the provider confirmed and this device persisted.
-    pub phase: UploadPhase,
-    /// Enqueue time.
-    pub queued_at: SystemTime,
-}
-/// Progress is advanced only over provider-confirmed, persisted bytes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum UploadPhase {
-    /// Not started, a one-request upload, or waiting for its retry delay.
-    Waiting,
-    /// Encrypted bytes confirmed by the provider and persisted in the
-    /// resumable session. Sending bytes alone does not advance this value.
-    Uploading {
-        /// Provider-confirmed ciphertext bytes.
-        bytes_confirmed: u64,
-        /// Whole ciphertext size.
-        bytes_total: u64,
-    },
-}
-/// Result of one explicit upload drain. Individual failures stay in
-/// `pending()`.
-#[derive(Debug, PartialEq, Eq)]
-pub enum DrainOutcome {
-    /// Every eligible item was attempted; this many were stored and retired.
-    Drained {
-        /// Files storage confirmed, each retired from the queue.
-        uploaded: usize,
-    },
-    /// No waiting upload exists.
-    QueueEmpty,
-    /// Uploads were paused.
-    Paused,
-}
-/// Project the committed queue: a recorded provider session's confirmed
-/// bytes are progress, and a file without one is waiting (E7).
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a stored value that won't convert or decode is DamagedDatabase"
-)]
-pub fn upload_queue_from_state(state: UploadQueueState) -> CovenResult<UploadQueue> {
-    let files = state
-        .uploads
-        .into_iter()
-        .map(|upload| {
-            let phase = match &upload.session {
-                None => UploadPhase::Waiting,
-                Some(bytes) => {
-                    let session = UploadSession::decode(bytes.as_bytes())
-                        .map_err(|_| DbError::DamagedDatabase)?;
-                    UploadPhase::Uploading {
-                        bytes_confirmed: session.confirmed_bytes(),
-                        bytes_total: session.total_bytes(),
-                    }
-                }
-            };
-            Ok(QueuedUpload {
-                file: upload.file,
-                phase,
-                queued_at: upload.queued_at,
-            })
-        })
-        .collect::<CovenResult<_>>()?;
-    Ok(UploadQueue {
-        paused: state.paused,
-        files,
-    })
-}
-
 impl FilesInner {
-    pub(crate) async fn drain_uploads(&self, force: bool) -> Result<DrainOutcome, SyncError> {
-        let _guard = self.drain.lock().await;
-        self.check_open()?;
-        // set_storage holds the same guard, so this connection remains in place
-        // throughout the drain. Disconnected files wait without failed attempts.
-        if self
-            .storage
-            .read()
-            .expect("storage lock poisoned")
-            .is_none()
-        {
-            return Err(SyncError::NoStorage);
-        }
-        // The persisted setting governs; parts check this copy between sends.
-        let paused = self.database.uploads_paused().await?;
-        self.paused.store(paused, Ordering::Release);
-        if paused {
-            return Ok(DrainOutcome::Paused);
-        }
-        let waiting = self
-            .database
-            .upload_work::<PendingRecord>(file_subject)
-            .await?;
-        if waiting.is_empty() {
-            return Ok(DrainOutcome::QueueEmpty);
-        }
-        if !self.send.files_allowed() {
-            return Err(coven_storage::StorageFailure::CatchUpRequired.into());
-        }
-        // An app retry overrides ordinary backoff, never a provider cooldown.
-        if let Some(remaining) = self.waits.cooldown() {
-            if force {
-                return Err(coven_storage::StorageFailure::RateLimited
-                    .with_source(coven_storage::CoolingDown { remaining })
-                    .into());
-            }
-            return Ok(DrainOutcome::Drained { uploaded: 0 });
-        }
-        let eligible: Vec<_> = waiting
-            .into_iter()
-            .filter(|(item, record)| {
-                record
-                    .as_ref()
-                    .is_none_or(|record| record.retry() != crate::Retry::Never)
-                    && (force || self.retry_due(item, record.as_ref()))
-            })
-            .map(|(item, _)| item)
-            .collect();
-        let limit = self.transfers.limits().uploads.get();
-        let mut attempts = futures_util::stream::iter(eligible)
-            .map(|item| self.attempt_upload(item))
-            .buffer_unordered(limit);
-        let mut uploaded = 0;
-        while let Some(attempt) = attempts.next().await {
-            if attempt? {
-                uploaded += 1;
-            }
-        }
-        Ok(DrainOutcome::Drained { uploaded })
-    }
-
     /// Whether this attempt stored the file. A failure becomes the file's
     /// pending record, which holds its error as the cause in this process.
-    async fn attempt_upload(&self, item: FileUpload) -> Result<bool, SyncError> {
+    pub(super) async fn attempt_upload(&self, item: FileUpload) -> Result<bool, SyncError> {
         if self.paused() {
             return Ok(false);
         }

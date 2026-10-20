@@ -799,10 +799,12 @@ minutes away. Her app reports the change with `network_changed`
   If that save fails, every wait keeps its backoff and the report stays: the
   owner acts on it again the next time it plans, so a failed write never drops
   a report.
-- **Reports coalesce.** The connection acts on reports between passes, and the
-  file worker between its transfers. Reports one hasn't acted on yet count as
-  one. If the pass or transfer they arrived during fails for want of a network,
-  its wait ends too: the failure may have come before the change.
+- **Reports coalesce.** The connection acts on reports between passes, the eager
+  fill between its fills, and the upload worker each time it starts uploads.
+  Reports one hasn't acted on yet count as one. If the pass, fill or upload they
+  arrived during fails for want of a network, its wait ends too: the failure may
+  have come before the change. The upload worker ends that one upload's wait as
+  the upload fails, because its other uploads keep running.
 
 ### 7. Order
 
@@ -3691,6 +3693,29 @@ waits for file uploads (§6.6): finishing an upload changes no app row and doesn
 delay the write that attached the file. A finished upload supplies evidence for
 deleting stored files (§17.8) without scheduling another full pass.
 
+**Uploads run up to the limit, all the time.** Ben imports 400 photos with the
+upload limit set to 3. The worker starts the first three as they are queued.
+When one finishes, the next photo in the queue starts at once, including photos
+queued while the others were uploading. Three stay in flight until the queue
+runs out. Without this, a worker that took the queue once and finished that
+batch before looking again would end each batch with one large file uploading
+alone while new photos sat idle.
+
+- The queue is served oldest first. A file waiting for its retry delay, one
+  that never retries and one already in flight are skipped.
+- A changed limit applies to the next upload that starts. Uploads in flight
+  keep running when the limit drops.
+- Pausing, a provider cooldown, a required catch-up (§5.4) and a connection
+  change start no new upload. Uploads in flight finish or stop at their next
+  part, and the worker starts again when the condition ends. A connection
+  change waits for the uploads in flight before it swaps the connection.
+- `retry_uploads_now` joins the uploads in progress rather than waiting for
+  them. It covers every queued file that can retry, whatever its delay, and
+  returns once each one's attempt has ended.
+- Eager downloads and carried pins have their own worker (§17.6), so a long
+  import never holds them up. A finished upload wakes it, since completion can
+  leave it work.
+
 - **Same stops as writes.** File sends follow the stuck-device rule (§5.4) and the
   removal cut-off (§14.1). Parts the provider confirmed stay recorded for
   resuming; no time-based permission to send is needed.
@@ -3752,9 +3777,13 @@ condition in the session, because a retry must not overwrite a competing floor.
 - The upload session records each part the provider confirms, and its byte count,
   before reporting progress. Resuming, and the app's `uploads()` and
   `subscribe_uploads()`, read that same state. Bytes written to a socket are not
-  progress; there are no separate progress writes or in-memory channel.
-- Pausing an upload is persisted too. An upload in one request stays `Waiting`
-  until confirmed completion removes it from the queue.
+  progress; there are no separate progress writes.
+- `uploads()` also shows which files this device is sending right now. That
+  fact lives only in the running process; a reopened store shows every file
+  waiting. A file in one request shows as uploading with no progress until
+  confirmed completion removes it from the queue. Without this, an app would
+  show three photos going out at once as all waiting.
+- Pausing an upload is persisted too.
 - After a crash, a session the provider still has continues from its confirmed
   parts; reopening the app forgets none of them.
 - A session the provider has expired starts over, reading and checking the

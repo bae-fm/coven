@@ -186,7 +186,7 @@ impl Fixture {
     }
     async fn drain(&self) {
         self.files.set_uploads_paused(false).await.unwrap();
-        self.files.retry_uploads_now().await.unwrap();
+        self.files.inner.drain_uploads(true).await.unwrap();
         for upload in self.queue().await.files {
             assert_eq!(self.upload_reason(&upload.file).await, None);
         }
@@ -210,14 +210,19 @@ impl Fixture {
             .iter()
             .any(|upload| upload.file == *file)
     }
-    /// The committed queue as the app reads it (E7).
+    /// The queue as the app reads it (E7).
     async fn queue(&self) -> UploadQueue {
-        upload_queue_from_state(self.database.upload_queue().await.unwrap()).unwrap()
+        self.files
+            .uploads_in_flight()
+            .project(self.database.upload_queue().await.unwrap())
+            .unwrap()
     }
     fn subscribe_queue(&self) -> coven_database::LiveQuery<UploadQueue> {
+        let sending = self.files.uploads_in_flight();
         self.database
             .subscribe_upload_queue()
-            .process(upload_queue_from_state)
+            .rerun_on(sending.changes())
+            .process(move |state| sending.project(state))
     }
     /// This device's pending reason about one of its queued files.
     async fn upload_reason(&self, file: &FileRef) -> Option<crate::PendingReason> {
@@ -538,6 +543,8 @@ mod cache;
 mod status;
 #[path = "file_upload_copy_tests.rs"]
 mod upload_copy;
+#[path = "file_upload_pool_tests.rs"]
+mod upload_pool;
 #[path = "file_upload_retry_tests.rs"]
 mod upload_retry;
 #[path = "file_upload_tests.rs"]
@@ -862,10 +869,10 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
 
 impl Files {
     pub(crate) async fn stop_background_for_counts(&self) {
-        // Isolate explicit fills and transfers from the independent worker,
+        // Isolate explicit fills and transfers from the independent workers,
         // retaining the real file owner and its database operations.
         self.worker.stop.send_replace(true);
-        if let Some(task) = self.worker.task.lock().await.take() {
+        for task in std::mem::take(&mut *self.worker.tasks.lock().await) {
             join(task).await;
         }
     }

@@ -1,6 +1,5 @@
 use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
-use crate::files::file_upload::*;
 use coven_database::FileRefJournal;
 use coven_database::{CacheFill, FileRef, Provenance};
 use coven_foundation::files::StoreDirAccess;
@@ -175,37 +174,6 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
         .unwrap()
         .remove_directory()
         .unwrap();
-}
-
-#[tokio::test]
-async fn a_single_request_stays_waiting_until_confirmed_completion_retires_it() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    f.attach("files", "single", vec![44; 19]).await;
-
-    let (started, receiving) = tokio::sync::oneshot::channel();
-    let (release, resume) = tokio::sync::oneshot::channel();
-    f.storage
-        .hold_next_creation(
-            coven_storage::ObjectPrefix::files(f.directory.id()),
-            started,
-            resume,
-        )
-        .await;
-    f.files.set_uploads_paused(false).await.unwrap();
-    let files = f.files.clone();
-    let task = tokio::spawn(async move { files.retry_uploads_now().await });
-    tokio::time::timeout(Duration::from_secs(20), receiving)
-        .await
-        .unwrap()
-        .unwrap();
-    // Bytes in flight are not progress: the file waits until storage confirms.
-    let mut uploads = f.subscribe_queue();
-    let phase = uploads.next().await.unwrap().files.remove(0).phase;
-    assert_eq!(phase, UploadPhase::Waiting);
-    release.send(()).unwrap();
-    task.await.unwrap().unwrap();
-    assert!(uploads.next().await.unwrap().files.is_empty());
-    f.close().await;
 }
 
 #[tokio::test]
@@ -982,11 +950,11 @@ async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
         })
         .await;
     f.files.set_uploads_paused(false).await.unwrap();
-    f.files.retry_uploads_now().await.unwrap();
+    f.files.inner.drain_uploads(true).await.unwrap();
     assert!(f.queued(&file).await);
     std::fs::write(f.root.path().join("take"), vec![8; CHUNK - 100]).unwrap();
     let before = f.storage.request_trace().len();
-    f.files.retry_uploads_now().await.unwrap();
+    f.files.inner.drain_uploads(true).await.unwrap();
     assert!(!f.storage.request_trace()[before..]
         .iter()
         .any(|request| matches!(request, MemoryRequest::Create(_))));

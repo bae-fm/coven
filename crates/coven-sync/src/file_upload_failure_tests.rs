@@ -246,7 +246,7 @@ async fn failures_that_never_clear_stay_visible_through_reconnect_and_manual_ret
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         0
     );
-    assert_eq!(drained(f.files.retry_uploads_now().await.unwrap()), 0);
+    assert_eq!(drained(f.files.inner.drain_uploads(true).await.unwrap()), 0);
     f.reopen().await;
     f.files.stop_background_for_counts().await;
     f.files.set_uploads_paused(false).await.unwrap();
@@ -314,7 +314,7 @@ async fn manual_retry_drains_recoverable_uploads_early() {
             drained(f.files.inner.drain_uploads(false).await.unwrap()),
             0
         );
-        assert_eq!(drained(f.files.retry_uploads_now().await.unwrap()), 1);
+        assert_eq!(drained(f.files.inner.drain_uploads(true).await.unwrap()), 1);
         assert!(!f.queued(&file).await);
         f.close().await;
     }

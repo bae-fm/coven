@@ -13,9 +13,13 @@ mod file_read;
 #[path = "file_status.rs"]
 mod file_status;
 #[path = "file_upload.rs"]
-pub(crate) mod file_upload;
+mod file_upload;
 #[path = "file_upload_failure.rs"]
 mod file_upload_failure;
+#[path = "file_upload_pool.rs"]
+mod file_upload_pool;
+#[path = "file_upload_queue.rs"]
+mod file_upload_queue;
 #[path = "file_upload_retry.rs"]
 mod file_upload_retry;
 use crate::SyncError;
@@ -26,13 +30,14 @@ use coven_storage::Storage;
 pub use file_error::FileReadError;
 pub use file_read::{FileRangeStream, FileStream};
 pub use file_status::FileStatus;
-pub use file_upload::{
-    upload_queue_from_state, DrainOutcome, QueuedUpload, UploadPhase, UploadQueue,
+pub use file_upload_pool::DrainOutcome;
+pub use file_upload_queue::{
+    QueuedUpload, UploadPhase, UploadProgress, UploadQueue, UploadsInFlight,
 };
 use std::{
     collections::{BTreeMap, BTreeSet},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicUsize, Ordering},
         Arc, Mutex,
     },
 };
@@ -42,8 +47,9 @@ use coven_storage::TransferBudget;
 pub use coven_storage::TransferLimits;
 
 /// Owns storage, database file operations and the device's file area (Appendix F.3).
-/// Construction starts commit-driven uploads and eager caching; no sync loop or
-/// timer is created. Call `close` before closing the database.
+/// Construction starts two commit-driven workers, one for uploads and one for
+/// eager caching; no sync loop or timer is created. Call `close` before
+/// closing the database.
 #[derive(Clone)]
 pub struct Files {
     inner: Arc<FilesInner>,
@@ -63,11 +69,22 @@ struct FilesInner {
     /// Reopening creates a new connection and permits one attempt again.
     connection_waits: Mutex<BTreeSet<coven_database::RetrySubject>>,
     ids: IdSourceRef,
-    /// The persisted pause setting as of the last drain or app change; parts
-    /// check it between sends.
+    /// The persisted pause setting as of the last upload run or app change;
+    /// parts check it between sends.
     paused: AtomicBool,
-    wake: Arc<Notify>,
+    /// Wakes the upload worker, or its run in progress.
+    upload_wake: Arc<Notify>,
+    /// Wakes the eager fill.
+    fill_wake: Arc<Notify>,
+    /// One upload run at a time.
     drain: tokio::sync::Mutex<()>,
+    /// The uploads being sent now, which the app's queue shows (E7).
+    in_flight: UploadsInFlight,
+    /// App retries waiting for an upload run to serve them.
+    app_retries: Mutex<Vec<file_upload_pool::AppRetry>>,
+    /// Connection changes waiting for the uploads in flight to end; while
+    /// any waits, no upload starts.
+    changing: AtomicUsize,
     cache: tokio::sync::RwLock<()>,
     reads: Mutex<FileReadLocks>,
     transfers: Arc<TransferBudget>,
@@ -91,7 +108,8 @@ impl Drop for SequenceDownloads<'_> {
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
-    task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// The upload worker and the eager fill.
+    tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 impl Drop for FileWorker {
     fn drop(&mut self) {
@@ -109,12 +127,11 @@ impl Files {
         ids: IdSourceRef,
         transfers: Arc<TransferBudget>,
     ) -> Self {
-        let mut changes = database.queued_work_changes();
-        let mut sending = send.subscribe();
-        let mut reports = waits.network_reports();
+        let uploads_changes = database.queued_work_changes();
+        let fill_changes = database.queued_work_changes();
         let (cancel_eager, _) = watch::channel(0);
         let (sequence_active, _) = watch::channel(false);
-        let (stop, mut stopping) = watch::channel(false);
+        let (stop, _) = watch::channel(false);
         let inner = Arc::new(FilesInner {
             database,
             directory,
@@ -124,8 +141,12 @@ impl Files {
             connection_waits: Mutex::new(BTreeSet::new()),
             ids,
             paused: AtomicBool::new(false),
-            wake: Arc::new(Notify::new()),
+            upload_wake: Arc::new(Notify::new()),
+            fill_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
+            in_flight: UploadsInFlight::default(),
+            app_retries: Mutex::new(Vec::new()),
+            changing: AtomicUsize::new(0),
             cache: tokio::sync::RwLock::new(()),
             reads: Mutex::new(BTreeMap::new()),
             transfers,
@@ -135,68 +156,23 @@ impl Files {
             cancel_eager,
             sequence_active,
         });
-        let weak = Arc::downgrade(&inner);
-        let wake = inner.wake.clone();
-        let task = tokio::spawn(async move {
-            // The earliest due upload or eager download retry, armed after
-            // each drain and fill (§6.7).
-            let mut retry: std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>> =
-                Box::pin(std::future::pending());
-            loop {
-                tokio::select! {
-                    biased;
-                    _=stopping.changed()=>break,
-                    result=changes.next()=>if let Err(error)=result {
-                        if !matches!(error,DbError::StoreClosed) {tracing::error!(?error,"file commit observation failed");}
-                        break;
-                    },
-                    _=wake.notified()=>{},
-                    result=sending.changed()=>if result.is_err() { break; },
-                    result=reports.changed()=>if result.is_err() { break; },
-                    _=&mut retry=>{},
-                }
-                let Some(owner) = weak.upgrade() else { break };
-                let work = async {
-                    // A network report ends upload and download waits for
-                    // the network; reports during this work are acted on
-                    // after it, ending the waits it fails into (§6.7).
-                    if let Err(error) = owner
-                        .waits
-                        .end_offline_waits(crate::NetworkOwner::Files)
-                        .await
-                    {
-                        // The waits keep their backoff and the report stays,
-                        // so the worker's next plan ends them.
-                        tracing::error!(?error, "ending file waits for the network failed");
-                    }
-                    match owner.drain_uploads(false).await {
-                        Ok(_) => (),
-                        Err(SyncError::NoStorage) => {
-                            tracing::debug!("file uploads waiting for storage");
-                        }
-                        Err(SyncError::Storage(error))
-                            if error.failure()
-                                == coven_storage::StorageFailure::CatchUpRequired =>
-                        {
-                            tracing::debug!("file uploads waiting for a completed catch-up");
-                        }
-                        Err(error) => tracing::error!(?error, "upload queue failed"),
-                    }
-                    if let Err(error) = owner.fill_eager().await {
-                        tracing::error!(?error, "eager cache fill failed");
-                    }
-                };
-                tokio::select! { biased; _=stopping.changed()=>break, _=work=>{} }
-                retry = owner
-                    .next_retry()
-                    .unwrap_or_else(|| Box::pin(std::future::pending()));
-            }
-        });
+        let tasks = vec![
+            tokio::spawn(upload_worker(
+                Arc::downgrade(&inner),
+                stop.subscribe(),
+                uploads_changes,
+            )),
+            tokio::spawn(fill_worker(
+                Arc::downgrade(&inner),
+                stop.subscribe(),
+                fill_changes,
+            )),
+        ];
         Self {
             inner,
             worker: Arc::new(FileWorker {
                 stop,
-                task: tokio::sync::Mutex::new(Some(task)),
+                tasks: tokio::sync::Mutex::new(tasks),
             }),
         }
     }
@@ -209,26 +185,45 @@ impl Files {
     pub fn transfer_limits(&self) -> TransferLimits {
         self.inner.transfers.limits()
     }
-    /// Change future upload batches and download admission. Active response
+    /// Change upload and download admission. The next upload to start sees
+    /// the new upload limit; uploads in flight keep running. Active response
     /// bodies retain their leases until they finish or are dropped.
     pub fn set_transfer_limits(&self, limits: TransferLimits) {
         self.inner.transfers.set_limits(limits);
+        self.inner.upload_wake.notify_one();
+    }
+    /// The uploads this process is sending now, which `UploadsInFlight::project`
+    /// adds to a committed queue (E7).
+    pub fn uploads_in_flight(&self) -> UploadsInFlight {
+        self.inner.in_flight.clone()
     }
     /// Stop background work and wait for in-flight database and transfer work.
+    /// An app retry still waiting fails as the store closes.
     pub async fn close(&self) {
         self.inner.closed.store(true, Ordering::Release);
         self.worker.stop.send_replace(true);
-        if let Some(task) = self.worker.task.lock().await.take() {
+        for task in std::mem::take(&mut *self.worker.tasks.lock().await) {
             join(task).await;
         }
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
+        self.inner
+            .app_retries
+            .lock()
+            .expect("app retries poisoned")
+            .clear();
     }
-    /// Optionally retry recoverable uploads early. Provider cooldowns and
-    /// failures that never clear still hold (§17.7).
+    /// Optionally retry recoverable uploads early: the upload worker attempts
+    /// every upload that can retry, whatever its wait, and this returns once
+    /// each attempt has ended. Provider cooldowns and failures that never
+    /// clear still hold (§17.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError> {
-        self.inner.drain_uploads(true).await
+        let answer = self.inner.ask_retry()?;
+        // The worker stopping with the store drops the retry unanswered.
+        answer
+            .await
+            .unwrap_or_else(|_| Err(DbError::StoreClosed.into()))
     }
     /// Persist the pause setting; a running upload stops between confirmed
     /// parts, preserving its provider session (E7).
@@ -237,7 +232,7 @@ impl Files {
         self.inner.database.set_uploads_paused(paused).await?;
         self.inner.paused.store(paused, Ordering::Release);
         if !paused {
-            self.inner.wake.notify_one();
+            self.inner.upload_wake.notify_one();
         }
         Ok(())
     }
@@ -249,17 +244,19 @@ impl Files {
         self.inner.sequence_active.send_replace(true);
         SequenceDownloads {
             active: &self.inner.sequence_active,
-            wake: &self.inner.wake,
+            wake: &self.inner.fill_wake,
         }
     }
 
     /// Finish transfers before verifying and committing a connection change.
-    /// A failed setup leaves the current connection installed.
+    /// No upload starts meanwhile. A failed setup leaves the current
+    /// connection installed.
     pub async fn set_storage(
         &self,
         storage: Option<Arc<dyn Storage>>,
         ready: impl std::future::Future<Output = Result<(), SyncError>>,
     ) -> Result<(), SyncError> {
+        let _changing = ConnectionChange::start(&self.inner.changing, &self.inner.upload_wake);
         let _eager = self.inner.eager_fill.lock().await;
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
@@ -272,8 +269,134 @@ impl Files {
             .lock()
             .expect("file connection waits poisoned")
             .clear();
-        self.inner.wake.notify_one();
+        self.inner.fill_wake.notify_one();
         Ok(())
+    }
+}
+
+/// A connection change waiting for, then holding, the upload runs. While it
+/// lasts no upload starts, so the run in progress ends once its attempts do;
+/// as it ends, also when its caller is cancelled, the upload worker runs again.
+struct ConnectionChange<'a> {
+    changing: &'a AtomicUsize,
+    wake: &'a Notify,
+}
+impl<'a> ConnectionChange<'a> {
+    fn start(changing: &'a AtomicUsize, wake: &'a Notify) -> Self {
+        changing.fetch_add(1, Ordering::AcqRel);
+        wake.notify_one();
+        Self { changing, wake }
+    }
+}
+impl Drop for ConnectionChange<'_> {
+    fn drop(&mut self) {
+        self.changing.fetch_sub(1, Ordering::AcqRel);
+        self.wake.notify_one();
+    }
+}
+
+/// The upload worker: runs uploads whenever queued work, a changed
+/// prerequisite or a due retry may let one start (§17.7). A run keeps the
+/// upload limit's number in flight until none can start.
+async fn upload_worker(
+    owner: std::sync::Weak<FilesInner>,
+    mut stopping: watch::Receiver<bool>,
+    mut changes: coven_database::DatabaseChanges,
+) {
+    let Some(first) = owner.upgrade() else { return };
+    let wake = first.upload_wake.clone();
+    let mut sending = first.send.subscribe();
+    let mut reports = first.waits.network_reports();
+    drop(first);
+    // The earliest due upload retry, armed after each run (§6.7).
+    let mut retry: crate::retry_waits::Wake = Box::pin(std::future::pending());
+    loop {
+        tokio::select! {
+            biased;
+            _ = stopping.changed() => break,
+            result = changes.next() => if let Err(error) = result {
+                if !matches!(error, DbError::StoreClosed) {
+                    tracing::error!(?error, "file commit observation failed");
+                }
+                break;
+            },
+            () = wake.notified() => {},
+            result = sending.changed() => if result.is_err() { break; },
+            result = reports.changed() => if result.is_err() { break; },
+            () = &mut retry => {},
+        }
+        let Some(owner) = owner.upgrade() else { break };
+        let run = async {
+            match owner.drain_uploads(false).await {
+                Ok(_) => (),
+                Err(SyncError::NoStorage) => {
+                    tracing::debug!("file uploads waiting for storage");
+                }
+                Err(SyncError::Storage(error))
+                    if error.failure() == coven_storage::StorageFailure::CatchUpRequired =>
+                {
+                    tracing::debug!("file uploads waiting for a completed catch-up");
+                }
+                Err(SyncError::Database(DbError::StoreClosed)) => (),
+                Err(error) => tracing::error!(?error, "upload queue failed"),
+            }
+        };
+        tokio::select! { biased; _ = stopping.changed() => break, () = run => {} }
+        retry = owner
+            .next_upload_retry()
+            .unwrap_or_else(|| Box::pin(std::future::pending()));
+    }
+}
+
+/// The eager fill: keeps eager files and carried pins in the cache whenever
+/// file rows change, an upload completes or a download retry is due (§17.6).
+async fn fill_worker(
+    owner: std::sync::Weak<FilesInner>,
+    mut stopping: watch::Receiver<bool>,
+    mut changes: coven_database::DatabaseChanges,
+) {
+    let Some(first) = owner.upgrade() else { return };
+    let wake = first.fill_wake.clone();
+    let mut reports = first.waits.network_reports();
+    drop(first);
+    // The earliest due download retry, armed after each fill (§6.7).
+    let mut retry: crate::retry_waits::Wake = Box::pin(std::future::pending());
+    loop {
+        tokio::select! {
+            biased;
+            _ = stopping.changed() => break,
+            result = changes.next() => if let Err(error) = result {
+                if !matches!(error, DbError::StoreClosed) {
+                    tracing::error!(?error, "file commit observation failed");
+                }
+                break;
+            },
+            () = wake.notified() => {},
+            result = reports.changed() => if result.is_err() { break; },
+            () = &mut retry => {},
+        }
+        let Some(owner) = owner.upgrade() else { break };
+        let fill = async {
+            // A network report ends download waits for the network; reports
+            // during this fill are acted on after it, ending the waits it
+            // fails into (§6.7).
+            if let Err(error) = owner
+                .waits
+                .end_offline_waits(crate::NetworkOwner::Downloads)
+                .await
+            {
+                // The waits keep their backoff and the report stays, so the
+                // next fill ends them.
+                tracing::error!(?error, "ending download waits for the network failed");
+            }
+            if let Err(error) = owner.fill_eager().await {
+                tracing::error!(?error, "eager cache fill failed");
+            }
+        };
+        tokio::select! { biased; _ = stopping.changed() => break, () = fill => {} }
+        retry = owner
+            .next_fill_retry()
+            .unwrap_or_else(|| Box::pin(std::future::pending()));
     }
 }
 impl FilesInner {

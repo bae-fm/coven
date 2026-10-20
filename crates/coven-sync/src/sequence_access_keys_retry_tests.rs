@@ -422,10 +422,10 @@ async fn a_network_report_ends_an_offline_operation_wait() {
     ana.sync.pass().await.unwrap();
     assert_eq!(parent(&ana).await.unwrap().last_step, record.last_step);
     ana.sync.waits.network_changed();
-    // The file worker's report leaves the operation to the connection.
+    // The upload worker's report leaves the operation to the connection.
     ana.sync
         .waits
-        .end_offline_waits(crate::NetworkOwner::Files)
+        .end_offline_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap();
     assert_eq!(

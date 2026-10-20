@@ -20,23 +20,35 @@ impl FilesInner {
                 .due(RetrySubject::Upload(item.id), item.retry.as_ref())
     }
 
-    /// When the worker must next drain and fill without other wakes: the
-    /// earliest due upload or eager download retry, or the end of a provider
-    /// cooldown holding the upload queue.
-    pub(crate) fn next_retry(&self) -> Option<crate::retry_waits::Wake> {
-        // Resuming, connecting and a completed catch-up wake the worker themselves.
+    /// When the upload worker must next run without other wakes: the
+    /// earliest due upload retry, or the end of a provider cooldown holding
+    /// the queue. Resuming, connecting and a completed catch-up wake it
+    /// themselves.
+    pub(crate) fn next_upload_retry(&self) -> Option<crate::retry_waits::Wake> {
+        let uploads = self
+            .storage
+            .read()
+            .expect("storage lock poisoned")
+            .is_some()
+            && !self.paused()
+            && self.send.files_allowed();
+        if !uploads {
+            return None;
+        }
+        self.waits
+            .next_wake(|subject| matches!(subject, RetrySubject::Upload(_)))
+            .or_else(|| self.waits.cooldown_wake())
+    }
+
+    /// When the eager fill must next run without other wakes: the earliest
+    /// due download retry. Connecting wakes it itself.
+    pub(crate) fn next_fill_retry(&self) -> Option<crate::retry_waits::Wake> {
         let connected = self
             .storage
             .read()
             .expect("storage lock poisoned")
             .is_some();
-        let uploads = connected && !self.paused() && self.send.files_allowed();
         self.waits
-            .next_wake(|subject| match subject {
-                RetrySubject::Upload(_) => uploads,
-                RetrySubject::Download { .. } => connected,
-                _ => false,
-            })
-            .or_else(|| uploads.then(|| self.waits.cooldown_wake()).flatten())
+            .next_wake(|subject| connected && matches!(subject, RetrySubject::Download { .. }))
     }
 }

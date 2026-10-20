@@ -2232,6 +2232,11 @@ impl<T: Send + 'static> LiveQuery<T> {
         T: Clone + PartialEq,
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static;
+
+    /// Also runs again whenever `local` changes: state the app keeps beside
+    /// the database, which its `process` step reads. Such a run is
+    /// delivered only when its result changed.
+    pub fn rerun_on(self, local: tokio::sync::watch::Receiver<()>) -> Self;
 }
 
 impl<Q, T> ReconfigurableLiveQuery<Q, T>
@@ -2247,6 +2252,9 @@ where
         T: Clone + PartialEq,
         P: Fn(T) -> CovenResult<U> + Send + Sync + 'static,
         U: Send + 'static;
+
+    /// Also runs again whenever `local` changes, as `LiveQuery::rerun_on`.
+    pub fn rerun_on(self, local: tokio::sync::watch::Receiver<()>) -> Self;
 
     /// A handle that replaces the request.
     pub fn requests(&self) -> LiveQueryRequests<Q>;
@@ -2854,7 +2862,8 @@ impl StorageConfig {
 
 /// Limits for concurrent transfers (E1, E5).
 pub struct TransferLimits {
-    /// Maximum file uploads running at once.
+    /// File uploads running at once. While uploads can run, the upload
+    /// worker keeps this many in flight, starting the next as each ends.
     pub uploads: NonZeroUsize,
     /// Maximum concurrent downloads, shared by sequence fetch-ahead and file reads.
     pub downloads: NonZeroUsize,
@@ -3491,8 +3500,8 @@ impl CovenHandle {
     /// How many uploads and downloads run at once.
     pub fn transfer_limits(&self) -> TransferLimits;
 
-    /// Changes them while the store is open. Transfers already running keep
-    /// the limit they started under.
+    /// Changes them while the store is open. The next upload to start sees
+    /// the new upload limit; transfers already running continue.
     pub fn set_transfer_limits(&self, limits: TransferLimits);
 }
 
@@ -3707,13 +3716,17 @@ impl CovenHandle {
 ```rust
 impl CovenHandle {
     /// Queue, pause setting and provider-confirmed session progress in one
-    /// committed database snapshot, available while disconnected.
+    /// committed database snapshot, available while disconnected, with the
+    /// files this device is sending now.
     pub async fn uploads(&self) -> CovenResult<UploadQueue>;
 
-    /// The same pre-built query, through the app's live-query mechanism.
+    /// The same pre-built query, through the app's live-query mechanism. It
+    /// answers again as an upload starts or ends, too.
     pub fn subscribe_uploads(&self) -> LiveQuery<UploadQueue>;
 
     /// Optional early retry of recoverable uploads; coven retries on its own.
+    /// It joins the uploads in progress, covers every queued file that can
+    /// retry whatever its delay, and returns once each one's attempt ended.
     /// Provider cooldowns still hold; failures stay in pending() (§6.7).
     pub async fn retry_uploads_now(&self) -> Result<DrainOutcome, SyncError>;
 
@@ -3730,19 +3743,33 @@ pub struct UploadQueue {
 
 pub struct QueuedUpload {
     pub file: FileRef,
+    /// Whether this device is sending the file now. Kept in memory only:
+    /// a reopened store shows every file waiting.
     pub phase: UploadPhase,
+    /// Bytes the provider confirmed in the file's resumable session; `None`
+    /// while it has none, as a file sent in one request never does.
+    pub progress: Option<UploadProgress>,
     pub queued_at: SystemTime,
 }
 
 pub enum UploadPhase {
-    /// Not started, or waiting for its retry delay.
+    /// Not being sent: not started, paused, waiting for a free upload slot
+    /// or for its retry delay.
     Waiting,
-    /// Encrypted bytes confirmed by the provider and persisted in the
-    /// resumable session. Sending bytes alone does not advance this value.
-    Uploading { bytes_confirmed: u64, bytes_total: u64 },
+    /// An attempt is sending it now, in one request or in parts.
+    Uploading,
 }
 
+/// Encrypted bytes confirmed by the provider and persisted in the resumable
+/// session. Sending bytes alone does not advance it; a paused upload keeps it.
+pub struct UploadProgress {
+    pub bytes_confirmed: u64,
+    pub bytes_total: u64,
+}
+
+/// What `retry_uploads_now` did.
 pub enum DrainOutcome {
+    /// Every file it covered was attempted; this many were stored.
     Drained { uploaded: usize },
     QueueEmpty,
     Paused,
@@ -3756,8 +3783,12 @@ let mut uploads = handle.subscribe_uploads();
 loop {
     let state = uploads.next().await?;
     for upload in &state.files {
-        if let UploadPhase::Uploading { bytes_confirmed, bytes_total } = upload.phase {
-            show_progress(upload.file.key(), bytes_confirmed, bytes_total);
+        let sending = upload.phase == UploadPhase::Uploading;
+        match upload.progress {
+            Some(UploadProgress { bytes_confirmed, bytes_total }) => {
+                show_progress(upload.file.key(), sending, bytes_confirmed, bytes_total)
+            }
+            None => show_state(upload.file.key(), sending),
         }
     }
     if state.files.is_empty() {

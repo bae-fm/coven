@@ -38,7 +38,7 @@ pub use coven_sync::{
 };
 pub use coven_sync::{
     DrainOutcome, EagerCacheFillStatus, FileRangeStream, FileReadError, FileStatus, FileStream,
-    PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadQueue,
+    PinProgress, QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue,
 };
 /// An admin entry is identified by the slot containing it (§10).
 pub type EntryId = Slot;

@@ -86,7 +86,7 @@ async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverab
             .await
             .unwrap()
             .is_empty());
-        assert!(b.files.inner.next_retry().is_none());
+        assert!(b.files.inner.next_fill_retry().is_none());
         let requests = a.storage.request_trace().len();
         advance(&clock, 600);
         b.files.inner.fill_eager().await.unwrap();
@@ -173,7 +173,7 @@ async fn reconnect_wakes_the_eager_worker_without_a_pass() {
     .await
     .unwrap();
     drop(b.files.inner.eager_fill.lock().await);
-    assert!(b.files.inner.next_retry().is_none());
+    assert!(b.files.inner.next_fill_retry().is_none());
     b.files
         .set_storage(Some(storage), std::future::ready(Ok(())))
         .await
@@ -402,7 +402,7 @@ async fn a_network_report_ends_only_an_offline_download_wait() {
         let waits = &b.files.inner.waits;
         waits.network_changed();
         waits
-            .end_offline_waits(crate::NetworkOwner::Files)
+            .end_offline_waits(crate::NetworkOwner::Downloads)
             .await
             .unwrap();
         let after = b.files.inner.database.download_waits().await.unwrap();

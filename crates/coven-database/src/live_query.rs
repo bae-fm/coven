@@ -7,7 +7,7 @@ use std::{
     pin::Pin,
     sync::{Arc, Mutex},
 };
-use tokio::sync::Notify;
+use tokio::sync::{watch, Notify};
 
 type Run<T> = Pin<Box<dyn Future<Output = CovenResult<T>> + Send>>;
 type Query<Q, T> = Arc<dyn Fn(Q) -> Run<T> + Send + Sync>;
@@ -26,7 +26,8 @@ pub struct LiveQueryClosed;
 pub enum LiveQueryCause {
     /// A new request, including the initial one.
     Request,
-    /// A commit changed a table, column and key read by the query.
+    /// A commit changed a table, column and key read by the query, or the
+    /// process-local state the query was told to rerun on changed.
     Write,
     /// A new request and a relevant commit arrived before this run.
     RequestAndWrite,
@@ -120,6 +121,9 @@ pub struct ReconfigurableLiveQuery<Q, T> {
     lifetime: QueryLifetime<Q>,
     query: Query<Q, T>,
     commits: CommitSubscription,
+    /// State this process keeps beside the database, which a `process` step
+    /// reads: a change reruns the query as a commit does.
+    local: Option<watch::Receiver<()>>,
     current: Option<(Q, LiveQueryRevision)>,
     running: Option<Running<Q, T>>,
     previous: Option<T>,
@@ -143,10 +147,19 @@ where
             })),
             query,
             commits,
+            local: None,
             current: None,
             running: None,
             previous: None,
         }
+    }
+
+    /// Also run again whenever `local` changes. It names state this process
+    /// keeps beside the database, which a `process` step reads; such a run is
+    /// a `Write` run, delivered only when its result changed.
+    pub fn rerun_on(mut self, local: watch::Receiver<()>) -> Self {
+        self.local = Some(local);
+        self
     }
 
     /// Obtain a cloneable handle for replacing this query's request.
@@ -169,6 +182,7 @@ where
             lifetime,
             query,
             commits,
+            local,
             current,
             running,
             previous: _,
@@ -203,6 +217,7 @@ where
             lifetime,
             query: mapped,
             commits,
+            local,
             current,
             running,
             previous: None,
@@ -219,7 +234,14 @@ where
             if self.running.is_none() {
                 let commits = self.commits.state();
                 let failure = commits.error();
-                let changed = commits.changed;
+                // Marking the local change seen before the run starts keeps a
+                // change during the run for the next one.
+                let local = self.local.as_mut().is_some_and(|local| {
+                    let changed = local.has_changed().unwrap_or(false);
+                    local.borrow_and_update();
+                    changed
+                });
+                let changed = commits.changed || local;
                 let request = self
                     .lifetime
                     .0
@@ -264,6 +286,7 @@ where
                     tokio::select! {
                         _ = self.lifetime.0.changed.notified() => {},
                         _ = self.commits.changed() => {},
+                        () = local_changed(&mut self.local) => {},
                     }
                     continue;
                 }
@@ -296,6 +319,16 @@ where
     }
 }
 
+/// Resolves when the local state changes; never once its owner is gone.
+async fn local_changed(local: &mut Option<watch::Receiver<()>>) {
+    if let Some(local) = local {
+        if local.changed().await.is_ok() {
+            return;
+        }
+    }
+    std::future::pending().await
+}
+
 /// A subscription's results and lifetime; dropping it ends future runs.
 pub struct LiveQuery<T> {
     inner: ReconfigurableLiveQuery<(), T>,
@@ -312,6 +345,14 @@ impl<T: Send + 'static> LiveQuery<T> {
         T: Clone + PartialEq,
     {
         self.inner.next().await.result
+    }
+
+    /// Also run again whenever `local` changes, as
+    /// [`ReconfigurableLiveQuery::rerun_on`] does.
+    pub fn rerun_on(self, local: watch::Receiver<()>) -> Self {
+        Self {
+            inner: self.inner.rerun_on(local),
+        }
     }
 
     /// Process each value on a worker after its connection has been released.

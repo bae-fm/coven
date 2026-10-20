@@ -5,10 +5,12 @@
 //! after a provider's answer, and the provider cooldown, hold.
 //!
 //! Each owner acts on reports for the waits it retries, when it next plans:
-//! the connection and its sync loop after the pass in flight, the file worker
-//! after the transfers in flight. So a report during an attempt also ends the
-//! wait that attempt fails into (IO `signal_during_attempt_wakes`). Reports
-//! an owner has not acted on yet coalesce into one.
+//! the connection and its sync loop after the pass in flight, the eager fill
+//! after the fill in flight, and the upload worker each time it starts
+//! uploads. A report during an attempt also ends the wait that attempt fails
+//! into (IO `signal_during_attempt_wakes`): the passes and fills act on it
+//! after the attempt, and the upload worker ends that wait as the attempt
+//! ends. Reports an owner has not acted on yet coalesce into one.
 
 use crate::{PendingRecord, PendingSubject, RetryWaits, SyncError};
 use coven_database::{FileUpload, RetrySubject, RetryWait};
@@ -24,25 +26,26 @@ pub enum NetworkOwner {
     /// The connection and its sync loop: the connection's backoff and
     /// coven's own operations.
     Connection,
-    /// The file worker: queued uploads and eager downloads.
-    Files,
+    /// The upload worker: queued uploads.
+    Uploads,
+    /// The eager fill: eager downloads and carried pins.
+    Downloads,
 }
 
 impl NetworkOwner {
     fn retries(self, subject: &RetrySubject) -> bool {
         match self {
             Self::Connection => matches!(subject, RetrySubject::Sync | RetrySubject::Operation(_)),
-            Self::Files => matches!(
-                subject,
-                RetrySubject::Upload(_) | RetrySubject::Download { .. }
-            ),
+            Self::Uploads => matches!(subject, RetrySubject::Upload(_)),
+            Self::Downloads => matches!(subject, RetrySubject::Download { .. }),
         }
     }
 
     fn index(self) -> usize {
         match self {
             Self::Connection => 0,
-            Self::Files => 1,
+            Self::Uploads => 1,
+            Self::Downloads => 2,
         }
     }
 }
@@ -51,14 +54,14 @@ impl NetworkOwner {
 /// on a report only once its waits for the network ended.
 pub(crate) struct Reports {
     reported: tokio::sync::watch::Sender<u64>,
-    handled: [AtomicU64; 2],
+    handled: [AtomicU64; 3],
 }
 
 impl Default for Reports {
     fn default() -> Self {
         Self {
             reported: tokio::sync::watch::channel(0).0,
-            handled: [AtomicU64::new(0), AtomicU64::new(0)],
+            handled: [AtomicU64::new(0), AtomicU64::new(0), AtomicU64::new(0)],
         }
     }
 }
@@ -124,9 +127,38 @@ impl RetryWaits {
         if handled.load(Ordering::SeqCst) >= reported {
             return Ok(false);
         }
+        self.end_network_waits(owner, None).await?;
+        // Reports since `reported` was read stay for the next plan.
+        handled.fetch_max(reported, Ordering::SeqCst);
+        Ok(true)
+    }
+
+    /// How many reports have arrived so far. An attempt notes it as it
+    /// starts, so it can tell whether one arrived while it ran.
+    pub(crate) fn network_reported(&self) -> u64 {
+        *self.network.reported.borrow()
+    }
+
+    /// End these subjects' waits for the network, whatever reports their
+    /// owner already acted on: each one's attempt was running when a report
+    /// arrived, so the report ends the wait it failed into (IO
+    /// `signal_during_attempt_wakes`). Fails as `end_offline_waits` does.
+    pub(crate) async fn end_waits_after_report(
+        &self,
+        owner: NetworkOwner,
+        subjects: BTreeSet<RetrySubject>,
+    ) -> Result<(), SyncError> {
+        self.end_network_waits(owner, Some(subjects)).await
+    }
+
+    /// End `owner`'s waits for the network, or only those of `only`.
+    async fn end_network_waits(
+        &self,
+        owner: NetworkOwner,
+        only: Option<BTreeSet<RetrySubject>>,
+    ) -> Result<(), SyncError> {
         let Some(database) = &self.database else {
-            handled.fetch_max(reported, Ordering::SeqCst);
-            return Ok(true);
+            return Ok(());
         };
         // A wait this session holds for the app stays held; one already
         // over needs no end unless a new failure replaced it.
@@ -154,6 +186,7 @@ impl RetryWaits {
                 .iter()
                 .filter(|(subject, wait)| {
                     owner.retries(subject)
+                        && only.as_ref().is_none_or(|only| only.contains(subject))
                         && !held.contains(subject)
                         && over.get(subject) != Some(&wait.not_before)
                         && !wait.wait.is_zero()
@@ -170,8 +203,6 @@ impl RetryWaits {
         {
             self.arm(subject, &ended);
         }
-        // Reports since `reported` was read stay for the next plan.
-        handled.fetch_max(reported, Ordering::SeqCst);
-        Ok(true)
+        Ok(())
     }
 }

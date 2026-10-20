@@ -2,7 +2,7 @@
 //! and the provider cooldown shared with every consumer (§6.7, E7).
 
 use super::*;
-use crate::{PendingReason, Prerequisite};
+use crate::PendingReason;
 use coven_database::RetrySubject;
 use coven_foundation::clock::{Clock, FixedClock};
 use coven_storage::{test_utils::Faults, StorageFailure};
@@ -174,7 +174,7 @@ async fn a_provider_cooldown_holds_uploads_even_when_the_app_retries() {
         f.files.inner.drain_uploads(false).await.unwrap(),
         DrainOutcome::Drained { uploaded: 0 }
     );
-    let Err(refused) = f.files.retry_uploads_now().await else {
+    let Err(refused) = f.files.inner.drain_uploads(true).await else {
         panic!("an app retry bypassed the provider cooldown");
     };
     assert!(
@@ -239,24 +239,28 @@ async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
         .hold_next_creation(ObjectPrefix::files(f.directory.id()), started, held)
         .await;
     let mut uploads = f.subscribe_queue();
-    let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
     f.files.set_uploads_paused(false).await.unwrap();
     observed.await.unwrap();
     f.send.set(crate::SequenceStatus::Opening);
     resume.send(()).unwrap();
-    // The second file waits for the next catch-up; that wait is its record.
+    // The first file finishes; the second does not start until a catch-up.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while !pending
-            .next()
-            .await
-            .unwrap()
-            .iter()
-            .any(|record| record.reason == PendingReason::Waits(Prerequisite::SequenceCatchUp))
-        {
-        }
+        while uploads.next().await.unwrap().files.len() != 1 {}
     })
     .await
     .unwrap();
+    drop(f.files.inner.drain.lock().await);
+    assert_eq!(
+        f.storage
+            .request_trace()
+            .iter()
+            .filter(|request| matches!(
+                request,
+                coven_storage::test_utils::MemoryRequest::Create(_)
+            ))
+            .count(),
+        1
+    );
     let first = f.database.file_ref("files", "first").await.unwrap();
     let second = f.database.file_ref("files", "second").await.unwrap();
     assert!(!f.queued(&first).await);
@@ -544,17 +548,21 @@ async fn pausing_between_parts_and_reconnecting_resume_the_recorded_session() {
             .store(true, std::sync::atomic::Ordering::Release)
     }));
     assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
+        f.files.inner.drain_uploads(false).await.unwrap(),
+        DrainOutcome::Paused
     );
     f.files.set_uploads_paused(true).await.unwrap();
     assert_eq!(confirmed(&f).await, CHUNK as u64);
+    let paused = &f.queue().await.files[0];
     assert_eq!(
-        f.queue().await.files[0].phase,
-        UploadPhase::Uploading {
-            bytes_confirmed: CHUNK as u64,
-            bytes_total: three_parts_total(),
-        }
+        (paused.phase, paused.progress),
+        (
+            UploadPhase::Waiting,
+            Some(UploadProgress {
+                bytes_confirmed: CHUNK as u64,
+                bytes_total: three_parts_total(),
+            })
+        )
     );
     assert!(matches!(
         f.files.inner.drain_uploads(false).await.unwrap(),
@@ -594,7 +602,7 @@ async fn provider_bytes_are_progress_only_once_the_session_records_them() {
     ));
     let f = fixture(&clock).await;
     let file = f.attach("files", "large", three_parts()).await;
-    assert_eq!(f.queue().await.files[0].phase, UploadPhase::Waiting);
+    assert_eq!(f.queue().await.files[0].progress, None);
     f.storage
         .set_faults(Faults {
             lose_part_reply: true,
@@ -605,12 +613,16 @@ async fn provider_bytes_are_progress_only_once_the_session_records_them() {
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         0
     );
+    let waiting = &f.queue().await.files[0];
     assert_eq!(
-        f.queue().await.files[0].phase,
-        UploadPhase::Uploading {
-            bytes_confirmed: 0,
-            bytes_total: three_parts_total(),
-        }
+        (waiting.phase, waiting.progress),
+        (
+            UploadPhase::Waiting,
+            Some(UploadProgress {
+                bytes_confirmed: 0,
+                bytes_total: three_parts_total(),
+            })
+        )
     );
     assert_eq!(f.upload_reason(&file).await, Some(network()));
     advance(&clock, 1);
@@ -637,8 +649,8 @@ async fn the_queue_reads_the_same_after_reopening_offline() {
             .store(true, std::sync::atomic::Ordering::Release)
     }));
     assert_eq!(
-        drained(f.files.inner.drain_uploads(false).await.unwrap()),
-        0
+        f.files.inner.drain_uploads(false).await.unwrap(),
+        DrainOutcome::Paused
     );
     f.files.set_uploads_paused(true).await.unwrap();
     let before = f.queue().await;
@@ -718,7 +730,7 @@ async fn a_network_report_ends_an_offline_upload_wait() {
     let waits = &f.files.inner.waits;
     waits.network_changed();
     assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Files)
+        .end_offline_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap());
     let ended = retry(&f).await.unwrap();
@@ -761,7 +773,7 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
     let waits = &f.files.inner.waits;
     waits.network_changed();
     waits
-        .end_offline_waits(crate::NetworkOwner::Files)
+        .end_offline_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap();
     assert_eq!(retry(&f).await, answered);
@@ -779,7 +791,7 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
         .unwrap();
     waits.network_changed();
     waits
-        .end_offline_waits(crate::NetworkOwner::Files)
+        .end_offline_waits(crate::NetworkOwner::Uploads)
         .await
         .unwrap();
     assert!(retry(&f).await.unwrap().wait.is_zero());
@@ -794,8 +806,8 @@ async fn a_network_report_leaves_an_answered_upload_wait_and_the_cooldown() {
     f.close().await;
 }
 
-/// A report the file worker could not act on, because ending the wait
-/// failed to save, stays: every wait keeps its backoff, and the next plan
+/// A report the upload worker could not act on, because ending the wait
+/// failed to save, stays: every wait keeps its backoff, and the next run
 /// ends the upload's wait (§6.7).
 #[tokio::test]
 async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
@@ -813,22 +825,19 @@ async fn a_report_whose_end_failed_to_save_ends_the_wait_next_time() {
     waits.network_changed();
     f.database.fail_retry_ends(1).await;
     assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Files)
+        .end_offline_waits(crate::NetworkOwner::Uploads)
         .await
         .is_err());
     assert_eq!(retry(&f).await, wait);
-    let requests = f.storage.request_trace().len();
-    f.files.inner.drain_uploads(false).await.unwrap();
-    assert_eq!(f.storage.request_trace().len(), requests);
-    // No new report: the one the failure left is acted on now.
-    assert!(waits
-        .end_offline_waits(crate::NetworkOwner::Files)
-        .await
-        .unwrap());
-    assert!(retry(&f).await.unwrap().wait.is_zero());
+    // No new report: the upload worker's next run acts on the one the
+    // failure left, ending the wait, and the upload runs.
     assert_eq!(
         drained(f.files.inner.drain_uploads(false).await.unwrap()),
         1
     );
+    assert!(!waits
+        .end_offline_waits(crate::NetworkOwner::Uploads)
+        .await
+        .unwrap());
     f.close().await;
 }

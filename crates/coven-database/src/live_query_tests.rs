@@ -164,6 +164,42 @@ async fn relevant_columns_in_any_row_rerun_and_equal_results_are_suppressed() {
 }
 
 #[tokio::test]
+async fn a_local_change_reruns_the_query_and_equal_results_are_suppressed() {
+    let store = TestStore::new();
+    let db = store
+        .builder(notes_tables(), notes_migrations())
+        .open()
+        .await
+        .unwrap();
+    // State this process keeps beside the database, read by the process step.
+    let local = Arc::new(AtomicUsize::new(0));
+    let (changed, changes) = tokio::sync::watch::channel(());
+    let reads = Arc::new(AtomicUsize::new(0));
+    let (count, seen) = (Arc::clone(&reads), Arc::clone(&local));
+    let mut query = db
+        .subscribe(move |sql| {
+            count.fetch_add(1, Ordering::SeqCst);
+            Ok(sql.query_row("SELECT count(*) FROM notes", [], |r| r.get::<_, i64>(0))?)
+        })
+        .rerun_on(changes)
+        .process(move |rows| Ok((rows, seen.load(Ordering::SeqCst))));
+    assert_eq!(next(&mut query).await.unwrap(), (0, 0));
+    local.store(1, Ordering::SeqCst);
+    changed.send_replace(());
+    assert_eq!(next(&mut query).await.unwrap(), (0, 1));
+    // An unchanged result is not delivered; the next change still is.
+    changed.send_replace(());
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('a','a','')").unwrap());
+    assert_eq!(next(&mut query).await.unwrap(), (1, 1));
+    assert!(reads.load(Ordering::SeqCst) >= 3);
+    // Dropping the local owner leaves commits rerunning the query.
+    drop(changed);
+    db.commit_writer(|sql| sql.batch("INSERT INTO notes VALUES ('b','b','')").unwrap());
+    assert_eq!(next(&mut query).await.unwrap(), (2, 1));
+    db.close().await.unwrap();
+}
+
+#[tokio::test]
 async fn row_count_ignores_updates_and_rollback_journals_do_not_publish() {
     let store = TestStore::new();
     let db = store

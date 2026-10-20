@@ -387,14 +387,24 @@ impl MemoryProvider {
             } else {
                 None
             };
-            let barrier = match &request {
-                MemoryRequest::Create(_) => state.faults.creation_barrier.clone(),
-                _ => None,
+            let (barrier, gate) = match &request {
+                MemoryRequest::Create(_) => (
+                    state.faults.creation_barrier.clone(),
+                    state.faults.creation_gate.clone(),
+                ),
+                _ => (None, None),
             };
-            (state.faults.delay, failure, barrier)
+            (state.faults.delay, failure, (barrier, gate))
         };
+        let (barrier, gate) = barrier;
         if let Some(barrier) = barrier {
             barrier.wait().await;
+        }
+        if let Some(gate) = gate {
+            gate.acquire()
+                .await
+                .map_err(|closed| StorageFailure::Protocol.with_source(closed))?
+                .forget();
         }
         if !delay.is_zero() {
             self.clock.sleep(delay).await;

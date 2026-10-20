@@ -66,7 +66,7 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
 }
 
 #[tokio::test]
-async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
+async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_upload() {
     use coven_storage::{
         test_utils::{Faults, MemoryStorage},
         Storage,
@@ -116,7 +116,8 @@ async fn transfer_limits_bound_requests_and_an_active_batch_keeps_its_limit() {
         memory.reset_request_peak();
         let mut uploads = handle.subscribe_uploads();
         while !uploads.next().await.unwrap().files.is_empty() {}
-        assert_eq!(memory.peak_requests(), 2, "remaining files use the active drain's original limit");
+        // The two in flight finish; each later upload starts under the new limit.
+        assert_eq!(memory.peak_requests(), 1, "remaining files start one at a time");
         let mut uploaded = Vec::new();
         for id in 0..4 { uploaded.push(handle.file_ref("files", id.to_string().as_str()).await.unwrap()); }
         memory.reset_request_peak();
