@@ -189,7 +189,7 @@ impl FileWriter {
         mut written: impl FnMut(&[u8]),
     ) -> Result<(), FileError> {
         use tokio::io::AsyncReadExt;
-        let mut buffer = [0; 64 * 1024];
+        let mut buffer = vec![0; 64 * 1024];
         loop {
             let count = reader
                 .read(&mut buffer)
