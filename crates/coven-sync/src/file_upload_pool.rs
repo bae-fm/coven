@@ -241,11 +241,15 @@ impl FilesInner {
             return self.end_blocked(blocked, 0);
         }
         // The persisted setting governs; parts check this copy between sends.
+        // A pause change waits until this run has acted on what it read, so
+        // the run cannot answer a retry asked after a resume with the pause.
+        let change = self.pause_change.lock().await;
         let paused = self.database.uploads_paused().await?;
         self.paused.store(paused, Ordering::Release);
         if paused {
             return self.end_blocked(Blocked::Paused, 0);
         }
+        drop(change);
         let work = self
             .database
             .upload_work::<PendingRecord>(file_subject)

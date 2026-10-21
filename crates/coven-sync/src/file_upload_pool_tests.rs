@@ -184,6 +184,44 @@ async fn an_app_retry_joins_the_run_in_progress() {
     f.close().await;
 }
 
+/// An app that resumes uploads and then retries is never told uploads are
+/// paused. Each attachment wakes the worker, whose run reads the pause setting;
+/// the app resumes a different number of yields later each round, and other
+/// reads keep the store's readers busy, as an app's screens do, so in some
+/// rounds the run's read began before the resume committed.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn a_retry_after_resuming_is_never_answered_paused() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let readers: Vec<_> = (0..8)
+        .map(|_| {
+            let database = f.files.inner.database.clone();
+            tokio::spawn(async move {
+                loop {
+                    database.uploads().await.unwrap();
+                }
+            })
+        })
+        .collect();
+    for round in 0..300u16 {
+        f.files.set_uploads_paused(true).await.unwrap();
+        f.attach("files", &format!("photo-{round}"), photo(round as u8))
+            .await;
+        for _ in 0..round % 16 {
+            tokio::task::yield_now().await;
+        }
+        f.files.set_uploads_paused(false).await.unwrap();
+        assert_ne!(
+            f.files.retry_uploads_now().await.unwrap(),
+            DrainOutcome::Paused,
+            "round {round}"
+        );
+    }
+    for reader in readers {
+        reader.abort();
+    }
+    f.close().await;
+}
+
 /// A file sent in one request shows as uploading while its request is open,
 /// with no progress: only storage's confirmation retires it (E7).
 #[tokio::test]

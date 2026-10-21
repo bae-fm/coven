@@ -72,6 +72,10 @@ struct FilesInner {
     /// The persisted pause setting as of the last upload run or app change;
     /// parts check it between sends.
     paused: AtomicBool,
+    /// Held by an app's pause change, and by an upload run from its read of
+    /// the persisted setting until it has acted on it, so neither the copy
+    /// above nor a retry's answer comes from a setting already replaced.
+    pause_change: tokio::sync::Mutex<()>,
     /// Wakes the upload worker, or its run in progress.
     upload_wake: Arc<Notify>,
     /// Wakes the pin worker.
@@ -139,6 +143,7 @@ impl Files {
             connection_waits: Mutex::new(BTreeSet::new()),
             ids,
             paused: AtomicBool::new(false),
+            pause_change: tokio::sync::Mutex::new(()),
             upload_wake: Arc::new(Notify::new()),
             pin_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
@@ -226,8 +231,11 @@ impl Files {
     /// parts, preserving its provider session (E7).
     pub async fn set_uploads_paused(&self, paused: bool) -> Result<(), DbError> {
         self.inner.check_open()?;
-        self.inner.database.set_uploads_paused(paused).await?;
-        self.inner.paused.store(paused, Ordering::Release);
+        {
+            let _change = self.inner.pause_change.lock().await;
+            self.inner.database.set_uploads_paused(paused).await?;
+            self.inner.paused.store(paused, Ordering::Release);
+        }
         if !paused {
             self.inner.upload_wake.notify_one();
         }
