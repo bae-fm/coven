@@ -67,7 +67,8 @@ pub(crate) fn covered(
 }
 
 /// Requested files' verified coverage. A pin completes with its checked
-/// whole file; a file still queued here is already whole on this device.
+/// whole file; a file still queued here is already whole on this device. A
+/// carried pin still waiting for its whole copy is not complete.
 pub(crate) fn pin_progress(
     db: &DatabaseConnection,
     files: &[FileRef],
@@ -95,7 +96,7 @@ pub(crate) fn pin_progress(
             .checked_add(file.plaintext_size())
             .ok_or_else(too_large)?;
         if file.uploader() == device && file_queue::queued(db, file)?
-            || crate::database::file_database::cache_pinned(db, file)?
+            || crate::database::file_database::cache_kept(db, file)?
         {
             progress.files_completed += 1;
         }

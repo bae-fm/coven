@@ -426,10 +426,24 @@ pub(super) fn unpin(db: &DatabaseConnection, file: &FileRef) -> Result<(), DbErr
     crate::file_queue::set_pinned(db, file, false)?;
     settle_pin(db, file)
 }
+/// Whether the app's pin on this file holds: a kept whole file, a carried
+/// pin still waiting for one, or a pin on the file still queued here.
 pub(crate) fn pinned(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
-    let id = id(file)?;
-    Ok(db.query_row("SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3 UNION ALL SELECT 1 FROM _coven_pin_requests WHERE namespace=?1 AND file_id=?2)",(file.namespace(),&id,file.content_hash().as_bytes().as_slice(),COMPLETE_FILE),|r|r.get(0))?
+    Ok(kept(db, file)?
+        || db.query_row(
+            "SELECT EXISTS(SELECT 1 FROM _coven_pin_requests WHERE namespace=?1 AND file_id=?2)",
+            (file.namespace(), id(file)?),
+            |r| r.get(0),
+        )?
         || crate::file_queue::pinned(db, file)?)
+}
+/// Whether a pinned, checked whole copy of this file is on the device.
+pub(crate) fn kept(db: &DatabaseConnection, file: &FileRef) -> Result<bool, DbError> {
+    db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM _coven_cache WHERE namespace=?1 AND file_id=?2 AND chunk=?4 AND pinned=1 AND checked_hash=?3)",
+        (file.namespace(), id(file)?, file.content_hash().as_bytes().as_slice(), COMPLETE_FILE),
+        |r| r.get(0),
+    )
 }
 /// Carry a queued file's pin to the stored file as its upload completes
 /// with no copy of its own kept: the pin then waits for a whole copy from

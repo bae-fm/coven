@@ -15,7 +15,9 @@ use std::sync::{Arc, RwLock};
 
 #[path = "file_cache.rs"]
 mod cache;
-pub(crate) use cache::{declare_budgets, id as cache_id, pinned as cache_pinned};
+pub(crate) use cache::{
+    declare_budgets, id as cache_id, kept as cache_kept, pinned as cache_pinned,
+};
 
 #[derive(Clone)]
 enum FileDatabaseAccess {

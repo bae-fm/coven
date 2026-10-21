@@ -543,6 +543,15 @@ async fn a_pin_taken_while_queued_survives_the_upload() {
         f.drain().await;
         assert!(!f.queued(&kept).await);
         assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
+        // A carried pin completes only once its whole copy is kept.
+        assert_eq!(
+            f.database
+                .pin_progress(vec![kept.clone()])
+                .await
+                .unwrap()
+                .files_completed,
+            u64::from(!original)
+        );
         f.files.inner.keep_pins().await.unwrap();
         assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
         assert!(f
