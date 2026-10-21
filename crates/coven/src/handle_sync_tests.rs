@@ -218,6 +218,16 @@ fn file_creates(device: &crate::tests::Device) -> usize {
         .count()
 }
 
+/// Slots this device has claimed, each carrying the writes one pass sent.
+fn slot_creates(device: &crate::tests::Device) -> usize {
+    device
+        .storage
+        .request_trace()
+        .iter()
+        .filter(|request| matches!(request, MemoryRequest::Create(path) if path.slot_number().is_some()))
+        .count()
+}
+
 async fn wait_for_empty_queue(handle: &CovenHandle) {
     let mut uploads = handle.subscribe_uploads();
     tokio::time::timeout(Duration::from_secs(10), async {
@@ -233,10 +243,11 @@ async fn stored(device: &crate::tests::Device, id: &str) -> bool {
     device.storage.status(&path).await.unwrap().is_some()
 }
 
-/// A pass neither waits for an upload in flight nor sends file bytes; the
-/// upload's completion schedules no pass (§6.6).
+/// A pass neither waits for an upload in flight nor sends file bytes. Once the
+/// file is stored, the write naming it in its row goes out in a later pass of
+/// its own (§6.6).
 #[tokio::test]
-async fn a_held_file_upload_delays_no_pass_and_its_completion_schedules_none() {
+async fn a_held_file_upload_delays_no_pass_and_a_later_pass_sends_its_completion() {
     let network = file_network().await;
     let device = &network.devices[0];
     let creates = file_creates(device);
@@ -254,12 +265,16 @@ async fn a_held_file_upload_delays_no_pass_and_its_completion_schedules_none() {
     wait_for_sent(&device.handle).await;
     assert_eq!(file_creates(device), creates + 1, "a pass sent file bytes");
     assert!(!stored(device, "photo").await);
+    let slots = slot_creates(device);
     resume.send(()).unwrap();
     wait_for_empty_queue(&device.handle).await;
     assert!(stored(device, "photo").await);
-    let after = passes(device);
-    tokio::time::sleep(Duration::from_millis(200)).await;
-    assert_eq!(passes(device), after, "upload completion scheduled a pass");
+    wait_for_sent(&device.handle).await;
+    assert_eq!(
+        slot_creates(device),
+        slots + 1,
+        "one pass sent the write naming the stored file"
+    );
     network.close().await;
 }
 
