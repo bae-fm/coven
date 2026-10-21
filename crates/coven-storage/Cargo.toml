@@ -50,6 +50,9 @@ tokio-rustls = { workspace = true, features = ["aws_lc_rs"] }
 
 [features]
 test-utils = ["coven-foundation/test-utils"]
+# Development tools outside the sync protocol, such as emptying an S3 prefix
+# (api.md E14). Never needed by an app's release build.
+dev-tools = []
 
 [lints]
 workspace = true

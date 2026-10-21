@@ -265,6 +265,16 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "check_new_store",
         ),
+        // Emptying an S3 prefix, a development tool, connects to the location
+        // with its own settings (api.md E14).
+        (
+            "crates/coven-storage/src/providers/s3_empty.rs",
+            "<free>",
+            "empty_prefix",
+        ),
+        // The development tool's entry point builds the production connector
+        // with the system clock and random ids, as the builder does (api.md E14).
+        ("crates/coven/src/dev_tools.rs", "<free>", "empty_s3_prefix"),
         // Admin access becomes one location's key administration (§20.10).
         (
             "crates/coven-storage/src/providers/s3_minting.rs",

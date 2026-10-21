@@ -150,6 +150,27 @@ impl ProviderConnector {
         self.folder_api = Some(api);
         self
     }
+    /// Delete every object and abort every unfinished upload under an S3
+    /// location's base prefix, with this connector's clock, ids and HTTP
+    /// client (api.md E14). A development tool outside the sync protocol.
+    #[cfg(feature = "dev-tools")]
+    pub async fn empty_s3_prefix(
+        &self,
+        config: StorageConfig,
+        credentials: S3Credentials,
+    ) -> Result<super::EmptiedS3Prefix, super::EmptyS3PrefixError> {
+        let http = self
+            .http(crate::CloudProvider::S3)
+            .map_err(super::EmptyS3PrefixError::Storage)?;
+        super::empty_s3_prefix(
+            config,
+            credentials,
+            self.clock.clone(),
+            self.ids.clone(),
+            http,
+        )
+        .await
+    }
     /// The HTTP client, or why TLS could not be set up.
     fn http(&self, provider: crate::CloudProvider) -> Result<HttpClient, StorageError> {
         self.http.clone().map_err(|source| StorageError::Provider {

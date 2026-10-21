@@ -19,6 +19,9 @@ mod test_utils;
 
 mod circles;
 
+#[cfg(feature = "dev-tools")]
+mod dev_tools;
+
 mod authentication;
 mod storage;
 mod store_layout;

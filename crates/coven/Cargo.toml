@@ -6,6 +6,9 @@ license.workspace = true
 
 [features]
 test-utils = ["coven-storage/test-utils", "coven-sync/test-utils", "coven-foundation/test-utils", "coven-crypto/test-utils", "coven-database/test-utils"]
+# Development tools outside the sync protocol, such as emptying an S3 prefix
+# (api.md E14). Never needed by an app's release build.
+dev-tools = ["coven-storage/dev-tools"]
 
 [dependencies]
 coven-foundation.workspace = true

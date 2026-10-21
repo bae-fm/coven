@@ -64,8 +64,17 @@ mod member_probe;
 #[path = "s3_minting.rs"]
 pub(crate) mod minting;
 pub(crate) use minting::member_policy;
+#[cfg(any(test, feature = "dev-tools"))]
+#[path = "s3_empty.rs"]
+mod empty;
 #[path = "s3_own_bucket.rs"]
 mod own_bucket;
+#[cfg(feature = "dev-tools")]
+pub(crate) use empty::empty_prefix;
+#[cfg(any(test, feature = "dev-tools"))]
+pub use empty::EmptiedS3Prefix;
+#[cfg(feature = "dev-tools")]
+pub use empty::EmptyS3PrefixError;
 #[path = "s3_r2_keys.rs"]
 mod r2_keys;
 #[path = "s3_rustfs_keys.rs"]

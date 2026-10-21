@@ -6,6 +6,8 @@ pub use crate::builder::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
 };
 pub use crate::coven::Coven;
+#[cfg(feature = "dev-tools")]
+pub use crate::dev_tools::empty_s3_prefix;
 pub use crate::error::{
     ReadOnlyOpenError, StoreCreationError, StoreDeletionError, StoreKeyUnlockError,
 };
@@ -79,6 +81,8 @@ pub use coven_storage::providers::{
     DropboxClients, OAuthClients, OAuthError, OAuthPresenter, OAuthRedirectError, ProviderResponse,
     StorageFolder,
 };
+#[cfg(feature = "dev-tools")]
+pub use coven_storage::providers::{EmptiedS3Prefix, EmptyS3PrefixError};
 #[cfg(any(test, feature = "test-utils"))]
 pub use coven_storage::test_utils::{
     BodyFailure, Faults, MemoryKeyAdmin, MemoryProvider, MemoryRequest, MemoryStorage,

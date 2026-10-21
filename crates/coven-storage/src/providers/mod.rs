@@ -59,6 +59,12 @@ pub(crate) fn retry_after(
     }
     s3::response_retry_after(source)
 }
+#[cfg(feature = "dev-tools")]
+pub(crate) use s3::empty_prefix as empty_s3_prefix;
+#[cfg(any(test, feature = "dev-tools"))]
+pub use s3::EmptiedS3Prefix;
+#[cfg(feature = "dev-tools")]
+pub use s3::EmptyS3PrefixError;
 pub(crate) use s3::{
     check_new_store as check_new_s3_store, check_s3_versioning, detect as detect_s3, s3_key_scope,
     s3_settings, S3KeyScope, S3Storage,

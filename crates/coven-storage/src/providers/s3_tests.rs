@@ -949,6 +949,9 @@ mod errors;
 #[path = "s3_restart_tests.rs"]
 mod restart;
 
+#[path = "s3_empty_tests.rs"]
+mod empty_tests;
+
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
 #[path = "s3_live.rs"]
 mod live;

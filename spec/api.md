@@ -5611,3 +5611,78 @@ fn migrations() -> Vec<Migration> {
     ]
 }
 ```
+
+### E14 Development tools
+
+- A development tool is a call an app's own development builds use around
+  coven, never part of the sync protocol. It opens no store, and it checks and
+  records nothing about any store. An app enables these calls with coven's
+  `dev-tools` feature; a release build leaves the feature off, so they are
+  absent from it.
+- Ana works on her app against a test bucket at base prefix `dev`. Each time
+  she resets her development library she wants it to start on an empty
+  remote. Before creating the new store she calls `empty_s3_prefix` with the
+  location and key the store will connect with. It deletes everything under
+  `dev/` that earlier stores left there, and returns how many objects and
+  unfinished uploads went.
+- `empty_s3_prefix` deletes every object whose key starts with the base prefix
+  and a slash, whatever wrote it. That includes other stores, upload
+  temporaries, detection probes and things coven never wrote. A neighbouring
+  prefix such as `dev-old` stays. It also aborts every unfinished multipart
+  upload under the prefix.
+- It lists everything before removing anything, so the listing's page markers
+  stay valid, and then lists again. Something still under the prefix means a
+  device kept writing there while it ran, and the call fails with
+  `StorageFailure::Conflict`.
+- A location with no base prefix is refused with
+  `EmptyS3PrefixError::WholeBucket` before any request. Emptying it would
+  empty the whole bucket.
+- The location is validated as setup validates it (E5). A location that is not
+  S3, an empty key, or an uncatalogued endpoint with no profile is refused
+  with `EmptyS3PrefixError::Storage`. Listing, aborting and deleting failures
+  keep their provider cause there too.
+
+Edge cases:
+
+- The first failure stops the call. What it removed before then stays
+  removed. Removal is idempotent: an object already gone counts as deleted,
+  and an upload already finished or aborted counts as aborted. So calling
+  again finishes the job.
+- In a versioned bucket, deleting an object leaves its earlier versions and
+  a delete marker. The call leaves those: a member key may not delete
+  versions. Only the bucket's own lifecycle or an admin removes them.
+- It needs only what a member key already may do under the prefix (§20.10):
+  list objects and uploads, delete objects and abort uploads.
+
+```rust
+/// What emptying an S3 prefix removed (E14).
+#[cfg(feature = "dev-tools")]
+pub struct EmptiedS3Prefix {
+    /// Objects deleted.
+    pub objects: usize,
+    /// Unfinished multipart uploads aborted.
+    pub uploads: usize,
+}
+
+/// Why an S3 prefix was not emptied (E14).
+#[cfg(feature = "dev-tools")]
+pub enum EmptyS3PrefixError {
+    /// The location has no base prefix, so emptying it would empty the whole
+    /// bucket. Nothing was sent.
+    WholeBucket,
+    /// The location or key was refused, or a request failed. Whatever was
+    /// removed before the failure stays removed; emptying again finishes.
+    Storage(StorageError),
+}
+
+/// Delete every object and abort every unfinished upload under an S3
+/// location's base prefix, whatever wrote them, and return how many of each
+/// went (E14). A location with no base prefix is refused before any request
+/// with `EmptyS3PrefixError::WholeBucket`. The first failure stops it;
+/// calling again finishes. Retained versions in a versioned bucket stay.
+#[cfg(feature = "dev-tools")]
+pub async fn empty_s3_prefix(
+    location: StorageConfig,
+    credentials: S3Credentials,
+) -> Result<EmptiedS3Prefix, EmptyS3PrefixError>;
+```
