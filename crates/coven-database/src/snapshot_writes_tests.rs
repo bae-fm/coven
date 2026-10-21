@@ -151,7 +151,10 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
         upload(&db, write).await;
     }
     attach(&db, b"waiting bytes".to_vec(), false).await.unwrap();
-    let waiting = records(&db).pop().unwrap();
+    // The attachment waits for its upload as a pending attachment; no write
+    // names the file before its bytes are stored (§17.2).
+    assert!(records(&db).is_empty());
+    let waiting = db.file_ref("files", "7").await.unwrap();
     let paths = owned_paths(&store);
     let expected = crate::tests::data(&db, Audience::Store);
     let before = contents(&db);
@@ -187,7 +190,11 @@ async fn waiting_files_survive_intermediate_snapshot_and_gap_write_states() {
         .collect();
     bytes.sort();
     assert_eq!(bytes, [b"original".to_vec(), b"waiting bytes".to_vec()]);
-    upload(&db, &waiting).await;
+    assert_eq!(db.file_ref("files", "7").await.unwrap(), waiting);
+    // Its upload completing after the reload names the waiting bytes in the row.
+    crate::file_write::tests::complete_uploads(&db).await;
+    assert_eq!(records(&db).len(), 1);
+    assert_eq!(db.file_ref("files", "7").await.unwrap(), waiting);
     db.close().await.unwrap();
 }
 
