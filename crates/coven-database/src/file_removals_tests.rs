@@ -211,11 +211,18 @@ fn crashing_file_writer() {
     panic!("file write did not reach its crash point");
 }
 
-/// Retire the only queued upload as confirmed storage would.
+/// Complete the only queued upload as confirmed storage would, whether its
+/// attachment is pending or abandoned.
 async fn complete(db: &Database) -> Result<(), DbError> {
-    let owner = FileDatabase::new(db.clone());
-    let id = owner.uploads().await?[0].id;
-    owner.complete_upload(id, (), None).await
+    let id = db.inspect_writer(|sql| {
+        sql.query_row("SELECT id FROM _coven_file_uploads", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    });
+    FileDatabase::new(db.clone())
+        .complete_upload(id, (), None)
+        .await
 }
 
 struct CrashingReader(bool);
@@ -267,6 +274,7 @@ async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
         .iter()
         .map(|(name, value)| (name.clone(), value.value.clone()))
         .collect();
+    columns.get_mut("hash").unwrap().value = Value::Blob(vec![9; 32]);
     columns.get_mut("location").unwrap().value = Value::Text(format!(
         "file {} {} {}",
         original.device.0,
@@ -289,7 +297,12 @@ async fn a_downloaded_reference_change_keeps_the_queued_copy_until_upload() {
     });
     let reference = db.file_ref("files", "7").await.unwrap();
     db.receive(record.into()).await.unwrap();
-    // The row names another file now; the queued upload keeps its own source.
+    // The row names another file now: the attachment is abandoned, and the
+    // queued upload keeps its own source until its attempt ends.
+    assert_eq!(
+        db.abandoned_attachments().await.unwrap()[0].reason,
+        crate::AbandonReason::Replaced
+    );
     assert_eq!(local_count(&db, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&store).len(), 1);
     assert!(FileDatabase::new(db.clone())

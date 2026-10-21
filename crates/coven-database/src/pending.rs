@@ -90,11 +90,16 @@ pub(crate) fn save<P: PendingValue>(db: &DatabaseConnection, record: &P) -> Resu
 }
 
 pub(crate) fn clear<S: Serialize>(db: &DatabaseConnection, subject: &S) -> Result<(), DbError> {
+    clear_encoded(
+        db,
+        serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?,
+    )
+}
+
+/// Clear the record of a subject already encoded for its key.
+pub(crate) fn clear_encoded(db: &DatabaseConnection, subject: Vec<u8>) -> Result<(), DbError> {
     db.pending_change(|| {
-        db.internal_execute(
-            "DELETE FROM _coven_pending WHERE subject=?1",
-            [serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?],
-        )?;
+        db.internal_execute("DELETE FROM _coven_pending WHERE subject=?1", [&subject])?;
         Ok(())
     })
 }

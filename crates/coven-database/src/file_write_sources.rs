@@ -8,20 +8,35 @@ use crate::{
     write_schema::WriteSchema,
     DbError, Provenance,
 };
+use coven_format::value::Value;
 use coven_merge::Audience;
 use std::collections::BTreeSet;
 
 impl FileWrite<'_> {
-    /// Refresh the file facts of the rows a write touched, then forget each
-    /// original no row can name any more (`retain`). Historical generations
-    /// cannot keep a record; audience moves keep a file's identity. The upload
-    /// queue keeps its own source facts and owned copies independently of
-    /// rows (§17.7).
-    pub(crate) fn retain_rows(&self, keys: BTreeSet<AppKey>) -> Result<(), DbError> {
+    /// Refresh the file facts of the rows a write touched, abandon a pending
+    /// attachment whose row's file the write changed (§17.2), then forget
+    /// each original nothing can name any more (`retain`). Historical
+    /// generations cannot keep a record; audience moves keep a file's
+    /// identity. The upload queue keeps its own source facts and owned copies
+    /// independently of rows (§17.7). A row this write attached a file to is
+    /// left to `queue_attached`, which replaces its earlier attachment.
+    pub(crate) fn retain_rows(&self, mut keys: BTreeSet<AppKey>) -> Result<(), DbError> {
+        // A clear that changed no cell, of a row whose file was only pending,
+        // still releases the original it named.
+        keys.extend(self.cleared.borrow().iter().cloned());
         for key in &keys {
             crate::file_protection::refresh(self.database, self.schema, key)?;
+            if !self.attached.borrow().contains_key(key) {
+                crate::pending_attachment::review_row(self.database, self.schema, key)?;
+            }
         }
-        retain(self.database, self.schema, keys)
+        // A row this write attached an original to keeps its new record.
+        let attached = self.attached.borrow();
+        retain(
+            self.database,
+            self.schema,
+            keys.into_iter().filter(|key| !attached.contains_key(key)),
+        )
     }
 }
 
@@ -53,6 +68,16 @@ fn retain(
             continue;
         }
         let mut retained = BTreeSet::new();
+        // The row's pending attachment names its original until completion.
+        if let Some(pending) = crate::pending_attachment::current_reference(db, schema, &key)? {
+            let (id, size, hash, location) = pending.columns();
+            retained.insert(file_row::identity_values(
+                id,
+                &Value::Integer(i64::try_from(size).map_err(|_overflow| DbError::DamagedDatabase)?),
+                &Value::Blob(hash.as_bytes().to_vec()),
+                location,
+            )?);
+        }
         for (audience, generation) in db.query(
             "SELECT audience,max(generation) FROM _coven_rows
              WHERE table_name=?1 AND key=?2 GROUP BY audience",

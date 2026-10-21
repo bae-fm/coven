@@ -415,15 +415,17 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
     (old, new)
 }
 
+/// The row is retargeted, then deleted, before any attempt starts: both
+/// attachments are abandoned, and the worker retires their uploads without
+/// sending a byte. Their records say why (§17.2, §17.7).
 #[tokio::test]
-async fn a_queued_upload_keeps_its_source_after_its_row_changes() {
+async fn abandoned_uploads_not_in_flight_are_retired_unsent() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
         let f = Fixture::new(provenance.clone()).await;
         let old = match provenance {
             Provenance::AppProvided => f.attach("files", "old", vec![36; CHUNK + 3]).await,
             Provenance::UserProvided => f.original("old", &vec![36; CHUNK + 3]).await,
         };
-        // Retarget the row, then delete it, before any attempt starts.
         let new = match provenance {
             Provenance::AppProvided => f.attach("files", "old", vec![37; 5]).await,
             Provenance::UserProvided => {
@@ -449,27 +451,25 @@ async fn a_queued_upload_keeps_its_source_after_its_row_changes() {
             })
             .await
             .unwrap();
+        let requests = f.storage.request_count();
         f.drain().await;
+        assert_eq!(f.storage.request_count(), requests);
         assert!(f.files.inner.database.uploads().await.unwrap().is_empty());
-        // Each upload sent its own bytes to its own fixed path.
-        for (file, bytes) in [(&old, vec![36; CHUNK + 3]), (&new, vec![37; 5])] {
-            let path = f.path(file);
-            let encrypted = f.storage.read(&path).await.unwrap();
-            let header = coven_format::file::FileHeader::decode(&encrypted[..11]).unwrap();
-            assert_eq!(header.size(), bytes.len() as u64);
-            let key = file.reference().unwrap().key;
-            let mut plain = Vec::new();
-            for index in 0..header.chunk_count() {
-                let chunk = header.chunk(index).unwrap();
-                let start = chunk.offset as usize;
-                let sealed = &encrypted[start..start + chunk.plaintext_length + 16];
-                plain.extend(
-                    header
-                        .open_chunk(&key, path.as_str(), index, sealed)
-                        .unwrap(),
-                );
-            }
-            assert_eq!(plain, bytes);
+        assert_eq!(
+            f.database
+                .abandoned_attachments()
+                .await
+                .unwrap()
+                .into_iter()
+                .map(|abandoned| (abandoned.file, abandoned.reason))
+                .collect::<Vec<_>>(),
+            [
+                (old.id(), coven_database::AbandonReason::Replaced),
+                (new.id(), coven_database::AbandonReason::RowGone)
+            ]
+        );
+        for file in [&old, &new] {
+            assert!(f.storage.status(&f.path(file)).await.unwrap().is_none());
         }
         f.close().await;
     }
@@ -575,7 +575,7 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
 mod differential {
     use super::{files_runner, Fixture};
     use crate::files::file_error::*;
-    use coven_database::{DbError, FileRef, Provenance};
+    use coven_database::{FileRef, Provenance};
     use coven_storage::{ObjectPrefix, Storage, StorageFailure};
     use serde_json::{json, Value};
 
@@ -609,7 +609,7 @@ mod differential {
                 "attach" => {
                     let file = event["file"].as_u64().unwrap();
                     json!({"op": "attach", "row": event["row"], "ref": reference(file),
-                       "size": bytes(file).len(), "hash": file, "version": 0})
+                       "size": bytes(file).len(), "hash": file})
                 }
                 "begin" => json!({"op": "begin"}),
                 "delete" => event.clone(),
@@ -678,7 +678,7 @@ mod differential {
                         .files
                         .inner
                         .database
-                        .uploads()
+                        .all_uploads()
                         .await
                         .unwrap()
                         .into_iter()
@@ -716,7 +716,7 @@ mod differential {
                                 .files
                                 .inner
                                 .database
-                                .uploads()
+                                .all_uploads()
                                 .await
                                 .unwrap()
                                 .into_iter()
@@ -744,24 +744,62 @@ mod differential {
                 op => panic!("unknown event {op}"),
             }
         }
+        // The file each row names in its where-column, as other devices see it.
         let mut row_refs = Vec::new();
         for row in rows {
-            let current = match f
+            let id = format!("r{row}");
+            let location = f
                 .database
-                .file_ref("files", format!("r{row}").as_str())
+                .read(move |sql| {
+                    Ok(
+                        sql.query("SELECT location FROM files WHERE id=?1", [id], |r| {
+                            r.get::<_, Option<String>>(0)
+                        })?,
+                    )
+                })
                 .await
-            {
-                Ok(file) => reference(number(&attached, &file)),
-                Err(DbError::FileAbsent { .. }) => Value::Null,
-                Err(error) => panic!("{error}"),
+                .unwrap()
+                .pop()
+                .flatten();
+            let current = match location {
+                Some(text) => {
+                    let named = coven_format::file_reference::FileReference::decode(&text).unwrap();
+                    let index = attached
+                        .iter()
+                        .position(|file| file.id() == named.id)
+                        .unwrap();
+                    reference(index as u64 + 1)
+                }
+                None => Value::Null,
             };
             row_refs.push(json!({"row": row, "ref": current}));
         }
+        let abandoned: Vec<Value> = f
+            .database
+            .abandoned_attachments()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|abandoned| {
+                let index = attached
+                    .iter()
+                    .position(|file| file.id() == abandoned.file)
+                    .unwrap();
+                json!({
+                    "ref": reference(index as u64 + 1),
+                    "reason": match abandoned.reason {
+                        coven_database::AbandonReason::Replaced => "replaced",
+                        coven_database::AbandonReason::Cleared => "cleared",
+                        coven_database::AbandonReason::RowGone => "removed",
+                    },
+                })
+            })
+            .collect();
         let queue: Vec<Value> = f
             .files
             .inner
             .database
-            .uploads()
+            .all_uploads()
             .await
             .unwrap()
             .iter()
@@ -773,13 +811,17 @@ mod differential {
             .store(true, std::sync::atomic::Ordering::Release);
         drop(guard);
         f.close().await;
-        json!({"finishes": finishes, "deletes": deletes, "rows": row_refs, "queue": queue})
+        json!({"finishes": finishes, "deletes": deletes, "rows": row_refs, "queue": queue,
+               "abandoned": abandoned})
     }
 
-    /// The model keeps its queue newest first; the order carries no meaning.
+    /// The model keeps its queue and abandonments newest first; the order
+    /// carries no meaning.
     fn sorted_queue(mut result: Value) -> Value {
         let queue = result["queue"].as_array_mut().unwrap();
         queue.sort_by_key(|reference| reference["id"].as_u64());
+        let abandoned = result["abandoned"].as_array_mut().unwrap();
+        abandoned.sort_by_key(|record| record["ref"]["id"].as_u64());
         result
     }
 

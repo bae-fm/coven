@@ -16,7 +16,9 @@ receiving bytes from applying their contents.
 observable progress and retry disposition. Disk failure preserves validated
 progress. Storage failures have three recovery classes: automatic retry,
 changed credentials or connection, and permanent refusal. A timeout or
-connection failure cannot be reported as a missing file. The model assumes
+connection failure cannot be reported as a missing file, and a confirmed absence
+at a path a row names never waits for an upload (`absence_never_waits`): rows
+name only stored files (§17.2). The model assumes
 the byte reader, validator and local writes supply truthful outcomes; it does
 not prove cipher security or filesystem atomicity.
 

@@ -84,6 +84,24 @@ impl CovenHandle {
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError> {
         self.files.get_cache_budget(namespace).await
     }
+    /// This device's abandoned attachments, oldest first, read offline too
+    /// (§17.2). Each stays until the app dismisses it.
+    pub async fn abandoned_attachments(&self) -> CovenResult<Vec<AbandonedAttachment>> {
+        self.database.abandoned_attachments().await
+    }
+    /// The same pre-built query, live.
+    pub fn subscribe_abandoned_attachments(&self) -> LiveQuery<Vec<AbandonedAttachment>> {
+        self.database.subscribe_abandoned_attachments()
+    }
+    /// Forgets these records. Records already gone are ignored.
+    pub async fn dismiss_abandoned_attachments(
+        &self,
+        records: &[AbandonedAttachment],
+    ) -> CovenResult<()> {
+        self.database
+            .dismiss_abandoned_attachments(records.to_vec())
+            .await
+    }
 }
 #[cfg(test)]
 #[path = "file_tests.rs"]

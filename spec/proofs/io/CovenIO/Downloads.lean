@@ -12,7 +12,6 @@ inductive Clears where
 inductive Reason where
   | noStorage | network | disk | database
   | storage (clears : Clears)
-  | object (path : Path)
   | range (path : Path) (index : Nat)
   | unavailable (reason : CovenStorage.Files.MissingReason)
   | key (parent : Path)
@@ -20,7 +19,7 @@ inductive Reason where
   deriving DecidableEq, Repr
 
 def automatic : Reason → Bool
-  | .storage .byItself | .network | .object _ | .range _ _ | .key _ | .disk | .database => true
+  | .storage .byItself | .network | .range _ _ | .key _ | .disk | .database => true
   | .storage _ | .noStorage | .unavailable _ | .authentication | .contentHash => false
 
 def connectionRetry : Reason → Bool
@@ -211,20 +210,14 @@ theorem connection_retry_keeps_cooldown (s : State) (timer : Waiting.Timer) (now
     (ready : canRetry s timer now true = true) : timer.provider ≤ now := by
   simpa [person_waits_for_connection s timer now has_pending] using ready
 
-def absence (path : Path) (uploader : CovenStorage.Files.DeviceState)
-    (source : Option CovenStorage.Files.SourceFailure) : Reason :=
-  match uploader with
-  | .removed => .unavailable .deviceRemoved
-  | .replaced => .unavailable .deviceReplaced
-  | .active => match source with | none => .object path | some f => .unavailable (.source f)
+/-- §17.4, §17.5: a confirmed absence at a path a row names. A row names a
+file only once storage confirmed it, so nothing will bring it back on its
+own: the download waits for the app, never for an upload. A pending
+attachment's own source failure is read locally and the upload retries it. -/
+def absence : Reason := .unavailable .lost
 
-theorem removed_not_waiting (p : Path) (source : Option CovenStorage.Files.SourceFailure) :
-    automatic (absence p .removed source) = false := rfl
-
-theorem replaced_not_waiting (p : Path) (source : Option CovenStorage.Files.SourceFailure) :
-    automatic (absence p .replaced source) = false := rfl
-
-theorem active_absence_retries (p : Path) : automatic (absence p .active none) = true := rfl
+theorem absence_never_waits : automatic absence = false ∧ connectionRetry absence = false :=
+  ⟨rfl, rfl⟩
 
 theorem eviction_preserves_refusal (rs : List Range) (reason : Reason) (index : Nat)
     (permanent : automatic reason = false) (no_connection : connectionRetry reason = false)

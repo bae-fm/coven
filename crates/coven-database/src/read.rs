@@ -72,6 +72,10 @@ impl<'connection> SqlReadContext<'connection> {
         self.database.lost_values()
     }
 
+    pub(crate) fn abandoned_attachments(&self) -> CovenResult<Vec<crate::AbandonedAttachment>> {
+        Ok(crate::pending_attachment::abandoned(self.database)?)
+    }
+
     pub(crate) fn pending<P: crate::PendingValue>(&self) -> CovenResult<Vec<P>> {
         Ok(crate::pending::read(self.database)?)
     }

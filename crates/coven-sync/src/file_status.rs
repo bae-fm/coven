@@ -1,77 +1,76 @@
-//! Remote file availability, derived from one storage observation and the
-//! uploader's applied state and locally observed source failures; never written to a row (§17.4).
+//! A file's availability, from one storage observation of the path its row
+//! names, or for this device's own pending attachment from local facts alone;
+//! never written to a row (§17.4).
 
 use crate::FileSourceFailure;
 use crate::{
     files::{Files, FilesInner},
     FileMissingReason, FileReadError, PendingReason, PendingRecord, PendingSubject,
 };
-use coven_database::{DeviceState, FileRef};
+use coven_database::FileRef;
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{ObjectPath, StoredObject};
 
-/// Current remote availability of a file (E8).
+/// A file's current availability (E8).
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FileStatus {
     /// Storage holds the complete file at its fixed path.
     Available,
-    /// Confirmed absent, with an active uploader and no local source failure.
-    Uploading {
-        /// The device responsible for uploading it.
-        device: DeviceId,
-    },
-    /// Confirmed absent, with the reason its uploader cannot supply it.
+    /// This device's own pending attachment, still queued here; no other
+    /// device has its reference yet (§17.2).
+    Uploading,
+    /// Unreadable from storage, with the reason.
     Missing {
-        /// The device responsible for uploading it.
+        /// The device that uploaded, or is uploading, it.
         device: DeviceId,
-        /// Why it cannot.
+        /// Why.
         reason: FileMissingReason,
     },
 }
 
-/// Why an absent file cannot arrive, if it cannot. The uploader's state comes
-/// before a locally observed source failure.
-fn missing_reason(
-    state: DeviceState,
-    report: Option<FileSourceFailure>,
-) -> Option<FileMissingReason> {
-    match (state, report) {
-        (DeviceState::Removed, _) => Some(FileMissingReason::DeviceRemoved),
-        (DeviceState::Replaced, _) => Some(FileMissingReason::DeviceReplaced),
-        (DeviceState::Active, Some(failure)) => Some(FileMissingReason::Source(failure)),
-        (DeviceState::Active, None) => None,
-    }
-}
+/// What this device knows locally about a file: `None` for one its row
+/// names, `Some(report)` for its own pending attachment, with its source
+/// failure if one is recorded (ST `Files.Local`).
+pub(crate) type Local = Option<Option<FileSourceFailure>>;
 
-/// §17.4, ST `Files.status`. Presence wins; a failed observation is never
-/// absence, and the evidence only explains a confirmed absence.
+/// §17.4, ST `Files.status`. This device's pending attachment is judged
+/// locally. For a file a row names, presence wins; a failed observation is
+/// never absence, and a confirmed absence is lost, whoever uploaded it.
 pub(crate) fn status<E>(
     uploader: DeviceId,
-    remote: Result<bool, E>,
-    state: DeviceState,
-    report: Option<FileSourceFailure>,
+    remote: impl FnOnce() -> Result<bool, E>,
+    here: Local,
 ) -> Result<FileStatus, E> {
-    if remote? {
-        return Ok(FileStatus::Available);
-    }
-    Ok(match missing_reason(state, report) {
-        Some(reason) => FileStatus::Missing {
+    match here {
+        Some(None) => Ok(FileStatus::Uploading),
+        Some(Some(failure)) => Ok(FileStatus::Missing {
             device: uploader,
-            reason,
-        },
-        None => FileStatus::Uploading { device: uploader },
-    })
+            reason: FileMissingReason::Source(failure),
+        }),
+        None => Ok(if remote()? {
+            FileStatus::Available
+        } else {
+            FileStatus::Missing {
+                device: uploader,
+                reason: FileMissingReason::Lost,
+            }
+        }),
+    }
 }
 
 impl Files {
-    /// Make one fresh single-object status call for the file's fixed path,
-    /// then combine it with the uploader's current state and locally observed
-    /// source failure. Checks the reference against its row first.
-    /// Network failures and denied access are errors, not absence.
+    /// Checks the reference against its row, then judges this device's own
+    /// pending attachment locally, with no storage request, or makes one
+    /// fresh single-object status call for the fixed path of a file a row
+    /// names. Network failures and denied access are errors, not absence.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError> {
         self.inner.check_open()?;
         self.inner.database.validate(file).await?;
+        let here = self.inner.local(file).await?;
+        if here.is_some() {
+            return status::<FileReadError>(file.uploader(), || Ok(false), here);
+        }
         let storage = self
             .inner
             .storage
@@ -84,52 +83,39 @@ impl Files {
             Some(object) => complete(file, &object).map(|()| true),
             None => Ok(false),
         };
-        let (state, report) = self.inner.evidence(file).await?;
-        status(file.uploader(), remote, state, report)
+        status(file.uploader(), || remote, None)
     }
 }
 
 impl FilesInner {
-    /// The uploader's applied state and, on its own installation, source failure.
-    async fn evidence(
-        &self,
-        file: &FileRef,
-    ) -> Result<(DeviceState, Option<FileSourceFailure>), FileReadError> {
-        let (state, record) = self
+    /// Whether the file is this device's own pending attachment, with the
+    /// source failure recorded about it.
+    async fn local(&self, file: &FileRef) -> Result<Local, FileReadError> {
+        let (pending, record) = self
             .database
-            .uploader_evidence::<PendingRecord>(
-                file.uploader(),
+            .local_evidence::<PendingRecord>(
+                file,
                 PendingSubject::File {
                     device: file.uploader(),
                     file: file.id(),
                 },
             )
             .await?;
-        let report = record.and_then(|record| match record.reason {
+        if !pending {
+            return Ok(None);
+        }
+        Ok(Some(record.and_then(|record| match record.reason {
             PendingReason::FileUnavailable(FileMissingReason::Source(failure)) => Some(failure),
             _ => None,
-        });
-        Ok((state, report))
+        })))
     }
 
-    /// The typed read failure for remote bytes storage confirms are absent:
-    /// still uploading, or missing with the uploader's reason (§17.4).
-    pub(crate) async fn absence_error(&self, file: &FileRef) -> FileReadError {
-        let (state, report) = match self.evidence(file).await {
-            Ok(evidence) => evidence,
-            Err(error) => return error,
-        };
-        let id = file.id().to_string();
-        match missing_reason(state, report) {
-            Some(reason) => FileReadError::Missing {
-                id,
-                device: file.uploader(),
-                reason,
-            },
-            None => FileReadError::Uploading {
-                id,
-                device: file.uploader(),
-            },
+    /// The typed read failure for remote bytes storage confirms are absent
+    /// at the path a row names: lost (§17.4).
+    pub(crate) fn absence_error(&self, file: &FileRef) -> FileReadError {
+        FileReadError::Missing {
+            id: file.id().to_string(),
+            device: file.uploader(),
         }
     }
 }

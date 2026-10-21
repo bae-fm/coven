@@ -514,6 +514,8 @@ async fn a_pin_taken_while_queued_survives_the_upload() {
             true => Provenance::UserProvided,
         };
         let f = Fixture::new(provenance).await;
+        // Only the explicit pin run below keeps the carried pin.
+        f.files.stop_background_for_counts().await;
         let bytes = vec![81; CHUNK * 3];
         let attach = |id: &'static str| {
             let f = &f;

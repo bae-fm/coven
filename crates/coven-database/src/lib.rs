@@ -49,6 +49,7 @@ mod migration_state;
 mod observation;
 mod ownership;
 mod pending;
+mod pending_attachment;
 mod provider_access;
 mod raise_capture;
 pub use provider_access::{ProviderAccess, ProviderAccessChange, ProviderAccessRequest};
@@ -131,6 +132,7 @@ pub use lost::{
 pub use members::{Circle, CircleMemberInfo, DeviceInfo, MemberInfo};
 pub use migration::{Migration, MigrationChange, MigrationContext, MigrationOutcome, OldWrites};
 pub use migration_change::{ChangeOp, ColumnChange, RowChange};
+pub use pending_attachment::{AbandonReason, AbandonedAttachment};
 pub use read::{Read, SqlReadContext};
 pub use row_key::RowKey;
 pub use snapshot_error::SnapshotError;

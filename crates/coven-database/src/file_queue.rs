@@ -8,13 +8,14 @@ use coven_foundation::files::FileName;
 use std::time::SystemTime;
 
 /// One durable upload; its plaintext chunk hashes are owned child rows.
-/// The captured reference carries the path and key fixed by the attaching write.
+/// The captured reference carries the path and key fixed by the attaching
+/// write, and is the row's pending attachment until the upload completes.
 /// Failures live in `_coven_pending` under the file's subject, not here.
 #[derive(Debug)]
 pub struct FileUpload {
     /// Local queue identity, stable across retries.
     pub id: i64,
-    /// The exact row version queued by its attaching write, with its fixed
+    /// The pending attachment queued by its attaching write, with its fixed
     /// uploader, object id and key.
     pub file: FileRef,
     /// When this device queued the file.
@@ -133,12 +134,13 @@ pub(crate) struct Attachment {
 
 /// Queue one attached file under its fixed reference, with its source and one
 /// hash per plaintext chunk, in the attaching transaction (§17.1, §17.9).
+/// Returns its queue id.
 pub(crate) fn enqueue(
     db: &DatabaseConnection,
     file: &FileRef,
     attachment: &Attachment,
     now: SystemTime,
-) -> Result<(), DbError> {
+) -> Result<i64, DbError> {
     if attachment.chunks.len() as u64 != FileHeader::new(file.plaintext_size()).chunk_count() {
         return Err(DbError::Invariant {
             what: "an attachment hashes every plaintext chunk",
@@ -150,9 +152,9 @@ pub(crate) fn enqueue(
         Source::Original { path, modified_at } => (Some(path), Some(modified_at)),
         Source::Copy(_) => (None, None),
     };
-    db.internal_execute(
+    let upload = db.query_row(
         "INSERT INTO _coven_file_uploads(reference,device,file,original,modified_at,queued_at,pinned)
-         VALUES(?1,?2,?3,?4,?5,?6,0)",
+         VALUES(?1,?2,?3,?4,?5,?6,0) RETURNING id",
         (
             file.encode()?,
             device,
@@ -161,6 +163,7 @@ pub(crate) fn enqueue(
             modified_at,
             crate::user_file::encode_time(now),
         ),
+        |r| r.get::<_, i64>(0),
     )?;
     if let Source::Copy(name) = &attachment.source {
         db.internal_execute(
@@ -179,32 +182,62 @@ pub(crate) fn enqueue(
             ),
         )?;
     }
-    Ok(())
+    Ok(upload)
+}
+
+/// The uploads whose attachment is still pending, oldest first: the queue the
+/// app sees and the worker serves (§17.7). An abandoned one waits only for
+/// retirement.
+pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
+    let rows = db.query(
+        "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait
+         FROM _coven_file_uploads AS u JOIN _coven_pending_attachments AS p ON p.upload=u.id
+         LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
+        [],
+        upload_row,
+    )?;
+    decode_uploads(rows)
+}
+
+/// Every queued upload, abandoned ones included, oldest first.
+#[cfg(any(test, feature = "test-utils"))]
+pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
+    let rows = db.query(
+        "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait
+         FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
+        [],
+        upload_row,
+    )?;
+    decode_uploads(rows)
+}
+
+type UploadRow = (
+    i64,
+    Vec<u8>,
+    Vec<u8>,
+    Option<Vec<u8>>,
+    (Option<i64>, Option<Vec<u8>>, Option<i64>),
+);
+
+fn upload_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<UploadRow> {
+    Ok((
+        r.get::<_, i64>(0)?,
+        r.get::<_, Vec<u8>>(1)?,
+        r.get::<_, Vec<u8>>(2)?,
+        r.get::<_, Option<Vec<u8>>>(3)?,
+        (
+            r.get::<_, Option<i64>>(4)?,
+            r.get::<_, Option<Vec<u8>>>(5)?,
+            r.get::<_, Option<i64>>(6)?,
+        ),
+    ))
 }
 
 #[expect(
     clippy::map_err_ignore,
     reason = "a stored value that won't convert or decode is DamagedDatabase"
 )]
-pub(crate) fn read(db: &DatabaseConnection) -> Result<Vec<FileUpload>, DbError> {
-    let rows = db.query(
-        "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait
-         FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id",
-        [],
-        |r| {
-            Ok((
-                r.get::<_, i64>(0)?,
-                r.get::<_, Vec<u8>>(1)?,
-                r.get::<_, Vec<u8>>(2)?,
-                r.get::<_, Option<Vec<u8>>>(3)?,
-                (
-                    r.get::<_, Option<i64>>(4)?,
-                    r.get::<_, Option<Vec<u8>>>(5)?,
-                    r.get::<_, Option<i64>>(6)?,
-                ),
-            ))
-        },
-    )?;
+fn decode_uploads(rows: Vec<UploadRow>) -> Result<Vec<FileUpload>, DbError> {
     rows.into_iter()
         .map(|(id, reference, queued, session, retry)| {
             let retry = match retry {
@@ -309,11 +342,43 @@ pub(crate) fn chunk_hash(
     ))
 }
 
-/// Retire a confirmed upload in one transaction (§17.7): the queue row, its
-/// chunk hashes, and the owned copy kept only until upload. The app row and
-/// every `FileRef` stay unchanged, whatever happened to the row meanwhile.
-/// A released copy no other queued file shares is recorded for removal after
-/// the caller commits. Returns the reference and whether it was pinned.
+/// The queued reference and whether the queued file is pinned.
+pub(crate) fn entry(db: &DatabaseConnection, id: i64) -> Result<(FileRef, bool), DbError> {
+    let (reference, pinned) = db
+        .query_row(
+            "SELECT reference,pinned FROM _coven_file_uploads WHERE id=?1",
+            [id],
+            |r| Ok((r.get::<_, Vec<u8>>(0)?, r.get::<_, bool>(1)?)),
+        )
+        .map_err(|error| match error {
+            DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows) => DbError::Invariant {
+                what: "a completed upload is queued",
+            },
+            error => error,
+        })?;
+    Ok((FileRef::decode(&reference)?, pinned))
+}
+
+/// Queued uploads whose attachment was abandoned, with their references.
+pub(crate) fn abandoned(db: &DatabaseConnection) -> Result<Vec<(i64, FileRef)>, DbError> {
+    db.query(
+        "SELECT u.id,u.reference FROM _coven_file_uploads AS u
+         WHERE NOT EXISTS(SELECT 1 FROM _coven_pending_attachments AS p WHERE p.upload=u.id)
+         ORDER BY u.id",
+        [],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, Vec<u8>>(1)?)),
+    )?
+    .into_iter()
+    .map(|(id, reference)| Ok((id, FileRef::decode(&reference)?)))
+    .collect()
+}
+
+/// Retire an upload in one transaction (§17.7): the queue row, its chunk
+/// hashes, its pending attachment, and the owned copy kept only until
+/// upload. A released copy no other queued file shares is recorded for
+/// removal after the caller commits; the path becomes a deletion candidate
+/// if nothing else protects it (§17.8). Returns the reference and whether it
+/// was pinned.
 pub(crate) fn complete(db: &DatabaseConnection, id: i64) -> Result<(FileRef, bool), DbError> {
     let (device, file, reference, pinned) = db
         .query_row(

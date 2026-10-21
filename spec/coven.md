@@ -719,8 +719,10 @@ provider work may still be pending.
 
 Ana adds a 300 MB recording to a note. Her write commits at once, and her next
 pass sends it. The recording uploads on its own schedule, through a separate
-upload worker, so a pass never waits for a file. §17.7 gives the rules for
-uploads, including how they resume and when they stop.
+upload worker, so a pass never waits for a file. Once the recording is stored,
+a second local write names it in the note's row, and a later pass sends that
+(§17.2). §17.7 gives the rules for uploads, including how they resume and when
+they stop.
 
 #### 6.7 Waiting and retrying
 
@@ -3114,10 +3116,11 @@ gives it a fresh id.
   snapshots. Devices outside Gifts see the deletion entry, not values.
   Dismissing a lost value follows the ordinary write and owner rules.
 - **Files.** Applying the deletion releases local records of where values came
-  from that no visible row can name again. Queued files keep their own records and
-  finish uploading (§17.7). Lost values, snapshots, writes and queue entries that
-  still point at stored files keep protecting them; a deleted circle is not
-  permission to delete its files.
+  from that no visible row can name again. It abandons the pending attachments
+  of the circle's rows (§17.2): an upload in flight finishes and writes nothing,
+  and one not started is retired unsent (§17.7). Lost values, snapshots, writes
+  and queue entries that still point at stored files keep protecting them; a
+  deleted circle is not permission to delete its files.
 - **Storage.** Deleting old slots and snapshots follows §16.6's coverage and grace
   period, and deleting files requires §17.8's complete reference checks.
 
@@ -3461,7 +3464,7 @@ For each synced table that carries files, the app declares:
 | file column | which column refers to the file |
 | size column | which column holds its size in bytes; a user-provided file is checked against it |
 | retargeting | whether a row, once it has a file, may be pointed at a different one |
-| content hash column | which column holds the file's *content hash*, the SHA-256 of its bytes; coven fills it in when a write attaches the file |
+| content hash column | which column holds the file's *content hash*, the SHA-256 of its bytes; coven fills it in when the file's upload completes (§17.2) |
 | where column | which column holds the file's fixed storage reference; coven fills it in (§17.2) |
 | kind | user-provided or app-provided (§17.1) |
 
@@ -3490,8 +3493,8 @@ memory.
 - Coven keeps its copy until the upload succeeds. After that, reads on the
   attaching device use the cache or storage, as for a user-provided file.
 - If the file must stay on this device, pinned (§17.6), coven's copy becomes
-  its cache copy in the step that completes the upload (§17.7). The device
-  doesn't download what it just uploaded.
+  its cache copy in the transaction that completes the upload (§17.7). The
+  device doesn't download what it just uploaded.
 
 Ana's laptop imports an album and pins its cover while it waits to upload. When
 the cover's upload completes, her laptop keeps the copy it uploaded from as the
@@ -3506,41 +3509,108 @@ every upload checks against them (§17.7).
 
 #### 17.2 Attaching a file
 
-Attaching a file is part of the write that changes its row. That write picks the
-file's random id and key, records its uploader, and fixes its storage path,
-`<store>/files/<device>/<file>`.
+A row names its file only once the file is in storage. Attaching a file is part
+of a write, but that write doesn't change the row's file. It records a *pending
+attachment* on the attaching device and queues the upload. The write that
+completes the upload sets the row's file. So no device ever receives a reference
+to bytes that aren't stored yet, and no device waits for another's upload.
 
-- The where column carries that reference from the start
-  ([format.md D12](format.md#d12-files)). It doesn't say whether the upload has
-  finished.
-- The same transaction queues the upload, even with no storage connected.
-- No later write marks the file uploaded, and nothing changes the row when the
-  transfer ends. Pinning and caching change no file reference either. A file
-  reference (`FileRef`) stays valid across upload completion.
+Ana's phone attaches photo A to row 7 of `attachments`. Her write commits at
+once, even offline, and her next pass sends it. Ben's laptop receives row 7 as
+it was: with no file, or with the photo it had before. When A's upload
+completes, Ana's phone writes A into row 7, and Ben's laptop receives that write
+like any other. It can read A as soon as the row names it.
 
-So a slow upload can't overwrite a newer file. Ana attaches photo A to row 7, then
-Ben replaces it with photo B. Ana's upload of A finishes later. It changes no row
-and can't restore A over B; each file keeps the reference chosen when it was
-attached.
+**The attaching write** picks the file's random id and key, records this device
+as its uploader, and fixes its storage path, `<store>/files/<device>/<file>`.
+
+- The same transaction queues the upload, even with no storage connected, and
+  records the pending attachment: the row, the file's id, size, content hash and
+  fixed reference, and how the row's file stood when the write committed.
+- The row's four file columns stay as they were. If the app's SQL changed the
+  id or size column of a row the write didn't insert, coven puts them back;
+  the pending attachment holds the new values. Without this, other devices
+  would read the new file's size with the old file's hash, and another
+  device's pending attachment to the row would be abandoned by a write that
+  names no file.
+- A row the write inserts keeps the id and size the app wrote, with no content
+  hash or reference: it has no file yet.
+- A new attachment to the same row replaces that row's earlier pending
+  attachment on this device. A table declared write-once refuses it, as it
+  refuses replacing a stored file.
+
+**On the attaching device, the pending attachment is the row's file.**
+`file_ref` returns it, reads use the original or coven's copy (§17.5), and its
+status is uploading (§17.4). The row's own file columns, which the app's SQL
+reads, show the row's file as other devices see it.
+
+**Completing.** When storage confirms the complete file (§17.7), one local
+transaction:
+
+- checks that the pending attachment is still current (below);
+- writes the row's four file columns as an ordinary write of this device, made
+  and stamped at that moment (§4, §7.2), which the next pass sends;
+- retires the upload, keeping a pinned copy (§17.7).
+
+A file reference (`FileRef`) taken from the pending attachment names the same
+file afterwards: completion doesn't invalidate it. Pinning and caching change no
+file reference either.
+
+**A newer change wins.** A pending attachment is *abandoned* when this device has
+seen a newer change to its row's file before the upload completes:
+
+- a later local write changes the row's file columns, clears its file, or
+  attaches another one;
+- a write from another device, applied here since the attach, changes them;
+- the row is deleted, moved to another audience (§15.4) or taken out (§8.4).
+
+Ana attaches photo A to row 7. Ben replaces row 7's file with photo B, and Ana's
+phone applies Ben's write before A's upload finishes. Ana's attachment is
+abandoned: completing A writes nothing, and B stays. Without this rule, A's
+completion, stamped after Ben's write, would win every cell and undo a choice
+Ana's phone had already seen.
+
+- The transaction that makes the change abandons the attachment, or failing
+  that, the step that completes or next serves its upload. Each checks the same
+  thing: the row and its generation (§8.3) are the ones the attach saw, and its
+  four file cells are still set by the writes that set them then.
+- An upload in flight finishes; its completion writes nothing. An abandoned
+  upload not in flight is retired without sending any more (§17.7).
+- Its stored bytes, which no row names, are deleted under §17.8.
+- Abandonment is never silent. Each one leaves a record with the row, the file
+  and why: the row's file was replaced, it was cleared, or the row is gone. The
+  app reads these records with `abandoned_attachments()` and keeps them until it
+  dismisses them ([api.md E8](api.md#e8-files-and-the-cache)). A user-provided
+  original is still at its path, so the app can attach it again.
+
+**A change not seen yet is concurrent.** If Ben's write reaches Ana's phone only
+after her upload completed, her completion write hadn't read it. The two writes
+are concurrent and merge like any others (§8.1): the larger stamp wins all four
+file columns, and the other file becomes a lost value (§8.2), which keeps its
+stored bytes from deletion (§17.8). Ana's completion is stamped when it's made,
+so it wins over any change Ben stamped before it (§7.2). Either way every
+device ends with the same file, and the replaced one stays visible as a lost
+value until the app restores or dismisses it.
 
 **The four file columns move together.** A write that changes any of a row's
 file, size, content hash or where columns writes all four, unchanged ones
 included, so a row's file always comes whole from one write. Ana's phone and
-Ben's laptop each attach a different file to row 7: the later write wins all four
-columns, never one file's size with the other's hash.
+Ben's laptop each complete the upload of a different file for row 7: the later
+write wins all four columns, never one file's size with the other's hash.
 
 - A row with no file has NULL in its hash and where columns, so both must allow
-  NULL. The app never writes them; coven fills them in the write that attaches a
-  file.
+  NULL. The app never writes them; coven fills them in the write that completes
+  a file's upload, and clears them when the app clears a user-provided file.
 - Coven refuses a foreign key with set null on any of the four, checked when the
   database opens and after migrating: that action would change one column alone
   (§9.1).
 
 **The key travels with the row.** An uploaded file is encrypted with a key of its
 own, which travels in its row's where column, inside the row's encrypted writes.
-So only the row's readers can read the file. Moving a row between the store and a
-circle changes nothing about its file: the new audience's devices get the key
-with the row.
+So only the row's readers can read the file. Moving a row whose file is stored
+between the store and a circle changes nothing about its file: the new
+audience's devices get the key with the row. Moving it while its file is still
+pending abandons the attachment, as above.
 
 #### 17.3 How a file is stored
 
@@ -3563,29 +3633,34 @@ any chunk can be read and checked without the rest of the file.
 
 #### 17.4 A file's status
 
-Rows can arrive before their files, so the app needs to know whether a file can be
-read yet. Status reads the fixed path's metadata in storage, then checks the
-uploader's current state and any source failure known on this device
-([api.md E8](api.md#e8-files-and-the-cache)):
+A row names a file only once storage holds it (§17.2), so a file other devices
+see can be read at once. The app still needs to know whether storage has it: a
+provider can lose an object, or hand back other bytes. Status reads the fixed
+path's metadata in storage ([api.md E8](api.md#e8-files-and-the-cache)):
 
-| Status | Storage says | And |
-|---|---|---|
-| **available** | an object at the path, of the file's complete encrypted size | |
-| **damaged** (integrity error) | an object at the path, of any other size | never available, never absent |
-| **uploading on Ana's phone** | nothing at the path | Ana's phone is an active device and no source failure is known here; it may be offline or paused, and bytes need not be moving |
-| **missing** | nothing at the path | the uploader was removed or replaced, or this device is the uploader and its source failed |
+| Status | When |
+|---|---|
+| **available** | storage holds an object at the path, of the file's complete encrypted size |
+| **damaged** (integrity error) | storage holds an object at the path of any other size; never available, never absent |
+| **missing** | storage confirms nothing at the path a row names |
+| **uploading** | the file is this device's pending attachment, still queued here (§17.2) |
+| **missing, source failed** | the file is this device's pending attachment, and its source failed (§17.7) |
 
 - A network or permission failure is an error, never proof of absence. With no
-  storage set up, the call returns `NoStorage`.
-- Other devices can't see Ana's source failure. Ana's phone reports it to its own
-  app.
-- What storage holds wins over a local source failure. No source failure is
-  evidence that stored bytes are absent.
+  storage set up, the call returns `NoStorage`, except for this device's own
+  pending attachment, whose status needs no storage.
+- Nothing deletes a stored file a row names (§17.8), so a missing file was lost
+  by storage. Nothing will bring it back on its own: the app can ask for it to
+  be attached again.
+- Only the attaching device has a pending attachment. Other devices never see
+  its reference, so they never wait for an upload. What storage holds decides a
+  stored file's status; no source failure is evidence that stored bytes are
+  absent.
 
 **Reads agree with status.** A read can still use a checked local source or cached
-bytes. If it needs remote bytes that are absent, its typed error says uploading or
-missing, names the uploader, and matches what status says. The app can ask for a
-missing file to be attached again.
+bytes. If it needs remote bytes that are absent, its typed error says missing,
+names the uploader, and matches what status says. The app can ask for a missing
+file to be attached again.
 
 A ranged read's reply still reports the whole object's size (§20.5), so a read
 checks that size as status does: any size but the file's complete encrypted size
@@ -3597,7 +3672,8 @@ never absence.
 #### 17.5 Reading a file
 
 The app reads a file through a file reference, taken from its row, naming the
-file the row had then. A read checks the reference against the row first, so a
+file the row had then. On the attaching device, a row's pending attachment is
+its file (§17.2). A read checks the reference against the row first, so a
 row changed since can't redirect it to another file. A write can check a
 reference the same way before changing the row.
 
@@ -3636,9 +3712,8 @@ condition:
 |---|---|---|
 | no storage connected | `NoStorage` | |
 | network or provider failure | the provider's `Storage` category | retried by its failure class (§17.7) |
-| storage confirms absence, the uploader is active, no local source failure | `Waits(Object(path))` | waits for the upload |
-| the uploader was removed or replaced | `FileUnavailable(FileMissingReason)` | needs the app to act |
-| this device is the uploader and its source failed | `FileUnavailable(FileMissingReason)` | the upload retries (§17.7) |
+| storage confirms nothing at the path a row names | `FileUnavailable(Lost)` | needs the app to act |
+| the file is this device's pending attachment and its source failed | `FileUnavailable(Source(..))` | the upload retries (§17.7) |
 | a complete chunk fails authentication | `Refused(Decryption)` | the same bytes are never retried on their own; an applicable coven update can permit a recheck (§19.1) |
 | authenticated bytes disagree with the row's content hash | `Refused(ContentHash)` | as above |
 | writing the local cache fails | `Failed(Disk)` | |
@@ -3675,7 +3750,8 @@ app unpins it.
   Publishing replaces the separate cached chunks in one step. A cancellation or a
   crash leaves no partly downloaded file exempt from eviction.
 - A file still queued for upload on this device is pinned at once. The
-  transaction that retires its upload keeps the pin. An app-provided file's own
+  transaction that completes its upload keeps the pin, if it writes the file
+  into its row; an abandoned attachment's pin goes with it (§17.2). An app-provided file's own
   copy becomes its pinned cache file (§17.7). A user-provided file's pin becomes
   a *carried pin*: the original is never read again (§17.1), so the pin worker
   (§17.7) keeps the stored file whole from storage like any pin. A carried pin
@@ -3695,16 +3771,18 @@ device (§19.3), both ways of reading the reset notice return that stored notice
 
 #### 17.7 Uploads
 
-The attaching write queues each file in the same transaction as its row. The file
-waits in that queue until storage is connected and the upload succeeds.
+The attaching write queues each file in the same transaction as its row's other
+changes and its pending attachment (§17.2). The file waits in that queue until
+storage is connected and the upload succeeds.
 
 **A separate worker uploads.** A file-upload worker serves that queue outside sync
 passes. It wakes for queued work, a changed prerequisite or a due retry, and it
 shares the connection's identity check, transfer limits and backoff. It uses the
 file key fixed at attachment; it never chooses an audience key. A pass never
-waits for file uploads (§6.6): finishing an upload changes no app row and doesn't
-delay the write that attached the file. A finished upload supplies evidence for
-deleting stored files (§17.8) without scheduling another full pass.
+waits for file uploads (§6.6), and the attaching write goes out without its
+file. A finished upload's write, naming the file in its row, goes out with the
+next pass, like any local write. A finished or abandoned upload supplies
+evidence for deleting stored files (§17.8) without scheduling another full pass.
 
 **Uploads run up to the limit, all the time.** Ben imports 400 photos with the
 upload limit set to 3. The worker starts the first three as they are queued.
@@ -3716,6 +3794,10 @@ alone while new photos sat idle.
 
 - The queue is served oldest first. A file waiting for its retry delay, one
   that never retries and one already in flight are skipped.
+- An upload whose attachment was abandoned (§17.2) never starts. Each run of
+  the worker first retires the abandoned uploads not in flight, paused or not,
+  and with no storage connected too. A retired upload's stored bytes, if an
+  earlier attempt left any, are deleted under §17.8.
 - A changed limit applies to the next upload that starts. Uploads in flight
   keep running when the limit drops.
 - Pausing, a provider cooldown, a required catch-up (§5.4) and a connection
@@ -3741,13 +3823,15 @@ modification time where there is one, and the chunk hashes. It keeps no encrypte
 copy.
 
 - Retargeting the row can't replace the source facts of an upload already queued.
-- Deleting or retargeting the row while its file uploads keeps the upload queued.
-  It settles by its own reference, and only a confirmed upload retires it.
-  Completion writes no row, so a deleted row stays deleted.
-- `_coven_user_files` keeps an original's path while a current row or a local
-  write not yet published can still name it. An applied delete releases it in the
-  same transaction once no row can return to it. A queued upload owns its own
-  copy of the source facts and keeps them until it settles.
+- Deleting or retargeting the row while its file uploads abandons its
+  attachment (§17.2), but an upload in flight stays queued until its attempt
+  ends. Its completion then writes no row, so a deleted row stays deleted and a
+  retargeted row keeps its new file.
+- `_coven_user_files` keeps an original's path while a current row, a pending
+  attachment or a local write not yet published can still name it. An applied
+  delete releases it in the same transaction once nothing can return to it. A
+  queued upload owns its own copy of the source facts and keeps them until it
+  settles.
 
 **Every attempt checks the source.** Each attempt, including retries and resumed
 provider sessions, checks the source's size and whole-file content hash, and a
@@ -3802,13 +3886,24 @@ condition in the session, because a retry must not overwrite a competing floor.
 - A session the provider has expired starts over, reading and checking the
   source again, with the same id, key and chunk hashes.
 
-**Completion** removes the queue row and its pending record in one local
-transaction. It creates no app write, changes no row or file version, and doesn't
-hold up the attaching write's own upload.
+**Completion** is one local transaction. If the pending attachment is still
+current (§17.2), it writes the four file columns into the row; otherwise it
+abandons the attachment and writes nothing. Either way it removes the queue row
+and the file's pending record.
 
-- A crash before that transaction retries the same upload. An occupied path
-  counts as this upload only after its bytes compare equal (§19.3).
-- Rows may arrive before their files. No write waits for file bytes.
+- The row's write and the queue row's removal commit together, so a completed
+  upload names its file exactly once. A crash before that transaction retries
+  the same upload; an occupied path counts as this upload only after its bytes
+  compare equal (§19.3). A crash after it leaves nothing to retry.
+- The write is an ordinary local write. If one can't be made now, because an
+  operation paused writes or an audience is reloading
+  ([api.md E3](api.md#e3-writing)), the transaction fails and changes nothing.
+  The upload stays queued and retries; its bytes are already stored, so the
+  retry only compares them. A shared trigger that removes the row when its
+  where column is set refuses the write the same way, with
+  `FileRowRemoved` as the failure's cause.
+- A row arrives on other devices with its file already stored. No write waits
+  for file bytes, and no device waits for another's upload.
 
 **The uploading device keeps its copy.** An app-provided file pinned while it is
 queued (§17.6) gets its cache file before completion.
@@ -3819,9 +3914,9 @@ queued (§17.6) gets its cache file before completion.
   file is byte for byte the stored object.
 - Its name is recorded before it's created, and its bytes are synced before the
   transaction (Appendix C.3). The completing transaction publishes it as the
-  file's cache copy, pinned if the queued file was and its row still names it,
-  and releases coven's staged copy. No step leaves the file neither queued nor
-  cached.
+  file's pinned cache copy if the queued file was pinned and the transaction
+  writes it into its row, and releases coven's staged copy. No step leaves a
+  pinned file neither queued nor cached.
 - A failure writing the cache file fails the attempt, which retries like any
   other. A crash before the transaction leaves the upload queued; its retry
   finds the stored object and writes the cache file again.
@@ -3847,15 +3942,26 @@ too early would leave a row naming a file that's gone for good.
 - **Permission.** A device deletes uploaded files only with provider permission;
   missing permission stays visible (§19.1).
 - **No idle listing.** No quiet pass lists files. File work follows changed
-  references, uploads, deleted history or a provider cut-off. Announcements and
+  references, uploads, abandoned attachments, deleted history or a provider
+  cut-off. Announcements and
   the floor name the snapshots to inspect; file deletion never lists snapshot
   folders.
 - **Ownership stays known.** A file's storage path and fixed reference carry the
   uploader's device id, so whose file it is stays known after the last reference
   disappears.
 
+**Abandoned uploads.** Only an upload's completion write would name its file, so
+the bytes of an abandoned attachment (§17.2), if any reached storage, are named
+by no row, write or snapshot. The transaction that retires the upload ends the
+queue's protection and makes the path a deletion candidate. The uploader then
+deletes it like any other candidate, once the evidence above shows nothing names
+it. A crash can't lose it: the queue row stays until that transaction, and an
+attempt still in flight retires it only when it ends, so no bytes land after the
+deletion.
+
 **Files nobody refers to any more.** A removed device can leave files in storage
-whose attaching rows didn't survive. The device responsible for that removed
+that no surviving row names: an upload whose completion write the cut-off
+refused, or one still in flight when the device was removed. The device responsible for that removed
 device's cleanup lists `<store>/files/<device>/` once, after the device's storage
 access has been taken away (§14.2).
 
@@ -3887,9 +3993,12 @@ A device keeps local records of file sources, uploads, cache work and cleanup.
 They don't sync.
 
 A queued upload owns its fixed reference and source facts (§17.7). Ana attaches A,
-then changes the row to B before A finishes uploading. Finishing A changes no row
-and can't delete B's source or hashes; retargeting the row can't make A's upload
-forget itself.
+then changes the row to B before A finishes uploading. Her change abandons A
+(§17.2): finishing A writes no row and can't delete B's source or hashes, and
+retargeting the row can't make A's upload forget itself before its attempt ends.
+
+The pending attachment, the record of each abandoned one, and the queue are local
+records too ([Appendix C.1](#c1-covens-tables-in-the-apps-database)).
 
 Calls retain native errors while the process runs, except that file integrity
 failures return `FileReadError::Integrity { id }` without a native cause. Pending
@@ -5627,7 +5736,9 @@ Coven's other tables, besides the merge records Appendix B.1 lists:
 |---|---|
 | `_coven_store` | the store id, current name and the slot that set it, which a saved restore code's name is compared by (§13.1); before slot 1, the local creation name is marked as not yet applied, and counts as set by slot 1 (§10.3) |
 | `_coven_uploads` | each write record waiting to be sent (§4) |
-| `_coven_user_files` | a user-provided original's path while a row or unpublished write can name it (§17.7) |
+| `_coven_user_files` | a user-provided original's path while a row, a pending attachment or an unpublished write can name it (§17.7) |
+| `_coven_pending_attachments` | each pending attachment: its row, its queued upload, and the row's generation and file-cell writes when it was attached (§17.2) |
+| `_coven_abandoned_attachments` | each abandoned attachment's row, file and reason, until the app dismisses it (§17.2) |
 | `_coven_pending` | one record per thing that can't proceed (§19.1) |
 | `_coven_device_reset` | the reset notice with old and new device ids (§19.3) |
 
@@ -6940,10 +7051,14 @@ Write-ups explain each model and state its assumptions:
 | Claim | Theorems | File | Section |
 |---|---|---|---|
 | Status is available exactly when an object of the complete size is there; any other size is damage | `available_iff`, `wrong_size_is_damage` | `proofs/storage/CovenStorage/Files.lean` | §17.4 |
+| A confirmed absence at a named path is missing, never uploading; only this device's own pending attachment is uploading, judged with no storage request | `absence_is_lost`, `uploading_only_here`, `pending_needs_no_storage` | `proofs/storage/CovenStorage/Files.lean` | §17.4 |
 | A read's absence error matches status | `read_absence_matches_status` | `proofs/storage/CovenStorage/Files.lean` | §17.4 |
 | Reads and status agree on every storage read; a wrong size and a range past the end are damage; a present object is never absent | `read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent`, `complete_object_reads` | `proofs/storage/CovenStorage/Files.lean` | §17.4 |
 | Where downloads are checked, including disk-full failures injected through the real Rust reader | (specification) | `proofs/io.md` | §17.5 |
-| Deleting or retargeting a row keeps its upload in flight, which settles by its own reference | `steps_keep_upload`, `inflight_upload_settles` | `proofs/storage/CovenStorage/Files.lean` | §17.7 |
+| The attaching write names no file; a completion writes exactly the queued, stored file for a current pending attachment and nothing otherwise | `attach_changes_no_row`, `completion_writes_current`, `stale_completion_writes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.2 |
+| Once this device has seen a newer change to the row's file, the upload's completion changes no row | `newer_change_wins`, `reattach_wins` | `proofs/storage/CovenStorage/Files.lean` | §17.2 |
+| A completion happens once, in the transaction retiring its upload; an unconfirmed attempt or a crash before it changes nothing | `completion_idempotent`, `completion_retires_queue`, `unconfirmed_changes_nothing` | `proofs/storage/CovenStorage/Files.lean` | §17.7 |
+| Every file a row names is in storage, and every stored path is named, queued or a deletion candidate | `steps_named_stored`, `steps_reachable` | `proofs/storage/CovenStorage/Files.lean` | §17.2, §17.8 |
 | A complete listing after the cut-off names every orphan file; restored access makes a completed listing stale | `scan_names_every_file`, `retention_forgetting_counterexample` | `proofs/io/CovenIO/Retired.lean` | §17.8 |
 
 ### G.7 Schema changes and resets (§18, §19)
@@ -7051,8 +7166,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `Offline`, `Failed` | the last attempt couldn't reach storage; a provider refusal or local failure prevents the whole pass | F.5 |
 | `NoStorage` | no storage is connected | §17.4, §17.5 |
 | `Storage` | a network or provider failure, kept with the provider's category | §17.5 |
-| `Waits(Object(path))` | storage confirms a file absent while its uploader is active | §17.5 |
-| `FileUnavailable(FileMissingReason)` | the uploader was removed or replaced, or this device's source failed | §17.5, §17.7 |
+| `FileUnavailable(FileMissingReason)` | storage confirms nothing at the path a row names (`Lost`), or this device's pending attachment's source failed (`Source`) | §17.4, §17.5, §17.7 |
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk failed authentication; authenticated bytes disagree with the content hash | §17.5 |
 | `Failed(Disk)`, `Failed(Database)` | writing the local cache failed; the database failed | §17.5 |
 | `Failed(LocalFailure::Database)` | a corrupted database, with the native cause on the call | §19.1 |

@@ -225,7 +225,19 @@ impl FilesInner {
         let mut sending = self.send.subscribe();
         let mut reports = self.waits.network_reports();
         let mut rearmed = self.waits.rearmed();
-        if let Some(blocked @ (Blocked::Closed | Blocked::NoStorage)) = self.blocked() {
+        if let Some(blocked @ Blocked::Closed) = self.blocked() {
+            return self.end_blocked(blocked, 0);
+        }
+        // Abandoned attachments' uploads go first, paused or not and with no
+        // storage too; an attempt in flight retires its own as it ends (§17.7).
+        for id in self
+            .database
+            .retire_abandoned(self.in_flight.current(), file_subject)
+            .await?
+        {
+            self.waits.forget(RetrySubject::Upload(id));
+        }
+        if let Some(blocked @ Blocked::NoStorage) = self.blocked() {
             return self.end_blocked(blocked, 0);
         }
         // The persisted setting governs; parts check this copy between sends.

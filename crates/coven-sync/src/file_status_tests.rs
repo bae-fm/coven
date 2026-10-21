@@ -1,14 +1,15 @@
 use super::{files_runner, Fixture, CHUNK};
-use crate::files::file_status::{status, FileStatus};
+use crate::files::file_status::{status, FileStatus, Local};
 use crate::FileSourceFailure;
 use crate::{FileMissingReason, FileReadError};
-use coven_database::{DeviceState, FileRef, Provenance};
+use coven_database::{FileRef, Provenance};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{test_utils::MemoryRequest, Storage, StorageFailure};
 use serde_json::{json, Value};
 
-/// A second device that received the attaching write but not the bytes.
+/// A second device that received every write `a` made, including the one
+/// naming its stored file.
 async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
     let b = Fixture::new(Provenance::AppProvided).await;
     b.files
@@ -26,37 +27,45 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
     (b, remote)
 }
 
+/// Storage loses a file its row names: status and reads say missing, lost,
+/// whoever uploaded it; nothing waits for an upload (§17.4).
 #[tokio::test]
-async fn absence_is_judged_by_the_uploaders_applied_state() {
+async fn a_named_file_absent_from_storage_is_lost() {
     let a = Fixture::new(Provenance::AppProvided).await;
-    let file = a.attach("files", "photo", vec![61; CHUNK + 9]).await;
+    let file = a.uploaded("photo", vec![61; CHUNK + 9]).await;
     let (b, remote) = receiver(&a, &file).await;
     let device = file.uploader();
-    // Confirmed absent, active uploader, no local source failure: still uploading.
+    let path = a.path(&file);
+    let stored = a.storage.read(&path).await.unwrap();
+    a.storage.delete(&path).await.unwrap();
     assert_eq!(
         b.files.file_status(&remote).await.unwrap(),
-        FileStatus::Uploading { device }
+        FileStatus::Missing {
+            device,
+            reason: FileMissingReason::Lost
+        }
     );
     assert!(matches!(b.files.read_file(&remote).await,
-        Err(FileReadError::Uploading { device: d, .. }) if d == device));
-    // The uploader's state takes precedence over a local source failure.
-    for (state, reason) in [
-        (DeviceState::Removed, FileMissingReason::DeviceRemoved),
-        (DeviceState::Replaced, FileMissingReason::DeviceReplaced),
-    ] {
-        b.database.test_device_state(device, state).await.unwrap();
-        assert_eq!(
-            b.files.file_status(&remote).await.unwrap(),
-            FileStatus::Missing { device, reason }
-        );
-    }
+        Err(FileReadError::Missing { device: d, .. }) if d == device));
+    assert_eq!(
+        b.database
+            .pending::<crate::PendingRecord>()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|record| record.reason)
+            .collect::<Vec<_>>(),
+        [crate::PendingReason::FileUnavailable(
+            FileMissingReason::Lost
+        )]
+    );
     // A provider failure is an error, never proof of absence.
     a.storage.set_online(false);
     assert!(matches!(b.files.file_status(&remote).await,
         Err(FileReadError::Storage(error)) if error.failure() == StorageFailure::Network));
     a.storage.set_online(true);
-    // The complete object takes precedence over the uploader's state.
-    a.drain().await;
+    // The complete object is available again.
+    a.storage.create(&path, &stored).await.unwrap();
     assert_eq!(
         b.files.file_status(&remote).await.unwrap(),
         FileStatus::Available
@@ -77,11 +86,42 @@ async fn absence_is_judged_by_the_uploaders_applied_state() {
     a.close().await;
 }
 
+/// The attaching device's own pending attachment is uploading, or missing
+/// with its source failure, judged with no storage at all (§17.4).
+#[tokio::test]
+async fn a_pending_attachment_is_judged_locally() {
+    let f = Fixture::new(Provenance::UserProvided).await;
+    f.files.stop_background_for_counts().await;
+    f.files
+        .set_storage(None, std::future::ready(Ok(())))
+        .await
+        .unwrap();
+    let file = f.original("photo", &[3; 40]).await;
+    assert_eq!(
+        f.files.file_status(&file).await.unwrap(),
+        FileStatus::Uploading
+    );
+    std::fs::remove_file(f.root.path().join("photo")).unwrap();
+    assert!(matches!(
+        f.files.read_file(&file).await,
+        Err(FileReadError::UserFileMissing { .. })
+    ));
+    assert_eq!(
+        f.files.file_status(&file).await.unwrap(),
+        FileStatus::Missing {
+            device: file.uploader(),
+            reason: FileMissingReason::Source(FileSourceFailure::Missing)
+        }
+    );
+    f.close().await;
+}
+
 #[tokio::test]
 async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
     let a = Fixture::new(Provenance::AppProvided).await;
-    let file = a.attach("files", "photo", vec![62; 40]).await;
+    let file = a.uploaded("photo", vec![62; 40]).await;
     let (b, remote) = receiver(&a, &file).await;
+    a.storage.delete(&a.path(&file)).await.unwrap();
     a.storage
         .create(&a.path(&file), b"truncated")
         .await
@@ -104,9 +144,8 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
 #[tokio::test]
 async fn a_longer_object_is_damage_to_status_and_reads() {
     let a = Fixture::new(Provenance::AppProvided).await;
-    let file = a.attach("files", "photo", vec![64; CHUNK + 9]).await;
+    let file = a.uploaded("photo", vec![64; CHUNK + 9]).await;
     let (b, remote) = receiver(&a, &file).await;
-    a.drain().await;
     let path = a.path(&file);
     let mut longer = a.storage.read(&path).await.unwrap();
     longer.push(0);
@@ -138,9 +177,16 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
             for row in &mut part.rows {
-                if let coven_merge::Operation::Insert(columns) = &mut row.change.operation {
-                    columns.get_mut("hash").unwrap().value =
-                        coven_format::value::Value::Blob(vec![0; 32]);
+                if let coven_merge::Operation::Insert(columns)
+                | coven_merge::Operation::Update(columns) = &mut row.change.operation
+                {
+                    // The completing write is the one naming the file.
+                    if let Some(hash) = columns
+                        .get_mut("hash")
+                        .filter(|hash| hash.value != coven_format::value::Value::Null)
+                    {
+                        hash.value = coven_format::value::Value::Blob(vec![0; 32]);
+                    }
                 }
             }
         }
@@ -160,14 +206,6 @@ async fn an_authenticated_object_with_other_content_is_present_but_unreadable() 
     a.close().await;
 }
 
-fn state_name(state: DeviceState) -> &'static str {
-    match state {
-        DeviceState::Active => "active",
-        DeviceState::Removed => "removed",
-        DeviceState::Replaced => "replaced",
-    }
-}
-
 fn failure_name(failure: FileSourceFailure) -> &'static str {
     match failure {
         FileSourceFailure::Missing => "missing",
@@ -180,12 +218,11 @@ fn status_json(result: Result<FileStatus, ()>) -> Value {
     match result {
         Err(()) => json!({"error": true}),
         Ok(FileStatus::Available) => json!("available"),
-        Ok(FileStatus::Uploading { device }) => json!({"uploading": device.0}),
+        Ok(FileStatus::Uploading) => json!("uploading"),
         Ok(FileStatus::Missing { device, reason }) => json!({
             "missing": device.0,
             "reason": match reason {
-                FileMissingReason::DeviceRemoved => "removed",
-                FileMissingReason::DeviceReplaced => "replaced",
+                FileMissingReason::Lost => "lost",
                 FileMissingReason::Source(failure) => failure_name(failure),
             },
         }),
@@ -209,12 +246,10 @@ fn read_result(result: Result<Vec<u8>, FileReadError>, original: &[u8]) -> Value
             assert_eq!(bytes, original);
             json!("ok")
         }
-        Err(FileReadError::Uploading { device, .. }) => {
-            status_json(Ok(FileStatus::Uploading { device }))
-        }
-        Err(FileReadError::Missing { device, reason, .. }) => {
-            status_json(Ok(FileStatus::Missing { device, reason }))
-        }
+        Err(FileReadError::Missing { device, .. }) => status_json(Ok(FileStatus::Missing {
+            device,
+            reason: FileMissingReason::Lost,
+        })),
         Err(error) => status_result(Err(error)),
     }
 }
@@ -244,61 +279,57 @@ async fn observe(
     (status, read, ranges)
 }
 
-/// ST `Files.status` over every observation, uploader state and local source failure, and,
-/// through the real status call and read, `Files.status` and `Files.fetch`
-/// for absent, failing, complete, longer and truncated objects.
+/// ST `Files.status` over every observation and local fact, and, through the
+/// real status call and read, `Files.status` and `Files.fetch` for absent,
+/// failing, complete, longer and truncated objects at a named path.
 #[tokio::test]
 #[ignore = "requires COVEN_FILES_LEAN; scripts/check.sh builds filesRunner"]
 async fn st_differential_file_status() {
     let mut cases = Vec::new();
     let mut actual = Vec::new();
     for remote in ["present", "absent", "error"] {
-        for state in [
-            DeviceState::Active,
-            DeviceState::Removed,
-            DeviceState::Replaced,
-        ] {
-            for report in [
-                None,
-                Some(FileSourceFailure::Missing),
-                Some(FileSourceFailure::Changed),
-                Some(FileSourceFailure::Integrity),
-            ] {
-                cases.push(json!({
-                    "status": true,
-                    "ref": {"uploader": 3, "id": 4, "key": 4},
-                    "size": 1,
-                    "remote": remote,
-                    "device": state_name(state),
-                    "report": report.map(failure_name),
-                }));
-                let observed = match remote {
-                    "present" => Ok(true),
-                    "absent" => Ok(false),
-                    _ => Err(()),
-                };
-                actual.push(status_json(status(DeviceId(3), observed, state, report)));
-            }
+        let locals: [(bool, Option<FileSourceFailure>); 5] = [
+            (false, None),
+            (true, None),
+            (true, Some(FileSourceFailure::Missing)),
+            (true, Some(FileSourceFailure::Changed)),
+            (true, Some(FileSourceFailure::Integrity)),
+        ];
+        for (pending, report) in locals {
+            cases.push(json!({
+                "status": true,
+                "ref": {"uploader": 3, "id": 4, "key": 4},
+                "size": 1,
+                "remote": remote,
+                "pending": pending,
+                "report": report.map(failure_name),
+            }));
+            let observed = match remote {
+                "present" => Ok(true),
+                "absent" => Ok(false),
+                _ => Err(()),
+            };
+            let here: Local = pending.then_some(report);
+            actual.push(status_json(status(DeviceId(3), || observed, here)));
         }
     }
 
     let a = Fixture::new(Provenance::AppProvided).await;
     let original = (0..CHUNK + 9).map(|i| (i % 249) as u8).collect::<Vec<_>>();
-    let file = a.attach("files", "photo", original.clone()).await;
+    let file = a.uploaded("photo", original.clone()).await;
     let (b, remote) = receiver(&a, &file).await;
     let device = file.uploader();
     let size = FileHeader::new(file.plaintext_size())
         .encrypted_size()
         .unwrap();
-    let mut evidence = ("active", None);
-    let mut case = |remote: &str, length: Option<u64>, evidence: (&str, Option<&str>), ranges| {
+    let mut case = |remote: &str, length: Option<u64>, ranges| {
         let mut case = json!({
             "status": true,
             "ref": {"uploader": device.0, "id": 1, "key": 1},
             "size": size,
             "remote": remote,
-            "device": evidence.0,
-            "report": evidence.1,
+            "pending": false,
+            "report": null,
             "read": ranges,
         });
         if let Some(length) = length {
@@ -310,25 +341,19 @@ async fn st_differential_file_status() {
         actual.push(json!({"status": status, "read": read}));
         ranges
     };
-    // Absent: judged by the uploader's evidence.
-    let ranges = record(observe(&a, &b, &remote, &original).await);
-    case("absent", None, evidence, ranges);
-    a.storage.set_online(false);
-    let ranges = record(observe(&a, &b, &remote, &original).await);
-    a.storage.set_online(true);
-    case("error", None, evidence, ranges);
-    b.database
-        .test_device_state(device, DeviceState::Removed)
-        .await
-        .unwrap();
-    evidence = ("removed", None);
-    let ranges = record(observe(&a, &b, &remote, &original).await);
-    case("absent", None, evidence, ranges);
-    // Present: the complete object, then a longer one and truncated ones.
-    a.drain().await;
     let path = a.path(&file);
     let stored = a.storage.read(&path).await.unwrap();
     assert_eq!(stored.len() as u64, size);
+    // Absent: lost by storage.
+    a.storage.delete(&path).await.unwrap();
+    let ranges = record(observe(&a, &b, &remote, &original).await);
+    case("absent", None, ranges);
+    a.storage.set_online(false);
+    let ranges = record(observe(&a, &b, &remote, &original).await);
+    a.storage.set_online(true);
+    case("error", None, ranges);
+    // Present: the complete object, then a longer one and truncated ones.
+    a.storage.create(&path, &stored).await.unwrap();
     let mut longer = stored.clone();
     longer.extend_from_slice(&[0; 5]);
     for bytes in [
@@ -340,7 +365,7 @@ async fn st_differential_file_status() {
         a.storage.delete(&path).await.unwrap();
         a.storage.create(&path, &bytes).await.unwrap();
         let ranges = record(observe(&a, &b, &remote, &original).await);
-        case("present", Some(bytes.len() as u64), evidence, ranges);
+        case("present", Some(bytes.len() as u64), ranges);
     }
     assert_eq!(actual, files_runner(&cases));
     b.close().await;

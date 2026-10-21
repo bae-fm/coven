@@ -14,8 +14,16 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("corruption detection checks every stored row and index"),
 ("download.rs", "SELECT (SELECT publication FROM _coven_snapshot_schema WHERE EXISTS(SELECT 1 FROM _coven_members))", "_coven_snapshot_schema" | "_coven_members") =>
     Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
-("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
+("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u JOIN _coven_pending_attachments AS p ON p.upload=u.id LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
     Some("the file queue reader returns every queued attachment"),
+("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
+    Some("tests read every queued upload, abandoned ones included"),
+("file_queue.rs", "SELECT u.id,u.reference FROM _coven_file_uploads AS u WHERE NOT EXISTS(SELECT 1 FROM _coven_pending_attachments AS p WHERE p.upload=u.id) ORDER BY u.id", "u") =>
+    Some("each upload worker run retires every abandoned attachment's upload"),
+("pending_attachment.rs", "SELECT upload FROM _coven_pending_attachments ORDER BY upload", "_coven_pending_attachments") =>
+    Some("each upload worker run reviews every pending attachment"),
+("pending_attachment.rs", "SELECT table_name,key,file,reason FROM _coven_abandoned_attachments ORDER BY id", "_coven_abandoned_attachments") =>
+    Some("the app's list returns every abandoned attachment"),
 ("file_cache.rs", "SELECT reference FROM _coven_pin_requests ORDER BY namespace,file_id", "_coven_pin_requests") =>
     Some("the file worker keeps every carried pin whole"),
 ("file_queue.rs", "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)", "_coven_uploads" | "_coven_file_uploads") =>

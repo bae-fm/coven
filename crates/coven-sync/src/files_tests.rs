@@ -579,10 +579,16 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
             for row in &mut part.rows {
-                // The attaching write is the only write carrying the file.
-                if let coven_merge::Operation::Insert(columns) = &mut row.change.operation {
-                    columns.get_mut("hash").unwrap().value =
-                        coven_format::value::Value::Blob(vec![0; 32]);
+                if let coven_merge::Operation::Insert(columns)
+                | coven_merge::Operation::Update(columns) = &mut row.change.operation
+                {
+                    // The completing write is the one naming the file.
+                    if let Some(hash) = columns
+                        .get_mut("hash")
+                        .filter(|hash| hash.value != coven_format::value::Value::Null)
+                    {
+                        hash.value = coven_format::value::Value::Blob(vec![0; 32]);
+                    }
                 }
             }
         }
@@ -781,8 +787,13 @@ async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {
     f.close().await;
 }
 
+/// A second device receives the attaching write with no file: no reference,
+/// nothing to fetch or wait for. The attaching device reads its pending
+/// attachment from its source and reports it uploading. Once the upload
+/// completes, one more write names the file, and the second device reads it
+/// at once; the attaching device's reference is the same file (§17.2, §17.4).
 #[tokio::test]
-async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
+async fn a_row_names_its_file_only_once_it_is_stored() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
         let a = Fixture::new(provenance.clone()).await;
         let b = Fixture::new(provenance.clone()).await;
@@ -795,21 +806,27 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
             Provenance::AppProvided => a.attach("files", "waiting", b"content".to_vec()).await,
             Provenance::UserProvided => a.original("waiting", b"content").await,
         };
-        let device = local.uploader();
         let queued = a.files.inner.database.uploads().await.unwrap();
         assert_eq!(queued.len(), 1);
         assert_eq!(queued[0].file, local);
         assert!(queued[0].retry.is_none());
         assert_eq!(a.upload_reason(&local).await, None);
+        // The attaching device: its pending attachment, read locally, with no
+        // storage connected.
+        assert_eq!(a.files.read_file(&local).await.unwrap(), b"content");
+        assert_eq!(
+            a.files.file_status(&local).await.unwrap(),
+            FileStatus::Uploading
+        );
         let attaching = a.database.test_queued_writes().await.unwrap();
         for write in attaching.clone() {
             crate::tests::apply_write(&b.database, write).await.unwrap();
         }
-        let remote = b.database.file_ref("files", "waiting").await.unwrap();
-        assert_eq!((remote.uploader(), remote.id()), (device, local.id()));
-        // B's storage confirms absence: the file is still uploading on A.
-        assert!(matches!(b.files.read_file(&remote).await,
-            Err(FileReadError::Uploading { device: owner, .. }) if owner == device));
+        // The second device has the row and no reference to wait on.
+        assert!(matches!(
+            b.database.file_ref("files", "waiting").await,
+            Err(coven_database::DbError::FileAbsent { .. })
+        ));
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         let mut uploads = a.subscribe_queue();
         a.files
@@ -821,15 +838,16 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
         })
         .await
         .unwrap();
-        // Completion queued no write: B's row and reference stay as they were.
-        assert_eq!(
-            a.database.test_queued_writes().await.unwrap().len(),
-            attaching.len()
-        );
+        // Completion queued exactly one more write, naming the same file.
+        let all = a.database.test_queued_writes().await.unwrap();
+        assert_eq!(all.len(), attaching.len() + 1);
         assert_eq!(
             a.database.file_ref("files", "waiting").await.unwrap(),
             local
         );
+        for write in all.into_iter().skip(attaching.len()) {
+            crate::tests::apply_write(&b.database, write).await.unwrap();
+        }
         b.files
             .set_storage(
                 Some(Arc::new(
@@ -840,7 +858,14 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
             .await
             .unwrap();
         let uploaded = b.database.file_ref("files", "waiting").await.unwrap();
-        assert_eq!(uploaded, remote);
+        assert_eq!(
+            (uploaded.uploader(), uploaded.id()),
+            (local.uploader(), local.id())
+        );
+        assert_eq!(
+            b.files.file_status(&uploaded).await.unwrap(),
+            FileStatus::Available
+        );
         assert_eq!(b.files.read_file(&uploaded).await.unwrap(), b"content");
         assert!(b.files.inner.database.uploads().await.unwrap().is_empty());
         b.files.pin(std::slice::from_ref(&uploaded)).await.unwrap();

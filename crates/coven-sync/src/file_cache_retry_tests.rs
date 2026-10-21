@@ -276,9 +276,16 @@ async fn io_differential_download() {
         for mut write in a.database.test_queued_writes().await.unwrap() {
             if !hash {
                 for row in write.parts.iter_mut().flat_map(|part| &mut part.rows) {
-                    if let coven_merge::Operation::Insert(columns) = &mut row.change.operation {
-                        columns.get_mut("hash").unwrap().value =
-                            coven_format::value::Value::Blob(vec![0; 32]);
+                    if let coven_merge::Operation::Insert(columns)
+                    | coven_merge::Operation::Update(columns) = &mut row.change.operation
+                    {
+                        // The completing write is the one naming the file.
+                        if let Some(hash) = columns
+                            .get_mut("hash")
+                            .filter(|hash| hash.value != coven_format::value::Value::Null)
+                        {
+                            hash.value = coven_format::value::Value::Blob(vec![0; 32]);
+                        }
                     }
                 }
             }

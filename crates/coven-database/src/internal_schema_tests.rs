@@ -89,6 +89,7 @@ async fn only_the_spec_tables_are_created() {
         assert_eq!(
             tables,
             [
+                "_coven_abandoned_attachments",
                 "_coven_absent_snapshots",
                 "_coven_access_keys",
                 "_coven_authored_changes",
@@ -134,6 +135,7 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_part_leaves",
                 "_coven_part_proofs",
                 "_coven_pending",
+                "_coven_pending_attachments",
                 "_coven_pin_requests",
                 "_coven_provider_access",
                 "_coven_published",
@@ -292,6 +294,9 @@ mod fixture {
      INSERT INTO _coven_write_pause VALUES(1,1);
      INSERT INTO _coven_pin_requests SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
+     INSERT INTO _coven_pending_attachments SELECT i,tab,key,audience,counter(1),key FROM fixture;
+     INSERT INTO _coven_abandoned_attachments(table_name,key,device,file,reason)
+       SELECT tab,key,device,CAST(zeroblob(8) || n AS BLOB),'replaced' FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
        SELECT audience,'file_' || i,CASE WHEN (i/64)%4=0 THEN -2 ELSE 0 END,'cache_' || i,
               65536,i,CASE WHEN (i/64)%4=0 THEN 1 ELSE 0 END,

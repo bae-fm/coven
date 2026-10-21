@@ -26,14 +26,15 @@ pub use coven_crypto::{
     SealingKey, SecretBytes, SecretText, SigningKey, StoreKey, StoreKeyring,
 };
 pub use coven_database::{
-    named_params, params, prepare_user_file, types, ChangeOp, ChangeSource, ColumnChange,
-    CovenError, CovenMigrationError, CovenResult, DbError, FileDecl, FileRef, FileSource,
-    LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests, LiveQueryRevision, Lost,
-    LostCell, LostValue, Migration, MigrationContext, MigrationError, OldWrites, Params,
-    PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery, ReconfigurableLiveQueryEvent,
-    RemovalRule, Replacement, Row, RowAuthorizationFailure, RowChange, RowIdentity, RowKey,
-    SchemaError, SnapshotError, SqlContext, SqlReadContext, SqliteError, SqliteResult, SyncedTable,
-    ToSql, UnsentWork, UserFile, WriteBatch, WriteId, WriteWait,
+    named_params, params, prepare_user_file, types, AbandonReason, AbandonedAttachment, ChangeOp,
+    ChangeSource, ColumnChange, CovenError, CovenMigrationError, CovenResult, DbError, FileDecl,
+    FileRef, FileSource, LiveQuery, LiveQueryCause, LiveQueryClosed, LiveQueryRequests,
+    LiveQueryRevision, Lost, LostCell, LostValue, Migration, MigrationContext, MigrationError,
+    OldWrites, Params, PreparedUserFile, Provenance, Read, ReconfigurableLiveQuery,
+    ReconfigurableLiveQueryEvent, RemovalRule, Replacement, Row, RowAuthorizationFailure,
+    RowChange, RowIdentity, RowKey, SchemaError, SnapshotError, SqlContext, SqlReadContext,
+    SqliteError, SqliteResult, SyncedTable, ToSql, UnsentWork, UserFile, WriteBatch, WriteId,
+    WriteWait,
 };
 pub use coven_sync::{
     decode_code_info, CodeError, CodeInfo, CodeKind, CodeMetadata, UnreadableSavedCode,

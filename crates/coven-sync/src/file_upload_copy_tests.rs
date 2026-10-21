@@ -155,9 +155,10 @@ async fn a_pinned_original_is_downloaded_after_its_upload() {
     f.close().await;
 }
 
-/// Storage stored a pinned file but its reply was lost; after reopening,
-/// the retry settles the occupied path and keeps the copy in the
-/// transaction that completes the upload.
+/// Storage stored a pinned file but its reply was lost, a crash between
+/// storage confirming it and the completing transaction; after reopening,
+/// the retry settles the occupied path, names the file in its row exactly
+/// once and keeps the copy in that transaction.
 #[tokio::test]
 async fn a_restart_after_a_lost_reply_still_keeps_the_copy() {
     let mut f = Fixture::new(Provenance::AppProvided).await;
@@ -186,9 +187,22 @@ async fn a_restart_after_a_lost_reply_still_keeps_the_copy() {
         .store(true, std::sync::atomic::Ordering::Release);
     drop(guard);
     assert!(f.queued(&file).await);
+    // Storage holds the file, but no transaction completed it: the row
+    // names nothing yet.
+    let writes = f.database.test_queued_writes().await.unwrap().len();
     f.reopen().await;
     f.drain().await;
     assert!(!f.queued(&file).await);
+    // The retry completed it exactly once: one write names the file.
+    assert_eq!(
+        f.database.test_queued_writes().await.unwrap().len(),
+        writes + 1
+    );
+    f.drain().await;
+    assert_eq!(
+        f.database.test_queued_writes().await.unwrap().len(),
+        writes + 1
+    );
     nothing_to_download(&f, &file).await;
     let settled = file_reads(&f, &file).await;
     assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);

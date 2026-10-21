@@ -106,48 +106,39 @@ pub(crate) fn lookup(
     Ok(((table.name.clone(), row_key(table, &values)?), values))
 }
 
-#[expect(
-    clippy::map_err_ignore,
-    reason = "a size past the target integer is TooLarge, which names the field and size"
-)]
-pub(crate) fn set(
+/// A new attachment's fixed reference: this device as uploader, a random
+/// object id and a new key (§17.2). Completion writes it into the row; no
+/// later write changes it.
+pub(crate) fn new_reference(
+    device: DeviceId,
+    ids: &dyn IdSource,
+) -> Result<FixedReference, DbError> {
+    FixedReference::decode(&Value::Text(
+        FileReference {
+            device,
+            id: FileId(ids.new_id()),
+            key: FileKey::generate().map_err(DbError::FileKey)?,
+        }
+        .encode()
+        .as_str()
+        .to_owned(),
+    ))
+}
+
+/// Set some of the row's file columns, by the file-filling authority.
+fn update(
     database: &DatabaseConnection,
     schema: &WriteSchema,
     key: &AppKey,
-    contents: Option<(ContentHash, u64)>,
-    device: DeviceId,
-    ids: &dyn IdSource,
+    values: Vec<(&str, rusqlite::types::Value)>,
 ) -> Result<(), DbError> {
-    let (table, file) = declaration(schema, &key.0)?;
-    let mut columns = vec![&file.hash, &file.location];
-    // Each attachment fixes a new uploader, random object id and key (§17.2);
-    // no later write changes them, including upload completion.
-    let mut parameters = match contents {
-        Some((hash, _)) => vec![
-            rusqlite::types::Value::Blob(hash.as_bytes().to_vec()),
-            FileReference {
-                device,
-                id: FileId(ids.new_id()),
-                key: FileKey::generate().map_err(DbError::FileKey)?,
-            }
-            .encode()
-            .as_str()
-            .to_owned()
-            .into(),
-        ],
-        None => vec![rusqlite::types::Value::Null; 2],
-    };
-    if file.provenance == crate::Provenance::AppProvided {
-        if let Some((_, size)) = contents {
-            let count = i64::try_from(size).map_err(|_| DbError::TooLarge {
-                field: "file size",
-                actual: size,
-                maximum: i64::MAX as u64,
-            })?;
-            columns.push(&file.size);
-            parameters.push(count.into());
-        }
-    }
+    let (table, _) = declaration(schema, &key.0)?;
+    let columns = values
+        .iter()
+        .map(|(c, _)| format!("{}=?", crate::sql::identifier(c)))
+        .collect::<Vec<_>>()
+        .join(",");
+    let mut parameters = values.into_iter().map(|(_, v)| v).collect::<Vec<_>>();
     parameters.extend(
         crate::write_encoding::decoded(coven_format::key::decode_key(&key.1))?
             .iter()
@@ -155,15 +146,9 @@ pub(crate) fn set(
     );
     let count = database.file_execute(
         &format!(
-            "UPDATE main.{}
-             SET {}
-             WHERE {}",
+            "UPDATE main.{} SET {} WHERE {}",
             crate::sql::identifier(&table.name),
-            columns
-                .iter()
-                .map(|c| format!("{}=?", crate::sql::identifier(c)))
-                .collect::<Vec<_>>()
-                .join(","),
+            columns,
             key_columns(table)
                 .iter()
                 .map(|c| format!("{}=?", crate::sql::identifier(&c.name)))
@@ -176,6 +161,87 @@ pub(crate) fn set(
         return Err(rusqlite::Error::StatementChangedRows(count).into());
     }
     Ok(())
+}
+
+/// Clear the row's file: NULL content hash and reference.
+pub(crate) fn clear(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    key: &AppKey,
+) -> Result<(), DbError> {
+    let (_, file) = declaration(schema, &key.0)?;
+    update(
+        database,
+        schema,
+        key,
+        vec![
+            (&file.hash, rusqlite::types::Value::Null),
+            (&file.location, rusqlite::types::Value::Null),
+        ],
+    )
+}
+
+/// The write completing an upload: all four file columns, so the row's file
+/// comes whole from this one write (§17.2).
+#[expect(
+    clippy::map_err_ignore,
+    reason = "a size past the target integer is TooLarge, which names the field and size"
+)]
+pub(crate) fn write(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    key: &AppKey,
+    id: &Value,
+    size: u64,
+    hash: ContentHash,
+    location: &FixedReference,
+) -> Result<(), DbError> {
+    let (_, file) = declaration(schema, &key.0)?;
+    let size = i64::try_from(size).map_err(|_| DbError::TooLarge {
+        field: "file size",
+        actual: size,
+        maximum: i64::MAX as u64,
+    })?;
+    update(
+        database,
+        schema,
+        key,
+        vec![
+            (&file.id, sql_value(id)),
+            (&file.size, size.into()),
+            (
+                &file.hash,
+                rusqlite::types::Value::Blob(hash.as_bytes().to_vec()),
+            ),
+            (&file.location, sql_value(&location.value())),
+        ],
+    )
+}
+
+/// An attaching write leaves the row's file as it was (§17.2): a row that
+/// existed before the write gets its four file columns back, whatever the
+/// app's SQL wrote, so the write changes nothing another device sees of its
+/// file; a row the write inserts keeps the app's id and size, with no content
+/// hash or reference. The update also lets the authorizer check that this
+/// device may write the row, as the completing write will.
+pub(crate) fn keep(
+    database: &DatabaseConnection,
+    schema: &WriteSchema,
+    key: &AppKey,
+    before: Option<&AppValues>,
+) -> Result<(), DbError> {
+    let (_, file) = declaration(schema, &key.0)?;
+    let values = match before {
+        Some(row) => [&file.id, &file.size, &file.hash, &file.location]
+            .into_iter()
+            .map(|column| (column.as_str(), sql_value(&row[column])))
+            .collect(),
+        None => vec![
+            (file.hash.as_str(), rusqlite::types::Value::Null),
+            (file.location.as_str(), rusqlite::types::Value::Null),
+        ],
+    };
+    update(database, schema, key, values)
 }
 
 pub(crate) fn size(values: &AppValues, file: &FileDecl) -> Result<u64, DbError> {

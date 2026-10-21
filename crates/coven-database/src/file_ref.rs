@@ -14,24 +14,29 @@ use coven_foundation::{
     files::{FileReader, ObservationError},
     id_source::{DeviceId, FileId},
 };
-use coven_merge::{Audience, RowId, WriteId};
+use coven_merge::{Audience, RowId};
 
 #[path = "local_file.rs"]
 mod local_file;
 pub(crate) use local_file::{open as open_local, open_source, queued_source, QueuedSource};
 pub use local_file::{LocalFileError, LocalFileStream};
 
+/// The file's facts and the row generation naming it. Each attachment picks a
+/// new random reference, so equal facts in one generation are one file: the
+/// pending attachment's reference equals the row's once completion writes it
+/// (§17.2).
 #[derive(Clone, Debug, PartialEq)]
 struct FileVersion {
     generation: u64,
-    setters: [WriteId; 4],
     id: Value,
     size: u64,
     hash: ContentHash,
     location: FixedReference,
 }
 
-/// A row's file at the time it was read. Facts and version remain private (§17.5).
+/// A row's file at the time it was read: on the attaching device, the row's
+/// pending attachment until its upload completes. Facts and version remain
+/// private (§17.2, §17.5).
 #[derive(Clone, Debug, PartialEq)]
 pub struct FileRef {
     row: RowId,
@@ -87,6 +92,48 @@ impl FileRef {
     /// The row's audience, whose encrypted writes carry the file's key.
     pub fn audience(&self) -> Audience {
         self.row.audience.clone()
+    }
+
+    /// A pending attachment's reference: the row as the attaching write left
+    /// it, and the file it attached (§17.2).
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "every captured fact of the attachment is one argument"
+    )]
+    pub(crate) fn pending(
+        row: RowId,
+        key: RowKey,
+        column: String,
+        namespace: String,
+        generation: u64,
+        id: Value,
+        size: u64,
+        hash: ContentHash,
+        location: FixedReference,
+    ) -> Self {
+        Self {
+            row,
+            key,
+            column,
+            namespace,
+            version: FileVersion {
+                generation,
+                id,
+                size,
+                hash,
+                location,
+            },
+        }
+    }
+
+    /// The four file columns' values the row takes when this file is its own.
+    pub(crate) fn columns(&self) -> (&Value, u64, ContentHash, &FixedReference) {
+        (
+            &self.version.id,
+            self.version.size,
+            self.version.hash,
+            &self.version.location,
+        )
     }
 }
 
@@ -150,6 +197,10 @@ fn current(
         Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
         Err(error) => return Err(error),
     };
+    // On the attaching device, the row's current pending attachment is its file.
+    if let Some(pending) = crate::pending_attachment::current_reference(db, schema, &key)? {
+        return Ok(Some(pending));
+    }
     let hash = match (&values[&file.hash], &values[&file.location]) {
         (Value::Null, Value::Null) => return Ok(None),
         (Value::Blob(hash), _) => ContentHash::from_bytes(
@@ -169,15 +220,6 @@ fn current(
     let row = row_id(&key, &app);
     let store = MergeStore::new(db, &visible);
     let stored = store.row(&row)?;
-    let setters = file.columns().map(|column| {
-        stored
-            .state
-            .cells()
-            .get(column)
-            .map(|cell| cell.write)
-            .ok_or(DbError::DamagedDatabase)
-    });
-    let [id_setter, size_setter, hash_setter, location_setter] = setters;
     Ok(Some(FileRef {
         key: file_row::key(&key)?,
         row,
@@ -185,7 +227,6 @@ fn current(
         namespace: file.namespace.clone(),
         version: FileVersion {
             generation: stored.state.generation(),
-            setters: [id_setter?, size_setter?, hash_setter?, location_setter?],
             id: values[&file.id].clone(),
             size,
             hash,
@@ -212,7 +253,7 @@ impl FileRefJournal for FileRef {
         self.version.location.reference()
     }
     fn encode(&self) -> Result<Vec<u8>, DbError> {
-        let mut fields = vec![
+        let fields = vec![
             Value::Text(self.row.table.clone()),
             Value::Blob(self.row.key.clone()),
             Value::Text(crate::write_encoding::audience_text(&self.row.audience)),
@@ -224,11 +265,6 @@ impl FileRefJournal for FileRef {
             Value::Blob(self.version.hash.as_bytes().to_vec()),
             self.version.location.value(),
         ];
-        for setter in &self.version.setters {
-            fields.push(Value::Blob(coven_format::merge_fields::encode_write_id(
-                setter,
-            )?));
-        }
         Ok(coven_format::key::encode_key(&fields)?)
     }
     #[expect(
@@ -237,21 +273,14 @@ impl FileRefJournal for FileRef {
     )]
     fn decode(bytes: &[u8]) -> Result<Self, DbError> {
         let fields = coven_format::key::decode_key(bytes)?;
-        let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location, setters @ ..] =
+        let [Value::Text(table), Value::Blob(key), Value::Text(audience), Value::Text(column), Value::Text(namespace), Value::Blob(generation), id, Value::Integer(size), Value::Blob(hash), location] =
             fields.as_slice()
         else {
             return Err(DbError::DamagedDatabase);
         };
-        if setters.len() != 4 || *size < 0 {
+        if *size < 0 {
             return Err(DbError::DamagedDatabase);
         }
-        let setters = setters
-            .iter()
-            .map(|v| match v {
-                Value::Blob(b) => Ok(coven_format::merge_fields::decode_write_id(b)?),
-                _ => Err(DbError::DamagedDatabase),
-            })
-            .collect::<Result<Vec<_>, DbError>>()?;
         Ok(Self {
             row: RowId {
                 table: table.clone(),
@@ -268,7 +297,6 @@ impl FileRefJournal for FileRef {
                         .try_into()
                         .map_err(|_| DbError::DamagedDatabase)?,
                 ),
-                setters: setters.try_into().map_err(|_| DbError::DamagedDatabase)?,
                 id: id.clone(),
                 size: *size as u64,
                 hash: ContentHash::from_bytes(

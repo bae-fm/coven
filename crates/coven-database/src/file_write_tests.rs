@@ -63,15 +63,21 @@ async fn size_ten_concurrent_replacements_keep_all_four_columns_from_the_later_w
         .open()
         .await
         .unwrap();
+    // Each file comes whole from the write completing its upload (§17.2).
     attach(&a, vec![b'I'; 10], true).await.unwrap();
-    let initial = records(&a).remove(0);
-    b.receive(initial.clone().into()).await.unwrap();
+    complete_uploads(&a).await;
+    let initial = records(&a);
+    for record in &initial {
+        b.receive(record.clone().into()).await.unwrap();
+    }
     clock.set(UNIX_EPOCH + Duration::from_secs(2));
     attach(&a, vec![b'A'; 20], false).await.unwrap();
+    complete_uploads(&a).await;
     clock.set(UNIX_EPOCH + Duration::from_secs(3));
     attach(&b, vec![b'B'; 10], false).await.unwrap();
-    let ra = records(&a).remove(1);
-    let rb = records(&b).remove(0);
+    complete_uploads(&b).await;
+    let ra = records(&a).pop().unwrap();
+    let rb = records(&b).pop().unwrap();
     let expected = b
         .read(|sql| {
             Ok(
@@ -93,7 +99,9 @@ async fn size_ten_concurrent_replacements_keep_all_four_columns_from_the_later_w
             .schema(tables(Provenance::AppProvided), SCHEMA)
             .await
             .unwrap();
-        db.receive(initial.clone().into()).await.unwrap();
+        for record in &initial {
+            db.receive(record.clone().into()).await.unwrap();
+        }
         for write in changes {
             db.receive(write.into()).await.unwrap();
         }
@@ -142,8 +150,15 @@ pub(crate) fn owned_paths(store: &TestStore) -> Vec<std::path::PathBuf> {
 /// queue's owned copies.
 pub(crate) async fn complete_uploads(db: &Database) {
     let owner = crate::FileDatabase::new(db.clone());
-    for upload in owner.uploads().await.unwrap() {
-        owner.complete_upload(upload.id, (), None).await.unwrap();
+    // Abandoned attachments' uploads too: their attempts end the same way.
+    let ids = db.inspect_writer(|sql| {
+        sql.query("SELECT id FROM _coven_file_uploads ORDER BY id", [], |r| {
+            r.get::<_, i64>(0)
+        })
+        .unwrap()
+    });
+    for id in ids {
+        owner.complete_upload(id, (), None).await.unwrap();
     }
 }
 
@@ -224,11 +239,11 @@ async fn a_stream_exceeds_its_memory_budget_and_is_read_once() {
     assert_eq!(paths.len(), 1);
     assert_eq!(std::fs::metadata(&paths[0]).unwrap().len(), LENGTH as u64);
     let prepared = prepare_user_file(&paths[0], |_| {}).await.unwrap();
-    let hash = db
-        .read(|sql| Ok(sql.query_row("SELECT hash FROM files", [], |r| r.get::<_, Vec<u8>>(0))?))
-        .await
-        .unwrap();
-    assert_eq!(hash, prepared.hashes.content.as_bytes());
+    // The pending attachment carries the hash of the bytes read once.
+    assert_eq!(
+        db.file_ref("files", "7").await.unwrap().content_hash(),
+        prepared.hashes.content
+    );
     assert_eq!(local_count(&db, "_coven_device_files"), 1);
     db.close().await.unwrap();
 }
@@ -425,6 +440,24 @@ async fn original_size_is_checked_against_the_final_row_and_clearing_keeps_the_o
     .await
     .unwrap();
     assert_eq!(local_count(&db, "_coven_user_files"), 1);
+    // Clearing a pending attachment abandons it; nothing syncs.
+    let writes = records(&db).len();
+    db.write(|sql| sql.clear_user_file("files", "7"))
+        .await
+        .unwrap();
+    assert_eq!(local_count(&db, "_coven_user_files"), 0);
+    assert_eq!(records(&db).len(), writes);
+    assert_eq!(
+        db.abandoned_attachments().await.unwrap()[0].reason,
+        crate::AbandonReason::Cleared
+    );
+    // Clearing a stored file is a write of all four columns.
+    let prepared = prepare_user_file(original.path(), |_| {}).await.unwrap();
+    db.write(move |sql| sql.register_user_file("files", "7", prepared))
+        .await
+        .unwrap();
+    complete_uploads(&db).await;
+    assert_eq!(local_count(&db, "_coven_user_files"), 1);
     db.write(|sql| sql.clear_user_file("files", "7"))
         .await
         .unwrap();
@@ -600,16 +633,20 @@ async fn shared_bytes_last_until_the_final_queued_upload_completes() {
     let paths = owned_paths(&store);
     assert_eq!(paths.len(), 1);
     assert_eq!(local_count(&db, "_coven_device_files"), 2);
+    let owner = crate::FileDatabase::new(db.clone());
+    let uploads = owner.uploads().await.unwrap();
+    assert_eq!(uploads.len(), 2);
     db.write(|sql| {
         sql.execute("DELETE FROM files", [])?;
         Ok(())
     })
     .await
     .unwrap();
+    // Both attachments are abandoned; their uploads stay queued until their
+    // attempts end, and the copy until the last of them.
     assert_eq!(owned_paths(&store), paths);
-    let owner = crate::FileDatabase::new(db.clone());
-    let uploads = owner.uploads().await.unwrap();
-    assert_eq!(uploads.len(), 2);
+    assert!(owner.uploads().await.unwrap().is_empty());
+    assert_eq!(local_count(&db, "_coven_file_uploads"), 2);
     assert_ne!(uploads[0].file.id(), uploads[1].file.id());
     owner
         .complete_upload(uploads[0].id, (), None)

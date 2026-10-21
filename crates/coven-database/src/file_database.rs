@@ -138,38 +138,84 @@ impl FileDatabase {
         self.run(move |db, _, _, _| db.transaction(|db| cache::settle_pin(db, &file)))
             .await
     }
-    /// The uploader's applied state and, for this device's uploads, its local
-    /// record about `subject`, read
-    /// in one committed state: the evidence a confirmed absence is judged
-    /// with (§17.4). A device with no registration here has no removal or
-    /// replacement either, so it reads as active.
-    pub async fn uploader_evidence<P: crate::PendingValue>(
+    /// Whether the file is this device's own pending attachment, still
+    /// queued here, and this device's record about `subject`, read in one
+    /// committed state: the local facts its status is judged with (§17.4).
+    pub async fn local_evidence<P: crate::PendingValue>(
         &self,
-        uploader: DeviceId,
+        file: &FileRef,
         subject: P::Subject,
-    ) -> Result<(crate::DeviceState, Option<P>), DbError>
+    ) -> Result<(bool, Option<P>), DbError>
     where
         P::Subject: Send,
     {
+        let file = file.clone();
         self.run(move |db, _, _, device| {
             db.read_transaction(|| {
-                let state = db
-                    .query(
-                        "SELECT state FROM _coven_devices WHERE device=?1",
-                        [uploader.0.to_be_bytes()],
-                        |r| crate::store_state_tables::device_state(r.get(0)?),
-                    )?
-                    .pop()
-                    .unwrap_or(crate::DeviceState::Active);
-                let record = if uploader == device {
+                let pending = file.uploader() == device && file_queue::queued(db, &file)?;
+                let record = if pending {
                     crate::pending::find::<P>(db, &subject)?
                 } else {
                     None
                 };
-                Ok((state, record))
+                Ok((pending, record))
             })
         })
         .await
+    }
+    /// Retire the uploads whose attachment was abandoned, except those in
+    /// `in_flight`, whose attempts retire them as they end (§17.7). First
+    /// every pending attachment is reviewed, so a change no transaction
+    /// reviewed abandons it here. Each retired upload's pending record goes
+    /// with it, and its path becomes a deletion candidate unless something
+    /// else protects it (§17.8). Returns the retired queue ids.
+    pub async fn retire_abandoned<S: serde::Serialize + Send + 'static>(
+        &self,
+        in_flight: Vec<i64>,
+        subject: impl Fn(&FileRef) -> S + Send + 'static,
+    ) -> Result<Vec<i64>, DbError> {
+        // A read-only handle queues nothing and retires nothing.
+        let FileDatabaseAccess::Writer(database) = &self.access else {
+            return Ok(Vec::new());
+        };
+        // An idle run writes nothing: only work found takes the writer.
+        let work = database
+            .call(move |inner| {
+                inner.access.with_committed(|db| {
+                    Ok::<_, DbError>(
+                        !file_queue::abandoned(db)?.is_empty()
+                            || crate::pending_attachment::any_stale(
+                                db,
+                                &inner.access.write_schema,
+                            )?,
+                    )
+                })
+            })
+            .await?;
+        if !work {
+            return Ok(Vec::new());
+        }
+        database
+            .call(move |inner| {
+                // The released copies go once the writer is free (§21.2).
+                inner.with_files(Vec::new(), |writer, _| {
+                    writer.transaction(|db| {
+                        let schema = &inner.access.write_schema;
+                        crate::pending_attachment::review_all(db, schema)?;
+                        let mut retired = Vec::new();
+                        for (id, file) in file_queue::abandoned(db)? {
+                            if in_flight.contains(&id) {
+                                continue;
+                            }
+                            file_queue::complete(db, id)?;
+                            crate::pending::clear(db, &subject(&file))?;
+                            retired.push(id);
+                        }
+                        Ok::<_, DbError>(retired)
+                    })
+                })
+            })
+            .await
     }
     /// Record this device's first unmet condition for one file it reads,
     /// replacing an earlier reason, with its retry wait, or with none when it
@@ -259,6 +305,11 @@ impl FileDatabase {
     /// Durable queue, including files whose row changed after attachment.
     pub async fn uploads(&self) -> Result<Vec<FileUpload>, DbError> {
         self.read(file_queue::read).await
+    }
+    /// Every queued upload, abandoned attachments' included.
+    #[cfg(any(test, feature = "test-utils"))]
+    pub async fn all_uploads(&self) -> Result<Vec<FileUpload>, DbError> {
+        self.read(file_queue::read_all).await
     }
     /// Whether the app paused uploads, as persisted (E7).
     pub async fn uploads_paused(&self) -> Result<bool, DbError> {
@@ -370,9 +421,9 @@ impl FileDatabase {
     }
     /// Whether completing this queued upload would keep coven's own copy as
     /// the file's cache copy: the queue's source is that copy of app-provided
-    /// bytes, and the file is pinned while queued and still named by its row
-    /// (§17.6). A user's original is never read again after its upload
-    /// (§17.1), so it never answers yes.
+    /// bytes, and the file is pinned while queued and still its row's pending
+    /// attachment (§17.6). A user's original is never read again after its
+    /// upload (§17.1), so it never answers yes.
     /// Completion decides again in its own transaction; this lets the
     /// uploader write the copy first.
     pub async fn upload_keeps_copy(&self, file: &FileRef) -> Result<bool, DbError> {
@@ -393,18 +444,20 @@ impl FileDatabase {
             })
             .await
     }
-    /// Retire an upload once storage confirms its complete bytes (§17.7): one
-    /// transaction removes the queue row, its chunk hashes, the copy kept for
-    /// it and this device's pending record about the file. No app row, file
-    /// reference or write changes, so a row retargeted, moved or deleted
+    /// Complete an upload once storage confirms its complete bytes (§17.2,
+    /// §17.7): one local transaction writes the file into its row if its
+    /// pending attachment is still current, or abandons it, and removes the
+    /// queue row, its chunk hashes, the copy kept for it and this device's
+    /// pending record about the file. A row retargeted, moved or deleted
     /// meanwhile keeps its newer state. Afterwards this device reads the file
-    /// from the cache or storage.
+    /// from the cache or storage. A write that can't be made now fails the
+    /// transaction, and the upload stays queued.
     ///
-    /// A file pinned while queued and still named by its row takes `copy`,
-    /// the whole encrypted file the uploader wrote from coven's own copy, as
-    /// its pinned cache copy in that transaction (§17.6). Without one, the
-    /// pin becomes the stored file's carried pin, kept whole from storage. A
-    /// copy nothing needs any more is removed with the queue's own.
+    /// A file pinned while queued whose row the transaction names it in takes
+    /// `copy`, the whole encrypted file the uploader wrote from coven's own
+    /// copy, as its pinned cache copy (§17.6). Without one, the pin becomes
+    /// the stored file's carried pin, kept whole from storage. A copy nothing
+    /// needs any more is removed with the queue's own.
     pub async fn complete_upload<S: serde::Serialize + Send + 'static>(
         &self,
         id: i64,
@@ -758,7 +811,8 @@ impl Drop for CacheReservation {
             .release_file_reservations(std::iter::once(&self.name));
     }
 }
-/// One upload's completion and its cache copy, under the writer (§17.7).
+/// One upload's completion and its cache copy (§17.2, §17.7): a local write
+/// that names the file in its row, or abandons it, then retires the upload.
 /// The copy's bytes are checked first, with no writer held (§21.2).
 fn complete<S: serde::Serialize>(
     inner: &DatabaseInner,
@@ -770,38 +824,52 @@ fn complete<S: serde::Serialize>(
         .as_deref()
         .map(|copy| cache::whole_size(&inner.access.directory, &copy.file, &copy.name))
         .transpose()?;
-    let (result, chosen) = inner.access.with_writer(|writer| {
-        let schema = &inner.access.write_schema;
-        let result = writer.transaction(|db| {
-            let (reference, pinned) = file_queue::complete(db, id)?;
-            match copy.as_deref().zip(size) {
-                Some((copy, size)) => {
-                    if cache::id(&copy.file)? != cache::id(&reference)? {
-                        return Err(DbError::Invariant {
-                            what: "an upload keeps a cache copy of its own file",
-                        });
-                    }
-                    // A pin keeps a file only while its row names it.
-                    if pinned && file_ref::naming(db, schema, &reference)?.is_some() {
-                        cache::publish(db, &reference, &copy.name, size, true)?;
-                    }
-                }
-                None => {
-                    if pinned {
-                        cache::request_pin(db, &reference)?;
-                    }
-                }
-            }
-            crate::pending::clear(db, subject)
-        });
+    let kept = copy
+        .as_deref()
+        .zip(size)
+        .map(|(copy, size)| (copy.file.clone(), copy.name.clone(), size));
+    let subject = serde_json::to_vec(subject).map_err(DbError::PendingEncoding)?;
+    inner.with_files(Vec::new(), |writer, files| {
+        let result = writer.local_write(
+            &inner.access.write_schema,
+            inner.access.device,
+            inner.clock.now(),
+            files,
+            |_sql| {
+                files.complete_upload(
+                    id,
+                    Box::new(move |db, reference, pinned, written| {
+                        // A pin keeps the file only when the row now names it.
+                        let pinned = pinned && written;
+                        match &kept {
+                            Some((file, name, size)) => {
+                                if cache::id(file)? != cache::id(reference)? {
+                                    return Err(DbError::Invariant {
+                                        what: "an upload keeps a cache copy of its own file",
+                                    });
+                                }
+                                if pinned {
+                                    cache::publish(db, reference, name, *size, true)?;
+                                }
+                            }
+                            None => {
+                                if pinned {
+                                    cache::request_pin(db, reference)?;
+                                }
+                            }
+                        }
+                        crate::pending::clear_encoded(db, subject)
+                    }),
+                )
+            },
+        );
         // Published, its name is the cache's; otherwise its recorded removal
         // goes with the queue's copy.
         if let Some(copy) = copy {
             copy.release(inner);
         }
-        Ok::<_, DbError>((result, super::released(writer, &inner.staging)))
-    })?;
-    inner.finish_removals(result, chosen)
+        result
+    })
 }
 /// Find a queued file's source under the writer, then open and check its
 /// bytes once the writer is free: checking reads the whole file (§21.2).
@@ -814,6 +882,34 @@ fn open_upload_source<L>(
         .map(|source| file_ref::open_source(&access.directory, file, source))
         .transpose()
 }
+impl Database {
+    /// This device's abandoned attachments, oldest first (§17.2, E8).
+    pub async fn abandoned_attachments(
+        &self,
+    ) -> crate::CovenResult<Vec<crate::AbandonedAttachment>> {
+        self.read(|sql| sql.abandoned_attachments()).await
+    }
+    /// The same query, live.
+    pub fn subscribe_abandoned_attachments(
+        &self,
+    ) -> crate::LiveQuery<Vec<crate::AbandonedAttachment>> {
+        self.subscribe(|sql| sql.abandoned_attachments())
+    }
+    /// Forget these records; ones already gone are ignored.
+    pub async fn dismiss_abandoned_attachments(
+        &self,
+        records: Vec<crate::AbandonedAttachment>,
+    ) -> crate::CovenResult<()> {
+        Ok(self
+            .call(move |inner| {
+                inner.access.with_writer(|writer| {
+                    writer.transaction(|db| crate::pending_attachment::dismiss(db, &records))
+                })
+            })
+            .await?)
+    }
+}
+
 fn changed(count: usize) -> Result<(), DbError> {
     if count == 1 {
         Ok(())

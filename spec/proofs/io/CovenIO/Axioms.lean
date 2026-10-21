@@ -13,9 +13,7 @@ import CovenIO
 #print axioms CovenIO.Downloads.permanent_storage_never_retries
 #print axioms CovenIO.Downloads.person_waits_for_connection
 #print axioms CovenIO.Downloads.connection_retry_keeps_cooldown
-#print axioms CovenIO.Downloads.removed_not_waiting
-#print axioms CovenIO.Downloads.replaced_not_waiting
-#print axioms CovenIO.Downloads.active_absence_retries
+#print axioms CovenIO.Downloads.absence_never_waits
 #print axioms CovenIO.Downloads.eviction_preserves_refusal
 #print axioms CovenIO.Downloads.completed_eviction_does_not_refill
 #print axioms CovenIO.Downloads.key_wait_names_parent

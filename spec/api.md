@@ -1852,13 +1852,14 @@ impl FileDecl {
     pub fn with_size_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding the file's content hash, the SHA-256 of its bytes,
-    /// which coven fills in (§17.3). Must allow NULL; app SQL cannot assign it.
-    /// Defaults to `hash`.
+    /// which coven fills in when the file's upload completes (§17.2, §17.3).
+    /// Must allow NULL; app SQL cannot assign it. Defaults to `hash`.
     pub fn with_hash_column(self, column: impl Into<String>) -> Self;
 
     /// The column holding the fixed path, uploader and file key chosen by
-    /// the attaching write (§17.2, D12). `file_status` checks availability
-    /// without changing this column.
+    /// the attaching write, which coven fills in when the file's upload
+    /// completes (§17.2, D12). `file_status` checks availability without
+    /// changing this column.
     /// Must allow NULL; app SQL cannot assign it. Defaults to `location`.
     pub fn with_location_column(self, column: impl Into<String>) -> Self;
 
@@ -1950,7 +1951,9 @@ impl WriteBatch {
     /// never has to fit in memory. The write must give a row of a table
     /// declared under `namespace` this id in its id column; a staged file
     /// no row names, or a row naming an id neither staged nor kept, fails
-    /// the write. Coven fills that row's size, hash and where-columns.
+    /// the write. The write records the row's pending attachment; the write
+    /// that completes the upload fills its size, hash and where-columns
+    /// (§17.2).
     pub fn put_file(
         &mut self,
         namespace: impl Into<String>,
@@ -2010,8 +2013,10 @@ impl SqlContext<'_, '_> {
         params: &[(&str, &dyn ToSql)],
     ) -> Result<(), DbError>;
 
-    /// Records a prepared user-provided file on a row the write already has.
-    /// Fails if the row's size column disagrees with the file.
+    /// Records a prepared user-provided file on a row the write already has,
+    /// as the row's pending attachment until its upload completes (§17.2).
+    /// Fails if the row's size column disagrees with the file. The row's
+    /// four file columns keep their values from before the write until then.
     pub fn register_user_file(
         &self,
         table: &str,
@@ -2021,7 +2026,8 @@ impl SqlContext<'_, '_> {
 
     /// Forgets the user-provided file recorded on a row and clears its hash
     /// and where-columns to NULL. All four file columns go in the write
-    /// (§17.1). The original is untouched.
+    /// (§17.1). It also abandons the row's pending attachment, if any
+    /// (§17.2). The original is untouched.
     pub fn clear_user_file(&self, table: &str, key: impl Into<RowKey>) -> Result<(), DbError>;
 
     /// Checks that a file reference taken earlier still names the row's
@@ -3704,10 +3710,13 @@ impl CovenHandle {
   - The write commits at once on this device; its moved rows' file
     references stay fixed ([§17.2](coven.md#172-attaching-a-file)).
 - Files enter the upload queue as the attaching write commits, including
-  with no storage connected. That write fixes the path and key. Upload
-  completion changes no row or `FileRef`; `file_status` derives availability
-  ([§17.2](coven.md#172-attaching-a-file)). Pinning and caching
-  change no file reference either.
+  with no storage connected. That write fixes the path and key and records
+  the row's pending attachment; the row's file columns stay as they were.
+  Upload completion writes them as a new local write, or abandons the
+  attachment if this device has seen a newer change to the row's file
+  ([§17.2](coven.md#172-attaching-a-file)). A `FileRef` taken from the
+  pending attachment stays valid through completion. Pinning and caching
+  change no file reference.
 - Upload attempts read the source again, checking its size and whole-file
   content hash before transfer, and the first-read hash of each plaintext
   chunk before encryption. A changed user original reports `UserFileChanged`;
@@ -3801,10 +3810,12 @@ loop {
 ### E8 Files and the cache
 
 - A *file reference*, `FileRef`, names one row's file as of that row's
-  current version, so a later change to the row can't redirect a read.
+  current version, so a later change to the row can't redirect a read. On the
+  attaching device, a row's pending attachment is its file until the upload
+  completes ([§17.2](coven.md#172-attaching-a-file)).
 - Coven reads a file from wherever it is: the user's original, coven's own
   copy, the cache, or storage ([§17](coven.md#17-files)).
-
+- An abandoned attachment stays listed until the app dismisses it.
 - A device caches a file when it reads it; nothing downloads a file because
   its row arrived. Pinning keeps a file whole on the device
   ([§17.6](coven.md#176-cache-and-pinning)).
@@ -3831,16 +3842,18 @@ pub struct PinProgress {
 }
 
 impl CovenHandle {
-    /// The file a row carries, as of its current file version. Its four file
-    /// columns, audience and version are read in one committed state. A row
-    /// without a file returns `DbError::FileAbsent`; malformed stored
-    /// file facts return `DbError::DamagedDatabase`.
+    /// The file a row carries, as of its current file version: on the
+    /// attaching device, the row's current pending attachment, otherwise its
+    /// four file columns. They, its audience and version are read in one
+    /// committed state. A row without a file returns `DbError::FileAbsent`;
+    /// malformed stored file facts return `DbError::DamagedDatabase`.
     pub async fn file_ref(&self, table: &str, key: impl Into<RowKey>) -> Result<FileRef, DbError>;
 
-    /// Reads the fixed path's metadata and checks the uploader's current state (§17.4).
-    /// This device also knows its own source failures. Checks the reference against its row.
-    /// Network failures and denied access are errors, not Missing; an object
-    /// at the fixed path of any size but the file's complete one is `Integrity`.
+    /// Reads the fixed path's metadata (§17.4); this device's own pending
+    /// attachment is judged locally, with no storage request. Checks the
+    /// reference against its row. Network failures and denied access are
+    /// errors, not Missing; an object at the fixed path of any size but the
+    /// file's complete one is `Integrity`.
     pub async fn file_status(&self, file: &FileRef) -> Result<FileStatus, FileReadError>;
 
     /// Reads a whole file, checking it against its row.
@@ -3886,6 +3899,36 @@ impl CovenHandle {
     /// A declared namespace's cache budget, in bytes; each evicts on its own.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError>;
+
+    /// This device's abandoned attachments, oldest first, read offline too
+    /// (§17.2). Each stays until the app dismisses it.
+    pub async fn abandoned_attachments(&self) -> CovenResult<Vec<AbandonedAttachment>>;
+
+    /// The same pre-built query, live.
+    pub fn subscribe_abandoned_attachments(&self) -> LiveQuery<Vec<AbandonedAttachment>>;
+
+    /// Forgets these records. Records already gone are ignored.
+    pub async fn dismiss_abandoned_attachments(&self, records: &[AbandonedAttachment]) -> CovenResult<()>;
+}
+
+/// A file this device attached whose row took a newer change before its
+/// upload completed, so the row never named it (§17.2). Its stored bytes,
+/// if any, are deleted under §17.8.
+pub struct AbandonedAttachment {
+    pub table: String,
+    pub key: RowKey,
+    /// The file's fixed id; its uploader is this device.
+    pub file: FileId,
+    pub reason: AbandonReason,
+}
+
+pub enum AbandonReason {
+    /// The row now names another file, or another file was attached here.
+    Replaced,
+    /// The row's file was cleared or its file columns changed.
+    Cleared,
+    /// The row was deleted, moved to another audience or taken out.
+    RowGone,
 }
 
 impl FileRef {
@@ -3907,19 +3950,22 @@ impl FileRef {
     pub fn content_hash(&self) -> coven_crypto::ContentHash;
 }
 
-/// Current remote availability; never persisted in the app row (§17.4).
+/// Current availability; never persisted in the app row (§17.4).
 pub enum FileStatus {
     Available,
-    /// Confirmed absent; the uploader is active, with no source failure known here.
-    Uploading { device: DeviceId },
-    /// Confirmed absent, with a reason the uploader cannot supply it.
+    /// This device's own pending attachment, still queued here. No other
+    /// device has its reference yet.
+    Uploading,
+    /// Unreadable from storage, with the reason.
     Missing { device: DeviceId, reason: FileMissingReason },
 }
 
 pub enum FileMissingReason {
-    DeviceRemoved,
-    DeviceReplaced,
-    /// Only known on the device that attached the file.
+    /// Storage confirms nothing at the path a row names: the provider lost
+    /// it. Nothing brings it back on its own; the app can attach it again.
+    Lost,
+    /// This device's pending attachment, whose source failed; its upload
+    /// retries (§17.7).
     Source(FileSourceFailure),
 }
 
@@ -3949,10 +3995,9 @@ pub enum FileReadError {
     UpdateRequired(RequiredUpdate),
     /// Remote status or uncached bytes were requested with no storage connected.
     NoStorage,
-    /// Storage confirms absence; the uploader is active, with no local source failure.
-    Uploading { id: String, device: DeviceId },
-    /// Storage confirms absence and the uploader cannot supply it (§17.4).
-    Missing { id: String, device: DeviceId, reason: FileMissingReason },
+    /// Storage confirms nothing at the path a row names: the provider lost
+    /// it (§17.4). Its pending reason is `FileUnavailable(Lost)`.
+    Missing { id: String, device: DeviceId },
     /// A user-provided file is gone from its recorded path.
     UserFileMissing { id: String, path: PathBuf },
     /// A user-provided file's size, modification time or checked content no

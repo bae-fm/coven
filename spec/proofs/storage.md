@@ -61,26 +61,47 @@ retain the journal and prevent early slot deletion.
 ## Files
 
 [Files.lean](storage/CovenStorage/Files.lean) distinguishes absence, damage,
-read failure, availability and active upload. `available_iff` and
-`wrong_size_is_damage` characterize status; `read_absence_matches_status`,
-`read_agrees_with_status`, `wrong_size_read_is_damage`, `past_end_is_damage`,
-`present_never_absent` and `complete_object_reads` connect status with range
-reads. An error cannot become an absent or valid object.
+read failure, availability and this device's own pending attachment.
+`available_iff` and `wrong_size_is_damage` characterize status;
+`absence_is_lost` shows that a confirmed absence at a path a row names is
+missing, never uploading, and `uploading_only_here` and
+`pending_needs_no_storage` that only the attaching device's own pending
+attachment is uploading, judged with no storage request.
+`read_absence_matches_status`, `read_agrees_with_status`,
+`wrong_size_read_is_damage`, `past_end_is_damage`, `present_never_absent` and
+`complete_object_reads` connect status with range reads. An error cannot become
+an absent or valid object.
 
-The upload owns its captured reference and source independently of the row.
-`steps_keep_upload` and `inflight_upload_settles` show that deleting or
-retargeting the row leaves that upload intact until confirmation. Completion
-changes no row. `completion_retires_both` and `completion_idempotent` cover
-removing upload work and its pending record together. Unequal bytes leave the
-queue intact and refuse that file attempt; they do not request a device reset.
-`encrypted_chunk_is_captured` and `file_retries_fixed` require
-verified original chunks before encryption and preserve retry plaintext.
+The attachment model follows one device: merged rows whose file cells carry
+the step that last set them, the upload queue, pending attachments, abandoned
+ones, what storage holds and the deletion candidates. `attach_changes_no_row`
+shows the attaching write names no file. `completion_writes_current` shows a
+completion writes exactly the queued file, which storage holds, when the row's
+pending attachment is current; `stale_completion_writes_nothing` that it
+writes nothing otherwise. `newer_change_wins` and `reattach_wins` show that
+once this device sees a newer change to the row's file (its own write, a
+write applied from another device, a delete, or another attachment), no
+later step but attaching the same upload again lets that upload's completion
+change a row. `completion_idempotent`, `completion_retires_queue` and
+`unconfirmed_changes_nothing` show a completion happens once, in the
+transaction that retires its upload, and that an unconfirmed attempt or a
+crash before it changes nothing. Unequal bytes leave the queue intact and
+refuse that file attempt; they do not request a device reset.
+
+Two invariants hold over every step. `steps_named_stored`: every file a row
+names is in storage, given that other devices' writes name only stored files.
+`steps_reachable`: every stored path is named by a row, held by the upload
+queue, or a deletion candidate, so an abandoned or retired upload's bytes stay
+within §17.8's reach. `encrypted_chunk_is_captured` and `file_retries_fixed`
+require verified original chunks before encryption and preserve retry
+plaintext.
 
 `filesRunner` supplies the file attachment, completion and status comparisons
 in coven-sync through `COVEN_FILES_LEAN`. The model assumes truthful source
-checks, authenticated chunks and atomic local transactions. The removed-device
-folder scan is proved in [IO](io.md#removed-device-file-scan); reference-based
-file deletion also needs the evidence required by §17.8.
+checks, authenticated chunks and atomic local transactions, and keeps lost
+values and snapshots out: they only add protection, and deleting a candidate
+still needs the evidence §17.8 requires. The removed-device folder scan is
+proved in [IO](io.md#removed-device-file-scan).
 
 ## Hybrid timestamps and retry time
 

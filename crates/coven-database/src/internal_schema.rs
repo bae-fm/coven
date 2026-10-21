@@ -435,6 +435,33 @@ macro_rules! coven_tables {
                     ON DELETE CASCADE
             ) STRICT, WITHOUT ROWID;
         ");
+        // Pending attachments (§17.2), one per row, each waiting for its
+        // queued upload: the row's audience, merged generation, and the write
+        // ids that set its four file cells as the attaching write left them.
+        $visit!(_coven_pending_attachments, "
+            CREATE TABLE _coven_pending_attachments (
+                upload INTEGER PRIMARY KEY REFERENCES _coven_file_uploads(id) ON DELETE CASCADE,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                audience TEXT NOT NULL,
+                generation BLOB NOT NULL CHECK(length(generation)=8),
+                setters BLOB NOT NULL,
+                UNIQUE(table_name,key)
+            ) STRICT;
+        ");
+        // Attachments abandoned for a newer change to their row's file, until
+        // the app dismisses them (§17.2).
+        $visit!(_coven_abandoned_attachments, "
+            CREATE TABLE _coven_abandoned_attachments (
+                id INTEGER PRIMARY KEY,
+                table_name TEXT NOT NULL,
+                key BLOB NOT NULL,
+                device BLOB NOT NULL CHECK(length(device)=8),
+                file BLOB NOT NULL CHECK(length(file)=16),
+                reason TEXT NOT NULL CHECK(reason IN ('replaced','cleared','gone')),
+                UNIQUE(file)
+            ) STRICT;
+        ");
         // Fixed file paths awaiting a storage-deletion decision (§17.8): the
         // transaction ending a path's last local protection adds it, so
         // retention never lists files/.

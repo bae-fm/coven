@@ -232,13 +232,14 @@ async fn unsent_work_is_what_deleting_refuses_until_uploads_confirm() {
         Err(StoreDeletionError::Unsent(refused)) => assert_eq!(refused, work),
         other => panic!("expected the unsent refusal, got {other:?}"),
     }
-    // Confirmed file uploads leave the writes, which only a sync pass sends.
+    // A confirmed upload is one more write, naming the file in its row
+    // (§17.2); only a sync pass sends the writes.
     handle.set_uploads_paused(false).await.unwrap();
     handle.retry_uploads_now().await.unwrap();
     assert_eq!(
         handle.unsent_work().await.unwrap(),
         UnsentWork {
-            writes: 2,
+            writes: 3,
             files: 0
         }
     );

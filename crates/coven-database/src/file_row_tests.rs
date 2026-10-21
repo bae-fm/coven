@@ -80,6 +80,7 @@ async fn invalid_file_lookups_report_the_declaration_and_key_shape() {
         matches!(db.file_ref("files", "7").await, Err(DbError::FileAbsent { table, key }) if table == "files" && key == RowKey::from("7"))
     );
     attach(&db, vec![1], true).await.unwrap();
+    crate::file_write::tests::complete_uploads(&db).await;
     let error = db
         .write(|sql| {
             sql.execute("UPDATE files SET size=2", [])?;
@@ -123,7 +124,10 @@ async fn invalid_original_rows_report_id_size_and_attachment_changes() {
             .await
             .unwrap_err();
         match case {
-            0 => assert!(matches!(error, DbError::FileIdMissing { column } if column == "file")),
+            0 => assert!(
+                matches!(error, DbError::FileIdMissing { ref column } if column == "file"),
+                "{error:?}"
+            ),
             1 => assert!(
                 matches!(error, DbError::FileSizeInvalid { column, value: types::Value::Integer(-1) } if column == "size")
             ),
@@ -148,6 +152,7 @@ async fn inconsistent_hash_and_location_report_the_row_and_refuse_the_write() {
             .await
             .unwrap();
         attach(&db, vec![1], true).await.unwrap();
+        crate::file_write::tests::complete_uploads(&db).await;
         // Inject damage behind app SQL's managed-column authorization.
         db.commit_writer(|sql| {
             sql.internal_execute(&format!("UPDATE files SET {column}=NULL"), [])
@@ -170,7 +175,8 @@ async fn inconsistent_hash_and_location_report_the_row_and_refuse_the_write() {
                 .unwrap(),
             None
         );
-        assert_eq!(owned_paths(&store).len(), 1);
+        // The completed upload released coven's copy.
+        assert!(owned_paths(&store).is_empty());
         db.close().await.unwrap();
     }
 }

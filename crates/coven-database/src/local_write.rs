@@ -40,6 +40,7 @@ impl DatabaseConnection {
             {
                 let _scope = database.authorization.write();
                 files.clear_null_ids(&captured)?;
+                files.keep_files(&captured)?;
             }
             let surviving = assignments.finish(database)?;
             let events = phase.finish_app(&surviving)?;

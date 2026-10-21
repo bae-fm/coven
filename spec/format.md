@@ -1920,8 +1920,8 @@ kind:u8 (38) | version:u16 | size:u64 | chunks
 - `size` is the file's plaintext size.
 - Chunks are `ciphertext | tag:16 bytes`, each 65,536 bytes (64 KiB) of the file
   except the last, which may be shorter. A file of size 0 has none.
-- Each chunk is XChaCha20-Poly1305 under the file's own key
-  ([§17.2](coven.md#172-attaching-a-file)). Its nonce is its index, as a 24-byte
+- Each chunk is XChaCha20-Poly1305 under the file's own key, chosen when it
+  was attached ([§17.2](coven.md#172-attaching-a-file)). Its nonce is its index, as a 24-byte
   big-endian number. Its associated data is D11's context of
   `coven/file-chunk/v1`, the path, the 11-byte cleartext header
   `kind | version | size`, and the index as an eight-byte big-endian string.
@@ -1934,7 +1934,8 @@ size (§17.4). Chunk 2 starts at 11 + 2 × 65,552 = 131,115.
 
 ### The file reference
 
-The attaching write sets the row's where column to the text:
+The write that completes the file's upload sets the row's where column to the
+text ([§17.2](coven.md#172-attaching-a-file)):
 
 ```
 file <device id> <file id> <key in lowercase hex>
@@ -1952,7 +1953,9 @@ key.
 
 **Edge cases.**
 
-- Upload completion, pinning and caching never change this reference.
+- No write carries a reference before its object is stored. Until then the
+  attaching device keeps it in a local pending attachment, which never syncs.
+- Pinning and caching never change this reference.
 - File status follows [§17.4](coven.md#174-a-files-status); a write doesn't
   record availability.
 - A row without a file has NULL here, and in its hash column.

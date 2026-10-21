@@ -91,7 +91,7 @@ publishes no completed file or pin.
 | --- | --- | --- |
 | `NoStorage` | no storage connected | |
 | `Storage { .. }` | a network or provider failure | retried by its failure class |
-| `Waits(Object(path))` | storage confirms absence; the uploader is active | waits for the upload |
-| `FileUnavailable(..)` | the uploader was removed or replaced | needs the app to act |
+| `FileUnavailable(Lost)` | storage confirms nothing at the path a row names | needs the app to act |
+| `FileUnavailable(Source(..))` | this device's pending attachment's original moved or changed | the upload retries |
 | `Refused(Decryption)`, `Refused(ContentHash)` | a complete chunk or the whole file failed its check | not retried on the same bytes |
 | `Failed(Disk)` | writing the local cache failed | |

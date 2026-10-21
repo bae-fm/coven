@@ -134,18 +134,32 @@ staged, fails the write.
 
 The attaching write picks the file's random id and key, records this device as
 its uploader, and fixes its storage path, `<store>/files/<device>/<file>`. It
-queues the upload in the same transaction, even with no storage connected.
+queues the upload in the same transaction, even with no storage connected, and
+records a *pending attachment* on this device. It doesn't change the row's
+file: other devices see the row as it was, with no file or with the one it had
+before. On this device, the pending attachment is the row's file:
+`file_ref` returns it, and reads use the original or coven's copy.
 
-No later write marks the file uploaded, and nothing changes the row when the
-transfer ends. So a slow upload can't overwrite a newer file: Ana attaches
-photo A to row 7, then Ben replaces it with photo B. Ana's upload of A finishes
-later. It changes no row and can't put A back over B.
+When the upload completes, one more write names the file in the row, and other
+devices can read it as soon as they receive that write. No device ever holds a
+reference to bytes that aren't stored yet.
+
+A newer change wins. Ana attaches photo A to row 7, then Ben replaces it with
+photo B. If Ana's phone applies Ben's write before A's upload finishes, A is
+abandoned: its completion writes nothing, and B stays. The same goes for a
+later write of Ana's own that clears or replaces the file, deletes the row or
+moves it to another audience. Each abandonment is listed by
+`abandoned_attachments()` until the app dismisses it with
+`dismiss_abandoned_attachments`, so the app can tell the person and offer to
+attach the file again. If Ben's write reaches Ana's phone only after her upload
+completed, the two writes are concurrent: the later one wins, and the other
+file stays visible as a lost value.
 
 ## Uploads
 
 A separate upload worker sends queued files, outside sync passes, so a pass
 never waits for a file and a file never holds up the write that attached it.
-Rows can arrive on other devices before their files.
+An upload whose attachment was abandoned is retired without sending more.
 
 Each attempt, retries included, checks the source's size and whole-file hash,
 and a user original's modification time, before sending any bytes. As it
@@ -182,15 +196,17 @@ or one that has been removed, sends nothing.
 
 ## File status
 
-Rows can arrive before their files, so the app needs to know whether a file can
-be read yet. `handle.file_status(&file)` reads the object's metadata at its
-fixed path, then checks its uploader:
+A row names a file only once it is stored, so a file can be read as soon as
+its row names it. `handle.file_status(&file)` still says whether storage holds
+it, reading the object's metadata at its fixed path. On the attaching device, a
+pending attachment is judged locally, with no storage request:
 
-| `FileStatus` | Storage says | And |
-| --- | --- | --- |
-| `Available` | an object of the file's complete encrypted size | |
-| `Uploading { device }` | nothing at the path | the uploader is an active device; it may be offline or paused |
-| `Missing { device, reason }` | nothing at the path | the uploader was removed or replaced, or this device is the uploader and its source failed |
+| `FileStatus` | When |
+| --- | --- |
+| `Available` | storage holds an object of the file's complete encrypted size |
+| `Uploading` | this device's own pending attachment, still queued here |
+| `Missing { device, reason: Lost }` | storage confirms nothing at the path a row names: the provider lost it |
+| `Missing { device, reason: Source(..) }` | this device's pending attachment, whose original moved or changed; the upload retries |
 
 An object of any other size at the path is damage
 (`FileReadError::Integrity`), never available and never absent. A network or
@@ -247,8 +263,7 @@ itself waits with `KeyUnavailable`, and no `FileRef` exists for it.
 | --- | --- |
 | `NoStorage` | the read needs storage and none is connected |
 | `Storage(..)` | a network or provider failure, with its native cause |
-| `Uploading { id, device }` | storage confirms absence; the uploader is active |
-| `Missing { id, device, reason }` | storage confirms absence; the uploader can't supply it |
+| `Missing { id, device }` | storage confirms nothing at the path a row names |
 | `UserFileMissing`, `UserFileChanged` | the user's original moved or changed |
 | `Integrity { id }` | a chunk, a local copy or the stored object failed its check |
 | `RangeOutOfBounds` | the range lies outside the file |

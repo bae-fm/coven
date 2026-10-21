@@ -98,12 +98,28 @@ pub(crate) fn read(
     if file.provenance != crate::Provenance::UserProvided {
         return Ok(None);
     }
-    let (key, values) = match crate::file_row::lookup(db, schema, table, key) {
+    let (key, _) = match crate::file_row::lookup(db, schema, table, key) {
         Ok(row) => row,
         Err(DbError::Sqlite(rusqlite::Error::QueryReturnedNoRows)) => return Ok(None),
         Err(error) => return Err(error),
     };
-    let records = db.query("SELECT path,size,modified_at FROM _coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&key.0,&key.1,&file.id,crate::file_row::identity(file,&values)?), |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,Vec<u8>>(2)?)))?;
+    // The row's file on this device: its pending attachment until the
+    // upload completes (§17.2).
+    let current = match crate::file_ref::read(db, schema, &key.0, &crate::file_row::key(&key)?) {
+        Ok(current) => current,
+        Err(DbError::FileAbsent { .. }) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    let (id, size, hash, location) = current.columns();
+    let identity = crate::file_row::identity_values(
+        id,
+        &coven_format::value::Value::Integer(
+            i64::try_from(size).map_err(|_| DbError::DamagedDatabase)?,
+        ),
+        &coven_format::value::Value::Blob(hash.as_bytes().to_vec()),
+        location,
+    )?;
+    let records = db.query("SELECT path,size,modified_at FROM _coven_user_files WHERE table_name=?1 AND key=?2 AND column_name=?3 AND identity=?4", (&key.0,&key.1,&file.id,identity), |row| Ok((row.get::<_,Vec<u8>>(0)?,row.get::<_,Vec<u8>>(1)?,row.get::<_,Vec<u8>>(2)?)))?;
     records
         .into_iter()
         .next()

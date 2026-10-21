@@ -53,9 +53,9 @@ impl FilesInner {
         failure: FileFailure<'_>,
     ) -> PendingReason {
         let reason = match &failure {
-            FileFailure::Held(error) => self.transfer_reason(file, copy, error),
-            FileFailure::Returned(error) => self.transfer_reason(file, copy, error),
-            FileFailure::ReturnedRead(error) => self.read_reason(file, copy, error),
+            FileFailure::Held(error) => self.transfer_reason(copy, error),
+            FileFailure::Returned(error) => self.transfer_reason(copy, error),
+            FileFailure::ReturnedRead(error) => self.read_reason(copy, error),
         };
         let failure = match failure {
             FileFailure::Held(error) => Failure::Held(held(error)),
@@ -68,21 +68,16 @@ impl FilesInner {
         reason
     }
 
-    fn transfer_reason(
-        &self,
-        file: &FileRef,
-        copy: FileCopy,
-        error: &TransferError,
-    ) -> PendingReason {
+    fn transfer_reason(&self, copy: FileCopy, error: &TransferError) -> PendingReason {
         match error {
             TransferError::Refused(refusal) => PendingReason::Refused(refusal.clone()),
-            TransferError::File(error) => self.read_reason(file, copy, error),
+            TransferError::File(error) => self.read_reason(copy, error),
         }
     }
 
     /// Every variant is matched by name, so a new one is classified here
     /// before it can reach a record.
-    fn read_reason(&self, file: &FileRef, copy: FileCopy, error: &FileReadError) -> PendingReason {
+    fn read_reason(&self, copy: FileCopy, error: &FileReadError) -> PendingReason {
         use FileCopy::{Original, Stored};
         match (copy, error) {
             (_, FileReadError::NoStorage) => PendingReason::NoStorage,
@@ -120,27 +115,17 @@ impl FilesInner {
                     cause: cause.clone(),
                 })
             }
-            (Stored, FileReadError::Uploading { .. }) => {
-                PendingReason::Waits(Prerequisite::Object(coven_storage::ObjectPath::file(
-                    self.directory.id(),
-                    file.uploader(),
-                    file.id(),
-                )))
-            }
-            (Stored, FileReadError::Missing { reason, .. }) => {
-                PendingReason::FileUnavailable(reason.clone())
+            (Stored, FileReadError::Missing { .. }) => {
+                PendingReason::FileUnavailable(FileMissingReason::Lost)
             }
             (Stored, FileReadError::UpdateRequired(update)) => {
                 PendingReason::UpdateRequired(*update)
             }
             // Only reading the stored copy meets these; on the original
             // they are a local invariant failing.
-            (
-                Original,
-                FileReadError::Uploading { .. }
-                | FileReadError::Missing { .. }
-                | FileReadError::UpdateRequired(_),
-            ) => PendingReason::Failed(LocalFailure::Database),
+            (Original, FileReadError::Missing { .. } | FileReadError::UpdateRequired(_)) => {
+                PendingReason::Failed(LocalFailure::Database)
+            }
         }
     }
 }

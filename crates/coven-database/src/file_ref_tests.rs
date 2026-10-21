@@ -96,6 +96,8 @@ async fn fixed_references_retain_the_key_identity_and_refuse_malformed_encodings
         .await
         .unwrap();
     attach(&db, b"original".to_vec(), true).await;
+    // The row names the file once its upload completes.
+    crate::file_write::tests::complete_uploads(&db).await;
     let device_ref = db.file_ref("files", "7").await.unwrap();
     let id = uuid::Uuid::from_u128(7);
     let location = format!("file 1 {id} {}", "ab".repeat(32));
@@ -400,6 +402,9 @@ async fn custom_columns_and_inherited_audience_are_read_together_with_composite_
         reader.file_ref("files", key.clone()).await.unwrap(),
         reference
     );
+    // Stored, the file moves with its row; a pending one would be abandoned.
+    crate::file_write::tests::complete_uploads(&db).await;
+    assert_eq!(db.file_ref("files", key.clone()).await.unwrap(), reference);
     db.write(|sql| {
         sql.execute("UPDATE notes SET audience='store'", [])?;
         Ok(())
@@ -504,13 +509,12 @@ async fn a_downloaded_clear_drops_original_facts_and_invalidates_the_reference()
     })
     .await
     .unwrap();
-    a.receive(crate::write::tests::records(&a)[0].clone().into())
-        .await
-        .unwrap();
+    crate::file_write::tests::complete_uploads(&a).await;
+    for record in crate::write::tests::records(&a) {
+        a.receive(record.clone().into()).await.unwrap();
+        b.receive(record.into()).await.unwrap();
+    }
     let reference = a.file_ref("files", "7").await.unwrap();
-    b.receive(crate::write::tests::records(&a).remove(0).into())
-        .await
-        .unwrap();
     assert!(b.user_file("files", "7").await.unwrap().is_none());
     b.write(|sql| sql.clear_user_file("files", "7"))
         .await

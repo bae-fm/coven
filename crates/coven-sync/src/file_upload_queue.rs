@@ -75,6 +75,11 @@ impl Default for UploadsInFlight {
     }
 }
 impl UploadsInFlight {
+    /// The queue ids being sent now.
+    pub(crate) fn current(&self) -> Vec<i64> {
+        self.ids().iter().copied().collect()
+    }
+
     fn ids(&self) -> std::sync::MutexGuard<'_, BTreeSet<i64>> {
         self.shared.ids.lock().expect("uploads in flight poisoned")
     }

@@ -72,23 +72,26 @@ async fn a_circle_deletion_releases_originals_and_keeps_queued_sources() {
     crate::tests::delete_circle(&db, circle).await.unwrap();
     assert_eq!(local_count(&db, "originals"), 0);
     assert_eq!(local_count(&db, "copies"), 0);
-    // Hiding released nothing and paused nothing: both files stay queued
-    // with their sources.
+    // Hiding the rows abandoned both pending attachments; their uploads
+    // stay queued with their sources until their attempts end.
     assert_eq!(local_count(&db, "_coven_user_files"), 0);
     assert_eq!(local_count(&db, "_coven_device_files"), 1);
     assert_eq!(owned_paths(&store), paths);
-    let queued = crate::FileDatabase::new(db.clone())
+    assert!(crate::FileDatabase::new(db.clone())
         .uploads()
         .await
-        .unwrap();
-    assert_eq!(queued.len(), 2);
-    for upload in &queued {
-        assert!(crate::FileDatabase::new(db.clone())
-            .open_upload_source(&upload.file)
+        .unwrap()
+        .is_empty());
+    assert_eq!(local_count(&db, "_coven_file_uploads"), 2);
+    assert_eq!(
+        db.abandoned_attachments()
             .await
             .unwrap()
-            .is_some());
-    }
+            .iter()
+            .map(|abandoned| abandoned.reason)
+            .collect::<Vec<_>>(),
+        [crate::AbandonReason::RowGone; 2]
+    );
     // The hidden rows' files upload like any other; that releases only the
     // queue's own copy.
     complete_uploads(&db).await;
@@ -144,6 +147,8 @@ async fn original_in_circle(
     })
     .await
     .unwrap();
+    // The row names its original once the upload completes (§17.2).
+    complete_uploads(&db).await;
     (store, db, circle, original)
 }
 
@@ -157,10 +162,12 @@ async fn receive_delete(
     circle: CircleId,
 ) -> (TestStore, Database) {
     let (store, peer) = originals_device(ids, circle).await;
+    // Each write in a slot of its own, as the peer received them.
     for write in records(db) {
+        let number = write.header.position.number;
         peer.receive(write.into()).await.unwrap();
+        crate::tests::publish_through(db, number).await.unwrap();
     }
-    crate::tests::publish(db).await.unwrap();
     peer.write(|sql| {
         sql.execute(&format!("DELETE FROM originals WHERE id='{ROW}'"), [])?;
         Ok(())

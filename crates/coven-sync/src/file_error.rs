@@ -17,23 +17,15 @@ pub enum FileReadError {
     /// No storage capability is connected.
     #[error("no storage connected")]
     NoStorage,
-    /// Storage confirms absence; the active uploader has not reported failure.
-    #[error("file {id} is still uploading on device {device:?}")]
-    Uploading {
-        /// The file's fixed object id.
-        id: String,
-        /// The device responsible for uploading it.
-        device: DeviceId,
-    },
-    /// Storage confirms absence and the uploader cannot supply it (§17.4).
-    #[error("file {id} is missing: device {device:?} cannot supply it ({reason:?})")]
+    /// Storage confirms nothing at the path a row names: the provider lost
+    /// it (§17.4). A row names a file only once it is stored, so nothing
+    /// brings it back on its own.
+    #[error("file {id}, uploaded by device {device:?}, is missing from storage")]
     Missing {
         /// The file's fixed object id.
         id: String,
-        /// The device responsible for uploading it.
+        /// The device that uploaded it.
         device: DeviceId,
-        /// Why it cannot.
-        reason: crate::FileMissingReason,
     },
     /// A recorded original is absent.
     #[error("file {id} is missing at {}", path.display())]

@@ -153,14 +153,14 @@ pub enum ProviderAccessAction {
     Revoke,
 }
 
-/// Why a file's uploader cannot supply its bytes.
+/// Why a file can't be read (§17.4).
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum FileMissingReason {
-    /// The uploading device was removed.
-    DeviceRemoved,
-    /// Another installation replaced the uploader.
-    DeviceReplaced,
-    /// Its local source is unavailable.
+    /// Storage confirms nothing at the path a row names: the provider lost
+    /// it. Nothing brings it back on its own; the app can attach it again.
+    Lost,
+    /// This device's pending attachment, whose source failed; its upload
+    /// retries (§17.7).
     Source(FileSourceFailure),
 }
 
