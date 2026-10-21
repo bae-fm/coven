@@ -84,19 +84,6 @@ impl CovenHandle {
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError> {
         self.files.get_cache_budget(namespace).await
     }
-    /// Progress of downloading every file declared to download as soon as
-    /// its row arrives, over the requested set's verified coverage.
-    pub async fn eager_cache_fill_status(&self) -> CovenResult<EagerCacheFillStatus> {
-        self.database.eager_cache_fill_status().await
-    }
-    /// The same query over cache reservations, cancellation and verified ranges.
-    pub fn subscribe_eager_cache_fill_status(&self) -> LiveQuery<EagerCacheFillStatus> {
-        self.database.subscribe_eager_cache_fill_status()
-    }
-    /// Records cancellation of the current eager requests without stopping sync.
-    pub async fn cancel_eager_cache_fill(&self) -> CovenResult<()> {
-        Ok(self.files.cancel_eager_cache_fill().await?)
-    }
 }
 #[cfg(test)]
 #[path = "file_tests.rs"]

@@ -3,7 +3,7 @@ use crate::FileRefJournal;
 use crate::{
     file_write::tests::{attach, tables},
     tests::TestStore,
-    CacheFill, CovenError, FileDecl, Provenance, RowIdentity, SchemaError, SyncedTable,
+    CovenError, FileDecl, Provenance, RowIdentity, SchemaError, SyncedTable,
 };
 
 #[tokio::test]
@@ -927,7 +927,6 @@ async fn a_namespace_has_the_budget_its_declaration_gives_until_set() {
                 "files",
                 budget,
                 Provenance::AppProvided,
-                CacheFill::CacheLazy,
             )),
         ]
     };
@@ -974,13 +973,11 @@ async fn tables_sharing_a_namespace_declare_one_budget() {
             "files",
             1,
             Provenance::AppProvided,
-            CacheFill::CacheLazy,
         )),
         SyncedTable::new("b", RowIdentity::SharedKey).carries_files(FileDecl::new(
             "files",
             2,
             Provenance::AppProvided,
-            CacheFill::CacheLazy,
         )),
     ];
     let sql = "CREATE TABLE a(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT);

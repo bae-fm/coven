@@ -40,9 +40,9 @@ impl FilesInner {
             .or_else(|| self.waits.cooldown_wake())
     }
 
-    /// When the eager fill must next run without other wakes: the earliest
+    /// When the pin worker must next run without other wakes: the earliest
     /// due download retry. Connecting wakes it itself.
-    pub(crate) fn next_fill_retry(&self) -> Option<crate::retry_waits::Wake> {
+    pub(crate) fn next_pin_retry(&self) -> Option<crate::retry_waits::Wake> {
         let connected = self
             .storage
             .read()

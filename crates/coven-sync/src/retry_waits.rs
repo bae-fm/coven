@@ -212,11 +212,6 @@ impl RetryWaits {
         self.causes.retain_operations(live);
     }
 
-    /// Whether the subject holds an armed wait in this session.
-    pub(crate) fn armed(&self, subject: RetrySubject) -> bool {
-        self.lock().armed.contains_key(&subject)
-    }
-
     /// Whether automatic work on the subject may start now, given its
     /// persisted wait. No subject is due while the provider cooldown lasts.
     /// An absent row means the work advanced or the app retried it, unless
@@ -364,22 +359,6 @@ impl RetryWaits {
                 Err(error.into())
             }
         }
-    }
-
-    /// Remove the subject's persisted wait once its work no longer waits.
-    pub(crate) async fn clear(&self, subject: RetrySubject) -> Result<(), SyncError> {
-        if !self.armed(subject) {
-            return Ok(());
-        }
-        // The work may have ended its row already, e.g. by advancing; an
-        // unchanged wait takes no writer.
-        if let Some(database) = &self.database {
-            if database.retry_wait(subject).await?.is_some() {
-                database.clear_retry(subject).await?;
-            }
-        }
-        self.forget(subject);
-        Ok(())
     }
 }
 

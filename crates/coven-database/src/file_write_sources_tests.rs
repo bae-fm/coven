@@ -21,16 +21,14 @@ async fn a_circle_deletion_releases_originals_and_keeps_queued_sources() {
                     .carries_files(FileDecl::new(
                         "originals",
                         1 << 30,
-                        Provenance::UserProvided,
-                        CacheFill::CacheLazy,
+                        Provenance::UserProvided
                     )),
                 SyncedTable::new("copies", RowIdentity::IndependentUuid)
                     .audience_column("audience")
                     .carries_files(FileDecl::new(
                         "copies",
                         1 << 30,
-                        Provenance::AppProvided,
-                        CacheFill::CacheLazy,
+                        Provenance::AppProvided
                     )),
             ],
             "CREATE TABLE originals(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL);
@@ -115,8 +113,7 @@ async fn originals_device(ids: &SequentialIds, circle: CircleId) -> (TestStore, 
                 .carries_files(FileDecl::new(
                     "originals",
                     1 << 30,
-                    Provenance::UserProvided,
-                    CacheFill::CacheLazy,
+                    Provenance::UserProvided
                 ))],
             "CREATE TABLE originals(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)",
         )

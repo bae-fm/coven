@@ -65,7 +65,7 @@ fn photo(n: u8) -> Vec<u8> {
 /// and raising the limit starts another without waiting for any to finish.
 #[tokio::test]
 async fn uploads_queued_during_an_upload_fill_every_free_slot() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let gate = gated(&f, 3).await;
     let mut files = vec![f.attach("files", "a", photo(1)).await];
     f.files.set_uploads_paused(false).await.unwrap();
@@ -125,7 +125,7 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
 #[tokio::test]
 async fn pausing_and_a_cooldown_start_no_new_upload() {
     for cooldown in [false, true] {
-        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let f = Fixture::new(Provenance::AppProvided).await;
         let gate = gated(&f, 2).await;
         for id in ["a", "b", "c", "d"] {
             f.attach("files", id, photo(7)).await;
@@ -158,7 +158,7 @@ async fn pausing_and_a_cooldown_start_no_new_upload() {
 /// flight and the one waiting, and answers once both attempts have ended.
 #[tokio::test]
 async fn an_app_retry_joins_the_run_in_progress() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let gate = gated(&f, 2).await;
     for id in ["a", "b", "c"] {
         f.attach("files", id, photo(9)).await;
@@ -188,7 +188,7 @@ async fn an_app_retry_joins_the_run_in_progress() {
 /// with no progress: only storage's confirmation retires it (E7).
 #[tokio::test]
 async fn a_single_request_is_uploading_without_progress_until_completion_retires_it() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     f.attach("files", "single", vec![44; 19]).await;
 
     let (started, receiving) = tokio::sync::oneshot::channel();

@@ -88,13 +88,6 @@ impl<'connection> SqlReadContext<'connection> {
         )?)
     }
 
-    pub(crate) fn eager_status(
-        &self,
-        device: coven_foundation::id_source::DeviceId,
-    ) -> CovenResult<crate::EagerCacheFillStatus> {
-        Ok(crate::cache_progress::eager_status(self.database, device)?)
-    }
-
     pub(crate) fn rows_pinned(
         &self,
         schema: &crate::write_schema::WriteSchema,

@@ -82,20 +82,6 @@ impl Files {
         self.inner.check_open()?;
         self.inner.database.budget(namespace).await
     }
-    /// Commit cancellation of the requested eager downloads, then stop the
-    /// active fill; later changed references remain eligible.
-    pub async fn cancel_eager_cache_fill(&self) -> Result<(), DbError> {
-        self.inner.check_open()?;
-        let retired = self.inner.database.cancel_eager().await?;
-        for subject in retired {
-            self.inner.waits.forget(subject);
-            self.inner.forget_connection_wait(subject);
-        }
-        self.inner
-            .cancel_eager
-            .send_modify(|version| *version = version.wrapping_add(1));
-        Ok(())
-    }
 }
 impl FilesInner {
     /// Reserve a whole cache file of `file` and create it for writing. The
@@ -121,10 +107,13 @@ impl FilesInner {
         .await;
         Ok((reservation, writer?))
     }
-    /// §6.7. One file's failure is that file's pending record; a failure
-    /// no file subject holds, such as reading the work, fails the fill.
-    pub(crate) async fn fill_eager(self: &Arc<Self>) -> Result<(), crate::SyncError> {
-        let _fill = self.eager_fill.lock().await;
+    /// Pins carried from completed uploads (§17.6, §6.7): each file is kept
+    /// whole from storage as an app's pin is. One file's failure is its own
+    /// pending record; a failure no file subject holds, such as reading the
+    /// work, fails the run. A pin whose row no longer names its file has
+    /// nothing to keep.
+    pub(crate) async fn keep_pins(self: &Arc<Self>) -> Result<(), crate::SyncError> {
+        let _run = self.pin_run.lock().await;
         let mut sequence = self.sequence_active.subscribe();
         if *sequence.borrow_and_update() {
             return Ok(());
@@ -137,93 +126,6 @@ impl FilesInner {
         {
             return Ok(());
         }
-        self.fill_pins(&mut sequence).await?;
-        if *sequence.borrow_and_update() {
-            return Ok(());
-        }
-        let files = self.database.eager_work().await?;
-        if files.is_empty() {
-            return Ok(());
-        }
-        let waits: std::collections::BTreeMap<_, _> =
-            self.database.download_waits().await?.into_iter().collect();
-        // A changed reference, or a failed one whose wait is due; neither
-        // while a provider cooldown holds the connection.
-        let pending = files
-            .into_iter()
-            .filter(|file| {
-                let subject = download_subject(file);
-                self.connection_due(subject) && self.waits.due(subject, waits.get(&subject))
-            })
-            .collect::<Vec<_>>();
-        if pending.is_empty() {
-            return Ok(());
-        }
-        // The reservations are the fill's progress and cancellation (§17.6).
-        self.database.request_eager(pending.clone()).await?;
-        let mut cancel = self.cancel_eager.subscribe();
-        for file in &pending {
-            if *sequence.borrow_and_update() {
-                return Ok(());
-            }
-            self.forget_connection_wait(download_subject(file));
-            let work = async {
-                self.database.validate(file).await?;
-                UploadedFile::open(self.clone(), file.clone())
-                    .await?
-                    .download()
-                    .await
-            };
-            let result = tokio::select! {
-                biased;
-                // Release the response but retain requests and committed ranges.
-                // Once a download returns, record its outcome before yielding.
-                _ = sequence.changed() => return Ok(()),
-                _ = cancel.changed() => {
-                    // Cancelled downloads are not retried; new references remain eligible.
-                    for file in &pending {
-                        self.waits.clear(download_subject(file)).await?;
-                        self.forget_connection_wait(download_subject(file));
-                    }
-                    self.database.settle_eager_work(pending.clone()).await?;
-                    return Ok(());
-                }
-                result = work => result,
-            };
-            // One file's failure is that file's pending record; the rest of
-            // the fill continues (§17.6, E8).
-            let reason = match result {
-                Ok(()) => None,
-                Err(error) => {
-                    // Authenticated chunks that are not this file publish no
-                    // completed file: they leave the cache with the refusal.
-                    if matches!(error, TransferError::Refused(_)) {
-                        self.database.evict(file).await?;
-                    }
-                    Some(self.file_failure(file, FileCopy::Stored, FileFailure::Held(error)))
-                }
-            };
-            // Recoverable failures keep their work, whether waiting for a
-            // timer or a new connection. Only terminal outcomes settle it.
-            if reason
-                .as_ref()
-                .is_none_or(|reason| download_clears(reason) == Clears::Never)
-            {
-                self.database.settle_eager_work(vec![file.clone()]).await?;
-            }
-            self.finish_download(file, reason, true).await?;
-        }
-        Ok(())
-    }
-
-    /// Pins carried from completed uploads (§17.6): each file is kept whole
-    /// from storage as an app's pin is. One file's failure is its own
-    /// pending record; a pin whose row no longer names its file has nothing
-    /// to keep.
-    async fn fill_pins(
-        self: &Arc<Self>,
-        sequence: &mut tokio::sync::watch::Receiver<bool>,
-    ) -> Result<(), crate::SyncError> {
         let files = self.database.pin_requests().await?;
         if files.is_empty() {
             return Ok(());

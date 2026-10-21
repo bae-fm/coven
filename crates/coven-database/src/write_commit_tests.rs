@@ -126,7 +126,6 @@ async fn membership_is_rechecked_after_file_staging_and_refusal_discards_bytes()
                 "files",
                 1 << 30,
                 crate::Provenance::AppProvided,
-                crate::CacheFill::CacheLazy,
             )),
     ];
     let db = store.schema(tables, "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL); CREATE TABLE local_rows(id TEXT PRIMARY KEY)").await.unwrap();
@@ -182,7 +181,7 @@ async fn refused_user_file_attachment_keeps_the_original_and_rolls_back_its_regi
     let store = TestStore::new();
     let db = store.schema(vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
         .audience_column("audience")
-        .carries_files(crate::FileDecl::new("files", 1 << 30, crate::Provenance::UserProvided, crate::CacheFill::CacheLazy))],
+        .carries_files(crate::FileDecl::new("files", 1 << 30, crate::Provenance::UserProvided))],
         "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)").await.unwrap();
     let original = tempfile::NamedTempFile::new().unwrap();
     std::fs::write(original.path(), b"original").unwrap();
@@ -218,7 +217,7 @@ async fn attaching_unchanged_bytes_still_requires_current_circle_membership() {
         let store = TestStore::new();
         let db = store.schema(vec![SyncedTable::new("files", crate::RowIdentity::IndependentUuid)
             .audience_column("audience")
-            .carries_files(crate::FileDecl::new("files", 1 << 30, provenance.clone(), crate::CacheFill::CacheLazy))],
+            .carries_files(crate::FileDecl::new("files", 1 << 30, provenance.clone()))],
             "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT,audience TEXT NOT NULL)").await.unwrap();
         store.join_circle(&db, circle());
         let original = tempfile::NamedTempFile::new().unwrap();

@@ -2,7 +2,7 @@
 //!
 //! Before an automatic retry waits, its owner persists the not-before
 //! wall-clock deadline `T` and the full wait `W` with the work: one row per
-//! operation, queued upload, eager file download, the joiner's approval poll,
+//! operation, queued upload, file download, the joiner's approval poll,
 //! or the provider cooldown. A running session enforces the wait
 //! monotonically; reopening arms `max(0, min(T - now, W))` from these rows.
 //! An operation's or upload's row is deleted with that work, an operation's
@@ -21,7 +21,7 @@ pub enum RetrySubject {
     Operation(OperationId),
     /// A queued file upload, by its queue id.
     Upload(i64),
-    /// An eager download of an uploaded file, by its fixed identity (§17.5).
+    /// A download of an uploaded file, by its fixed identity (§17.5).
     Download {
         /// The device that uploads the file.
         uploader: DeviceId,
@@ -204,7 +204,7 @@ pub(crate) fn read_all(db: &DatabaseConnection) -> Result<Vec<(RetrySubject, Ret
     .collect()
 }
 
-/// The eager downloads' waits, by the download index: every download key is
+/// The downloads' waits, by the download index: every download key is
 /// a blob, and no blob sorts before the empty one.
 pub(crate) fn read_downloads(
     db: &DatabaseConnection,

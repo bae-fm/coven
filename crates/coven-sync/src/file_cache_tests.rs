@@ -1,6 +1,6 @@
-//! Eager cache fill (§17.6, E8, §6.7): commit-driven fills, one file's
-//! failure as its own pending record, retries under persisted waits and the
-//! provider cooldown (§6.7), and cancellation.
+//! Reads, pins and carried pins (§17.5, §17.6, E8, §6.7): one file's
+//! failure as its own pending record, and retries under persisted waits and
+//! the provider cooldown (§6.7).
 use super::*;
 use coven_database::RetrySubject;
 use coven_foundation::clock::{Clock, FixedClock};
@@ -8,7 +8,7 @@ use coven_storage::{test_utils::Faults, StorageFailure};
 
 #[tokio::test]
 async fn local_reads_settle_only_the_source_condition_they_checked() {
-    let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::UserProvided).await;
     let file = f.original("original", b"kept original").await;
     f.files.stop_background_for_counts().await;
     let source = f.root.path().join("original");
@@ -61,7 +61,7 @@ async fn local_reads_settle_only_the_source_condition_they_checked() {
 
 #[tokio::test]
 async fn read_only_downloads_keep_typed_errors_without_writing_pending_records() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("read-only", vec![24; 100]).await;
     f.files.stop_background_for_counts().await;
     let reader = builder(&f.directory, &f.ids, &f.clock, &f.declarations)
@@ -96,7 +96,7 @@ async fn read_only_downloads_keep_typed_errors_without_writing_pending_records()
 #[tokio::test]
 async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() {
     for pin in [false, true] {
-        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let f = Fixture::new(Provenance::AppProvided).await;
         let file = f.uploaded("explicit", vec![19; CHUNK * 2]).await;
         f.files.stop_background_for_counts().await;
         f.storage.set_online(false);
@@ -142,7 +142,7 @@ async fn explicit_reads_and_pins_record_failures_and_clear_them_after_success() 
 
 #[tokio::test]
 async fn empty_file_open_records_a_missing_connection() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("empty", Vec::new()).await;
     f.files
         .set_storage(None, std::future::ready(Ok(())))
@@ -164,7 +164,7 @@ async fn empty_file_open_records_a_missing_connection() {
 
 #[tokio::test]
 async fn explicit_authentication_failure_is_a_permanent_file_refusal() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("damaged", vec![20; CHUNK]).await;
     f.storage.corrupt_byte(&f.path(&file), 15).await.unwrap();
     // The error keeps the chunk's authentication failure.
@@ -200,21 +200,32 @@ fn advance(clock: &FixedClock, seconds: u64) {
     clock.set(clock.now() + Duration::from_secs(seconds));
 }
 
-/// A device eager for `files` that reads `a`'s storage through its own
-/// connection, so a `Retry-After` it receives is its own store's cooldown.
-async fn eager_reader(a: &Fixture, clock: &Arc<FixedClock>) -> Fixture {
-    let b = Fixture::with_clock(
-        Provenance::AppProvided,
-        CacheFill::CacheEager,
-        clock.clone(),
-    )
-    .await;
-    connect(&b, a).await;
-    b
+/// A device whose pinned original finished uploading: its pin is carried
+/// to the stored file, which only the pin worker downloads (§17.6). Its
+/// connection takes `Retry-After` as its own store's cooldown, and only the
+/// explicit runs below download.
+async fn carried_pin(clock: &Arc<FixedClock>, id: &str, bytes: &[u8]) -> (Fixture, FileRef) {
+    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
+    let file = f.original(id, bytes).await;
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    reconnect(&f).await;
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.inner.drain_uploads(true).await.unwrap();
+    assert!(!f.queued(&file).await);
+    assert_eq!(
+        f.files.inner.database.pin_requests().await.unwrap(),
+        vec![file.clone()]
+    );
+    (f, file)
+}
+
+/// A new connection to the device's own storage.
+async fn reconnect(f: &Fixture) {
+    connect(f, f).await;
 }
 
 async fn connect(b: &Fixture, a: &Fixture) {
-    // Only the explicit fills below download.
+    // Only the explicit runs below download.
     b.files.stop_background_for_counts().await;
     let storage = Arc::new(
         a.storage
@@ -227,12 +238,6 @@ async fn connect(b: &Fixture, a: &Fixture) {
         .unwrap();
 }
 
-async fn apply_all(a: &Fixture, b: &Fixture) {
-    for write in a.database.test_queued_writes().await.unwrap() {
-        crate::tests::apply_write(&b.database, write).await.unwrap();
-    }
-}
-
 /// Requests for `file`'s object at `a`'s storage.
 async fn reads_of(a: &Fixture, file: &FileRef) -> usize {
     let path = a.path(file);
@@ -242,49 +247,6 @@ async fn reads_of(a: &Fixture, file: &FileRef) -> usize {
         .iter()
         .filter(|(read, _, _)| *read == path)
         .count()
-}
-
-#[tokio::test]
-async fn eager_commit_observation_handles_download_apply() {
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
-    b.files.close().await;
-    let files = Files::new(
-        FileDatabase::new(b.database.clone()),
-        b.directory.clone(),
-        Some(Arc::new(
-            a.storage.with_transfers(b.files.inner.transfers.clone()),
-        )),
-        b.send.clone(),
-        b.files.inner.waits.clone(),
-        b.ids.clone(),
-        b.files.inner.transfers.clone(),
-    );
-    let mut status = b.database.subscribe_eager_cache_fill_status();
-    for write in a.database.test_queued_writes().await.unwrap() {
-        crate::tests::apply_write(&b.database, write).await.unwrap();
-    }
-    tokio::time::timeout(Duration::from_secs(20), async {
-        loop {
-            if files.inner.database.missing_bytes(&file).await.unwrap() == 0 {
-                break;
-            }
-            status.next().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
-    let requests = a.storage.request_count();
-    let reference = b.database.file_ref("files", "eager").await.unwrap();
-    assert_eq!(
-        files.read_file(&reference).await.unwrap(),
-        vec![72; CHUNK * 2]
-    );
-    assert_eq!(a.storage.request_count(), requests);
-    files.close().await;
-    b.database.close().await.unwrap();
-    a.close().await;
 }
 
 /// This device's pending reasons about files, in subject order.
@@ -299,247 +261,86 @@ async fn file_records(f: &Fixture) -> Vec<crate::PendingReason> {
         .collect()
 }
 
+/// A carried pin whose stored bytes fail authentication is refused for
+/// good, and the run still keeps the next one whole (§17.6).
 #[tokio::test]
-async fn one_files_failure_leaves_its_record_while_the_fill_continues() {
+async fn one_pins_failure_leaves_its_record_while_the_run_continues() {
     use crate::{PendingReason, PendingSubject, Refusal};
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let damaged = a.uploaded("b-damaged", vec![82; CHUNK + 5]).await;
-    let other = a.uploaded("c-other-content", vec![83; 30]).await;
-    let good = a.uploaded("d-good", vec![84; CHUNK * 2]).await;
-    // Attached after the drains with uploads paused, so it is still waiting.
-    a.files.set_uploads_paused(true).await.unwrap();
-    let waiting = a.attach("files", "a-waiting", vec![81; 40]).await;
-    a.storage
-        .corrupt_byte(&a.path(&damaged), 11 + 3)
-        .await
-        .unwrap();
     let clock = clock();
-    let b = Fixture::with_clock(
-        Provenance::AppProvided,
-        CacheFill::CacheEager,
-        clock.clone(),
-    )
-    .await;
-    // One explicit fill requests all four as one set; the background worker
-    // would fill and retire each arriving file on its own.
-    b.files.stop_background_for_counts().await;
-    b.files
-        .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
+    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
+    let damaged = f.original("a-damaged", &[82; CHUNK + 5]).await;
+    let good = f.original("b-good", &[84; CHUNK * 2]).await;
+    f.files.pin(&[damaged.clone(), good.clone()]).await.unwrap();
+    reconnect(&f).await;
+    f.files.set_uploads_paused(false).await.unwrap();
+    f.files.inner.drain_uploads(true).await.unwrap();
+    f.storage
+        .corrupt_byte(&f.path(&damaged), 11 + 3)
         .await
         .unwrap();
-    let other_key = coven_format::key::encode_key(&[coven_format::value::Value::Text(
-        "c-other-content".into(),
-    )])
-    .unwrap();
-    for mut write in a.database.test_queued_writes().await.unwrap() {
-        for part in &mut write.parts {
-            for row in &mut part.rows {
-                if row.row.key != other_key {
-                    continue;
-                }
-                if let coven_merge::Operation::Insert(columns) = &mut row.change.operation {
-                    columns.get_mut("hash").unwrap().value =
-                        coven_format::value::Value::Blob(vec![0; 32]);
-                }
-            }
-        }
-        crate::tests::apply_write(&b.database, write).await.unwrap();
-    }
-    b.files.inner.fill_eager().await.unwrap();
-    // The last file completed although every earlier one failed.
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
-        b.files.inner.database.missing_bytes(&good).await.unwrap(),
+        f.files.inner.database.missing_bytes(&good).await.unwrap(),
         0
     );
-    let subject = |file: &FileRef| PendingSubject::File {
-        device: file.uploader(),
-        file: file.id(),
-    };
-    let records: std::collections::BTreeMap<_, _> = b
-        .database
-        .pending::<crate::PendingRecord>()
-        .await
-        .unwrap()
-        .into_iter()
-        .map(|record| (format!("{:?}", record.subject), record.reason))
-        .collect();
-    assert_eq!(records.len(), 3, "{records:?}");
+    let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
+    assert_eq!(records.len(), 1, "{records:?}");
     assert_eq!(
-        records[&format!("{:?}", subject(&waiting))],
-        PendingReason::Waits(crate::Prerequisite::Object(a.path(&waiting)))
+        records[0].subject,
+        PendingSubject::File {
+            device: damaged.uploader(),
+            file: damaged.id(),
+        }
     );
     assert!(matches!(
-        records[&format!("{:?}", subject(&damaged))],
+        records[0].reason,
         PendingReason::Refused(Refusal::Decryption { .. })
     ));
-    assert!(matches!(
-        records[&format!("{:?}", subject(&other))],
-        PendingReason::Refused(Refusal::ContentHash)
-    ));
-    // The requested set stays until it finishes; its progress counts only
-    // the verified file, and failures stay in pending().
-    let status = b.database.eager_cache_fill_status().await.unwrap();
-    assert!(
-        matches!(&status, EagerCacheFillStatus::Downloading(progress)
-            if progress.files_total == 4 && progress.files_completed == 1
-                && progress.bytes_cached == good.plaintext_size()),
-        "{status:?}"
-    );
-    // A wake before the waiting file's retry is due neither requests it
-    // nor changes the status the pass left.
-    let requests = a.storage.request_count();
-    b.files.inner.fill_eager().await.unwrap();
-    assert_eq!(a.storage.request_count(), requests);
-    assert_eq!(b.database.eager_cache_fill_status().await.unwrap(), status);
-    // Retry once due: the waiting file arrives and completes; refused bytes
-    // are not fetched again automatically.
-    a.drain().await;
-    clock.set(clock.now() + Duration::from_secs(1));
-    let damaged_reads = |reads: &[(coven_storage::ObjectPath, u64, u64)]| {
-        reads
-            .iter()
-            .filter(|(path, _, _)| *path == a.path(&damaged) || *path == a.path(&other))
-            .count()
-    };
-    let before = damaged_reads(&a.storage.reads().await);
-    b.files.inner.fill_eager().await.unwrap();
-    assert_eq!(
-        b.files
-            .inner
-            .database
-            .missing_bytes(&waiting)
-            .await
-            .unwrap(),
-        0
-    );
-    assert_eq!(damaged_reads(&a.storage.reads().await), before);
-    assert_eq!(file_records(&b).await.len(), 2);
-    // Every request has settled, refusals included: the set retires.
-    assert_eq!(
-        b.database.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Idle
-    );
-    b.close().await;
-    a.close().await;
-}
-
-#[tokio::test]
-#[expect(
-    clippy::let_underscore_must_use,
-    reason = "a send fails only when the receiver is gone, which this names"
-)]
-async fn a_fill_preserves_eager_cancellation_and_retries_network_failures() {
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let clock = clock();
-    let b = Fixture::with_clock(
-        Provenance::AppProvided,
-        CacheFill::CacheEager,
-        clock.clone(),
-    )
-    .await;
-    b.files
-        .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
+    // A refusal settles its carried pin: no run fetches the bytes again.
+    assert!(f
+        .files
+        .inner
+        .database
+        .pin_requests()
         .await
-        .unwrap();
-    a.storage.set_online(false);
-    let mut status = b.database.subscribe_eager_cache_fill_status();
-    for write in a.database.test_queued_writes().await.unwrap() {
-        crate::tests::apply_write(&b.database, write).await.unwrap();
-    }
-    // The network failure is the file's pending record, not a fill state.
-    b.files.inner.fill_eager().await.unwrap();
-    assert!(matches!(
-        file_records(&b).await.as_slice(),
-        [crate::PendingReason::Storage {
-            failure: coven_storage::StorageFailure::Network,
-            ..
-        }]
-    ));
-    a.storage.set_online(true);
-    clock.set(clock.now() + Duration::from_secs(1));
-    b.files.inner.fill_eager().await.unwrap();
-    assert_eq!(
-        b.files.inner.database.missing_bytes(&file).await.unwrap(),
-        0
-    );
-    assert!(file_records(&b).await.is_empty());
-    b.files.evict_file(&file).await.unwrap();
-    // A newly observed version is eligible; cancel while its first request
-    // is held.
-    let second = a.uploaded("another", vec![73; CHUNK * 2]).await;
-    let (requested, request) = tokio::sync::oneshot::channel();
-    let (resume, resumed) = tokio::sync::oneshot::channel();
-    a.storage
-        .hold_next_read(
-            coven_storage::ObjectPath::file(b.directory.id(), second.uploader(), second.id()),
-            requested,
-            resumed,
-        )
-        .await;
-    for write in a.database.test_queued_writes().await.unwrap() {
-        crate::tests::apply_write(&b.database, write).await.unwrap();
-    }
-    while !matches!(
-        status.next().await.unwrap(),
-        EagerCacheFillStatus::Downloading(_)
-    ) {}
-    request.await.unwrap();
-    // Cancellation commits before it is reported, with the set's coverage.
-    b.files.cancel_eager_cache_fill().await.unwrap();
-    assert!(matches!(
-        b.database.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Cancelled(progress) if progress.files_total == 1
-    ));
-    // Cancelling drops the held request, or releases it into a fill that
-    // stops before the file's next one.
-    let _ = resume.send(());
-    while !matches!(
-        status.next().await.unwrap(),
-        EagerCacheFillStatus::Cancelled(_)
-    ) {}
-    b.files.inner.fill_eager().await.unwrap();
-    assert!(b.files.inner.database.missing_bytes(&second).await.unwrap() > 0);
-    b.close().await;
-    a.close().await;
+        .unwrap()
+        .is_empty());
+    let reads = reads_of(&f, &damaged).await;
+    advance(&clock, 600);
+    f.files.inner.keep_pins().await.unwrap();
+    assert_eq!(reads_of(&f, &damaged).await, reads);
+    f.close().await;
 }
 
-/// A fill that cannot read its own work returns the database failure to its
-/// worker, which logs it (§17.6).
+/// A pin run that cannot read its own work returns the database failure to
+/// its worker, which logs it (§17.6).
 #[tokio::test]
-async fn a_fill_that_cannot_read_its_work_fails_its_step() {
+async fn a_pin_run_that_cannot_read_its_work_fails_its_step() {
     let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    a.uploaded("eager", vec![72; CHUNK]).await;
-    let b = eager_reader(&a, &clock).await;
-    apply_all(&a, &b).await;
-    b.database.close().await.unwrap();
+    let (f, _) = carried_pin(&clock, "pinned", &[72; CHUNK]).await;
+    f.database.close().await.unwrap();
     assert!(matches!(
-        b.files.inner.fill_eager().await,
+        f.files.inner.keep_pins().await,
         Err(crate::SyncError::Database(
             coven_database::DbError::StoreClosed
         ))
     ));
-    b.files.close().await;
-    a.close().await;
+    f.files.close().await;
 }
 
 #[path = "file_cache_retry_tests.rs"]
 mod retries;
 
-/// A failed eager download persists `T` and `W` with its record before it
-/// waits: no fill requests it again before its deadline, reopening included,
+/// A failed carried pin persists `T` and `W` with its record before it
+/// waits: no run requests it again before its deadline, reopening included,
 /// and the completed download takes the wait with its record (§6.7).
 #[tokio::test]
 async fn a_failed_download_is_not_requested_before_its_deadline() {
     let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let mut b = eager_reader(&a, &clock).await;
-    apply_all(&a, &b).await;
-    a.storage.set_online(false);
-    b.files.inner.fill_eager().await.unwrap();
-    let waits = b.files.inner.database.download_waits().await.unwrap();
+    let (mut f, file) = carried_pin(&clock, "pinned", &[72; CHUNK * 2]).await;
+    f.storage.set_online(false);
+    f.files.inner.keep_pins().await.unwrap();
+    let waits = f.files.inner.database.download_waits().await.unwrap();
     let [(subject, wait)] = waits.as_slice() else {
         panic!("one persisted wait: {waits:?}");
     };
@@ -550,24 +351,24 @@ async fn a_failed_download_is_not_requested_before_its_deadline() {
     assert_eq!(wait.failures, 1);
     assert_eq!(wait.wait, Duration::from_secs(1));
     assert_eq!(wait.not_before, clock.now() + Duration::from_secs(1));
-    a.storage.set_online(true);
-    let reads = reads_of(&a, &file).await;
-    b.files.inner.fill_eager().await.unwrap();
-    assert_eq!(reads_of(&a, &file).await, reads);
+    f.storage.set_online(true);
+    let reads = reads_of(&f, &file).await;
+    f.files.inner.keep_pins().await.unwrap();
+    assert_eq!(reads_of(&f, &file).await, reads);
     // Reopening arms the remaining wait from the persisted row.
-    b.reopen().await;
-    connect(&b, &a).await;
-    b.files.inner.fill_eager().await.unwrap();
-    assert_eq!(reads_of(&a, &file).await, reads);
-    assert_eq!(file_records(&b).await.len(), 1);
+    f.reopen().await;
+    reconnect(&f).await;
+    f.files.inner.keep_pins().await.unwrap();
+    assert_eq!(reads_of(&f, &file).await, reads);
+    assert_eq!(file_records(&f).await.len(), 1);
     advance(&clock, 1);
-    b.files.inner.fill_eager().await.unwrap();
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
-        b.files.inner.database.missing_bytes(&file).await.unwrap(),
+        f.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
     );
-    assert!(file_records(&b).await.is_empty());
-    assert!(b
+    assert!(file_records(&f).await.is_empty());
+    assert!(f
         .files
         .inner
         .database
@@ -575,21 +376,17 @@ async fn a_failed_download_is_not_requested_before_its_deadline() {
         .await
         .unwrap()
         .is_empty());
-    b.close().await;
-    a.close().await;
+    f.close().await;
 }
 
-/// A `Retry-After` a download receives is the store's cooldown: no eager
-/// download, even one whose own wait ended, and no upload is requested until
-/// it ends (§6.7).
+/// A `Retry-After` a download receives is the store's cooldown: no carried
+/// pin, even one whose own wait ended, and no upload is requested until it
+/// ends (§6.7).
 #[tokio::test]
-async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
+async fn a_provider_cooldown_holds_carried_pins_and_uploads_alike() {
     let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let b = eager_reader(&a, &clock).await;
-    apply_all(&a, &b).await;
-    a.storage
+    let (f, file) = carried_pin(&clock, "pinned", &[72; CHUNK * 2]).await;
+    f.storage
         .set_faults(Faults {
             fail_next: 1,
             failure: StorageFailure::RateLimited,
@@ -597,73 +394,69 @@ async fn a_provider_cooldown_holds_eager_downloads_and_uploads_alike() {
             ..Faults::none()
         })
         .await;
-    b.files.inner.fill_eager().await.unwrap();
-    let cooldown = b
+    f.files.inner.keep_pins().await.unwrap();
+    let cooldown = f
         .database
         .retry_wait(RetrySubject::Provider)
         .await
         .unwrap()
         .unwrap();
     assert_eq!(cooldown.wait, Duration::from_secs(600));
-    let photo = b.attach("other", "photo", b"photo".to_vec()).await;
-    b.files.set_uploads_paused(false).await.unwrap();
+    let photo = f.attach("other", "photo", b"photo".to_vec()).await;
     // The download's own one-second wait ends; the cooldown still holds it
     // and the upload queue.
     advance(&clock, 1);
-    let requests = a.storage.request_trace().len();
-    let status = b.database.eager_cache_fill_status().await.unwrap();
-    b.files.inner.fill_eager().await.unwrap();
-    // Not attempted at all: the fill never started.
-    assert_eq!(b.database.eager_cache_fill_status().await.unwrap(), status);
+    let requests = f.storage.request_trace().len();
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
-        b.files.inner.drain_uploads(false).await.unwrap(),
+        f.files.inner.drain_uploads(false).await.unwrap(),
         DrainOutcome::Drained { uploaded: 0 }
     );
-    assert_eq!(a.storage.request_trace().len(), requests);
+    assert_eq!(f.storage.request_trace().len(), requests);
     advance(&clock, 599);
-    b.files.inner.fill_eager().await.unwrap();
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
-        b.files.inner.database.missing_bytes(&file).await.unwrap(),
+        f.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
     );
-    b.files.inner.drain_uploads(false).await.unwrap();
-    assert!(!b.queued(&photo).await);
-    b.close().await;
-    a.close().await;
+    f.files.inner.drain_uploads(false).await.unwrap();
+    assert!(!f.queued(&photo).await);
+    f.close().await;
 }
 
-/// The file worker wakes when a download's wait ends, without a pass or
+/// The pin worker wakes when a download's wait ends, without a pass or
 /// another commit (§6.7).
 #[tokio::test]
 async fn the_worker_retries_a_download_when_its_wait_ends() {
     let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let b = Fixture::with_clock(
-        Provenance::AppProvided,
-        CacheFill::CacheEager,
-        clock.clone(),
-    )
-    .await;
-    b.files
+    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
+    f.files
         .set_storage(
             Some(Arc::new(
-                a.storage
-                    .with_cooldown(b.files.inner.waits.clone())
-                    .with_transfers(b.files.inner.transfers.clone()),
+                f.storage
+                    .with_cooldown(f.files.inner.waits.clone())
+                    .with_transfers(f.files.inner.transfers.clone()),
             )),
             std::future::ready(Ok(())),
         )
         .await
         .unwrap();
-    a.storage.set_online(false);
+    let file = f.original("pinned", &[72; CHUNK * 2]).await;
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    // The upload succeeds; the carried pin's first read finds no network.
+    f.storage
+        .set_faults(Faults {
+            read_failures: [(f.path(&file), StorageFailure::Network)].into(),
+            ..Faults::none()
+        })
+        .await;
     // The failure's record commits with its wait.
-    let mut pending = b.database.subscribe_pending::<crate::PendingRecord>();
-    let mut status = b.database.subscribe_eager_cache_fill_status();
-    let mut rearmed = b.files.inner.waits.rearmed();
-    apply_all(&a, &b).await;
+    let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
+    let mut progress = f.database.subscribe_pin_progress(vec![file.clone()]);
+    let mut rearmed = f.files.inner.waits.rearmed();
+    f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while b
+        while f
             .files
             .inner
             .database
@@ -680,7 +473,7 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
     // The worker starts the wait's timer only after the record commits. A
     // clock set before then would move the timer's start, not its end.
     tokio::time::timeout(Duration::from_secs(5), async {
-        while b
+        while f
             .files
             .inner
             .waits
@@ -692,17 +485,19 @@ async fn the_worker_retries_a_download_when_its_wait_ends() {
     })
     .await
     .unwrap();
-    a.storage.set_online(true);
+    f.storage.set_faults(Faults::none()).await;
     clock.set(clock.now() + Duration::from_secs(1));
     tokio::time::timeout(Duration::from_secs(5), async {
-        while b.files.inner.database.missing_bytes(&file).await.unwrap() > 0 {
-            status.next().await.unwrap();
+        loop {
+            let progress = progress.next().await.unwrap();
+            if progress.bytes_cached == progress.bytes_total {
+                break;
+            }
         }
     })
     .await
     .unwrap();
-    b.close().await;
-    a.close().await;
+    f.close().await;
 }
 
 /// A pin taken while the file is still queued here is kept through its
@@ -718,7 +513,7 @@ async fn a_pin_taken_while_queued_survives_the_upload() {
             false => Provenance::AppProvided,
             true => Provenance::UserProvided,
         };
-        let f = Fixture::new(provenance, CacheFill::CacheLazy).await;
+        let f = Fixture::new(provenance).await;
         let bytes = vec![81; CHUNK * 3];
         let attach = |id: &'static str| {
             let f = &f;
@@ -748,7 +543,7 @@ async fn a_pin_taken_while_queued_survives_the_upload() {
         f.drain().await;
         assert!(!f.queued(&kept).await);
         assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
-        f.files.inner.fill_eager().await.unwrap();
+        f.files.inner.keep_pins().await.unwrap();
         assert_eq!(pinned().await.unwrap(), [Some(true), Some(false)]);
         assert!(f
             .files
@@ -778,7 +573,7 @@ async fn a_pin_taken_while_queued_survives_the_upload() {
 /// them, and reopening reads the same answer (§17.6, E8).
 #[tokio::test]
 async fn pin_progress_reads_committed_coverage() {
-    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let mut f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("progress", vec![77; CHUNK * 3]).await;
     let total = 3 * CHUNK as u64;
     let progress = |cached| crate::PinProgress {
@@ -837,7 +632,7 @@ fn cache_files(f: &Fixture) -> usize {
 /// one row; reopening serves it without a request (§17.5, Appendix C.3).
 #[tokio::test]
 async fn a_verified_range_publishes_as_one_entry() {
-    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let mut f = Fixture::new(Provenance::AppProvided).await;
     let bytes: Vec<u8> = (0..CHUNK * 4).map(|i| (i % 249) as u8).collect();
     let file = f.uploaded("range", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
@@ -863,7 +658,7 @@ async fn a_verified_range_publishes_as_one_entry() {
 /// of the range, and leaves no unnamed bytes behind.
 #[tokio::test]
 async fn a_failed_chunk_publishes_none_of_its_range() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("damaged-range", vec![61; CHUNK * 3]).await;
     f.storage
         .corrupt_byte(&f.path(&file), 11 + (CHUNK + 16) + 3)
@@ -890,7 +685,7 @@ async fn a_failed_chunk_publishes_none_of_its_range() {
 /// range and reads it from the cache (§6.7).
 #[tokio::test]
 async fn overlapping_readers_fetch_each_byte_once() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let bytes: Vec<u8> = (0..CHUNK * 4).map(|i| (i % 241) as u8).collect();
     let file = f.uploaded("shared", bytes.clone()).await;
     let first = f.files.open_file_stream(&file).await.unwrap();
@@ -933,7 +728,7 @@ async fn overlapping_readers_fetch_each_byte_once() {
 /// A cancelled fetch publishes nothing and leaves no bytes behind.
 #[tokio::test]
 async fn a_cancelled_range_leaves_no_bytes() {
-    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let mut f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cancelled", vec![62; CHUNK * 2]).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
     f.storage

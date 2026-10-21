@@ -156,8 +156,7 @@ async fn stopped_store_with_files() -> (tempfile::TempDir, TestCoven, CovenHandl
             SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "files",
                 1 << 30,
-                Provenance::AppProvided,
-                CacheFill::CacheLazy,
+                Provenance::AppProvided
             )),
         ])
         .migrations(vec![Migration::addition(

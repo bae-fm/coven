@@ -191,7 +191,7 @@ In reading order; each page builds on the ones before it:
 - [Files](/docs/files): files that rows carry: attaching, uploading, status and
   reading.
 - [Cache](/docs/cache): the device's copies of uploaded files: budgets,
-  pinning and eager downloads.
+  pinning and progress.
 - [Sharing](/docs/sharing): members, roles and devices; restore codes,
   invites and removal.
 - [Members and profiles](/docs/profiles): showing who is who, with a profile

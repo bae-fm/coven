@@ -20,7 +20,6 @@ impl FileWrite<'_> {
     pub(crate) fn retain_rows(&self, keys: BTreeSet<AppKey>) -> Result<(), DbError> {
         for key in &keys {
             crate::file_protection::refresh(self.database, self.schema, key)?;
-            crate::eager_work::note(self.database, self.schema, self.device, key)?;
         }
         retain(self.database, self.schema, keys)
     }

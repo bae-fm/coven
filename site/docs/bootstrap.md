@@ -72,8 +72,8 @@ app passes in, as [`BootstrapStatus`](rustdoc:enum:coven::BootstrapStatus):
 `Connecting`, `WaitingForApproval`, `Loading`, or `Pending(records)` naming what
 it waits for. Until it finishes, the installation is hidden from
 `layout.stores()` and ordinary opens refuse it. Cancelling removes it. Rows
-arrive before their files; files declared `CacheEager` then download as they
-would for any arriving row ([Cache](/docs/cache#eager-downloads)).
+arrive before their files; a file downloads when the app reads or pins it
+([Cache](/docs/cache)).
 
 ## Coming back after a long absence
 

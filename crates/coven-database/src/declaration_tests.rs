@@ -18,7 +18,6 @@ fn declaration_getters_expose_defaults_without_opening_a_database() {
     assert_eq!(file.namespace(), "attachments");
     assert_eq!(file.cache_budget(), 1 << 30);
     assert_eq!(file.provenance(), &Provenance::AppProvided);
-    assert_eq!(file.fill(), &CacheFill::CacheEager);
     assert_eq!(file.id_column(), "id");
     assert_eq!(file.size_column(), "size");
     assert_eq!(file.hash_column(), "hash");
@@ -36,17 +35,12 @@ fn declaration_getters_preserve_the_builders_choices_and_spelling() {
         .shared_trigger("RecordUpdate")
         .shared_trigger("RecordInsert")
         .carries_files(
-            FileDecl::new(
-                "Originals",
-                12345,
-                Provenance::UserProvided,
-                CacheFill::CacheLazy,
-            )
-            .with_id_column("File")
-            .with_size_column("Bytes")
-            .with_hash_column("Digest")
-            .with_location_column("WhereAt")
-            .write_once(),
+            FileDecl::new("Originals", 12345, Provenance::UserProvided)
+                .with_id_column("File")
+                .with_size_column("Bytes")
+                .with_hash_column("Digest")
+                .with_location_column("WhereAt")
+                .write_once(),
         );
     assert_eq!(table.name(), "Attachments");
     assert_eq!(table.identity(), &RowIdentity::SharedKey);
@@ -62,7 +56,6 @@ fn declaration_getters_preserve_the_builders_choices_and_spelling() {
     assert_eq!(file.namespace(), "Originals");
     assert_eq!(file.cache_budget(), 12345);
     assert_eq!(file.provenance(), &Provenance::UserProvided);
-    assert_eq!(file.fill(), &CacheFill::CacheLazy);
     assert_eq!(file.id_column(), "File");
     assert_eq!(file.size_column(), "Bytes");
     assert_eq!(file.hash_column(), "Digest");
@@ -102,12 +95,7 @@ const SCHEMA: &str =
     "CREATE TABLE attachments(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location BLOB)";
 
 fn declaration() -> FileDecl {
-    FileDecl::new(
-        "attachments",
-        1 << 30,
-        Provenance::AppProvided,
-        CacheFill::CacheEager,
-    )
+    FileDecl::new("attachments", 1 << 30, Provenance::AppProvided)
 }
 
 fn table(file: FileDecl) -> Vec<SyncedTable> {
@@ -132,8 +120,7 @@ async fn default_and_custom_file_columns_are_checked_on_the_synced_table() {
             FileDecl::new(
                 "originals",
                 1 << 30,
-                Provenance::UserProvided,
-                CacheFill::CacheLazy,
+                Provenance::UserProvided
             )
             .with_id_column("FILE")
             .with_size_column("BYTES")

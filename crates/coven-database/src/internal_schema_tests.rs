@@ -117,10 +117,6 @@ async fn only_the_spec_tables_are_created() {
                 "_coven_device_files",
                 "_coven_device_reset",
                 "_coven_devices",
-                "_coven_eager_cancel",
-                "_coven_eager_requests",
-                "_coven_eager_rows",
-                "_coven_eager_work",
                 "_coven_file_candidates",
                 "_coven_file_chunks",
                 "_coven_file_removals",
@@ -294,10 +290,6 @@ mod fixture {
      INSERT INTO _coven_file_scan_access SELECT n,CASE WHEN i%2=0 THEN 'account' ELSE 'key' END,'account_' || i FROM fixture;
      INSERT INTO _coven_upload_pause VALUES(1);
      INSERT INTO _coven_write_pause VALUES(1,1);
-     INSERT INTO _coven_eager_cancel VALUES(1);
-     INSERT INTO _coven_eager_requests SELECT audience,'file_' || i,key FROM fixture;
-     INSERT INTO _coven_eager_rows SELECT tab,key,'file_' || i FROM fixture;
-     INSERT INTO _coven_eager_work SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_pin_requests SELECT audience,'file_' || i,key FROM fixture;
      INSERT INTO _coven_file_chunks SELECT device,substr(key,17,16),0,key FROM fixture;
      INSERT INTO _coven_cache(namespace,file_id,chunk,path,size,last_read,pinned,checked_hash)
@@ -353,8 +345,7 @@ mod fixture {
                 | "_coven_device_reset"
                 | "_coven_upload_pause"
                 | "_coven_write_pause"
-                | "_coven_claim_journal"
-                | "_coven_eager_cancel" => {
+                | "_coven_claim_journal" => {
                     assert_eq!(count, 1)
                 }
                 _ => assert!(

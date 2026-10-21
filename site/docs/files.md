@@ -16,14 +16,14 @@ A synced table whose rows carry a file says so with `carries_files` and a
 fn tables() -> Vec<SyncedTable> {
     vec![
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
-        // The user's own file, downloaded on first read.
+        // The user's own file.
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided, CacheFill::CacheLazy)),
-        // A thumbnail the app makes, downloaded as soon as its row arrives.
+            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided)),
+        // A thumbnail the app makes.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("thumbnails", 256 << 20, Provenance::AppProvided, CacheFill::CacheEager)),
+            .carries_files(FileDecl::new("thumbnails", 256 << 20, Provenance::AppProvided)),
     ]
 }
 ```
@@ -33,9 +33,10 @@ fn tables() -> Vec<SyncedTable> {
 - a **namespace**, which groups files for the [cache](/docs/cache), and the
   namespace's cache budget in bytes;
 - the file's **kind**: `Provenance::UserProvided` or `Provenance::AppProvided`
-  ([below](#two-kinds-of-file));
-- when devices **download** it: `CacheFill::CacheEager` as soon as its row
-  arrives, `CacheFill::CacheLazy` on first read.
+  ([below](#two-kinds-of-file)).
+
+Other devices download a file when they read it, into their
+[cache](/docs/cache), or keep it whole when the app pins it.
 
 It also names four columns of the table, with these defaults:
 

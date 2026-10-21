@@ -1,5 +1,5 @@
 use super::*;
-use crate::{tests::TestStore, CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
+use crate::{tests::TestStore, FileDecl, Provenance, RowIdentity, SyncedTable};
 
 #[tokio::test]
 async fn overwritten_and_deleted_old_values_protect_their_uploaded_files() {
@@ -108,13 +108,7 @@ const FILES: &str = "CREATE TABLE t(id TEXT NOT NULL PRIMARY KEY,size INTEGER,ha
 
 fn files_table() -> SyncedTable {
     SyncedTable::new("t", RowIdentity::SharedKey).carries_files(
-        FileDecl::new(
-            "files",
-            1 << 30,
-            Provenance::AppProvided,
-            CacheFill::CacheLazy,
-        )
-        .with_location_column("x"),
+        FileDecl::new("files", 1 << 30, Provenance::AppProvided).with_location_column("x"),
     )
 }
 

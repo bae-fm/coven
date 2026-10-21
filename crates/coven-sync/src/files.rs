@@ -23,8 +23,8 @@ mod file_upload_queue;
 #[path = "file_upload_retry.rs"]
 mod file_upload_retry;
 use crate::SyncError;
+pub use coven_database::PinProgress;
 use coven_database::{DbError, FileDatabase};
-pub use coven_database::{EagerCacheFillStatus, PinProgress};
 use coven_foundation::{files::StoreDir, id_source::IdSourceRef};
 use coven_storage::Storage;
 pub use file_error::FileReadError;
@@ -48,7 +48,7 @@ pub use coven_storage::TransferLimits;
 
 /// Owns storage, database file operations and the device's file area (Appendix F.3).
 /// Construction starts two commit-driven workers, one for uploads and one for
-/// eager caching; no sync loop or timer is created. Call `close` before
+/// carried pins; no sync loop or timer is created. Call `close` before
 /// closing the database.
 #[derive(Clone)]
 pub struct Files {
@@ -74,8 +74,8 @@ struct FilesInner {
     paused: AtomicBool,
     /// Wakes the upload worker, or its run in progress.
     upload_wake: Arc<Notify>,
-    /// Wakes the eager fill.
-    fill_wake: Arc<Notify>,
+    /// Wakes the pin worker.
+    pin_wake: Arc<Notify>,
     /// One upload run at a time.
     drain: tokio::sync::Mutex<()>,
     /// The uploads being sent now, which the app's queue shows (E7).
@@ -90,9 +90,8 @@ struct FilesInner {
     transfers: Arc<TransferBudget>,
     pins: tokio::sync::Mutex<()>,
     closed: AtomicBool,
-    /// One eager fill at a time, and none while the connection changes.
-    eager_fill: tokio::sync::Mutex<()>,
-    cancel_eager: watch::Sender<u64>,
+    /// One pin run at a time, and none while the connection changes.
+    pin_run: tokio::sync::Mutex<()>,
     /// A sequence pass needs the same download capacity as this worker.
     sequence_active: watch::Sender<bool>,
 }
@@ -108,7 +107,7 @@ impl Drop for SequenceDownloads<'_> {
 }
 struct FileWorker {
     stop: watch::Sender<bool>,
-    /// The upload worker and the eager fill.
+    /// The upload worker and the pin worker.
     tasks: tokio::sync::Mutex<Vec<tokio::task::JoinHandle<()>>>,
 }
 impl Drop for FileWorker {
@@ -128,8 +127,7 @@ impl Files {
         transfers: Arc<TransferBudget>,
     ) -> Self {
         let uploads_changes = database.queued_work_changes();
-        let fill_changes = database.queued_work_changes();
-        let (cancel_eager, _) = watch::channel(0);
+        let pin_changes = database.queued_work_changes();
         let (sequence_active, _) = watch::channel(false);
         let (stop, _) = watch::channel(false);
         let inner = Arc::new(FilesInner {
@@ -142,7 +140,7 @@ impl Files {
             ids,
             paused: AtomicBool::new(false),
             upload_wake: Arc::new(Notify::new()),
-            fill_wake: Arc::new(Notify::new()),
+            pin_wake: Arc::new(Notify::new()),
             drain: tokio::sync::Mutex::new(()),
             in_flight: UploadsInFlight::default(),
             app_retries: Mutex::new(Vec::new()),
@@ -152,8 +150,7 @@ impl Files {
             transfers,
             pins: tokio::sync::Mutex::new(()),
             closed: AtomicBool::new(false),
-            eager_fill: tokio::sync::Mutex::new(()),
-            cancel_eager,
+            pin_run: tokio::sync::Mutex::new(()),
             sequence_active,
         });
         let tasks = vec![
@@ -162,10 +159,10 @@ impl Files {
                 stop.subscribe(),
                 uploads_changes,
             )),
-            tokio::spawn(fill_worker(
+            tokio::spawn(pin_worker(
                 Arc::downgrade(&inner),
                 stop.subscribe(),
-                fill_changes,
+                pin_changes,
             )),
         ];
         Self {
@@ -244,7 +241,7 @@ impl Files {
         self.inner.sequence_active.send_replace(true);
         SequenceDownloads {
             active: &self.inner.sequence_active,
-            wake: &self.inner.fill_wake,
+            wake: &self.inner.pin_wake,
         }
     }
 
@@ -257,7 +254,7 @@ impl Files {
         ready: impl std::future::Future<Output = Result<(), SyncError>>,
     ) -> Result<(), SyncError> {
         let _changing = ConnectionChange::start(&self.inner.changing, &self.inner.upload_wake);
-        let _eager = self.inner.eager_fill.lock().await;
+        let _pin_run = self.inner.pin_run.lock().await;
         let _drain = self.inner.drain.lock().await;
         let _pins = self.inner.pins.lock().await;
         let _cache = self.inner.cache.write().await;
@@ -269,7 +266,7 @@ impl Files {
             .lock()
             .expect("file connection waits poisoned")
             .clear();
-        self.inner.fill_wake.notify_one();
+        self.inner.pin_wake.notify_one();
         Ok(())
     }
 }
@@ -348,18 +345,18 @@ async fn upload_worker(
     }
 }
 
-/// The eager fill: keeps eager files and carried pins in the cache whenever
-/// file rows change, an upload completes or a download retry is due (§17.6).
-async fn fill_worker(
+/// The pin worker: keeps carried pins whole in the cache whenever file rows
+/// change, an upload completes or a download retry is due (§17.6).
+async fn pin_worker(
     owner: std::sync::Weak<FilesInner>,
     mut stopping: watch::Receiver<bool>,
     mut changes: coven_database::DatabaseChanges,
 ) {
     let Some(first) = owner.upgrade() else { return };
-    let wake = first.fill_wake.clone();
+    let wake = first.pin_wake.clone();
     let mut reports = first.waits.network_reports();
     drop(first);
-    // The earliest due download retry, armed after each fill (§6.7).
+    // The earliest due download retry, armed after each run (§6.7).
     let mut retry: crate::retry_waits::Wake = Box::pin(std::future::pending());
     loop {
         tokio::select! {
@@ -376,9 +373,9 @@ async fn fill_worker(
             () = &mut retry => {},
         }
         let Some(owner) = owner.upgrade() else { break };
-        let fill = async {
+        let run = async {
             // A network report ends download waits for the network, and the
-            // person's retry every download wait; reports during this fill
+            // person's retry every download wait; reports during this run
             // are acted on after it, ending the waits it fails into (§6.7).
             if let Err(error) = owner
                 .waits
@@ -386,16 +383,16 @@ async fn fill_worker(
                 .await
             {
                 // The waits keep their backoff and the report stays, so the
-                // next fill ends them.
+                // next run ends them.
                 tracing::error!(?error, "ending reported download waits failed");
             }
-            if let Err(error) = owner.fill_eager().await {
-                tracing::error!(?error, "eager cache fill failed");
+            if let Err(error) = owner.keep_pins().await {
+                tracing::error!(?error, "keeping carried pins failed");
             }
         };
-        tokio::select! { biased; _ = stopping.changed() => break, () = fill => {} }
+        tokio::select! { biased; _ = stopping.changed() => break, () = run => {} }
         retry = owner
-            .next_fill_retry()
+            .next_pin_retry()
             .unwrap_or_else(|| Box::pin(std::future::pending()));
     }
 }

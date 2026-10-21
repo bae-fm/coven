@@ -12,7 +12,6 @@ fn tables() -> Vec<SyncedTable> {
             "attachments",
             1 << 30,
             Provenance::AppProvided,
-            CacheFill::CacheLazy,
         )),
     ]
 }

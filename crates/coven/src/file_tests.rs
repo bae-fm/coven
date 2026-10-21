@@ -14,7 +14,7 @@ async fn uncached_file_bodies_and_sequence_reads_share_the_download_limit() {
         let directory = app.create_closed_store(&layout, "Downloads", Arc::new(UuidIds)).await.unwrap();
         let handle = app.builder(layout).storage_connector(memory.clone())
             .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files", 1 << 30, Provenance::AppProvided, CacheFill::CacheLazy,
+                "files", 1 << 30, Provenance::AppProvided
             ))])
             .migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .open(directory.id()).await.unwrap();
@@ -86,7 +86,7 @@ async fn transfer_limits_bound_requests_and_a_changed_limit_applies_to_the_next_
             .max_concurrent_uploads(NonZeroUsize::new(2).unwrap())
             .max_concurrent_downloads(NonZeroUsize::new(2).unwrap())
             .synced_tables(vec![SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-                "files", 1 << 30, Provenance::AppProvided, CacheFill::CacheLazy,
+                "files", 1 << 30, Provenance::AppProvided
             ))])
             .migrations(vec![Migration::addition(1, "files", "CREATE TABLE files(id TEXT NOT NULL PRIMARY KEY,size INTEGER,hash BLOB,location TEXT)")])
             .open(directory.id()).await.unwrap();
@@ -168,7 +168,6 @@ fn tables() -> Vec<SyncedTable> {
                 "attachments",
                 1 << 30,
                 Provenance::UserProvided,
-                CacheFill::CacheLazy,
             )),
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
@@ -176,7 +175,6 @@ fn tables() -> Vec<SyncedTable> {
                 "thumbnails",
                 1 << 30,
                 Provenance::AppProvided,
-                CacheFill::CacheEager,
             )),
         SyncedTable::new("tags", RowIdentity::SharedKey),
         SyncedTable::new("note_tags", RowIdentity::SharedKey)

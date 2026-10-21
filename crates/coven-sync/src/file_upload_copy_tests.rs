@@ -1,9 +1,9 @@
-//! The uploading device keeps coven's own copy of a file it must cache
+//! The uploading device keeps coven's own copy of a file pinned here
 //! instead of downloading what it just stored (§17.6, §17.7).
 
 use super::{Fixture, CHUNK};
 use crate::files::file_error::*;
-use coven_database::{CacheFill, EagerCacheFillStatus, FileRef, Provenance};
+use coven_database::{FileRef, Provenance};
 use coven_format::file::FILE_HEADER_LEN;
 use coven_storage::{test_utils::Faults, Storage};
 
@@ -32,20 +32,12 @@ async fn cached_as_stored(f: &Fixture, file: &FileRef) {
 }
 
 /// Nothing is waiting to download, as the upload completed and after the
-/// eager worker runs.
+/// pin worker runs.
 async fn nothing_to_download(f: &Fixture, file: &FileRef) {
-    for fill in [false, true] {
-        if fill {
-            f.files.inner.fill_eager().await.unwrap();
+    for run in [false, true] {
+        if run {
+            f.files.inner.keep_pins().await.unwrap();
         }
-        assert!(f
-            .files
-            .inner
-            .database
-            .eager_work()
-            .await
-            .unwrap()
-            .is_empty());
         assert!(f
             .files
             .inner
@@ -54,93 +46,54 @@ async fn nothing_to_download(f: &Fixture, file: &FileRef) {
             .await
             .unwrap()
             .is_empty());
-        assert_eq!(
-            f.database.eager_cache_fill_status().await.unwrap(),
-            EagerCacheFillStatus::Idle
-        );
         assert_eq!(f.files.inner.database.missing_bytes(file).await.unwrap(), 0);
     }
 }
 
+/// Pin the file while it is queued, then upload it.
+async fn pinned_upload(f: &Fixture, id: &str, bytes: Vec<u8>) -> FileRef {
+    let file = f.attach("files", id, bytes).await;
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    f.drain().await;
+    assert!(!f.queued(&file).await);
+    file
+}
+
+/// One request, or a session of parts sealed again from the copy: either
+/// way the pinned copy is the stored object, byte for byte, and outlives a
+/// budget of nothing without a request.
 #[tokio::test]
-async fn an_eager_upload_keeps_its_copy_and_downloads_nothing() {
-    // One request, then a session of parts sealed again from the copy.
-    for size in [CHUNK / 2 + 7, CHUNK * 3 + 19] {
-        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
+async fn a_pin_taken_while_queued_keeps_the_uploaded_copy_pinned() {
+    for size in [CHUNK / 2 + 7, CHUNK * 2 + 5, CHUNK * 3 + 19] {
+        let f = Fixture::new(Provenance::AppProvided).await;
         let bytes = (0..size).map(|i| (i % 251) as u8).collect::<Vec<_>>();
-        let mut eager = f.database.subscribe_eager_cache_fill_status();
-        assert_eq!(eager.next().await.unwrap(), EagerCacheFillStatus::Idle);
-        let file = f.uploaded("cover", bytes.clone()).await;
-        nothing_to_download(&f, &file).await;
-        assert_eq!(file_reads(&f, &file).await, 0);
-        assert_eq!(f.files.read_file(&file).await.unwrap(), bytes);
-        assert_eq!(file_reads(&f, &file).await, 0);
-        // The status never left idle while the upload completed.
-        assert!(
-            tokio::time::timeout(std::time::Duration::from_millis(100), eager.next())
-                .await
-                .is_err()
-        );
-        cached_as_stored(&f, &file).await;
-        // An unpinned copy is under the namespace budget like any download,
-        // and evicting it requests nothing again.
-        assert!(!f
+        let attached = pinned_upload(&f, "pinned", bytes.clone()).await;
+        nothing_to_download(&f, &attached).await;
+        assert!(f
             .database
-            .rows_pinned("files", vec!["cover".into()])
+            .rows_pinned("files", vec!["pinned".into()])
             .await
             .unwrap()[0]
             .unwrap());
-        f.files.set_cache_budget("files", 0).await.unwrap();
-        assert_eq!(
-            f.files.inner.database.missing_bytes(&file).await.unwrap(),
-            file.plaintext_size()
-        );
-        assert!(f
-            .files
-            .inner
+        let progress = f
             .database
-            .eager_work()
+            .pin_progress(vec![attached.clone()])
             .await
-            .unwrap()
-            .is_empty());
+            .unwrap();
+        assert_eq!(progress.files_completed, 1);
+        f.files.set_cache_budget("files", 0).await.unwrap();
+        assert_eq!(f.files.read_file(&attached).await.unwrap(), bytes);
+        assert_eq!(file_reads(&f, &attached).await, 0);
+        cached_as_stored(&f, &attached).await;
         f.close().await;
     }
-}
-
-#[tokio::test]
-async fn a_pin_taken_while_queued_keeps_the_uploaded_copy_pinned() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let bytes = vec![61; CHUNK * 2 + 5];
-    let attached = f.attach("files", "pinned", bytes.clone()).await;
-    f.files.pin(std::slice::from_ref(&attached)).await.unwrap();
-    f.drain().await;
-    assert!(!f.queued(&attached).await);
-    nothing_to_download(&f, &attached).await;
-    assert!(f
-        .database
-        .rows_pinned("files", vec!["pinned".into()])
-        .await
-        .unwrap()[0]
-        .unwrap());
-    let progress = f
-        .database
-        .pin_progress(vec![attached.clone()])
-        .await
-        .unwrap();
-    assert_eq!(progress.files_completed, 1);
-    // The pinned copy outlives a budget of nothing.
-    f.files.set_cache_budget("files", 0).await.unwrap();
-    assert_eq!(f.files.read_file(&attached).await.unwrap(), bytes);
-    assert_eq!(file_reads(&f, &attached).await, 0);
-    cached_as_stored(&f, &attached).await;
-    f.close().await;
 }
 
 /// A pin keeps a file only while its row names it: a row deleted during the
 /// upload leaves no pinned copy outside the budget.
 #[tokio::test]
 async fn a_pinned_upload_whose_row_is_gone_keeps_no_copy() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.attach("files", "gone", vec![65; CHUNK + 1]).await;
     f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     f.database
@@ -169,7 +122,7 @@ async fn a_pinned_upload_whose_row_is_gone_keeps_no_copy() {
 
 #[tokio::test]
 async fn a_file_nothing_keeps_here_leaves_no_copy() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("lazy", vec![62; CHUNK + 3]).await;
     assert_eq!(
         f.files.inner.database.missing_bytes(&file).await.unwrap(),
@@ -187,28 +140,30 @@ async fn a_file_nothing_keeps_here_leaves_no_copy() {
 }
 
 /// A user's original is never read again after its upload (§17.1), so its
-/// eager copy comes from storage.
+/// pin is carried to the stored file, which comes from storage.
 #[tokio::test]
-async fn an_eager_original_is_downloaded_after_its_upload() {
-    let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheEager).await;
+async fn a_pinned_original_is_downloaded_after_its_upload() {
+    let f = Fixture::new(Provenance::UserProvided).await;
     let file = f.original("song", &[63; CHUNK + 9]).await;
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     f.drain().await;
     assert!(!f.queued(&file).await);
     assert_eq!(
-        f.files.inner.database.eager_work().await.unwrap(),
+        f.files.inner.database.pin_requests().await.unwrap(),
         vec![file.clone()]
     );
     f.close().await;
 }
 
-/// Storage stored the file but its reply was lost; after reopening, the
-/// retry settles the occupied path and keeps the copy in the transaction
-/// that completes the upload.
+/// Storage stored a pinned file but its reply was lost; after reopening,
+/// the retry settles the occupied path and keeps the copy in the
+/// transaction that completes the upload.
 #[tokio::test]
 async fn a_restart_after_a_lost_reply_still_keeps_the_copy() {
-    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
+    let mut f = Fixture::new(Provenance::AppProvided).await;
     let bytes = vec![64; CHUNK / 2];
     let file = f.attach("files", "cover", bytes.clone()).await;
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
     f.storage
         .set_faults(Faults {
             lose_completion_reply: true,

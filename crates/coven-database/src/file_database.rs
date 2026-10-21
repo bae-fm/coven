@@ -125,11 +125,6 @@ impl FileDatabase {
             FileDatabaseAccess::Reader(db) => db.open_local_file(file).await,
         }
     }
-    /// Pending eager work: changed references and temporary failures awaiting
-    /// their retry wait, from one indexed table (§17.6, §6.7).
-    pub async fn eager_work(&self) -> Result<Vec<FileRef>, DbError> {
-        self.read(crate::eager_work::read).await
-    }
     /// Pins carried from completed uploads that still wait for a whole copy.
     pub async fn pin_requests(&self) -> Result<Vec<FileRef>, DbError> {
         self.read(cache::pin_requests).await
@@ -140,21 +135,6 @@ impl FileDatabase {
         self.require_writer()?;
         self.run(move |db, _, _, _| db.transaction(|db| cache::settle_pin(db, &file)))
             .await
-    }
-    /// Settle eager work: downloaded, permanently refused or cancelled. The
-    /// requested set retires with its last settled file.
-    pub async fn settle_eager_work(&self, files: Vec<FileRef>) -> Result<(), DbError> {
-        self.require_writer()?;
-        self.run(move |db, _, _, _| {
-            db.transaction(|db| {
-                for file in &files {
-                    crate::eager_work::settle(db, file)?;
-                }
-                // The last settled request retires its set with it (§17.6).
-                crate::cache_progress::retire_eager(db)
-            })
-        })
-        .await
     }
     /// The uploader's applied state and, for this device's uploads, its local
     /// record about `subject`, read
@@ -388,9 +368,9 @@ impl FileDatabase {
     }
     /// Whether completing this queued upload would keep coven's own copy as
     /// the file's cache copy: the queue's source is that copy of app-provided
-    /// bytes, and the file must be cached here, pinned while queued and still
-    /// named by its row, or named by an eager row (§17.6). A user's original
-    /// is never read again after its upload (§17.1), so it never answers yes.
+    /// bytes, and the file is pinned while queued and still named by its row
+    /// (§17.6). A user's original is never read again after its upload
+    /// (§17.1), so it never answers yes.
     /// Completion decides again in its own transaction; this lets the
     /// uploader write the copy first.
     pub async fn upload_keeps_copy(&self, file: &FileRef) -> Result<bool, DbError> {
@@ -405,9 +385,8 @@ impl FileDatabase {
                     Ok(matches!(
                         file_ref::queued_source(db, &file)?,
                         Some(file_ref::QueuedSource::Copy(_))
-                    ) && (file_queue::pinned(db, &file)?
-                        && file_ref::naming(db, schema, &file)?.is_some()
-                        || crate::eager_work::named(db, schema, &file)?.is_some()))
+                    ) && file_queue::pinned(db, &file)?
+                        && file_ref::naming(db, schema, &file)?.is_some())
                 })
             })
             .await
@@ -419,13 +398,11 @@ impl FileDatabase {
     /// meanwhile keeps its newer state. Afterwards this device reads the file
     /// from the cache or storage.
     ///
-    /// A file that must stay cached here, pinned while queued and still named
-    /// by its row, or named by an eager row, takes `copy`, the whole encrypted
-    /// file the uploader wrote from coven's own copy, as its cache copy in
-    /// that transaction: pinned if the pin was, under the budget otherwise
-    /// (§17.6). Without one, the pin becomes the stored file's carried pin
-    /// and the eager row's file becomes eager work, both kept whole from
-    /// storage. A copy nothing needs any more is removed with the queue's own.
+    /// A file pinned while queued and still named by its row takes `copy`,
+    /// the whole encrypted file the uploader wrote from coven's own copy, as
+    /// its pinned cache copy in that transaction (§17.6). Without one, the
+    /// pin becomes the stored file's carried pin, kept whole from storage. A
+    /// copy nothing needs any more is removed with the queue's own.
     pub async fn complete_upload<S: serde::Serialize + Send + 'static>(
         &self,
         id: i64,
@@ -710,43 +687,6 @@ impl FileDatabase {
         })
         .await
     }
-    /// Reserve eager downloads of these references; a cancelled set gives
-    /// way to them (§17.6).
-    pub async fn request_eager(&self, files: Vec<FileRef>) -> Result<(), DbError> {
-        self.require_writer()?;
-        self.run(move |db, _, _, _| {
-            db.transaction(|db| crate::cache_progress::request_eager(db, &files))
-        })
-        .await
-    }
-    /// Cancel and retire the requested eager work in one transaction. Return
-    /// the retry subjects retired with it; a carried pin keeps its own wait.
-    pub async fn cancel_eager(&self) -> Result<Vec<crate::RetrySubject>, DbError> {
-        self.require_writer()?;
-        self.run(|db, _, _, _| {
-            db.transaction(|db| {
-                let cancelled = crate::cache_progress::cancel_eager(db)?;
-                let pins = cache::pin_requests(db)?;
-                let mut retired = Vec::new();
-                for file in cancelled {
-                    crate::eager_work::settle(db, &file)?;
-                    if !pins
-                        .iter()
-                        .any(|pin| pin.uploader() == file.uploader() && pin.id() == file.id())
-                    {
-                        let subject = crate::RetrySubject::Download {
-                            uploader: file.uploader(),
-                            file: file.id(),
-                        };
-                        crate::retry::clear(db, subject)?;
-                        retired.push(subject);
-                    }
-                }
-                Ok(retired)
-            })
-        })
-        .await
-    }
     /// The namespace's budget, declared or since set.
     pub async fn budget(&self, namespace: &str) -> Result<u64, DbError> {
         let namespace = namespace.to_owned();
@@ -832,7 +772,6 @@ fn complete<S: serde::Serialize>(
         let schema = &inner.access.write_schema;
         let result = writer.transaction(|db| {
             let (reference, pinned) = file_queue::complete(db, id)?;
-            let eager = crate::eager_work::named(db, schema, &reference)?;
             match copy.as_deref().zip(size) {
                 Some((copy, size)) => {
                     if cache::id(&copy.file)? != cache::id(&reference)? {
@@ -841,17 +780,13 @@ fn complete<S: serde::Serialize>(
                         });
                     }
                     // A pin keeps a file only while its row names it.
-                    let pinned = pinned && file_ref::naming(db, schema, &reference)?.is_some();
-                    if pinned || eager.is_some() {
-                        cache::publish(db, &reference, &copy.name, size, pinned)?;
+                    if pinned && file_ref::naming(db, schema, &reference)?.is_some() {
+                        cache::publish(db, &reference, &copy.name, size, true)?;
                     }
                 }
                 None => {
                     if pinned {
                         cache::request_pin(db, &reference)?;
-                    }
-                    if let Some(current) = &eager {
-                        crate::eager_work::request(db, current)?;
                     }
                 }
             }

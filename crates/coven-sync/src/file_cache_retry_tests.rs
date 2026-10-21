@@ -1,67 +1,60 @@
-//! Eager downloads retain recoverable provider failures until they can retry.
+//! Carried pins retain recoverable provider failures until they can retry.
 use super::*;
 use crate::{PendingReason, Retry};
 
 #[tokio::test]
-async fn full_storage_retries_eager_downloads_under_backoff() {
+async fn full_storage_retries_carried_pins_under_backoff() {
     let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-    let b = eager_reader(&a, &clock).await;
-    apply_all(&a, &b).await;
+    let (f, file) = carried_pin(&clock, "pinned", &[72; CHUNK * 2]).await;
     for wait in [1, 2, 4] {
-        a.storage
+        f.storage
             .set_faults(Faults {
                 fail_next: 1,
                 failure: StorageFailure::QuotaExceeded,
                 ..Faults::none()
             })
             .await;
-        b.files.inner.fill_eager().await.unwrap();
-        let waits = b.files.inner.database.download_waits().await.unwrap();
+        f.files.inner.keep_pins().await.unwrap();
+        let waits = f.files.inner.database.download_waits().await.unwrap();
         assert_eq!(waits.len(), 1);
         assert_eq!(waits[0].1.wait, Duration::from_secs(wait));
-        let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
+        let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
         assert_eq!(records[0].retry(), Retry::Automatic);
-        // No caller awaits the fill: its record carries the error.
-        let cause = b.file_cause(&file).await.unwrap();
+        // No caller awaits the run: its record carries the error.
+        let cause = f.file_cause(&file).await.unwrap();
         assert!(cause.contains("QuotaExceeded"), "{cause}");
-        let requests = a.storage.request_trace().len();
-        b.files.inner.fill_eager().await.unwrap();
-        assert_eq!(a.storage.request_trace().len(), requests);
+        let requests = f.storage.request_trace().len();
+        f.files.inner.keep_pins().await.unwrap();
+        assert_eq!(f.storage.request_trace().len(), requests);
         advance(&clock, wait);
     }
-    b.files.inner.fill_eager().await.unwrap();
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
-        b.files.inner.database.missing_bytes(&file).await.unwrap(),
+        f.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
     );
-    assert!(file_records(&b).await.is_empty());
-    b.close().await;
-    a.close().await;
+    assert!(file_records(&f).await.is_empty());
+    f.close().await;
 }
 
 #[tokio::test]
-async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverable() {
+async fn pin_provider_failures_wait_for_connection_changes_only_when_recoverable() {
     for failure in [
         StorageFailure::Authentication,
         StorageFailure::PermissionDenied,
         StorageFailure::Protocol,
     ] {
         let clock = clock();
-        let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-        let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-        let mut b = eager_reader(&a, &clock).await;
-        apply_all(&a, &b).await;
-        a.storage
+        let (mut f, file) = carried_pin(&clock, "pinned", &[72; CHUNK * 2]).await;
+        f.storage
             .set_faults(Faults {
                 fail_next: 1,
                 failure,
                 ..Faults::none()
             })
             .await;
-        b.files.inner.fill_eager().await.unwrap();
-        let records = b.database.pending::<crate::PendingRecord>().await.unwrap();
+        f.files.inner.keep_pins().await.unwrap();
+        let records = f.database.pending::<crate::PendingRecord>().await.unwrap();
         assert_eq!(
             records[0].reason,
             PendingReason::Storage {
@@ -78,7 +71,7 @@ async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverab
                 Retry::AppAction
             }
         );
-        assert!(b
+        assert!(f
             .files
             .inner
             .database
@@ -86,124 +79,85 @@ async fn eager_provider_failures_wait_for_connection_changes_only_when_recoverab
             .await
             .unwrap()
             .is_empty());
-        assert!(b.files.inner.next_fill_retry().is_none());
-        let requests = a.storage.request_trace().len();
+        assert!(f.files.inner.next_pin_retry().is_none());
+        let requests = f.storage.request_trace().len();
         advance(&clock, 600);
-        b.files.inner.fill_eager().await.unwrap();
-        assert_eq!(a.storage.request_trace().len(), requests);
-        connect(&b, &a).await;
-        b.files.inner.fill_eager().await.unwrap();
+        f.files.inner.keep_pins().await.unwrap();
+        assert_eq!(f.storage.request_trace().len(), requests);
+        reconnect(&f).await;
+        f.files.inner.keep_pins().await.unwrap();
         if failure == StorageFailure::Protocol {
-            b.reopen().await;
-            connect(&b, &a).await;
-            b.files.inner.fill_eager().await.unwrap();
-            assert_eq!(a.storage.request_trace().len(), requests);
+            f.reopen().await;
+            reconnect(&f).await;
+            f.files.inner.keep_pins().await.unwrap();
+            assert_eq!(f.storage.request_trace().len(), requests);
             assert_eq!(
-                b.database.pending::<crate::PendingRecord>().await.unwrap(),
+                f.database.pending::<crate::PendingRecord>().await.unwrap(),
                 records
             );
         } else {
             assert_eq!(
-                b.files.inner.database.missing_bytes(&file).await.unwrap(),
+                f.files.inner.database.missing_bytes(&file).await.unwrap(),
                 0
             );
-            assert!(file_records(&b).await.is_empty());
+            assert!(file_records(&f).await.is_empty());
         }
-        b.close().await;
-        a.close().await;
+        f.close().await;
     }
 }
 
 #[tokio::test]
-async fn cancellation_while_waiting_for_credentials_survives_reconnection() {
+async fn reconnect_wakes_the_pin_worker_without_a_pass() {
     let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK]).await;
-    let b = eager_reader(&a, &clock).await;
-    apply_all(&a, &b).await;
-    a.storage
-        .set_faults(Faults {
-            fail_next: 1,
-            failure: StorageFailure::Authentication,
-            ..Faults::none()
-        })
-        .await;
-    b.files.inner.fill_eager().await.unwrap();
-    let records = file_records(&b).await;
-    b.files.cancel_eager_cache_fill().await.unwrap();
-    let requests = a.storage.request_trace().len();
-    connect(&b, &a).await;
-    b.files.inner.fill_eager().await.unwrap();
-    assert_eq!(a.storage.request_trace().len(), requests);
-    assert_eq!(file_records(&b).await, records);
-    assert_eq!(
-        b.files.inner.database.missing_bytes(&file).await.unwrap(),
-        file.plaintext_size()
-    );
-    b.close().await;
-    a.close().await;
-}
-
-#[tokio::test]
-async fn reconnect_wakes_the_eager_worker_without_a_pass() {
-    let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![72; CHUNK]).await;
-    let b = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheEager, clock).await;
-    let storage = Arc::new(a.storage.with_cooldown(b.files.inner.waits.clone()));
-    b.files
+    let f = Fixture::with_clock(Provenance::UserProvided, clock).await;
+    let storage = Arc::new(f.storage.with_cooldown(f.files.inner.waits.clone()));
+    f.files
         .set_storage(Some(storage.clone()), std::future::ready(Ok(())))
         .await
         .unwrap();
-    a.storage
+    let file = f.original("pinned", &[72; CHUNK]).await;
+    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
+    // The upload succeeds; the carried pin's read needs new credentials.
+    f.storage
         .set_faults(Faults {
-            fail_next: 1,
-            failure: StorageFailure::Authentication,
+            read_failures: [(f.path(&file), StorageFailure::Authentication)].into(),
             ..Faults::none()
         })
         .await;
-    let mut pending = b.database.subscribe_pending::<crate::PendingRecord>();
-    let mut status = b.database.subscribe_eager_cache_fill_status();
-    apply_all(&a, &b).await;
+    let mut pending = f.database.subscribe_pending::<crate::PendingRecord>();
+    let mut progress = f.database.subscribe_pin_progress(vec![file.clone()]);
+    f.files.set_uploads_paused(false).await.unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while file_records(&b).await.is_empty() {
+        while file_records(&f).await.is_empty() {
             pending.next().await.unwrap();
         }
     })
     .await
     .unwrap();
-    drop(b.files.inner.eager_fill.lock().await);
-    assert!(b.files.inner.next_fill_retry().is_none());
-    b.files
+    drop(f.files.inner.pin_run.lock().await);
+    assert!(f.files.inner.next_pin_retry().is_none());
+    f.storage.set_faults(Faults::none()).await;
+    f.files
         .set_storage(Some(storage), std::future::ready(Ok(())))
         .await
         .unwrap();
     tokio::time::timeout(Duration::from_secs(5), async {
-        while b.files.inner.database.missing_bytes(&file).await.unwrap() > 0 {
-            status.next().await.unwrap();
+        loop {
+            let progress = progress.next().await.unwrap();
+            if progress.bytes_cached == progress.bytes_total {
+                break;
+            }
         }
     })
     .await
     .unwrap();
-    b.close().await;
-    a.close().await;
+    f.close().await;
 }
 
 #[tokio::test]
 async fn carried_pins_survive_a_provider_sign_in_failure() {
     let clock = clock();
-    // A pinned original's upload carries its pin to storage (§17.6).
-    let f = Fixture::with_clock(
-        Provenance::UserProvided,
-        CacheFill::CacheLazy,
-        clock.clone(),
-    )
-    .await;
-    f.files.stop_background_for_counts().await;
-    let file = f.original("pinned", &[72; CHUNK]).await;
-    f.files.pin(std::slice::from_ref(&file)).await.unwrap();
-    f.files.set_uploads_paused(false).await.unwrap();
-    f.files.inner.drain_uploads(false).await.unwrap();
+    let (f, file) = carried_pin(&clock, "pinned", &[72; CHUNK]).await;
     f.storage
         .set_faults(Faults {
             fail_next: 1,
@@ -211,19 +165,16 @@ async fn carried_pins_survive_a_provider_sign_in_failure() {
             ..Faults::none()
         })
         .await;
-    f.files.inner.fill_eager().await.unwrap();
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
         f.files.inner.database.pin_requests().await.unwrap(),
         vec![file.clone()]
     );
     let requests = f.storage.request_trace().len();
-    f.files.inner.fill_eager().await.unwrap();
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(f.storage.request_trace().len(), requests);
-    f.files
-        .set_storage(Some(f.storage.clone()), std::future::ready(Ok(())))
-        .await
-        .unwrap();
-    f.files.inner.fill_eager().await.unwrap();
+    reconnect(&f).await;
+    f.files.inner.keep_pins().await.unwrap();
     assert!(f
         .files
         .inner
@@ -259,19 +210,16 @@ async fn io_differential_download_retries() {
             for provider in [0, 2] {
                 for changed in [false, true] {
                     let clock = clock();
-                    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-                    a.uploaded("eager", vec![72; CHUNK]).await;
-                    let b = eager_reader(&a, &clock).await;
-                    apply_all(&a, &b).await;
-                    a.storage
+                    let (f, _) = carried_pin(&clock, "pinned", &[72; CHUNK]).await;
+                    f.storage
                         .set_faults(Faults {
                             fail_next: 1,
                             failure,
                             ..Faults::none()
                         })
                         .await;
-                    b.files.inner.fill_eager().await.unwrap();
-                    let timed = !b
+                    f.files.inner.keep_pins().await.unwrap();
+                    let timed = !f
                         .files
                         .inner
                         .database
@@ -280,24 +228,23 @@ async fn io_differential_download_retries() {
                         .unwrap()
                         .is_empty();
                     coven_storage::Cooldown::record(
-                        b.files.inner.waits.as_ref(),
+                        f.files.inner.waits.as_ref(),
                         Duration::from_secs(provider),
                     )
                     .await
                     .unwrap();
                     advance(&clock, now);
                     if changed {
-                        connect(&b, &a).await;
+                        reconnect(&f).await;
                     }
-                    let requests = a.storage.request_trace().len();
-                    b.files.inner.fill_eager().await.unwrap();
+                    let requests = f.storage.request_trace().len();
+                    f.files.inner.keep_pins().await.unwrap();
                     actual.push(serde_json::json!({
                         "timed": timed,
-                        "retried": a.storage.request_trace().len() > requests,
+                        "retried": f.storage.request_trace().len() > requests,
                     }));
                     inputs.push(serde_json::json!({"clears": clears, "now": now, "provider": provider, "changed": changed}));
-                    b.close().await;
-                    a.close().await;
+                    f.close().await;
                 }
             }
         }
@@ -322,9 +269,9 @@ async fn io_differential_download() {
         (true, true, false, true),
         (true, true, true, false),
     ] {
-        let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let a = Fixture::new(Provenance::AppProvided).await;
         let file = a.uploaded("download", vec![72; CHUNK]).await;
-        let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let b = Fixture::new(Provenance::AppProvided).await;
         connect(&b, &a).await;
         for mut write in a.database.test_queued_writes().await.unwrap() {
             if !hash {
@@ -377,18 +324,14 @@ async fn io_differential_download() {
     assert_eq!(actual, crate::tests::io_runner(&inputs), "{inputs:?}");
 }
 
-/// An eager download that found no network waits its backoff until the
-/// app's network report ends it; one the provider answered keeps its wait
-/// (§6.7).
+/// A carried pin that found no network waits its backoff until the app's
+/// network report ends it; one the provider answered keeps its wait (§6.7).
 #[tokio::test]
 async fn a_network_report_ends_only_an_offline_download_wait() {
     for answered in [false, true] {
         let clock = clock();
-        let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-        let file = a.uploaded("eager", vec![72; CHUNK * 2]).await;
-        let b = eager_reader(&a, &clock).await;
-        apply_all(&a, &b).await;
-        a.storage
+        let (f, file) = carried_pin(&clock, "pinned", &[72; CHUNK * 2]).await;
+        f.storage
             .set_faults(Faults {
                 fail_next: 1,
                 failure: StorageFailure::Network,
@@ -396,63 +339,59 @@ async fn a_network_report_ends_only_an_offline_download_wait() {
                 ..Faults::none()
             })
             .await;
-        b.files.inner.fill_eager().await.unwrap();
-        let before = b.files.inner.database.download_waits().await.unwrap();
+        f.files.inner.keep_pins().await.unwrap();
+        let before = f.files.inner.database.download_waits().await.unwrap();
         assert_eq!(before[0].1.wait, Duration::from_secs(1));
-        let waits = &b.files.inner.waits;
+        let waits = &f.files.inner.waits;
         waits.network_changed();
         waits
             .end_reported_waits(crate::NetworkOwner::Downloads)
             .await
             .unwrap();
-        let after = b.files.inner.database.download_waits().await.unwrap();
+        let after = f.files.inner.database.download_waits().await.unwrap();
         if answered {
             assert_eq!(after, before);
         } else {
             assert_eq!(after[0].1.failures, 1);
             assert!(after[0].1.wait.is_zero());
         }
-        b.files.inner.fill_eager().await.unwrap();
+        f.files.inner.keep_pins().await.unwrap();
         assert_eq!(
-            b.files.inner.database.missing_bytes(&file).await.unwrap() == 0,
+            f.files.inner.database.missing_bytes(&file).await.unwrap() == 0,
             !answered,
             "answered {answered}"
         );
-        b.close().await;
-        a.close().await;
+        f.close().await;
     }
 }
 
-/// Ben pulls to refresh while an eager download waits after the provider
-/// answered "not found", which a network report leaves alone. His retry ends
-/// that wait, keeping its failure count, and the download completes now that
-/// the object is there (§6.7).
+/// Ana pulls to refresh while her carried pin waits after the provider
+/// answered with a server error, which a network report leaves alone. Her
+/// retry ends that wait, keeping its failure count, and the download
+/// completes now (§6.7).
 #[tokio::test]
 async fn the_persons_retry_ends_an_answered_download_wait() {
     let clock = clock();
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
-    let file = a.uploaded("eager", vec![73; CHUNK * 2]).await;
-    let b = eager_reader(&a, &clock).await;
-    apply_all(&a, &b).await;
-    a.storage
+    let (f, file) = carried_pin(&clock, "pinned", &[73; CHUNK * 2]).await;
+    f.storage
         .set_faults(Faults {
             fail_next: 1,
-            failure: StorageFailure::NotFound,
-            response: Some(404),
+            failure: StorageFailure::Network,
+            response: Some(503),
             ..Faults::none()
         })
         .await;
-    b.files.inner.fill_eager().await.unwrap();
-    let before = b.files.inner.database.download_waits().await.unwrap();
+    f.files.inner.keep_pins().await.unwrap();
+    let before = f.files.inner.database.download_waits().await.unwrap();
     assert_eq!(before[0].1.wait, Duration::from_secs(1));
-    let waits = &b.files.inner.waits;
+    let waits = &f.files.inner.waits;
     waits.network_changed();
     waits
         .end_reported_waits(crate::NetworkOwner::Downloads)
         .await
         .unwrap();
     assert_eq!(
-        b.files.inner.database.download_waits().await.unwrap(),
+        f.files.inner.database.download_waits().await.unwrap(),
         before
     );
     waits.retry_requested();
@@ -460,14 +399,13 @@ async fn the_persons_retry_ends_an_answered_download_wait() {
         .end_reported_waits(crate::NetworkOwner::Downloads)
         .await
         .unwrap());
-    let after = b.files.inner.database.download_waits().await.unwrap();
+    let after = f.files.inner.database.download_waits().await.unwrap();
     assert_eq!(after[0].1.failures, before[0].1.failures);
     assert!(after[0].1.wait.is_zero());
-    b.files.inner.fill_eager().await.unwrap();
+    f.files.inner.keep_pins().await.unwrap();
     assert_eq!(
-        b.files.inner.database.missing_bytes(&file).await.unwrap(),
+        f.files.inner.database.missing_bytes(&file).await.unwrap(),
         0
     );
-    b.close().await;
-    a.close().await;
+    f.close().await;
 }

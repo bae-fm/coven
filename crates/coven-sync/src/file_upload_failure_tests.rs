@@ -14,7 +14,7 @@ async fn restored_sources_upload_after_backoff_without_provider_probes() {
             FileSourceFailure::Integrity => Provenance::AppProvided,
             _ => Provenance::UserProvided,
         };
-        let f = Fixture::with_clock(provenance, CacheFill::CacheLazy, clock.clone()).await;
+        let f = Fixture::with_clock(provenance, clock.clone()).await;
         f.files.stop_background_for_counts().await;
         let bytes = vec![41; CHUNK * 2];
         let (file, path) = match failure {
@@ -88,12 +88,7 @@ async fn restored_sources_upload_after_backoff_without_provider_probes() {
 #[tokio::test]
 async fn a_disk_failure_retries_after_its_backoff() {
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
-    let f = Fixture::with_clock(
-        Provenance::UserProvided,
-        CacheFill::CacheLazy,
-        clock.clone(),
-    )
-    .await;
+    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
     f.files.stop_background_for_counts().await;
     let file = f.original("photo", b"photo").await;
     let path = f.root.path().join("photo");
@@ -323,12 +318,7 @@ async fn manual_retry_drains_recoverable_uploads_early() {
 #[tokio::test]
 async fn the_worker_retries_a_restored_original_without_an_app_call() {
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
-    let f = Fixture::with_clock(
-        Provenance::UserProvided,
-        CacheFill::CacheLazy,
-        clock.clone(),
-    )
-    .await;
+    let f = Fixture::with_clock(Provenance::UserProvided, clock.clone()).await;
     let file = f.original("photo", b"photo").await;
     let path = f.root.path().join("photo");
     let saved = f.root.path().join("saved");
@@ -366,7 +356,7 @@ async fn the_worker_retries_a_restored_original_without_an_app_call() {
 #[tokio::test]
 async fn the_worker_retries_sign_in_failure_on_client_swap() {
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
-    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock).await;
+    let f = Fixture::with_clock(Provenance::AppProvided, clock).await;
     let file = f.attach("files", "photo", b"photo".to_vec()).await;
     f.storage
         .set_faults(fail_next(StorageFailure::Authentication, None))

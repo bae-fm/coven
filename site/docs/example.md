@@ -15,7 +15,7 @@ note. Attachments carry the user's own files.
 
 ```rust
 use coven::{
-    Audience, CacheFill, Coven, DropboxAccess, DropboxLocation, FileDecl, InviteAccess,
+    Audience, Coven, DropboxAccess, DropboxLocation, FileDecl, InviteAccess,
     InviteTarget, MemberRole, Migration, OAuthAccess, Provenance, RowIdentity, StorageConfig,
     StoreLayout, SyncStatus, SyncedTable, UuidText,
 };
@@ -51,7 +51,7 @@ fn tables() -> Vec<SyncedTable> {
         SyncedTable::new("notes", RowIdentity::IndependentUuid).audience_column("audience"),
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided, CacheFill::CacheLazy)),
+            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided)),
         SyncedTable::new("tags", RowIdentity::SharedKey),
         SyncedTable::new("note_tags", RowIdentity::SharedKey)
             .key_columns(["note_id", "tag_id"])

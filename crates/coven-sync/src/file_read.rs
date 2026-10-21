@@ -339,29 +339,6 @@ impl UploadedFile {
             .store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     }
-    /// Fetch every chunk into the cache, authenticating each, then compare the
-    /// whole plaintext with the row's content hash (§17.5).
-    pub(crate) async fn download(&self) -> Result<(), TransferError> {
-        let mut index = 0;
-        let mut hash = ContentHasher::new();
-        while index < self.header.chunk_count() {
-            let (last, chunks) = self
-                .chunks(
-                    index,
-                    self.header.chunk_count() - 1,
-                    ChunkDestination::Cache,
-                )
-                .await?;
-            for chunk in chunks {
-                hash.update(&chunk.plaintext);
-            }
-            index = last + 1;
-        }
-        if hash.finish() != self.file.content_hash() {
-            return Err(TransferError::Refused(crate::Refusal::ContentHash));
-        }
-        Ok(())
-    }
     pub(crate) async fn keep_whole(&self) -> Result<(), TransferError> {
         let (reservation, mut writer) = self.owner.create_cache_file(&self.file).await?;
         writer.append(&self.header.encode()).await?;

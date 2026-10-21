@@ -7,7 +7,7 @@ use crate::{
 };
 use coven_database::{DbError, FileRef, RetrySubject, RetryWait};
 
-/// The persisted wait of an eager download of `file`.
+/// The persisted wait of a download of `file`.
 pub(crate) fn download_subject(file: &FileRef) -> RetrySubject {
     RetrySubject::Download {
         uploader: file.uploader(),
@@ -177,7 +177,7 @@ impl FilesInner {
     /// waits (§17.7): recoverable conditions retry by time or a new connection;
     /// permanent failures and updates keep no timer. A wait that
     /// cannot be chosen or persisted holds the download until the app acts,
-    /// and fails the fill.
+    /// and fails the pin run.
     pub(super) async fn record_download_failure(
         &self,
         subject: PendingSubject,
@@ -218,7 +218,7 @@ impl FilesInner {
 }
 
 /// Provider and local failures use the shared classification. Immutable
-/// refusals, unavailable uploaders and required updates end eager work.
+/// refusals, unavailable uploaders and required updates end a carried pin.
 pub(super) fn download_clears(reason: &PendingReason) -> Clears {
     reason.clears().unwrap_or(match reason {
         PendingReason::NoStorage => Clears::ByPerson,

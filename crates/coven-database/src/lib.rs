@@ -54,9 +54,8 @@ mod raise_capture;
 pub use provider_access::{ProviderAccess, ProviderAccessChange, ProviderAccessRequest};
 pub use raise_capture::RaiseCapture;
 mod cache_progress;
-mod eager_work;
 mod read;
-pub use cache_progress::{EagerCacheFillStatus, PinProgress};
+pub use cache_progress::PinProgress;
 mod removal;
 mod removal_schema;
 mod removal_sql;
@@ -112,7 +111,7 @@ pub use database::{
     discarded_operations, discarded_store_name, read_store_name, Database, DatabaseBuilder,
     DatabaseReadHandle,
 };
-pub use declaration::{CacheFill, FileDecl, Provenance, RowIdentity, SyncedTable};
+pub use declaration::{FileDecl, Provenance, RowIdentity, SyncedTable};
 pub use download::{ApplyOutcome, WriteWait};
 #[cfg(test)]
 use download::{DownloadedPart, DownloadedWrite};

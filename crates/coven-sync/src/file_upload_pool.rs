@@ -404,8 +404,8 @@ impl FilesInner {
         let started = run.started.remove(&id);
         if stored {
             run.uploaded += 1;
-            // Completion can leave eager work, such as a carried pin (§17.6).
-            self.fill_wake.notify_one();
+            // Completion can leave a carried pin to keep (§17.6).
+            self.pin_wake.notify_one();
         } else if let Some(ending) = started.and_then(|seen| self.waits.reports_since(seen)) {
             run.crossed.insert(RetrySubject::Upload(id), ending);
         }

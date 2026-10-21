@@ -7,7 +7,6 @@ fn tables(kind: Provenance) -> Vec<SyncedTable> {
             "files",
             1 << 30,
             kind,
-            CacheFill::CacheLazy,
         )),
     ]
 }
@@ -205,16 +204,10 @@ async fn fixed_references_retain_the_key_identity_and_refuse_malformed_encodings
 }
 
 #[tokio::test]
-async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
+async fn fixed_file_references_are_found_by_retention() {
     let store = TestStore::new();
-    let declarations = vec![
-        SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
-            "files",
-            1 << 30,
-            Provenance::AppProvided,
-            CacheFill::CacheEager,
-        )),
-    ];
+    let declarations = vec![SyncedTable::new("files", RowIdentity::SharedKey)
+        .carries_files(FileDecl::new("files", 1 << 30, Provenance::AppProvided))];
     let db = store.schema(declarations, SCHEMA).await.unwrap();
     attach(&db, b"original".to_vec(), true).await;
     let queued = db.file_ref("files", "7").await.unwrap();
@@ -222,7 +215,6 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
         .lines()
         .nth(1)
         .unwrap();
-    let device = db.local_device().unwrap();
     db.inspect_writer_schema(|sql, schema| {
         sql.transaction(|sql| {
             sql.internal_execute("UPDATE files SET location=?1", [text])?;
@@ -230,13 +222,10 @@ async fn fixed_file_references_are_found_by_eager_reads_and_retention() {
                 "files".into(),
                 coven_format::key::encode_key(&[coven_format::value::Value::Text("7".into())])?,
             );
-            crate::file_protection::refresh(sql, schema, &key)?;
-            crate::eager_work::note(sql, schema, device, &key)
+            crate::file_protection::refresh(sql, schema, &key)
         })
         .unwrap()
     });
-    let files = FileDatabase::new(db.clone()).eager_work().await.unwrap();
-    assert_eq!(files, vec![db.file_ref("files", "7").await.unwrap()]);
     // The row's current reference, and the queued attachment it replaced.
     assert_eq!(
         db.retained_files().await.unwrap().references,
@@ -356,16 +345,11 @@ async fn custom_columns_and_inherited_audience_are_read_together_with_composite_
                 .key_columns(["note_id", "name"])
                 .audience_from("note_id")
                 .carries_files(
-                    FileDecl::new(
-                        "files",
-                        1 << 30,
-                        Provenance::AppProvided,
-                        CacheFill::CacheLazy,
-                    )
-                    .with_id_column("TOKEN")
-                    .with_size_column("BYTES")
-                    .with_hash_column("DIGEST")
-                    .with_location_column("WHERE_AT"),
+                    FileDecl::new("files", 1 << 30, Provenance::AppProvided)
+                        .with_id_column("TOKEN")
+                        .with_size_column("BYTES")
+                        .with_hash_column("DIGEST")
+                        .with_location_column("WHERE_AT"),
                 ),
         ]
     };

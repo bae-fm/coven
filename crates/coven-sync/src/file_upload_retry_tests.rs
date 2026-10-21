@@ -8,7 +8,7 @@ use coven_foundation::clock::{Clock, FixedClock};
 use coven_storage::{test_utils::Faults, StorageFailure};
 
 async fn fixture(clock: &Arc<FixedClock>) -> Fixture {
-    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock.clone()).await;
+    let f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
     // Only the explicit drains below attempt uploads.
     f.files.stop_background_for_counts().await;
     f.files.set_uploads_paused(false).await.unwrap();
@@ -196,7 +196,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
     let clock = Arc::new(FixedClock::new(
         SystemTime::UNIX_EPOCH + Duration::from_secs(1000),
     ));
-    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock.clone()).await;
+    let f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
     f.storage
         .set_faults(fail_next(StorageFailure::Network, None))
         .await;
@@ -230,7 +230,7 @@ async fn the_worker_wakes_for_a_due_retry_without_another_commit() {
 async fn completed_catch_up_wakes_a_worker_blocked_between_file_sends() {
     use coven_storage::ObjectPrefix;
     let clock = Arc::new(FixedClock::new(SystemTime::UNIX_EPOCH));
-    let f = Fixture::with_clock(Provenance::AppProvided, CacheFill::CacheLazy, clock.clone()).await;
+    let f = Fixture::with_clock(Provenance::AppProvided, clock.clone()).await;
     f.attach("files", "first", b"first".to_vec()).await;
     f.attach("files", "second", b"second".to_vec()).await;
     let (started, observed) = tokio::sync::oneshot::channel();

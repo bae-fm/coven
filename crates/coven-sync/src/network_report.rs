@@ -3,16 +3,16 @@
 //! A network report says the device's network changed. A wait whose last
 //! attempt received no provider response waits for the network, so the
 //! report ends it: the connection's backoff, an operation's, a queued
-//! upload's and an eager download's. A wait after a provider's answer holds.
+//! upload's and a download's. A wait after a provider's answer holds.
 //! A retry report says the person asked to retry everything now: it ends
 //! every ordinary wait, answered or not. Neither ends the provider cooldown,
 //! and an ended wait keeps its failure count.
 //!
 //! Each owner acts on reports for the waits it retries, when it next plans:
-//! the connection and its sync loop after the pass in flight, the eager fill
-//! after the fill in flight, and the upload worker each time it starts
+//! the connection and its sync loop after the pass in flight, the pin worker
+//! after the run in flight, and the upload worker each time it starts
 //! uploads. A report during an attempt also ends the wait that attempt fails
-//! into (IO `signal_during_attempt_wakes`): the passes and fills act on it
+//! into (IO `signal_during_attempt_wakes`): the passes and pin runs act on it
 //! after the attempt, and the upload worker ends that wait as the attempt
 //! ends. Reports an owner has not acted on yet coalesce into one, which ends
 //! every ordinary wait if any of them was a retry report.
@@ -33,7 +33,7 @@ pub enum NetworkOwner {
     Connection,
     /// The upload worker: queued uploads.
     Uploads,
-    /// The eager fill: eager downloads and carried pins.
+    /// The pin worker: carried pins' downloads.
     Downloads,
 }
 

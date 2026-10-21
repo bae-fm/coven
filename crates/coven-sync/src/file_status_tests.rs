@@ -2,7 +2,7 @@ use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_status::{status, FileStatus};
 use crate::FileSourceFailure;
 use crate::{FileMissingReason, FileReadError};
-use coven_database::{CacheFill, DeviceState, FileRef, Provenance};
+use coven_database::{DeviceState, FileRef, Provenance};
 use coven_format::file::FileHeader;
 use coven_foundation::id_source::DeviceId;
 use coven_storage::{test_utils::MemoryRequest, Storage, StorageFailure};
@@ -10,7 +10,7 @@ use serde_json::{json, Value};
 
 /// A second device that received the attaching write but not the bytes.
 async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
-    let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let b = Fixture::new(Provenance::AppProvided).await;
     b.files
         .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
         .await
@@ -28,7 +28,7 @@ async fn receiver(a: &Fixture, file: &FileRef) -> (Fixture, FileRef) {
 
 #[tokio::test]
 async fn absence_is_judged_by_the_uploaders_applied_state() {
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let a = Fixture::new(Provenance::AppProvided).await;
     let file = a.attach("files", "photo", vec![61; CHUNK + 9]).await;
     let (b, remote) = receiver(&a, &file).await;
     let device = file.uploader();
@@ -79,7 +79,7 @@ async fn absence_is_judged_by_the_uploaders_applied_state() {
 
 #[tokio::test]
 async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let a = Fixture::new(Provenance::AppProvided).await;
     let file = a.attach("files", "photo", vec![62; 40]).await;
     let (b, remote) = receiver(&a, &file).await;
     a.storage
@@ -103,7 +103,7 @@ async fn an_object_of_the_wrong_size_at_the_fixed_path_is_damage_not_absence() {
 /// its complete size: the read is damage, as status says (§17.4).
 #[tokio::test]
 async fn a_longer_object_is_damage_to_status_and_reads() {
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let a = Fixture::new(Provenance::AppProvided).await;
     let file = a.attach("files", "photo", vec![64; CHUNK + 9]).await;
     let (b, remote) = receiver(&a, &file).await;
     a.drain().await;
@@ -127,9 +127,9 @@ async fn a_longer_object_is_damage_to_status_and_reads() {
 
 #[tokio::test]
 async fn an_authenticated_object_with_other_content_is_present_but_unreadable() {
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let a = Fixture::new(Provenance::AppProvided).await;
     let file = a.uploaded("photo", vec![63; CHUNK]).await;
-    let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let b = Fixture::new(Provenance::AppProvided).await;
     b.files
         .set_storage(Some(a.storage.clone()), std::future::ready(Ok(())))
         .await
@@ -282,7 +282,7 @@ async fn st_differential_file_status() {
         }
     }
 
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let a = Fixture::new(Provenance::AppProvided).await;
     let original = (0..CHUNK + 9).map(|i| (i % 249) as u8).collect::<Vec<_>>();
     let file = a.attach("files", "photo", original.clone()).await;
     let (b, remote) = receiver(&a, &file).await;

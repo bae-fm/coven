@@ -96,7 +96,7 @@ impl Database {
         .await
     }
 
-    /// Every eager download's persisted wait (§6.7).
+    /// Every download's persisted wait (§6.7).
     pub async fn download_retry_waits(&self) -> Result<Vec<(RetrySubject, RetryWait)>, DbError> {
         self.call(move |inner| {
             inner

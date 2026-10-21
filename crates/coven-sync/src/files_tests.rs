@@ -1,7 +1,6 @@
 use super::*;
 use coven_database::{
-    CacheFill, Database, DatabaseBuilder, FileDecl, FileRef, Migration, Provenance, RowIdentity,
-    SyncedTable,
+    Database, DatabaseBuilder, FileDecl, FileRef, Migration, Provenance, RowIdentity, SyncedTable,
 };
 use coven_foundation::{
     clock::{ClockRef, ClosureClock},
@@ -24,22 +23,17 @@ struct Fixture {
     declarations: Vec<SyncedTable>,
 }
 impl Fixture {
-    async fn new(provenance: Provenance, fill: CacheFill) -> Self {
+    async fn new(provenance: Provenance) -> Self {
         let clock: ClockRef = Arc::new(ClosureClock(|| {
             SystemTime::UNIX_EPOCH + Duration::from_secs(100)
         }));
-        Self::with_clock(provenance, fill, clock).await
+        Self::with_clock(provenance, clock).await
     }
-    async fn with_clock(provenance: Provenance, fill: CacheFill, clock: ClockRef) -> Self {
-        Self::with_single_limit(provenance, fill, clock, CHUNK as u64).await
+    async fn with_clock(provenance: Provenance, clock: ClockRef) -> Self {
+        Self::with_single_limit(provenance, clock, CHUNK as u64).await
     }
     /// A provider taking one request up to `single_limit` encrypted bytes.
-    async fn with_single_limit(
-        provenance: Provenance,
-        fill: CacheFill,
-        clock: ClockRef,
-        single_limit: u64,
-    ) -> Self {
+    async fn with_single_limit(provenance: Provenance, clock: ClockRef, single_limit: u64) -> Self {
         let root = tempfile::tempdir().unwrap();
         let ids: IdSourceRef = Arc::new(UuidIds);
         let layout = StoreDirectories::new(root.path().to_owned());
@@ -51,13 +45,11 @@ impl Fixture {
                 "files",
                 1 << 30,
                 provenance,
-                fill,
             )),
             SyncedTable::new("other", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "other",
                 1 << 30,
                 Provenance::AppProvided,
-                CacheFill::CacheLazy,
             )),
         ];
         let database = builder(&directory, &ids, &clock, &declarations)
@@ -299,7 +291,7 @@ fn builder(
 
 #[tokio::test]
 async fn ranges_authenticate_cache_batch_and_fail_offline() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let bytes = (0..CHUNK * 40 + 31)
         .map(|i| (i % 251) as u8)
         .collect::<Vec<_>>();
@@ -358,10 +350,10 @@ async fn ranges_authenticate_cache_batch_and_fail_offline() {
 
 #[tokio::test]
 async fn budgets_pins_eviction_and_second_device_reads() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let bytes = vec![51; CHUNK * 3 + 21];
     let file = f.uploaded("first", bytes.clone()).await;
-    let second = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let second = Fixture::new(Provenance::AppProvided).await;
     for write in f.database.test_queued_writes().await.unwrap() {
         crate::tests::apply_write(&second.database, write)
             .await
@@ -416,7 +408,7 @@ async fn budgets_pins_eviction_and_second_device_reads() {
 
 #[tokio::test]
 async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("one", vec![67; CHUNK * 4]).await;
     f.attach("other", "other", vec![68; CHUNK]).await;
 
@@ -471,7 +463,7 @@ async fn eviction_uses_chunk_recency_and_keeps_namespace_budgets_independent() {
 
 #[tokio::test]
 async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let bytes = vec![69; CHUNK * 40];
     let file = f.uploaded("ahead", bytes.clone()).await;
     let stream = f.files.open_file_stream(&file).await.unwrap();
@@ -505,7 +497,7 @@ async fn sequential_reading_starts_read_ahead_and_streams_a_whole_hash_check() {
 
 #[tokio::test]
 async fn cancelling_a_pin_releases_partial_budget_exemptions() {
-    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let mut f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cancel-pin", vec![70; CHUNK * 40]).await;
     f.storage
         .set_faults(coven_storage::test_utils::Faults {
@@ -552,7 +544,7 @@ mod uploads;
 
 #[tokio::test]
 async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     f.files.set_cache_budget("files", 0).await.unwrap();
     for bytes in [Vec::new(), vec![71; CHUNK]] {
         let id = format!("length-{}", bytes.len());
@@ -581,9 +573,9 @@ async fn opening_a_file_respects_a_zero_cache_budget_including_empty_files() {
 
 #[tokio::test]
 async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
-    let a = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let a = Fixture::new(Provenance::AppProvided).await;
     a.uploaded("hash", vec![73; CHUNK * 2]).await;
-    let b = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let b = Fixture::new(Provenance::AppProvided).await;
     for mut write in a.database.test_queued_writes().await.unwrap() {
         for part in &mut write.parts {
             for row in &mut part.rows {
@@ -654,7 +646,7 @@ async fn whole_reads_and_pins_check_the_row_hash_after_authenticating_chunks() {
 
 #[tokio::test]
 async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("cached-tail", vec![74; CHUNK * 4]).await;
     f.files
         .set_cache_budget("files", 11 + 2 * (CHUNK as u64 + 16))
@@ -680,7 +672,7 @@ async fn pinning_preserves_cached_tail_chunks_while_assembling_the_whole_file() 
 
 #[tokio::test]
 async fn unused_headers_do_not_displace_recently_read_chunks() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     // An empty file's header is its whole object, cached on opening.
     let old = f.uploaded("old-header", Vec::new()).await;
     f.files.open_file_stream(&old).await.unwrap();
@@ -733,7 +725,7 @@ async fn unused_headers_do_not_displace_recently_read_chunks() {
 
 #[tokio::test]
 async fn a_file_from_a_newer_format_requests_an_update() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("future", vec![91; CHUNK]).await;
     let path = f.path(&file);
     let mut bytes = f.storage.read(&path).await.unwrap();
@@ -764,7 +756,7 @@ async fn a_file_from_a_newer_format_requests_an_update() {
 /// and its chunk in one request, caches both, and a later open reads nothing.
 #[tokio::test]
 async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.uploaded("byte", vec![93]).await;
     let requests = f.storage.request_count();
     let stream = f.files.open_file_stream(&file).await.unwrap();
@@ -792,8 +784,8 @@ async fn a_first_read_from_zero_fetches_the_header_with_the_first_chunks() {
 #[tokio::test]
 async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
-        let a = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
-        let b = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
+        let a = Fixture::new(provenance.clone()).await;
+        let b = Fixture::new(provenance.clone()).await;
         a.files
             .set_storage(None, std::future::ready(Ok(())))
             .await
@@ -869,7 +861,7 @@ async fn waiting_files_name_the_attaching_device_until_its_automatic_upload() {
 
 impl Files {
     pub(crate) async fn stop_background_for_counts(&self) {
-        // Isolate explicit fills and transfers from the independent workers,
+        // Isolate explicit runs and transfers from the independent workers,
         // retaining the real file owner and its database operations.
         self.worker.stop.send_replace(true);
         for task in std::mem::take(&mut *self.worker.tasks.lock().await) {

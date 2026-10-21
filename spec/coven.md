@@ -786,7 +786,7 @@ minutes away. Her app reports the change with `network_changed`
   hammering a network it can't reach. Once the platform says the network
   changed, waiting longer only delays work that can now succeed. So the report
   ends every wait whose last attempt got no provider response: the connection's,
-  an operation's, a queued upload's and an eager download's. A wait after an
+  an operation's, a queued upload's and a download's. A wait after an
   answer, such as a server error, and a provider's cooldown hold: a new network
   changes neither. Each wait's pending record keeps whether the provider
   answered, so this survives a restart.
@@ -799,20 +799,20 @@ minutes away. Her app reports the change with `network_changed`
   If that save fails, every wait keeps its backoff and the report stays: the
   owner acts on it again the next time it plans, so a failed write never drops
   a report.
-- **Reports coalesce.** The connection acts on reports between passes, the eager
-  fill between its fills, and the upload worker each time it starts uploads.
-  Reports one hasn't acted on yet count as one. If the pass, fill or upload they
+- **Reports coalesce.** The connection acts on reports between passes, the pin
+  worker between its runs (§17.7), and the upload worker each time it starts
+  uploads. Reports one hasn't acted on yet count as one. If the pass, run or
+  upload they
   arrived during fails for want of a network, its wait ends too: the failure may
   have come before the change. The upload worker ends that one upload's wait as
   the upload fails, because its other uploads keep running.
 
-**The person's retry ends every ordinary wait.** Ben's library shows a cover
-that won't download: the provider answered "not found" while Ana's upload was
-still on its way, and the download now waits five minutes. Ben pulls to
-refresh. A pass alone would leave that wait in place, so his app calls
-`retry_now` ([api.md E5](api.md#e5-storage-and-sync)). It ends every ordinary
-wait, answered or not: the connection's, the operations', the uploads' and the
-eager downloads'. A pass runs at once, and the cover downloads.
+**The person's retry ends every ordinary wait.** Ben's photo won't upload: the
+provider answered with a server error, and the upload now waits five minutes.
+Ben pulls to refresh. A pass alone would leave that wait in place, so his app
+calls `retry_now` ([api.md E5](api.md#e5-storage-and-sync)). It ends every
+ordinary wait, answered or not: the connection's, the operations', the uploads'
+and the downloads'. A pass runs at once, and the photo uploads.
 
 - **It travels as a report.** Coven delivers the retry exactly as a network
   report: the same owners act on it when they next plan, it ends the wait of
@@ -3464,7 +3464,6 @@ For each synced table that carries files, the app declares:
 | content hash column | which column holds the file's *content hash*, the SHA-256 of its bytes; coven fills it in when a write attaches the file |
 | where column | which column holds the file's fixed storage reference; coven fills it in (§17.2) |
 | kind | user-provided or app-provided (§17.1) |
-| download | whether devices download an uploaded file as soon as its row arrives (*eager*), or on first read |
 
 The file declarations also belong to a *namespace*, which the cache budgets by
 (§17.6, [api.md E2](api.md#e2-declaring-synced-tables)).
@@ -3480,8 +3479,8 @@ as a song in their music folder.
   before reading any of it.
 - After a successful upload, reads on the attaching device use the cache or
   storage. Coven never reads the original again, and it stays where it is. So
-  if the file must stay on this device, pinned or eager (§17.6), the device
-  downloads its cache copy from storage like any other device.
+  if the file must stay on this device, pinned (§17.6), the device downloads
+  its cache copy from storage like any other device.
 - Deleting a row deletes only coven's copies of its file, never the original.
 
 An **app-provided** file is bytes the app hands to coven, which keeps and owns
@@ -3490,15 +3489,14 @@ memory.
 
 - Coven keeps its copy until the upload succeeds. After that, reads on the
   attaching device use the cache or storage, as for a user-provided file.
-- If the file must stay on this device, pinned or eager (§17.6), coven's copy
-  becomes its cache copy in the step that completes the upload (§17.7). The
-  device doesn't download what it just uploaded.
+- If the file must stay on this device, pinned (§17.6), coven's copy becomes
+  its cache copy in the step that completes the upload (§17.7). The device
+  doesn't download what it just uploaded.
 
-Ana's laptop imports an album and attaches its cover to an eager table. When the
-cover's upload completes, her laptop keeps the copy it uploaded from. It doesn't
-download the cover again, and its eager-fill progress never shows the cover.
-Without this rule the laptop would throw the bytes away and fetch them straight
-back from storage.
+Ana's laptop imports an album and pins its cover while it waits to upload. When
+the cover's upload completes, her laptop keeps the copy it uploaded from as the
+pinned cache copy. It doesn't download the cover again. Without this rule the
+laptop would throw the bytes away and fetch them straight back from storage.
 
 For both kinds, the first read records the whole-file content hash and a SHA-256
 hash of each 64 KiB chunk of plaintext (the last chunk may be shorter). That read
@@ -3629,8 +3627,8 @@ read that row hasn't arrived, the write or snapshot holding the row waits with
 a reference it doesn't know. Once the key arrives, coven reuses the encrypted
 input it kept.
 
-**When a read, pin or download fails.** Reads, pinning and eager downloads share
-the verified cache ranges and one pending record per file (§19.1). A call that
+**When a read, pin or download fails.** Reads, pinning and carried pins (§17.6)
+share the verified cache ranges and one pending record per file (§19.1). A call that
 fails returns its typed cause at once; the pending list records the first unmet
 condition:
 
@@ -3648,9 +3646,9 @@ condition:
 
 No failed range is marked cached or pinned.
 
-Ben's laptop is downloading an eager file and has two verified ranges when Wi-Fi
-drops. The list reports the network failure, and progress stays at those two
-committed ranges. The retry fetches the rest. A bad final content hash would
+Ben's laptop is pinning a song and has two verified ranges when Wi-Fi drops.
+The list reports the network failure, and progress stays at those two committed
+ranges. The retry fetches the rest. A bad final content hash would
 instead leave a permanent refusal and publish no completed file or pin.
 
 [IO and observable work](proofs/io.md) specifies where downloads are checked,
@@ -3661,10 +3659,13 @@ buffer.
 
 #### 17.6 Cache and pinning
 
-Each device caches uploaded files and chunks of them within a size budget the app
-declares for each namespace. Each namespace evicts on its own
-([api.md E8](api.md#e8-files-and-the-cache)). Over budget, the least recently
-used files and chunks go first. Freeing space never fails a read.
+A device caches an uploaded file when it reads it: the chunks a read fetches stay
+on the device (§17.5). Nothing downloads a file just because its row arrived;
+a file stays whole on a device only when the app pins it. The cache keeps files
+and chunks within a size budget the app declares for each namespace. Each
+namespace evicts on its own ([api.md E8](api.md#e8-files-and-the-cache)). Over
+budget, the least recently used files and chunks go first. Freeing space never
+fails a read.
 
 **Pinning** keeps a file whole on the device regardless of the budget, until the
 app unpins it.
@@ -3675,27 +3676,17 @@ app unpins it.
   crash leaves no partly downloaded file exempt from eviction.
 - A file still queued for upload on this device is pinned at once. The
   transaction that retires its upload keeps the pin. An app-provided file's own
-  copy becomes its pinned cache file (§17.7). A user-provided file's pin is
-  carried to the stored file, which coven then keeps whole from storage like
-  any pin.
+  copy becomes its pinned cache file (§17.7). A user-provided file's pin becomes
+  a *carried pin*: the original is never read again (§17.1), so the pin worker
+  (§17.7) keeps the stored file whole from storage like any pin. A carried pin
+  keeps its file reference until it settles, failures included; a refusal or a
+  row that no longer names the file settles it.
 
 The app can remove an uploaded file from the cache; that never touches storage.
 
-**Eager downloads** keep their requested file references until each one settles,
-failures included. Evicting a completed download doesn't request it again; a
-changed reference can.
-
-The device that uploads an eager file has nothing to download for it. Its upload
-makes an app-provided file's own copy the cache copy (§17.7), so the file never
-becomes eager work there. That copy counts against the namespace's budget like
-any cached file; evicting it requests nothing. A user-provided file becomes eager
-work when its upload completes, because the original is never read again
-(§17.1).
-
-**Progress** for pins and eager downloads counts authenticated bytes committed to
-the cache. The one-time reads and the subscriptions report the same data
-([api.md E4](api.md#e4-reading)). Cancellation commits before it's reported;
-failures stay in `pending()`.
+**Progress** for pins counts authenticated bytes committed to the cache. The
+one-time reads and the subscriptions report the same data
+([api.md E4](api.md#e4-reading)); failures stay in `pending()`.
 
 Ana's app restarts after the provider confirmed two upload parts and her cache
 committed three download ranges. Her first reads and subscriptions show those same
@@ -3734,9 +3725,9 @@ alone while new photos sat idle.
 - `retry_uploads_now` joins the uploads in progress rather than waiting for
   them. It covers every queued file that can retry, whatever its delay, and
   returns once each one's attempt has ended.
-- Eager downloads and carried pins have their own worker (§17.6), so a long
+- Carried pins have their own worker, the *pin worker* (§17.6), so a long
   import never holds them up. A finished upload wakes it, since completion can
-  leave it work.
+  carry a pin.
 
 - **Same stops as writes.** File sends follow the stuck-device rule (§5.4) and the
   removal cut-off (§14.1). Parts the provider confirmed stay recorded for
@@ -3776,7 +3767,7 @@ encrypting it and taking the bytes the part needs.
 
 **Retries.** A missing, changed or mismatching source and a disk failure retry
 under backoff (§6.7), checking the source before any provider request. Uploads
-and eager downloads retry storage failures by their class
+and carried pins retry storage failures by their class
 ([api.md E5](api.md#e5-storage-and-sync)):
 
 | Class | Retry |
@@ -3819,8 +3810,8 @@ hold up the attaching write's own upload.
   counts as this upload only after its bytes compare equal (§19.3).
 - Rows may arrive before their files. No write waits for file bytes.
 
-**The uploading device keeps its copy.** An app-provided file that must stay on
-this device, pinned or eager (§17.6), gets its cache file before completion.
+**The uploading device keeps its copy.** An app-provided file pinned while it is
+queued (§17.6) gets its cache file before completion.
 
 - The uploader writes the whole encrypted file: the bytes a single create sent,
   or coven's copy encrypted again, each chunk checked against its recorded hash

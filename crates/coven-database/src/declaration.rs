@@ -169,22 +169,12 @@ pub enum Provenance {
     AppProvided,
 }
 
-/// When devices fill the cache with an uploaded file.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum CacheFill {
-    /// When the row arrives.
-    CacheEager,
-    /// On first read.
-    CacheLazy,
-}
-
 /// A table's file columns and declared file choices (§17, E2).
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FileDecl {
     pub(crate) namespace: String,
     pub(crate) cache_budget: u64,
     pub(crate) provenance: Provenance,
-    pub(crate) fill: CacheFill,
     pub(crate) id: String,
     pub(crate) size: String,
     pub(crate) hash: String,
@@ -206,11 +196,6 @@ impl FileDecl {
     /// Whether the declared file belongs to the user or is supplied by the app.
     pub fn provenance(&self) -> &Provenance {
         &self.provenance
-    }
-
-    /// The declared cache-fill policy.
-    pub fn fill(&self) -> &CacheFill {
-        &self.fill
     }
 
     /// The declared file identity column; defaults to `id`.
@@ -238,21 +223,15 @@ impl FileDecl {
         self.write_once
     }
 
-    /// Declare a file namespace, its cache budget in bytes, origin and cache
-    /// policy. The budget applies when the namespace is first declared;
-    /// `set_cache_budget` changes it after. Every attached file is queued for
-    /// upload in the attaching write.
-    pub fn new(
-        namespace: impl Into<String>,
-        cache_budget: u64,
-        provenance: Provenance,
-        fill: CacheFill,
-    ) -> Self {
+    /// Declare a file namespace, its cache budget in bytes and origin. The
+    /// budget applies when the namespace is first declared; `set_cache_budget`
+    /// changes it after. Every attached file is queued for upload in the
+    /// attaching write; other devices cache it when they read it.
+    pub fn new(namespace: impl Into<String>, cache_budget: u64, provenance: Provenance) -> Self {
         Self {
             namespace: namespace.into(),
             cache_budget,
             provenance,
-            fill,
             id: "id".into(),
             size: "size".into(),
             hash: "hash".into(),

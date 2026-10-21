@@ -1810,14 +1810,7 @@ pub enum Provenance {
     AppProvided,
 }
 
-pub enum CacheFill {
-    /// Devices download an uploaded file as soon as its row arrives.
-    CacheEager,
-    /// Devices download it on first read.
-    CacheLazy,
-}
-
-/// One table's file columns, namespace, kind and cache choice (§17, E2).
+/// One table's file columns, namespace and kind (§17, E2).
 pub struct FileDecl { /* private fields */ }
 
 impl FileDecl {
@@ -1829,9 +1822,6 @@ impl FileDecl {
 
     /// Whether the declared file belongs to the user or is supplied by the app.
     pub fn provenance(&self) -> &Provenance;
-
-    /// The declared cache-fill policy.
-    pub fn fill(&self) -> &CacheFill;
 
     /// The declared file identity column; defaults to `id`.
     pub fn id_column(&self) -> &str;
@@ -1850,14 +1840,10 @@ impl FileDecl {
 
     /// Declares the file a table's rows carry: its namespace, which groups
     /// files in the cache, its cache budget in bytes from first declaration
-    /// (E8), its kind, and when devices download it. Every attached file is
-    /// queued for upload as the attaching write commits, even disconnected.
-    pub fn new(
-        namespace: impl Into<String>,
-        cache_budget: u64,
-        provenance: Provenance,
-        fill: CacheFill,
-    ) -> Self;
+    /// (E8), and its kind. Every attached file is queued for upload as the
+    /// attaching write commits, even disconnected; other devices cache it
+    /// when they read it.
+    pub fn new(namespace: impl Into<String>, cache_budget: u64, provenance: Provenance) -> Self;
 
     /// The column naming the file. Defaults to `id`.
     pub fn with_id_column(self, column: impl Into<String>) -> Self;
@@ -1891,11 +1877,11 @@ fn tables() -> Vec<SyncedTable> {
         // Descendants of notes. Each attachment carries the user's own file.
         SyncedTable::new("attachments", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided, CacheFill::CacheLazy)),
+            .carries_files(FileDecl::new("attachments", 2 << 30, Provenance::UserProvided)),
         // A thumbnail the app makes, in the note's audience.
         SyncedTable::new("thumbnails", RowIdentity::IndependentUuid)
             .audience_from("note_id")
-            .carries_files(FileDecl::new("thumbnails", 256 << 20, Provenance::AppProvided, CacheFill::CacheEager)),
+            .carries_files(FileDecl::new("thumbnails", 256 << 20, Provenance::AppProvided)),
         // In the store, with keys from the tag's name.
         SyncedTable::new("tags", RowIdentity::SharedKey),
         // A shared key over two columns, which includes note_id (§15.2).
@@ -2501,7 +2487,7 @@ while let Ok(values) = lost.next().await {
   - `sync_now` never shortens a backoff. `network_changed` ends every backoff
     whose last attempt got no provider response: the connection's, which status
     shows as `Offline`, and those of coven's operations, queued uploads and
-    eager downloads, whose pending records say `answered: false`. Call it when
+    carried pins' downloads, whose pending records say `answered: false`. Call it when
     the platform reports that the network became available or changed, and
     when the app returns to the foreground or the device wakes. It also requests
     a pass, so the app need not call both. A backoff after a provider's answer,
@@ -2516,7 +2502,7 @@ while let Ok(values) = lost.next().await {
   - `retry_now` is the person asking to retry everything now, such as by
     pulling to refresh. `sync_now` leaves every backoff in place; `retry_now`
     ends every ordinary one, answered or not: the connection's, operations',
-    uploads' and eager downloads'. It requests a pass, travels and coalesces
+    uploads' and downloads'. It requests a pass, travels and coalesces
     as a network report does, and keeps each wait's failure count, so a retry
     that fails again waits the next longer delay. Provider cooldowns,
     failures that never retry, and waits for new credentials or a new
@@ -3483,14 +3469,14 @@ impl CovenHandle {
     /// The device's network changed: it became available, or moved to
     /// another network. Ends every backoff whose last attempt got no provider
     /// response: the connection's (`Offline`), operations', uploads' and
-    /// eager downloads'. Syncs now, as `sync_now` does. Backoffs after a
+    /// downloads'. Syncs now, as `sync_now` does. Backoffs after a
     /// provider's answer, and provider cooldowns, hold. Reports coalesce as
     /// `sync_now` requests do (§6.7).
     pub fn network_changed(&self);
 
     /// The person asked to retry everything now. Ends every ordinary
     /// backoff, answered or not: the connection's, operations', uploads'
-    /// and eager downloads'; each keeps its failure count. Syncs now, as
+    /// and downloads'; each keeps its failure count. Syncs now, as
     /// `sync_now` does. Provider cooldowns and failures that never retry
     /// hold. Requests coalesce with network reports (§6.7).
     pub fn retry_now(&self);
@@ -3819,9 +3805,13 @@ loop {
 - Coven reads a file from wherever it is: the user's original, coven's own
   copy, the cache, or storage ([§17](coven.md#17-files)).
 
-Ana's photo cannot be downloaded while her voice note continues arriving.
-The photo's reason is in `pending()`; eager-fill status still describes the
-files and bytes completed. There is no competing failure state in that progress.
+- A device caches a file when it reads it; nothing downloads a file because
+  its row arrived. Pinning keeps a file whole on the device
+  ([§17.6](coven.md#176-cache-and-pinning)).
+
+Ana pins an album and one song cannot be downloaded. The song's reason is in
+`pending()`; pin progress still counts the files and bytes kept. There is no
+competing failure state in that progress.
 
 ```rust
 /// Plaintext bytes in a full file, write-part or snapshot chunk: 64 KiB.
@@ -3838,17 +3828,6 @@ pub struct PinProgress {
     pub bytes_cached: u64,
     /// Total plaintext size of the requested files, including cached bytes.
     pub bytes_total: u64,
-}
-
-/// Progress of files declared CacheEager (§17.6, E8).
-/// Failures appear only in pending(); independent downloads keep progressing.
-pub enum EagerCacheFillStatus {
-    /// No files are waiting to download.
-    Idle,
-    /// Files are being fetched into the cache.
-    Downloading(PinProgress),
-    /// The app stopped these downloads.
-    Cancelled(PinProgress),
 }
 
 impl CovenHandle {
@@ -3907,17 +3886,6 @@ impl CovenHandle {
     /// A declared namespace's cache budget, in bytes; each evicts on its own.
     pub async fn set_cache_budget(&self, namespace: &str, max_bytes: u64) -> Result<(), DbError>;
     pub async fn get_cache_budget(&self, namespace: &str) -> Result<u64, DbError>;
-
-    /// Progress of downloading every file declared to download as soon as
-    /// its row arrives that this device doesn't have yet, such as after
-    /// loading a snapshot to join or recover (§17.6, §19.2).
-    pub async fn eager_cache_fill_status(&self) -> CovenResult<EagerCacheFillStatus>;
-
-    /// The same committed progress and later changes as eager_cache_fill_status.
-    pub fn subscribe_eager_cache_fill_status(&self) -> LiveQuery<EagerCacheFillStatus>;
-
-    /// Records cancellation of the current eager requests without stopping sync.
-    pub async fn cancel_eager_cache_fill(&self) -> CovenResult<()>;
 }
 
 impl FileRef {

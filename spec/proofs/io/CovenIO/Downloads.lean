@@ -69,7 +69,7 @@ def pinned : State → Bool | .complete _ pin => pin | _ => false
 def completed : State → Bool | .complete _ _ => true | _ => false
 
 /-- A local map has exactly one current record per fixed subject (§19.1, E5).
-There is no parallel progress or pending state in the eager worker. -/
+There is no parallel progress or pending state in the pin worker. -/
 abbrev Database := Subject → State
 def pendingAt (db : Database) (s : Subject) : Option Reason := pending (db s)
 

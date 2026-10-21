@@ -173,8 +173,7 @@ fn file_schema() -> (Vec<SyncedTable>, Vec<Migration>) {
             SyncedTable::new("files", RowIdentity::SharedKey).carries_files(FileDecl::new(
                 "files",
                 1 << 30,
-                Provenance::AppProvided,
-                CacheFill::CacheLazy,
+                Provenance::AppProvided
             )),
         ],
         vec![Migration::addition(1, "records", "CREATE TABLE parents(id TEXT NOT NULL PRIMARY KEY, label TEXT NOT NULL UNIQUE, value INTEGER NOT NULL);

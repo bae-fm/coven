@@ -1,7 +1,7 @@
 use super::{files_runner, Fixture, CHUNK};
 use crate::files::file_error::*;
 use coven_database::FileRefJournal;
-use coven_database::{CacheFill, FileRef, Provenance};
+use coven_database::{FileRef, Provenance};
 use coven_foundation::files::StoreDirAccess;
 use coven_storage::{test_utils::Faults, ObjectPath, Storage, UploadSession};
 use std::time::Duration;
@@ -12,7 +12,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
         // A resumed part begins inside chunk zero. Even a change in the part
         // already sent must prevent re-encrypting that chunk with its old nonce.
         for resume in [None, Some(false), Some(true)] {
-            let mut f = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
+            let mut f = Fixture::new(provenance.clone()).await;
             let bytes = vec![41; CHUNK * 2];
             let file = match provenance {
                 Provenance::UserProvided => f.original("changed-during-upload", &bytes).await,
@@ -145,7 +145,7 @@ async fn same_size_edits_with_restored_mtime_send_no_changed_chunks() {
 
 #[tokio::test]
 async fn an_upload_reader_retains_the_store_after_its_database_closes() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     f.attach("files", "held", vec![45; CHUNK * 2]).await;
 
     let item = f.files.inner.database.uploads().await.unwrap().remove(0);
@@ -179,14 +179,11 @@ async fn an_upload_reader_retains_the_store_after_its_database_closes() {
 #[tokio::test]
 async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage() {
     for original in [false, true] {
-        let f = Fixture::new(
-            if original {
-                Provenance::UserProvided
-            } else {
-                Provenance::AppProvided
-            },
-            CacheFill::CacheLazy,
-        )
+        let f = Fixture::new(if original {
+            Provenance::UserProvided
+        } else {
+            Provenance::AppProvided
+        })
         .await;
         let bytes = (0..8 * 1024 * 1024 + 19)
             .map(|i| (i % 251) as u8)
@@ -219,7 +216,7 @@ async fn bounded_uploads_from_originals_and_owned_copies_publish_after_storage()
 
 #[tokio::test]
 async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
-    let mut f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    let mut f = Fixture::new(Provenance::UserProvided).await;
     let bytes = vec![93; CHUNK * 3 + 18];
     let file = f.original("recording", &bytes).await;
 
@@ -265,7 +262,7 @@ async fn a_reopened_upload_refuses_a_changed_original_without_a_copy() {
 #[tokio::test]
 async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
     for expire in [false, true] {
-        let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let mut f = Fixture::new(Provenance::AppProvided).await;
         f.attach("files", "recording", vec![94; CHUNK * 5 + 18])
             .await;
 
@@ -336,7 +333,7 @@ async fn recorded_sessions_continue_or_restart_with_the_same_encrypted_bytes() {
 
 #[tokio::test]
 async fn lost_completion_reply_resumes_the_published_object() {
-    let mut f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let mut f = Fixture::new(Provenance::AppProvided).await;
     let file = f.attach("files", "one", vec![43; CHUNK * 2]).await;
 
     f.storage
@@ -421,7 +418,7 @@ pub(super) async fn retargeted_upload(f: &Fixture) -> (FileRef, FileRef) {
 #[tokio::test]
 async fn a_queued_upload_keeps_its_source_after_its_row_changes() {
     for provenance in [Provenance::AppProvided, Provenance::UserProvided] {
-        let f = Fixture::new(provenance.clone(), CacheFill::CacheLazy).await;
+        let f = Fixture::new(provenance.clone()).await;
         let old = match provenance {
             Provenance::AppProvided => f.attach("files", "old", vec![36; CHUNK + 3]).await,
             Provenance::UserProvided => f.original("old", &vec![36; CHUNK + 3]).await,
@@ -480,7 +477,7 @@ async fn a_queued_upload_keeps_its_source_after_its_row_changes() {
 
 #[tokio::test]
 async fn completing_a_replaced_files_upload_cannot_restore_it() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let (old, new) = retargeted_upload(&f).await;
     // A is stored at its own fixed path; B still waits on this device.
     let objects = f
@@ -496,7 +493,7 @@ async fn completing_a_replaced_files_upload_cannot_restore_it() {
 
 #[tokio::test]
 async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     let file = f.attach("files", "gone", vec![35; 19]).await;
     let (started, receiving) = tokio::sync::oneshot::channel();
     let (release, resume) = tokio::sync::oneshot::channel();
@@ -545,7 +542,7 @@ async fn deleting_a_row_during_its_upload_is_not_undone_by_completion() {
 
 #[tokio::test]
 async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
-    let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheEager).await;
+    let f = Fixture::new(Provenance::AppProvided).await;
     f.files.set_uploads_paused(false).await.unwrap();
     f.attach("files", "one", vec![14; CHUNK]).await;
     let mut uploads = f.subscribe_queue();
@@ -558,17 +555,8 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
     })
     .await
     .unwrap();
-    let file = f.database.file_ref("files", "one").await.unwrap();
-    let mut eager = f.database.subscribe_eager_cache_fill_status();
-    tokio::time::timeout(Duration::from_secs(20), async {
-        while f.files.inner.database.missing_bytes(&file).await.unwrap() != 0 {
-            eager.next().await.unwrap();
-        }
-    })
-    .await
-    .unwrap();
     f.close().await;
-    let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::UserProvided).await;
     f.original("changed", b"original").await;
 
     std::fs::write(f.root.path().join("changed"), b"replacement").unwrap();
@@ -587,7 +575,7 @@ async fn attaching_starts_upload_after_commit_and_checks_changed_originals() {
 mod differential {
     use super::{files_runner, Fixture};
     use crate::files::file_error::*;
-    use coven_database::{CacheFill, DbError, FileRef, Provenance};
+    use coven_database::{DbError, FileRef, Provenance};
     use coven_storage::{ObjectPrefix, Storage, StorageFailure};
     use serde_json::{json, Value};
 
@@ -645,7 +633,7 @@ mod differential {
 
     /// Run the events against the real database, queue and upload attempt.
     async fn actual(events: &[Value]) -> Value {
-        let f = Fixture::new(Provenance::AppProvided, CacheFill::CacheLazy).await;
+        let f = Fixture::new(Provenance::AppProvided).await;
         // Hold the worker away from the queue; each finish is one attempt.
         let guard = f.files.inner.drain.lock().await;
         f.files
@@ -901,9 +889,7 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
         let clock: coven_foundation::clock::ClockRef = std::sync::Arc::new(
             coven_foundation::clock::FixedClock::new(std::time::SystemTime::UNIX_EPOCH),
         );
-        let f =
-            Fixture::with_single_limit(Provenance::AppProvided, CacheFill::CacheLazy, clock, limit)
-                .await;
+        let f = Fixture::with_single_limit(Provenance::AppProvided, clock, limit).await;
         let bytes: Vec<u8> = (0..plain).map(|i| (i % 251) as u8).collect();
         let file = f.attach("files", "song", bytes.clone()).await;
         let before = f.storage.request_trace().len();
@@ -939,7 +925,7 @@ async fn a_file_goes_in_one_request_up_to_the_providers_limit() {
 #[tokio::test]
 async fn a_single_request_retry_refuses_a_source_changed_after_a_failed_send() {
     use coven_storage::test_utils::MemoryRequest;
-    let f = Fixture::new(Provenance::UserProvided, CacheFill::CacheLazy).await;
+    let f = Fixture::new(Provenance::UserProvided).await;
     // Only the app's retries attempt it: the worker's own drains would race them.
     f.files.stop_background_for_counts().await;
     let file = f.original("take", &vec![7; CHUNK - 100]).await;

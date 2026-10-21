@@ -2,66 +2,28 @@ use super::*;
 use crate::{
     file_write::tests::{attach, tables, SCHEMA},
     tests::TestStore,
-    FileDatabase, Provenance,
+    Provenance,
 };
 
-/// Eager reservations persist with their cancellation; a new request
-/// replaces a cancelled set, and a finished set retires together (§17.6).
+/// A file still queued here is whole on this device: pin progress counts
+/// it complete, before and after reopening (§17.6).
 #[tokio::test]
-async fn eager_reservations_and_cancellation_survive_reopening() {
+async fn queued_file_counts_whole_across_reopening() {
     let store = TestStore::new();
     let open = || store.schema(tables(Provenance::AppProvided), SCHEMA);
     let db = open().await.unwrap();
-    assert_eq!(
-        db.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Idle
-    );
     attach(&db, b"bytes".to_vec(), true).await.unwrap();
     let file = db.file_ref("files", "7").await.unwrap();
-    let owner = FileDatabase::new(db.clone());
-    // Still queued here, the file is wholly local: its coverage is complete.
     let whole = PinProgress {
         files_completed: 1,
         files_total: 1,
         bytes_cached: 5,
         bytes_total: 5,
     };
-    owner.request_eager(vec![file.clone()]).await.unwrap();
-    assert_eq!(
-        db.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Downloading(whole.clone())
-    );
-    owner.cancel_eager().await.unwrap();
+    assert_eq!(db.pin_progress(vec![file.clone()]).await.unwrap(), whole);
     db.close().await.unwrap();
     let db = open().await.unwrap();
-    let owner = FileDatabase::new(db.clone());
-    assert_eq!(
-        db.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Cancelled(whole.clone())
-    );
-    // A cancelled set never retires; a new request starts a fresh set.
-    owner.settle_eager_work(Vec::new()).await.unwrap();
-    assert!(matches!(
-        db.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Cancelled(_)
-    ));
-    owner.request_eager(vec![file.clone()]).await.unwrap();
-    assert_eq!(
-        db.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Downloading(whole)
-    );
-    // With no work left, settling retires it.
-    owner.settle_eager_work(Vec::new()).await.unwrap();
-    assert_eq!(
-        db.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Idle
-    );
-    // Cancelling with nothing requested records nothing.
-    owner.cancel_eager().await.unwrap();
-    assert_eq!(
-        db.eager_cache_fill_status().await.unwrap(),
-        EagerCacheFillStatus::Idle
-    );
+    assert_eq!(db.pin_progress(vec![file]).await.unwrap(), whole);
     db.close().await.unwrap();
 }
 

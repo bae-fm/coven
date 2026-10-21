@@ -16,18 +16,8 @@ pub(super) fn reason(statement: &Statement, relation: &str) -> Option<&'static s
     Some("the schema row is singular; unfiltered membership EXISTS stops after its first row"),
 ("file_queue.rs", "SELECT u.id,u.reference,u.queued_at,u.session,r.failures,r.not_before,r.wait FROM _coven_file_uploads AS u LEFT JOIN _coven_retries AS r ON r.upload=u.id ORDER BY u.id", "u") =>
     Some("the file queue reader returns every queued attachment"),
-("cache_progress.rs", "INSERT INTO _coven_eager_cancel(cancelled) SELECT 1 WHERE EXISTS(SELECT 1 FROM _coven_eager_requests) ON CONFLICT DO NOTHING", "_coven_eager_requests") =>
-    Some("unfiltered EXISTS stops after the first requested file"),
-("cache_progress.rs", "SELECT EXISTS(SELECT 1 FROM _coven_eager_cancel)", "_coven_eager_cancel") =>
-    Some("the cancellation table holds at most one row"),
-("eager_work.rs", "SELECT reference FROM _coven_eager_work ORDER BY namespace,file_id", "_coven_eager_work") =>
-    Some("the eager fill reads every pending changed reference"),
 ("file_cache.rs", "SELECT reference FROM _coven_pin_requests ORDER BY namespace,file_id", "_coven_pin_requests") =>
     Some("the file worker keeps every carried pin whole"),
-("cache_progress.rs", "SELECT reference FROM _coven_eager_requests ORDER BY namespace,file_id", "_coven_eager_requests") =>
-    Some("eager progress covers the whole requested set"),
-("cache_progress.rs", "SELECT EXISTS(SELECT 1 FROM _coven_eager_requests JOIN _coven_eager_work USING(namespace,file_id))", "_coven_eager_requests") =>
-    Some("retirement stops at the first requested file still holding work"),
 ("file_queue.rs", "SELECT (SELECT count(*) FROM _coven_uploads),(SELECT count(*) FROM _coven_file_uploads)", "_coven_uploads" | "_coven_file_uploads") =>
     Some("deleting a store counts every waiting write and file, once"),
 ("file_queue.rs", "SELECT EXISTS(SELECT 1 FROM _coven_upload_pause)", "_coven_upload_pause") =>

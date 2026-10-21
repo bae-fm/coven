@@ -373,9 +373,6 @@ impl<'a> FileWrite<'a> {
                 &reference.audience(),
             )?;
             crate::file_queue::enqueue(self.database, &reference, &attached.queued, now)?;
-            // Its bytes are local while queued; completing the upload requests
-            // them for an eager cache then.
-            crate::eager_work::settle(self.database, &reference)?;
         }
         Ok(())
     }

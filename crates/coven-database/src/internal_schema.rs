@@ -504,21 +504,6 @@ macro_rules! coven_tables {
             CREATE INDEX _coven_cache_lru ON _coven_cache(namespace,pinned,last_read);
             CREATE INDEX _coven_cache_recency ON _coven_cache(last_read);
         ");
-        // Eager-fill reservations: the requested fixed references, kept
-        // until the whole set is cached, and the set's cancellation (§17.6).
-        $visit!(_coven_eager_requests, "
-            CREATE TABLE _coven_eager_requests (
-                namespace TEXT NOT NULL,
-                file_id TEXT NOT NULL,
-                reference BLOB NOT NULL,
-                PRIMARY KEY(namespace,file_id)
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_eager_cancel, "
-            CREATE TABLE _coven_eager_cancel (
-                cancelled INTEGER PRIMARY KEY CHECK(cancelled=1)
-            ) STRICT;
-        ");
         // Each declared namespace's budget and the cached bytes the cache
         // records hold, maintained with them so a budget check needs no sum.
         // Cache records live only in declared namespaces (FileRef validation).
@@ -534,24 +519,6 @@ macro_rules! coven_tables {
             CREATE TRIGGER _coven_cache_removed AFTER DELETE ON _coven_cache BEGIN
                 UPDATE _coven_cache_budgets SET total=total-OLD.size WHERE namespace=OLD.namespace;
             END;
-        ");
-        // Eager rows' fixed file identities as last noted, so only a changed
-        // reference becomes eager work, and that work until it is settled.
-        $visit!(_coven_eager_rows, "
-            CREATE TABLE _coven_eager_rows (
-                table_name TEXT NOT NULL,
-                key BLOB NOT NULL,
-                file TEXT NOT NULL,
-                PRIMARY KEY(table_name,key)
-            ) STRICT, WITHOUT ROWID;
-        ");
-        $visit!(_coven_eager_work, "
-            CREATE TABLE _coven_eager_work (
-                namespace TEXT NOT NULL,
-                file_id TEXT NOT NULL,
-                reference BLOB NOT NULL,
-                PRIMARY KEY(namespace,file_id)
-            ) STRICT, WITHOUT ROWID;
         ");
         // Pins carried from queued uploads to their stored files, until a
         // whole pinned copy is published or the app unpins (§17.6).
@@ -603,7 +570,7 @@ macro_rules! coven_tables {
             ) STRICT;
         ");
         // One persisted retry wait, T and W, per waiting operation, queued
-        // upload, eager file download, joiner poll or provider cooldown
+        // upload, file download, joiner poll or provider cooldown
         // (§6.7). Work rows take their waits with them; a download's work
         // is its file's pending record.
         $visit!(_coven_retries, "
