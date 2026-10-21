@@ -222,6 +222,51 @@ async fn a_retry_after_resuming_is_never_answered_paused() {
     f.close().await;
 }
 
+/// A pause that starts while a file uploads ends the run once that upload
+/// ends. An app that resumes and retries as the run ends is still not told
+/// uploads are paused: the gate holds the run where it found itself paused
+/// with nothing in flight while the app resumes and asks.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn a_retry_after_resuming_as_a_paused_run_ends_is_not_answered_paused() {
+    let f = Fixture::new(Provenance::AppProvided).await;
+    let gate = gated(&f, 1).await;
+    f.attach("files", "a", photo(1)).await;
+    f.attach("files", "b", photo(2)).await;
+    f.files.set_uploads_paused(false).await.unwrap();
+    until_creates(&f, 1).await;
+    f.files.set_uploads_paused(true).await.unwrap();
+
+    let (reached, mut ending) = tokio::sync::mpsc::unbounded_channel();
+    let (proceed, held) = std::sync::mpsc::channel::<()>();
+    // Only the first end waits; later runs pass straight through.
+    let held = Mutex::new(Some(held));
+    *f.files.inner.blocked_end_gate.lock().unwrap() = Some(Arc::new(move || {
+        if let Some(held) = held.lock().unwrap().take() {
+            reached.send(()).unwrap();
+            held.recv().unwrap();
+        }
+    }));
+    gate.add_permits(1);
+    tokio::time::timeout(Duration::from_secs(10), ending.recv())
+        .await
+        .expect("the run ends paused once its upload ends")
+        .unwrap();
+
+    f.files.set_uploads_paused(false).await.unwrap();
+    let answer = f.files.inner.ask_retry().unwrap();
+    proceed.send(()).unwrap();
+    gate.add_permits(1);
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(10), answer)
+            .await
+            .expect("the retry is answered")
+            .unwrap()
+            .unwrap(),
+        DrainOutcome::Drained { uploaded: 1 }
+    );
+    f.close().await;
+}
+
 /// A file sent in one request shows as uploading while its request is open,
 /// with no progress: only storage's confirmation retires it (E7).
 #[tokio::test]

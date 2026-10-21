@@ -218,6 +218,18 @@ impl FilesInner {
         blocked.run_outcome(uploaded)
     }
 
+    #[cfg(test)]
+    fn pass_blocked_end_gate(&self) {
+        let gate = self
+            .blocked_end_gate
+            .lock()
+            .expect("blocked end gate poisoned")
+            .clone();
+        if let Some(gate) = gate {
+            gate();
+        }
+    }
+
     async fn serve_uploads(&self) -> Result<DrainOutcome, SyncError> {
         // Observe before reading the queue, so nothing that happens while it
         // is read is missed.
@@ -263,6 +275,17 @@ impl FilesInner {
         loop {
             if let Some(blocked) = self.blocked() {
                 if run.attempts.is_empty() {
+                    #[cfg(test)]
+                    self.pass_blocked_end_gate();
+                    if let Blocked::Paused = blocked {
+                        // As with the read above, a pause change waits while
+                        // the run acts on the pause it saw; after a resume
+                        // since the check, the run serves uploads again.
+                        let _change = self.pause_change.lock().await;
+                        if !self.paused() {
+                            continue;
+                        }
+                    }
                     return self.end_blocked(blocked, run.uploaded);
                 }
             } else {

@@ -98,6 +98,11 @@ struct FilesInner {
     pin_run: tokio::sync::Mutex<()>,
     /// A sequence pass needs the same download capacity as this worker.
     sequence_active: watch::Sender<bool>,
+    /// Runs where an upload run that found uploads blocked, with none in
+    /// flight, is about to act on that, so a test can change the setting
+    /// between the run's check and what it does.
+    #[cfg(test)]
+    blocked_end_gate: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 pub(crate) struct SequenceDownloads<'a> {
     active: &'a watch::Sender<bool>,
@@ -157,6 +162,8 @@ impl Files {
             closed: AtomicBool::new(false),
             pin_run: tokio::sync::Mutex::new(()),
             sequence_active,
+            #[cfg(test)]
+            blocked_end_gate: Mutex::new(None),
         });
         let tasks = vec![
             tokio::spawn(upload_worker(
