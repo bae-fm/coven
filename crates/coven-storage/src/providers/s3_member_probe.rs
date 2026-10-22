@@ -18,7 +18,7 @@ impl S3Storage {
     ) -> Result<(), StorageError> {
         let namespace = format!(
             "{}.coven-check/{run}/",
-            ObjectPrefix::all(store).under(&self.prefix)
+            self.prefix.key_prefix_of(&ObjectPrefix::all(store))
         );
         let key = format!("{namespace}member-key");
         let bytes = format!("coven member key {run}").into_bytes();
@@ -152,11 +152,7 @@ impl S3Storage {
     /// A listing of the location's base prefix, outside every store's
     /// folder, must be refused with permission denied.
     pub(super) async fn outside_store_refused(&self, store: StoreId) -> Result<(), StorageError> {
-        let outside = if self.prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", self.prefix)
-        };
+        let outside = self.prefix.key_prefix();
         match self
             .list_page(self.settings.listing, &outside, Some("/"), None, None)
             .await

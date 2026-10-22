@@ -9,7 +9,7 @@ fn location() -> StorageConfig {
         region: "region".into(),
         endpoint: Some("https://s3.us-east-1.amazonaws.com".parse().unwrap()),
         profile: None,
-        prefix: "store".into(),
+        prefix: coven_storage::S3Prefix::parse("store").unwrap(),
     }
 }
 

@@ -29,7 +29,7 @@ impl S3Storage {
             .client
             .get_object()
             .bucket(&self.bucket)
-            .key(path.under(&self.prefix));
+            .key(self.prefix.key(path));
         if let Some(range) = range {
             request = request.range(range.header());
         }

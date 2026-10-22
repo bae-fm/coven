@@ -408,7 +408,7 @@ async fn fake(uniform: bool) -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessK
             region: "auto".into(),
             endpoint: Some(url),
             profile: Some(S3Profile::Named(S3ProfileName::Gcs)),
-            prefix: "base".into(),
+            prefix: crate::S3Prefix::parse("base").unwrap(),
         },
         AdminCredential::BearerToken(SecretText::new("admin-token".into())),
         endpoints,

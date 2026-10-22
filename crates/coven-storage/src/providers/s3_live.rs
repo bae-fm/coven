@@ -43,8 +43,10 @@ impl LiveS3 {
         let prefix = match crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())
             .expect("valid live endpoint")
         {
-            crate::providers::S3KeyScope::Bucket => String::new(),
-            crate::providers::S3KeyScope::Prefix => "coven-live".into(),
+            crate::providers::S3KeyScope::Bucket => crate::S3Prefix::default(),
+            crate::providers::S3KeyScope::Prefix => {
+                crate::S3Prefix::parse("coven-live").expect("a valid base prefix")
+            }
         };
         let config = StorageConfig::S3 {
             bucket: settings.take("COVEN_LIVE_S3_BUCKET").as_str().to_owned(),
@@ -105,7 +107,10 @@ impl LiveS3 {
             Ok(true) => {
                 live_cleanup::cleanup_versions(
                     &storage.provider,
-                    &ObjectPrefix::all(store).under(&storage.provider.prefix),
+                    &storage
+                        .provider
+                        .prefix
+                        .key_prefix_of(&ObjectPrefix::all(store)),
                 )
                 .await
             }

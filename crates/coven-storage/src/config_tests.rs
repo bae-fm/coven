@@ -33,7 +33,7 @@ fn endpoints_allow_http_but_refuse_credentials_queries_and_fragments() {
         let config = StorageConfig::S3 {
             bucket: "bucket".into(),
             region: "region".into(),
-            prefix: String::new(),
+            prefix: crate::S3Prefix::default(),
             endpoint: Some(url.parse().unwrap()),
             profile: None,
         };
@@ -95,7 +95,7 @@ fn catalogued_hosts_require_https_and_their_own_profile_name() {
             region: "region".into(),
             endpoint: endpoint.map(|url| url.parse().unwrap()),
             profile,
-            prefix: String::new(),
+            prefix: crate::S3Prefix::default(),
         };
         let result = config.validate();
         assert_eq!(result.is_ok(), accepted, "{endpoint:?} {profile:?}");
@@ -139,7 +139,7 @@ fn locations_select_the_required_initial_access() {
                 region: "region".into(),
                 endpoint: None,
                 profile: None,
-                prefix: String::new(),
+                prefix: crate::S3Prefix::default(),
             },
             None,
         ),
@@ -226,23 +226,33 @@ fn every_native_location_identifier_is_required() {
 }
 
 #[test]
-fn s3_base_prefixes_have_no_leading_or_trailing_slash() {
-    for (prefix, valid) in [
-        ("", true),
-        ("base", true),
-        ("base/nested", true),
-        ("/", false),
-        ("/base", false),
-        ("base/", false),
-    ] {
-        let config = StorageConfig::S3 {
-            bucket: "bucket".into(),
-            region: "region".into(),
-            endpoint: None,
-            profile: None,
-            prefix: prefix.into(),
-        };
-        assert_eq!(config.validate().is_ok(), valid, "{prefix}");
+fn a_recorded_s3_location_keeps_its_prefix_canonical() {
+    let typed = StorageConfig::S3 {
+        bucket: "bucket".into(),
+        region: "region".into(),
+        endpoint: None,
+        profile: None,
+        prefix: crate::S3Prefix::parse("/base/nested/").unwrap(),
+    };
+    let bytes = typed.encode().unwrap();
+    assert_eq!(StorageConfig::decode(bytes.as_bytes()).unwrap(), typed);
+    let recorded = |prefix: &str| {
+        format!(
+            r#"{{"S3":{{"bucket":"bucket","region":"region","endpoint":null,"profile":null,"prefix":"{prefix}"}}}}"#
+        )
+    };
+    assert_eq!(
+        StorageConfig::decode(recorded("base/nested").as_bytes()).unwrap(),
+        typed
+    );
+    for prefix in ["/", "/base", "base/", "base//nested", "base.nested"] {
+        assert_eq!(
+            StorageConfig::decode(recorded(prefix).as_bytes())
+                .unwrap_err()
+                .failure(),
+            StorageFailure::Encoding,
+            "{prefix}"
+        );
     }
 }
 
@@ -292,7 +302,7 @@ fn a_base_prefix_needs_member_keys_limited_to_a_prefix() {
             region: "region".into(),
             endpoint: endpoint.map(|url| url.parse().unwrap()),
             profile,
-            prefix: prefix.into(),
+            prefix: crate::S3Prefix::parse(prefix).unwrap(),
         };
         config("").validate().unwrap();
         let prefixed = config("stores").validate();

@@ -640,9 +640,6 @@ impl ObjectPath {
 
     /// The provider path with a leading slash.
     pub fn absolute(&self) -> String;
-
-    /// The provider path beneath a configured location prefix.
-    pub fn under(&self, root: &str) -> String;
 }
 
 /// A path outside the canonical object layout.
@@ -675,9 +672,6 @@ impl ObjectPrefix {
 
     /// Whether a validated path is under this prefix.
     pub fn contains(&self, path: &ObjectPath) -> bool;
-
-    /// The provider path beneath a configured location prefix.
-    pub fn under(&self, root: &str) -> String;
 }
 
 /// A nonempty byte range, including its start and excluding its end (§17.5).
@@ -2420,6 +2414,15 @@ while let Ok(values) = lost.next().await {
   classified cause; the error retains a cleanup failure too if both fail.
   It also checks conditional replacement for the floor: a matching revision
   succeeds and a stale revision changes nothing.
+- An S3 location's base prefix is an `S3Prefix`, parsed from what the person
+  typed when the app builds the location (§20.3). Slashes at its ends are
+  dropped, so `/music/stores/`, `music/stores/` and `music/stores` are one
+  location, and a prefix of only slashes is the bucket's root, as an empty one
+  is. Two slashes in a row, a folder name with a character other than an ASCII
+  letter or digit, `-` or `_`, or a folder name over 255 bytes is refused with
+  an `S3PrefixError` naming the folder at fault, before any location exists.
+  A recorded location decodes only the canonical spelling; a recorded `dev/` is
+  `StorageFailure::Encoding`.
 - An S3 location's behaviors are `S3Settings` (§20.7). Its `S3Profile` names a
   known service or carries custom settings; with no profile, the
   endpoint selects (Appendix E.3): no endpoint means AWS S3; `storage.googleapis.com`
@@ -2662,10 +2665,10 @@ pub enum StorageConfig {
         /// AWS, and setup detects any other endpoint's settings, recording
         /// them as Custom. All run the setup checks.
         profile: Option<S3Profile>,
-        /// The base prefix, without leading or trailing slashes; paths add
+        /// The base prefix, parsed where the location is built; paths add
         /// the store id. Empty where member keys reach a whole bucket;
         /// otherwise `OwnBucketRequired { reason: Prefix }`.
-        prefix: String,
+        prefix: S3Prefix,
     },
     /// Required creation choice: an App folder or a shared-capable namespace.
     Dropbox {
@@ -2689,6 +2692,39 @@ pub enum StorageConfig {
         /// The custom zone containing the store.
         zone: String,
     },
+}
+
+/// An S3 location's base prefix in its one spelling: folder names joined by
+/// single slashes, with no slash at either end. The default is the bucket's
+/// root. Serialized as that string; decoding refuses any other spelling.
+pub struct S3Prefix { /* private fields */ }
+
+impl S3Prefix {
+    /// Parse a prefix as a person typed it, dropping slashes at either end;
+    /// only slashes is the bucket's root (§20.3).
+    pub fn parse(typed: &str) -> Result<Self, S3PrefixError>;
+    /// The canonical spelling.
+    pub fn as_str(&self) -> &str;
+    /// Whether this is the bucket's root.
+    pub fn is_empty(&self) -> bool;
+    /// What every key under this prefix starts with: empty at the bucket's
+    /// root, otherwise the prefix and a slash.
+    pub fn key_prefix(&self) -> String;
+    /// The S3 key of an object in the layout.
+    pub fn key(&self, path: &ObjectPath) -> String;
+    /// The S3 key prefix that selects these objects.
+    pub fn key_prefix_of(&self, objects: &ObjectPrefix) -> String;
+}
+
+/// Why a typed base prefix was refused (§20.3).
+pub enum S3PrefixError {
+    /// Two slashes in a row, as in `music//bae`, leave a folder with no name.
+    EmptySegment,
+    /// A folder name holds a character other than an ASCII letter or digit,
+    /// `-` or `_`: the folder as typed, and its first such character.
+    InvalidCharacter { segment: String, character: char },
+    /// A folder name is longer than 255 bytes.
+    SegmentTooLong { segment: String },
 }
 
 /// An S3 location's behaviors: a known service's, or its own (§20.7).
@@ -5697,7 +5733,8 @@ fn migrations() -> Vec<Migration> {
   `StorageFailure::Conflict`.
 - A location with no base prefix is refused with
   `EmptyS3PrefixError::WholeBucket` before any request. Emptying it would
-  empty the whole bucket.
+  empty the whole bucket. A prefix typed as only slashes is that location too:
+  it parses to the bucket's root (§20.3).
 - The location is validated as setup validates it (E5). A location that is not
   S3, an empty key, or an uncatalogued endpoint with no profile is refused
   with `EmptyS3PrefixError::Storage`. Listing, aborting and deleting failures

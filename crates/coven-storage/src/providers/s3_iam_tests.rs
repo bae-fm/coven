@@ -471,7 +471,7 @@ impl Fake {
             region: REGION.into(),
             endpoint: Some(Url::parse(&self.server.url).unwrap()),
             profile: Some(S3Profile::Named(name)),
-            prefix: "base".into(),
+            prefix: crate::S3Prefix::parse("base").unwrap(),
         }
     }
 

@@ -103,7 +103,7 @@ macro_rules! observation {
                     .ok_or(StorageFailure::Protocol.with_source("S3 omitted storage time"))?,
             )?,
             time_resolution: std::time::Duration::from_secs(1),
-            object_id: $path.under(&$storage.prefix),
+            object_id: $storage.prefix.key(&$path),
             revision: revision(
                 $storage,
                 $path,

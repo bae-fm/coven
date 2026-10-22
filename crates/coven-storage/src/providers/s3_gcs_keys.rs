@@ -87,7 +87,7 @@ impl<'a> Gcs<'a> {
         Ok(Self {
             context,
             bucket: bucket.clone(),
-            folder: ObjectPrefix::all(store).under(prefix),
+            folder: prefix.key_prefix_of(&ObjectPrefix::all(store)),
         })
     }
 

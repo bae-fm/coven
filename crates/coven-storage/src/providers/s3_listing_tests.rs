@@ -12,7 +12,7 @@ fn storage(url: &str) -> S3Storage {
             region: "us-east-1".into(),
             endpoint: Some(url.parse().unwrap()),
             profile: Some(crate::S3Profile::Custom(profile::PLAIN)),
-            prefix: "root".into(),
+            prefix: crate::S3Prefix::parse("root").unwrap(),
         },
         S3Credentials {
             access_key_id: "access".into(),

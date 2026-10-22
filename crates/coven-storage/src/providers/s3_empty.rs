@@ -49,7 +49,7 @@ pub(crate) async fn empty_prefix(
     }
     // The slash keeps a sibling prefix that merely starts with the same
     // characters, `dev-old` beside `dev`, out of the listing.
-    let under = format!("{prefix}/");
+    let under = prefix.key_prefix();
     let emptied = async {
         crate::ConnectionCredentials {
             location: config.clone(),

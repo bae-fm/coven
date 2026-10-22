@@ -17,7 +17,7 @@ fn code(store: StoreId) -> RestoreCode {
             region: "us-east-1".into(),
             endpoint: None,
             profile: None,
-            prefix: "libraries".into(),
+            prefix: coven_storage::S3Prefix::parse("libraries").unwrap(),
         }
         .encode()
         .unwrap(),

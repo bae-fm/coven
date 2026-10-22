@@ -487,7 +487,7 @@ impl Fixture {
             region: "us-east-1".into(),
             endpoint: Some(self.server.url.parse().unwrap()),
             profile,
-            prefix: String::new(),
+            prefix: crate::S3Prefix::default(),
         }
     }
     async fn detect(&self, profile: Option<S3Profile>) -> Result<S3Detection, StorageError> {
@@ -847,7 +847,7 @@ async fn v2_is_unsupported_on_501_but_an_outage_fails_detection() {
             region: "us-east-1".into(),
             endpoint: Some(outage.url.parse().unwrap()),
             profile: None,
-            prefix: String::new(),
+            prefix: crate::S3Prefix::default(),
         },
         credentials(),
         STORE,

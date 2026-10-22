@@ -40,6 +40,8 @@ pub mod providers;
 mod restore_storage;
 mod s3_detection;
 pub use s3_detection::*;
+mod s3_prefix;
+pub use s3_prefix::{S3Prefix, S3PrefixError};
 mod s3_settings;
 pub use s3_settings::*;
 mod secret_json;

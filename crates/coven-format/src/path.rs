@@ -142,10 +142,6 @@ impl ObjectPath {
     pub fn absolute(&self) -> String {
         format!("/{}", self.0)
     }
-    /// The provider path beneath a configured location prefix.
-    pub fn under(&self, root: &str) -> String {
-        join_root(root, &self.0)
-    }
 }
 
 impl TryFrom<String> for ObjectPath {
@@ -217,10 +213,6 @@ impl ObjectPrefix {
     pub fn contains(&self, path: &ObjectPath) -> bool {
         path.0.starts_with(&self.0)
     }
-    /// The provider path beneath a configured location prefix.
-    pub fn under(&self, root: &str) -> String {
-        join_root(root, &self.0)
-    }
 }
 
 /// Validate a provider folder as a strict ancestor of an object in the
@@ -273,13 +265,6 @@ fn canonical_uuid(value: &str) -> bool {
     match uuid::Uuid::parse_str(value) {
         Ok(id) => id.to_string() == value,
         Err(_) => false,
-    }
-}
-fn join_root(root: &str, value: &str) -> String {
-    if root.is_empty() {
-        value.to_owned()
-    } else {
-        format!("{root}/{value}")
     }
 }
 

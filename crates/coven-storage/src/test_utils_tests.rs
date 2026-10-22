@@ -7,7 +7,7 @@ fn config() -> StorageConfig {
         region: "us-east-1".into(),
         endpoint: None,
         profile: None,
-        prefix: "store".into(),
+        prefix: crate::S3Prefix::parse("store").unwrap(),
     }
 }
 #[tokio::test]

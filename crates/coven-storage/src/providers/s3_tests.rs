@@ -25,7 +25,7 @@ pub(super) fn profile_provider(url: &str, settings: S3Settings) -> StorageConnec
                 endpoint: Some(url.parse().unwrap()),
                 profile: None,
                 // An undetected endpoint's member keys reach the whole bucket (§20.7).
-                prefix: String::new(),
+                prefix: crate::S3Prefix::default(),
             },
             S3Credentials {
                 access_key_id: "access".into(),
@@ -470,7 +470,7 @@ fn provider(url: &str) -> StorageConnection<S3Storage> {
             endpoint: Some(url.parse().unwrap()),
             profile: Some(crate::S3Profile::Custom(profile::PLAIN)),
             // A custom profile's member keys reach the whole bucket (§20.7).
-            prefix: String::new(),
+            prefix: crate::S3Prefix::default(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -655,7 +655,7 @@ async fn duplicate_listing_entries_merge_or_fail_before_fetching_another_page() 
     for (size, expected_requests) in [(4, 2), (5, 1)] {
         let requests = Arc::new(AtomicUsize::new(0));
         let received = requests.clone();
-        let key = path.under("");
+        let key = crate::S3Prefix::default().key(&path);
         let server = TestServer::new(Router::new().fallback(move || {
             let page = received.fetch_add(1, Ordering::SeqCst);
             let key = key.clone();

@@ -14,7 +14,7 @@ fn location(endpoint: &str, prefix: &str) -> (StorageConfig, S3Credentials) {
             endpoint: Some(endpoint.parse().unwrap()),
             // AWS keys can be limited to a prefix, so the location may name one.
             profile: Some(S3Profile::Named(S3ProfileName::Aws)),
-            prefix: prefix.into(),
+            prefix: crate::S3Prefix::parse(prefix).unwrap(),
         },
         S3Credentials {
             access_key_id: "access".into(),

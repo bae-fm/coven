@@ -9,7 +9,7 @@ fn location(profile: Option<S3Profile>, endpoint: Option<&str>, prefix: &str) ->
         region: "us-east-1".into(),
         endpoint: endpoint.map(|url| Url::parse(url).unwrap()),
         profile,
-        prefix: prefix.into(),
+        prefix: crate::S3Prefix::parse(prefix).unwrap(),
     }
 }
 

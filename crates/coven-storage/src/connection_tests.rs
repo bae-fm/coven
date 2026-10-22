@@ -94,7 +94,7 @@ async fn wrong_location_and_invalid_part_keep_the_provider_refusal_order() {
                 region: "region".into(),
                 endpoint: None,
                 profile: None,
-                prefix: "store".into(),
+                prefix: crate::S3Prefix::parse("store").unwrap(),
             },
             StorageFailure::InvalidPart,
         ),

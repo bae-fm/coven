@@ -255,7 +255,7 @@ async fn fake() -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessKeyAdmin>) {
             region: "us-east-1".into(),
             endpoint: Some(Url::parse(&server.url).unwrap()),
             profile: Some(S3Profile::Named(S3ProfileName::RustFs)),
-            prefix: "base".into(),
+            prefix: crate::S3Prefix::parse("base").unwrap(),
         },
         AdminCredential::AccessKey {
             access_key_id: "root".into(),

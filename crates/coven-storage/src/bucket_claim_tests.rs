@@ -10,7 +10,7 @@ fn location() -> StorageConfig {
         region: "auto".into(),
         endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
         profile: None,
-        prefix: String::new(),
+        prefix: crate::S3Prefix::default(),
     }
 }
 
@@ -119,7 +119,7 @@ async fn prefix_scoped_locations_need_no_marker_requests() {
                 region: "auto".into(),
                 endpoint: Some("http://localhost:9000".parse().unwrap()),
                 profile: Some(S3Profile::Named(profile)),
-                prefix: "stores".into(),
+                prefix: crate::S3Prefix::parse("stores").unwrap(),
             })
             .build()
             .unwrap();

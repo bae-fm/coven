@@ -102,7 +102,7 @@ impl Fixture {
                 region: "auto".into(),
                 endpoint: Some(self.server.url.parse().unwrap()),
                 profile,
-                prefix: prefix.into(),
+                prefix: crate::S3Prefix::parse(prefix).unwrap(),
             },
             S3Credentials {
                 access_key_id: "access".into(),

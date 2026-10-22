@@ -321,7 +321,7 @@ pub(crate) fn member_policy(
     let StorageConfig::S3 { bucket, prefix, .. } = config else {
         return Err(StorageFailure::InvalidConfiguration.with_source("expected S3 configuration"));
     };
-    let scope = ObjectPrefix::all(store).under(prefix);
+    let scope = prefix.key_prefix_of(&ObjectPrefix::all(store));
     Ok(serde_json::json!({
         "Version": "2012-10-17",
         "Statement": [

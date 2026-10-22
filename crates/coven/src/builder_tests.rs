@@ -304,7 +304,7 @@ mod recovery {
                 region: "us-east-1".into(),
                 endpoint: None,
                 profile: None,
-                prefix: "recovery".into(),
+                prefix: crate::S3Prefix::parse("recovery").unwrap(),
             },
             StorageConfig::Dropbox {
                 account_label: None,

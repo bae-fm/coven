@@ -563,7 +563,7 @@ impl Fake {
                     .unwrap(),
             ),
             profile: Some(S3Profile::Named(profile)),
-            prefix: "base".into(),
+            prefix: coven_storage::S3Prefix::parse("base").unwrap(),
         };
         let StorageConfig::S3 {
             endpoint: Some(endpoint),

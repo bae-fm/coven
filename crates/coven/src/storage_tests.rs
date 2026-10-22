@@ -740,7 +740,7 @@ async fn setup_refuses_another_location_after_disconnect_and_reopen() {
     let StorageConfig::S3 { prefix, .. } = &mut config else {
         unreachable!()
     };
-    *prefix = "destination".into();
+    *prefix = crate::S3Prefix::parse("destination").unwrap();
     let destination = Arc::new(
         MemoryStorage::builder()
             .location(config.clone())

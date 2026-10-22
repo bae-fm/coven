@@ -56,7 +56,7 @@ impl Fixture {
                 .location(StorageConfig::S3 {
                     bucket: "guarantees".into(),
                     region: "test".into(),
-                    prefix: "store".into(),
+                    prefix: crate::S3Prefix::parse("store").unwrap(),
                     endpoint: None,
                     profile: None,
                 })

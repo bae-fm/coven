@@ -119,7 +119,7 @@ fn location(provider: CloudProvider) -> StorageConfig {
             region: "us-east-1".into(),
             endpoint: None,
             profile: None,
-            prefix: "store".into(),
+            prefix: crate::S3Prefix::parse("store").expect("a valid base prefix"),
         },
         CloudProvider::Dropbox => StorageConfig::Dropbox {
             account_label: None,

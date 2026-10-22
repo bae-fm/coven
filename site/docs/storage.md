@@ -57,6 +57,15 @@ whole bucket ([below](#a-bucket-of-its-own)). Finding the sequence never lists
 anything: reading `seq/41` never enumerates Ana's 20,000 photos, or another
 store's objects.
 
+An S3 location's base prefix is an
+[`S3Prefix`](rustdoc:struct:coven::S3Prefix). Build it with
+`S3Prefix::parse(typed)` from what the person typed: slashes at its ends mean
+nothing, so `/music/stores/` and `music/stores` are one location, and only
+slashes is the bucket's root. Its error,
+[`S3PrefixError`](rustdoc:enum:coven::S3PrefixError), names the folder at fault:
+two slashes in a row, a character other than an ASCII letter or digit, `-` or
+`_`, or a folder name over 255 bytes.
+
 ## Setting up storage
 
 A store works on the device before any storage exists. Setting storage up

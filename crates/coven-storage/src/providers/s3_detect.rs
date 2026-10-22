@@ -93,7 +93,7 @@ pub(crate) async fn detect(
 fn namespace(storage: &S3Storage, store: StoreId, run: uuid::Uuid) -> String {
     format!(
         "{}{PROBES}/{run}/",
-        ObjectPrefix::all(store).under(&storage.prefix)
+        storage.prefix.key_prefix_of(&ObjectPrefix::all(store))
     )
 }
 

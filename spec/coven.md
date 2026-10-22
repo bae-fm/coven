@@ -4837,6 +4837,24 @@ Household and Ben creates Garden in the same folder; their store ids differ, so
 their first entries land at different paths. On an S3 service whose keys reach a
 whole bucket, each store gets its own bucket instead (§20.7).
 
+An S3 location names a bucket and a *base prefix*: the folder inside the bucket
+that holds its stores' folders. Ana types `music/stores` when she sets up
+Household on AWS, and Household's objects go under `music/stores/<store>/`.
+
+The base prefix is a folder path, so slashes at its ends mean nothing:
+`/music/stores/`, `music/stores/` and `music/stores` are one location. The app
+parses what Ana typed into an `S3Prefix` when it builds the location, and the
+parse drops those slashes once (api.md E5). Every device, restore code and request
+then spells the prefix the same way. Without that, Ben typing `music/stores/` on
+reconnecting would not match the recorded `music/stores`, and setup would refuse
+it as a different location.
+
+- A prefix of only slashes is the bucket's root, as an empty prefix is.
+- What's left is folder names of ASCII letters, digits, `-` and `_`, each at most
+  255 bytes, joined by single slashes. Two slashes in a row, any other character,
+  or a longer folder name is refused with an `S3PrefixError` that names the folder
+  at fault, before any request.
+
 Setup writes and reads only its own store's prefix. Where stores can share a
 prefix-scoped location, other stores and unrelated objects outside this prefix
 don't compete with this store. A few accesses are wider, and none reads another
@@ -7203,6 +7221,7 @@ the constraint or foreign key (§9, §15.1, §15.2, Appendix A).
 | `StorageFailure::StoreExists` | another creation already holds slot 1 | §10.3 |
 | `StorageFailure::ProviderUnavailable` | CloudKit on a platform other than Apple's | §20.2, E.1 |
 | `ContainerNotFound` | CloudKit's zone is missing | E.1 |
+| `S3PrefixError` | a typed S3 base prefix has two slashes in a row, a folder name with a character other than an ASCII letter or digit, `-` or `_`, or a folder name over 255 bytes | §20.3 |
 | `StorageFailure::OwnBucketRequired { reason: Prefix }` | a bucket-scoped service's location has a base prefix | §20.7 |
 | `OwnBucketRequired { reason: Occupied }` | at first setup, a bucket-scoped store's bucket holds anything besides its own folder and the bucket marker, or the marker `coven-bucket` names another store; on reconnecting, restoring or joining, the marker is missing, malformed or names another store | §20.7 |
 | `InvalidConfiguration` | an S3 location contradicts its host, names an IAM endpoint wrongly, or has an unknown host outside setup | §20.7, E.3, E.12 |

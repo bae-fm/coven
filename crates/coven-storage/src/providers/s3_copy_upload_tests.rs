@@ -99,7 +99,7 @@ pub(super) fn gcs_provider(url: &str) -> StorageConnection<S3Storage> {
             region: "auto".into(),
             endpoint: Some("https://storage.googleapis.com".parse().unwrap()),
             profile: None,
-            prefix: "store".into(),
+            prefix: crate::S3Prefix::parse("store").unwrap(),
         },
         S3Credentials {
             access_key_id: "access".into(),
@@ -212,7 +212,7 @@ async fn gcs_multipart_copy_preserves_occupied_bytes_and_removes_temporaries() {
     assert!(state.uploads.is_empty());
     assert_eq!(
         state.objects.keys().collect::<Vec<_>>(),
-        vec![&path.under("store")]
+        vec![&crate::S3Prefix::parse("store").unwrap().key(&path)]
     );
 }
 

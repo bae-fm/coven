@@ -185,7 +185,7 @@ mod location {
                 endpoint: Some(url.parse().unwrap()),
                 // AWS keys can be limited to a prefix, so the location may name one.
                 profile: Some(S3Profile::Named(S3ProfileName::Aws)),
-                prefix: prefix.into(),
+                prefix: crate::S3Prefix::parse(prefix).unwrap(),
             },
             S3Credentials {
                 access_key_id: "access".into(),
@@ -208,38 +208,46 @@ mod location {
 
     #[tokio::test]
     async fn a_location_is_emptied_under_its_base_prefix_and_not_a_sibling_prefix() {
-        let state = seeded();
-        let server =
-            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        // Slashes typed at the prefix's ends name the same prefix.
+        for typed in ["dev", "dev/", "/dev/"] {
+            let state = seeded();
+            let server =
+                TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
 
-        let emptied = empty(&server.url, "dev").await.unwrap();
+            let emptied = empty(&server.url, typed).await.unwrap();
 
-        assert_eq!(
-            emptied,
-            EmptiedS3Prefix {
-                objects: 4,
-                uploads: 1
-            }
-        );
-        assert_eq!(
-            remaining(&state).0,
-            ["dev-old/kept".to_owned(), "other/kept".to_owned()]
-        );
+            assert_eq!(
+                emptied,
+                EmptiedS3Prefix {
+                    objects: 4,
+                    uploads: 1
+                },
+                "{typed}"
+            );
+            assert_eq!(
+                remaining(&state).0,
+                ["dev-old/kept".to_owned(), "other/kept".to_owned()],
+                "{typed}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn a_location_without_a_base_prefix_is_refused_before_any_request() {
-        let state = seeded();
-        let server =
-            TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
+        // A prefix of only slashes is the bucket's root too.
+        for typed in ["", "/", "//"] {
+            let state = seeded();
+            let server =
+                TestServer::new(Router::new().fallback(endpoint).with_state(state.clone())).await;
 
-        let error = empty(&server.url, "").await.unwrap_err();
+            let error = empty(&server.url, typed).await.unwrap_err();
 
-        assert!(
-            matches!(error, EmptyS3PrefixError::WholeBucket),
-            "{error:?}"
-        );
-        assert!(state.lock().unwrap().requests.is_empty());
+            assert!(
+                matches!(error, EmptyS3PrefixError::WholeBucket),
+                "{typed}: {error:?}"
+            );
+            assert!(state.lock().unwrap().requests.is_empty(), "{typed}");
+        }
     }
 
     #[tokio::test]

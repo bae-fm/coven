@@ -73,7 +73,7 @@ fn s3_recording() -> UploadSession {
             region: "region".into(),
             endpoint: None,
             profile: None,
-            prefix: "store".into(),
+            prefix: crate::S3Prefix::parse("store").unwrap(),
         },
         SessionState::S3 {
             id: SecretText::new("id".into()),
@@ -299,7 +299,7 @@ fn completed_and_verifying_recordings_still_obey_their_provider() {
         region: "region".into(),
         endpoint: None,
         profile: None,
-        prefix: "store".into(),
+        prefix: crate::S3Prefix::parse("store").unwrap(),
     };
     assert_invalid_recording(&session);
 

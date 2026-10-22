@@ -47,10 +47,10 @@ pub enum StorageConfig {
         /// AWS, and setup detects any other endpoint's settings, recording
         /// them as Custom. All run the setup checks.
         profile: Option<crate::S3Profile>,
-        /// The base prefix, without leading or trailing slashes; paths add
+        /// The base prefix, parsed where the location is built; paths add
         /// the store id. Empty where member keys reach a whole bucket;
         /// otherwise `OwnBucketRequired { reason: Prefix }`.
-        prefix: String,
+        prefix: crate::S3Prefix,
     },
     /// Dropbox's access and location, fixed when cloud storage is created.
     Dropbox {
@@ -143,7 +143,6 @@ impl StorageConfig {
                     }
                 }
                 let scope = crate::providers::s3_key_scope(endpoint.as_ref(), profile.as_ref())?;
-                crate::path::validate_root(prefix)?;
                 // A key that reaches the whole bucket reaches every store in
                 // it, so such a store occupies the bucket's root (§20.7).
                 if scope == crate::providers::S3KeyScope::Bucket && !prefix.is_empty() {

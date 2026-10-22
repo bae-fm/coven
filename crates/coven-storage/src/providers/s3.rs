@@ -96,7 +96,7 @@ pub(crate) struct S3Storage {
     credentials: SigningCredentials,
     config: StorageConfig,
     bucket: String,
-    prefix: String,
+    prefix: crate::S3Prefix,
     ids: IdSourceRef,
     settings: S3Settings,
     #[cfg(test)]
@@ -238,7 +238,7 @@ impl S3Storage {
             .client
             .put_object()
             .bucket(&self.bucket)
-            .key(path.under(&self.prefix))
+            .key(path.key(&self.prefix))
             .body(ByteStream::from(bytes.to_vec()));
         if path.is_replaceable() && self.settings.revision == S3Revision::ETag {
             request = request.metadata("coven-revision", self.ids.new_id().to_string());
@@ -315,7 +315,7 @@ impl S3Storage {
             .client
             .head_object()
             .bucket(&self.bucket)
-            .key(path.under(&self.prefix))
+            .key(path.key(&self.prefix))
             .send()
             .await
             .map_err(s3_error);
@@ -444,7 +444,7 @@ impl ProviderOps for S3Storage {
             .client
             .head_object()
             .bucket(&self.bucket)
-            .key(path.under(&self.prefix));
+            .key(self.prefix.key(path));
         if self.settings.request_checksums {
             request = request.checksum_mode(aws_sdk_s3::types::ChecksumMode::Enabled);
         }
@@ -458,7 +458,7 @@ impl ProviderOps for S3Storage {
                 // from the exact HEAD, never from the listing.
                 self.list_page(
                     self.settings.listing,
-                    &path.under(&self.prefix),
+                    &self.prefix.key(path),
                     None,
                     None,
                     Some(0),
@@ -479,12 +479,8 @@ impl ProviderOps for S3Storage {
     }
     async fn list(&self, listing: &mut ObjectListing) -> Result<(), StorageError> {
         let prefix = listing.prefix().clone();
-        let full = prefix.under(&self.prefix);
-        let root = if self.prefix.is_empty() {
-            String::new()
-        } else {
-            format!("{}/", self.prefix)
-        };
+        let full = self.prefix.key_prefix_of(&prefix);
+        let root = self.prefix.key_prefix();
         let mut marker = None;
         let mut seen = Pagination::new();
         loop {
@@ -556,7 +552,7 @@ impl ProviderOps for S3Storage {
     }
 
     async fn delete(&self, path: &ObjectPath) -> Result<(), StorageError> {
-        self.delete_key(&path.under(&self.prefix)).await
+        self.delete_key(&self.prefix.key(path)).await
     }
     async fn grant_access(&self, _account: &str) -> Result<AccessGrant, StorageError> {
         Ok(AccessGrant::CreateAccessKey)

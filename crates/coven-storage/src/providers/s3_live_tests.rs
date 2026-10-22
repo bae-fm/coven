@@ -380,7 +380,7 @@ async fn listing_lag(
         );
         s.create(&target, b"listing visibility").await?;
         let replied = Instant::now();
-        let stored_at = detect::time(&head(&s.provider, &target.under(&s.provider.prefix)).await?)?;
+        let stored_at = detect::time(&head(&s.provider, &s.provider.prefix.key(&target)).await?)?;
         let all = ObjectPrefix::files(store);
         let object = observe("S3_object", trial, replied, stored_at, || async {
             Ok(s.list(&all)

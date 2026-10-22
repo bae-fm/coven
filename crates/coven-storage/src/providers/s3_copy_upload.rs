@@ -11,7 +11,7 @@ impl S3Storage {
         token: &SecretText,
     ) -> Result<String, StorageError> {
         match self.settings.copy_publication.multipart() {
-            None => Ok(path.under(&self.prefix)),
+            None => Ok(self.prefix.key(path)),
             Some(_) => self.temporary_key(path, token),
         }
     }
@@ -35,7 +35,7 @@ impl S3Storage {
             .map_err(|source| StorageFailure::SessionMismatch.with_source(source))?;
         Ok(format!(
             "{}{TEMPORARIES}/{id}",
-            ObjectPrefix::all(store).under(&self.prefix)
+            self.prefix.key_prefix_of(&ObjectPrefix::all(store))
         ))
     }
 
@@ -358,7 +358,7 @@ impl S3Storage {
             .client
             .copy_object()
             .bucket(&self.bucket)
-            .key(path.under(&self.prefix))
+            .key(path.key(&self.prefix))
             .copy_source(format!("/{}/{temporary}", self.bucket))
             .customize()
             .mutate_request(move |request| {

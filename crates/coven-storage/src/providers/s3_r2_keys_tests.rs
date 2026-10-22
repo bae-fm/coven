@@ -121,7 +121,7 @@ async fn fake() -> (Arc<Mutex<Remote>>, TestServer, Arc<dyn AccessKeyAdmin>) {
             region: "auto".into(),
             endpoint: Some(Url::parse("https://acct.eu.r2.cloudflarestorage.com").unwrap()),
             profile: Some(S3Profile::Named(S3ProfileName::R2)),
-            prefix: String::new(),
+            prefix: crate::S3Prefix::default(),
         },
         AdminCredential::BearerToken(SecretText::new("admin-token".into())),
         endpoints,
@@ -185,7 +185,7 @@ fn the_endpoint_names_the_account_and_jurisdiction() {
         region: "auto".into(),
         endpoint: Some(Url::parse(&format!("https://{host}")).unwrap()),
         profile: None,
-        prefix: String::new(),
+        prefix: crate::S3Prefix::default(),
     };
     assert_eq!(
         account(&config("acct.r2.cloudflarestorage.com")).unwrap(),
@@ -271,7 +271,7 @@ async fn a_bucket_scoped_key_must_not_list_other_buckets() {
                 region: "auto".into(),
                 endpoint: Some(Url::parse(&server.url).unwrap()),
                 profile: Some(S3Profile::Named(S3ProfileName::R2)),
-                prefix: String::new(),
+                prefix: crate::S3Prefix::default(),
             },
             AdminCredential::BearerToken(SecretText::new("admin-token".into())),
             minting::AdminEndpoints::production(),

@@ -19,7 +19,9 @@ async fn gcs_race_prepares_temporaries_then_sends_conditional_publication_copies
         let state = state.lock().unwrap();
         assert!(state.uploads.is_empty());
         assert_eq!(state.objects.len(), 2);
-        assert!(!state.objects.contains_key(&target.under("store")));
+        assert!(!state
+            .objects
+            .contains_key(&crate::S3Prefix::parse("store").unwrap().key(&target)));
         assert_eq!(state.copies, 0);
     }
     fire(&s.provider, &target, b"first".to_vec(), first)

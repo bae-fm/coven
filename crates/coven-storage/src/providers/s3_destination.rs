@@ -16,9 +16,11 @@ impl Destination<'_> {
             Self::BucketClaim(_) => BUCKET_CLAIM,
         }
     }
-    pub(super) fn under(&self, prefix: &str) -> String {
+    /// The S3 key of this destination: an object's path under the base
+    /// prefix, or the bucket marker at the bucket's root.
+    pub(super) fn key(&self, prefix: &crate::S3Prefix) -> String {
         match self {
-            Self::Object(path) => path.under(prefix),
+            Self::Object(path) => prefix.key(path),
             Self::BucketClaim(_) => BUCKET_CLAIM.into(),
         }
     }

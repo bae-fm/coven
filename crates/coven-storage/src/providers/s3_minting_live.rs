@@ -193,7 +193,7 @@ async fn lifecycle(
             .client
             .put_object()
             .bucket(&member.bucket)
-            .key(elsewhere.under(&member.prefix))
+            .key(member.prefix.key(&elsewhere))
             .body(ByteStream::from_static(b"member write"))
             .send()
             .await
@@ -205,7 +205,7 @@ async fn lifecycle(
             .client
             .get_object()
             .bucket(&member.bucket)
-            .key(foreign.under(&member.prefix))
+            .key(member.prefix.key(foreign))
             .send()
             .await
             .map_err(s3_error),
@@ -215,7 +215,7 @@ async fn lifecycle(
         member
             .list_page(
                 member.settings.listing,
-                &ObjectPrefix::all(other).under(&member.prefix),
+                &member.prefix.key_prefix_of(&ObjectPrefix::all(other)),
                 None,
                 None,
                 None,
@@ -253,7 +253,7 @@ async fn lifecycle(
         return Err(StorageFailure::Protocol.with_source("the store's listing keeps a revoked key"));
     }
     // The provider must stop honoring the key, within propagation.
-    let own = ObjectPrefix::all(scope.store).under(&member.prefix);
+    let own = member.prefix.key_prefix_of(&ObjectPrefix::all(scope.store));
     let mut waited = Duration::ZERO;
     loop {
         match member

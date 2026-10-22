@@ -12,7 +12,7 @@ fn uncatalogued_under(profile: Option<S3Profile>, prefix: &str) -> StorageConfig
         region: "us-east-1".into(),
         endpoint: Some("http://localhost:9000".parse().unwrap()),
         profile,
-        prefix: prefix.into(),
+        prefix: crate::S3Prefix::parse(prefix).unwrap(),
     }
 }
 
@@ -22,7 +22,7 @@ fn r2(prefix: &str) -> StorageConfig {
         region: "auto".into(),
         endpoint: Some("https://account.r2.cloudflarestorage.com".parse().unwrap()),
         profile: None,
-        prefix: prefix.into(),
+        prefix: crate::S3Prefix::parse(prefix).unwrap(),
     }
 }
 
