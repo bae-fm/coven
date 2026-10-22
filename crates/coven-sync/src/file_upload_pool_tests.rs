@@ -74,13 +74,17 @@ async fn uploads_queued_during_an_upload_fill_every_free_slot() {
         files.push(f.attach("files", id, photo(n as u8 + 2)).await);
     }
     until_creates(&f, 3).await;
-    // Three requests are open at the provider and none has finished.
+    // Three requests are open at the provider and none has finished: the three
+    // oldest files'. Uploads that start together reach the provider in either
+    // order, so only which files went out is fixed.
     assert_eq!(
-        creates(&f),
+        creates(&f)
+            .into_iter()
+            .collect::<std::collections::BTreeSet<_>>(),
         files[..3]
             .iter()
             .map(|file| f.path(file))
-            .collect::<Vec<_>>()
+            .collect::<std::collections::BTreeSet<_>>()
     );
     assert_eq!(f.storage.peak_requests(), 3);
     // The queue shows the three being sent, with no progress until stored.
