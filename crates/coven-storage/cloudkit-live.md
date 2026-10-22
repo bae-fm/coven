@@ -67,7 +67,7 @@ and [Development environment](https://developer.apple.com/documentation/bundlere
 Build without running:
 
 ```sh
-PATH=$HOME/.elan/bin:$PATH lockf -k "$CARGO_TARGET_DIR/.full-check.lock" \
+PATH=$HOME/.elan/bin:$PATH \
   cargo test -p coven-storage --lib --no-run --message-format=json \
   > /private/tmp/coven-cloudkit-test-build.json
 ```
