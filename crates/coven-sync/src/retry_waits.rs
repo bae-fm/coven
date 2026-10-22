@@ -51,6 +51,8 @@ pub struct RetryWaits {
     rearmed: tokio::sync::watch::Sender<u64>,
     /// The app's network reports, and how far each owner acted on them.
     network: network_report::Reports,
+    /// The person's retry requests waiting for a pass (`retry_answer.rs`).
+    requests: Mutex<retry_answer::Requests>,
     /// The error behind each failure recorded for a subject in this session.
     causes: crate::PendingCauses,
 }
@@ -91,6 +93,7 @@ impl RetryWaits {
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
+            requests: Mutex::default(),
             causes: crate::PendingCauses::default(),
         };
         for (subject, wait) in waits {
@@ -113,6 +116,7 @@ impl RetryWaits {
             evidence: Mutex::default(),
             rearmed: tokio::sync::watch::channel(0).0,
             network: network_report::Reports::default(),
+            requests: Mutex::default(),
             causes: crate::PendingCauses::default(),
         }
     }
@@ -400,6 +404,10 @@ mod operation_evidence;
 mod network_report;
 pub(crate) use network_report::Ending;
 pub use network_report::NetworkOwner;
+
+#[path = "retry_answer.rs"]
+mod retry_answer;
+pub use retry_answer::{PassRequests, RetryAnswer, RetryOutcome};
 
 #[cfg(test)]
 #[path = "retry_waits_tests.rs"]

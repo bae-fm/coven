@@ -100,7 +100,11 @@ with no outside event.
 
 The model assumes what Rust keeps under one lock: a request, stopping, and a
 pass taking its requests each happen at once. It does not model what a pass
-does, only how it ends.
+does, only how it ends. `retry_waits::retry_answer::tests` check the request
+list against these rules; the retry tests in `storage::tests::control` and
+`sequence_sync::sync_loop::tests::a_removed_device_never_retries_on_a_new_connection` check
+the connection's first attempt and its loop. No differential runner compares
+them.
 
 ## Work notifications
 

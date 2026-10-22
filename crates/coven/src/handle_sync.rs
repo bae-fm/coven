@@ -36,8 +36,15 @@ impl CovenHandle {
     /// now. Provider cooldowns hold, and failures that never retry stay. An
     /// ended wait keeps its failure count, so a retry that fails again waits
     /// the next longer delay. Requests coalesce as `sync_now` requests do.
-    pub fn retry_now(&self) {
-        self.storage.retry_now();
+    ///
+    /// The retry takes effect at once; the returned future resolves when the
+    /// first pass after it ends: `Synced`, or `Failed` with why. A pass held
+    /// by a provider cooldown answers `CoolingDown` with when it ends, and
+    /// one held by a failure only the person can clear answers `Failed` with
+    /// it, both at once. Stopped sync, or a closed handle, answers
+    /// `NotSyncing`. Dropping the future leaves the retry in place.
+    pub fn retry_now(&self) -> RetryAnswer {
+        self.storage.retry_now()
     }
     /// Observe the current status and every subsequent status change.
     pub fn subscribe_sync_status(&self) -> tokio::sync::watch::Receiver<SyncStatus> {

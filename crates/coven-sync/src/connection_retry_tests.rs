@@ -22,7 +22,14 @@ async fn fail(
     };
     let error = SyncError::Storage(StorageError::Failure(StorageFailure::Network));
     retry
-        .failed(database, waits, reason, waits.connection_version(), &error)
+        .failed(
+            database,
+            waits,
+            reason,
+            waits.connection_version(),
+            error,
+            crate::connection_failure,
+        )
         .await
         .unwrap();
 }

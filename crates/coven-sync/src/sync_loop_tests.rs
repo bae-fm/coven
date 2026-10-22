@@ -38,9 +38,9 @@ async fn slot_read_failures_keep_their_pass_status_and_retry() {
             let shown = super::failed(&ben.sync, error);
             match failure {
                 StorageFailure::Network => {
-                    assert!(matches!(shown, SyncStatus::Offline { .. }), "{shown:?}")
+                    assert!(matches!(shown, PassFailure::Offline { .. }), "{shown:?}")
                 }
-                _ => assert!(matches!(shown, SyncStatus::Failed { .. }), "{shown:?}"),
+                _ => assert!(matches!(shown, PassFailure::Failed { .. }), "{shown:?}"),
             }
             assert_eq!(ben.database().applied_slot().await.unwrap(), before);
             assert!(ben
@@ -240,6 +240,7 @@ async fn a_local_failure_retries_the_pass_on_its_own() {
     }
 }
 
+/// A removed device never retries, and a retry is answered with why at once.
 #[tokio::test]
 async fn a_removed_device_never_retries_on_a_new_connection() {
     let group = Group::new();
@@ -297,6 +298,22 @@ async fn a_removed_device_never_retries_on_a_new_connection() {
         .set(std::time::UNIX_EPOCH + std::time::Duration::from_secs(600));
     worker.sync_now().unwrap();
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    // Pulling to refresh is told why at once, and runs no pass.
+    let answer = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ben.sync.waits.retry_requested(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        matches!(
+            answer,
+            RetryOutcome::Failed(PassFailure::Failed {
+                error: SyncFailure::Removed
+            })
+        ),
+        "{answer:?}"
+    );
     assert_eq!(ben.storage.request_count(), requests);
     assert!(ben
         .database()

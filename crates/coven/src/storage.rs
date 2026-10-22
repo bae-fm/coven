@@ -382,7 +382,10 @@ impl StorageConnections {
     }
 
     /// Release the current connection after its active pass and transfers.
+    /// No connection plans afterwards, so retries waiting for a pass are
+    /// answered `NotSyncing`.
     async fn release(&self, live: &mut Connection) -> Result<(), SyncError> {
+        self.waits.sync_stopped();
         self.control.lock().expect("loop control poisoned").take();
         let closed = match std::mem::replace(live, Connection::Released) {
             Connection::Active(previous) => previous.close().await,
@@ -822,6 +825,7 @@ impl StorageConnections {
                     }
                     return Err(error);
                 }
+                owner.waits.sync_stopped();
                 owner.control.lock().expect("loop control poisoned").take();
                 let released = match std::mem::replace(&mut *live, Connection::Released) {
                     Connection::Active(previous) => previous.close().await,

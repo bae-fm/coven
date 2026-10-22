@@ -2513,6 +2513,18 @@ while let Ok(values) = lost.next().await {
     that fails again waits the next longer delay. Provider cooldowns,
     failures that never retry, and waits for new credentials or a new
     connection hold ([§6.7](coven.md#67-waiting-and-retrying)).
+  - `retry_now` returns a `RetryAnswer`, a future that resolves when the
+    first pass after the request ends, so a pull-to-refresh spinner can stay
+    until then: `Synced`, or `Failed` with the pass's failure. A request made
+    while a pass runs waits for the next pass, which it runs; requests made
+    together share one. A pass held by a provider cooldown answers
+    `CoolingDown` with when it ends, and one held by a failure only new
+    credentials, an update or a reset can clear answers `Failed` with that
+    failure, both at once. Stopped sync, or a closed handle, answers
+    `NotSyncing`, and stopping answers every waiting request so. The retry
+    takes effect when called: dropping the future leaves it in place. The
+    answer is about the pass; uploads and downloads retry on their own and
+    report in `pending()`.
   - [A sync pass (§6)](coven.md#6-a-sync-pass) gives the read, apply, claim and effects order.
     An idle pass reads the next slot and the floor: two requests.
   - A missing slot below the floor reloads its snapshots. Returning devices retain eligible queued
@@ -3484,8 +3496,10 @@ impl CovenHandle {
     /// backoff, answered or not: the connection's, operations', uploads'
     /// and downloads'; each keeps its failure count. Syncs now, as
     /// `sync_now` does. Provider cooldowns and failures that never retry
-    /// hold. Requests coalesce with network reports (§6.7).
-    pub fn retry_now(&self);
+    /// hold. Requests coalesce with network reports (§6.7). Resolves when
+    /// the first pass after the request ends; a pass held by a cooldown or
+    /// by a failure only the person can clear answers at once.
+    pub fn retry_now(&self) -> RetryAnswer;
 
     /// The sync status, live. The first value is the current status.
     pub fn subscribe_sync_status(&self) -> watch::Receiver<SyncStatus>;
@@ -3561,6 +3575,40 @@ pub enum SyncStatus {
     },
     /// Storage refused the whole pass, or coven's own operation failed.
     Failed { error: SyncFailure },
+}
+
+/// Why a pass, or the connection attempt that begins one, failed: the
+/// status it leaves.
+pub enum PassFailure {
+    Offline { error: Arc<StorageError> },
+    Blocked {
+        slot: Slot,
+        reason: PendingReason,
+        error: Option<Arc<dyn std::error::Error + Send + Sync>>,
+    },
+    Failed { error: SyncFailure },
+}
+
+/// What the first sync pass after the person's retry came to.
+pub enum RetryOutcome {
+    /// The pass reached its read end.
+    Synced { finished_at: SystemTime },
+    /// The pass failed, or a failure only new credentials, an update or a
+    /// reset can clear holds every pass.
+    Failed(PassFailure),
+    /// A provider cooldown holds every pass until then, by the store's clock.
+    /// The pass runs once it ends, with no further request.
+    CoolingDown { until: SystemTime },
+    /// Sync is stopped or the handle closed, so no pass follows the request.
+    NotSyncing,
+}
+
+/// Resolves when the first sync pass after a retry request ends.
+/// Dropping it leaves the retry in place.
+pub struct RetryAnswer { /* private */ }
+
+impl Future for RetryAnswer {
+    type Output = RetryOutcome;
 }
 
 /// Storage this device has set up, with whether it holds the store key.

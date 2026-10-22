@@ -39,7 +39,7 @@ pub use files::{
     DrainOutcome, FileRangeStream, FileReadError, FileStatus, FileStream, Files, PinProgress,
     QueuedUpload, TransferLimits, UploadPhase, UploadProgress, UploadQueue, UploadsInFlight,
 };
-pub use retry_waits::{NetworkOwner, RetryWaits};
+pub use retry_waits::{NetworkOwner, PassRequests, RetryAnswer, RetryOutcome, RetryWaits};
 
 pub use codes::{
     decode_code_info, read_invite_code, read_restore_code, CodeError, CodeInfo, CodeKind,
@@ -61,7 +61,7 @@ pub use restore_codes::{read_connection, RestoreCodes};
 pub use saved_code::{
     follow_name, read_saved_code, replacement_code, SavedName, UnreadableSavedCode,
 };
-pub use sequence_state::{SequenceStatus, SyncState, SyncStatus};
+pub use sequence_state::{PassFailure, SequenceStatus, SyncState, SyncStatus};
 pub use sequence_sync::access_keys::DeleteAccessKeyError;
 pub use sequence_sync::sequence_join::JoinOutcome;
 pub use sequence_sync::SequenceSync;

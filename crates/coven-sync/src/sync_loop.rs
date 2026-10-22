@@ -1,6 +1,9 @@
 //! Event-driven sequence passes with durable backoff and retained app wakes.
 use crate::pending_cause::Failure;
-use crate::{SequenceStatus, SequenceSync, SyncError, SyncFailure, SyncStatus};
+use crate::{
+    PassFailure, RetryOutcome, RetryWaits, SequenceStatus, SequenceSync, SyncError, SyncFailure,
+    SyncStatus,
+};
 use coven_database::{DbError, RetrySubject};
 use std::{sync::Arc, time::Duration};
 use tokio::sync::{mpsc, oneshot};
@@ -10,6 +13,8 @@ use tokio::sync::{mpsc, oneshot};
 /// It publishes its activity to the owner's `SyncState`.
 pub struct SyncLoop {
     commands: mpsc::UnboundedSender<Command>,
+    /// Where the person's retry requests wait for this loop's passes.
+    waits: Arc<RetryWaits>,
 }
 enum Command {
     Start,
@@ -29,14 +34,18 @@ impl SyncLoop {
     /// on this device after each pass (§11.5, §14.3).
     pub fn new(sync: Arc<SequenceSync>, codes: crate::RestoreCodes) -> Self {
         let (commands, receiver) = mpsc::unbounded_channel();
+        let waits = sync.waits.clone();
         tokio::spawn(run(sync, codes, receiver));
-        Self { commands }
+        Self { commands, waits }
     }
-    /// Start and request an immediate pass.
+    /// Start and request an immediate pass. From now on the person's retry
+    /// requests wait for this loop's passes.
     pub fn start(&self) -> Result<(), SyncError> {
-        self.commands
-            .send(Command::Start)
-            .map_err(|_| DbError::StoreClosed.into())
+        self.waits.sync_started();
+        self.commands.send(Command::Start).map_err(|_| {
+            self.waits.sync_stopped();
+            DbError::StoreClosed.into()
+        })
     }
     /// Retain one pass request, including while a pass is running.
     pub fn sync_now(&self) -> Result<(), SyncError> {
@@ -46,7 +55,9 @@ impl SyncLoop {
     }
     /// Queue stopping after the active pass and this connection's transfers.
     /// Completion publishes `Stopped`; a release failure publishes `Failed`.
+    /// Retry requests no pass has taken are answered `NotSyncing` now.
     pub fn stop(&self) -> Result<(), SyncError> {
+        self.waits.sync_stopped();
         self.commands
             .send(Command::Stop)
             .map_err(|_| DbError::StoreClosed.into())
@@ -121,7 +132,7 @@ async fn pass(
 /// What a failed pass shows: a blocked slot, an attempt that received no
 /// provider response, or the failure itself (E5). A blocked slot's error is
 /// logged when the slot or its reason changes.
-fn failed(sync: &SequenceSync, error: SyncError) -> SyncStatus {
+fn failed(sync: &SequenceSync, error: SyncError) -> PassFailure {
     let blocked = match &*sync.state.subscribe().borrow() {
         SequenceStatus::Blocked(record) => Some(record.as_ref().clone()),
         SequenceStatus::Opening | SequenceStatus::Synced { .. } | SequenceStatus::Stopped(_) => {
@@ -160,7 +171,7 @@ fn failed(sync: &SequenceSync, error: SyncError) -> SyncStatus {
             Some(cause)
         }
     };
-    SyncStatus::Blocked {
+    PassFailure::Blocked {
         slot,
         reason: record.reason,
         error,
@@ -175,17 +186,12 @@ async fn run(
     let status = &sync.state;
     let mut changes = sync.database.sync_changes();
     let mut rearmed = sync.waits.rearmed();
-    let (mut retry, retained) = match crate::ConnectionRetry::open(&sync.database).await {
+    let mut retry = match crate::ConnectionRetry::open(&sync.database).await {
         Ok(retry) => retry,
-        Err(error) => {
-            status.publish(crate::connection_failure(error));
-            (crate::ConnectionRetry::Never, None)
-        }
+        Err(error) => crate::ConnectionRetry::Never(crate::connection_failure(error)),
     };
-    if !retry.ready(&sync.waits) {
-        if let Some(error) = retained {
-            status.publish(SyncStatus::Failed { error });
-        }
+    if let Some(failure) = retry.held(&sync.waits) {
+        status.publish(failure.clone().into());
     }
     let mut started = false;
     let mut paused = false;
@@ -210,6 +216,11 @@ async fn run(
                     });
                     break;
                 }
+            }
+            // A pass held by a cooldown, or by a failure only the person can
+            // clear, answers the retries acted on at once (IO `held_answers`).
+            if started {
+                sync.waits.answer_held(retry.held(&sync.waits));
             }
         }
         // A requested pass waits only for the connection's backoff; an idle
@@ -244,7 +255,7 @@ async fn run(
             }
         };
         let due = !paused
-            && retry.ready(&sync.waits)
+            && retry.held(&sync.waits).is_none()
             && sync.waits.due(RetrySubject::Sync, previous.as_ref());
         let cooldown = sync.waits.cooldown_wake();
         tokio::select! {
@@ -258,10 +269,11 @@ async fn run(
                                 started = true;
                                 pending = true;
                                 sync.waits.connection_changed();
-                                if retry.ready(&sync.waits) { status.publish(SyncStatus::Syncing); }
+                                if retry.held(&sync.waits).is_none() { status.publish(SyncStatus::Syncing); }
                             }
                             Err(error) => {
                                 status.publish(SyncStatus::Failed { error: error.into() });
+                                sync.waits.sync_stopped();
                             }
                         }
                     }
@@ -316,6 +328,7 @@ async fn run(
                 Err(error) => {
                     status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
                     started = false;
+                    sync.waits.sync_stopped();
                 }
             },
             _ = &mut idle, if started && !paused && !pending => pending = true,
@@ -332,43 +345,62 @@ async fn run(
                     status.publish(SyncStatus::Failed { error: SyncError::from(error).into() });
                     break;
                 }
+                // The pass answers the retries acted on before it began
+                // (IO `pass_answers_acted_on`).
+                let requests = sync.waits.take_requests();
                 status.publish(SyncStatus::Syncing);
                 let connection_version = sync.waits.connection_version();
-                match pass(&sync, &codes).await {
+                let outcome = match pass(&sync, &codes).await {
                     Ok(failing) => match retry.succeeded(&sync.database, &sync.waits).await {
                         Ok(()) => match failing {
-                            None => status.publish(SyncStatus::Synced { finished_at: sync.clock.now() }),
+                            None => {
+                                let finished_at = sync.clock.now();
+                                status.publish(SyncStatus::Synced { finished_at });
+                                RetryOutcome::Synced { finished_at }
+                            }
                             Some(record) => {
                                 // Work that never clears stops sync until a
                                 // person resets it (E5).
                                 started = record.retry() != crate::Retry::Never;
                                 pending = false;
-                                status.publish(SyncStatus::Failed {
-                                    error: SyncFailure::Operation(Box::new(record)),
-                                });
+                                PassFailure::Failed { error: SyncFailure::Operation(Box::new(record)) }.into()
                             }
                         },
                         Err(error) => {
-                            status.publish(SyncStatus::Failed { error: error.into() });
                             started = false;
+                            PassFailure::Failed { error: error.into() }.into()
                         }
                     },
                     Err(error) => {
                         let reason = sync.error_reason(&error);
-                        if let Err(persist) = retry.failed(&sync.database, &sync.waits, reason, connection_version, &error).await {
-                            status.publish(SyncStatus::Failed { error: SyncError::Cleanup {
-                                operation: Box::new(error), cleanup: Box::new(persist),
-                            }.into() });
-                            started = false;
-                        } else {
-                            status.publish(failed(&sync, error));
-                            pending = true;
+                        match retry.failed(&sync.database, &sync.waits, reason, connection_version, error, |error| failed(&sync, error)).await {
+                            Ok(failure) => {
+                                pending = true;
+                                failure.into()
+                            }
+                            Err(failure) => {
+                                started = false;
+                                failure.into()
+                            }
                         }
                     }
+                };
+                if let RetryOutcome::Failed(failure) = &outcome {
+                    status.publish(failure.clone().into());
+                }
+                requests.answer(&outcome);
+                if !started {
+                    sync.waits.sync_stopped();
                 }
                 idle = sync.clock.sleep(Duration::from_secs(30));
             }
         }
+    }
+    // Closing hands waiting retries to the connection that replaces this
+    // one, or its owner answers them as it releases; any other end leaves no
+    // pass to answer them.
+    if closing.is_none() {
+        sync.waits.sync_stopped();
     }
     // The connection's owners are released before the closer learns so.
     drop(changes);

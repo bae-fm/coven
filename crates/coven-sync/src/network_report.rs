@@ -137,16 +137,13 @@ impl RetryWaits {
         self.report(Ending::Network);
     }
 
-    /// The person asked to retry everything now (§6.7): each owner ends
-    /// every ordinary wait it retries when it next plans, as for a network
-    /// report, answered or not. The provider cooldown holds.
-    pub fn retry_requested(&self) {
-        self.report(Ending::Every);
-    }
-
-    fn report(&self, ending: Ending) {
+    /// Report and return its number. The person's retry
+    /// (`retry_requested`) reports this way too.
+    pub(crate) fn report(&self, ending: Ending) -> u64 {
+        let mut number = 0;
         self.network.reported.send_modify(|count| {
             *count += 1;
+            number = *count;
             if ending == Ending::Every {
                 self.network.retried.store(*count, Ordering::SeqCst);
             }
@@ -154,6 +151,12 @@ impl RetryWaits {
         // The owners plan again on a changed schedule.
         self.rearmed
             .send_modify(|count| *count = count.wrapping_add(1));
+        number
+    }
+
+    /// How many reports `owner` has acted on.
+    pub(crate) fn handled(&self, owner: NetworkOwner) -> u64 {
+        self.network.handled[owner.index()].load(Ordering::SeqCst)
     }
 
     /// Changes with every report, for an owner that waits on its own timers.

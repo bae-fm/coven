@@ -61,6 +61,50 @@ pub enum SyncStatus {
     },
 }
 
+/// Why a pass, or the connection attempt that begins one, failed: the
+/// status it leaves (E5).
+#[derive(Clone, Debug)]
+pub enum PassFailure {
+    /// The request preventing the pass received no usable provider response.
+    Offline {
+        /// The network failure and its original cause.
+        error: std::sync::Arc<StorageError>,
+    },
+    /// This slot invokes §5.4's stuck-device rule.
+    Blocked {
+        /// The slot that cannot apply.
+        slot: coven_merge::Slot,
+        /// Why it cannot apply.
+        reason: crate::PendingReason,
+        /// The error that blocked the slot, with every cause below it, while
+        /// this process holds it.
+        error: Option<std::sync::Arc<dyn std::error::Error + Send + Sync>>,
+    },
+    /// Storage refused the whole pass, or coven's own operation failed.
+    Failed {
+        /// The failure and its original cause.
+        error: SyncFailure,
+    },
+}
+
+impl From<PassFailure> for SyncStatus {
+    fn from(failure: PassFailure) -> Self {
+        match failure {
+            PassFailure::Offline { error } => Self::Offline { error },
+            PassFailure::Blocked {
+                slot,
+                reason,
+                error,
+            } => Self::Blocked {
+                slot,
+                reason,
+                error,
+            },
+            PassFailure::Failed { error } => Self::Failed { error },
+        }
+    }
+}
+
 /// Shared state of this open installation. It carries no time-based permission.
 pub struct SyncState {
     status: watch::Sender<SequenceStatus>,

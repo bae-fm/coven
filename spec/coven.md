@@ -829,6 +829,23 @@ and the downloads'. A pass runs at once, and the photo uploads.
   retry fails again, the next wait is the next longer delay, not one second. So
   each retry adds exactly one attempt to each wait; restarting the count would
   let one tap buy a burst of automatic attempts at a provider that just failed.
+- **The person hears how it went.** Ben's spinner should stay until his retry
+  has run, then say how it went. So the retry is answered by the first pass
+  that begins after the connection acted on it: synced, or failed with why
+  ([api.md E5](api.md#e5-storage-and-sync)).
+- **A pass already running doesn't answer.** It read the store before Ben
+  pulled, so it can't say whether his retry worked. The next pass answers him,
+  and it runs because he asked. Retries made together share that pass.
+- **A held pass answers at once.** If the provider's cooldown holds the pass,
+  the answer says when the cooldown ends; the pass runs then without another
+  pull. If a failure only new credentials, an update or a reset can clear holds
+  it, the answer is that failure. Waiting would keep the spinner for something
+  a pull can't change.
+- **Stopping answers too.** If sync is stopped, or stops before the pass, the
+  answer is that sync isn't running. A pass already running when sync stops
+  still finishes and gives its own answer.
+- **The answer is about the pass.** Uploads and downloads retry on their own
+  schedule; their failures show in `pending()`.
 
 ### 7. Order
 

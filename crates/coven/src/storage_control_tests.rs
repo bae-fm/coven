@@ -252,3 +252,188 @@ async fn credentials_changed_during_a_failed_pass_are_evidence_for_its_retry() {
     status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
     f.handle.close().await.unwrap();
 }
+
+/// What `retry_now` came to, within the test's patience.
+async fn answer(answer: RetryAnswer) -> RetryOutcome {
+    tokio::time::timeout(Duration::from_secs(10), answer)
+        .await
+        .expect("the retry was answered")
+}
+
+/// Ana pulls to refresh: the pass her retry runs answers her (§6.7).
+#[tokio::test]
+async fn a_retry_is_answered_by_the_pass_it_runs() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    let outcome = answer(f.handle.retry_now()).await;
+    assert!(
+        matches!(outcome, RetryOutcome::Synced { finished_at } if finished_at == f.clock.now()),
+        "{outcome:?}"
+    );
+    f.handle.close().await.unwrap();
+}
+
+/// Ben pulls to refresh while a pass is already running. That pass read the
+/// store before he asked, so it is not his answer: it ends synced, and the
+/// next pass, which the provider refuses, answers him (IO
+/// `running_pass_skips`).
+#[tokio::test]
+async fn a_retry_during_a_pass_is_answered_by_the_next_pass() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    let floor = ObjectPath::floor(f.directory.id());
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    f.storage.hold_next_read(floor, entered, resumed).await;
+    f.handle.sync_now();
+    entering.await.unwrap();
+    let retried = f.handle.retry_now();
+    // The held read's response is fixed; the next request is refused.
+    f.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::PermissionDenied,
+            ..Faults::none()
+        })
+        .await;
+    resume.send(()).unwrap();
+    let outcome = answer(retried).await;
+    assert!(
+        matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
+            error: SyncFailure::Storage(error)
+        }) if error.failure() == StorageFailure::PermissionDenied),
+        "{outcome:?}"
+    );
+    f.handle.close().await.unwrap();
+}
+
+/// A connection attempt already running when Ana and Ben pull to refresh
+/// fails, but it started before they asked: the next attempt connects, and
+/// the loop's first pass answers both of them (IO
+/// `concurrent_requests_share`).
+#[tokio::test]
+async fn retries_during_a_connection_attempt_share_the_next_pass() {
+    let f = stopped_fixture().await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    *f.connector.held.lock().await = Some((entered, resumed));
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
+    f.handle.start_sync().await.unwrap();
+    entering.await.unwrap();
+    let attempts = *f.connector.attempts.borrow();
+    let ana = f.handle.retry_now();
+    let ben = f.handle.retry_now();
+    resume.send(()).unwrap();
+    for outcome in [answer(ana).await, answer(ben).await] {
+        assert!(
+            matches!(outcome, RetryOutcome::Synced { .. }),
+            "{outcome:?}"
+        );
+    }
+    // The failed attempt and one more, for both requests.
+    assert_eq!(*f.connector.attempts.borrow(), attempts + 1);
+    f.handle.close().await.unwrap();
+}
+
+/// The provider asked for a cooldown: a pull to refresh says when it ends,
+/// at once, and runs no pass (IO `held_answers`).
+#[tokio::test]
+async fn a_retry_during_a_cooldown_says_when_it_ends() {
+    let f = Fixture::new().await;
+    f.setup().await.unwrap();
+    status(&f.handle, |s| matches!(s, SyncStatus::Synced { .. })).await;
+    f.storage
+        .set_faults(Faults {
+            fail_next: 1,
+            failure: StorageFailure::RateLimited,
+            retry_after: Some(200),
+            ..Faults::none()
+        })
+        .await;
+    f.handle.sync_now();
+    status(&f.handle, failed).await;
+    let requests = f.storage.request_count();
+    let outcome = answer(f.handle.retry_now()).await;
+    assert!(
+        matches!(outcome, RetryOutcome::CoolingDown { until }
+            if until == f.clock.now() + Duration::from_secs(200)),
+        "{outcome:?}"
+    );
+    assert_eq!(
+        f.storage.request_count(),
+        requests,
+        "a pass ran in the cooldown"
+    );
+    f.handle.close().await.unwrap();
+}
+
+/// A failed attempt answers with its cause; a failure only new credentials
+/// can clear answers with itself at once, making no attempt.
+#[tokio::test]
+async fn failed_and_held_attempts_answer_failed_with_their_cause() {
+    let f = stopped_fixture().await;
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.with_source(
+        std::io::Error::new(std::io::ErrorKind::NotConnected, "offline"),
+    ));
+    f.handle.start_sync().await.unwrap();
+    status(&f.handle, failed).await;
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.with_source(
+        std::io::Error::new(std::io::ErrorKind::NotConnected, "offline"),
+    ));
+    let outcome = answer(f.handle.retry_now()).await;
+    assert!(
+        matches!(outcome, RetryOutcome::Failed(PassFailure::Offline { .. })),
+        "{outcome:?}"
+    );
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Authentication.into());
+    let outcome = answer(f.handle.retry_now()).await;
+    assert!(
+        matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
+            error: SyncFailure::Storage(error)
+        }) if error.failure() == StorageFailure::Authentication),
+        "{outcome:?}"
+    );
+    let attempts = *f.connector.attempts.borrow();
+    let outcome = answer(f.handle.retry_now()).await;
+    assert!(
+        matches!(&outcome, RetryOutcome::Failed(PassFailure::Failed {
+            error: SyncFailure::Storage(error)
+        }) if error.failure() == StorageFailure::Authentication),
+        "{outcome:?}"
+    );
+    assert_eq!(*f.connector.attempts.borrow(), attempts);
+    f.handle.close().await.unwrap();
+}
+
+/// Stopping answers a retry still waiting `NotSyncing`, and leaves the
+/// attempt already running to answer its own; so does asking while
+/// stopped, or on a closed handle (IO `stop_lets_pass_answer`,
+/// `stopped_answers_at_once`).
+#[tokio::test]
+async fn stopping_answers_waiting_retries_not_syncing() {
+    let f = stopped_fixture().await;
+    let outcome = answer(f.handle.retry_now()).await;
+    assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
+    f.handle.start_sync().await.unwrap();
+    status(&f.handle, failed).await;
+    let (entered, entering) = tokio::sync::oneshot::channel();
+    let (resume, resumed) = tokio::sync::oneshot::channel();
+    *f.connector.held.lock().await = Some((entered, resumed));
+    *f.connector.failure.lock().unwrap() = Some(StorageFailure::Network.into());
+    // This retry ends the backoff; the attempt it starts takes it.
+    let taken = f.handle.retry_now();
+    entering.await.unwrap();
+    let waiting = f.handle.retry_now();
+    f.handle.stop_sync();
+    let outcome = answer(waiting).await;
+    assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
+    resume.send(()).unwrap();
+    let outcome = answer(taken).await;
+    assert!(matches!(outcome, RetryOutcome::Failed(_)), "{outcome:?}");
+    f.handle.close().await.unwrap();
+    let outcome = answer(f.handle.retry_now()).await;
+    assert!(matches!(outcome, RetryOutcome::NotSyncing), "{outcome:?}");
+}

@@ -43,6 +43,8 @@ impl StorageConnections {
         }
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
         self.publications.publish(SyncStatus::Syncing);
+        // The attempt is the start of the first pass: retries wait for it.
+        self.waits.sync_started();
         let owner = self.clone();
         *self.attempts.lock().expect("connection attempts poisoned") = Some(ConnectionAttempt {
             epoch,
@@ -52,22 +54,23 @@ impl StorageConnections {
     }
 
     /// Build the started loop's first client, retrying under the connection
-    /// backoff until it connects or stopping is requested.
+    /// backoff until it connects or stopping is requested. Each attempt is
+    /// the start of a pass: a failed one answers the retries it took, and a
+    /// connected one leaves them to the loop's first pass (IO `RetryAnswer`).
     async fn connect_started(self: Arc<Self>, epoch: u64) {
         let superseded = || self.epoch.load(Ordering::SeqCst) != epoch;
-        let mut rearmed = self.waits.rearmed();
-        let (mut retry, retained) = match coven_sync::ConnectionRetry::open(&self.database).await {
-            Ok(retry) => retry,
-            Err(error) => {
-                self.publications
-                    .publish(coven_sync::connection_failure(error));
-                return;
-            }
+        // An attempt that cannot go on publishes why; no pass follows it.
+        let give_up = |failure: coven_sync::PassFailure| {
+            self.publications.publish(failure.into());
+            self.waits.sync_stopped();
         };
-        if !retry.ready(&self.waits) {
-            if let Some(error) = retained {
-                self.publications.publish(SyncStatus::Failed { error });
-            }
+        let mut rearmed = self.waits.rearmed();
+        let mut retry = match coven_sync::ConnectionRetry::open(&self.database).await {
+            Ok(retry) => retry,
+            Err(error) => return give_up(coven_sync::connection_failure(error)),
+        };
+        if let Some(failure) = retry.held(&self.waits) {
+            self.publications.publish(failure.clone().into());
         }
         loop {
             // Register before I/O: stop may arrive while the request is in flight.
@@ -84,23 +87,18 @@ impl StorageConnections {
                 .end_reported_waits(coven_sync::NetworkOwner::Connection)
                 .await
             {
-                self.publications
-                    .publish(coven_sync::connection_failure(error));
-                return;
+                return give_up(coven_sync::connection_failure(error));
             }
+            self.waits.answer_held(retry.held(&self.waits));
             let previous = match self
                 .database
                 .retry_wait(coven_database::RetrySubject::Sync)
                 .await
             {
                 Ok(wait) => wait,
-                Err(error) => {
-                    self.publications
-                        .publish(coven_sync::connection_failure(error.into()));
-                    return;
-                }
+                Err(error) => return give_up(coven_sync::connection_failure(error.into())),
             };
-            if !retry.ready(&self.waits)
+            if retry.held(&self.waits).is_some()
                 || !self
                     .waits
                     .due(coven_database::RetrySubject::Sync, previous.as_ref())
@@ -112,7 +110,7 @@ impl StorageConnections {
                 tokio::select! {
                     () = async { if let Some(wake) = wake { wake.await } else { std::future::pending().await } } => {}
                     () = stopped => {}
-                    changed = rearmed.changed() => if changed.is_err() { return },
+                    changed = rearmed.changed() => if changed.is_err() { return self.waits.sync_stopped() },
                 }
                 continue;
             }
@@ -120,6 +118,7 @@ impl StorageConnections {
             if superseded() {
                 break;
             }
+            let requests = self.waits.take_requests();
             self.publications.publish(SyncStatus::Syncing);
             // Location identifies the provider even if decoding or reading its
             // credentials fails. A location read itself is a local disk failure.
@@ -146,42 +145,48 @@ impl StorageConnections {
                         reason = "a failed release is published to the status, which carries it"
                     )]
                     let _ = self.publish_released(released);
+                    requests.answer(&coven_sync::RetryOutcome::NotSyncing);
                     return;
                 }
                 Ok(()) => {
+                    self.waits.return_requests(requests);
                     if let Connection::Active(connected) = &*live {
                         if let Err(error) = connected.sync_loop.start() {
                             self.publications
-                                .publish(coven_sync::connection_failure(error));
+                                .publish(coven_sync::connection_failure(error).into());
                         }
+                    } else {
+                        // Connecting installs the connection's loop; without
+                        // one, nothing plans the returned retries.
+                        self.waits.sync_stopped();
                     }
                     return;
                 }
                 Err((error, reason)) => {
-                    if let Err(persist) = retry
+                    let failed = retry
                         .failed(
                             &self.database,
                             &self.waits,
                             reason,
                             connection_version,
-                            &error,
+                            error,
+                            coven_sync::connection_failure,
                         )
-                        .await
-                    {
-                        self.publications.publish(coven_sync::connection_failure(
-                            SyncError::Cleanup {
-                                operation: Box::new(error),
-                                cleanup: Box::new(persist),
-                            },
-                        ));
-                        return;
-                    }
+                        .await;
                     drop(live);
-                    if superseded() {
-                        break;
+                    match failed {
+                        Ok(failure) => {
+                            requests.answer(&failure.clone().into());
+                            if superseded() {
+                                break;
+                            }
+                            self.publications.publish(failure.into());
+                        }
+                        Err(failure) => {
+                            requests.answer(&failure.clone().into());
+                            return give_up(failure);
+                        }
                     }
-                    self.publications
-                        .publish(coven_sync::connection_failure(error));
                 }
             }
         }
@@ -190,12 +195,15 @@ impl StorageConnections {
             reason = "a failed release is published to the status, which carries it"
         )]
         let _ = self.publish_released(Ok(()));
+        self.waits.sync_stopped();
     }
 
     /// Stop after the active pass and transfers, then release the provider
     /// client; keys, credentials and location remain (E5).
+    /// Retry requests no pass has taken are answered `NotSyncing` now.
     pub(crate) fn stop(self: &Arc<Self>) {
         let epoch = self.epoch.fetch_add(1, Ordering::SeqCst) + 1;
+        self.waits.sync_stopped();
         self.stopped.notify_waiters();
         let owner = self.clone();
         tokio::spawn(async move {
@@ -232,9 +240,10 @@ impl StorageConnections {
     }
 
     /// The person asked to retry everything now: the same owners end every
-    /// ordinary wait they retry (§6.7).
-    pub(crate) fn retry_now(&self) {
-        self.waits.retry_requested();
+    /// ordinary wait they retry (§6.7), and the first pass after the request
+    /// answers it.
+    pub(crate) fn retry_now(&self) -> coven_sync::RetryAnswer {
+        self.waits.retry_requested()
     }
 
     pub(crate) fn subscribe(&self) -> tokio::sync::watch::Receiver<SyncStatus> {
@@ -278,6 +287,7 @@ impl StorageConnections {
     /// Finish the connection's work, then release custody owners.
     pub(crate) async fn close(&self) -> Result<(), SyncError> {
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.waits.sync_stopped();
         self.stopped.notify_waiters();
         let attempts = self
             .attempts

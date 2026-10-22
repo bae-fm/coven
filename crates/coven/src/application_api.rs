@@ -110,9 +110,9 @@ pub use coven_sync::{
     DeleteAccessKeyError, DeviceIdEvidence, DeviceInfo, DeviceState, EntryTarget,
     FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteTarget, JoinRequest,
     LocalFailure, MemberInfo, OldKeyDeletion, OperationError, OperationId, OperationKind,
-    OperationRejection, PendingReason, PendingRecord, PendingSubject, Prerequisite,
-    ProviderAccessAction, Refusal, RequiredUpdate, Retry, SyncError, SyncFailure, SyncStatus,
-    WriteCutoff,
+    OperationRejection, PassFailure, PendingReason, PendingRecord, PendingSubject, Prerequisite,
+    ProviderAccessAction, Refusal, RequiredUpdate, Retry, RetryAnswer, RetryOutcome, SyncError,
+    SyncFailure, SyncStatus, WriteCutoff,
 };
 
 #[cfg(any(test, doctest))]
