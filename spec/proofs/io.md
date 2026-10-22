@@ -1,7 +1,8 @@
 # IO and observable work
 
 The Lean package in [io](io/) covers retained byte ranges, file downloads,
-retry waits, work notifications and the removed-device file scan. The
+retry waits, the answer to the person's retry, work notifications and the
+removed-device file scan. The
 [sequence model](sequence.md) covers ordered reads, blocked devices, claims,
 operations, snapshot selection, the floor and history deletion.
 
@@ -65,6 +66,41 @@ saving it with no full wait left, so a reopen cannot bring it back. `connection_
 download and access-key operation owners, and those in
 `handle::sync_control::tests` check the Rust owners against these rules; no
 differential runner compares them.
+
+## The answer to the person's retry
+
+[RetryAnswer.lean](io/CovenIO/RetryAnswer.lean) models how `retry_now` is
+answered. A request is a report, so it takes the next report number. The
+connection's owner acts on reports between passes and remembers how far it
+acted. A pass that begins takes every waiting request the owner acted on, and
+answers them when it ends: synced or failed. A request made after the owner
+last acted, such as one made while a pass runs, waits for a later pass. The
+connection's first attempt is the start of the first pass: a failed attempt
+answers as a failed pass, and a connected one hands its requests to the
+loop's first pass.
+
+Before a pass begins, the owner may find it held, by a provider cooldown or
+by a failure only new credentials, an update or a reset can clear. It then
+answers the requests it acted on at once: cooling down, or failed. Stopping
+sync answers every waiting request "not syncing", and a request made while
+sync is stopped is answered so at once; a pass already running still answers
+its own requests with its result.
+
+`answer_final` proves an answer never changes, so each request is answered at
+most once. `pass_answers_acted_on`, `running_pass_skips` and
+`next_pass_answers` prove the answer comes from the first pass that begins
+after the owner acted on the request, never from one already running.
+`concurrent_requests_share` proves requests made together share that pass.
+`held_answers` and `held_runs_no_pass` cover a held pass,
+`stopped_answers_at_once` and `stop_lets_pass_answer` stopping, and
+`waits_only_while_syncing` that a request waits only while a started
+connection will plan. `never_stranded` proves no request is left waiting:
+from every reachable state, the owner's own steps answer every request,
+with no outside event.
+
+The model assumes what Rust keeps under one lock: a request, stopping, and a
+pass taking its requests each happen at once. It does not model what a pass
+does, only how it ends.
 
 ## Work notifications
 
