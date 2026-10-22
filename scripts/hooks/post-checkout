@@ -1,0 +1,16 @@
+#!/bin/bash
+# post-checkout: fires after `git checkout` and `git worktree add`. On
+# new-worktree creation, link the checkout's build output paths. Normal branch
+# checkouts do nothing.
+set -euo pipefail
+
+prev_head="$1"
+flag="$3"
+null_sha="0000000000000000000000000000000000000000"
+
+if [ "$prev_head" != "$null_sha" ] || [ "$flag" != "1" ]; then
+    exit 0
+fi
+
+cd "$(git rev-parse --show-toplevel)"
+./scripts/build-layout.sh

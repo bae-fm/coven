@@ -1,0 +1,14 @@
+# Build output paths and the size each may reach before the `builds` tool
+# deletes it whole for the next build to refill (cargo mostly from sccache).
+# scripts/build-layout.sh, run first by the hooks and scripts/check.sh, links
+# each path to /Volumes/Builds/coven/<checkout>/<path> and applies the caps.
+#
+# Caps are about twice a fresh build of each.
+#
+# path                     cap
+target                     20G
+spec/proofs/io/.lake       1G
+spec/proofs/merge/.lake    1G
+spec/proofs/queue/.lake    1G
+spec/proofs/sequence/.lake 1G
+spec/proofs/storage/.lake  1G

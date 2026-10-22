@@ -28,6 +28,7 @@ case "${1-all}:$#" in
 esac
 
 cd "$(dirname "$0")/.."
+./scripts/build-layout.sh
 
 # nextest gives each test a fresh process, whose glibc malloc starts with its
 # smallest trim threshold: a test allocating and freeing large buffers then

@@ -8,6 +8,9 @@ trap cleanup EXIT
 
 CHANGED_FILES=$(git --no-pager diff --cached --name-only)
 
+# The checks below build into the checkout's build output paths.
+./scripts/build-layout.sh
+
 run_check() {
     local name="$1"
     shift
