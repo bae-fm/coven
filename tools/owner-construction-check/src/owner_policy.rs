@@ -184,10 +184,11 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "reserve_bootstrap_directory",
         ),
+        // Both store listings read the directory on a blocking task.
         (
             "crates/coven-foundation/src/files/layout.rs",
             "StoreDirectories",
-            "store_ids",
+            "listed",
         ),
         (
             "crates/coven-foundation/src/files/lock_registry.rs",
@@ -378,6 +379,13 @@ pub(crate) const POLICY: Policy = Policy {
             "<free>",
             "join_with_invite",
         ),
+        ("crates/coven/src/bootstrap.rs", "<free>", "resume_join"),
+        // Listing reads each unfinished installation's saved code.
+        (
+            "crates/coven/src/bootstrap.rs",
+            "<free>",
+            "unfinished_joins",
+        ),
         (
             "crates/coven/src/bootstrap.rs",
             "<free>",
@@ -479,6 +487,7 @@ pub(crate) const POLICY: Policy = Policy {
             "CovenBuilder",
             "restore_device",
         ),
+        ("crates/coven/src/builder.rs", "CovenBuilder", "resume_join"),
         (
             "crates/coven/src/builder.rs",
             "CovenBuilder",

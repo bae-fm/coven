@@ -240,7 +240,7 @@ impl Installation {
     pub(super) fn join_request(invite: &Invite) -> BootstrapRequest {
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(&invite.code).unwrap(),
-            name: "New phone".into(),
+            name: DeviceName::Given("New phone".into()),
             // Nobody asks this join to check now.
             check: watch::channel(0).1,
         }

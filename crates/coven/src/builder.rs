@@ -243,6 +243,25 @@ impl CovenBuilder {
         .await
     }
 
+    /// The joins under way on this device, ordered by store id (§13.2). A
+    /// saved code coven can't read fails the call; it is never skipped.
+    pub async fn unfinished_joins(&self) -> Result<Vec<UnfinishedJoin>, BootstrapError> {
+        bootstrap::unfinished_joins(self).await
+    }
+
+    /// Continues an unfinished join from its saved code and device name, as
+    /// `join_with_invite` does. Returns `None` when the request was declined
+    /// or the invite expired, after deleting the saved code. A store with no
+    /// saved code fails with `BootstrapError::NoUnfinishedJoin`.
+    pub async fn resume_join(
+        self,
+        store: StoreId,
+        on_status: impl Fn(BootstrapStatus),
+        control: &JoinControl,
+    ) -> Result<Option<CovenHandle>, BootstrapError> {
+        Box::pin(bootstrap::resume_join(self, store, on_status, control)).await
+    }
+
     /// Opens the store for reading only, alongside a handle that has it open.
     /// Its shared lock protects both read connections and local cache metadata.
     /// It runs no migration and refuses a database whose schema is newer or
@@ -661,5 +680,5 @@ mod creation;
 mod bootstrap;
 pub use bootstrap::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
-    JoinControl,
+    JoinControl, UnfinishedJoin,
 };

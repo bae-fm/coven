@@ -344,6 +344,12 @@ async fn declined_cancelled_and_expired_requests_finish_without_committing_custo
         let (result, ()) = join_with_response(joining, settle).await;
         assert!(result.unwrap().is_none());
         install.absent(owner.directory.id()).await;
+        assert!(
+            StoreKeychain::new(install.keychain.clone(), owner.directory.id())
+                .invite_code()
+                .unwrap()
+                .is_none()
+        );
         assert!(!install
             .root
             .path()

@@ -35,6 +35,9 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
         .replace(b"fixed request")
         .unwrap();
     assert!(layout.store_ids().await.unwrap().is_empty());
+    // The unfinished first installation lists on its own, so a join under
+    // way can be resumed.
+    assert_eq!(layout.unfinished_first_installations().await.unwrap(), [id]);
     assert!(matches!(
         layout.begin_bootstrap(id, &UuidIds).await,
         Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(
@@ -86,6 +89,11 @@ async fn interrupted_bootstrap_retains_identity_without_publishing() {
     assert_eq!(std::fs::read(&path).unwrap(), b"loaded database");
     assert_eq!(directory.settings().unwrap().device_id, device);
     assert_eq!(layout.store_ids().await.unwrap().len(), 1);
+    assert!(layout
+        .unfinished_first_installations()
+        .await
+        .unwrap()
+        .is_empty());
     assert!(matches!(
         pending.cancel(),
         Err(BootstrapDirectoryError::Lock(StoreLockError::AlreadyOpen(

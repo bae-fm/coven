@@ -53,6 +53,10 @@ pub enum BootstrapError {
     /// (§13.2).
     #[error("the join request may have been sent; the join stays unfinished")]
     JoinRequestSent,
+    /// No join is under way for this store on this device: none was started
+    /// here, or it has ended.
+    #[error("no join is under way for store {0}")]
+    NoUnfinishedJoin(StoreId),
     /// The code cannot be used for this operation.
     #[error(transparent)]
     Code(#[from] CodeError),
@@ -206,13 +210,100 @@ pub async fn join_with_invite(
         builder,
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
-            name: device_name.into(),
+            name: DeviceName::Given(device_name.into()),
             check: control.check.subscribe(),
         },
         on_status,
         &cancel,
     ))
     .await
+}
+
+/// A join under way on this device (§13.2), from its saved code.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct UnfinishedJoin {
+    /// The store being joined.
+    pub store: StoreId,
+    /// The store's name as the invite carried it.
+    pub store_name: String,
+    /// The new person's name as the invite carried it; `None` for a
+    /// replacement.
+    pub invitee: Option<String>,
+    /// In person or sent: whether the waiting screen shows a confirmation
+    /// number.
+    pub delivery: InviteDeliveryKind,
+}
+
+/// The joins under way on this device, ordered by store id: each unfinished
+/// first installation with a saved invite code (`CovenBuilder::unfinished_joins`).
+pub(super) async fn unfinished_joins(
+    builder: &CovenBuilder,
+) -> Result<Vec<UnfinishedJoin>, BootstrapError> {
+    let keychain = builder.keychain()?;
+    let mut joins = Vec::new();
+    for store in builder
+        .layout
+        .unfinished_first_installations()
+        .await
+        .map_err(BootstrapDirectoryError::from)?
+    {
+        // An unfinished restore, or a join that can't have sent its
+        // request, saves no code: it is not a join to resume.
+        let Some(code) = saved_invite_code(&StoreKeychain::new(keychain.clone(), store), store)?
+        else {
+            continue;
+        };
+        joins.push(UnfinishedJoin {
+            store,
+            store_name: code.name,
+            invitee: code.invitee,
+            delivery: code.delivery,
+        });
+    }
+    Ok(joins)
+}
+
+/// Continue an unfinished join from its saved code and the device name its
+/// saved request carries (`CovenBuilder::resume_join`).
+pub(super) async fn resume_join(
+    builder: CovenBuilder,
+    store: StoreId,
+    on_status: impl Fn(BootstrapStatus),
+    control: &JoinControl,
+) -> Result<Option<CovenHandle>, BootstrapError> {
+    let code = saved_invite_code(&StoreKeychain::new(builder.keychain()?, store), store)?
+        .ok_or(BootstrapError::NoUnfinishedJoin(store))?;
+    let cancel = control.cancel.subscribe();
+    Box::pin(bootstrap_device(
+        builder,
+        BootstrapRequest::Join {
+            code,
+            name: DeviceName::Saved,
+            check: control.check.subscribe(),
+        },
+        on_status,
+        &cancel,
+    ))
+    .await
+}
+
+/// The invite code a join under way saved for `store`.
+fn saved_invite_code(
+    keychain: &StoreKeychain,
+    store: StoreId,
+) -> Result<Option<InviteCode>, BootstrapError> {
+    let Some(text) = keychain.invite_code()? else {
+        return Ok(None);
+    };
+    let code = coven_sync::read_invite_code(text.as_str())?;
+    if code.store != store {
+        return Err(CodeError::WrongStore {
+            expected: store,
+            actual: code.store,
+        }
+        .into());
+    }
+    Ok(Some(code))
 }
 
 /// The app's hold on a running join: cancel it, or check for approval at once.
@@ -277,10 +368,18 @@ enum BootstrapRequest {
     },
     Join {
         code: InviteCode,
-        name: String,
+        name: DeviceName,
         /// Changes each time the app asks for a check for approval now.
         check: watch::Receiver<u64>,
     },
+}
+
+/// The device name a join's request carries.
+enum DeviceName {
+    /// The name the app passed, which a saved request must repeat.
+    Given(String),
+    /// The name the saved request carries: the join resumes from it.
+    Saved,
 }
 
 /// Its state runs to tens of KiB, so the public calls await it boxed and the
@@ -299,6 +398,7 @@ async fn bootstrap_device(
         BootstrapRequest::Restore { code, .. } => code.store,
         BootstrapRequest::Join { code, .. } => code.store,
     };
+    let device_entries = StoreKeychain::new(keychain.clone(), id);
     status(BootstrapStatus::Connecting);
     let pending = builder
         .layout
@@ -362,6 +462,10 @@ async fn bootstrap_device(
                 }
                 Err(error) => Err(error),
             };
+            let result = match &request {
+                BootstrapRequest::Join { .. } => forget_joined_code(&device_entries, result),
+                BootstrapRequest::Restore { .. } => result,
+            };
             match result {
                 Ok(handle) => Ok(Some(handle)),
                 Err(error @ BootstrapError::Published { .. }) => Err(error),
@@ -382,9 +486,53 @@ async fn bootstrap_device(
                 }
             }
         }
-        Ok(None) => cleanup(&pending, Ok(None)),
-        Err(BootstrapError::Cancelled) => cleanup(&pending, Err(BootstrapError::Cancelled)),
+        // Only a join ends without a store: declined or expired.
+        Ok(None) => end_join(&device_entries, &pending, Ok(None)),
+        Err(BootstrapError::Cancelled) => match &request {
+            BootstrapRequest::Join { .. } => {
+                end_join(&device_entries, &pending, Err(BootstrapError::Cancelled))
+            }
+            BootstrapRequest::Restore { .. } => cleanup(&pending, Err(BootstrapError::Cancelled)),
+        },
         Err(error) => Err(error),
+    }
+}
+
+/// Remove a join that ends without loading, declined, expired or cancelled
+/// before its request was sent: its saved code first, then its installation.
+/// A failure part way leaves the installation without a code, which lists as
+/// no join, or both, which a retry ends again (§13.2).
+fn end_join<T>(
+    device_entries: &StoreKeychain,
+    pending: &BootstrapStore,
+    result: Result<T, BootstrapError>,
+) -> Result<T, BootstrapError> {
+    match device_entries.delete_invite_code() {
+        Ok(()) => cleanup(pending, result),
+        Err(error) => combine(result, Err(error.into())),
+    }
+}
+
+/// A published join no longer needs its saved code. Failing to delete it is
+/// reported with the open handle, as other failures after publication are.
+fn forget_joined_code(
+    device_entries: &StoreKeychain,
+    result: Result<CovenHandle, BootstrapError>,
+) -> Result<CovenHandle, BootstrapError> {
+    let (handle, published) = match result {
+        Ok(handle) => (handle, None),
+        Err(BootstrapError::Published { handle, source }) => (handle, Some(*source)),
+        Err(error) => return Err(error),
+    };
+    let deleted = device_entries
+        .delete_invite_code()
+        .map_err(BootstrapError::from);
+    match (published.map_or(Ok(()), Err), deleted) {
+        (Ok(()), Ok(())) => Ok(handle),
+        (failed, deleted) => Err(BootstrapError::Published {
+            handle,
+            source: Box::new(combine(failed, deleted).expect_err("a failure")),
+        }),
     }
 }
 
@@ -456,7 +604,7 @@ async fn prepare_and_load(
             MemberIdentity::new(code.member, code.member_keys.clone()),
             data.clone(),
             sign_in.clone(),
-            name.as_str(),
+            name.clone(),
             Admission::Restoring,
         ),
         BootstrapRequest::Join { code, name, check } => {
@@ -466,7 +614,7 @@ async fn prepare_and_load(
                 joining.identity(),
                 data,
                 sign_in,
-                name.as_str(),
+                joining.device_name().to_owned(),
                 Admission::Joining(joining),
             )
         }
@@ -588,7 +736,7 @@ async fn prepare_and_load(
             .is_some_and(|device| device.member == member.member());
         if !registered {
             let replaces = replacement.map(|replacement| replacement.device_reset().old_device);
-            sync.register_device(device_name.into(), replaces).await?;
+            sync.register_device(device_name, replaces).await?;
         }
         // The notice commits before any handle is published (E5).
         if let Some(replacement) = replacement {

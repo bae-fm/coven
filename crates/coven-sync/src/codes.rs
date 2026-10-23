@@ -77,10 +77,12 @@ pub enum CodeError {
         /// The actual kind.
         actual: CodeKind,
     },
-    /// A valid restore code names another store than the one being restored.
-    #[error("restore code is for store {actual}, not {expected}")]
+    /// A valid code names another store than the one it is used for: a
+    /// restore code for a store being restored in place, or an invite code
+    /// saved for another store's join.
+    #[error("code is for store {actual}, not {expected}")]
     WrongStore {
-        /// The store being restored.
+        /// The store the code is used for.
         expected: StoreId,
         /// The store the code names.
         actual: StoreId,

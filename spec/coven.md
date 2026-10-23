@@ -2719,6 +2719,24 @@ with the store's and Dan's names from the code, and the app resumes it without
 asking Dan for the code again. The saved code is deleted when the join finishes,
 is declined or expires.
 
+The listing reads unfinished first installations on this device and lists each
+one with a saved code; an unfinished restore has none. The steps are ordered so
+that it never lists a join that can't resume, and never misses one that may have
+sent its request:
+
+- Starting, Dan's phone makes the installation, then saves his keys and request
+  in it, then saves the code, and only then may send the request. A listed join
+  always has the request it resumes from.
+- Ending without loading, declined, expired, or cancelled before sending, it
+  deletes the code first, then the installation. Stopping between the two leaves
+  an installation without a code, which lists as no join.
+- Finishing, it publishes the store first, then deletes the code. A failure
+  deleting it is reported to the call with the open handle; the leftover entry
+  goes with the store's other device-only entries when the store is deleted.
+
+A saved code coven can't read fails the listing: the join it belongs to may have
+sent its request, so leaving it out would hide a join the app has to finish.
+
 Dan's phone may also stop after Ana approves, while it loads. By then Ana's phone
 has deleted the request, and Dan's installation has applied the entry adding him
 but has kept no store key. Resuming, it opens its copies again and rebuilds the

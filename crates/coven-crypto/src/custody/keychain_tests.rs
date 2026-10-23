@@ -362,6 +362,9 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         store
             .set_host_secret("another-token", "another secret")
             .unwrap();
+        store
+            .set_invite_code(&SecretText::new("CVI1-CODE".into()))
+            .unwrap();
         let synced = SyncedKeychain::new(fake.clone(), store.store);
         synced
             .set_restore_code(&SecretBytes::new(b"restore".to_vec()))
@@ -380,6 +383,7 @@ fn deletion_discovers_only_this_stores_entries_from_custody() {
         MEMBER_KEYS_ENTRY,
         CREDENTIALS_ENTRY,
         HOST_SECRET_NAMES_ENTRY,
+        INVITE_CODE_ENTRY,
         &host_secret_entry("token"),
         &host_secret_entry("another-token"),
     ] {
@@ -691,4 +695,29 @@ fn deletion_can_retry_after_each_keychain_failure() {
         let memory = fake.memory_backend();
         assert!(memory.lock().unwrap().device.is_empty());
     }
+}
+
+/// A join's invite code stays on this device: the person's other devices
+/// never see it, and it reads back exactly until the join deletes it (§13.2).
+#[test]
+fn an_invite_code_is_kept_on_this_device_only_until_deleted() {
+    let fake = Keychain::in_memory("invite-code").unwrap();
+    let store = StoreKeychain::new(fake.clone(), StoreId(Uuid::from_u128(1)));
+    assert!(store.invite_code().unwrap().is_none());
+    store
+        .set_invite_code(&SecretText::new("CVI1-CODE".into()))
+        .unwrap();
+    assert_eq!(store.invite_code().unwrap().unwrap().as_str(), "CVI1-CODE");
+    assert!(fake
+        .read(EntryScope::Synced, &store.account(INVITE_CODE_ENTRY))
+        .unwrap()
+        .is_none());
+    store.write(INVITE_CODE_ENTRY, &[0xff]).unwrap();
+    assert!(matches!(
+        store.invite_code(),
+        Err(KeyError::Material(MaterialError::Encoding))
+    ));
+    store.delete_invite_code().unwrap();
+    store.delete_invite_code().unwrap();
+    assert!(store.invite_code().unwrap().is_none());
 }

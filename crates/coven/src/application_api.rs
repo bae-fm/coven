@@ -4,7 +4,7 @@
 pub use crate::builder::CovenBuilder;
 pub use crate::builder::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
-    JoinControl,
+    JoinControl, UnfinishedJoin,
 };
 pub use crate::coven::Coven;
 #[cfg(feature = "dev-tools")]

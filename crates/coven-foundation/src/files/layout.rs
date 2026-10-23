@@ -28,6 +28,15 @@ pub struct StoreDirectories {
     app_dir: PathBuf,
 }
 
+/// Which of the store directories a listing reads.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Installations {
+    /// Published stores, including those whose replacement is unfinished.
+    Published,
+    /// Stores whose first installation on this device hasn't been published.
+    UnfinishedFirst,
+}
+
 /// A failure reading the app's store directories.
 #[derive(Debug, thiserror::Error)]
 pub enum StoreDirectoriesError {
@@ -48,15 +57,34 @@ impl StoreDirectories {
     /// Only directories with a canonical UUID name and matching valid settings
     /// are stores. Invalid entries are logged; filesystem failures are errors.
     pub async fn store_ids(&self) -> Result<Vec<StoreId>, StoreDirectoriesError> {
+        self.listed(Installations::Published).await
+    }
+
+    /// The stores whose first installation on this device is unfinished, a
+    /// restore or a join that hasn't loaded, ordered by id (§19.1). A store
+    /// whose replacement is unfinished is listed by `store_ids` instead.
+    pub async fn unfinished_first_installations(
+        &self,
+    ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
+        self.listed(Installations::UnfinishedFirst).await
+    }
+
+    async fn listed(
+        &self,
+        installations: Installations,
+    ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
         let layout = self.clone();
-        match tokio::task::spawn_blocking(move || layout.list_stores()).await {
+        match tokio::task::spawn_blocking(move || layout.list_stores(installations)).await {
             Ok(result) => result,
             Err(error) if error.is_panic() => std::panic::resume_unwind(error.into_panic()),
             Err(error) => panic!("store listing task cancelled: {error}"),
         }
     }
 
-    fn list_stores(&self) -> Result<Vec<StoreId>, StoreDirectoriesError> {
+    fn list_stores(
+        &self,
+        installations: Installations,
+    ) -> Result<Vec<StoreId>, StoreDirectoriesError> {
         let root = self.app_dir.join("stores");
         let entries = match fs::read_dir(&root) {
             Ok(entries) => entries,
@@ -89,10 +117,13 @@ impl StoreDirectories {
                     continue;
                 }
             };
-            // A first installation stays hidden until published; a store
-            // whose replacement is unfinished lists, so the app can finish it.
-            if super::bootstrap::is_pending(&path)? && super::device_reset::read(&path)?.is_none() {
-                tracing::debug!(path = %path.display(), "store is awaiting bootstrap publication");
+            // A first installation stays hidden from the stores until
+            // published; a store whose replacement is unfinished lists, so
+            // the app can finish it.
+            let first =
+                super::bootstrap::is_pending(&path)? && super::device_reset::read(&path)?.is_none();
+            if first != (installations == Installations::UnfinishedFirst) {
+                tracing::debug!(path = %path.display(), first, "store is not in this listing");
                 continue;
             }
             match settings::read(&path, id) {

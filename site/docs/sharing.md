@@ -209,6 +209,20 @@ it granted. Dan's phone keeps its new keys and request across restarts, and
 picks up where it left off; `join_with_invite` returns `None` when the request
 is declined, the invite is cancelled, or it expires.
 
+While a join is under way, Dan's phone also keeps the invite code in its own
+keychain, never synced. If Dan closes the app while he waits, the next start
+finds the join without asking him for the code again:
+
+```rust
+if let Some(join) = builder.unfinished_joins().await?.into_iter().next() {
+    // join.store_name and join.invitee come from the invite.
+    match builder.resume_join(join.store, |step| show_step(step), &control).await? {
+        Some(handle) => show_store(handle),
+        None => show_declined(),
+    }
+}
+```
+
 Once Dan's phone may have sent its request, the join can't be cancelled: Ana's
 phone may already be approving it. `control.cancel()` then ends the call with
 `BootstrapError::JoinRequestSent` and keeps the join for later, as closing the

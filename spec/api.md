@@ -4529,6 +4529,9 @@ pub enum BootstrapError {
     /// Cancelling a join after its request may have been sent. The join stays
     /// unfinished and resumable; it ends only by approval, decline or expiry.
     JoinRequestSent,
+    /// `resume_join` found no join under way for this store on this device:
+    /// none was started here, or it has ended.
+    NoUnfinishedJoin(StoreId),
     /// The code cannot be used.
     Code(CodeError),
     /// Preparing, publishing or removing the unpublished directory failed.
@@ -4955,7 +4958,8 @@ impl CovenBuilder {
 
     /// Continues an unfinished join from its saved code and device name, as
     /// `join_with_invite` does. Returns `None` when the request was declined or
-    /// the invite expired, after deleting the saved code.
+    /// the invite expired, after deleting the saved code. A store with no
+    /// saved code fails with `BootstrapError::NoUnfinishedJoin`.
     pub async fn resume_join(
         self,
         store: StoreId,

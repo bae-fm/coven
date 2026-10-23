@@ -2,7 +2,7 @@
 
 use super::platform::NativeKeychain;
 use super::{KeyError, SyncedRestoreCode, MEMBER_KEYS_ENTRY, STORE_KEYS_ENTRY};
-use crate::{wire, MaterialError, SecretBytes};
+use crate::{wire, MaterialError, SecretBytes, SecretText};
 use coven_foundation::id_source::{DeviceId, StoreId};
 use std::{
     collections::BTreeSet,
@@ -48,6 +48,7 @@ fn validate_service(name: &str) -> Result<(), KeyError> {
 const DEVICE_ID_ENTRY: &str = "device-id";
 const CREDENTIALS_ENTRY: &str = "storage-credentials";
 const HOST_SECRET_NAMES_ENTRY: &str = "host-secret-names";
+const INVITE_CODE_ENTRY: &str = "invite-code";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 pub(crate) enum EntryScope {
@@ -161,7 +162,8 @@ impl std::fmt::Debug for Keychain {
 }
 
 /// One store's entries kept on this device only: its device id, store and
-/// member keys, provider credentials and the app's host secrets (§12.4). They
+/// member keys, provider credentials, the invite code of a join under way and
+/// the app's host secrets (§12.4, §13.2). They
 /// never leave the device, so deleting them reaches no other device of the
 /// person. Every read, write and deletion here uses the device-only scope; the
 /// person's synced entries belong to [`SyncedKeychain`](super::SyncedKeychain).
@@ -235,6 +237,34 @@ impl StoreKeychain {
         self.remove(CREDENTIALS_ENTRY)
     }
 
+    /// The invite code of a join under way for this store on this device:
+    /// its saved request is encrypted with the code's secret, so resuming
+    /// needs the code (§13.2). It is never synced.
+    #[expect(
+        clippy::map_err_ignore,
+        reason = "a saved invite code fails only by not being UTF-8, which Encoding names"
+    )]
+    pub fn invite_code(&self) -> Result<Option<SecretText>, KeyError> {
+        self.read(INVITE_CODE_ENTRY)?
+            .map(|bytes| {
+                std::str::from_utf8(bytes.as_bytes())
+                    .map(|code| SecretText::new(code.to_owned()))
+                    .map_err(|_| MaterialError::Encoding.into())
+            })
+            .transpose()
+    }
+
+    /// Keep a join's invite code until the join ends.
+    pub fn set_invite_code(&self, code: &SecretText) -> Result<(), KeyError> {
+        self.write(INVITE_CODE_ENTRY, code.as_str().as_bytes())
+    }
+
+    /// Remove a join's invite code once the join has ended; an absent entry
+    /// succeeds.
+    pub fn delete_invite_code(&self) -> Result<(), KeyError> {
+        self.remove(INVITE_CODE_ENTRY)
+    }
+
     /// Remove this device's entries for the store, including all recorded host
     /// secrets, without opening the database or decoding the values. Delete
     /// listed secrets before the list, then coven's other entries. The person's
@@ -258,6 +288,7 @@ impl StoreKeychain {
             MEMBER_KEYS_ENTRY,
             DEVICE_ID_ENTRY,
             CREDENTIALS_ENTRY,
+            INVITE_CODE_ENTRY,
         ] {
             self.remove(name)?;
         }

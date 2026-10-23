@@ -102,6 +102,13 @@ async fn the_store_stays_as_it_was_until_the_loaded_replacement_swaps_in() {
             })
         );
         assert_eq!(f.layout.store_ids().await.unwrap(), [f.store.id()]);
+        // A replacement under way is the store's, not a first installation.
+        assert!(f
+            .layout
+            .unfinished_first_installations()
+            .await
+            .unwrap()
+            .is_empty());
         let directory = replacement.directory();
         assert_eq!(directory.settings().unwrap().device_id, reset.new_device);
         assert_eq!(

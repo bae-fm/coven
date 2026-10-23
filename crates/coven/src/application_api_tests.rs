@@ -240,6 +240,14 @@ fn bootstrap_and_operation_futures_stay_small() {
             ),
         ),
         (
+            "resume_join",
+            size(
+                |(b, s, o, x): (CovenBuilder, StoreId, Status, &'static JoinControl)| {
+                    b.resume_join(s, o, x)
+                },
+            ),
+        ),
+        (
             "create_store",
             size(|(b, n): (CovenBuilder, &'static str)| b.create_store(n)),
         ),

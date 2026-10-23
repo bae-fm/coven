@@ -25,6 +25,8 @@ pub struct JoiningIdentity {
     request: Vec<u8>,
     path: ObjectPath,
     attempted: bool,
+    /// The name the device gave itself in its request.
+    device_name: String,
     inviting_writer: coven_foundation::id_source::DeviceId,
     read_through: u64,
     /// Set for a sent invite, whose admin compares it before approving.
@@ -39,6 +41,23 @@ impl JoiningIdentity {
         code: &InviteCode,
         device_name: &str,
     ) -> Result<Self, SyncError> {
+        match Self::saved(directory, code)? {
+            Some(saved) if saved.device_name != device_name => Err(SyncError::InvitationChanged),
+            Some(saved) => Ok(saved),
+            None => Self::create(directory, code, device_name),
+        }
+    }
+
+    /// Continue a join from its saved request, with the device name that
+    /// request carries (§13.2). A join's code is saved only after its
+    /// request, so a missing request is damaged local state.
+    pub fn resume(directory: &StoreDir, code: &InviteCode) -> Result<Self, SyncError> {
+        Self::saved(directory, code)?.ok_or_else(|| coven_database::DbError::DamagedDatabase.into())
+    }
+
+    /// The request this directory keeps for `code`, opened with the code's
+    /// secret and checked against it.
+    fn saved(directory: &StoreDir, code: &InviteCode) -> Result<Option<Self>, SyncError> {
         if code.store != directory.id() {
             return Err(SyncError::WrongStore {
                 expected: directory.id(),
@@ -49,74 +68,79 @@ impl JoiningIdentity {
         let binding = code.to_bytes()?;
         let path = ObjectPath::join_request(code.store, code.invite);
         let prefix = SingleChunkPrefix::JoinRequest;
-        let saved = file.read_optional()?;
-        if let Some(saved) = saved {
-            let bytes = Zeroizing::new(code.secret.join_request_key().open_object_chunk(
-                &local_path(code),
-                &binding,
-                0,
-                0,
-                &saved,
-            )?);
-            let attempted = match bytes.first() {
-                Some(0) => false,
-                Some(1) => true,
-                _ => return Err(coven_database::DbError::DamagedDatabase.into()),
-            };
-            let key_length = bytes
-                .get(1..5)
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
-            let key_length =
-                u32::from_be_bytes(key_length.try_into().expect("four bytes")) as usize;
-            let end = 5usize
-                .checked_add(key_length)
-                .ok_or(coven_database::DbError::DamagedDatabase)?;
-            let identity = MemberIdentity::new(
-                code.member,
-                MemberKeys::from_secret_bytes(
-                    bytes
-                        .get(5..end)
-                        .ok_or(coven_database::DbError::DamagedDatabase)?,
-                )?,
-            );
-            let keys = identity.keys().public_keys();
-            let request = bytes
-                .get(end..)
-                .ok_or(coven_database::DbError::DamagedDatabase)?
-                .to_vec();
-            let object = SingleChunkObject::decode(&request)?;
-            let SingleChunkObject::JoinRequest { chunk, signature } = &object;
-            let mut hash = ObjectHasher::new();
-            hash.update(&object.signed_bytes()?);
-            keys.signing
-                .verify_object(path.as_str(), &hash.finish(), signature)?;
-            let plain = code.secret.join_request_key().open_object_chunk(
-                path.as_str(),
-                &prefix.encode()?,
-                0,
-                0,
-                chunk,
-            )?;
-            let Object::JoinRequest(opened) = Object::decode(&plain)? else {
-                return Err(coven_database::DbError::DamagedDatabase.into());
-            };
-            if opened.invite != code.invite
-                || opened.member != code.member
-                || opened.keys != keys
-                || opened.device_name != device_name
-            {
-                return Err(SyncError::InvitationChanged);
-            }
-            return Ok(Self {
-                confirmation: confirmation(code, &keys),
-                identity,
-                request,
-                path,
-                attempted,
-                inviting_writer: code.inviting_writer,
-                read_through: code.read_through,
-            });
+        let Some(saved) = file.read_optional()? else {
+            return Ok(None);
+        };
+        let bytes = Zeroizing::new(code.secret.join_request_key().open_object_chunk(
+            &local_path(code),
+            &binding,
+            0,
+            0,
+            &saved,
+        )?);
+        let attempted = match bytes.first() {
+            Some(0) => false,
+            Some(1) => true,
+            _ => return Err(coven_database::DbError::DamagedDatabase.into()),
+        };
+        let key_length = bytes
+            .get(1..5)
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let key_length = u32::from_be_bytes(key_length.try_into().expect("four bytes")) as usize;
+        let end = 5usize
+            .checked_add(key_length)
+            .ok_or(coven_database::DbError::DamagedDatabase)?;
+        let identity = MemberIdentity::new(
+            code.member,
+            MemberKeys::from_secret_bytes(
+                bytes
+                    .get(5..end)
+                    .ok_or(coven_database::DbError::DamagedDatabase)?,
+            )?,
+        );
+        let keys = identity.keys().public_keys();
+        let request = bytes
+            .get(end..)
+            .ok_or(coven_database::DbError::DamagedDatabase)?
+            .to_vec();
+        let object = SingleChunkObject::decode(&request)?;
+        let SingleChunkObject::JoinRequest { chunk, signature } = &object;
+        let mut hash = ObjectHasher::new();
+        hash.update(&object.signed_bytes()?);
+        keys.signing
+            .verify_object(path.as_str(), &hash.finish(), signature)?;
+        let plain = code.secret.join_request_key().open_object_chunk(
+            path.as_str(),
+            &prefix.encode()?,
+            0,
+            0,
+            chunk,
+        )?;
+        let Object::JoinRequest(opened) = Object::decode(&plain)? else {
+            return Err(coven_database::DbError::DamagedDatabase.into());
+        };
+        if opened.invite != code.invite || opened.member != code.member || opened.keys != keys {
+            return Err(SyncError::InvitationChanged);
         }
+        Ok(Some(Self {
+            confirmation: confirmation(code, &keys),
+            identity,
+            request,
+            path,
+            attempted,
+            device_name: opened.device_name,
+            inviting_writer: code.inviting_writer,
+            read_through: code.read_through,
+        }))
+    }
+
+    fn create(
+        directory: &StoreDir,
+        code: &InviteCode,
+        device_name: &str,
+    ) -> Result<Self, SyncError> {
+        let path = ObjectPath::join_request(code.store, code.invite);
+        let prefix = SingleChunkPrefix::JoinRequest;
         // The request repeats the id the invite fixed and names this
         // device's fresh pair, which signs it (D8).
         let identity = MemberIdentity::generate(code.member)?;
@@ -147,10 +171,11 @@ impl JoiningIdentity {
             request,
             path,
             attempted: false,
+            device_name: device_name.into(),
             inviting_writer: code.inviting_writer,
             read_through: code.read_through,
         };
-        identity.save(&file, code)?;
+        identity.save(&directory.owned_file(StoreFile::Bootstrap), code)?;
         Ok(identity)
     }
 
@@ -169,6 +194,12 @@ impl JoiningIdentity {
     /// this request can only follow it (§13.2).
     pub fn read_through(&self) -> u64 {
         self.read_through
+    }
+
+    /// The name the device gave itself in its request, which it registers
+    /// with once admitted.
+    pub fn device_name(&self) -> &str {
+        &self.device_name
     }
 
     /// The number the admin of a sent invite compares before approving; the

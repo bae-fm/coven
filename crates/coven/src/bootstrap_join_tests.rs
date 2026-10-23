@@ -438,6 +438,8 @@ async fn an_in_person_join_loads_without_an_approval_call() {
         .iter()
         .any(|member| member.is_self && member.id == invite.member));
     assert!(owner.handle.subscribe_invites().borrow().is_empty());
+    // The finished join no longer keeps its code.
+    assert!(saved_code(&install, owner.directory.id()).is_none());
     handle.close().await.unwrap();
     owner.close().await;
 }
@@ -576,14 +578,19 @@ async fn cancelling_a_sent_join_keeps_it_for_a_later_call() {
         .await
         .unwrap()
         .is_some());
-    let (_, cancel) = watch::channel(false);
-    let resumed = install.run(
-        &owner,
-        Installation::join_request(&invite),
-        owner.recipient(),
-        &cancel,
-        |_| {},
+    let builder = install.builder(&owner, owner.recipient());
+    assert_eq!(
+        builder
+            .unfinished_joins()
+            .await
+            .unwrap()
+            .iter()
+            .map(|join| join.store)
+            .collect::<Vec<_>>(),
+        [owner.directory.id()]
     );
+    let control = JoinControl::new();
+    let resumed = builder.resume_join(owner.directory.id(), |_| {}, &control);
     let approve = owner.handle.approve_join_request(&request);
     let (result, approved) = join_with_response(resumed, approve).await;
     approved.unwrap();
@@ -613,6 +620,7 @@ async fn cancelling_a_join_before_its_request_is_sent_removes_every_local_value(
         "{result:?}"
     );
     install.absent(owner.directory.id()).await;
+    assert!(saved_code(&install, owner.directory.id()).is_none());
     assert!(!install
         .root
         .path()
@@ -669,5 +677,129 @@ async fn cancelling_an_approved_join_while_it_loads_keeps_it() {
         .iter()
         .any(|found| found.is_self && found.id == member));
     handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Start Carol's join with a sent invite and stop it while it waits, as when
+/// the app is closed.
+async fn waiting_join(owner: &Owner, install: &Installation, invite: &Invite) {
+    let (waiting, mut waits) = watch::channel(false);
+    let control = JoinControl::new();
+    let joining = join_with_invite(
+        install.builder(owner, owner.recipient()),
+        &invite.code,
+        "Carol's phone",
+        |status| {
+            if matches!(status, BootstrapStatus::WaitingForApproval { .. }) {
+                waiting.send_replace(true);
+            }
+        },
+        &control,
+    );
+    tokio::time::timeout(Duration::from_secs(20), async {
+        tokio::select! {
+            result = joining => panic!("the join ended while waiting: {result:?}"),
+            changed = waits.wait_for(|waiting| *waiting) => drop(changed.unwrap()),
+        }
+    })
+    .await
+    .unwrap();
+}
+
+fn saved_code(install: &Installation, store: StoreId) -> Option<SecretText> {
+    StoreKeychain::new(install.keychain.clone(), store)
+        .invite_code()
+        .unwrap()
+}
+
+/// Carol closes the app while she waits. Her phone lists the join with the
+/// names the invite carried, and continues it without the code; once it
+/// loads, the saved code is gone (§13.2).
+#[tokio::test]
+async fn a_closed_join_is_listed_and_resumes_without_its_code() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    owner.handle.rename_store("Household").await.unwrap();
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    let builder = install.builder(&owner, owner.recipient());
+    assert_eq!(
+        builder.unfinished_joins().await.unwrap(),
+        [UnfinishedJoin {
+            store,
+            store_name: "Household".into(),
+            invitee: Some("Carol".into()),
+            delivery: InviteDeliveryKind::Sent,
+        }]
+    );
+    assert_eq!(saved_code(&install, store).unwrap().as_str(), invite.code);
+    let control = JoinControl::new();
+    let resumed = builder.resume_join(store, |_| {}, &control);
+    let (result, _) = join_and_approve(&owner.handle, resumed, |request| async move {
+        // The resumed request is the one Carol's phone made, with its name.
+        assert_eq!(request.device_name, "Carol's phone");
+    })
+    .await;
+    let handle = result.unwrap().unwrap();
+    assert!(saved_code(&install, store).is_none());
+    let builder = install.builder(&owner, owner.recipient());
+    assert!(builder.unfinished_joins().await.unwrap().is_empty());
+    assert!(matches!(
+        builder.resume_join(store, |_| {}, &control).await,
+        Err(BootstrapError::NoUnfinishedJoin(missing)) if missing == store
+    ));
+    handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// A closed join that Ana declines resumes to `None`, and its saved code and
+/// installation are gone (§13.2).
+#[tokio::test]
+async fn a_closed_join_declined_meanwhile_resumes_to_none_and_forgets_its_code() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    let request = next_join_request(&owner.handle).await;
+    owner.handle.decline_join_request(&request).await.unwrap();
+    let control = JoinControl::new();
+    let result = install
+        .builder(&owner, owner.recipient())
+        .resume_join(store, |_| {}, &control)
+        .await;
+    assert!(matches!(result, Ok(None)), "{result:?}");
+    assert!(saved_code(&install, store).is_none());
+    install.absent(store).await;
+    assert!(install
+        .builder(&owner, owner.recipient())
+        .unfinished_joins()
+        .await
+        .unwrap()
+        .is_empty());
+    owner.close().await;
+}
+
+/// A saved code coven can't read fails the listing: a join that may have
+/// sent its request is never silently left out (§13.2).
+#[tokio::test]
+async fn an_unreadable_saved_code_fails_the_listing() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let store = owner.directory.id();
+    waiting_join(&owner, &install, &invite).await;
+    StoreKeychain::new(install.keychain.clone(), store)
+        .set_invite_code(&SecretText::new("CVI1-NOTACODE".into()))
+        .unwrap();
+    assert!(matches!(
+        install
+            .builder(&owner, owner.recipient())
+            .unfinished_joins()
+            .await,
+        Err(BootstrapError::Code(CodeError::Invalid))
+    ));
+    owner.handle.cancel_invite(&invite.id).await.unwrap();
     owner.close().await;
 }

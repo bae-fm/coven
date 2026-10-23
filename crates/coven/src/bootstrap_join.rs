@@ -24,7 +24,7 @@ pub(super) fn prepare_request<'a>(
     builder: &CovenBuilder,
     directory: &StoreDir,
     code: &'a InviteCode,
-    name: &str,
+    name: &DeviceName,
     check: tokio::sync::watch::Receiver<u64>,
 ) -> Result<
     (
@@ -34,7 +34,16 @@ pub(super) fn prepare_request<'a>(
     ),
     BootstrapError,
 > {
-    let identity = JoiningIdentity::prepare(directory, code, name)?;
+    let identity = match name {
+        DeviceName::Given(name) => JoiningIdentity::prepare(directory, code, name)?,
+        DeviceName::Saved => JoiningIdentity::resume(directory, code)?,
+    };
+    // Kept from before the request can be sent until the join ends, so a
+    // join that may have sent its request is always listed and resumable
+    // (§13.2). Its request is saved first: a listed join can be read.
+    StoreKeychain::new(builder.keychain()?, code.store).set_invite_code(&SecretText::new(
+        code.to_text().map_err(SyncError::from)?.to_string(),
+    ))?;
     let mut sign_in = None;
     let (invitation, credentials) =
         match InviteStorage::decode(code.storage.as_bytes()).map_err(SyncError::from)? {
@@ -74,6 +83,11 @@ pub(super) fn prepare_request<'a>(
 impl Joining<'_> {
     pub(super) fn identity(&self) -> coven_crypto::MemberIdentity {
         self.identity.identity()
+    }
+
+    /// The name the device gave itself in its request.
+    pub(super) fn device_name(&self) -> &str {
+        self.identity.device_name()
     }
 
     /// Whether the request may have been sent, here or before a restart.

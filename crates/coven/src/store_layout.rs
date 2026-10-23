@@ -110,6 +110,15 @@ impl StoreLayout {
         self.directories.create_store_dir(id, ids)
     }
 
+    /// The stores whose first installation on this device is unfinished,
+    /// ordered by id: a restore or a join that hasn't loaded.
+    pub(crate) async fn unfinished_first_installations(&self) -> Result<Vec<StoreId>, FileError> {
+        self.directories
+            .unfinished_first_installations()
+            .await
+            .map_err(|coven_foundation::files::StoreDirectoriesError::File(error)| error)
+    }
+
     pub(crate) async fn begin_bootstrap(
         &self,
         id: StoreId,
