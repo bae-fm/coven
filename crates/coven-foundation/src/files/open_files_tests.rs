@@ -120,45 +120,29 @@ fn open_directory(path: &Path) -> std::fs::File {
 #[cfg(windows)]
 mod probe {
     use super::*;
+    use std::collections::BTreeMap;
     use std::os::windows::fs::OpenOptionsExt;
     use std::os::windows::io::AsRawHandle;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::{Arc, Mutex};
     use windows_sys::Win32::Foundation::HANDLE;
     use windows_sys::Win32::Storage::FileSystem::*;
 
-    fn name(handle: HANDLE, flags: u32) -> String {
+    fn name(handle: HANDLE, flags: u32) -> Result<String, i32> {
         let mut buffer = vec![0u16; 32_768];
         let length = unsafe {
             GetFinalPathNameByHandleW(handle, buffer.as_mut_ptr(), buffer.len() as u32, flags)
         } as usize;
         if length == 0 {
-            format!("ERR {}", std::io::Error::last_os_error())
+            Err(std::io::Error::last_os_error().raw_os_error().unwrap())
         } else {
-            String::from_utf16_lossy(&buffer[..length])
+            Ok(String::from_utf16_lossy(&buffer[..length]))
         }
     }
 
-    fn describe(label: &str, handle: HANDLE) {
-        let access = windows_handles::snapshot()
-            .into_iter()
-            .find(|entry| entry.handle_value == handle)
-            .map(|entry| {
-                format!(
-                    "{:#x} type {}",
-                    entry.granted_access, entry.object_type_index
-                )
-            });
-        let kind = unsafe { GetFileType(handle) };
-        let mut information: BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
-        let info = if unsafe { GetFileInformationByHandle(handle, &mut information) } != 0 {
-            format!(
-                "attrs {:#x} links {}",
-                information.dwFileAttributes, information.nNumberOfLinks
-            )
-        } else {
-            format!("ERR {}", std::io::Error::last_os_error())
-        };
+    fn standard(handle: HANDLE) -> String {
         let mut standard: FILE_STANDARD_INFO = unsafe { std::mem::zeroed() };
-        let std_info = if unsafe {
+        if unsafe {
             GetFileInformationByHandleEx(
                 handle,
                 FileStandardInfo,
@@ -168,26 +152,14 @@ mod probe {
         } != 0
         {
             format!(
-                "delete_pending {} directory {} links {}",
+                "pending {} dir {} links {}",
                 standard.DeletePending, standard.Directory, standard.NumberOfLinks
             )
         } else {
-            format!("ERR {}", std::io::Error::last_os_error())
-        };
-        let other = tempfile::tempdir().unwrap();
-        let listed = std::panic::catch_unwind(|| open_files_under(other.path()))
-            .map(|v| format!("{v:?}"))
-            .unwrap_or_else(|p| p.downcast_ref::<String>().cloned().unwrap_or_default());
-        eprintln!(
-            "PROBE {label}: access {access:?} filetype {kind}\n  nt|norm {}\n  nt|opened {}\n  dos|norm {}\n  dos|opened {}\n  info {info}\n  std {std_info}\n  open_files_under(other) {listed}",
-            name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED),
-            name(handle, VOLUME_NAME_NT | FILE_NAME_OPENED),
-            name(handle, VOLUME_NAME_DOS | FILE_NAME_NORMALIZED),
-            name(handle, VOLUME_NAME_DOS | FILE_NAME_OPENED),
-        );
+            format!("std ERR {}", std::io::Error::last_os_error())
+        }
     }
 
-    /// The handle notify's Windows watcher holds on a watched directory.
     fn watch(path: &Path) -> std::fs::File {
         std::fs::OpenOptions::new()
             .access_mode(FILE_LIST_DIRECTORY)
@@ -196,109 +168,162 @@ mod probe {
             .unwrap()
     }
 
-    fn h(file: &std::fs::File) -> HANDLE {
-        file.as_raw_handle() as HANDLE
+    fn legacy_delete(path: &Path, directory: bool) -> std::io::Result<()> {
+        let mut options = std::fs::OpenOptions::new();
+        options.access_mode(DELETE);
+        if directory {
+            options.custom_flags(FILE_FLAG_BACKUP_SEMANTICS);
+        }
+        let file = options.open(path)?;
+        let info = FILE_DISPOSITION_INFO { DeleteFile: true };
+        if unsafe {
+            SetFileInformationByHandle(
+                file.as_raw_handle() as HANDLE,
+                FileDispositionInfo,
+                (&info as *const FILE_DISPOSITION_INFO).cast(),
+                std::mem::size_of::<FILE_DISPOSITION_INFO>() as u32,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error());
+        }
+        Ok(())
+    }
+
+    fn churn(mode: &str, stop: &AtomicBool) {
+        while !stop.load(Ordering::Relaxed) {
+            let root = tempfile::tempdir().unwrap();
+            let r = root.path().to_path_buf();
+            let x = r.join("x");
+            let y = x.join("y");
+            std::fs::create_dir_all(&y).unwrap();
+            std::fs::write(y.join("f"), b"f").unwrap();
+            let handles = (
+                watch(&y),
+                watch(&x),
+                watch(&r),
+                std::fs::File::open(y.join("f")).unwrap(),
+                std::fs::OpenOptions::new()
+                    .access_mode(FILE_READ_DATA)
+                    .open(y.join("f"))
+                    .unwrap(),
+            );
+            match mode {
+                "posix" => {
+                    std::fs::remove_dir_all(&r).unwrap();
+                }
+                "legacy" => {
+                    std::fs::create_dir(r.join("z")).unwrap();
+                    let z = watch(&r.join("z"));
+                    legacy_delete(&y.join("f"), false).unwrap();
+                    legacy_delete(&r.join("z"), true).unwrap();
+                    std::thread::yield_now();
+                    drop(z);
+                }
+                "rename" => {
+                    for n in 0..5 {
+                        if let Err(error) = std::fs::rename(&y, x.join(format!("y{n}")))
+                            .and_then(|()| std::fs::rename(x.join(format!("y{n}")), &y))
+                        {
+                            eprintln!("RENAME y {error}");
+                        }
+                        if let Err(error) = std::fs::rename(&x, r.join("x2"))
+                            .and_then(|()| std::fs::rename(r.join("x2"), &x))
+                        {
+                            eprintln!("RENAME x {error}");
+                            break;
+                        }
+                    }
+                }
+                _ => unreachable!(),
+            }
+            drop(handles);
+            drop(root);
+        }
     }
 
     #[test]
-    fn probe_handle_states() {
-        let root = tempfile::tempdir().unwrap();
-        let r = root.path();
-
-        // A: watched empty directory removed.
-        std::fs::create_dir(r.join("a")).unwrap();
-        let a = watch(&r.join("a"));
-        describe("A watched dir before", h(&a));
-        eprintln!("A remove_dir {:?}", std::fs::remove_dir(r.join("a")));
-        describe("A watched dir after remove_dir", h(&a));
-
-        // B: watched directory whose parent tree is removed.
-        std::fs::create_dir_all(r.join("b/inner")).unwrap();
-        let b = watch(&r.join("b/inner"));
-        eprintln!(
-            "B remove_dir_all {:?}",
-            std::fs::remove_dir_all(r.join("b"))
-        );
-        describe("B watched inner dir after parent remove_dir_all", h(&b));
-
-        // F: watched directory holding files, removed whole.
-        std::fs::create_dir(r.join("f")).unwrap();
-        std::fs::write(r.join("f/x"), b"x").unwrap();
-        let f = watch(&r.join("f"));
-        eprintln!(
-            "F remove_dir_all {:?}",
-            std::fs::remove_dir_all(r.join("f"))
-        );
-        describe("F watched dir after remove_dir_all", h(&f));
-
-        // C: open file removed.
-        std::fs::create_dir(r.join("c")).unwrap();
-        std::fs::write(r.join("c/f"), b"c").unwrap();
-        let c = std::fs::File::open(r.join("c/f")).unwrap();
-        describe("C file before", h(&c));
-        eprintln!("C remove_file {:?}", std::fs::remove_file(r.join("c/f")));
-        describe("C file after remove_file", h(&c));
-        eprintln!("C remove_dir parent {:?}", std::fs::remove_dir(r.join("c")));
-        describe("C file after parent remove_dir", h(&c));
-
-        // D: open file whose directory is removed whole.
-        std::fs::create_dir(r.join("d")).unwrap();
-        std::fs::write(r.join("d/f"), b"d").unwrap();
-        let d = std::fs::File::open(r.join("d/f")).unwrap();
-        eprintln!(
-            "D remove_dir_all {:?}",
-            std::fs::remove_dir_all(r.join("d"))
-        );
-        describe("D file after dir remove_dir_all", h(&d));
-
-        // E: file opened for read data only, its directory removed whole.
-        std::fs::create_dir(r.join("e")).unwrap();
-        std::fs::write(r.join("e/f"), b"e").unwrap();
-        let e = std::fs::OpenOptions::new()
-            .access_mode(FILE_READ_DATA)
-            .open(r.join("e/f"))
-            .unwrap();
-        describe("E read-data file before", h(&e));
-        eprintln!(
-            "E remove_dir_all {:?}",
-            std::fs::remove_dir_all(r.join("e"))
-        );
-        describe("E read-data file after dir remove_dir_all", h(&e));
-
-        // G: a read_dir in progress.
-        std::fs::create_dir(r.join("g")).unwrap();
-        std::fs::write(r.join("g/1"), b"1").unwrap();
-        std::fs::write(r.join("g/2"), b"2").unwrap();
-        let before: Vec<_> = windows_handles::snapshot()
-            .iter()
-            .map(|e| e.handle_value as usize)
-            .collect();
-        let mut listing = std::fs::read_dir(r.join("g")).unwrap();
-        listing.next();
-        for entry in windows_handles::snapshot() {
-            if !before.contains(&(entry.handle_value as usize)) {
-                describe("G read_dir handle", entry.handle_value);
+    fn probe_races() {
+        let file_type = windows_handles::file_object_type();
+        for mode in ["posix", "legacy", "rename"] {
+            let stop = Arc::new(AtomicBool::new(false));
+            let failures: Arc<Mutex<BTreeMap<String, (usize, Vec<String>)>>> = Default::default();
+            let named = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+            let mut threads = Vec::new();
+            for _ in 0..4 {
+                let stop = stop.clone();
+                threads.push(std::thread::spawn(move || churn(mode, &stop)));
+            }
+            for _ in 0..2 {
+                let stop = stop.clone();
+                let failures = failures.clone();
+                let named = named.clone();
+                threads.push(std::thread::spawn(move || {
+                    while !stop.load(Ordering::Relaxed) {
+                        for entry in windows_handles::snapshot() {
+                            if entry.object_type_index != file_type || entry.granted_access & 3 == 0 {
+                                continue;
+                            }
+                            let handle = entry.handle_value;
+                            match name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED) {
+                                Ok(_) => {
+                                    named.fetch_add(1, Ordering::Relaxed);
+                                }
+                                Err(code) => {
+                                    let after = standard(handle);
+                                    let opened = name(handle, VOLUME_NAME_NT | FILE_NAME_OPENED);
+                                    let again = name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED);
+                                    let mut failures = failures.lock().unwrap();
+                                    let slot = failures
+                                        .entry(format!("normalized error {code}"))
+                                        .or_default();
+                                    slot.0 += 1;
+                                    if slot.1.len() < 6 {
+                                        slot.1.push(format!(
+                                            "{handle:?} access {:#x}: {after}; opened {opened:?}; normalized again {again:?}",
+                                            entry.granted_access
+                                        ));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }));
+            }
+            {
+                let stop = stop.clone();
+                let failures = failures.clone();
+                threads.push(std::thread::spawn(move || {
+                    let other = tempfile::tempdir().unwrap();
+                    while !stop.load(Ordering::Relaxed) {
+                        if let Err(panic) =
+                            std::panic::catch_unwind(|| open_files_under(other.path()))
+                        {
+                            let message =
+                                panic.downcast_ref::<String>().cloned().unwrap_or_default();
+                            let mut failures = failures.lock().unwrap();
+                            let slot = failures.entry("open_files_under panic".into()).or_default();
+                            slot.0 += 1;
+                            if slot.1.len() < 6 {
+                                slot.1.push(message);
+                            }
+                        }
+                    }
+                }));
+            }
+            std::thread::sleep(std::time::Duration::from_secs(20));
+            stop.store(true, Ordering::Relaxed);
+            for thread in threads {
+                thread.join().unwrap();
+            }
+            eprintln!("RACE {mode}: named {}", named.load(Ordering::Relaxed));
+            for (key, (count, examples)) in failures.lock().unwrap().iter() {
+                eprintln!("RACE {mode}: {key}: {count}");
+                for example in examples {
+                    eprintln!("    {example}");
+                }
             }
         }
-        eprintln!(
-            "G remove_dir_all {:?}",
-            std::fs::remove_dir_all(r.join("g"))
-        );
-        for entry in windows_handles::snapshot() {
-            if !before.contains(&(entry.handle_value as usize)) {
-                describe("G read_dir handle after remove_dir_all", entry.handle_value);
-            }
-        }
-        drop(listing);
-
-        // H: whole root removed with watches on it.
-        let root_path = r.to_path_buf();
-        let top = watch(&root_path);
-        drop(root);
-        eprintln!("H root exists after drop {}", root_path.exists());
-        describe("H watched root after tempdir drop", h(&top));
-
-        drop((a, b, c, d, e, f, top));
         panic!("probe output above");
     }
 }
