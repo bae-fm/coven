@@ -65,6 +65,43 @@ fn a_directory_handle_is_not_an_open_file() {
     assert_no_open_files_under(dir.path());
 }
 
+/// A directory deleted while its handle stays open is still not an open
+/// file: on Windows it cannot be named while it moves out of its parent, so
+/// listing other directories meanwhile must not stop to name it.
+#[test]
+fn a_directory_deleted_while_open_is_not_an_open_file() {
+    let listed = tempfile::tempdir().unwrap();
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let deleters: Vec<_> = (0..4)
+        .map(|_| {
+            let stop = stop.clone();
+            std::thread::spawn(move || {
+                while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                    let deleted = tempfile::tempdir().unwrap();
+                    std::fs::create_dir(deleted.path().join("inner")).unwrap();
+                    let directories = [
+                        open_directory(deleted.path()),
+                        open_directory(&deleted.path().join("inner")),
+                    ];
+                    deleted.close().unwrap();
+                    drop(directories);
+                }
+            })
+        })
+        .collect();
+    let listings = std::panic::catch_unwind(|| {
+        (0..500)
+            .map(|_| open_files_under(listed.path()))
+            .collect::<Vec<_>>()
+    });
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    for deleter in deleters {
+        deleter.join().unwrap();
+    }
+    let listings = listings.unwrap_or_else(|panic| std::panic::resume_unwind(panic));
+    assert!(listings.iter().all(Vec::is_empty), "{listings:?}");
+}
+
 #[test]
 fn directory_filter_includes_descendants_but_not_similarly_named_siblings() {
     let root = tempfile::tempdir().unwrap();
@@ -278,7 +315,7 @@ mod probe {
                                     let again = name(handle, VOLUME_NAME_NT | FILE_NAME_NORMALIZED);
                                     let mut failures = failures.lock().unwrap();
                                     let slot = failures
-                                        .entry(format!("normalized error {code}"))
+                                        .entry(format!("normalized error {code} ({})", after.split(" links").next().unwrap()))
                                         .or_default();
                                     slot.0 += 1;
                                     if slot.1.len() < 6 {
