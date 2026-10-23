@@ -25,4 +25,4 @@ jobs:
         env:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
-        run: cargo test -p coven-foundation --lib files::open_files -- --nocapture --test-threads=1
+        run: cargo test -p coven-foundation -p coven-database --lib files::open_files -- --nocapture --test-threads=1
