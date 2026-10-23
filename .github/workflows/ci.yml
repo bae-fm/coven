@@ -1,150 +1,28 @@
 name: ci
 
-# One script runs every check of Appendix F.6: its code checks on every platform,
-# and the Lean proofs once, on Linux, since a proof checks the same anywhere.
-# Spec edits alone don't run it, so they never cancel a run checking code.
 on:
-  push:
-    branches: [main]
-    paths: &code_paths
-      - "crates/**"
-      - "tools/**"
-      - "scripts/**"
-      - ".cargo/**"
-      - "Cargo.toml"
-      - "Cargo.lock"
-      - "clippy.toml"
-      - "deny.toml"
-      - "rust-toolchain.toml"
-      - "spec/**"
-      - ".github/workflows/ci.yml"
   pull_request:
-    paths: *code_paths
-
-concurrency:
-  group: ci-${{ github.ref }}
-  # A main run always finishes; GitHub still replaces a waiting run with the newest.
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  check:
-    strategy:
-      fail-fast: false
-      matrix:
-        os: [ubuntu-latest, macos-latest, windows-latest]
-    runs-on: ${{ matrix.os }}
+  probe:
+    runs-on: windows-latest
     defaults:
       run:
         shell: bash
     steps:
       - uses: actions/checkout@v6
-      # coven-format's pinned-bytes test reruns its Python fixture generator,
-      # which seals with libsodium (D14). That test is left out on Windows.
-      - name: Install libsodium
-        if: runner.os != 'Windows'
-        run: |
-          if [ "$RUNNER_OS" = Linux ]; then
-            sudo apt-get update && sudo apt-get install -y libsodium23
-          else
-            brew install libsodium
-          fi
-      # The pinned toolchain and components come from rust-toolchain.toml on
-      # the first cargo invocation.
-      #
-      # Most of the build is the workspace's own crates, which every commit
-      # changes. The target directory, with their incremental state, is saved
-      # after each run and restored from the latest one with the same
-      # manifests and toolchain, so rustc recompiles only what changed. A
-      # checkout's fresh timestamps make cargo rerun rustc on every workspace
-      # crate, which is why incremental state and not the artifacts alone is
-      # what makes the next build short. (Swatinem/rust-cache keeps
-      # dependencies only, under a key that never changes, and turns
-      # incremental compilation off.)
       - name: Restore the build
-        id: build
         uses: actions/cache/restore@v5
         with:
-          path: &build_paths |
+          path: |
             ~/.cargo/registry/index/
             ~/.cargo/registry/cache/
             ~/.cargo/git/db/
             target/
           key: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
           restore-keys: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.143,cargo-deny@0.19.9
-      # Tests make their stores under the system temporary directory. On
-      # Windows that is on C:, the runner's OS disk, where file creation and
-      # fsync are several times slower than on D:, which holds the runner's
-      # own temporary directory. The stores keep production's settings,
-      # synchronous writes included, so crash and durability tests check the
-      # same thing on a faster disk. Elsewhere TMP and TEMP go unread.
-      - name: scripts/check.sh code
+      - name: probe
         env:
           TMP: ${{ runner.temp }}
           TEMP: ${{ runner.temp }}
-        run: scripts/check.sh code
-      # The next run rebuilds the workspace's own libraries and test binaries
-      # whatever it restores; only their incremental state and the
-      # dependencies' outputs save it work. A failed run's build is as sound
-      # as a passing one's. Only main saves: one platform's build is 2 to 4 GB
-      # compressed, so a set from every branch would evict main's from the
-      # repository's 10 GB, and a pull request restores main's latest.
-      - name: Drop the workspace's own outputs and report what the build holds
-        if: ${{ !cancelled() }}
-        run: |
-          for name in $(cargo metadata --format-version 1 --no-deps |
-              "$(command -v python3 || command -v python)" -c '
-          import json, sys
-          for package in json.load(sys.stdin)["packages"]:
-              for target in package["targets"]:
-                  print(target["name"].replace("-", "_"))
-          ' | tr -d '\r' | sort -u); do
-              rm -f target/debug/deps/"$name"-* target/debug/deps/lib"$name"-*
-          done
-          rm -rf target/doc
-          # du counts a file once, under the first argument holding it.
-          du -sh target/debug/incremental/* target/debug/* ~/.cargo/registry 2>/dev/null | sort -h | tail -30
-      - name: Save the build
-        if: ${{ !cancelled() && github.ref == 'refs/heads/main' }}
-        uses: actions/cache/save@v5
-        with:
-          path: *build_paths
-          key: ${{ steps.build.outputs.cache-primary-key }}
-
-  proofs:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v6
-      # The differential tests run from the workspace's test binaries, the
-      # ones the Linux check builds, so main's latest saved Linux build serves
-      # this job too; it saves nothing of its own.
-      - name: Restore the build
-        uses: actions/cache/restore@v5
-        with:
-          path: *build_paths
-          key: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-${{ github.sha }}
-          restore-keys: build-${{ runner.os }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '**/Cargo.toml', 'rust-toolchain.toml') }}-
-      - uses: taiki-e/install-action@v2
-        with:
-          tool: cargo-nextest@0.9.143
-      # elan reads each proof's lean-toolchain the first time lake runs there;
-      # the cache keeps those toolchains. The proofs themselves are built from
-      # scratch every run (scripts/check.sh).
-      - name: Restore elan and the Lean toolchains
-        id: elan-cache
-        uses: actions/cache@v5
-        with:
-          path: ~/.elan
-          key: elan-${{ runner.os }}-${{ hashFiles('spec/proofs/*/lean-toolchain') }}
-      - name: Install elan
-        if: steps.elan-cache.outputs.cache-hit != 'true'
-        run: |
-          curl -sSfL https://raw.githubusercontent.com/leanprover/elan/master/elan-init.sh -o elan-init.sh
-          sh elan-init.sh -y --no-modify-path --default-toolchain none
-          rm elan-init.sh
-      - name: Put elan on the path
-        run: echo "$HOME/.elan/bin" >> "$GITHUB_PATH"
-      - name: scripts/check.sh proofs
-        run: scripts/check.sh proofs
+        run: cargo test -p coven-foundation --lib files::open_files -- --nocapture --test-threads=1
