@@ -2621,7 +2621,8 @@ pub enum CloudProvider {
 impl CloudProvider {
     /// Instructions for cutting off a removed device's provider access (§14.2).
     /// This depends on the provider kind, not on a connected account or request.
-    pub fn sign_out(self) -> ProviderSignOut;
+    /// None on S3, where a member's devices share one key.
+    pub fn sign_out(self) -> Option<ProviderSignOut>;
 }
 
 /// A store's location, with credentials kept separately (§20.3, E5).
@@ -4089,10 +4090,10 @@ match stream.read_at(resume_at, 256 * 1024).await {
 - A member records their own new storage access; an admin may also record an
   S3 replacement for another member. Authority uses the author's role in the
   state immediately preceding its slot.
-  `ProviderSignOut::ReplaceAccessKey` directs the person to replace the S3 key
-  in the provider's console (§14.3): `replace_access_key` installs the new key
-  on one device and records it. Each of the member's other devices needs the
-  new key from the person, through `update_credentials`.
+  To replace their S3 key, the person makes a new one in the provider's
+  console (§14.3): `replace_access_key` installs it on one device and records
+  it. Each of the member's other devices needs the new key from the person,
+  through `update_credentials`.
 - A member can replace their own signing/sealing pair; any admin can publish
   a prepared pair for an existing member with `replace_member_keys_for`.
   Replacement invites provide approval/bootstrap (E10), subject to provider
@@ -4216,8 +4217,9 @@ impl CovenHandle {
 
     /// Removes a device. The provider can't cut off one device alone, so the
     /// result says how its member signs out of the provider and signs in
-    /// again on the devices they keep (§14.2).
-    pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError>;
+    /// again on the devices they keep (§14.2). None on S3: the member's
+    /// devices share one key, so nothing at the provider changes.
+    pub async fn remove_device(&self, device: DeviceId) -> Result<Option<ProviderSignOut>, SyncError>;
 }
 
 /// Guided console steps for a key made by hand (§20.10).
@@ -4292,10 +4294,6 @@ pub enum ProviderSignOut {
     RemoveAppAccess { provider: CloudProvider },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Make a new S3 key in the provider's console, replace the member's key
-    /// with it, and delete the old one there (§14.3). The restore code does
-    /// not change.
-    ReplaceAccessKey,
 }
 ```
 

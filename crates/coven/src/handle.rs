@@ -232,8 +232,12 @@ impl CovenHandle {
     pub async fn remove_member(&self, member: &MemberId) -> Result<(), SyncError> {
         self.storage.remove_member(*member).await
     }
-    /// Remove a device and return instructions for its provider sign-out.
-    pub async fn remove_device(&self, device: DeviceId) -> Result<ProviderSignOut, SyncError> {
+    /// Remove a device and return instructions for its provider sign-out;
+    /// none on S3, where the member's other devices share its key (§14.2).
+    pub async fn remove_device(
+        &self,
+        device: DeviceId,
+    ) -> Result<Option<ProviderSignOut>, SyncError> {
         self.storage.remove_device(device).await
     }
     /// The bucket, store prefix and filled member policy for making a key in

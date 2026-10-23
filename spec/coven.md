@@ -2809,6 +2809,11 @@ alone. To lock out a lost phone:
 | iCloud | remove the lost device from their Apple account |
 | S3 | the member makes a new key in the provider's console, replaces their key with it on a device they keep, and deletes the old one there (§14.3) |
 
+`remove_device` returns the step for Dropbox, OneDrive and iCloud. On S3 it
+returns none: the lost phone shares its member's key with their other devices,
+so removing the device alone changes nothing at the provider, and replacing
+the key is the member's own change (§14.3).
+
 Removal changes no ciphertext or private key anyone already obtained. Confirmed
 cut-off prevents further reads and publishing. Until then, every device still
 applies the sequence's rules on who counts.

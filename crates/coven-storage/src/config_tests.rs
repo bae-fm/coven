@@ -3,18 +3,17 @@ use crate::*;
 
 #[test]
 fn sign_out_instructions_depend_only_on_the_provider() {
-    assert_eq!(
-        CloudProvider::S3.sign_out(),
-        ProviderSignOut::ReplaceAccessKey
-    );
+    // The member's other devices share their S3 key: one device has
+    // nothing to sign out of (§14.2).
+    assert_eq!(CloudProvider::S3.sign_out(), None);
     assert_eq!(
         CloudProvider::CloudKit.sign_out(),
-        ProviderSignOut::RemoveFromAppleAccount
+        Some(ProviderSignOut::RemoveFromAppleAccount)
     );
     for provider in [CloudProvider::Dropbox, CloudProvider::OneDrive] {
         assert_eq!(
             provider.sign_out(),
-            ProviderSignOut::RemoveAppAccess { provider }
+            Some(ProviderSignOut::RemoveAppAccess { provider })
         );
     }
 }

@@ -16,11 +16,12 @@ pub enum CloudProvider {
 impl CloudProvider {
     /// Instructions for cutting off a removed device's provider access (§14.2).
     /// This depends on the provider kind, not on a connected account or request.
-    pub fn sign_out(self) -> crate::ProviderSignOut {
+    /// None on S3: the member's other devices share the key, which stays theirs.
+    pub fn sign_out(self) -> Option<crate::ProviderSignOut> {
         match self {
-            Self::S3 => crate::ProviderSignOut::ReplaceAccessKey,
-            Self::CloudKit => crate::ProviderSignOut::RemoveFromAppleAccount,
-            provider => crate::ProviderSignOut::RemoveAppAccess { provider },
+            Self::S3 => None,
+            Self::CloudKit => Some(crate::ProviderSignOut::RemoveFromAppleAccount),
+            provider => Some(crate::ProviderSignOut::RemoveAppAccess { provider }),
         }
     }
 }

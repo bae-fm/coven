@@ -65,10 +65,6 @@ pub enum ProviderSignOut {
     },
     /// Remove the device from the Apple account.
     RemoveFromAppleAccount,
-    /// Replace the member's S3 key: make a new key in the provider's console,
-    /// install it on the retained devices and delete the old key there. The
-    /// restore code stays unchanged.
-    ReplaceAccessKey,
 }
 
 pub use coven_format::MemberAccess;

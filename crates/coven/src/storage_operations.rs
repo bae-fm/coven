@@ -42,11 +42,12 @@ impl StorageConnections {
         }
     }
 
-    /// Remove a device, then say how its member signs out of the provider.
+    /// Remove a device, then say how its member signs out of the provider,
+    /// if anything is left to do there.
     pub(crate) async fn remove_device(
         &self,
         device: DeviceId,
-    ) -> Result<ProviderSignOut, SyncError> {
+    ) -> Result<Option<ProviderSignOut>, SyncError> {
         match self.administer(StoreChange::RemoveDevice { device }).await {
             // Applying this device's own removal stops it: the removal took effect.
             Err(SyncError::Removed) if device == self.device => {}

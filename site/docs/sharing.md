@@ -261,8 +261,9 @@ and reports grants it can't remove alone, such as a parent folder's share or a
 public link, as `PendingReason::AccessRemains`.
 
 These providers can't cut off one device of an account. To lock out a lost
-phone, [`ProviderSignOut`](rustdoc:enum:coven::ProviderSignOut) tells the app
-what the person does:
+phone, the person does this; [`ProviderSignOut`](rustdoc:enum:coven::ProviderSignOut)
+tells the app the step for Dropbox, OneDrive and iCloud, and on S3 there is none
+to return, because the phone shares its member's key:
 
 | Provider | What the person does |
 | --- | --- |
