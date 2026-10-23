@@ -4,6 +4,7 @@
 pub use crate::builder::CovenBuilder;
 pub use crate::builder::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
+    JoinControl,
 };
 pub use crate::coven::Coven;
 #[cfg(feature = "dev-tools")]
@@ -101,7 +102,7 @@ pub use coven_storage::{StorageCheck, StorageSetupError};
 pub use coven_sync::{
     Circle, CircleMemberInfo, DamagedObject, DeviceIdEvidence, DeviceInfo, DeviceState,
     EntryTarget, FileMissingReason, FileSourceFailure, Invite, InviteAccess, InviteDelivery,
-    InviteLifetime, InviteTarget, JoinRequest, LocalFailure, MemberInfo, OperationError,
+    InviteLifetime, InviteTarget, JoinRequest, LocalFailure, MemberInfo, NextCheck, OperationError,
     OperationId, OperationKind, OperationRejection, PassFailure, PendingReason, PendingRecord,
     PendingSubject, Prerequisite, ProviderAccessAction, Refusal, RequiredUpdate, Retry,
     RetryAnswer, RetryOutcome, SyncError, SyncFailure, SyncStatus, WriteCutoff,

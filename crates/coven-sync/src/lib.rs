@@ -62,7 +62,7 @@ pub use saved_code::{
     follow_name, read_saved_code, replacement_code, SavedName, UnreadableSavedCode,
 };
 pub use sequence_state::{PassFailure, SequenceStatus, SyncState, SyncStatus};
-pub use sequence_sync::sequence_join::JoinOutcome;
+pub use sequence_sync::sequence_join::{JoinOutcome, NextCheck};
 pub use sequence_sync::SequenceSync;
 pub use sign_in::{DeviceCredentials, SessionSignIn};
 

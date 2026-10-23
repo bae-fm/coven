@@ -49,7 +49,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
     // would wait for it. The file handle names only the path.
     drop(directory);
     drop(pending);
-    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     for field in ["initial_key", "inviting_writer", "read_through"] {
         let mut changed = coven_sync::read_invite_code(&invite.code).unwrap();
         match field {
@@ -63,7 +63,7 @@ async fn resuming_join_authenticates_the_initial_key_and_writer_cursor() {
             &changed.to_text().unwrap(),
             "New phone",
             |_| {},
-            &cancel,
+            &control,
         )
         .await;
         assert!(
@@ -235,6 +235,8 @@ async fn a_refused_join_request_is_sent_again() {
 }
 
 /// A join reports connecting, then waiting for approval, then loading (E10).
+/// While it waits, a sent invite's status carries the number Ana's phone
+/// shows with the request, and when the next check runs.
 #[tokio::test]
 async fn a_join_reports_each_bootstrap_phase_in_order() {
     let owner = Owner::new(CloudProvider::S3, false).await;
@@ -254,16 +256,35 @@ async fn a_join_reports_each_bootstrap_phase_in_order() {
             }
         },
     );
-    let (result, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
+    let approved = std::sync::Mutex::new(None);
+    let (result, _) = join_and_approve(&owner.handle, joining, |request| {
+        *approved.lock().unwrap() = Some(request);
+        async {}
+    })
+    .await;
     result.unwrap().unwrap().close().await.unwrap();
-    assert_eq!(
-        reported.into_inner().unwrap(),
-        [
-            BootstrapStatus::Connecting,
-            BootstrapStatus::WaitingForApproval,
-            BootstrapStatus::Loading,
-        ]
-    );
+    let reported = reported.into_inner().unwrap();
+    let request = approved.into_inner().unwrap().unwrap();
+    assert_eq!(reported.first(), Some(&BootstrapStatus::Connecting));
+    assert_eq!(reported.last(), Some(&BootstrapStatus::Loading));
+    let waits = &reported[1..reported.len() - 1];
+    assert!(waits.len() >= 2, "{reported:?}");
+    for (index, status) in waits.iter().enumerate() {
+        let BootstrapStatus::WaitingForApproval {
+            confirmation,
+            next_check,
+        } = status
+        else {
+            panic!("{status:?} while waiting");
+        };
+        assert_eq!(*confirmation, Some(request.confirmation));
+        // The first check runs at once; then checks and waits alternate.
+        assert_eq!(
+            matches!(next_check, NextCheck::Checking),
+            index % 2 == 0,
+            "{reported:?}"
+        );
+    }
     owner.close().await;
 }
 
@@ -316,13 +337,13 @@ async fn snapshots_restore_the_name_and_invites_keep_the_name_at_creation() {
 
     // An unexpired invite's captured label cannot become the joined store's name.
     let joined = Installation::new();
-    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     let joining = join_with_invite(
         joined.builder(&owner, owner.recipient()),
         &invite.code,
         "Guest phone",
         |_| {},
-        &cancel,
+        &control,
     );
     let (handle, _) = join_and_approve(&owner.handle, joining, |_| async {}).await;
     let handle = handle.unwrap().unwrap();
@@ -418,5 +439,46 @@ async fn an_in_person_join_loads_without_an_approval_call() {
         .any(|member| member.is_self && member.id == invite.member));
     assert!(owner.handle.subscribe_invites().borrow().is_empty());
     handle.close().await.unwrap();
+    owner.close().await;
+}
+
+/// Carol is on a call with Ana as Ana approves: Carol's Check now runs the
+/// next check at once, instead of after the join's wait (§13.2).
+#[tokio::test]
+async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    // The joining device's waits end only when the test moves the clock.
+    let builder = install
+        .builder(&owner, owner.recipient())
+        .clock(owner.clock.clone());
+    let control = JoinControl::new();
+    let (waits, mut waiting) = watch::channel(false);
+    let joining = join_with_invite(
+        builder,
+        &invite.code,
+        "New phone",
+        |status| {
+            if matches!(
+                status,
+                BootstrapStatus::WaitingForApproval {
+                    next_check: NextCheck::At(_),
+                    ..
+                }
+            ) {
+                waits.send_replace(true);
+            }
+        },
+        &control,
+    );
+    let approve = async {
+        waiting.wait_for(|waiting| *waiting).await.unwrap();
+        let request = next_join_request(&owner.handle).await;
+        owner.handle.approve_join_request(&request).await.unwrap();
+        control.check_now();
+    };
+    let (result, ()) = join_with_response(joining, approve).await;
+    result.unwrap().unwrap().close().await.unwrap();
     owner.close().await;
 }

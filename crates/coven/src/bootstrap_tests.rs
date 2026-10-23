@@ -224,6 +224,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
     let invite = owner.invite().await;
     let install = Installation::new();
     let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     // Interrupt successive await points, including database opening and reads.
     // Each next attempt starts immediately, with no approval-timer barrier.
     for stop_at in 1..=12 {
@@ -232,7 +233,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
             &invite.code,
             "New phone",
             |_| {},
-            &cancel,
+            &control,
         ));
         let mut polls = 0;
         poll_fn(|cx| {
@@ -252,7 +253,7 @@ async fn restart_while_waiting_reuses_the_member_device_and_request_bytes() {
         &invite.code,
         "New phone",
         |_| {},
-        &cancel,
+        &control,
     ));
     let request = tokio::time::timeout(Duration::from_secs(20), async {
         tokio::select! {
@@ -922,12 +923,12 @@ async fn joining_retains_the_approved_member_in_session_custody() {
     let owner = Owner::new(CloudProvider::S3, false).await;
     let invite = owner.invite().await;
     let install = Installation::new();
-    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     let builder = install
         .builder(&owner, owner.recipient())
         .key_custody(KeyCustody::InMemory)
         .identity_custody(IdentityCustody::InMemory);
-    let joining = join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel);
+    let joining = join_with_invite(builder, &invite.code, "New phone", |_| {}, &control);
     let (handle, member) = join_and_approve(&owner.handle, joining, |_| async {
         install.absent(owner.directory.id()).await;
     })

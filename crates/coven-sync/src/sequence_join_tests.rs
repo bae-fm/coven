@@ -376,3 +376,126 @@ async fn a_failed_history_read_does_not_lose_the_scans_tentative_keys() {
         device.database().close().await.unwrap();
     }
 }
+
+/// Asking to check now ends the join's own wait at once, keeping its failure
+/// count, but not a provider cooldown, which the wait reports instead
+/// (§13.2, §6.7).
+#[tokio::test]
+async fn check_now_ends_the_joins_wait_but_not_a_provider_cooldown() {
+    use crate::NextCheck;
+    use coven_database::RetrySubject;
+    use coven_foundation::clock::Clock;
+    let group = Group::shared();
+    let (ana, carol) = waiting(&group).await;
+    let sync = &carol.device.sync;
+    let wait = || async {
+        carol
+            .device
+            .database()
+            .retry_wait(RetrySubject::Join)
+            .await
+            .unwrap()
+            .unwrap()
+    };
+    // Polls that found the request waiting back the join off to 300 seconds.
+    while sync.join_poll_waiting().await.is_ok() && wait().await.wait < Duration::from_secs(300) {}
+    let failures = wait().await.failures;
+    let now = group.clock.now();
+    let (asking, mut asked) = tokio::sync::watch::channel(0u64);
+    let reported = std::sync::Mutex::new(Vec::new());
+    let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
+        reported.lock().unwrap().push(next);
+    }));
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due)
+        .await
+        .is_err());
+    assert_eq!(
+        *reported.lock().unwrap(),
+        [NextCheck::At(now + Duration::from_secs(300))]
+    );
+    asking.send_modify(|asked| *asked += 1);
+    tokio::time::timeout(Duration::from_secs(5), due)
+        .await
+        .unwrap()
+        .unwrap();
+    let ended = wait().await;
+    assert_eq!((ended.failures, ended.wait), (failures, Duration::ZERO));
+
+    // The next wait is 300 seconds again; a 600-second cooldown outlasts it.
+    sync.join_poll_waiting().await.unwrap();
+    coven_storage::Cooldown::record(sync.waits.as_ref(), Duration::from_secs(600))
+        .await
+        .unwrap();
+    reported.lock().unwrap().clear();
+    let mut due = Box::pin(sync.join_poll_due(&mut asked, |next| {
+        reported.lock().unwrap().push(next);
+    }));
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due)
+        .await
+        .is_err());
+    let cooling = NextCheck::CoolingDown(now + Duration::from_secs(600));
+    assert_eq!(*reported.lock().unwrap(), [cooling]);
+    asking.send_modify(|asked| *asked += 1);
+    assert!(tokio::time::timeout(Duration::from_millis(100), &mut due)
+        .await
+        .is_err());
+    // The join's own wait ended; the cooldown still holds the check.
+    assert_eq!(wait().await.wait, Duration::ZERO);
+    assert_eq!(*reported.lock().unwrap(), [cooling, cooling]);
+    group.clock.set(now + Duration::from_secs(600));
+    tokio::time::timeout(Duration::from_secs(5), due)
+        .await
+        .unwrap()
+        .unwrap();
+    for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}
+
+/// Only a sent invite's join has a confirmation number: Ana compares it
+/// before approving. In person, she watched the phone that scanned.
+#[tokio::test]
+async fn only_a_sent_invites_join_has_a_confirmation_number() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let sent = invite(&ana).await;
+    let in_person = ana
+        .sync
+        .create_invite(
+            crate::InviteTarget::NewMember {
+                role: coven_format::admin::MemberRole::Member,
+                name: "Dan".into(),
+            },
+            crate::InviteAccess::ProviderAccount {
+                email: "dan@example.org".into(),
+            },
+            crate::InviteDelivery::InPerson,
+        )
+        .await
+        .unwrap();
+    let carol = join(&group, &sent.code, "Carol's phone").await;
+    let (_temp, directory) = group.directory();
+    let dan = crate::JoiningIdentity::prepare(
+        &directory,
+        &crate::read_invite_code(&in_person.code).unwrap(),
+        "Dan's phone",
+    )
+    .unwrap();
+    assert_eq!(
+        carol.request.confirmation(),
+        Some(coven_crypto::ConfirmationNumber::of(
+            sent.id,
+            &carol.request.identity().keys().public_keys()
+        ))
+    );
+    assert_eq!(dan.confirmation(), None);
+    for device in [&ana, &carol.device] {
+        device.database().close().await.unwrap();
+    }
+}

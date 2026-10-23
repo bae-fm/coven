@@ -62,7 +62,11 @@ the connection's, an operation's, an upload's or a download's. A wait after a
 provider's answer names something else, so the report leaves it alone. The
 person's retry (`retry_now`) is a commit changing whatever each wait names, so
 it ends every wait but leaves the provider cooldown. Rust ends the wait by
-saving it with no full wait left, so a reopen cannot bring it back. `connection_retry::tests`, the `network_report` tests of the upload,
+saving it with no full wait left, so a reopen cannot bring it back. A joining
+device has no handle to retry with; its `JoinControl::check_now` ends the
+approval poll's wait the same way, keeping its failure count, and leaves the
+cooldown, which `sequence_join::tests::check_now_ends_the_joins_wait_but_not_a_provider_cooldown`
+checks. `connection_retry::tests`, the `network_report` tests of the upload,
 download and invite owners, and those in
 `handle::sync_control::tests` check the Rust owners against these rules; no
 differential runner compares them.

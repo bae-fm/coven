@@ -188,7 +188,10 @@ let mut builder = Coven::builder(layout.clone())
     .migrations(migrations())
     .oauth_clients(oauth_clients.clone());
 builder.authenticate(OAuthAccess::Dropbox(DropboxAccess::FullDropbox)).await?;
-match join_with_invite(builder, &scanned, "Dan's phone", |step| show_step(step), &cancel_rx).await? {
+// The waiting screen shows Dan's number and when the next check runs; its
+// Check now button calls control.check_now().
+let control = JoinControl::new();
+match join_with_invite(builder, &scanned, "Dan's phone", |step| show_step(step), &control).await? {
     Some(handle) => show_store(handle),
     None => show_declined(),
 }

@@ -6,6 +6,20 @@ use super::{
 };
 use crate::{JoiningIdentity, SyncError};
 use coven_storage::{StorageFailure, StorageInvitation};
+use std::time::{Duration, SystemTime};
+use tokio::sync::watch;
+
+/// When a waiting join checks for approval next (§13.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NextCheck {
+    /// Now: a check is running.
+    Checking,
+    /// At this time, on the join's backoff; `check_now` ends the wait.
+    At(SystemTime),
+    /// The provider asked coven to slow down until this time; `check_now`
+    /// can't end it.
+    CoolingDown(SystemTime),
+}
 
 /// The joining member's outcome after checking storage (§13.2).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -78,14 +92,22 @@ impl SequenceSync {
     }
 
     /// Wait until the next approval poll is due: its persisted delay, armed
-    /// again after reopening, and any provider cooldown (§6.7).
-    pub async fn join_poll_due(&self) -> Result<(), SyncError> {
+    /// again after reopening, and any provider cooldown (§6.7). `report`
+    /// receives when the next check is due each time the wait begins or
+    /// changes. A change on `check_now` ends the join's own wait, keeping its
+    /// failure count; a provider cooldown still holds (§13.2).
+    pub async fn join_poll_due(
+        &self,
+        check_now: &mut watch::Receiver<u64>,
+        report: impl Fn(NextCheck),
+    ) -> Result<(), SyncError> {
         let subject = coven_database::RetrySubject::Join;
         loop {
             let persisted = self.database.retry_wait(subject).await?;
             if self.waits.due(subject, persisted.as_ref()) {
                 return Ok(());
             }
+            report(self.next_check(subject)?);
             let wake = self
                 .waits
                 .next_wake(|candidate| *candidate == subject)
@@ -93,8 +115,40 @@ impl SequenceSync {
                 .ok_or_else(|| {
                     StorageFailure::File.with_source("the approval poll's delay was not persisted")
                 })?;
-            wake.await;
+            let asked = async {
+                if check_now.changed().await.is_err() {
+                    // Nobody can ask any more; only the wait ends it.
+                    std::future::pending::<()>().await;
+                }
+            };
+            tokio::select! {
+                () = wake => (),
+                () = asked => self.waits.end_wait(subject).await?,
+            }
         }
+    }
+
+    /// When a poll that is not due yet will run: at the join's own deadline,
+    /// or when a provider cooldown that ends no earlier is over.
+    fn next_check(&self, subject: coven_database::RetrySubject) -> Result<NextCheck, SyncError> {
+        let at = |wait: Duration| {
+            self.clock.now().checked_add(wait).ok_or_else(|| {
+                StorageFailure::InvalidConfiguration
+                    .with_source("the clock cannot represent the next approval check")
+            })
+        };
+        Ok(
+            match (self.waits.remaining(subject), self.waits.cooldown()) {
+                (Some(wait), Some(cooldown)) if cooldown < wait => NextCheck::At(at(wait)?),
+                (_, Some(cooldown)) => NextCheck::CoolingDown(at(cooldown)?),
+                (Some(wait), None) => NextCheck::At(at(wait)?),
+                (None, None) => {
+                    return Err(StorageFailure::File
+                        .with_source("the approval poll's delay was not persisted")
+                        .into())
+                }
+            },
+        )
     }
 
     /// A poll that found the request still waiting persists its next delay

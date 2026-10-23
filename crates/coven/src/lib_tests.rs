@@ -241,7 +241,7 @@ impl Network {
         std::fs::create_dir(&app_dir).unwrap();
         let layout = StoreLayout::new(app_dir);
         let storage = Arc::new(self.devices[0].storage.for_device());
-        let (_, cancel) = tokio::sync::watch::channel(false);
+        let control = JoinControl::new();
         let name = format!("Device {index}");
         let joining = join_with_invite(
             builder(
@@ -256,7 +256,7 @@ impl Network {
             &invite.code,
             &name,
             |_| {},
-            &cancel,
+            &control,
         );
         let (handle, _) = join_and_approve(owner, joining, |_| async {}).await;
         let handle = handle.unwrap().unwrap();

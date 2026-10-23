@@ -4746,7 +4746,9 @@ pub fn decode_code_info(code: &str) -> Result<CodeInfo, CodeError>;
 /// Bootstrap progress, using the same records before an open handle exists.
 pub enum BootstrapStatus {
     Connecting,
-    /// The request is sent. `confirmation` is set for a sent invite.
+    /// The request is sent. `confirmation` is set for a sent invite. A new
+    /// status is reported each time the next check changes: `Checking` while
+    /// a check runs, then when the next one is due.
     WaitingForApproval {
         confirmation: Option<ConfirmationNumber>,
         next_check: NextCheck,
@@ -4929,8 +4931,10 @@ pub struct JoinControl { /* private */ }
 impl JoinControl {
     pub fn new() -> Self;
     pub fn cancel(&self);
-    /// Ends the join's wait so the next check runs now. A provider cooldown
-    /// still holds.
+    /// Ends the join's wait so the next check runs now. The wait keeps its
+    /// failure count, as `retry_now` does for a handle's waits, so a check
+    /// that finds the request still waiting waits the next longer delay. A
+    /// provider cooldown still holds, and the status says when it ends.
     pub fn check_now(&self);
 }
 

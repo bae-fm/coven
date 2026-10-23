@@ -2,9 +2,10 @@
 //! approval, before the shared new-device loading (§13.2).
 
 use super::*;
+use coven_crypto::ConfirmationNumber;
 use coven_foundation::files::StoreDirAccess;
 use coven_foundation::files::{AtomicFile, StoreDir, StoreFile};
-use coven_sync::{JoinOutcome, JoiningIdentity};
+use coven_sync::{JoinOutcome, JoiningIdentity, NextCheck};
 
 /// A prepared join request with the provider access its invite grants.
 pub(super) struct Joining<'a> {
@@ -13,6 +14,8 @@ pub(super) struct Joining<'a> {
     code: &'a InviteCode,
     // The encrypted local copy of the request, outside final custody.
     file: AtomicFile,
+    /// Changes each time the app asks for a check for approval now.
+    check: tokio::sync::watch::Receiver<u64>,
 }
 
 /// Restore or fix the request, then obtain credentials for the invite's
@@ -22,6 +25,7 @@ pub(super) fn prepare_request<'a>(
     directory: &StoreDir,
     code: &'a InviteCode,
     name: &str,
+    check: tokio::sync::watch::Receiver<u64>,
 ) -> Result<
     (
         Joining<'a>,
@@ -60,6 +64,7 @@ pub(super) fn prepare_request<'a>(
             invitation,
             code,
             file: directory.owned_file(StoreFile::Bootstrap),
+            check,
         },
         data,
         sign_in,
@@ -93,12 +98,26 @@ impl Joining<'_> {
                 return Err(error.into());
             }
         }
-        let mut shown = BootstrapStatus::WaitingForApproval;
-        status(shown.clone());
+        let confirmation = self.identity.confirmation();
+        // Each status is shown once, when the next check changes.
+        let shown = std::sync::Mutex::new(None);
+        let show = |next: BootstrapStatus| {
+            let mut shown = shown.lock().expect("join status lock poisoned");
+            if shown.as_ref() != Some(&next) {
+                status(next.clone());
+                *shown = Some(next);
+            }
+        };
+        // The conditions the last check found unmet, shown instead of the wait.
+        let mut pending = Vec::new();
         // Polls back off 1, 2, 4, … 300 seconds apart; the persisted delay
         // survives reopening and a provider cooldown holds them (§6.7).
         loop {
-            sync.join_poll_due().await?;
+            sync.join_poll_due(&mut self.check, |next_check| {
+                show(waiting(confirmation, &pending, next_check));
+            })
+            .await?;
+            show(waiting(confirmation, &pending, NextCheck::Checking));
             match sync.join_outcome(&self.identity).await? {
                 JoinOutcome::Admitted => {
                     sync.join_poll_settled().await?;
@@ -109,19 +128,27 @@ impl Joining<'_> {
                     return Ok(false);
                 }
                 JoinOutcome::Waiting => {
-                    let pending = database.pending::<coven_sync::PendingRecord>().await?;
-                    let waiting = if pending.is_empty() {
-                        BootstrapStatus::WaitingForApproval
-                    } else {
-                        BootstrapStatus::Pending(pending)
-                    };
-                    if waiting != shown {
-                        shown = waiting;
-                        status(shown.clone());
-                    }
+                    pending = database.pending::<coven_sync::PendingRecord>().await?;
                     sync.join_poll_waiting().await?
                 }
             }
         }
+    }
+}
+
+/// What a waiting join shows: the unmet conditions its last check found, or
+/// its wait for approval.
+fn waiting(
+    confirmation: Option<ConfirmationNumber>,
+    pending: &[coven_sync::PendingRecord],
+    next_check: NextCheck,
+) -> BootstrapStatus {
+    if pending.is_empty() {
+        BootstrapStatus::WaitingForApproval {
+            confirmation,
+            next_check,
+        }
+    } else {
+        BootstrapStatus::Pending(pending.to_vec())
     }
 }

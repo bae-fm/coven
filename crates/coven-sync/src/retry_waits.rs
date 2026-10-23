@@ -278,6 +278,50 @@ impl RetryWaits {
         Some(due.saturating_sub(elapsed).max(Duration::from_nanos(1)))
     }
 
+    /// How long until the subject's own wait is over, cooldown aside; `None`
+    /// when it waits on no timer.
+    pub(crate) fn remaining(&self, subject: RetrySubject) -> Option<Duration> {
+        let elapsed = self.clock.elapsed();
+        let state = self.lock();
+        let armed = state.armed.get(&subject)?;
+        let (due, _) = armed.timer.as_ref()?;
+        Some(if armed.over(elapsed) {
+            Duration::ZERO
+        } else {
+            due.saturating_sub(elapsed)
+        })
+    }
+
+    /// End one subject's wait now, as the person's retry ends every ordinary
+    /// wait (§6.7): it keeps its failure count, so the next failure continues
+    /// the backoff, and is saved ended, so no reopen arms it again. A wait
+    /// this session holds because saving it failed is released. The provider
+    /// cooldown holds.
+    pub(crate) async fn end_wait(&self, subject: RetrySubject) -> Result<(), SyncError> {
+        let Some(database) = &self.database else {
+            self.forget(subject);
+            return Ok(());
+        };
+        let select = move |waits: &[(RetrySubject, RetryWait)],
+                           _: &[crate::PendingRecord],
+                           _: &[coven_database::FileUpload]| {
+            waits
+                .iter()
+                .filter(|(held, wait)| *held == subject && !wait.wait.is_zero())
+                .map(|(held, _)| *held)
+                .collect()
+        };
+        match database
+            .end_retry_waits::<crate::PendingRecord>(self.clock.now(), select)
+            .await?
+            .first()
+        {
+            Some((subject, wait)) => self.arm(*subject, wait),
+            None => self.forget(subject),
+        }
+        Ok(())
+    }
+
     /// How long until the earliest armed subject `matching` is due by its
     /// deadline, cooldown included; `None` when nothing it covers waits on a timer.
     #[cfg(test)]

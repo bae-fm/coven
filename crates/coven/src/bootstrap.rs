@@ -93,8 +93,13 @@ pub enum BootstrapStatus {
     /// Preparing this installation, accepting provider access and sending a
     /// join request.
     Connecting,
-    /// The join request waits for an admin's approval.
-    WaitingForApproval,
+    /// The join request is sent and waits for approval (§13.2).
+    WaitingForApproval {
+        /// The number the admin of a sent invite compares; `None` in person.
+        confirmation: Option<ConfirmationNumber>,
+        /// When the join checks for approval next.
+        next_check: NextCheck,
+    },
     /// Loading the floor's snapshots and the slots after them, then keeping
     /// keys and credentials.
     Loading,
@@ -179,24 +184,61 @@ pub async fn restore_from_keychain(
 /// for approval. Returns the open store, or None when declined or expired.
 /// Cancellation removes the unpublished installation; dropping the future
 /// preserves it for a subsequent call with the same invite and device name.
+/// `control` cancels the join or asks for a check for approval at once.
 pub async fn join_with_invite(
     builder: CovenBuilder,
     code: &str,
     device_name: &str,
     on_status: impl Fn(BootstrapStatus),
-    cancel: &watch::Receiver<bool>,
+    control: &JoinControl,
 ) -> Result<Option<CovenHandle>, BootstrapError> {
-    check_cancel(cancel)?;
+    let cancel = control.cancel.subscribe();
+    check_cancel(&cancel)?;
     Box::pin(bootstrap_device(
         builder,
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(code)?,
             name: device_name.into(),
+            check: control.check.subscribe(),
         },
         on_status,
-        cancel,
+        &cancel,
     ))
     .await
+}
+
+/// The app's hold on a running join: cancel it, or check for approval at once.
+pub struct JoinControl {
+    cancel: watch::Sender<bool>,
+    check: watch::Sender<u64>,
+}
+
+impl JoinControl {
+    /// A control no join has used yet.
+    pub fn new() -> Self {
+        Self {
+            cancel: watch::channel(false).0,
+            check: watch::channel(0).0,
+        }
+    }
+
+    /// Cancel the join this control was passed to.
+    pub fn cancel(&self) {
+        self.cancel.send_replace(true);
+    }
+
+    /// End the join's wait so the next check runs now, keeping its backoff's
+    /// failure count. A provider cooldown still holds (§13.2).
+    pub fn check_now(&self) {
+        self.check
+            .send_modify(|asked| *asked = asked.wrapping_add(1));
+    }
+}
+
+impl Default for JoinControl {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[expect(
@@ -228,6 +270,8 @@ enum BootstrapRequest {
     Join {
         code: InviteCode,
         name: String,
+        /// Changes each time the app asks for a check for approval now.
+        check: watch::Receiver<u64>,
     },
 }
 
@@ -387,8 +431,9 @@ async fn prepare_and_load(
             name.as_str(),
             Admission::Restoring,
         ),
-        BootstrapRequest::Join { code, name } => {
-            let (joining, data, sign_in) = join::prepare_request(builder, &directory, code, name)?;
+        BootstrapRequest::Join { code, name, check } => {
+            let (joining, data, sign_in) =
+                join::prepare_request(builder, &directory, code, name, check.clone())?;
             (
                 joining.identity(),
                 data,

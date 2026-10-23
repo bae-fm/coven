@@ -1,9 +1,11 @@
 //! Fixed joining keys and request bytes, sealed locally using the scanned invite.
 
 use crate::SyncError;
-use coven_crypto::{MemberIdentity, MemberKeys, ObjectHasher};
+use coven_crypto::{
+    ConfirmationNumber, MemberIdentity, MemberKeys, MemberPublicKeys, ObjectHasher,
+};
 use coven_format::{
-    codes::InviteCode,
+    codes::{InviteCode, InviteDeliveryKind},
     objects::JoinRequest,
     sealed_single::{SingleChunkObject, SingleChunkPrefix},
     Object,
@@ -25,6 +27,8 @@ pub struct JoiningIdentity {
     attempted: bool,
     inviting_writer: coven_foundation::id_source::DeviceId,
     read_through: u64,
+    /// Set for a sent invite, whose admin compares it before approving.
+    confirmation: Option<ConfirmationNumber>,
 }
 
 impl JoiningIdentity {
@@ -104,6 +108,7 @@ impl JoiningIdentity {
                 return Err(SyncError::InvitationChanged);
             }
             return Ok(Self {
+                confirmation: confirmation(code, &keys),
                 identity,
                 request,
                 path,
@@ -137,6 +142,7 @@ impl JoiningIdentity {
         }
         .encode()?;
         let identity = Self {
+            confirmation: confirmation(code, &identity.keys().public_keys()),
             identity,
             request,
             path,
@@ -163,6 +169,12 @@ impl JoiningIdentity {
     /// this request can only follow it (§13.2).
     pub fn read_through(&self) -> u64 {
         self.read_through
+    }
+
+    /// The number the admin of a sent invite compares before approving; the
+    /// admin's device computes it from the same keys (format.md D11).
+    pub fn confirmation(&self) -> Option<ConfirmationNumber> {
+        self.confirmation
     }
 
     /// The request's path, named by its invite.
@@ -235,6 +247,13 @@ impl JoiningIdentity {
     /// Whether the request object still exists.
     pub(crate) async fn pending(&self, storage: &dyn Storage) -> Result<bool, SyncError> {
         Ok(storage.status(&self.path).await?.is_some())
+    }
+}
+
+fn confirmation(code: &InviteCode, keys: &MemberPublicKeys) -> Option<ConfirmationNumber> {
+    match code.delivery {
+        InviteDeliveryKind::InPerson => None,
+        InviteDeliveryKind::Sent => Some(ConfirmationNumber::of(code.invite, keys)),
     }
 }
 

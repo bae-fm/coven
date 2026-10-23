@@ -661,4 +661,5 @@ mod creation;
 mod bootstrap;
 pub use bootstrap::{
     join_with_invite, restore_from_code, restore_from_keychain, BootstrapError, BootstrapStatus,
+    JoinControl,
 };

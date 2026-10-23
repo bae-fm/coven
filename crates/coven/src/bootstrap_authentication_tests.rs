@@ -102,10 +102,10 @@ async fn join_requires_the_shared_folder_access_before_contacting_storage() {
         .await
         .unwrap();
     let before = recipient.request_count();
-    let (_, cancel) = watch::channel(false);
+    let control = JoinControl::new();
     let required = OAuthAccess::Dropbox(DropboxAccess::FullDropbox);
     assert!(matches!(
-        join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel).await,
+        join_with_invite(builder, &invite.code, "New phone", |_| {}, &control).await,
         Err(BootstrapError::Sync(SyncError::Storage(error)))
             if error.failure() == StorageFailure::AccessNotGranted { required }
     ));
@@ -135,8 +135,8 @@ async fn a_join_waiting_past_its_token_refreshes_on_rejection_and_publishes_the_
         ))
         .await
         .unwrap();
-    let (_, cancel) = watch::channel(false);
-    let join = join_with_invite(builder, &invite.code, "New phone", |_| {}, &cancel);
+    let control = JoinControl::new();
+    let join = join_with_invite(builder, &invite.code, "New phone", |_| {}, &control);
     let (joined, _) = join_and_approve(&owner.handle, join, |_| async {
         install.absent(owner.directory.id()).await;
         asleep.wait_for(|sleeping| *sleeping).await.unwrap();

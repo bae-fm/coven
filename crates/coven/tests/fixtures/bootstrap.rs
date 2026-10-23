@@ -241,6 +241,8 @@ impl Installation {
         BootstrapRequest::Join {
             code: coven_sync::read_invite_code(&invite.code).unwrap(),
             name: "New phone".into(),
+            // Nobody asks this join to check now.
+            check: watch::channel(0).1,
         }
     }
 
