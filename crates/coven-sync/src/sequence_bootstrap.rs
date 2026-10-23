@@ -56,13 +56,26 @@ impl SequenceSync {
                 }
             },
         };
+        self.restore_history(session, &mut ring, member).await?;
+        Ok(ring)
+    }
+
+    /// An installation that applied history before it held keys, such as a
+    /// join stopped while loading, reconstructs that history once keys open
+    /// it, so the bindings it applied count again (§12.1, §13.2).
+    pub(crate) async fn restore_history(
+        &self,
+        session: &mut Session,
+        ring: &mut StoreKeyring,
+        member: &MemberIdentity,
+    ) -> Result<(), SyncError> {
         if session.locked {
             let originals = self.database.original_slots().await?;
-            session.history = super::History::restore(&originals, self.store(), &mut ring, member)?;
-            self.keys.persist(&ring)?;
+            session.history = super::History::restore(&originals, self.store(), ring, member)?;
+            self.keys.persist(ring)?;
             session.locked = false;
         }
-        Ok(ring)
+        Ok(())
     }
 
     /// The store key that sealed this installation's newest applied original

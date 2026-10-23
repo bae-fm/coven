@@ -482,3 +482,58 @@ async fn check_now_finds_an_approval_before_the_joins_wait_ends() {
     result.unwrap().unwrap().close().await.unwrap();
     owner.close().await;
 }
+
+/// Carol's join is approved, then stops while it loads, as when the app is
+/// closed. Her installation had applied the entry adding her; the next call
+/// finds that approval and loads, instead of taking the deleted request for a
+/// decline (§13.2).
+#[tokio::test]
+async fn an_approved_join_stopped_while_loading_loads_on_the_next_call() {
+    let owner = Owner::new(CloudProvider::S3, false).await;
+    let invite = owner.invite().await;
+    let install = Installation::new();
+    let (_, cancel) = watch::channel(false);
+    let (loading, mut loaded) = watch::channel(false);
+    let joining = install.run(
+        &owner,
+        Installation::join_request(&invite),
+        owner.recipient(),
+        &cancel,
+        |status| {
+            if status == BootstrapStatus::Loading {
+                loading.send_replace(true);
+            }
+        },
+    );
+    let stopped = async {
+        tokio::select! {
+            result = joining => panic!("the join finished before it stopped: {result:?}"),
+            changed = loaded.wait_for(|loading| *loading) => drop(changed.unwrap()),
+        }
+    };
+    let approve = async {
+        let request = next_join_request(&owner.handle).await;
+        owner.handle.approve_join_request(&request).await.unwrap();
+        request.member
+    };
+    let ((), member) = join_with_response(stopped, approve).await;
+    let handle = install
+        .run(
+            &owner,
+            Installation::join_request(&invite),
+            owner.recipient(),
+            &cancel,
+            |_| {},
+        )
+        .await
+        .unwrap()
+        .expect("the approved join loads");
+    assert!(handle
+        .members()
+        .await
+        .unwrap()
+        .iter()
+        .any(|found| found.is_self && found.id == member));
+    handle.close().await.unwrap();
+    owner.close().await;
+}

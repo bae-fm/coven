@@ -76,6 +76,8 @@ impl SequenceSync {
                 }
             },
         };
+        self.restore_history(&mut session, &mut ring, &member)
+            .await?;
         self.read_forward(&mut session, &mut ring, &member).await?;
         if self.admitted(&session, &member, request) {
             return Ok(JoinOutcome::Admitted);

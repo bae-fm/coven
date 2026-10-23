@@ -2719,6 +2719,13 @@ with the store's and Dan's names from the code, and the app resumes it without
 asking Dan for the code again. The saved code is deleted when the join finishes,
 is declined or expires.
 
+Dan's phone may also stop after Ana approves, while it loads. By then Ana's phone
+has deleted the request, and Dan's installation has applied the entry adding him
+but has kept no store key. Resuming, it opens its copies again and rebuilds the
+history it applied from those slots, so it finds that entry and loads. Without
+the rebuilt history, the missing request would read as a decline, and the join
+would throw away the only keys Ana approved.
+
 **No cancelling once sent.** Once Dan's phone has sent the request, nothing on
 its side can take it back safely. Ana's phone may already have read it, and her
 approval could land after Dan's phone had thrown away the keys it approved. That
