@@ -133,6 +133,112 @@ async fn a_declined_request_takes_back_the_share_and_the_joiner_sees_the_decline
     }
 }
 
+/// The delivery fixes the expiry when the invite is made, and the code
+/// carries the person's name and the delivery to the joining device.
+#[tokio::test]
+async fn each_delivery_expires_after_its_lifetime_on_the_inviting_device() {
+    use std::time::Duration;
+    for (delivery, lifetime) in [
+        (InviteDelivery::InPerson, 3_600),
+        (
+            InviteDelivery::Sent {
+                lifetime: InviteLifetime::Hour,
+            },
+            3_600,
+        ),
+        (
+            InviteDelivery::Sent {
+                lifetime: InviteLifetime::Day,
+            },
+            86_400,
+        ),
+        (
+            InviteDelivery::Sent {
+                lifetime: InviteLifetime::Week,
+            },
+            604_800,
+        ),
+    ] {
+        let group = Group::new();
+        let ana = group.device(1).await;
+        group.create(&ana).await;
+        let made = coven_foundation::clock::Clock::now(group.clock.as_ref());
+        let invite = ana
+            .sync
+            .create_invite(
+                InviteTarget::NewMember {
+                    role: MemberRole::Member,
+                    name: "Dan".into(),
+                },
+                InviteAccess::S3AccessKey {
+                    access_key_id: "dan-key".into(),
+                    secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
+                },
+                delivery,
+            )
+            .await
+            .unwrap();
+        assert_eq!(invite.expires_at, made + Duration::from_secs(lifetime));
+        assert_eq!(invite.invitee.as_deref(), Some("Dan"));
+        assert_eq!(invite.delivery, delivery.kind());
+        let CodeInfo::Invite {
+            invitee,
+            delivery: carried,
+            ..
+        } = decode_code_info(&invite.code).unwrap()
+        else {
+            panic!("an invite code");
+        };
+        assert_eq!(
+            (invitee.as_deref(), carried),
+            (Some("Dan"), delivery.kind())
+        );
+        group.clock.set(invite.expires_at - Duration::from_secs(1));
+        ana.sync.pass().await.unwrap();
+        assert_eq!(ana.database().operations().await.unwrap().len(), 1);
+        group.clock.set(invite.expires_at);
+        ana.sync.pass().await.unwrap();
+        assert!(ana.database().operations().await.unwrap().is_empty());
+        ana.database().close().await.unwrap();
+    }
+}
+
+/// A new person's invite needs a name the format can carry, checked before
+/// any provider change.
+#[tokio::test]
+async fn an_invite_for_a_new_person_refuses_an_empty_name() {
+    let group = Group::shared();
+    let ana = group.device(1).await;
+    group
+        .create_with_access(
+            &ana,
+            MemberAccess::ProviderAccount("ana@example.org".into()),
+        )
+        .await;
+    let requests = ana.storage.request_count();
+    let result = ana
+        .sync
+        .create_invite(
+            InviteTarget::NewMember {
+                role: MemberRole::Member,
+                name: String::new(),
+            },
+            InviteAccess::ProviderAccount {
+                email: "dan@example.org".into(),
+            },
+            InviteDelivery::InPerson,
+        )
+        .await;
+    assert!(
+        matches!(result, Err(SyncError::Format(_))),
+        "{:?}",
+        result.err()
+    );
+    assert_eq!(ana.storage.request_count(), requests);
+    assert!(ana.database().operations().await.unwrap().is_empty());
+    ana.database().close().await.unwrap();
+}
+
 #[tokio::test]
 async fn an_invite_expires_a_day_later_on_the_inviting_device() {
     let group = Group::shared();
@@ -255,6 +361,9 @@ async fn a_replacement_invite_rebinds_an_existing_member_on_a_new_device() {
             InviteAccess::ProviderAccount {
                 email: "carol@example.org".into(),
             },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
+            },
         )
         .await
         .unwrap();
@@ -360,9 +469,13 @@ async fn a_refused_grant_answers_the_invite_call_and_settles_the_invite() {
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::ProviderAccount {
                 email: "owner@example.test".into(),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await;
@@ -480,6 +593,9 @@ async fn a_replacement_invite_keeps_its_expected_pair_across_approval_and_retry(
                 InviteTarget::ReplaceMemberKeys { member: target },
                 InviteAccess::ProviderAccount {
                     email: "carol@example.org".into(),
+                },
+                crate::InviteDelivery::Sent {
+                    lifetime: crate::InviteLifetime::Day,
                 },
             )
             .await
@@ -685,10 +801,14 @@ async fn a_cancelled_s3_invite_leaves_no_work_behind() {
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::S3AccessKey {
                 access_key_id: "dan-key".into(),
                 secret_access_key: coven_crypto::SecretText::new("dan-secret".into()),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await

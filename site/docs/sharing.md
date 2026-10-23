@@ -149,8 +149,9 @@ The invite only lets Dan ask; Ana's approval lets him in.
 // Ana's phone
 let invite = handle
     .create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member },
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Dan".into() },
         InviteAccess::ProviderAccount { email: "dan@example.com".into() },
+        InviteDelivery::Sent { lifetime: InviteLifetime::Day },
     )
     .await?;
 show_qr_code(&invite.code);
@@ -188,7 +189,8 @@ it, so the inviting admin must be that member. On S3 there is no sharing:
 `InviteAccess::S3AccessKey` hands over a key made by hand in the provider's
 console ([below](#s3-access-keys)).
 
-An invite expires a day after it was made. Declining, letting it expire, or
+An invite shown in person expires an hour after it was made; one sent by
+message or email expires after the hour, day or week the admin chose. Declining, letting it expire, or
 `cancel_invite` takes back the provider access it granted. Dan's phone keeps
 its new keys and request across restarts, and picks up where it left off;
 `join_with_invite` returns `None` when the request is declined or the invite

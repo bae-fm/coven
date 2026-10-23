@@ -361,9 +361,13 @@ pub(super) async fn invite(ana: &Device) -> Invite {
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::ProviderAccount {
                 email: "Carol@example.org".into(),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await

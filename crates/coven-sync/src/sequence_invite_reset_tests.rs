@@ -43,9 +43,13 @@ async fn carried_account_revocation_reports_failure_and_survives_reopening() {
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::ProviderAccount {
                 email: "carol@example.org".into(),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await
@@ -124,9 +128,13 @@ async fn reset_carries_account_work_after_the_invite_journal_has_finished() {
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::ProviderAccount {
                 email: "carol@example.org".into(),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await
@@ -179,6 +187,9 @@ async fn reset_preserves_an_active_members_account() {
             InviteAccess::ProviderAccount {
                 email: "carol@example.org".into(),
             },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
+            },
         )
         .await
         .unwrap();
@@ -219,6 +230,9 @@ async fn a_reset_ends_a_replacement_invite_and_records_nothing_about_its_s3_key(
                     access_key_id: key.into(),
                     secret_access_key: SecretText::new("secret".into()),
                 },
+                crate::InviteDelivery::Sent {
+                    lifetime: crate::InviteLifetime::Day,
+                },
             )
             .await
             .unwrap();
@@ -248,10 +262,14 @@ async fn reset_keeps_an_invite_key_whose_approval_landed_before_journal_completi
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::S3AccessKey {
                 access_key_id: "carol-key".into(),
                 secret_access_key: SecretText::new("secret".into()),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await
@@ -312,10 +330,14 @@ async fn an_undecodable_invite_fails_reset_without_a_completion_notice() {
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::S3AccessKey {
                 access_key_id: "carol-key".into(),
                 secret_access_key: SecretText::new("secret".into()),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await

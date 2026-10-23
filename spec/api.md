@@ -4662,7 +4662,9 @@ impl CovenHandle {
 /// The admin's choice, fixed before sharing the invite (§13.2, §13.3).
 pub enum InviteTarget {
     /// The name is the one the admin typed; the invite carries it to the new
-    /// person's device, and the app uses it for their profile.
+    /// person's device, and the app uses it for their profile. It follows the
+    /// format's `name` rule (format.md D2): an empty one fails the call with
+    /// `SyncError::Format` before any provider change.
     NewMember { role: MemberRole, name: String },
     ReplaceMemberKeys { member: MemberId },
 }

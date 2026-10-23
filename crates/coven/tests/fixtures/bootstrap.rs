@@ -113,8 +113,12 @@ impl Owner {
             .create_invite(
                 InviteTarget::NewMember {
                     role: MemberRole::Member,
+                    name: "Carol".into(),
                 },
                 access,
+                InviteDelivery::Sent {
+                    lifetime: InviteLifetime::Day,
+                },
             )
             .await
             .unwrap()

@@ -16,6 +16,7 @@ async fn removed_uploader() -> (Network, MemberId) {
             1,
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
         )
         .await;

@@ -42,9 +42,13 @@ async fn reset_revokes_open_account_invites_and_deletes_their_requests() {
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::ProviderAccount {
                 email: "carol@example.test".into(),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await

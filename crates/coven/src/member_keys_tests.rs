@@ -240,6 +240,7 @@ mod owner_identity {
                 1,
                 InviteTarget::NewMember {
                     role: MemberRole::Member,
+                    name: "Carol".into(),
                 },
             )
             .await;
@@ -305,6 +306,7 @@ mod owner_identity {
                 1,
                 InviteTarget::NewMember {
                     role: MemberRole::Member,
+                    name: "Carol".into(),
                 },
             )
             .await;
@@ -351,6 +353,7 @@ mod owner_identity {
                 2,
                 InviteTarget::NewMember {
                     role: MemberRole::Member,
+                    name: "Carol".into(),
                 },
             )
             .await;

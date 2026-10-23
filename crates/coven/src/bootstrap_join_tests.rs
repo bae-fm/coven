@@ -123,6 +123,9 @@ async fn a_recovery_invite_rebinds_a_lost_member_through_the_public_calls() {
                 access_key_id: "recovery-key".into(),
                 secret_access_key: SecretText::new("recovery-secret".into()),
             },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
+            },
         )
         .await
         .unwrap();

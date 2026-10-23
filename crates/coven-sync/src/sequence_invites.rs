@@ -3,8 +3,9 @@
 
 use super::{SequenceSync, Session};
 use crate::{
-    Invite, InviteAccess, InviteTarget, JoinRequest, OperationKind, OperationRejection,
-    PendingReason, PendingRecord, PendingSubject, ProviderAccessAction, SyncError,
+    Invite, InviteAccess, InviteDelivery, InviteTarget, JoinRequest, OperationKind,
+    OperationRejection, PendingReason, PendingRecord, PendingSubject, ProviderAccessAction,
+    SyncError,
 };
 use coven_crypto::{
     ConfirmationNumber, InviteSecret, MemberIdentity, ObjectHasher, SecretText, StoreKeyring,
@@ -24,7 +25,7 @@ use coven_storage::{
     CloudProvider, InviteStorage, ObjectPath, S3Credentials, StorageFailure, StorageInvitation,
 };
 use serde::{Deserialize, Serialize};
-use std::{collections::BTreeSet, time::Duration};
+use std::collections::BTreeSet;
 
 pub(crate) const INVITE: &str = "invite";
 
@@ -84,6 +85,9 @@ pub(crate) enum InviteState {
 pub(crate) struct InviteWork {
     id: InviteId,
     member: MemberId,
+    /// The new person's name; `None` for a replacement.
+    invitee: Option<String>,
+    delivery: InviteDeliveryKind,
     binding: InviteBinding,
     access: InviteGrant,
     secret: SecretText,
@@ -143,13 +147,17 @@ impl SequenceSync {
     }
 
     /// Fix the member id and storage access, grant that access, and return
-    /// the code to show (§13.2). The invite expires a day later by this
-    /// device's clock.
+    /// the code to show (§13.2). The invite expires after the delivery's
+    /// lifetime by this device's clock.
     pub async fn create_invite(
         &self,
         target: InviteTarget,
         access: InviteAccess,
+        delivery: InviteDelivery,
     ) -> Result<Invite, SyncError> {
+        if let InviteTarget::NewMember { name, .. } = &target {
+            coven_format::value::name(name)?;
+        }
         let mut session = self.session.lock().await;
         let member = self
             .member
@@ -172,10 +180,12 @@ impl SequenceSync {
             return Err(StorageFailure::NotStoreOwner.into());
         }
         let provider = self.storage.config().provider();
-        let (target_member, binding) = match target {
-            InviteTarget::NewMember { role } => {
-                (MemberId(self.ids.new_id()), InviteBinding::Add { role })
-            }
+        let (target_member, binding, invitee) = match target {
+            InviteTarget::NewMember { role, name } => (
+                MemberId(self.ids.new_id()),
+                InviteBinding::Add { role },
+                Some(name),
+            ),
             InviteTarget::ReplaceMemberKeys { member: target } => {
                 let Some(existing) = state.members.get(&target).filter(|value| !value.removed)
                 else {
@@ -203,6 +213,7 @@ impl SequenceSync {
                     InviteBinding::Replace {
                         expected: existing.keys,
                     },
+                    None,
                 )
             }
         };
@@ -246,17 +257,15 @@ impl SequenceSync {
         let work = InviteWork {
             id,
             member: target_member,
+            invitee,
+            delivery: delivery.kind(),
             binding,
             access: grant,
             secret: SecretText::new(serde_json::to_string(secret.to_secret_bytes().as_bytes())?),
-            expires_at: self
-                .clock
-                .now()
-                .checked_add(Duration::from_secs(86_400))
-                .ok_or(
-                    StorageFailure::InvalidConfiguration
-                        .with_source("the clock cannot represent the invite's expiry"),
-                )?,
+            expires_at: self.clock.now().checked_add(delivery.lifetime()).ok_or(
+                StorageFailure::InvalidConfiguration
+                    .with_source("the clock cannot represent the invite's expiry"),
+            )?,
             state: InviteState::Grant,
         };
         let changes = match work.account() {
@@ -728,10 +737,8 @@ impl SequenceSync {
         let code = InviteCode {
             store: store.id,
             name: store.name.clone(),
-            // Sentinel: every invite is approved by the admin and names no
-            // person until `create_invite` takes the delivery and the name.
-            invitee: None,
-            delivery: InviteDeliveryKind::Sent,
+            invitee: work.invitee.clone(),
+            delivery: work.delivery,
             invite: work.id,
             member: work.member,
             secret: work.secret()?,
@@ -744,6 +751,8 @@ impl SequenceSync {
         Ok(Invite {
             id: work.id,
             member: work.member,
+            invitee: work.invitee.clone(),
+            delivery: work.delivery,
             access: work.access.member_access(),
             code: code.to_string(),
             expires_at: work.expires_at,

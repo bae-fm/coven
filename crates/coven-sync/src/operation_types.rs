@@ -1,9 +1,9 @@
 //! Application values for operations, members, circles and invitations (api.md).
 
 use coven_crypto::SecretText;
-use coven_format::admin::MemberRole;
+use coven_format::{admin::MemberRole, codes::InviteDeliveryKind};
 use coven_foundation::id_source::{InviteId, MemberId};
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 pub use coven_database::{
     Circle, CircleMemberInfo, DeviceInfo, DeviceState, MemberInfo, OperationId,
@@ -83,12 +83,16 @@ impl OperationKind {
 }
 
 /// The admin's choice, fixed before the invite is shown (§13.2, §13.3).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub enum InviteTarget {
     /// A new person: coven generates a fresh member id, added with this role.
     NewMember {
         /// The role the person receives on approval.
         role: MemberRole,
+        /// The person's name as the admin typed it, a format `name`: the
+        /// invite carries it to their device, whose app uses it for their
+        /// profile.
+        name: String,
     },
     /// An existing active member who lost every device: approval binds the
     /// requester's new keys to this id, keeping its role, circles and devices.
@@ -115,18 +119,76 @@ pub enum InviteAccess {
     },
 }
 
+/// How the invite reaches the person, which fixes how it is approved (§13.2).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteDelivery {
+    /// Shown as a QR code to the person beside the admin; the inviting device
+    /// approves the request on its own. Expires an hour after it is made.
+    InPerson,
+    /// Sent by message or email; the admin approves after comparing the
+    /// confirmation number.
+    Sent {
+        /// How long the invite stays open.
+        lifetime: InviteLifetime,
+    },
+}
+
+impl InviteDelivery {
+    /// The choice without its lifetime, as the code carries it.
+    pub(crate) fn kind(self) -> InviteDeliveryKind {
+        match self {
+            Self::InPerson => InviteDeliveryKind::InPerson,
+            Self::Sent { .. } => InviteDeliveryKind::Sent,
+        }
+    }
+
+    /// How long after it is made the invite expires, by the inviting
+    /// device's clock.
+    pub(crate) fn lifetime(self) -> Duration {
+        match self {
+            Self::InPerson => InviteLifetime::Hour.duration(),
+            Self::Sent { lifetime } => lifetime.duration(),
+        }
+    }
+}
+
+/// How long a sent invite stays open.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum InviteLifetime {
+    /// One hour.
+    Hour,
+    /// One day.
+    Day,
+    /// One week.
+    Week,
+}
+
+impl InviteLifetime {
+    fn duration(self) -> Duration {
+        Duration::from_secs(match self {
+            Self::Hour => 3_600,
+            Self::Day => 86_400,
+            Self::Week => 7 * 86_400,
+        })
+    }
+}
+
 /// The invitation returned once its storage access has been granted.
 pub struct Invite {
     /// The one-time request path's identity.
     pub id: InviteId,
     /// The stable member id the invite fixed.
     pub member: MemberId,
+    /// The new person's name; `None` for a replacement.
+    pub invitee: Option<String>,
+    /// In person or sent.
+    pub delivery: InviteDeliveryKind,
     /// The access the invite grants: the account shared with, or the id of
     /// the S3 key it carries, never its secret (§14.3).
     pub access: coven_format::MemberAccess,
     /// Code the app may show as a QR code. Contains secrets.
     pub code: String,
-    /// One day after creation on the inviting device's clock.
+    /// The delivery's lifetime after creation, on the inviting device's clock.
     pub expires_at: SystemTime,
 }
 

@@ -268,14 +268,16 @@ impl CovenHandle {
         Box::pin(self.storage.retry_pending_operation(operation)).await
     }
     /// Fixes a fresh member id or an existing active replacement target, as
-    /// an admin, then shares access and creates an invitation expiring after a
-    /// day. Replacement preserves role, circle memberships and device ids.
+    /// an admin, then shares access and creates an invitation. An in-person
+    /// invite expires an hour after it is made; a sent one after the lifetime
+    /// chosen. Replacement preserves role, circle memberships and device ids.
     pub async fn create_invite(
         &self,
         target: InviteTarget,
         access: InviteAccess,
+        delivery: InviteDelivery,
     ) -> Result<Invite, SyncError> {
-        Box::pin(self.storage.create_invite(target, access)).await
+        Box::pin(self.storage.create_invite(target, access, delivery)).await
     }
     /// Checked join requests, starting with the current list.
     pub fn subscribe_join_requests(&self) -> tokio::sync::watch::Receiver<Vec<JoinRequest>> {

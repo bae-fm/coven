@@ -128,6 +128,7 @@ impl StorageConnections {
         &self,
         target: InviteTarget,
         access: InviteAccess,
+        delivery: coven_sync::InviteDelivery,
     ) -> Result<Invite, SyncError> {
         self.prepare_invite().await?;
         let mut live = self.live.lock().await;
@@ -135,7 +136,7 @@ impl StorageConnections {
         let Connection::Active(live) = &*live else {
             return Err(SyncError::NoStorage);
         };
-        live.sync.create_invite(target, access).await
+        live.sync.create_invite(target, access, delivery).await
     }
 
     pub(crate) async fn approve_join_request(

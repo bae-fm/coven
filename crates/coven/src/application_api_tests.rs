@@ -188,9 +188,9 @@ fn app_tests_can_find_open_files_and_assert_they_are_released() {
 #[test]
 fn bootstrap_and_operation_futures_stay_small() {
     use crate::{
-        BootstrapStatus, CovenBuilder, CovenHandle, InviteAccess, InviteId, InviteTarget,
-        JoinRequest, MemberId, MemberPublicKeys, OperationId, S3Credentials, SavedRestoreCode,
-        StoreId,
+        BootstrapStatus, CovenBuilder, CovenHandle, InviteAccess, InviteDelivery, InviteId,
+        InviteTarget, JoinRequest, MemberId, MemberPublicKeys, OperationId, S3Credentials,
+        SavedRestoreCode, StoreId,
     };
     use std::future::Future;
     use tokio::sync::watch::Receiver;
@@ -269,9 +269,12 @@ fn bootstrap_and_operation_futures_stay_small() {
         (
             "create_invite",
             size(
-                |(h, t, a): (&'static CovenHandle, InviteTarget, InviteAccess)| {
-                    h.create_invite(t, a)
-                },
+                |(h, t, a, d): (
+                    &'static CovenHandle,
+                    InviteTarget,
+                    InviteAccess,
+                    InviteDelivery,
+                )| h.create_invite(t, a, d),
             ),
         ),
         (

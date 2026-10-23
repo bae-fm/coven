@@ -478,10 +478,14 @@ async fn admit_member(f: &Fixture, handle: &CovenHandle, keys: &MemberKeys) -> M
         .create_invite(
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::S3AccessKey {
                 access_key_id: "member-key".into(),
                 secret_access_key: SecretText::new("secret".into()),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await

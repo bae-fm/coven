@@ -16,8 +16,8 @@ note. Attachments carry the user's own files.
 ```rust
 use coven::{
     Audience, Coven, DropboxAccess, DropboxLocation, FileDecl, InviteAccess,
-    InviteTarget, MemberRole, Migration, OAuthAccess, Provenance, RowIdentity, StorageConfig,
-    StoreLayout, SyncStatus, SyncedTable, UuidText,
+    InviteDelivery, InviteTarget, MemberRole, Migration, OAuthAccess, Provenance,
+    RowIdentity, StorageConfig, StoreLayout, SyncStatus, SyncedTable, UuidText,
 };
 use uuid::Uuid;
 
@@ -219,8 +219,9 @@ let bytes = handle.read_file(&file).await?;
 ```rust
 let invite = handle
     .create_invite(
-        InviteTarget::NewMember { role: MemberRole::Member },
+        InviteTarget::NewMember { role: MemberRole::Member, name: "Ben".into() },
         InviteAccess::ProviderAccount { email: "ben@example.com".into() },
+        InviteDelivery::InPerson,
     )
     .await?;
 show_qr_code(&invite.code);

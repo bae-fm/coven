@@ -121,9 +121,13 @@ async fn an_ended_operation_wait_does_not_starve_a_requested_pass() {
         .create_invite(
             InviteTarget::NewMember {
                 role: coven_format::admin::MemberRole::Member,
+                name: "Carol".into(),
             },
             InviteAccess::ProviderAccount {
                 email: "carol@example.org".into(),
+            },
+            crate::InviteDelivery::Sent {
+                lifetime: crate::InviteLifetime::Day,
             },
         )
         .await

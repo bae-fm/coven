@@ -215,6 +215,7 @@ impl Network {
             index,
             InviteTarget::NewMember {
                 role: MemberRole::Member,
+                name: "Carol".into(),
             },
         )
         .await;
@@ -228,6 +229,9 @@ impl Network {
                 InviteAccess::S3AccessKey {
                     access_key_id: format!("member-{index}"),
                     secret_access_key: SecretText::new("secret".into()),
+                },
+                crate::InviteDelivery::Sent {
+                    lifetime: crate::InviteLifetime::Day,
                 },
             )
             .await

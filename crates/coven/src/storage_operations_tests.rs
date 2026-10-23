@@ -207,6 +207,7 @@ async fn leave(refused: bool) {
             1,
             InviteTarget::NewMember {
                 role: MemberRole::Admin,
+                name: "Carol".into(),
             },
         )
         .await;
